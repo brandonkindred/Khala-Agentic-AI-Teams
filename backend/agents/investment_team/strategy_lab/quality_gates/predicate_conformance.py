@@ -102,6 +102,7 @@ class _ShadowContext:
 
     def __init__(self, *, initial_capital: float = 100_000.0) -> None:
         self._history: Dict[str, list] = {}
+        self._current_symbol: Optional[str] = None
         self._positions: Dict[str, _SimplePosition] = {}
         self._capital: float = initial_capital
         self._equity: float = initial_capital
@@ -134,6 +135,40 @@ class _ShadowContext:
         if n <= 0:
             return []
         return bars[-n:]
+
+    def indicator(
+        self,
+        name: str,
+        *,
+        symbol: Optional[str] = None,
+        source: str = "close",
+        **params,
+    ) -> Optional[float]:
+        """Shadow mirror of ``StrategyContext.indicator`` (issue #703).
+
+        Routes through the same shared ``indicator_value`` accessor the real
+        context uses, so a strategy that reads indicators via ``ctx.indicator``
+        evaluates identically under shadow execution.
+
+        Preconditions:
+            Same as ``StrategyContext.indicator``.
+        Postconditions:
+            Returns the latest indicator value as ``float``, or ``None`` during
+            warm-up / when no bars for ``symbol`` have arrived yet.
+        """
+        sym = symbol if symbol is not None else self._current_symbol
+        if sym is None:
+            # Mirror the real StrategyContext.indicator: calling it before any
+            # bar is dispatched (e.g. from on_start) with no explicit symbol is
+            # a contract error, not a None — so shadow execution takes the same
+            # branch the live runtime would.
+            raise ValueError("indicator() needs a symbol when no bar has been dispatched yet")
+        bars = self._history.get(sym, [])
+        if not bars:
+            return None
+        from ..executor.strategy_indicators import indicator_value
+
+        return indicator_value(name, bars, source=source, **params)
 
     def submit_order(
         self,
@@ -194,6 +229,7 @@ class _ShadowContext:
         hist = self._history[bar.symbol]
         if len(hist) > 500:
             del hist[:-500]
+        self._current_symbol = bar.symbol
         self._now = bar.timestamp
 
     def _last_close(self, symbol: str) -> float:

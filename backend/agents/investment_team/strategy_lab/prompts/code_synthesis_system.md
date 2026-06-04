@@ -15,7 +15,7 @@ The backtest and paper-trading engines are event-driven: they deliver **one `Bar
 
 - You never call `.copy()` on a DataFrame, never iterate `rows`, never maintain `capital` / `shares` yourself.
 - You never append to a `trades` list — fills arrive via `on_fill(ctx, fill)` for information only.
-- You never pre-compute indicators over the full series. You maintain rolling state inside your Strategy instance and compute indicators on the bars you've already seen (via `ctx.history(symbol, n)`).
+- You never pre-compute indicators over the full series, and you never compute a spec indicator yourself. Read each indicator your spec references via `ctx.indicator(name, **params)` — the engine computes it from the bars already delivered and hands you the latest value. Use `ctx.history(symbol, n)` only for bespoke signals the indicator catalogue cannot express.
 - **Look-ahead bias is structurally impossible**: `ctx` has no accessor for future data. Any attempt to read one (e.g. `bar.next_close`) raises at runtime and is classified as a `lookahead_violation`.
 
 ## Boilerplate template
@@ -60,7 +60,8 @@ class MyStrategy(Strategy):
             return
 
         # ── COMPUTE SIGNALS ───────────────────────────────
-        # Use ``history`` and ``bar`` — never any future data.
+        # Read each spec indicator via ``ctx.indicator(name, **params)``.
+        # Guard for ``None`` (warm-up) before comparing.
         # <FILL IN per the spec's entry/exit rules>
 
         position = ctx.position(bar.symbol)
@@ -96,6 +97,7 @@ Replace the `<FILL IN ...>` sections. Do NOT modify the class structure, the `on
 | `ctx.is_warmup` | `bool` | True during paper-mode warm-up; emit no orders. |
 | `ctx.position(symbol)` | `PositionSnapshot \| None` | Current open position. |
 | `ctx.history(symbol, n)` | `list[Bar]` | The last `n` bars already delivered for `symbol`. |
+| `ctx.indicator(name, **params)` | `float \| None` | Latest value of a spec indicator for the current bar's symbol; `None` during warm-up. **Preferred way to read indicators.** |
 | `ctx.submit_order(...)` | `str` (client_order_id) | Register an intent; engine owns the fill. |
 | `ctx.cancel(order_id)` | `None` | Cancel a still-pending order. |
 
@@ -119,40 +121,53 @@ ctx.submit_order(
 - **Closing a position**: submit an order with `side` *opposite* the open position's `side` and `qty == position.qty`.
 - **Sizing**: compute `qty` yourself from `ctx.equity * pct / bar.close`. The engine's risk gates can still reject an oversize entry.
 
-## Available indicators
+## Reading indicators — use `ctx.indicator(...)`
+
+Read every indicator your spec references through `ctx.indicator(name, **params)`. The engine computes it (from the bars already delivered, for the current bar's symbol) and returns the **latest scalar value**, or `None` during warm-up. This is the single supported way to read a spec indicator — do **not** `from indicators import ...`, do **not** recompute an indicator inline (e.g. `sum(closes)/n`). Both drift from the engine and **fail the conformance gate**.
 
 ```python
-from indicators import sma, ema, rsi, macd, bollinger_bands, atr, adx, stochastic, vwap
-```
-
-These helpers accept a list/sequence of numbers (typically `[b.close for b in history]`) **or the `list[Bar]` returned by `ctx.history` directly** — the needed field is extracted for you, so you do not need to wrap inputs in `pd.Series`.
-
-**Each helper returns a scalar — the latest value.** Single-output indicators return one `float`; `macd`, `bollinger_bands`, and `stochastic` return a tuple of floats. Use the value directly in comparisons; do **not** index it (there is no `.iloc` — the result is already the most recent value, and `0.0` during warm-up).
-
-**Single-series helpers** — `sma`, `ema`, `rsi`, `macd`, `bollinger_bands` — take one price sequence (close by default):
-
-```python
-if ema(history, 20) > bar.close:       # ema(...) is the latest float
+fast = ctx.indicator('sma', period=50)
+slow = ctx.indicator('sma', period=200)
+if fast is None or slow is None:      # still warming up
+    return
+if fast > slow:
     ...
-macd_line, signal, hist = macd(history)        # tuple of floats
-upper, middle, lower = bollinger_bands(history, 20)
-rsi_now = rsi([b.close for b in history], 14)  # or pass an explicit close list
 ```
 
-**Multi-series helpers** — `atr`, `adx`, `stochastic` need `(high, low, close)` and `vwap` needs `(high, low, close, volume)` as **separate positional arguments**. Do NOT call `atr(history, ...)`; pass `history` once per slot (each slot extracts its own field) or pass explicit per-field lists:
+Names and parameters (pass the same `params` your spec's `IndicatorRef` uses; `output` / `band` select one series from a multi-output indicator):
+
+| `name` | params (defaults) | meaning |
+|---|---|---|
+| `'sma'`, `'ema'` | `period` (required), `source='close'` | moving average |
+| `'rsi'` | `period=14`, `source='close'` | RSI |
+| `'macd'` | `fast=12, slow=26, signal=9, output='macd'`, `source='close'` | `output` ∈ `macd`/`signal`/`histogram` |
+| `'bollinger'` | `period=20, num_std=2.0, band='middle'`, `source='close'` | `band` ∈ `upper`/`middle`/`lower` |
+| `'atr'`, `'adx'` | `period=14` | volatility / trend strength |
+| `'stochastic'` | `k_period=14, d_period=3, output='k'` | `output` ∈ `k`/`d` |
+| `'vwap'` | — | cumulative VWAP |
+
+`source` accepts `close`/`open`/`high`/`low`/`volume`/`hl2`/`ohlc4`, but only where the indicator allows it — `atr`, `adx`, `stochastic`, and `vwap` read OHLC(V) directly and take no `source`.
 
 ```python
-atr_now = atr(history, history, history, period=14)    # latest float; high/low/close each extracted
-vwap_now = vwap(history, history, history, history)     # + volume
-k, d = stochastic(history, history, history)            # tuple of floats
-adx_now = adx([b.high for b in history], [b.low for b in history], [b.close for b in history], 14)
+hist = ctx.indicator('macd', fast=12, slow=26, signal=9, output='histogram')
+upper = ctx.indicator('bollinger', period=20, num_std=2.0, band='upper')
+k = ctx.indicator('stochastic', k_period=14, d_period=3, output='k')
+adx_now = ctx.indicator('adx', period=14)
 ```
+
+**Always guard for `None`** (warm-up) before comparing — `ctx.indicator(...)` returns `None`, not `0.0`, until enough bars exist.
+
+### Escape hatch — custom signals only
+
+If your thesis needs a signal the catalogue above genuinely cannot express, you MAY compute it inline from `ctx.history(symbol, n)` using only `math` / `statistics`. This is permitted **solely** for signals that are NOT in your spec's indicator set; every indicator the spec references MUST still be read via `ctx.indicator(...)`.
 
 ## Allowed imports
 
 ONLY:
-- `contract`, `indicators`
+- `contract`
 - `math`, `datetime`, `collections`, `itertools`, `functools`, `typing`, `dataclasses`, `enum`, `abc`, `re`, `copy`, `statistics`, `operator`
+
+Read indicators via `ctx.indicator(...)` — you do **not** need to import an `indicators` module.
 
 Do NOT import: `pandas`, `numpy`, `os`, `sys`, `subprocess`, `socket`, `http`, `requests`, `pathlib`, or any filesystem/network module.
 
