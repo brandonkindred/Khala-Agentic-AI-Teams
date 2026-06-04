@@ -190,7 +190,9 @@ class TestGraphHelpers:
         _commit_file(clone, "work.py", "x = 1\n", "progress")
         assert api._is_ahead(clone, "khala/issue-7", "origin/main") is True
 
-    def test_rescue_branch_name_tags_issue_and_avoids_collisions(self, api, repo_pair, monkeypatch) -> None:
+    def test_rescue_branch_name_tags_issue_and_avoids_collisions(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
         _, clone = repo_pair
         monkeypatch.setattr(api, "_utc_timestamp", lambda: "20260101-000000")
         first = api._rescue_branch_name(clone, 5)
@@ -268,7 +270,9 @@ class TestRecoverDirtyTree:
 
 
 def _prep(api, clone: str, issue: int = 7):
-    return api._prepare_issue_branch(clone, "origin", "main", f"khala/issue-{issue}", None, issue_number=issue)
+    return api._prepare_issue_branch(
+        clone, "origin", "main", f"khala/issue-{issue}", None, issue_number=issue
+    )
 
 
 class TestPrepareIssueBranchRecovery:
@@ -278,7 +282,9 @@ class TestPrepareIssueBranchRecovery:
         assert ok is True, err
         assert notes == []
         assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "khala/issue-7"
-        assert _must(clone, "rev-parse", "khala/issue-7") == _must(clone, "rev-parse", "origin/main")
+        assert _must(clone, "rev-parse", "khala/issue-7") == _must(
+            clone, "rev-parse", "origin/main"
+        )
         assert _branch_exists(clone, "khala/rescue/*") is None
 
     def test_marker_written_on_success(self, api, repo_pair) -> None:
@@ -325,12 +331,16 @@ class TestPrepareIssueBranchRecovery:
 
     def test_status_failure_fails_closed(self, api, repo_pair, monkeypatch) -> None:
         _, clone = repo_pair
-        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, True, "git status failed"))
+        monkeypatch.setattr(
+            api, "_working_tree_dirty", lambda p: (False, True, "git status failed")
+        )
         ok, err, _ = _prep(api, clone)
         assert ok is False
         assert "git status failed" in err
 
-    def test_recovery_failure_fails_closed_with_both_messages(self, api, repo_pair, monkeypatch) -> None:
+    def test_recovery_failure_fails_closed_with_both_messages(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
         _, clone = repo_pair
         with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
             fh.write("x\n")
@@ -428,3 +438,145 @@ class TestWorkingTreeDirtyTriple:
         ok, dirty, listing = api._working_tree_dirty(not_a_repo)
         assert ok is False and dirty is True
         assert listing
+
+
+# ---------------------------------------------------------------------------
+# Failure-matrix branches (fail closed; never destroy work)
+# ---------------------------------------------------------------------------
+
+
+class TestFailureMatrix:
+    def test_is_ahead_false_when_rev_list_fails(self, api, monkeypatch) -> None:
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            if args[0] == "rev-parse":
+                return 0, "abc123"
+            return 1, "rev-list exploded"
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        assert api._is_ahead("/repo", "branch", "origin/main") is False
+
+    def test_rescue_branch_name_exhaustion_returns_none(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        monkeypatch.setattr(api, "_utc_timestamp", lambda: "20260101-000000")
+        base = "khala/rescue/issue-5-20260101-000000"
+        _must(clone, "branch", base)
+        for i in range(1, 10):
+            _must(clone, "branch", f"{base}-{i}")
+        assert api._rescue_branch_name(clone, 5) is None
+
+    def test_recover_same_issue_commit_failure_reported(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        monkeypatch.setattr(api, "commit_working_tree", lambda *_a, **_kw: (False, "in-place boom"))
+        tip, note, err = api._recover_dirty_tree(clone, 7, 7, "?? wip.txt")
+        assert (tip, note) == (None, None)
+        assert "in-place boom" in err
+        assert os.path.exists(os.path.join(clone, "wip.txt"))
+
+    def test_recover_rescue_name_exhaustion_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        monkeypatch.setattr(api, "_rescue_branch_name", lambda *_a: None)
+        tip, note, err = api._recover_dirty_tree(clone, None, 7, "?? wip.txt")
+        assert (tip, note) == (None, None)
+        assert "could not allocate" in err
+
+    def test_recover_rescue_branch_creation_failure_fails_closed(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
+        _, clone = repo_pair
+        _must(clone, "branch", "khala/rescue/taken")
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        # Simulate a name-allocation race: the allocated name already exists.
+        monkeypatch.setattr(api, "_rescue_branch_name", lambda *_a: "khala/rescue/taken")
+        tip, note, err = api._recover_dirty_tree(clone, None, 7, "?? wip.txt")
+        assert (tip, note) == (None, None)
+        assert "rescue branch creation failed" in err
+        assert os.path.exists(os.path.join(clone, "wip.txt"))
+
+    def test_preserve_noop_when_tip_reachable_from_seed(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "development", "origin/main")
+        _commit_file(clone, "dev.py", "d = 1\n", "dev work")
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(clone, "more.py", "m = 1\n", "more work")
+        # development is ahead of base but fully contained in the seed.
+        err = api._preserve_if_would_orphan(
+            clone, "development", "origin/main", "khala/issue-7", None
+        )
+        assert err is None
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+    def test_preserve_name_exhaustion_is_an_error(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "development", "origin/main")
+        _commit_file(clone, "dev.py", "d = 1\n", "dev work")
+        _must(clone, "checkout", "-q", "main")
+        monkeypatch.setattr(api, "_rescue_branch_name", lambda *_a: None)
+        err = api._preserve_if_would_orphan(
+            clone, "development", "origin/main", "origin/main", None
+        )
+        assert "could not allocate" in err
+
+    def test_preserve_branch_command_failure_is_an_error(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "development", "origin/main")
+        _commit_file(clone, "dev.py", "d = 1\n", "dev work")
+        _must(clone, "checkout", "-q", "main")
+        _must(clone, "branch", "khala/rescue/taken")
+        monkeypatch.setattr(api, "_rescue_branch_name", lambda *_a: "khala/rescue/taken")
+        err = api._preserve_if_would_orphan(
+            clone, "development", "origin/main", "origin/main", None
+        )
+        assert "failed to preserve" in err
+
+    def test_prep_fetch_failure_fails_closed(self, api, repo_pair) -> None:
+        remote, clone = repo_pair
+        import shutil
+
+        shutil.rmtree(remote)
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert err
+
+    def test_prep_preserve_failure_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        monkeypatch.setattr(api, "_preserve_if_would_orphan", lambda *_a, **_kw: "boom-preserve")
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "boom-preserve" in err
+
+    def test_prep_development_checkout_failure_fails_closed(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
+        _, clone = repo_pair
+        real_git = api._git
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            if args[:2] == ("checkout", "-B") and args[2] == "development":
+                return 1, "dev checkout exploded"
+            return real_git(repo_path, *args, timeout=timeout, env=env)
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "dev checkout exploded" in err
+
+    def test_prep_integration_checkout_failure_fails_closed(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
+        _, clone = repo_pair
+        real_git = api._git
+
+        def fake_git(repo_path, *args, timeout=120.0, env=None):
+            if args[:2] == ("checkout", "-B") and args[2] == "khala/issue-7":
+                return 1, "integration checkout exploded"
+            return real_git(repo_path, *args, timeout=timeout, env=env)
+
+        monkeypatch.setattr(api, "_git", fake_git)
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "integration checkout exploded" in err
