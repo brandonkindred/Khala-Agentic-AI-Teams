@@ -1227,11 +1227,18 @@ def test_rule9_check_b_skipped_for_volatility_target_sizing() -> None:
     assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
 
 
-def test_rule9_check_b_no_stop_with_tolerance_is_critical() -> None:
-    """A declared per-trade loss tolerance with a known deployed fraction but NO
-    stop is unenforceable (realised loss unbounded) — flag it as critical so the
-    spec cannot pass readiness with a limit it has no mechanism to honour."""
+def test_rule9_check_b_no_stop_short_with_tolerance_is_critical() -> None:
+    """A declared per-trade loss tolerance on a SHORT entry with no effective stop
+    is unenforceable: a short's loss is unbounded, so the runtime sizes it to
+    zero and it never executes — flag it as critical."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
     spec = _spec(
+        entry=short_entry,
         sizing=FixedFractionSizing(fraction=0.50),  # default exit is signal-only
         risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
     )
@@ -1242,7 +1249,22 @@ def test_rule9_check_b_no_stop_with_tolerance_is_critical() -> None:
         if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
     ]
     assert crit, _critical(results)
-    assert "no stop_loss rule" in crit[0] and "50.00%" in crit[0]
+    assert "no stop_loss rule" in crit[0] and "short" in crit[0]
+
+
+def test_rule9_check_b_no_stop_long_with_tolerance_is_silent() -> None:
+    """A LONG entry with a declared loss tolerance and no stop is NOT critical:
+    the runtime loss-clamp caps an uncovered long to deploy at most
+    max_loss_per_trade_pct, so the limit is honoured without a stop (gap-proof —
+    a long bottoms at zero) regardless of the declared deployed fraction."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.50),  # default exit is signal-only
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
 
 
 def test_rule9_check_b_no_stop_small_long_within_tolerance_is_silent() -> None:
@@ -1259,22 +1281,20 @@ def test_rule9_check_b_no_stop_small_long_within_tolerance_is_silent() -> None:
     ), _critical(results)
 
 
-def test_rule9_check_b_no_stop_long_over_tolerance_is_critical() -> None:
-    """An uncovered LONG whose full deployment exceeds the tolerance is
-    unenforceable. Use max_position_pct=20 so Check A does not also fire (10% <=
-    20%), isolating the loss-tolerance critical."""
+def test_rule9_check_b_no_stop_long_over_tolerance_is_silent() -> None:
+    """An uncovered LONG whose declared deployment exceeds the tolerance is still
+    NOT critical: the runtime loss-clamp sizes it down to max_loss_per_trade_pct,
+    so the realised worst-case loss equals the tolerance. The earlier
+    'deployment > tolerance' rejection was a false positive (it ignored the
+    runtime clamp). max_position_pct=20 keeps Check A from firing (10% <= 20%)."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.10),  # 10% deployed, no stop
         risk_limits={"max_position_pct": 20, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    crit = [
-        r.details
-        for r in results
-        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
-    ]
-    assert crit, _critical(results)
-    assert "10.00%" in crit[0] and "long" in crit[0]
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
 
 
 def test_rule9_check_b_no_stop_volatility_target_long_within_cap_is_silent() -> None:
@@ -1373,18 +1393,18 @@ def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
     )
 
 
-def test_rule9_check_b_no_stop_volatility_target_is_critical() -> None:
-    """The no-stop check is deployment-independent: a vol-target spec that
-    declares a loss tolerance with no effective stop is unenforceable and must
-    be rejected even though the deployed fraction is unknown."""
+def test_rule9_check_b_no_stop_volatility_target_long_is_silent() -> None:
+    """A vol-target LONG with a declared loss tolerance and no stop is NOT
+    critical: the runtime clamps an uncovered long to deploy at most
+    max_loss_per_trade_pct, honouring the limit without a stop even though the
+    deployed fraction is dynamic/unknown at design time."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert any(
-        r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
-        for r in results
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
     ), _critical(results)
 
 
@@ -1415,19 +1435,21 @@ def test_rule9_check_b_no_stop_volatility_target_short_is_critical() -> None:
 
 
 def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
-    """A long-only spec whose only stop is ``trailing_low`` has no effective stop
-    (the executor no-ops trailing_low for longs), so the declared loss tolerance
-    is unenforceable — flag it exactly as if no stop were present."""
-    long_entry = [
+    """A short-only spec whose only stop is ``trailing_high`` has no effective
+    stop (the executor no-ops trailing_high for shorts), so the short's loss is
+    unbounded and the declared tolerance is unenforceable — flag it exactly as if
+    no stop were present. (An uncovered long would NOT be critical; the runtime
+    clamps it. Shorts are the unbounded side.)"""
+    short_entry = [
         EntryRule(
-            side="long",
-            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
         )
     ]
     spec = _spec(
-        entry=long_entry,
+        entry=short_entry,
         sizing=FixedFractionSizing(fraction=0.50),
-        exit_=[StopLossRule(basis="trailing_low", pct=0.05)],
+        exit_=[StopLossRule(basis="trailing_high", pct=0.05)],  # no-ops for shorts
         risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -1437,7 +1459,7 @@ def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
         if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
     ]
     assert crit, _critical(results)
-    assert "long" in crit[0] and "no stop_loss rule that can cap" in crit[0]
+    assert "short" in crit[0] and "no stop_loss rule that can cap" in crit[0]
 
 
 def test_rule9_check_b_covered_side_checked_despite_uncovered_fitting_long() -> None:

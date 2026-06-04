@@ -843,11 +843,11 @@ class SpecReadinessGate(GateResultsMixin):
     #      ``trailing_low`` → short, ``entry_price`` → both). When the tolerance
     #      is set but some entry side has no effective stop, that is its own
     #      critical (``risk_limits:loss_tolerance_no_stop``) — but side-asym­
-    #      metrically: an uncovered SHORT is unbounded (always critical, any
-    #      sizing kind), while an uncovered LONG loses at most its deployed
-    #      amount, so it is critical only when the worst-case deployment (the
-    #      known fraction, else ``max_position_pct``) exceeds the tolerance — a
-    #      small no-stop long that fits the limit is coherent. The realised-loss
+    #      metrically, mirroring the runtime loss-clamp: an uncovered LONG is
+    #      clamped to deploy at most ``max_loss_per_trade_pct`` (full-deployment
+    #      loss == tolerance, gap-proof), so it is honoured without a stop and is
+    #      never a critical; an uncovered SHORT is unbounded, sized to zero by the
+    #      runtime, so it is always a critical. The realised-loss
     #      *magnitude* check additionally needs a known deployed fraction, so it
     #      is skipped when the tolerance is unset or the deployment is
     #      dynamic/unknown (``volatility_target`` / unconfigured
@@ -947,18 +947,12 @@ class SpecReadinessGate(GateResultsMixin):
         # — a stop is side-specific (``trailing_high`` → long, ``trailing_low``
         # → short, ``entry_price`` → both), so a declared/mis-sided stop that
         # no-ops for the spec's side leaves that side without an effective stop.
-        # Whether that makes the tolerance UNENFORCEABLE is side-asymmetric:
-        #   * SHORT: loss is unbounded (price can gap up arbitrarily), so NO
-        #     position size can honour the tolerance — always critical,
-        #     regardless of sizing kind.
-        #   * LONG: loss is capped at the deployed amount (price floors at
-        #     zero), so the tolerance IS enforceable when the worst-case
-        #     deployment fits within it; critical only when the worst-case
-        #     deployment exceeds the tolerance. The worst case is the known
-        #     deployed fraction, or — when sizing is dynamic/unknown
-        #     (``volatility_target`` / unconfigured ``fixed_notional``) — the
-        #     position cap (``max_position_pct``), the most the runtime can
-        #     deploy before its loss-clamp binds.
+        # Whether a *missing* stop makes the tolerance UNENFORCEABLE is
+        # side-asymmetric, mirroring the runtime loss-clamp: an uncovered LONG is
+        # clamped to deploy at most ``max_loss_per_trade_pct`` (full-deployment
+        # loss == the tolerance, gap-proof), so it is honoured without a stop and
+        # is never a critical; an uncovered SHORT is unbounded, sized to zero by
+        # the runtime, and is always a critical. See the no-stop block below.
         # The realised-loss magnitude check (the fully-covered branch)
         # additionally requires a known deployed fraction.
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
@@ -970,45 +964,33 @@ class SpecReadinessGate(GateResultsMixin):
                 s for s in entry_sides if not any(stop_caps_side(r.basis, s) for r in stop_rules)
             )
             short_uncovered = [s for s in uncovered_sides if s == "short"]
-            long_uncovered = [s for s in uncovered_sides if s == "long"]
-            # An uncovered long's worst case is its full deployed amount: the
-            # known deployed fraction, else the position cap (the most a
-            # dynamic/unconfigured sizing rule can deploy).
-            worst_long_deploy_pct = (
-                pos_fraction * 100.0 if pos_fraction is not None else max_position_pct
-            )
-            long_over_tolerance = bool(long_uncovered) and worst_long_deploy_pct > max_loss_pct * (
-                1.0 + _HARD_LIMIT_REL_EPS
-            )
-            # Check B-no-stop — a declared per-trade loss tolerance with no
-            # mechanism to honour it. Reject the unbounded short(s) and any long
-            # whose worst-case deployment already exceeds the tolerance; an
-            # uncovered long that fits the tolerance is coherent and passes.
-            reject_sides = sorted(
-                set(short_uncovered) | (set(long_uncovered) if long_over_tolerance else set())
-            )
-            if reject_sides:
-                sides_txt = "/".join(reject_sides)
-                reasons: List[str] = []
-                if short_uncovered:
-                    reasons.append("a short with no stop has unbounded loss")
-                if long_over_tolerance:
-                    reasons.append(
-                        f"an uncovered long deploys up to {worst_long_deploy_pct:.2f}% per trade, "
-                        f"more than the {max_loss_pct:.2f}% tolerance"
-                    )
-                fix = (
-                    f", OR lower the deployed size to <={max_loss_pct:.2f}%"
-                    if long_over_tolerance
-                    else ""
-                )
+            # Check B-no-stop — a declared per-trade loss tolerance the runtime
+            # has no mechanism to honour. This is side-asymmetric because the
+            # runtime loss-clamp (``_cap_qty_to_loss``) handles the sides
+            # differently:
+            #   * LONG: an uncovered long is clamped with ``stop_factor=1.0`` —
+            #     deployment is capped at ``max_loss_per_trade_pct`` itself, so
+            #     the worst-case loss (full deployment; gap-proof since a long
+            #     bottoms at zero) is exactly the tolerance. The limit is honoured
+            #     WITHOUT a stop by deploying less, so an uncovered long is NOT a
+            #     critical regardless of its sizing rule or deployed fraction.
+            #   * SHORT: an uncovered short has unbounded loss (price can gap up
+            #     arbitrarily), so NO size honours the tolerance — the runtime
+            #     sizes it to zero and the short entries never execute. A declared
+            #     short with a loss limit and no effective stop is therefore a
+            #     critical (it can never trade).
+            # Custom-code specs bypass the dispatcher clamp entirely and are
+            # caught by ``risk_limits:custom_code_unenforceable`` above, so this
+            # branch reasons purely about the compiled runtime.
+            if short_uncovered:
                 out.append(
                     self._critical(
                         f"max_loss_per_trade_pct={max_loss_pct:.2f}% is declared but the spec "
-                        f"has no stop_loss rule that can cap its {sides_txt} position(s) — "
-                        f"{'; '.join(reasons)}, so the per-trade loss limit cannot be enforced. "
-                        f"Add a stop_loss rule whose basis fires for {sides_txt} entries "
-                        f"(entry_price always works){fix}, OR remove max_loss_per_trade_pct.",
+                        "has no stop_loss rule that can cap its short position(s) — a short with "
+                        "no effective stop has unbounded loss, so no size honours the tolerance "
+                        "and the runtime sizes the short to zero (it never executes). Add a "
+                        "stop_loss rule whose basis fires for short entries (entry_price or "
+                        "trailing_low), OR drop the short entry / max_loss_per_trade_pct.",
                         rule_id="risk_limits:loss_tolerance_no_stop",
                     )
                 )
