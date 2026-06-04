@@ -1171,6 +1171,8 @@ def test_rule9_check_a_fixed_notional_skipped_without_config() -> None:
 
 
 def test_rule9_volatility_target_sizing_is_silent() -> None:
+    """Vol-target sizing has no static deployed fraction, so Checks A and C
+    abstain. With no per-trade loss tolerance declared, Check B is also silent."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
@@ -1181,6 +1183,23 @@ def test_rule9_volatility_target_sizing_is_silent() -> None:
         for r in results
         if not r.passed
     )
+
+
+def test_rule9_check_b_runs_for_volatility_target_sizing() -> None:
+    """Check B compares two static risk-limit fields, so it must fire even for
+    volatility_target sizing (whose deployed fraction is dynamic/unknown)."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
+    ]
+    assert crit, _critical(results)
+    assert "max_position_pct=10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
 
 
 def test_rule9_check_b_cap_exceeds_loss_tolerance_is_critical() -> None:
@@ -1232,7 +1251,9 @@ def test_rule9_check_c_prose_disagrees_is_warning() -> None:
     )
 
 
-def test_rule9_check_c_prose_matches_cap_is_silent() -> None:
+def test_rule9_check_c_prose_matches_actual_deployment_is_silent() -> None:
+    """Prose agrees with the actual deployed fraction (sizing.fraction=5%),
+    which also happens to equal the cap — no warning."""
     spec = _spec(
         hypothesis="Allocate 5% per trade to AAPL.",
         sizing=FixedFractionSizing(fraction=0.05),
@@ -1240,6 +1261,25 @@ def test_rule9_check_c_prose_matches_cap_is_silent() -> None:
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert not any(r.rule_id == "hypothesis:position_pct" for r in results if not r.passed)
+
+
+def test_rule9_check_c_prose_matches_cap_not_fraction_warns() -> None:
+    """Prose matching the cap must not suppress the warning when it disagrees
+    with the ACTUAL deployed fraction — the engine deploys sizing.fraction, not
+    the cap, so 'allocate 10%' with fraction=0.02 (2% deployed) and cap=10 is a
+    real prose↔deployment contradiction."""
+    spec = _spec(
+        hypothesis="Allocate 10% per trade to AAPL on RSI mean reversion.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warns = [r.details for r in results if r.rule_id == "hypothesis:position_pct"]
+    assert warns, _warning(results)
+    assert "10.00%" in warns[0] and "2.00%" in warns[0]
+    assert not any(
+        r.rule_id == "hypothesis:position_pct" and r.severity == "critical" for r in results
+    )
 
 
 def test_rule9_check_c_no_position_prose_is_silent() -> None:

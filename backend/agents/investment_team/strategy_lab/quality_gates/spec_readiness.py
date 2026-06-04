@@ -798,12 +798,19 @@ class SpecReadinessGate(GateResultsMixin):
     #     breach.
     # Three deterministic checks, all using correct algebra:
     #   A. Deployed capital must not exceed the position cap
-    #      (``sizing.fraction`` ≤ ``max_position_pct``) — critical.
+    #      (``sizing.fraction`` ≤ ``max_position_pct``) — critical. Only when
+    #      the deployed fraction is known (skipped for ``volatility_target`` and
+    #      unconfigured ``fixed_notional``).
     #   B. The position cap must not exceed the declared per-trade loss
     #      tolerance (``max_position_pct`` ≤ ``max_loss_per_trade_pct`` when
-    #      set), keeping the declared policy self-consistent — critical.
-    #   C. A prose-stated per-trade deployment % must agree with the spec's
-    #      sizing / cap — warning (prose hygiene).
+    #      set), keeping the declared policy self-consistent — critical. Both
+    #      operands are static risk-limit fields independent of the sizing kind,
+    #      so this runs for EVERY spec (including ``volatility_target``).
+    #   C. A prose-stated per-trade deployment % must agree with the ACTUAL
+    #      deployed fraction (``sizing.fraction``) when it is known — warning
+    #      (prose hygiene). The cap is an upper bound, not the deployed amount,
+    #      so matching it must not by itself satisfy the claim;
+    #      ``volatility_target`` deployment is dynamic so the check abstains.
     # ------------------------------------------------------------------
     def _check_risk_math_reconciliation(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
@@ -811,17 +818,14 @@ class SpecReadinessGate(GateResultsMixin):
         rel_tol = _sizing_coherence_rel_tol()
 
         kind = getattr(ctx.spec.sizing, "kind", None)
-        # Volatility-target sizing is dynamic (depends on realised vol); the
-        # deployed fraction is unknown at design time, so there is nothing to
-        # reconcile — consistent with Rule 5 abstaining on the same kind.
-        if kind == "volatility_target":
-            return ()
-
         max_position_pct = float(ctx.spec.risk_limits.max_position_pct)
 
         # Resolve the deployed fraction (of the account) for the supported
         # static sizing kinds. ``fixed_notional`` needs initial_capital to
         # express the notional as a fraction, so it is skipped without config.
+        # ``volatility_target`` is dynamic (depends on realised vol), so the
+        # deployed fraction is unknown at design time and stays ``None`` —
+        # consistent with Rule 5 abstaining on the same kind.
         pos_fraction: Optional[float] = None
         if kind == "fixed_fraction":
             pos_fraction = float(ctx.spec.sizing.fraction)
@@ -834,6 +838,8 @@ class SpecReadinessGate(GateResultsMixin):
         # Check A — deployed capital must not exceed the position cap. Both
         # sides are account-capital fractions, so this is the one genuine
         # structural contradiction (e.g. fraction=0.10 with max_position_pct=5).
+        # Skipped when the deployed fraction is unknown (volatility_target /
+        # unconfigured fixed_notional).
         if pos_fraction is not None:
             pos_pct = pos_fraction * 100.0
             if pos_pct > max_position_pct * (1.0 + rel_tol):
@@ -860,6 +866,9 @@ class SpecReadinessGate(GateResultsMixin):
         # the latter is declared. (The realised loss is reduced further by the
         # stop and can never *exceed* the deployed amount — there is no runtime
         # budget to breach; this keeps the declared policy self-consistent.)
+        # Both operands are static risk-limit fields, independent of the sizing
+        # kind, so this fires for every spec — including volatility_target,
+        # whose dynamic deployed fraction does not affect this comparison.
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
         if max_loss_pct is not None:
             max_loss_pct = float(max_loss_pct)
@@ -877,28 +886,45 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
 
-        # Check C — prose claim vs actual deployment. "risk/deploy X% per
-        # trade" denotes capital deployed; flag when it disagrees with both the
-        # sizing fraction and the position cap beyond tolerance.
-        prose_pct = _extract_prose_position_pct(ctx.spec.hypothesis or "")
-        if prose_pct is not None:
-            spec_targets: List[tuple[str, float]] = [("max_position_pct", max_position_pct)]
-            if pos_fraction is not None:
-                spec_targets.append(("sizing.fraction", pos_fraction * 100.0))
-            disagrees_all = all(
-                abs(prose_pct - value) > max(rel_tol * max(value, prose_pct), 1e-9)
-                for _, value in spec_targets
-            )
-            if disagrees_all:
-                detail = "; ".join(f"{name}={value:.2f}%" for name, value in spec_targets)
-                out.append(
-                    self._warning(
-                        f"Hypothesis states ~{prose_pct:.2f}% deployed per trade but the "
-                        f"spec sets {detail}. Reconcile the prose with the sizing/limit "
-                        "(per-trade % is capital deployed, not a loss budget).",
-                        rule_id="hypothesis:position_pct",
+        # Check C — prose claim vs ACTUAL deployment. "risk/deploy X% per trade"
+        # denotes capital deployed, which the engine computes from the sizing
+        # rule (``sizing.fraction``), NOT from ``max_position_pct`` (an upper
+        # bound, not the deployed amount). When the deployed fraction is known,
+        # reconcile the prose against it alone — matching the cap must not on
+        # its own satisfy the claim, or a thesis can promise 10%/trade while the
+        # backtest deploys 2%. ``volatility_target`` deployment is dynamic and
+        # unknown at design time, so a prose deployment % cannot be reconciled
+        # and the check abstains; unconfigured ``fixed_notional`` falls back to
+        # the cap as the only available static figure.
+        if kind != "volatility_target":
+            prose_pct = _extract_prose_position_pct(ctx.spec.hypothesis or "")
+            if prose_pct is not None:
+                if pos_fraction is not None:
+                    actual_pct = pos_fraction * 100.0
+                    if abs(prose_pct - actual_pct) > max(
+                        rel_tol * max(actual_pct, prose_pct), 1e-9
+                    ):
+                        out.append(
+                            self._warning(
+                                f"Hypothesis states ~{prose_pct:.2f}% deployed per trade but the "
+                                f"spec deploys {actual_pct:.2f}% (sizing.fraction; "
+                                f"max_position_pct={max_position_pct:.2f}% is only an upper bound, "
+                                "not the deployed amount). Reconcile the prose with the actual sizing.",
+                                rule_id="hypothesis:position_pct",
+                            )
+                        )
+                elif abs(prose_pct - max_position_pct) > max(
+                    rel_tol * max(max_position_pct, prose_pct), 1e-9
+                ):
+                    out.append(
+                        self._warning(
+                            f"Hypothesis states ~{prose_pct:.2f}% deployed per trade but "
+                            f"max_position_pct={max_position_pct:.2f}% (no static deployed "
+                            "fraction is available to compare against). Reconcile the prose with "
+                            "the sizing/limit (per-trade % is capital deployed, not a loss budget).",
+                            rule_id="hypothesis:position_pct",
+                        )
                     )
-                )
 
         return out
 
