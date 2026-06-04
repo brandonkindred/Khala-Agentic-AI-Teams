@@ -192,6 +192,43 @@ def test_periods_to_process_skips_open_period(monkeypatch: pytest.MonkeyPatch) -
     assert _dt(2026, 5, 9, 0) in starts
 
 
+def test_periods_to_process_skips_partial_aggregate_at_floor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An aggregate (week) period the lookback floor bisects is not scheduled as
+    missing — building it would consume only its post-floor day children and
+    silently omit the older days while marking the parent non-stale."""
+    monkeypatch.setenv("AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS", "10")
+    monkeypatch.setattr(store, "fetch_stale_summaries", lambda agent_id, scale: [])
+    monkeypatch.setattr(store, "fetch_summaries", lambda agent_id, scale: [])
+    now = _dt(2026, 1, 20, 9)
+    floor = now - timedelta(days=10)  # 2026-01-10 09:00 (a Saturday → mid-week)
+    partial_start, partial_end = rollup._week_bounds(floor)
+    assert partial_start < floor  # the floor bisects this week (test is meaningful)
+
+    starts = {p[0] for p in rollup._periods_to_process("a", Scale.WEEK, now)}
+
+    assert partial_start not in starts  # partial leading week skipped
+    assert partial_end in starts  # the first fully-in-window week (starts at floor week's end)
+
+
+def test_periods_to_process_keeps_floor_day_for_day_scale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Days have no children and read their whole event set, so a floor-bisected
+    day is complete and is still scheduled (the aggregate trim must not apply)."""
+    monkeypatch.setenv("AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS", "5")
+    monkeypatch.setattr(store, "fetch_stale_summaries", lambda agent_id, scale: [])
+    monkeypatch.setattr(store, "fetch_summaries", lambda agent_id, scale: [])
+    now = _dt(2026, 1, 20, 9)
+    floor_day_start = rollup._day_bounds(now - timedelta(days=5))[0]
+    assert floor_day_start < now - timedelta(days=5)  # floor is mid-day
+
+    starts = {p[0] for p in rollup._periods_to_process("a", Scale.DAY, now)}
+
+    assert floor_day_start in starts
+
+
 def _child(start: datetime, *, stale: bool, source_count: int = 3) -> PeriodSummary:
     return PeriodSummary(
         id=uuid4().hex,
@@ -246,6 +283,97 @@ def test_build_summary_builds_aggregate_when_all_children_current(
     assert out is not None and out.stale is False
     assert out.source_count == 7  # summed across current children
     assert Scale.WEEK.value not in report.deferred
+
+
+def _one_event(period_start: datetime) -> MemoryEvent:
+    return MemoryEvent(
+        id="e1",
+        agent_id="a",
+        kind=EventKind.OUTCOME,
+        content="did a thing",
+        occurred_at=period_start,
+        source_run_id="r1",
+        source_seq=1,
+    )
+
+
+def _wire_first_insert(monkeypatch: pytest.MonkeyPatch, *, day_start: datetime) -> dict:
+    """Monkeypatch the store so a first-time DAY rollup builds and upserts once,
+    recording the re-probe / re-stale calls for assertions."""
+    calls: dict = {"upserted": [], "marked_stale": []}
+    monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 5, 0))
+    monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: None)
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [_one_event(day_start)])
+    monkeypatch.setattr(
+        store, "upsert_summary", lambda agent_id, summary, **k: calls["upserted"].append(summary)
+    )
+    monkeypatch.setattr(
+        store, "mark_period_stale", lambda agent_id, ts: calls["marked_stale"].append(ts) or True
+    )
+    monkeypatch.setattr(rollup, "_flag_dependent_evidence", lambda *a, **k: None)
+    return calls
+
+
+def test_first_day_summary_reprobes_and_restales_on_post_snapshot_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first-ever day summary self-flags stale when an event was recorded after
+    the read snapshot (the writeback had no row to flag), so a later pass folds
+    it."""
+    day_start, day_end = rollup._day_bounds(_dt(2026, 5, 4))
+    calls = _wire_first_insert(monkeypatch, day_start=day_start)
+    monkeypatch.setattr(store, "has_events_recorded_after", lambda *a, **k: True)
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.DAY, day_start, day_end, llm=CannedLLM(), report=report)
+
+    assert len(calls["upserted"]) == 1
+    assert report.recomputed[Scale.DAY.value] == 1
+    assert calls["marked_stale"] == [day_start]  # self-flagged for a later fold
+
+
+def test_first_day_summary_no_restale_without_post_snapshot_append(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No concurrent append → the first summary stays current (no re-stale)."""
+    day_start, day_end = rollup._day_bounds(_dt(2026, 5, 4))
+    calls = _wire_first_insert(monkeypatch, day_start=day_start)
+    monkeypatch.setattr(store, "has_events_recorded_after", lambda *a, **k: False)
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.DAY, day_start, day_end, llm=CannedLLM(), report=report)
+
+    assert len(calls["upserted"]) == 1
+    assert calls["marked_stale"] == []
+
+
+def test_first_aggregate_summary_does_not_reprobe(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The re-probe is day-only: a first-time week never event-re-probes (its
+    children's staleness carries the late-arrival signal up instead)."""
+    week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
+    monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 12, 0))
+    monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: None)
+    monkeypatch.setattr(
+        store, "fetch_summaries_in_window", lambda *a, **k: [_child(week_start, stale=False)]
+    )
+    upserted: list = []
+    monkeypatch.setattr(
+        store, "upsert_summary", lambda agent_id, summary, **k: upserted.append(summary)
+    )
+    monkeypatch.setattr(rollup, "_flag_dependent_evidence", lambda *a, **k: None)
+    probed = {"called": False}
+    monkeypatch.setattr(
+        store, "has_events_recorded_after", lambda *a, **k: probed.update(called=True) or True
+    )
+    monkeypatch.setattr(
+        store, "mark_period_stale", lambda *a, **k: pytest.fail("must not re-stale")
+    )
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.WEEK, week_start, week_end, llm=CannedLLM(), report=report)
+
+    assert len(upserted) == 1
+    assert probed["called"] is False  # day-only gate short-circuits before the probe
 
 
 # ===========================================================================

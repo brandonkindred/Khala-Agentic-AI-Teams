@@ -148,14 +148,18 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
           clean re-run. Periods whose ``period_end > now`` are left untouched.
         * Returns a :class:`RollupReport` counting the work done.
     Invariants:
-        * A single ``snapshot`` time, captured before any event is read, bounds
-          every event read and is passed as ``computed_at`` to every upsert, so
-          the read set and the prune guard stay consistent.
+        * Each period captures its own ``snapshot`` (read-time) immediately
+          before reading its inputs, and passes that same value as
+          ``computed_at`` to its upsert, so a period's read set and prune guard
+          stay consistent. The snapshot is deliberately *not* shared across
+          periods: a single up-front snapshot widens (to the whole multi-scale
+          run) the window in which a concurrent append to a not-yet-summarized
+          period is read-excluded yet has no summary row to flag stale — see
+          :func:`_rollup_one_period`'s first-summary re-probe.
     """
     assert agent_id, "ensure_rollups_current: agent_id must be non-empty"
     assert now.tzinfo is not None, "ensure_rollups_current: now must be tz-aware (UTC)"
 
-    snapshot = store._now()
     llm = get_client("cognition")
     report = RollupReport(agent_id=agent_id)
 
@@ -169,7 +173,6 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
                 scale,
                 period_start,
                 period_end,
-                snapshot=snapshot,
                 llm=llm,
                 report=report,
             )
@@ -253,7 +256,11 @@ def _periods_to_process(
         * Returns ``(period_start, period_end)`` pairs, ascending by start,
           for every closed period that either has no summary (within the
           lookback window) or has a ``stale`` summary (any age). Open periods
-          (``period_end > now``) are excluded.
+          (``period_end > now``) are excluded. A leading **aggregate** period
+          that the lookback floor bisects (``period_start < floor``) is excluded
+          from the missing set, so a partial week/month/year at the horizon is
+          never summarized from only its post-floor children; an already-stale
+          such period is still returned (staleness ignores the floor).
     Invariants:
         * Ascending order plus the bottom-up scale loop guarantees a child is
           rebuilt before any parent that consumes it.
@@ -271,6 +278,15 @@ def _periods_to_process(
     existing_starts = {s.period_start for s in store.fetch_summaries(agent_id, scale)}
     floor = now - timedelta(days=_max_lookback_days())
     start, end = _period_bounds(scale, floor)
+    # Skip a leading aggregate period that the floor bisects (``start < floor``):
+    # its pre-floor child periods sit outside this missing walk and may never
+    # have been summarized, so building the parent now would consume only its
+    # post-floor children and silently omit the older calendar-period events
+    # while marking the parent non-stale (hence never rebuilt). Days have no
+    # children and always read their full event set, so a floor-bisected day is
+    # complete and is kept.
+    if scale in _CHILD_SCALE and start < floor:
+        start, end = _period_bounds(scale, end)
     while _is_closed(end, now):
         if start not in existing_starts:
             candidates[start] = (start, end)
@@ -288,23 +304,34 @@ def _rollup_one_period(
     period_start: datetime,
     period_end: datetime,
     *,
-    snapshot: datetime,
     llm,
     report: RollupReport,
 ) -> None:
     """(Re)summarize one period, choosing recompute vs. amend by regime.
 
+    A per-period read ``snapshot`` is captured here, immediately before any
+    input is read, and reused as the upsert's ``computed_at`` — keeping this
+    period's read set and prune guard consistent while minimizing the window in
+    which a concurrent append is read-excluded.
+
     Preconditions:
         * ``[period_start, period_end)`` is a closed calendar period at
-          ``scale``; ``snapshot`` was captured before this call.
+          ``scale``.
     Postconditions:
         * At most one ``upsert_summary`` for ``(agent_id, scale,
-          period_start)`` with ``computed_at=snapshot``. A pruned day is
-          amended (base preserved); any other missing/stale period is
-          recomputed from inputs. An empty, never-summarized period is a
-          no-op. A recompute/amend of a previously-summarized period flags any
-          evidence that cited the now-superseded version.
+          period_start)`` with ``computed_at`` = the per-period snapshot. A
+          pruned day is amended (base preserved); any other missing/stale
+          period is recomputed from inputs. An empty, never-summarized period
+          is a no-op. A recompute/amend of a previously-summarized period flags
+          any evidence that cited the now-superseded version.
+        * **First-summary re-probe.** When a period gets its *first* summary
+          (no prior row) and a day-scale event was recorded after this
+          snapshot (so it was read-excluded yet had no row for the writeback to
+          flag), the just-created period is self-flagged stale so a later pass
+          folds it. Day-scale only: aggregates fold child summaries, and a
+          still-stale child already defers the parent.
     """
+    snapshot = store._now()
     existing = store.get_existing_summary(agent_id, scale, period_start)
 
     # Regime (b): the day's raw events were pruned — amend, never rebuild.
@@ -337,6 +364,20 @@ def _rollup_one_period(
     report.recomputed[scale.value] = report.recomputed.get(scale.value, 0) + 1
     if existing is not None:
         _flag_dependent_evidence(agent_id, summary, report)
+    elif scale is Scale.DAY and store.has_events_recorded_after(
+        agent_id, period_start, period_end, after=snapshot
+    ):
+        # First-ever summary for this day, but an event was appended after our
+        # read snapshot and before this row existed — so the writeback's
+        # mark_period_stale found no row to flag and the read excluded it.
+        # Self-flag stale now that the row exists; the next pass folds it (and
+        # the stale-child defer carries the signal up to week/month/year).
+        store.mark_period_stale(agent_id, period_start)
+        logger.debug(
+            "rollup re-probe: first %s summary %s saw a post-snapshot append; re-flagged stale",
+            scale.value,
+            period_start.isoformat(),
+        )
 
 
 def _build_summary(

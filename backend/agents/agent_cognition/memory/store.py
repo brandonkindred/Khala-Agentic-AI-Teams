@@ -220,9 +220,41 @@ def fetch_unfolded_events(
         return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
 
 
-# ---------------------------------------------------------------------------
-# Rollup summaries
-# ---------------------------------------------------------------------------
+@timed_query(store=_STORE, op="has_events_recorded_after")
+def has_events_recorded_after(
+    agent_id: str, period_start: datetime, period_end: datetime, *, after: datetime
+) -> bool:
+    """True iff an event in ``[start, end)`` was *recorded* after ``after``.
+
+    The rollup's first-summary re-probe: when a period gets its very first
+    summary, an event appended after the rollup's read snapshot but before the
+    summary row existed cannot be flagged stale by the writeback's
+    :func:`mark_period_stale` (there is no row yet). After inserting the first
+    summary the engine calls this with ``after = computed_at`` (the read
+    snapshot); a ``True`` result means such a concurrent append happened, so the
+    engine self-flags the just-created period stale and a later pass folds it.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open.
+    Postconditions:
+        * ``True`` iff at least one event owned by ``agent_id`` has
+          ``period_start <= occurred_at < period_end`` **and** ``recorded_at >
+          after``; no rows are modified.
+    """
+    assert agent_id, "has_events_recorded_after: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM agent_cognition_events
+                   WHERE agent_id = %s
+                     AND occurred_at >= %s AND occurred_at < %s
+                     AND recorded_at > %s
+               )""",
+            (agent_id, period_start, period_end, after),
+        )
+        return bool(cur.fetchone()[0])
+
+
 @timed_query(store=_STORE, op="upsert_summary")
 def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: datetime) -> None:
     """Insert or replace one rollup, idempotent on the period unique key.
