@@ -9,11 +9,16 @@ Two design constraints shape the digest, both from the cognition spec:
 
 * **Closed-period rollups only.** A rollup summary exists only once its calendar
   period has *closed*, so mid-week/mid-month there is no current-period summary.
-  The digest therefore stitches the most recent **closed** month / week / day
-  summaries (stable long-range context) together with the **in-progress** period
-  rendered directly from the top-N most salient raw events that no closed summary
-  covers yet (events at/after the latest closed day). It never goes empty merely
-  because the current period hasn't closed yet.
+  The digest therefore stitches the most recent **closed, non-stale** month /
+  week / day summaries (stable long-range context) together with the
+  **in-progress** period rendered directly from the top-N most salient raw events
+  that no such summary covers yet (events at/after the latest non-stale closed
+  day). A summary the memory subsystem has flagged ``stale`` (a late writeback
+  landed in it and the rollup hasn't reconciled it yet) is skipped in favour of
+  the latest summary still considered current — so the digest never shows
+  invalidated context, and the late events that triggered the staleness fall
+  through into the live section rather than being hidden behind an obsolete
+  boundary. It never goes empty merely because the current period hasn't closed.
 * **Caller-bounded size.** The whole block is trimmed to a caller-supplied
   ``token_budget`` (converted to characters, then compacted and hard-capped), so
   the injector can size it against the model context window.
@@ -47,6 +52,12 @@ _CHARS_PER_TOKEN = 4
 # Read at call time so operators/tests can override via the env var below.
 _DEFAULT_EVENT_TOP_N = 20
 
+# How many recent summaries to scan per scale when skipping ``stale`` rows to find
+# the latest still-current one. Staleness is rare and transient (the lazy/central
+# rollup reconciles it), so consecutive stale summaries past this bound are not
+# expected; if they occur, that scale simply contributes no long-range context.
+_STALE_SCAN_LIMIT = 8
+
 # Closed-period summary scales folded into the digest, broadest first so the
 # rendered block reads long-range → short-range before the live events. Year is
 # intentionally omitted from v1 (day/week/month give enough long-range context).
@@ -68,9 +79,11 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
           over-budget or best-effort LLM compaction can never breach the budget).
         * Sections are ordered broadest→narrowest: month, week, day summaries,
           then the recent in-progress events in ``(salience DESC, occurred_at
-          DESC)`` order as returned by :func:`store.fetch_recent_events`.
-        * Returns ``""`` when the agent has no summaries and no recent events, or
-          when ``token_budget == 0``.
+          DESC)`` order.
+        * Only **non-stale** summaries are surfaced; a ``stale`` latest summary is
+          skipped in favour of the latest non-stale one at that scale (or none).
+        * Returns ``""`` when the agent has no non-stale summaries and no recent
+          events, or when ``token_budget == 0``.
     """
     assert agent_id, "agent_id must be non-empty"
     assert token_budget >= 0, "token_budget must be non-negative"
@@ -80,11 +93,11 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
 
     char_budget = token_budget * _CHARS_PER_TOKEN
 
-    # Most recent closed summary per scale (stable long-range context). A scale
-    # with no closed period yet simply contributes nothing.
+    # Most recent *non-stale* closed summary per scale (stable long-range context).
+    # A scale with no current summary yet simply contributes nothing.
     summaries: list[tuple[Scale, PeriodSummary]] = []
     for scale in _SUMMARY_SCALES:
-        summary = store.get_last_summary(agent_id, scale)
+        summary = _latest_non_stale_summary(agent_id, scale)
         if summary is not None:
             summaries.append((scale, summary))
 
@@ -109,27 +122,55 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
     return digest
 
 
+def _latest_non_stale_summary(agent_id: str, scale: Scale) -> PeriodSummary | None:
+    """Most recent **non-stale** closed summary at ``scale``, or ``None``.
+
+    ``get_last_summary`` returns the newest period regardless of state, but a
+    summary flagged ``stale`` has been invalidated by a late writeback the rollup
+    engine hasn't reconciled yet. Surfacing it would inject obsolete long-term
+    memory and — for the day scale, whose ``period_end`` bounds the live event
+    window — hide the late events behind a boundary that no longer reflects them.
+    So skip stale rows (newest first) and return the latest summary the memory
+    subsystem still considers current.
+
+    Postconditions:
+        * Returns the non-stale summary with the maximal ``period_start`` among the
+          most recent ``_STALE_SCAN_LIMIT`` summaries at ``scale``, or ``None`` if
+          none of them is current.
+    """
+    for summary in store.fetch_summaries(agent_id, scale, limit=_STALE_SCAN_LIMIT):
+        if not summary.stale:
+            return summary
+    return None
+
+
 def _fetch_in_progress_events(
     agent_id: str, summaries: list[tuple[Scale, PeriodSummary]]
 ) -> list[MemoryEvent]:
     """Top-N salient events from the in-progress period only.
 
-    The closed day/week/month summaries already capture everything up to the most
-    recent closed **day**, so the digest's live section must represent only what
-    those summaries don't: events occurring at or after that day's ``period_end``.
-    Without this bound, an unbounded top-N-by-salience scan over the agent's whole
-    retained history could resurface a high-salience event from an
-    already-summarized period (duplicating the summary) and evict genuinely
+    The closed, non-stale day/week/month summaries capture everything up to the
+    most recent **non-stale** closed day, so the digest's live section must
+    represent only what those summaries don't: events occurring at or after that
+    day's ``period_end``. Without this bound, an unbounded top-N-by-salience scan
+    over the agent's whole retained history could resurface a high-salience event
+    from an already-summarized period (duplicating the summary) and evict genuinely
     current-period events from the window.
 
-    When no closed day summary exists yet (cold start), every retained event is
-    still uncovered, so the unbounded recent-events fetch is used.
+    Because the bounding day is the latest *non-stale* one (``summaries`` already
+    excludes stale rows), events folded into a now-stale day summary correctly fall
+    *after* the boundary and surface here as recent activity rather than vanishing
+    until the rollup reconciles.
+
+    When no non-stale closed day summary exists yet (cold start, or every recent
+    day still stale), every retained event is uncovered, so the unbounded
+    recent-events fetch is used.
 
     Postconditions:
         * At most ``_event_top_n()`` events, ordered ``(salience DESC, occurred_at
           DESC, id ASC)`` — identical to :func:`store.fetch_recent_events`.
-        * When a closed day summary exists, every returned event satisfies
-          ``occurred_at >= day.period_end``.
+        * When a non-stale closed day summary exists, every returned event
+          satisfies ``occurred_at >= day.period_end``.
     """
     top_n = _event_top_n()
     day = next((summary for scale, summary in summaries if scale is Scale.DAY), None)

@@ -57,6 +57,7 @@ def _summary(
     window: tuple[datetime, datetime] = _DAY,
     summary: str = "",
     highlights: list | None = None,
+    stale: bool = False,
 ) -> PeriodSummary:
     return PeriodSummary(
         id=str(uuid4()),
@@ -66,6 +67,7 @@ def _summary(
         period_end=window[1],
         summary=summary,
         highlights=highlights or [],
+        stale=stale,
         created_at=_CREATED,
     )
 
@@ -80,7 +82,13 @@ def _wire_store(
     summaries = summaries or {}
     captured: dict[str, Any] = {}
 
-    monkeypatch.setattr(store, "get_last_summary", lambda agent_id, scale: summaries.get(scale))
+    # The builder gathers per-scale context via fetch_summaries (newest first),
+    # skipping stale rows. The map holds one non-stale summary per scale.
+    def _fetch_summaries(agent_id: str, scale: Scale, limit=None, offset: int = 0):
+        s = summaries.get(scale)
+        return [s] if s is not None else []
+
+    monkeypatch.setattr(store, "fetch_summaries", _fetch_summaries)
 
     def _fetch_recent(agent_id: str, top_n: int, by_salience: bool = True):
         captured["agent_id"] = agent_id
@@ -132,7 +140,7 @@ def test_zero_budget_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     _no_llm(monkeypatch)
     # Store is never consulted for a zero budget.
     monkeypatch.setattr(
-        store, "get_last_summary", lambda *a, **k: pytest.fail("no store read for 0 budget")
+        store, "fetch_summaries", lambda *a, **k: pytest.fail("no store read for 0 budget")
     )
     assert retrieval.build_memory_digest("a", 0) == ""
 
@@ -242,7 +250,7 @@ def test_live_events_bounded_to_after_latest_closed_day(
     captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
-        store, "get_last_summary", lambda agent_id, scale: day if scale is Scale.DAY else None
+        store, "fetch_summaries", lambda agent_id, scale, **k: [day] if scale is Scale.DAY else []
     )
     monkeypatch.setattr(
         store,
@@ -276,7 +284,7 @@ def test_live_events_sorted_by_salience_and_capped(monkeypatch: pytest.MonkeyPat
         _event(content="mid", salience=0.5, occurred_at=datetime(2026, 6, 2, 3, tzinfo=_UTC)),
     ]
     monkeypatch.setattr(
-        store, "get_last_summary", lambda agent_id, scale: day if scale is Scale.DAY else None
+        store, "fetch_summaries", lambda agent_id, scale, **k: [day] if scale is Scale.DAY else []
     )
     monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: list(window_events))
     _no_llm(monkeypatch)
@@ -291,7 +299,7 @@ def test_live_events_sorted_by_salience_and_capped(monkeypatch: pytest.MonkeyPat
 def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     # No closed day summary yet → every retained event is uncovered, so the
     # unbounded recent-events fetch is used.
-    monkeypatch.setattr(store, "get_last_summary", lambda agent_id, scale: None)
+    monkeypatch.setattr(store, "fetch_summaries", lambda *a, **k: [])
     monkeypatch.setattr(
         store,
         "fetch_events_for_period",
@@ -310,6 +318,88 @@ def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch)
 
     assert captured["by_salience"] is True
     assert "all-history" in digest
+
+
+# ===========================================================================
+# Stale-summary handling
+# ===========================================================================
+def test_stale_latest_summary_falls_back_to_non_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The newest day summary is stale (a late writeback invalidated it); the
+    # digest must skip it and surface the latest still-current summary instead.
+    stale_day = _summary(scale=Scale.DAY, window=_DAY, summary="STALE today", stale=True)
+    older_day = _summary(
+        scale=Scale.DAY,
+        window=(datetime(2026, 5, 31, tzinfo=_UTC), datetime(2026, 6, 1, tzinfo=_UTC)),
+        summary="current yesterday",
+    )
+    monkeypatch.setattr(
+        store,
+        "fetch_summaries",
+        lambda agent_id, scale, **k: [stale_day, older_day] if scale is Scale.DAY else [],
+    )
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [])
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "current yesterday" in digest
+    assert "STALE today" not in digest
+
+
+def test_all_recent_summaries_stale_contributes_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Every scanned summary is stale → that scale contributes no long-range
+    # context (rather than surfacing invalidated memory).
+    monkeypatch.setattr(
+        store,
+        "fetch_summaries",
+        lambda agent_id, scale, **k: [_summary(scale=scale, summary="x", stale=True)],
+    )
+    monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "## Long-term memory" not in digest
+    assert "live" in digest  # cold-start event path still runs (no non-stale day)
+
+
+def test_stale_day_does_not_hide_late_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A late event lands in the latest closed day, marking that day stale. The
+    # event boundary must come from the latest *non-stale* day, so the late event
+    # (which occurred within the now-stale day) still surfaces as recent activity.
+    stale_day = _summary(scale=Scale.DAY, window=_DAY, summary="stale", stale=True)
+    prev_day = _summary(
+        scale=Scale.DAY,
+        window=(datetime(2026, 5, 31, tzinfo=_UTC), datetime(2026, 6, 1, tzinfo=_UTC)),
+        summary="prev",
+    )
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        store,
+        "fetch_summaries",
+        lambda agent_id, scale, **k: [stale_day, prev_day] if scale is Scale.DAY else [],
+    )
+
+    def _fetch_period(agent_id, period_start, period_end, *, snapshot=None):
+        captured["period_start"] = period_start
+        return [_event(content="late event", salience=0.3)]
+
+    monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    # Boundary is the non-stale (previous) day's end, not the stale day's end,
+    # so the late event inside the stale day is included.
+    assert captured["period_start"] == prev_day.period_end
+    assert "late event" in digest
+    assert "prev" in digest
+    assert "stale" not in digest
 
 
 # ===========================================================================
