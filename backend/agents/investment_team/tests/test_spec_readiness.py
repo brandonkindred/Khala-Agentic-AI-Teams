@@ -1258,17 +1258,45 @@ def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
     )
 
 
-def test_rule9_check_b_no_stop_volatility_target_is_silent() -> None:
-    """Vol-target deployment is unknown, so even with a tolerance and no stop the
-    no-stop critical abstains (no deployed fraction to reason about)."""
+def test_rule9_check_b_no_stop_volatility_target_is_critical() -> None:
+    """The no-stop check is deployment-independent: a vol-target spec that
+    declares a loss tolerance with no effective stop is unenforceable and must
+    be rejected even though the deployed fraction is unknown."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
-    assert not any(
-        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_volatility_target_short_is_critical() -> None:
+    """A short vol-target spec with a declared loss tolerance and no effective
+    stop is unbounded-loss; it must be rejected even though deployment is
+    dynamic (the realised-loss magnitude check abstains, but stop coverage does
+    not)."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
     )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "short" in crit[0]
 
 
 def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
@@ -1503,6 +1531,10 @@ def test_extract_prose_position_pct_positive(text, expected) -> None:
         "risk 0.25% of equity per trade",
         "risks 0.25% of equity per trade",
         "lose at most 0.5% per trade",
+        # "X% position" without an explicit size/sizing qualifier is not a
+        # deployment claim — e.g. a profit-target phrasing.
+        "take profit after a 10% position gain",
+        "exit on a 10% position loss",
         "RSI(14) below 30 signals entry.",
     ],
 )
