@@ -617,15 +617,20 @@ class _EngineEntryDispatcher:
         if close <= 0:
             return 0
         sizing = self.sizing
-        # ``cap_position`` is only true for vol-target sizing: its deployment is
-        # data-dependent so the readiness gate cannot bound it statically, and
-        # the position cap is the only enforcement point. Fixed sizing skips the
-        # position clamp — its deployment is explicit and the gate already
-        # bounds it — but every kind still goes through the loss clamp.
+        # ``cap_position`` gates the runtime position clamp. ``fixed_fraction``
+        # is exempt: it deploys exactly ``fraction`` of CURRENT equity every
+        # bar, so a readiness-verified ``fraction <= max_position_pct`` holds at
+        # any equity level. ``fixed_notional`` and ``volatility_target`` are NOT
+        # exempt — their fraction OF EQUITY drifts as equity moves (a fixed
+        # dollar notional becomes a larger share of a shrunken account; vol-
+        # target is data-dependent), so the readiness check against initial
+        # capital can be breached on later entries. Both go through the position
+        # clamp at runtime; every kind still goes through the loss clamp.
         cap_position = False
         if isinstance(sizing, FixedFractionSizing):
             raw_qty = equity * float(sizing.fraction) / close
         elif isinstance(sizing, FixedNotionalSizing):
+            cap_position = True
             raw_qty = float(sizing.notional_usd) / close
         elif isinstance(sizing, VolatilityTargetSizing):
             cap_position = True

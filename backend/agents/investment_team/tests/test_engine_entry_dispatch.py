@@ -350,3 +350,21 @@ def test_cap_qty_to_loss_short_with_effective_stop_sizes_down():
     )
     # 1% / 5% stop = 20% deployable -> 200 shares @ $100 on $100k.
     assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 200.0
+
+
+def test_compute_qty_fixed_notional_clamped_to_position_cap_on_equity_drop():
+    """A fixed-notional order that fit max_position_pct at initial capital can
+    breach it after equity falls (notional is a fixed $ amount, so its share of
+    a shrunken account rises). It is clamped to the live position cap. $5k
+    notional, 5% cap: valid at $100k equity (5%), clamped at $50k (would be
+    10%)."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedNotionalSizing(notional_usd=5000.0),
+        risk_limits=RiskLimits(max_position_pct=5),
+    )
+    bar = _make_bar(close=100.0)
+    # At $100k equity: 5000/100 = 50 shares = $5k = 5% -> within cap, unchanged.
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=100000.0), {}) == 50
+    # At $50k equity: cap is 5% * 50k = $2.5k = 25 shares; raw 50 -> clamped 25.
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=50000.0), {}) == 25
