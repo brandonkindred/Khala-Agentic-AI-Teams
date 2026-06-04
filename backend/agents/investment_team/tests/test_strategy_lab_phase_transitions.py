@@ -478,13 +478,17 @@ def test_failed_design_attempt_does_not_poison_next_attempt_drift(
     _stub_pipeline_for_happy_path(monkeypatch, orch)
 
     real_run_design_attempt = orch._run_design_attempt
-    # (attempt_index, collector_id, spec_history_len_on_entry)
-    entries: List[Tuple[int, int, int]] = []
+    # (attempt_index, drift_collector, spec_history_len_on_entry). The collector
+    # object itself is retained — not merely its id() — because id() is unique
+    # only among simultaneously-live objects: a failed attempt's collector would
+    # otherwise be garbage-collected and its address reused by the next attempt's
+    # collector, making the distinctness check below spuriously fail.
+    entries: List[Tuple[int, Any, int]] = []
 
     def _flaky_run_design_attempt(**kwargs: Any) -> Any:
         collector = kwargs["drift_collector"]
         attempt = kwargs["design_attempt"]
-        entries.append((attempt, id(collector), len(collector.spec_history)))
+        entries.append((attempt, collector, len(collector.spec_history)))
         if attempt < 2:
             _record_attempt_drift(orch, collector, attempt)
             raise SpecImplementabilityError(
@@ -500,10 +504,11 @@ def test_failed_design_attempt_does_not_poison_next_attempt_drift(
     _events, _transitions, record = _drive_cycle_capturing_transitions(orch)
 
     # Three attempts ran, each with a distinct collector object that was
-    # empty on entry (copy-on-entry isolation).
-    assert [a for a, _id, _n in entries] == [0, 1, 2]
-    assert len({_id for _a, _id, _n in entries}) == 3
-    assert all(n == 0 for _a, _id, n in entries)
+    # empty on entry (copy-on-entry isolation). All three collectors are still
+    # referenced via ``entries``, so their id()s are guaranteed non-colliding.
+    assert [a for a, _c, _n in entries] == [0, 1, 2]
+    assert len({id(c) for _a, c, _n in entries}) == 3
+    assert all(n == 0 for _a, _c, n in entries)
 
     # The successful attempt's record carries none of the failed attempts'
     # drift — no cross-attempt contamination.
