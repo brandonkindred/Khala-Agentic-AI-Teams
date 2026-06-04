@@ -1141,6 +1141,80 @@ class TestGitCredentialThreading:
         assert called["ran"] is False
 
 
+class TestActiveIssueMarkerLifecycle:
+    """The marker must be cleared on every terminal path after a successful prep."""
+
+    def _run(self, patched_app, monkeypatch, github_client, orchestrator=None):
+        api = patched_app["api"]
+        cleared: list[str] = []
+        monkeypatch.setattr(api, "_clear_active_issue", lambda p: cleared.append(p))
+        if orchestrator is not None:
+            monkeypatch.setattr(api, "run_coding_team_orchestrator", orchestrator)
+        patched_app["set_github"](github_client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        return cleared
+
+    def test_cleared_on_success(self, patched_app, monkeypatch) -> None:
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_cleared_when_orchestrator_raises(self, patched_app, monkeypatch) -> None:
+        def boom(*_a, **_kw):
+            raise RuntimeError("orchestrator died")
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=boom)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_cleared_when_no_merged_tasks(self, patched_app, monkeypatch) -> None:
+        def no_merge(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](status="completed", task_graph_snapshot=[])
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_prep_notes_posted_as_issue_comments(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_clear_active_issue", lambda p: None)
+        monkeypatch.setattr(
+            api,
+            "_prepare_issue_branch",
+            lambda *a, **kw: (True, None, ["♻️ recovered", "▶️ continuing"]),
+        )
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        bodies = [body for _n, body in client.comments]
+        assert "♻️ recovered" in bodies
+        assert "▶️ continuing" in bodies
+
+    def test_prep_receives_issue_number(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        seen: dict = {}
+
+        def fake_prep(*args, **kwargs):
+            seen["issue_number"] = kwargs.get("issue_number")
+            return True, None, []
+
+        monkeypatch.setattr(api, "_clear_active_issue", lambda p: None)
+        monkeypatch.setattr(api, "_prepare_issue_branch", fake_prep)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        assert seen["issue_number"] == 3
+
+
 class TestStatusResponseSurfacing:
     def test_status_returns_github_fields(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
