@@ -229,7 +229,9 @@ def test_periods_to_process_keeps_floor_day_for_day_scale(
     assert floor_day_start in starts
 
 
-def _child(start: datetime, *, stale: bool, source_count: int = 3) -> PeriodSummary:
+def _child(
+    start: datetime, *, stale: bool, source_count: int = 3, version: int = 1
+) -> PeriodSummary:
     return PeriodSummary(
         id=uuid4().hex,
         agent_id="a",
@@ -239,6 +241,7 @@ def _child(start: datetime, *, stale: bool, source_count: int = 3) -> PeriodSumm
         summary="a day",
         highlights=["h"],
         source_count=source_count,
+        version=version,
         stale=stale,
         created_at=start,
     )
@@ -256,11 +259,11 @@ def test_build_summary_defers_aggregate_when_a_child_is_stale(
     monkeypatch.setattr(store, "fetch_summaries_in_window", lambda *a, **k: children)
     report = rollup.RollupReport(agent_id="a")
 
-    out = rollup._build_summary(
+    out, consumed = rollup._build_summary(
         "a", Scale.WEEK, week_start, week_end, None, _dt(2026, 5, 12), CannedLLM(), report
     )
 
-    assert out is None
+    assert out is None and consumed == []
     assert report.deferred[Scale.WEEK.value] == 1
 
 
@@ -276,12 +279,13 @@ def test_build_summary_builds_aggregate_when_all_children_current(
     monkeypatch.setattr(store, "fetch_summaries_in_window", lambda *a, **k: children)
     report = rollup.RollupReport(agent_id="a")
 
-    out = rollup._build_summary(
+    out, consumed = rollup._build_summary(
         "a", Scale.WEEK, week_start, week_end, None, _dt(2026, 5, 12), CannedLLM(), report
     )
 
     assert out is not None and out.stale is False
     assert out.source_count == 7  # summed across current children
+    assert consumed == children  # the exact child set it folded
     assert Scale.WEEK.value not in report.deferred
 
 
@@ -415,6 +419,58 @@ def test_first_aggregate_summary_restales_on_child_gone_stale(
 
     assert len(upserted) == 1
     assert marked == [(Scale.WEEK, week_start)]  # targeted: only the parent
+
+
+def test_first_aggregate_summary_restales_on_child_version_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child recomputed concurrently — non-stale by re-probe time but at a
+    different ``(period_start, version)`` than the build folded — re-stales the
+    parent. A staleness-only check would miss it."""
+    week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
+    monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 12, 0))
+    monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: None)
+    reads = {"n": 0}
+
+    def _window(*a, **k):
+        reads["n"] += 1
+        version = 1 if reads["n"] == 1 else 2  # recomputed to v2, still non-stale
+        return [_child(week_start, stale=False, version=version)]
+
+    monkeypatch.setattr(store, "fetch_summaries_in_window", _window)
+    upserted: list = []
+    monkeypatch.setattr(
+        store, "upsert_summary", lambda agent_id, summary, **k: upserted.append(summary)
+    )
+    monkeypatch.setattr(rollup, "_flag_dependent_evidence", lambda *a, **k: None)
+    marked: list = []
+    monkeypatch.setattr(
+        store, "mark_summary_stale", lambda agent_id, scale, ps: marked.append((scale, ps)) or True
+    )
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.WEEK, week_start, week_end, llm=CannedLLM(), report=report)
+
+    assert len(upserted) == 1
+    assert marked == [(Scale.WEEK, week_start)]  # version drift caught despite non-stale child
+
+
+def test_ensure_rollups_current_normalizes_non_utc_now(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An aware non-UTC ``now`` is converted to UTC so period keys are
+    UTC-midnight-aligned, not local-midnight (which UTC callers never match)."""
+    from datetime import timezone as _tz
+
+    seen: list = []
+    monkeypatch.setattr(
+        rollup, "_periods_to_process", lambda agent_id, scale, now: seen.append(now) or []
+    )
+    monkeypatch.setattr(rollup, "get_client", lambda key: CannedLLM())
+    # 2026-05-04 02:00 at UTC-05:00 is 2026-05-04 07:00 UTC.
+    rollup.ensure_rollups_current("a", datetime(2026, 5, 4, 2, tzinfo=_tz(timedelta(hours=-5))))
+
+    assert seen, "expected _periods_to_process to be called"
+    assert all(n.utcoffset() == timedelta(0) for n in seen)  # every scale got UTC
+    assert seen[0] == datetime(2026, 5, 4, 7, tzinfo=_UTC)
 
 
 def _wire_pruned_day(

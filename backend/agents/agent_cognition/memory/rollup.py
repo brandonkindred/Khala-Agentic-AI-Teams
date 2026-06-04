@@ -37,7 +37,7 @@ import logging
 import os
 import uuid
 from calendar import monthrange
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from pydantic import BaseModel, Field
 
@@ -139,7 +139,10 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
 
     Preconditions:
         * ``agent_id`` is non-empty.
-        * ``now`` is timezone-aware (UTC).
+        * ``now`` is timezone-aware (any zone). It is normalized to UTC before
+          any calendar key is computed, so period boundaries are always
+          UTC-midnight-aligned regardless of the caller's zone — a naive
+          ``now`` is a caller bug and is rejected.
     Postconditions:
         * For each scale, every closed period (``period_end <= now``) inside
           the lookback window that has no summary, or a ``stale`` summary, is
@@ -158,7 +161,11 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
           :func:`_rollup_one_period`'s first-summary re-probe.
     """
     assert agent_id, "ensure_rollups_current: agent_id must be non-empty"
-    assert now.tzinfo is not None, "ensure_rollups_current: now must be tz-aware (UTC)"
+    assert now.tzinfo is not None, "ensure_rollups_current: now must be tz-aware"
+    # Normalize to UTC so ``_midnight``/period keys are UTC-aligned even if the
+    # caller passed an aware non-UTC zone (local midnight would otherwise key
+    # summaries at 04:00/05:00 UTC, which later UTC callers would never match).
+    now = now.astimezone(timezone.utc)
 
     llm = get_client("cognition")
     report = RollupReport(agent_id=agent_id)
@@ -374,7 +381,7 @@ def _rollup_one_period(
         return
 
     # Regime (a): never-summarized or stale-with-events — recompute.
-    summary = _build_summary(
+    summary, consumed = _build_summary(
         agent_id, scale, period_start, period_end, existing, snapshot, llm, report
     )
     if summary is None:
@@ -384,7 +391,17 @@ def _rollup_one_period(
     if existing is not None:
         _flag_dependent_evidence(agent_id, summary, report)
     else:
-        _reprobe_first_summary(agent_id, scale, period_start, period_end, snapshot)
+        _reprobe_first_summary(agent_id, scale, period_start, period_end, snapshot, consumed)
+
+
+def _child_signature(children: list[PeriodSummary]) -> frozenset[tuple[datetime, int]]:
+    """Identity of a consumed child set: ``(period_start, version)`` per child.
+
+    Postconditions: equality holds iff the same child periods at the same
+    versions are present — so a child added, removed, or version-bumped (every
+    re-resolution bumps ``version`` via ``mark_period_stale``) changes it.
+    """
+    return frozenset((c.period_start, c.version) for c in children)
 
 
 def _reprobe_first_summary(
@@ -393,6 +410,7 @@ def _reprobe_first_summary(
     period_start: datetime,
     period_end: datetime,
     snapshot: datetime,
+    consumed: list[PeriodSummary],
 ) -> None:
     """Close the first-insert race for a just-created summary.
 
@@ -405,15 +423,17 @@ def _reprobe_first_summary(
 
     Preconditions:
         * The summary for ``(agent_id, scale, period_start)`` was just inserted
-          for the first time; ``snapshot`` is its ``computed_at`` read-time.
+          for the first time; ``snapshot`` is its ``computed_at`` read-time;
+          ``consumed`` is the child set the build folded (empty for days).
     Postconditions:
         * **Day**: if an event was recorded after ``snapshot``, the day is
           cascade-flagged stale (with its containing parents, which consume
           days) so a later pass folds it.
-        * **Aggregate**: if a consumed child summary is now stale — it must have
-          gone stale *after* we read it, since a stale child at build time would
-          have deferred the insert — just this parent is re-flagged stale
-          (targeted, leaving its children untouched).
+        * **Aggregate**: if the child set changed since the build read —
+          compared by ``(period_start, version)`` so a concurrently
+          inserted/recomputed child counts even when it is non-stale now, not
+          just a child that is currently ``stale`` — just this parent is
+          re-flagged stale (targeted, leaving its children untouched).
         * Otherwise a no-op.
     """
     if scale is Scale.DAY:
@@ -428,10 +448,12 @@ def _reprobe_first_summary(
     children_now = store.fetch_summaries_in_window(
         agent_id, _CHILD_SCALE[scale], period_start, period_end
     )
-    if any(c.stale for c in children_now):
+    if _child_signature(children_now) != _child_signature(consumed) or any(
+        c.stale for c in children_now
+    ):
         store.mark_summary_stale(agent_id, scale, period_start)
         logger.debug(
-            "rollup re-probe: first %s summary %s saw a child go stale post-read; re-flagged stale",
+            "rollup re-probe: first %s summary %s saw its child set change post-read; re-flagged stale",
             scale.value,
             period_start.isoformat(),
         )
@@ -446,31 +468,37 @@ def _build_summary(
     snapshot: datetime,
     llm,
     report: RollupReport,
-) -> PeriodSummary | None:
+) -> tuple[PeriodSummary | None, list[PeriodSummary]]:
     """Recompute a period summary from its calendar-correct inputs.
 
     Preconditions:
         * ``[period_start, period_end)`` is a closed period at ``scale``.
     Postconditions:
-        * Returns a fresh ``PeriodSummary`` (``stale=False``) assembled around
-          the LLM digest, or ``None`` when (a) the period has no inputs and no
-          existing summary (empty-history no-op), or (b) an aggregate period is
-          *deferred* because a child summary it consumes is still ``stale``
+        * Returns ``(summary, consumed_children)``. ``summary`` is a fresh
+          ``PeriodSummary`` (``stale=False``) assembled around the LLM digest,
+          or ``None`` when (a) the period has no inputs and no existing summary
+          (empty-history no-op), or (b) an aggregate period is *deferred*
+          because a child summary it consumes is still ``stale``
           (``report.deferred[scale]`` is bumped and the parent is left
           missing/stale for a later pass). ``version`` is left at the existing
           value (monotonicity is owned by ``upsert_summary``); ``id`` and
           ``created_at`` are preserved on recompute.
+        * ``consumed_children`` is the exact child-summary list an aggregate
+          folded (empty for days, or when the summary is ``None``); the
+          first-summary re-probe compares it by ``(period_start, version)``
+          against a fresh re-read to catch children that changed concurrently.
     """
     if scale is Scale.DAY:
         events = store.fetch_events_for_period(
             agent_id, period_start, period_end, snapshot=snapshot
         )
         if not events and existing is None:
-            return None
+            return None, []
         text = _render_events_text(events)
         source_count = len(events)
         covers_through = max((e.occurred_at for e in events), default=None)
         body = _summarize(text, _DAY_SYSTEM_PROMPT, f"{scale.value} memory events", llm)
+        consumed: list[PeriodSummary] = []
     else:
         children = store.fetch_summaries_in_window(
             agent_id, _CHILD_SCALE[scale], period_start, period_end
@@ -492,15 +520,16 @@ def _build_summary(
                 len(stale_children),
             )
             report.deferred[scale.value] = report.deferred.get(scale.value, 0) + 1
-            return None
+            return None, []
         if not children and existing is None:
-            return None
+            return None, []
         text = _render_children_text(children)
         source_count = sum(c.source_count for c in children)
         covers_through = _max_covers_through(children)
         body = _summarize(text, _AGG_SYSTEM_PROMPT, f"{scale.value} child summaries", llm)
+        consumed = children
 
-    return PeriodSummary(
+    summary = PeriodSummary(
         id=existing.id if existing else uuid.uuid4().hex,
         agent_id=agent_id,
         scale=scale,
@@ -514,6 +543,7 @@ def _build_summary(
         stale=False,
         created_at=existing.created_at if existing else snapshot,
     )
+    return summary, consumed
 
 
 def revise_summary(
