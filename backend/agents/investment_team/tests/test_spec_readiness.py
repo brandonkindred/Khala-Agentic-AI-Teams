@@ -1202,9 +1202,11 @@ def test_rule9_check_b_runs_for_volatility_target_sizing() -> None:
     assert "max_position_pct=10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
 
 
-def test_rule9_check_b_cap_exceeds_loss_tolerance_is_critical() -> None:
+def test_rule9_check_b_deployed_exceeds_loss_tolerance_is_critical() -> None:
+    """Critical is measured against the ACTUAL deployed fraction: deploying 10%
+    per trade against a 5% loss tolerance is a real breach."""
     spec = _spec(
-        sizing=FixedFractionSizing(fraction=0.05),
+        sizing=FixedFractionSizing(fraction=0.10),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -1214,7 +1216,28 @@ def test_rule9_check_b_cap_exceeds_loss_tolerance_is_critical() -> None:
         if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
     ]
     assert crit, _critical(results)
-    assert "max_position_pct=10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
+    assert "10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
+
+
+def test_rule9_check_b_slack_cap_within_deployment_is_warning_not_critical() -> None:
+    """A slack cap above the tolerance, with actual deployment within it
+    (fraction=0.02 → 2% deployed, cap=10, tolerance=5), is a non-blocking
+    WARNING (latent policy inconsistency), never a critical that stalls design."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed), (
+        _critical(results)
+    )
+    warns = [
+        r.details
+        for r in results
+        if r.severity == "warning" and r.rule_id == "risk_limits:loss_tolerance_cap"
+    ]
+    assert warns, _warning(results)
+    assert "max_position_pct=10.00%" in warns[0] and "2.00%" in warns[0]
 
 
 def test_rule9_check_a_small_overage_is_critical_not_tolerated() -> None:
@@ -1240,12 +1263,12 @@ def test_rule9_check_a_exactly_at_cap_is_silent() -> None:
     assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
 
 
-def test_rule9_check_b_small_overage_is_critical_not_tolerated() -> None:
-    """A cap just over the loss tolerance (5.2% vs 5%, within the old 5% band)
-    is a real breach and must be critical now that A/B are strict."""
+def test_rule9_check_b_small_deployed_overage_is_critical_not_tolerated() -> None:
+    """A deployed fraction just over the loss tolerance (5.2% vs 5%, within the
+    old 5% band) is a real breach and must be critical now that A/B are strict."""
     spec = _spec(
-        sizing=FixedFractionSizing(fraction=0.05),
-        risk_limits={"max_position_pct": 5.2, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+        sizing=FixedFractionSizing(fraction=0.052),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any(
