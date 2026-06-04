@@ -347,9 +347,11 @@ def test_first_day_summary_no_restale_without_post_snapshot_append(
     assert calls["marked_stale"] == []
 
 
-def test_first_aggregate_summary_does_not_reprobe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The re-probe is day-only: a first-time week never event-re-probes (its
-    children's staleness carries the late-arrival signal up instead)."""
+def test_first_aggregate_summary_reprobes_children_not_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first-time week re-probes its *children* (not events): with children
+    that stay current it neither event-probes nor re-stales anything."""
     week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
     monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 12, 0))
     monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: None)
@@ -366,14 +368,112 @@ def test_first_aggregate_summary_does_not_reprobe(monkeypatch: pytest.MonkeyPatc
         store, "has_events_recorded_after", lambda *a, **k: probed.update(called=True) or True
     )
     monkeypatch.setattr(
-        store, "mark_period_stale", lambda *a, **k: pytest.fail("must not re-stale")
+        store,
+        "mark_period_stale",
+        lambda *a, **k: pytest.fail("must not event-cascade an aggregate"),
+    )
+    monkeypatch.setattr(
+        store, "mark_summary_stale", lambda *a, **k: pytest.fail("children current → no re-stale")
     )
     report = rollup.RollupReport(agent_id="a")
 
     rollup._rollup_one_period("a", Scale.WEEK, week_start, week_end, llm=CannedLLM(), report=report)
 
     assert len(upserted) == 1
-    assert probed["called"] is False  # day-only gate short-circuits before the probe
+    assert probed["called"] is False  # aggregates use the child re-read, not the event probe
+
+
+def test_first_aggregate_summary_restales_on_child_gone_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A child that goes stale after the build read (so the insert still
+    happened) is caught by the post-insert re-read; just the parent is
+    re-staled."""
+    week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
+    monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 12, 0))
+    monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: None)
+    reads = {"n": 0}
+
+    def _window(*a, **k):
+        reads["n"] += 1
+        stale = reads["n"] > 1  # current at build, stale on the post-insert re-read
+        return [_child(week_start, stale=stale)]
+
+    monkeypatch.setattr(store, "fetch_summaries_in_window", _window)
+    upserted: list = []
+    monkeypatch.setattr(
+        store, "upsert_summary", lambda agent_id, summary, **k: upserted.append(summary)
+    )
+    monkeypatch.setattr(rollup, "_flag_dependent_evidence", lambda *a, **k: None)
+    marked: list = []
+    monkeypatch.setattr(
+        store, "mark_summary_stale", lambda agent_id, scale, ps: marked.append((scale, ps)) or True
+    )
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.WEEK, week_start, week_end, llm=CannedLLM(), report=report)
+
+    assert len(upserted) == 1
+    assert marked == [(Scale.WEEK, week_start)]  # targeted: only the parent
+
+
+def _wire_pruned_day(
+    monkeypatch: pytest.MonkeyPatch, *, day_start: datetime, day_end: datetime, recorded_after: bool
+) -> list:
+    """Drive the regime-(b) pruned-day path with no surviving late rows."""
+    pruned = PeriodSummary(
+        id="d",
+        agent_id="a",
+        scale=Scale.DAY,
+        period_start=day_start,
+        period_end=day_end,
+        summary="kept history",
+        source_count=2,
+        stale=True,
+        events_pruned=True,
+        created_at=day_start,
+    )
+    monkeypatch.setattr(store, "_now", lambda: _dt(2026, 5, 5, 0))
+    monkeypatch.setattr(store, "get_existing_summary", lambda *a, **k: pruned)
+    monkeypatch.setattr(store, "fetch_unfolded_events", lambda *a, **k: [])
+    monkeypatch.setattr(store, "has_events_recorded_after", lambda *a, **k: recorded_after)
+    upserted: list = []
+    monkeypatch.setattr(
+        store, "upsert_summary", lambda agent_id, summary, **k: upserted.append(summary)
+    )
+    return upserted
+
+
+def test_pruned_day_no_late_rows_clears_spurious_stale(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A stale pruned day with nothing to amend and no post-snapshot append has
+    its stale flag cleared, so it stops deferring its parents forever."""
+    day_start, day_end = rollup._day_bounds(_dt(2026, 5, 4))
+    upserted = _wire_pruned_day(
+        monkeypatch, day_start=day_start, day_end=day_end, recorded_after=False
+    )
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.DAY, day_start, day_end, llm=CannedLLM(), report=report)
+
+    assert len(upserted) == 1
+    assert upserted[0].stale is False and upserted[0].summary == "kept history"
+    assert report.amended == {}  # a clear is not an amend
+
+
+def test_pruned_day_keeps_stale_when_late_row_recorded_after_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real late row recorded after the snapshot (not yet visible) leaves the
+    pruned day stale for a later pass — no premature clear."""
+    day_start, day_end = rollup._day_bounds(_dt(2026, 5, 4))
+    upserted = _wire_pruned_day(
+        monkeypatch, day_start=day_start, day_end=day_end, recorded_after=True
+    )
+    report = rollup.RollupReport(agent_id="a")
+
+    rollup._rollup_one_period("a", Scale.DAY, day_start, day_end, llm=CannedLLM(), report=report)
+
+    assert upserted == []  # left stale, untouched
 
 
 # ===========================================================================

@@ -618,6 +618,39 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
         return not day[0]
 
 
+@timed_query(store=_STORE, op="mark_summary_stale")
+def mark_summary_stale(agent_id: str, scale: Scale, period_start: datetime) -> bool:
+    """Flag exactly one summary ``(agent_id, scale, period_start)`` stale.
+
+    The targeted complement of :func:`mark_period_stale` (which flags *every*
+    scale containing a timestamp). Used by the rollup's first-aggregate
+    re-probe to re-stale just the parent it consumes — without the cascade
+    re-staling the parent's own child rows, which would force a needless child
+    recompute. Idempotent on the stale flag exactly like ``mark_period_stale``:
+    only the non-stale → stale transition bumps ``version``.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * If a row for ``(agent_id, scale, period_start)`` exists it is now
+          ``stale`` with ``stale_since = NOW()``; ``version`` advances by one
+          only on the non-stale → stale transition. No other row is touched.
+    Returns:
+        ``True`` iff a matching row existed and was updated.
+    """
+    assert agent_id, "mark_summary_stale: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_summaries
+               SET stale = TRUE,
+                   stale_since = NOW(),
+                   version = version + (CASE WHEN stale THEN 0 ELSE 1 END)
+               WHERE agent_id = %s AND scale = %s AND period_start = %s""",
+            (agent_id, scale.value, period_start),
+        )
+        return cur.rowcount > 0
+
+
 @timed_query(store=_STORE, op="prune_events")
 def prune_events(agent_id: str, retention_days: int) -> int:
     """Delete raw events older than the cutoff, losslessly.

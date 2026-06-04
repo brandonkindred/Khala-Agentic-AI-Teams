@@ -324,12 +324,16 @@ def _rollup_one_period(
           period is recomputed from inputs. An empty, never-summarized period
           is a no-op. A recompute/amend of a previously-summarized period flags
           any evidence that cited the now-superseded version.
-        * **First-summary re-probe.** When a period gets its *first* summary
-          (no prior row) and a day-scale event was recorded after this
-          snapshot (so it was read-excluded yet had no row for the writeback to
-          flag), the just-created period is self-flagged stale so a later pass
-          folds it. Day-scale only: aggregates fold child summaries, and a
-          still-stale child already defers the parent.
+        * **Pruned-day no-op clears spurious staleness.** When a pruned day is
+          stale but no late row survives to amend *and* nothing was recorded
+          after this snapshot, the stale flag is cleared so the day stops
+          deferring its parents indefinitely; a genuine not-yet-visible late
+          row (recorded after the snapshot) leaves it stale for a later pass.
+        * **First-summary re-probe** (see :func:`_reprobe_first_summary`). A
+          period getting its *first* summary self-flags stale if a concurrent
+          late arrival could not flag the not-yet-existing row: a day re-probes
+          for an event recorded after the snapshot; an aggregate re-probes for a
+          child that went stale after it was read.
     """
     snapshot = store._now()
     existing = store.get_existing_summary(agent_id, scale, period_start)
@@ -347,6 +351,21 @@ def _rollup_one_period(
             agent_id, scale, period_start, period_end, snapshot=snapshot
         )
         if not late:
+            # Nothing survives to amend at this snapshot. Either the staleness
+            # is spurious (a duplicate writeback re-marked an already-pruned
+            # period, or the late row was already folded) — clear the flag so
+            # the day stops blocking its parents forever (aggregates defer on
+            # any stale child) — or a real late row was recorded *after* this
+            # snapshot and isn't visible yet, in which case leave it stale for a
+            # later pass (with a later snapshot) to fold. ``upsert_summary``'s
+            # ``stale_since > computed_at`` guard independently keeps it stale
+            # if it was re-flagged after our read.
+            if existing.stale and not store.has_events_recorded_after(
+                agent_id, period_start, period_end, after=snapshot
+            ):
+                store.upsert_summary(
+                    agent_id, existing.model_copy(update={"stale": False}), computed_at=snapshot
+                )
             return
         revised = revise_summary(existing, late, llm=llm, snapshot=snapshot)
         store.upsert_summary(agent_id, revised, computed_at=snapshot)
@@ -364,17 +383,55 @@ def _rollup_one_period(
     report.recomputed[scale.value] = report.recomputed.get(scale.value, 0) + 1
     if existing is not None:
         _flag_dependent_evidence(agent_id, summary, report)
-    elif scale is Scale.DAY and store.has_events_recorded_after(
-        agent_id, period_start, period_end, after=snapshot
-    ):
-        # First-ever summary for this day, but an event was appended after our
-        # read snapshot and before this row existed — so the writeback's
-        # mark_period_stale found no row to flag and the read excluded it.
-        # Self-flag stale now that the row exists; the next pass folds it (and
-        # the stale-child defer carries the signal up to week/month/year).
-        store.mark_period_stale(agent_id, period_start)
+    else:
+        _reprobe_first_summary(agent_id, scale, period_start, period_end, snapshot)
+
+
+def _reprobe_first_summary(
+    agent_id: str,
+    scale: Scale,
+    period_start: datetime,
+    period_end: datetime,
+    snapshot: datetime,
+) -> None:
+    """Close the first-insert race for a just-created summary.
+
+    A period's *first* summary can be written clean while a concurrent late
+    arrival could not flag it (no row existed yet) and our snapshot-bounded read
+    excluded it. Now that the row exists, re-probe and self-flag stale so a
+    later pass resolves it. Recomputes (existing rows) need no re-probe — they
+    are already protected by ``upsert_summary``'s ``stale_since > computed_at``
+    guard — so only first inserts reach here.
+
+    Preconditions:
+        * The summary for ``(agent_id, scale, period_start)`` was just inserted
+          for the first time; ``snapshot`` is its ``computed_at`` read-time.
+    Postconditions:
+        * **Day**: if an event was recorded after ``snapshot``, the day is
+          cascade-flagged stale (with its containing parents, which consume
+          days) so a later pass folds it.
+        * **Aggregate**: if a consumed child summary is now stale — it must have
+          gone stale *after* we read it, since a stale child at build time would
+          have deferred the insert — just this parent is re-flagged stale
+          (targeted, leaving its children untouched).
+        * Otherwise a no-op.
+    """
+    if scale is Scale.DAY:
+        if store.has_events_recorded_after(agent_id, period_start, period_end, after=snapshot):
+            store.mark_period_stale(agent_id, period_start)
+            logger.debug(
+                "rollup re-probe: first day summary %s saw a post-snapshot append; re-flagged stale",
+                period_start.isoformat(),
+            )
+        return
+
+    children_now = store.fetch_summaries_in_window(
+        agent_id, _CHILD_SCALE[scale], period_start, period_end
+    )
+    if any(c.stale for c in children_now):
+        store.mark_summary_stale(agent_id, scale, period_start)
         logger.debug(
-            "rollup re-probe: first %s summary %s saw a post-snapshot append; re-flagged stale",
+            "rollup re-probe: first %s summary %s saw a child go stale post-read; re-flagged stale",
             scale.value,
             period_start.isoformat(),
         )
