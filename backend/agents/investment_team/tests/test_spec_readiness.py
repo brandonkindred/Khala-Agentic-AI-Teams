@@ -1378,7 +1378,6 @@ def test_readiness_signature_changes_with_hypothesis() -> None:
         ("deploy 5% per trade", 5.0),
         ("Allocate 10% per trade to AAPL", 10.0),
         ("use up to 7.5% per trade", 7.5),
-        ("risk 5% per trade", 5.0),
         ("commit ~3% of the account per trade", 3.0),
         ("invest 8% in each position", 8.0),
         ("12% per-trade allocation", 12.0),
@@ -1398,7 +1397,12 @@ def test_extract_prose_position_pct_positive(text, expected) -> None:
         "Exit on a 5% stop loss.",
         "Take profit at 10%.",
         "Cap the max drawdown at 25%.",
-        "risks 0.25% of equity per trade",  # a LOSS statement, not deployment
+        # Loss-budget phrasings ("risk/lose X% per trade") are the realised
+        # per-trade loss, not the deployed position — both singular and plural
+        # must stay out of the deployment extractor.
+        "risk 0.25% of equity per trade",
+        "risks 0.25% of equity per trade",
+        "lose at most 0.5% per trade",
         "RSI(14) below 30 signals entry.",
     ],
 )
