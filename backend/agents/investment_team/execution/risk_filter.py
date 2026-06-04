@@ -199,14 +199,19 @@ class RiskFilter:
                 reason=f"max_open_positions ({self.limits.max_open_positions}) reached",
             )
 
-        # A percent-of-equity cap admits no positive position on a non-positive
-        # account, and the ratio checks below are undefined there. When the cap
-        # is this order's only enforcement point (custom-code), reject rather
-        # than fall through to allowed=True on a ruined account.
-        if enforce_position_cap and current_equity <= 0:
+        # A non-positive-equity (ruined) account can never safely add exposure:
+        # a percent-of-equity cap admits no positive position there, and the
+        # leverage/concentration ratios below are undefined. Reject
+        # UNCONDITIONALLY — including for presized orders, whose sizing was
+        # decided on an earlier bar when equity was still positive; that stale
+        # decision does not make a now-bankrupt account safe to fill into.
+        # Without this, a presized order (enforce_position_cap=False) would skip
+        # this guard AND the equity>0-gated ratio checks and fall through to
+        # allowed=True.
+        if current_equity <= 0:
             return EntryDecision(
                 allowed=False,
-                reason=f"non-positive equity ({current_equity:.2f}); cannot size against max_position_pct",
+                reason=f"non-positive equity ({current_equity:.2f}); cannot open a position",
             )
 
         total_notional = (

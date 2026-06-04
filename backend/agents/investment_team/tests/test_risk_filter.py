@@ -138,22 +138,16 @@ def test_can_enter_enforces_position_cap_for_custom_code_orders():
     assert "max_position_pct" in result.reason
 
 
-def test_can_enter_rejects_non_positive_equity_when_enforcing_cap():
-    # A custom-code order on a ruined account (equity <= 0) is rejected rather
-    # than slipping through the equity>0-gated ratio checks to allowed=True.
+def test_can_enter_rejects_non_positive_equity_unconditionally():
+    # A ruined account (equity <= 0) can never add exposure — rejected for both
+    # custom-code orders AND presized orders (whose sizing was decided on an
+    # earlier, still-solvent bar; that stale decision doesn't make a bankrupt
+    # account safe to fill into).
     rf = RiskFilter(RiskLimits(max_position_pct=6.0))
-    result = rf.can_enter("A", 1_000.0, 0.0, {})
-    assert not result.allowed
-    assert "non-positive equity" in result.reason
-
-
-def test_can_enter_presized_order_allowed_on_non_positive_equity():
-    # A presized (dispatcher) order does not trip the non-positive-equity
-    # rejection — the dispatcher's own sizing already handled equity (it would
-    # produce qty<=0 and skip), and the gate must not double-reject.
-    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
-    result = rf.can_enter("A", 1_000.0, 0.0, {}, enforce_position_cap=False)
-    assert result.allowed
+    custom = rf.can_enter("A", 1_000.0, 0.0, {})
+    assert not custom.allowed and "non-positive equity" in custom.reason
+    presized = rf.can_enter("A", 1_000.0, -500.0, {}, enforce_position_cap=False)
+    assert not presized.allowed and "non-positive equity" in presized.reason
 
 
 def test_can_enter_allows_within_limits():
