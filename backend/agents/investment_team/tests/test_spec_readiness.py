@@ -1512,6 +1512,12 @@ def test_readiness_signature_changes_with_hypothesis() -> None:
         ("4% position size", 4.0),
         ("position sizing of 6%", 6.0),
         ("position size of 9%", 9.0),
+        # "risk X% per trade" without an "of equity/capital" qualifier is the
+        # deployment rendering emitted by format_sizing_rule(), so it parses as
+        # a deployed-size claim.
+        ("risk 10% per trade", 10.0),
+        ("risk up to 2% per trade", 2.0),
+        ("risking 5% in each trade", 5.0),
     ],
 )
 def test_extract_prose_position_pct_positive(text, expected) -> None:
@@ -1525,9 +1531,10 @@ def test_extract_prose_position_pct_positive(text, expected) -> None:
         "Exit on a 5% stop loss.",
         "Take profit at 10%.",
         "Cap the max drawdown at 25%.",
-        # Loss-budget phrasings ("risk/lose X% per trade") are the realised
-        # per-trade loss, not the deployed position — both singular and plural
-        # must stay out of the deployment extractor.
+        # Loss-budget phrasings are the realised per-trade loss, not the
+        # deployed position. "risk X% OF equity/capital per trade" is the loss
+        # form (the bare "risk X% per trade" deployment form is a positive
+        # above); "lose X%" is always a loss claim.
         "risk 0.25% of equity per trade",
         "risks 0.25% of equity per trade",
         "lose at most 0.5% per trade",

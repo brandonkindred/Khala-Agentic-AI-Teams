@@ -127,13 +127,15 @@ def _sizing_coherence_rel_tol() -> float:
 
 # Capital-deployment phrasings Rule 9 reconciles against the spec's actual
 # sizing. Under the realised-loss risk model these patterns match only the
-# capital *deployed* into a position (a fraction of the account). Loss-budget
-# verbs are deliberately excluded: "risk/lose X% per trade" denotes the
-# realised per-trade loss (``sizing.fraction × stop_loss.pct``), NOT the
-# deployed amount, so feeding it to the deployment reconciliation would falsely
-# flag a coherent spec (e.g. "risk 0.25% per trade" with fraction=0.05 × stop=
-# 0.05). Each pattern captures the percentage in group ``pct`` and requires an
-# explicit per-trade / position framing so the rule never fires on a stop-loss,
+# capital *deployed* into a position (a fraction of the account). "risk" is
+# overloaded: the codebase's own ``format_sizing_rule()`` renders fixed sizing
+# as "risk X% per trade" (DEPLOYMENT), so that bare form is matched below — but
+# the loss-budget form "risk/lose X% OF equity/capital/account per trade"
+# denotes the realised per-trade loss (``sizing.fraction × stop_loss.pct``), NOT
+# the deployed amount, and is excluded so it cannot falsely flag a coherent spec
+# (e.g. "risk 0.25% of equity per trade" with fraction=0.05 × stop=0.05). Each
+# pattern captures the percentage in group ``pct`` and requires an explicit
+# per-trade / position framing so the rule never fires on a stop-loss,
 # take-profit, or drawdown percentage elsewhere in the prose.
 _PROSE_POSITION_PCT_PATTERNS: tuple[re.Pattern[str], ...] = (
     # "deploy/allocate/use/commit/invest (up to|about|~) X% per trade|position"
@@ -141,6 +143,18 @@ _PROSE_POSITION_PCT_PATTERNS: tuple[re.Pattern[str], ...] = (
         r"\b(?:deploy|allocate|use|commit|invest)(?:ing)?\s+"
         r"(?:up\s+to\s+|about\s+|around\s+|approximately\s+|~\s*)?"
         r"(?P<pct>\d+(?:\.\d+)?)\s*%\s+(?:of\s+(?:the\s+)?(?:account|equity|capital|portfolio)\s+)?"
+        r"(?:per[\s-]+trade|per[\s-]+position|in\s+(?:each|a)\s+(?:trade|position))",
+        re.IGNORECASE,
+    ),
+    # "risk (up to|about|~) X% per trade|position" — DEPLOYMENT, matching
+    # ``format_sizing_rule()``'s fixed-fraction rendering. The negative
+    # lookahead drops the loss-budget form "risk X% OF equity/capital/account/
+    # portfolio …", which is a realised-loss claim, not a deployed amount.
+    re.compile(
+        r"\brisk(?:ing)?\s+"
+        r"(?:up\s+to\s+|about\s+|around\s+|approximately\s+|~\s*)?"
+        r"(?P<pct>\d+(?:\.\d+)?)\s*%\s+"
+        r"(?!of\s+(?:the\s+)?(?:account|equity|capital|portfolio))"
         r"(?:per[\s-]+trade|per[\s-]+position|in\s+(?:each|a)\s+(?:trade|position))",
         re.IGNORECASE,
     ),
