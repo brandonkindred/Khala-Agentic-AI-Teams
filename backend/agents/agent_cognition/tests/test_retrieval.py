@@ -86,9 +86,19 @@ def _wire_store(
         captured["agent_id"] = agent_id
         captured["top_n"] = top_n
         captured["by_salience"] = by_salience
-        return events or []
+        return list(events or [])
 
     monkeypatch.setattr(store, "fetch_recent_events", _fetch_recent)
+
+    # When a closed DAY summary is present the builder bounds the live section via
+    # fetch_events_for_period instead; return the same events through that seam so
+    # tests don't have to care which path runs.
+    def _fetch_period(agent_id: str, period_start, period_end, *, snapshot=None):
+        captured["period_start"] = period_start
+        captured["period_end"] = period_end
+        return list(events or [])
+
+    monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
     return captured
 
 
@@ -217,6 +227,89 @@ def test_events_only_renders_without_long_term_section(
 
     assert "## Recent activity" in digest
     assert "## Long-term memory" not in digest
+
+
+# ===========================================================================
+# In-progress event window (bounded to what closed summaries don't cover)
+# ===========================================================================
+def test_live_events_bounded_to_after_latest_closed_day(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # With a closed day summary present, the live section is sourced from
+    # fetch_events_for_period starting at that day's period_end (not the unbounded
+    # fetch_recent_events, which would resurface already-summarized history).
+    day = _summary(scale=Scale.DAY, window=_DAY, summary="yesterday")
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        store, "get_last_summary", lambda agent_id, scale: day if scale is Scale.DAY else None
+    )
+    monkeypatch.setattr(
+        store,
+        "fetch_recent_events",
+        lambda *a, **k: pytest.fail("must not use the unbounded fetch when a day summary exists"),
+    )
+
+    def _fetch_period(agent_id: str, period_start, period_end, *, snapshot=None):
+        captured["period_start"] = period_start
+        captured["period_end"] = period_end
+        return [_event(content="today", salience=0.4)]
+
+    monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert captured["period_start"] == day.period_end
+    assert captured["period_end"] == retrieval._FAR_FUTURE
+    assert "today" in digest
+
+
+def test_live_events_sorted_by_salience_and_capped(monkeypatch: pytest.MonkeyPatch) -> None:
+    # fetch_events_for_period yields (occurred_at, id) ASC; the builder must
+    # re-rank by salience DESC and apply the top-N cap.
+    monkeypatch.setenv("AGENT_COGNITION_DIGEST_EVENT_TOP_N", "2")
+    day = _summary(scale=Scale.DAY, window=_DAY)
+    window_events = [
+        _event(content="lo", salience=0.1, occurred_at=datetime(2026, 6, 2, 1, tzinfo=_UTC)),
+        _event(content="hi", salience=0.9, occurred_at=datetime(2026, 6, 2, 2, tzinfo=_UTC)),
+        _event(content="mid", salience=0.5, occurred_at=datetime(2026, 6, 2, 3, tzinfo=_UTC)),
+    ]
+    monkeypatch.setattr(
+        store, "get_last_summary", lambda agent_id, scale: day if scale is Scale.DAY else None
+    )
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: list(window_events))
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "hi" in digest and "mid" in digest  # top-2 by salience
+    assert "lo" not in digest  # capped out
+    assert digest.index("hi") < digest.index("mid")  # salience DESC
+
+
+def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No closed day summary yet → every retained event is uncovered, so the
+    # unbounded recent-events fetch is used.
+    monkeypatch.setattr(store, "get_last_summary", lambda agent_id, scale: None)
+    monkeypatch.setattr(
+        store,
+        "fetch_events_for_period",
+        lambda *a, **k: pytest.fail("cold start must use the unbounded fetch"),
+    )
+    captured: dict[str, Any] = {}
+
+    def _fetch_recent(agent_id: str, top_n: int, by_salience: bool = True):
+        captured["by_salience"] = by_salience
+        return [_event(content="all-history")]
+
+    monkeypatch.setattr(store, "fetch_recent_events", _fetch_recent)
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert captured["by_salience"] is True
+    assert "all-history" in digest
 
 
 # ===========================================================================

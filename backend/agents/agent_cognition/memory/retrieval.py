@@ -11,8 +11,9 @@ Two design constraints shape the digest, both from the cognition spec:
   period has *closed*, so mid-week/mid-month there is no current-period summary.
   The digest therefore stitches the most recent **closed** month / week / day
   summaries (stable long-range context) together with the **in-progress** period
-  rendered directly from the top-N most salient recent raw events. It never goes
-  empty merely because the current period hasn't closed yet.
+  rendered directly from the top-N most salient raw events that no closed summary
+  covers yet (events at/after the latest closed day). It never goes empty merely
+  because the current period hasn't closed yet.
 * **Caller-bounded size.** The whole block is trimmed to a caller-supplied
   ``token_budget`` (converted to characters, then compacted and hard-capped), so
   the injector can size it against the model context window.
@@ -26,12 +27,16 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 
 from agent_cognition.memory import store
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
 from llm_service import compact_text, get_client
 
 logger = logging.getLogger(__name__)
+
+# Open upper bound for the in-progress event window — any sane event predates it.
+_FAR_FUTURE = datetime(9999, 12, 31, tzinfo=timezone.utc)
 
 # Token→char conversion. The repo uses a conservative ~4-chars-per-token
 # heuristic (see ``llm_service`` clients), reused here so callers express the
@@ -83,9 +88,9 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
         if summary is not None:
             summaries.append((scale, summary))
 
-    # In-progress period: the freshest, most salient raw events. Ordering is the
-    # store's (salience DESC, occurred_at DESC, id ASC).
-    events = store.fetch_recent_events(agent_id, _event_top_n(), by_salience=True)
+    # In-progress period: the freshest, most salient raw events *not yet covered*
+    # by a closed summary (see _fetch_in_progress_events).
+    events = _fetch_in_progress_events(agent_id, summaries)
 
     if not summaries and not events:
         return ""
@@ -102,6 +107,41 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
 
     assert len(digest) <= char_budget
     return digest
+
+
+def _fetch_in_progress_events(
+    agent_id: str, summaries: list[tuple[Scale, PeriodSummary]]
+) -> list[MemoryEvent]:
+    """Top-N salient events from the in-progress period only.
+
+    The closed day/week/month summaries already capture everything up to the most
+    recent closed **day**, so the digest's live section must represent only what
+    those summaries don't: events occurring at or after that day's ``period_end``.
+    Without this bound, an unbounded top-N-by-salience scan over the agent's whole
+    retained history could resurface a high-salience event from an
+    already-summarized period (duplicating the summary) and evict genuinely
+    current-period events from the window.
+
+    When no closed day summary exists yet (cold start), every retained event is
+    still uncovered, so the unbounded recent-events fetch is used.
+
+    Postconditions:
+        * At most ``_event_top_n()`` events, ordered ``(salience DESC, occurred_at
+          DESC, id ASC)`` — identical to :func:`store.fetch_recent_events`.
+        * When a closed day summary exists, every returned event satisfies
+          ``occurred_at >= day.period_end``.
+    """
+    top_n = _event_top_n()
+    day = next((summary for scale, summary in summaries if scale is Scale.DAY), None)
+    if day is None:
+        return store.fetch_recent_events(agent_id, top_n, by_salience=True)
+
+    # fetch_events_for_period returns the window ordered (occurred_at, id) ASC;
+    # a stable sort by (salience, occurred_at) DESC therefore yields the store's
+    # (salience DESC, occurred_at DESC, id ASC) order before the top-N slice.
+    open_events = store.fetch_events_for_period(agent_id, day.period_end, _FAR_FUTURE)
+    open_events.sort(key=lambda e: (e.salience, e.occurred_at), reverse=True)
+    return open_events[:top_n]
 
 
 # ---------------------------------------------------------------------------
