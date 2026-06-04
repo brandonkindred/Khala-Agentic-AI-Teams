@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import math
-from typing import Annotated, Any, Literal, Union
+from typing import Annotated, Any, Literal, Optional, Sequence, Union
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
 
@@ -317,6 +317,52 @@ class SignalExitRule(_SpecNode):
     kind: Literal["signal_exit"] = "signal_exit"
     when: Predicate
     note: str = ""
+
+
+def stop_caps_side(basis: str, side: str) -> bool:
+    """Whether a ``StopLossRule`` ``basis`` can cap loss for an entry ``side``.
+
+    Mirrors the executor's stop-trigger semantics (``rule_compiler._stop_loss_triggers``):
+    a ``trailing_high`` stop only fires for a LONG (it tracks the running high
+    and floors below it), ``trailing_low`` only fires for a SHORT, and
+    ``entry_price`` fires for both. A stop whose basis cannot fire for the
+    position's side never caps that side's loss — the executor no-ops it.
+
+    Preconditions: ``side`` is ``"long"`` or ``"short"``.
+    Postconditions: returns ``True`` iff a stop with ``basis`` can trigger for a
+    position on ``side``.
+    """
+    assert side in ("long", "short"), "side must be 'long' or 'short'"
+    if basis == "entry_price":
+        return True
+    if basis == "trailing_high":
+        return side == "long"
+    if basis == "trailing_low":
+        return side == "short"
+    return False  # pragma: no cover - DSL Literal forbids other bases
+
+
+def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[float]:
+    """Worst-case stop fraction for ``side``: the FIRST side-compatible
+    ``StopLossRule.pct`` in spec order, or ``None`` when no stop can fire for it.
+
+    The engine's ``evaluate_exit_rules`` breaks on the first triggered rule in
+    spec order, so on a gap that crosses several stops at once the earliest
+    (possibly loosest) side-compatible stop wins — its pct bounds the modeled
+    realised loss. A later stop only wins when no earlier one triggered, which
+    for a monotonic move means it is tighter, so the first side-compatible stop
+    is the true worst case. Shared by the runtime loss-clamp
+    (``_cap_qty_to_loss``) and the readiness covered-side check so the two
+    cannot drift on this rule.
+
+    Preconditions: ``side`` is ``"long"`` or ``"short"``.
+    Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
+    else ``None``.
+    """
+    for r in exit_rules:
+        if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side):
+            return float(r.pct)
+    return None
 
 
 # Exit rules: structured close conditions the engine enforces (stop-loss /

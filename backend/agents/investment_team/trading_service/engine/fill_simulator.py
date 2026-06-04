@@ -543,7 +543,13 @@ class FillSimulator:
 
         notional = filled_qty * ref_price
         equity = self.portfolio.mark_to_market()
-        gate = self.risk.can_enter(req.symbol, notional, equity, self.portfolio.positions)
+        gate = self.risk.can_enter(
+            req.symbol,
+            notional,
+            equity,
+            self.portfolio.positions,
+            enforce_position_cap=not req.risk_presized,
+        )
         if not gate.allowed:
             logger.info("risk gate rejected entry for %s: %s", req.symbol, gate.reason)
             self.order_book.remove(po.order_id)
@@ -711,8 +717,26 @@ class FillSimulator:
             s: p for s, p in self.portfolio.positions.items() if s != req.symbol
         }
         equity = self.portfolio.mark_to_market()
+        # The position cap is enforced here only for non-presized (custom-code)
+        # orders; a dispatcher-presized order was already clamped to the cap at
+        # the sizing price, so re-checking its continuation slices at the fill
+        # price would falsely reject them on a gap-up. This is safe for
+        # continuations because the engine dispatcher does NOT pyramid (it skips
+        # a symbol that already has a position), so every slice here fills the
+        # remainder of that one already-clamped order — the total share count is
+        # bounded by the dispatcher's one-time cap, not a fresh sizing decision.
+        # Notional drift from price movement on those committed shares is normal
+        # holding behaviour (``max_drawdown_pct`` is the realised-exposure
+        # backstop), and the catastrophic case — equity falling to non-positive
+        # before a later slice — is still rejected unconditionally inside
+        # ``can_enter``. Leverage / concentration always run on the post-extend
+        # notional.
         gate = self.risk.can_enter(
-            req.symbol, post_extend_notional, equity, positions_excluding_self
+            req.symbol,
+            post_extend_notional,
+            equity,
+            positions_excluding_self,
+            enforce_position_cap=not req.risk_presized,
         )
         if not gate.allowed:
             logger.info("risk gate rejected entry continuation for %s: %s", req.symbol, gate.reason)

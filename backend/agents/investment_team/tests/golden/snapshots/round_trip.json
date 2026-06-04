@@ -264,6 +264,7 @@
       "orders_rejected": 0,
       "orders_rejection_reasons": {},
       "orders_unfilled": 84,
+      "risk_capped_entries": 0,
       "summary": "Backtest closed zero trades; 84 order(s) left unfilled with no entry fills recorded.",
       "warmup_orders_dropped": 0,
       "zero_trade_category": "ORDERS_UNFILLED"
