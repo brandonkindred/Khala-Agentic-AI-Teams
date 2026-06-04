@@ -423,7 +423,11 @@ def _apply_approval(
     # ADD or AMEND: build the replacement rule and validate enforced predicates
     # *before* any write so an invalid predicate leaves everything untouched.
     new_rule = _build_rule_from_spec(
-        agent_id, proposal.proposed_rule, rule_id=new_rule_id, now=decided_at
+        agent_id,
+        proposal.proposed_rule,
+        rule_id=new_rule_id,
+        now=decided_at,
+        fallback_evidence=proposal.evidence,
     )
     _assert_storable_rule(new_rule)
 
@@ -443,14 +447,24 @@ def _apply_approval(
 
 
 def _build_rule_from_spec(
-    agent_id: str, spec: dict[str, Any] | None, *, rule_id: str | None, now: datetime
+    agent_id: str,
+    spec: dict[str, Any] | None,
+    *,
+    rule_id: str | None,
+    now: datetime,
+    fallback_evidence: list[Any] | None = None,
 ) -> Rule:
     """Build an ``active`` :class:`Rule` from a proposal's ``proposed_rule`` dict.
 
     Preconditions: ``spec`` is a dict with a non-empty ``text``.
     Postconditions: returns an active rule for ``agent_id`` (source from ``spec``,
     default ``derived``, timestamps ``now``); raises :class:`RuleStoreError` on a
-    malformed spec.
+    malformed spec. ``evidence`` is taken from ``spec`` when it carries its own,
+    otherwise from ``fallback_evidence`` (the proposal's ``(summary_id, version)``
+    refs) — so an approved derived rule keeps the evidence chain that
+    ``flag_rules_needing_review`` walks when a summary version advances, even in
+    the common flow where ``proposed_rule`` holds only the rule fields and the
+    evidence lives on the proposal.
     """
     if not isinstance(spec, dict) or not isinstance(spec.get("text"), str) or not spec.get("text"):
         raise RuleStoreError("proposed_rule must be a dict with a non-empty 'text'")
@@ -464,7 +478,7 @@ def _build_rule_from_spec(
             predicate=spec.get("predicate") or {},
             rationale=spec.get("rationale"),
             source=RuleSource(spec.get("source", RuleSource.DERIVED.value)),
-            evidence=spec.get("evidence") or [],
+            evidence=spec.get("evidence") or fallback_evidence or [],
             needs_review=False,
             priority=int(spec.get("priority", 0)),
             created_at=now,

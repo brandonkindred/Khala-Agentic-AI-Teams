@@ -265,6 +265,47 @@ def test_approve_amend_retires_and_inserts_with_lineage() -> None:
     assert [r.id for r in store.list_rules("a", status=RuleStatus.ACTIVE)] == ["t2"]
 
 
+def test_approve_preserves_proposal_evidence_on_activated_rule() -> None:
+    # A derived proposal carries its (summary_id, version) refs on the proposal,
+    # while proposed_rule holds only the rule fields. The activated rule must
+    # inherit that evidence, or flag_rules_needing_review can never surface it
+    # when the referenced summary version advances.
+    ev = [{"summary_id": "s1", "version": 3}]
+    add = _proposal("a", ProposalAction.ADD, proposed_rule=_add_spec(text="derived"), evidence=ev)
+    store.create_proposal("a", add)
+    rule = store.approve_proposal("a", add.id, decided_by="op")
+    assert rule is not None and rule.evidence == ev
+    assert store.get_rule("a", rule.id).evidence == ev  # type: ignore[union-attr]
+
+    # AMEND likewise carries the proposal's evidence onto the replacement rule.
+    store.create_rule("a", _rule("a", rid="t1", status=RuleStatus.ACTIVE))
+    amend = _proposal(
+        "a",
+        ProposalAction.AMEND,
+        target_rule_id="t1",
+        proposed_rule=_add_spec(text="v2"),
+        evidence=ev,
+    )
+    store.create_proposal("a", amend)
+    amended = store.approve_proposal("a", amend.id, decided_by="op", new_rule_id="t2")
+    assert amended is not None and amended.evidence == ev
+
+
+def test_approve_spec_evidence_overrides_proposal_evidence() -> None:
+    # When proposed_rule explicitly provides evidence, it wins over the
+    # proposal's own refs (the spec is authoritative when present).
+    spec_ev = [{"summary_id": "spec", "version": 9}]
+    add = _proposal(
+        "a",
+        ProposalAction.ADD,
+        proposed_rule=_add_spec(text="r", evidence=spec_ev),
+        evidence=[{"summary_id": "proposal", "version": 1}],
+    )
+    store.create_proposal("a", add)
+    rule = store.approve_proposal("a", add.id, decided_by="op")
+    assert rule is not None and rule.evidence == spec_ev
+
+
 def test_approve_enforced_add_invalid_predicate_raises_no_write() -> None:
     proposal = _proposal(
         "a",
