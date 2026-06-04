@@ -808,15 +808,13 @@ class SpecReadinessGate(GateResultsMixin):
     #      (``sizing.fraction`` ≤ ``max_position_pct``) — critical. Only when
     #      the deployed fraction is known (skipped for ``volatility_target`` and
     #      unconfigured ``fixed_notional``).
-    #   B. The capital actually DEPLOYED per trade must not exceed the declared
+    #   B. The REALISED loss on a stopped-out trade
+    #      (``sizing.fraction`` × ``stop_loss.pct``) must not exceed the declared
     #      per-trade loss tolerance (``max_loss_per_trade_pct`` when set) —
-    #      critical. Deployment is the known ``sizing.fraction`` / notional, or
-    #      the ``max_position_pct`` cap when sizing is dynamic/unknown
-    #      (``volatility_target``, unconfigured ``fixed_notional``); the breach
-    #      is measured against the deployed figure, not a slack cap. A cap that
-    #      exceeds the tolerance while the current sizing stays within it is a
-    #      non-blocking WARNING (latent policy inconsistency). Runs for EVERY
-    #      spec when the tolerance is set.
+    #      critical. ``max_loss_per_trade_pct`` is the most you can lose on a
+    #      trade, governed by the stop. Skipped when the tolerance is unset, the
+    #      deployed fraction is unknown (``volatility_target`` / unconfigured
+    #      ``fixed_notional``), or the spec declares no ``stop_loss`` rule.
     #   C. A prose-stated per-trade deployment % must agree with the ACTUAL
     #      deployed fraction (``sizing.fraction``) when it is known — warning
     #      (prose hygiene). The cap is an upper bound, not the deployed amount,
@@ -872,58 +870,37 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
 
-        # Check B — a single trade may not put more capital at risk than the
-        # declared per-trade loss tolerance. Worst-case per-trade loss = capital
-        # actually DEPLOYED (a trade can lose up to 100% of its value). The
-        # compiled engine sizes orders from ``sizing.fraction`` / notional, NOT
-        # from ``max_position_pct`` (a slack cap that never binds for fixed
-        # sizing), so the breach is measured against the *deployed* fraction
-        # when it is known; when deployment is dynamic/unknown
-        # (volatility_target, unconfigured fixed_notional) the position cap is
-        # the best static bound on the worst-case size. Hard limit → strict.
-        #   * deployed > tolerance → CRITICAL (a real, realised breach).
-        #   * deployed ≤ tolerance but the cap still exceeds the tolerance →
-        #     WARNING: the current sizing is safe, but the cap permits a future
-        #     position that would breach the declared tolerance (latent policy
-        #     inconsistency; non-blocking so a coherent slack-cap spec is not
-        #     stalled).
+        # Check B — the REALISED loss on a single trade must not exceed the
+        # declared per-trade loss tolerance. ``max_loss_per_trade_pct`` is the
+        # most you can lose on a trade, which the stop governs: a position that
+        # deploys ``sizing.fraction`` of the account and stops out at
+        # ``stop_loss.pct`` realises ``sizing.fraction × stop_loss.pct`` of the
+        # account (e.g. 10% deployed × 5% stop = 0.5%). Critical when that
+        # realised loss exceeds the tolerance. Hard limit → strict.
+        #
+        # Skipped (cannot compute a realised loss) when: the tolerance is unset;
+        # the deployed fraction is unknown (volatility_target / unconfigured
+        # fixed_notional); or the spec declares no stop_loss rule (the realised
+        # loss is then unbounded and other gates own that concern).
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
-        if max_loss_pct is not None:
+        stop_pcts = [r.pct for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
+        if max_loss_pct is not None and pos_fraction is not None and stop_pcts:
             max_loss_pct = float(max_loss_pct)
-            deployment_known = pos_fraction is not None
-            deployed_pct = pos_fraction * 100.0 if deployment_known else max_position_pct
-            if deployed_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
-                if deployment_known:
-                    detail = (
-                        f"sizing deploys {deployed_pct:.2f}% of equity per trade but "
-                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% — a single trade can put "
-                        "more capital at risk than the declared per-trade loss tolerance "
-                        "(worst case is a 100% loss of the deployed amount). Resolve by "
-                        f"lowering the per-trade size to <={max_loss_pct:.2f}% OR raising "
-                        f"max_loss_per_trade_pct to >={deployed_pct:.2f}."
-                    )
-                else:
-                    detail = (
-                        f"max_position_pct={max_position_pct:.2f}% exceeds "
-                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% — per-trade sizing is "
-                        "dynamic/unknown at design time, so the position cap bounds the "
-                        "worst-case deployment, which can put more capital at risk than the "
-                        "declared per-trade loss tolerance (worst case is a 100% loss of the "
-                        f"deployed amount). Resolve by lowering max_position_pct to "
-                        f"<={max_loss_pct:.2f} OR raising max_loss_per_trade_pct to "
-                        f">={max_position_pct:.2f}."
-                    )
-                out.append(self._critical(detail, rule_id="risk_limits:loss_tolerance"))
-            elif deployment_known and max_position_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
+            # Worst case across multiple stops is the widest stop (largest loss).
+            worst_stop_pct = max(float(p) for p in stop_pcts)
+            realised_loss_pct = pos_fraction * worst_stop_pct * 100.0
+            if realised_loss_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
                 out.append(
-                    self._warning(
-                        f"max_position_pct={max_position_pct:.2f}% exceeds "
-                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% even though the current "
-                        f"sizing only deploys {deployed_pct:.2f}% per trade — the cap still "
-                        "permits a position that would breach the declared per-trade loss "
-                        f"tolerance. Tighten max_position_pct to <={max_loss_pct:.2f}% or "
-                        "accept the slack.",
-                        rule_id="risk_limits:loss_tolerance_cap",
+                    self._critical(
+                        f"realised per-trade loss {realised_loss_pct:.2f}% "
+                        f"(sizing.fraction={pos_fraction * 100.0:.2f}% × stop_loss.pct="
+                        f"{worst_stop_pct * 100.0:.2f}%) exceeds "
+                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% — a stopped-out trade "
+                        "loses more than the declared per-trade loss tolerance. Resolve by "
+                        "tightening the stop or the position size so the product is "
+                        f"<={max_loss_pct:.2f}%, OR raising max_loss_per_trade_pct to "
+                        f">={realised_loss_pct:.2f}.",
+                        rule_id="risk_limits:loss_tolerance",
                     )
                 )
 

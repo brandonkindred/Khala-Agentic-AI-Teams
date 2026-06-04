@@ -24,8 +24,7 @@ Return `ready = true` only when **both** of the following hold:
 - **Universe ↔ thesis fit** — if the hypothesis names QQQ, does `target_symbols` include it? If the hypothesis is asset-class-wide ("US large-caps"), is `target_symbols` empty as intended?
 - **Mathematical coherence of sizing + risk + stops** — verify the algebra:
   - `sizing` position size ≤ `risk_limits.max_position_pct` (e.g. `fraction=0.10` with `max_position_pct=5` is a contradiction).
-  - Realised per-trade loss = position size × `stop_loss.pct`. Reject "10% fraction × 20% stop = 2% per trade" if the hypothesis claims tight risk control. (This realised number is a sanity check on the prose — it is not what `max_loss_per_trade_pct` should hold.)
-  - `max_loss_per_trade_pct` is a per-trade capital-at-risk *tolerance* (an upper bound on the deployed position, since a trade can lose up to 100% of what it deploys), so `risk_limits.max_position_pct ≤ max_loss_per_trade_pct`. Reject as critical if `max_loss_per_trade_pct` is set below `max_position_pct`.
+  - Per-trade risk = position size × `stop_loss.pct`. Reject "10% fraction × 20% stop = 2% per trade" if the hypothesis claims tight risk control.
   - `take_profit.pct` vs `stop_loss.pct` — payoff ratio implies a required win rate (`p ≥ stop / (stop + tp)`). Reject if the hypothesis cannot defend that win rate.
   - `volatility_target` sizing implies stops sized to that vol budget — a 5% annual vol target with a 20% stop is incoherent.
   - `max_drawdown_pct` must be reachable but not trivial (single losing streak shouldn't blow through it; nor should it be unreachable by design).

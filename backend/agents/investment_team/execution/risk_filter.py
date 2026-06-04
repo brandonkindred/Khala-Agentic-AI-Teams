@@ -41,12 +41,13 @@ class RiskLimits(BaseModel):
         ge=0,
         le=100,
         description=(
-            "Per-trade capital-at-risk tolerance as a % of the account. A trade "
-            "can lose at most the capital it deploys (worst case = 100% of the "
-            "position), so this is an upper bound on the deployed position: "
-            "``max_position_pct`` must not exceed it. The stop-loss only reduces "
-            "the realised loss further. ``None`` means no explicit tolerance is "
-            "declared (the readiness gate then skips the cap-vs-tolerance check)."
+            "Maximum realised loss on a single trade as a % of the account — the "
+            "loss when the stop fires, i.e. deployed fraction × ``stop_loss.pct`` "
+            "(e.g. a 10% position with a 5% stop realises 0.5%). The readiness "
+            "gate flags a critical when the spec's actual realised loss "
+            "(sizing.fraction × stop_loss.pct) exceeds this tolerance. ``None`` "
+            "means no explicit tolerance is declared (the check is then skipped); "
+            "the check is also skipped when the spec has no stop_loss rule."
         ),
     )
     target_annual_vol: Optional[float] = Field(
