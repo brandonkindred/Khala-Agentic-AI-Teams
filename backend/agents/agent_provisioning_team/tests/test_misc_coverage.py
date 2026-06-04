@@ -289,6 +289,55 @@ def test_credential_store_load_key_with_blank_env(tmp_path: Path, monkeypatch) -
     assert store.fernet is not None
 
 
+@pytest.mark.parametrize("partial", [b"", b"   ", b"not-a-valid-fernet-key"])
+def test_credential_store_tolerates_partial_key_file(tmp_path: Path, monkeypatch, partial) -> None:
+    """A present-but-invalid key file (the concurrent-write race window) is
+    replaced rather than crashing the store with an invalid Fernet key."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+    sdir = tmp_path / "store"
+    sdir.mkdir()
+    (sdir / ".encryption_key").write_bytes(partial)  # simulate a half-written file
+
+    store = CredentialStore(storage_dir=sdir)  # must not raise
+    store.store_credentials("a1", "pg", {"password": "secret"})
+    assert store.get_credentials("a1", "pg") == {"password": "secret"}
+
+
+def test_credential_store_concurrent_init_never_reads_partial_key(tmp_path: Path, monkeypatch) -> None:
+    """Many stores built concurrently against one shared dir all succeed."""
+    import threading
+
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+    sdir = tmp_path / "shared"
+    errors: list[Exception] = []
+    barrier = threading.Barrier(12)
+
+    def _build() -> None:
+        try:
+            barrier.wait()
+            CredentialStore(storage_dir=sdir)
+        except Exception as exc:  # pragma: no cover - only on regression
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_build) for _ in range(12)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent init raised: {errors}"
+    # A single valid key persisted; a fresh store loads it without error.
+    assert CredentialStore(storage_dir=sdir).fernet is not None
+
+
 # ---------------------------------------------------------------------------
 # documentation phase — LLM path (mock LLMClient.is_configured)
 # ---------------------------------------------------------------------------

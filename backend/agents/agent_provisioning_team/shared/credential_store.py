@@ -107,17 +107,63 @@ class CredentialStore:
         return raw.strip()
 
     def _load_or_generate_key(self) -> bytes:
-        """Load existing key or generate a new one."""
+        """Load the dev-fallback key, generating it once, race-safely.
+
+        ``storage_dir`` can be shared by concurrent processes (e.g. parallel
+        test workers, or multiple workers of the same service). The old
+        check-then-``write_bytes`` sequence let one process observe the file a
+        peer had just created but not finished writing, reading an empty/partial
+        value and raising ``Fernet key must be 32 url-safe base64-encoded
+        bytes``. Publication is now atomic: a fresh key is written to a unique
+        temp file and ``os.replace``d into place, so a concurrent reader sees
+        either the previous key or the complete new one — never a partial file.
+        A present-but-invalid file (empty/stale/partial) is treated as absent
+        and replaced.
+
+        Postconditions:
+            * Returns a syntactically valid url-safe base64 Fernet key.
+            * No caller ever observes a partially-written key file.
+        """
         key_file = self.storage_dir / ".encryption_key"
 
-        if key_file.exists():
-            raw = key_file.read_bytes()
-            return raw.strip()
+        existing = self._read_valid_key(key_file)
+        if existing is not None:
+            return existing
 
         key = Fernet.generate_key()
-        key_file.write_bytes(key)
-        key_file.chmod(0o600)
-        return key
+        tmp = self.storage_dir / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        try:
+            tmp.write_bytes(key)
+            tmp.chmod(0o600)
+            os.replace(tmp, key_file)  # atomic within the same filesystem
+        finally:
+            tmp.unlink(missing_ok=True)  # no-op after a successful replace
+
+        # A racing writer may have published first; converge on whatever valid
+        # key is now persisted, falling back to ours if the read briefly fails.
+        published = self._read_valid_key(key_file)
+        return published if published is not None else key
+
+    @staticmethod
+    def _read_valid_key(key_file: Path) -> Optional[bytes]:
+        """Return a syntactically valid Fernet key from ``key_file``, else None.
+
+        Tolerates an absent file and a present-but-empty/partial file (the
+        window where a concurrent writer has created but not finished writing
+        the key), so callers can retry rather than constructing ``Fernet`` on a
+        truncated value.
+        """
+        try:
+            raw = key_file.read_bytes().strip()
+        except FileNotFoundError:
+            return None
+        if not raw:
+            return None
+        try:
+            Fernet(raw)
+        except (ValueError, TypeError):
+            return None
+        return raw
 
     @staticmethod
     def generate_key() -> str:
