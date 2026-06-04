@@ -311,6 +311,9 @@ class StrategyContext:
         # mutable attribute being involved (PR #425 review defense).
         self._emit = emit
         self._history: Dict[str, List[Bar]] = {}
+        # Symbol of the bar currently being dispatched to ``on_bar`` — the
+        # default subject of ``ctx.indicator(...)`` when no symbol is given.
+        self._current_symbol: Optional[str] = None
         self._positions: Dict[str, _PositionSnapshot] = {}
         self._capital: float = 0.0
         self._equity: float = 0.0
@@ -346,6 +349,46 @@ class StrategyContext:
         if n <= 0:
             return []
         return bars[-n:]
+
+    def indicator(
+        self,
+        name: str,
+        *,
+        symbol: Optional[str] = None,
+        source: str = "close",
+        **params,
+    ) -> Optional[float]:
+        """Latest value of indicator ``name`` for ``symbol`` (current bar's symbol by default).
+
+        Reads the indicator straight off the bars already delivered to this
+        strategy, computed by the same engine indicator math (the shared scalar
+        ``indicators`` module), so the value matches what the engine sees on the
+        current bar. This is the prescribed way to read indicators in generated
+        strategies — do not import ``indicators`` or recompute inline.
+
+        Preconditions:
+            ``name`` is a known DSL indicator and ``params`` satisfy it
+            (``sma``/``ema`` require ``period``); a bar has been dispatched (so a
+            default ``symbol`` exists) unless ``symbol`` is passed explicitly.
+            Contract violations raise ``ValueError`` — never silently coerced.
+        Postconditions:
+            Returns the latest indicator value as ``float``, or ``None`` during
+            warm-up / when no bars for ``symbol`` have arrived yet.
+        """
+        sym = symbol if symbol is not None else self._current_symbol
+        if sym is None:
+            raise ValueError("indicator() needs a symbol when no bar has been dispatched yet")
+        history = self._history.get(sym, [])
+        if not history:
+            return None
+        # ``indicators`` is the scalar API: a top-level module in the flat
+        # sandbox (copied in by the harness), or the in-package module under
+        # tests / the shadow gate.
+        try:
+            from indicators import indicator_value  # type: ignore[import-not-found]
+        except ImportError:
+            from ...strategy_lab.executor.strategy_indicators import indicator_value
+        return indicator_value(name, history, source=source, **params)
 
     # ------------------------------------------------------------------
     # Mutators — produce OrderRequest / CancelRequest records that the
@@ -436,6 +479,7 @@ class StrategyContext:
         hist = self._history[bar.symbol]
         if len(hist) > 500:
             del hist[:-500]
+        self._current_symbol = bar.symbol
         self._now = bar.timestamp
 
     def _ingest_state(
