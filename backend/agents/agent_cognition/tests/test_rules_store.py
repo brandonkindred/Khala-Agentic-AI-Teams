@@ -356,6 +356,17 @@ def test_approve_and_reject_missing_return_none() -> None:
     assert store.reject_proposal("a", "nope", decided_by="op") is None
 
 
+def test_approve_stale_evidence_proposal_raises() -> None:
+    # A pending proposal whose evidence went stale on a recompute must not be
+    # approved (it would activate a rule from outdated summaries); force re-review.
+    proposal = _proposal("a", ProposalAction.ADD, proposed_rule=_add_spec(), stale_evidence=True)
+    store.create_proposal("a", proposal)
+    with pytest.raises(store.RuleStoreError):
+        store.approve_proposal("a", proposal.id, decided_by="op")
+    assert store.get_proposal("a", proposal.id).status == ProposalStatus.PENDING  # type: ignore[union-attr]
+    assert store.list_rules("a") == []  # nothing activated
+
+
 # ---------------------------------------------------------------------------
 # agent_id isolation
 # ---------------------------------------------------------------------------

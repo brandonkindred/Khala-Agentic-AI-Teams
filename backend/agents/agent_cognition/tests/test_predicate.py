@@ -97,6 +97,14 @@ def test_parse_valid_constructs() -> None:
             "phase": "precondition",
             "check": {"op": "==", "path": "input.x", "value": {"a": 1}},
         },  # scalar op dict
+        {
+            "phase": "precondition",
+            "check": {"op": "<=", "path": "input.x", "value": "0.7"},
+        },  # ordered op, non-numeric (string) value
+        {
+            "phase": "precondition",
+            "check": {"op": ">", "path": "input.x", "value": True},
+        },  # ordered op, bool value (bool is not a number here)
         {"phase": "precondition", "check": {"op": "all", "of": []}},  # empty of
         {"phase": "precondition", "check": {"op": "all", "of": "x"}},  # of not a list
         {  # not with two children
@@ -450,3 +458,19 @@ def test_eval_failure_reason_survives_unrepresentable_value() -> None:
     holds, reason = _eval(pred, {"input": {"x": _BoomRepr()}})
     assert holds is False
     assert reason is not None and "unrepresentable" in reason
+
+
+def test_eval_guards_against_raising_eq() -> None:
+    # A value whose __eq__ raises must fail closed (block), not propagate — and
+    # for != too (must not become a fail-open allow via `not`).
+    class _BoomEq:
+        def __eq__(self, other: object) -> bool:
+            raise RuntimeError("boom")
+
+    eq = {"phase": "precondition", "check": {"op": "==", "path": "input.x", "value": "v"}}
+    ne = {"phase": "precondition", "check": {"op": "!=", "path": "input.x", "value": "v"}}
+    member = {"phase": "precondition", "check": {"op": "in", "path": "input.x", "value": ["v"]}}
+    for pred in (eq, ne, member):
+        holds, reason = _eval(pred, {"input": {"x": _BoomEq()}})
+        assert holds is False
+        assert reason is not None and "could not be compared" in reason

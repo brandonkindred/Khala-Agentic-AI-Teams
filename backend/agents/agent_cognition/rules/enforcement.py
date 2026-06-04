@@ -39,6 +39,7 @@ from typing import Any
 
 from agent_cognition.models import Rule, RuleMode, RuleStatus
 from agent_cognition.rules.predicate import (
+    Predicate,
     PredicateError,
     evaluate,
     is_valid_predicate,
@@ -57,10 +58,6 @@ __all__ = [
 ]
 
 _PROMPT_HEADER = "## Operating rules"
-
-# The phases a predicate may declare; an active enforced rule whose predicate
-# declares none of these is un-enforceable and fails closed (see _evaluate_phase).
-_KNOWN_PHASES = frozenset({"precondition", "postcondition", "tool_gate"})
 
 
 def build_rule_prompt_block(advisory_rules: list[Rule]) -> str:
@@ -148,29 +145,28 @@ def _evaluate_phase(
 ) -> tuple[bool, str | None]:
     """Allow iff every active enforced rule of ``phase`` holds against ``root``.
 
-    Defense in depth: an active enforced rule whose predicate declares **no
-    recognized phase** (e.g. an empty/`{}` or otherwise malformed predicate)
-    belongs to no gate, so dropping it would silently un-enforce a safety rule.
-    Such a rule fails **closed** at every gate — the store validates enforced
-    predicates on write, but the boundary must not trust that for a row that was
-    inserted directly or predates the validation.
+    Defense in depth: **every** active enforced rule is parsed, not just the
+    phase-matched ones. A rule whose predicate fails to parse — a malformed
+    ``check`` *or* no recognized phase, so it belongs to no gate — is
+    untrustworthy and fails **closed** at every gate (the store validates enforced
+    predicates on write, but the boundary must not trust that for a row inserted
+    directly or predating the validation). A rule that parses cleanly but targets
+    a different phase is correctly skipped here.
     """
-    applicable: list[Rule] = []
+    applicable: list[tuple[Rule, Predicate]] = []
     for rule in rules:
         if rule.mode != RuleMode.ENFORCED or rule.status != RuleStatus.ACTIVE:
             continue
-        rule_phase = rule.predicate.get("phase") if isinstance(rule.predicate, dict) else None
-        if rule_phase == phase:
-            applicable.append(rule)
-        elif rule_phase not in _KNOWN_PHASES:
-            return False, f"{rule.text}: enforced rule has no enforceable phase ({rule_phase!r})"
-    applicable.sort(key=lambda r: (-r.priority, r.id))
-    for rule in applicable:
         try:
             pred = parse_predicate(rule.predicate)
         except PredicateError as exc:
-            # Fail closed: a malformed enforced predicate blocks rather than allows.
+            # Fail closed at every gate: a malformed enforced predicate (bad check
+            # or no enforceable phase) must never silently allow.
             return False, f"{rule.text}: invalid predicate ({exc})"
+        if pred.phase == phase:
+            applicable.append((rule, pred))
+    applicable.sort(key=lambda rp: (-rp[0].priority, rp[0].id))
+    for rule, pred in applicable:
         holds, reason = evaluate(pred, root)
         if not holds:
             return False, f"{rule.text}: {reason}" if reason else rule.text

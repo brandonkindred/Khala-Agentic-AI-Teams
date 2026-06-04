@@ -321,7 +321,10 @@ def approve_proposal(
     Postconditions:
         * Returns ``None`` iff the proposal does not exist for ``agent_id``.
         * Raises :class:`RuleStoreError` if the proposal is not ``pending`` (no
-          double-apply), if a retire/amend target is missing/foreign, or if an
+          double-apply), if it is flagged ``stale_evidence`` (its evidence went
+          stale on a summary recompute — it must be re-reviewed after the next
+          reflection refreshes or supersedes it, not activated from outdated
+          summaries), if a retire/amend target is missing/foreign, or if an
           ``enforced`` add/amend has an invalid ``predicate`` — and in every error
           case **nothing is mutated** (the whole transaction rolls back).
         * On success, applies the action in one transaction — ``add`` inserts a
@@ -342,6 +345,13 @@ def approve_proposal(
         if proposal.status != ProposalStatus.PENDING:
             raise RuleStoreError(
                 f"proposal {proposal_id!r} is {proposal.status.value}, not pending"
+            )
+        if proposal.stale_evidence:
+            # Its evidence went stale on a recompute; approving now would activate
+            # a rule from outdated summaries. Force re-review (reflection will
+            # refresh or supersede it) instead of accepting known-stale evidence.
+            raise RuleStoreError(
+                f"proposal {proposal_id!r} has stale evidence; re-review after reflection refreshes it"
             )
         result = _apply_approval(
             conn, agent_id, proposal, decided_at=decided_at, new_rule_id=new_rule_id

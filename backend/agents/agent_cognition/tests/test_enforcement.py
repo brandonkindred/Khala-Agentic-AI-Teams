@@ -187,7 +187,7 @@ def test_phaseless_enforced_rule_fails_closed_at_every_gate() -> None:
         evaluate_tool_call("t", {}, [orphan]),
     ):
         assert holds is False
-        assert reason is not None and "no enforceable phase" in reason
+        assert reason is not None and "invalid predicate" in reason
     # A well-formed enforced rule for a DIFFERENT phase is still skipped (not
     # blocked) by an unrelated gate.
     pc = _rule(
@@ -198,6 +198,19 @@ def test_phaseless_enforced_rule_fails_closed_at_every_gate() -> None:
         },
     )
     assert evaluate_precondition({"input": {}}, [pc]) == (True, None)
+
+
+def test_malformed_enforced_rule_blocks_other_gates_too() -> None:
+    # A rule with a recognized phase but a malformed `check` must fail closed at
+    # EVERY gate (it's parsed regardless of phase), not just its own phase's gate.
+    bad = _rule(text="bad", predicate={"phase": "precondition", "check": {"op": "bogus"}})
+    for holds, reason in (
+        evaluate_precondition({"input": {}}, [bad]),
+        evaluate_postcondition({}, [bad]),
+        evaluate_tool_call("t", {}, [bad]),
+    ):
+        assert holds is False
+        assert reason is not None and "invalid predicate" in reason
 
 
 def test_malformed_enforced_predicate_blocks() -> None:

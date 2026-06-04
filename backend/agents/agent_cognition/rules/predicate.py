@@ -228,6 +228,13 @@ def _parse_comparison(node: dict[str, Any], *, op: str) -> _Comparison:
         raise PredicateError(
             f"comparison '{op}' requires a scalar 'value', got {type(value).__name__}"
         )
+    elif op in _NUMERIC_OPS and not _is_number(value):
+        # An ordered comparison against a non-number can never hold at runtime, so
+        # a typo'd threshold (e.g. the string "0.7") would silently become a
+        # permanent block. Reject it at the write boundary instead.
+        raise PredicateError(
+            f"ordered comparison '{op}' requires a numeric 'value', got {type(value).__name__}"
+        )
     return _Comparison(op=op, path=segments, value=value)
 
 
@@ -314,22 +321,35 @@ def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, 
     dotted = ".".join(node.path)
     missing = actual is MISSING
     op = node.op
-    if op == "in":
-        if any(_strict_eq(actual, candidate) for candidate in node.value):
-            return True, None
-        return False, f"path {dotted!r} value {_shown(actual, missing)} not in {list(node.value)!r}"
-    if op == "==":
-        ok = _strict_eq(actual, node.value)
-    elif op == "!=":
-        # A missing/distinct value is genuinely "not equal", so this allows when
-        # the path is absent — and composes correctly under ``not`` because the
-        # result is a concrete bool, not a fail-closed sentinel.
-        ok = not _strict_eq(actual, node.value)
-    else:  # numeric: < <= > >=
-        if not _is_number(actual) or not _is_number(node.value):
-            detail = "is missing" if missing else f"is not numeric ({_shown(actual, missing)})"
-            return False, f"path {dotted!r} {detail}; {op!r} needs numeric operands"
-        ok = _NUMERIC_CMP[op](actual, node.value)
+    try:
+        if op == "in":
+            ok = any(_strict_eq(actual, candidate) for candidate in node.value)
+            if ok:
+                return True, None
+            return (
+                False,
+                f"path {dotted!r} value {_shown(actual, missing)} not in {list(node.value)!r}",
+            )
+        if op == "==":
+            ok = _strict_eq(actual, node.value)
+        elif op == "!=":
+            # A missing/distinct value is genuinely "not equal", so this allows when
+            # the path is absent — and composes correctly under ``not`` because the
+            # result is a concrete bool, not a fail-closed sentinel.
+            ok = not _strict_eq(actual, node.value)
+        else:  # numeric: < <= > >=
+            if not _is_number(actual) or not _is_number(node.value):
+                detail = "is missing" if missing else f"is not numeric ({_shown(actual, missing)})"
+                return False, f"path {dotted!r} {detail}; {op!r} needs numeric operands"
+            ok = _NUMERIC_CMP[op](actual, node.value)
+    except Exception:
+        # A value whose __eq__/comparison raises is malformed runtime data. The
+        # evaluator must never raise on data shape, so fail closed (treat the
+        # constraint as unsatisfied → block) instead of propagating.
+        return (
+            False,
+            f"path {dotted!r} value {_shown(actual, missing)} could not be compared with {op!r}",
+        )
     if ok:
         return True, None
     # ``_shown`` (repr) runs only on the failure path and is exception-guarded,
