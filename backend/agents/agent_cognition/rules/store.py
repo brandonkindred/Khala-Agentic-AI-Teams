@@ -35,6 +35,7 @@ clean 503.
 
 from __future__ import annotations
 
+import json
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -114,8 +115,14 @@ def _assert_storable_rule(rule: Rule) -> None:
 
 
 def _seed_rule_id(agent_id: str, pack_name: str, seed_key: str) -> str:
-    """Stable rule id for a seed rule, so re-install collides on the primary key."""
-    return str(uuid5(_SEED_NAMESPACE, f"{agent_id}\x00{pack_name}\x00{seed_key}"))
+    """Stable rule id for a seed rule, so re-install collides on the primary key.
+
+    The uuid5 name is a JSON-encoded tuple so the ``(agent_id, pack, key)`` → id
+    mapping is injective — no separator ambiguity that could map two distinct
+    seeds onto one id.
+    """
+    name = json.dumps([agent_id, pack_name, seed_key], separators=(",", ":"))
+    return str(uuid5(_SEED_NAMESPACE, name))
 
 
 # ---------------------------------------------------------------------------
@@ -514,6 +521,7 @@ def install_seed_pack(agent_id: str, pack_name: str, *, now: datetime | None = N
                 created_at=created_at,
                 updated_at=created_at,
             )
+            _assert_storable_rule(rule)  # an enforced seed must carry a valid predicate
             if _insert_rule(conn, rule, ignore_conflict=True) == 1:
                 new_ids.append(rule.id)
     return new_ids

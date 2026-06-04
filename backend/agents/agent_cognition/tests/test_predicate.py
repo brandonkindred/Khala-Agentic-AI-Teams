@@ -420,3 +420,17 @@ def test_forbid_tool_non_string_tool_id_never_raises() -> None:
     pred = {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "shell"}}
     assert _eval(pred, {"tool_id": ["shell"], "args": {}})[0] is True
     assert _eval(pred, {"tool_id": None, "args": {}})[0] is True
+
+
+def test_eval_does_not_repr_on_success_path() -> None:
+    # A passing comparison must not call repr(actual); a value whose __repr__
+    # raises must not break evaluation (repr is only built for failure reasons).
+    class _BoomRepr:
+        def __eq__(self, other: object) -> bool:
+            return True
+
+        def __repr__(self) -> str:
+            raise RuntimeError("boom")
+
+    pred = {"phase": "precondition", "check": {"op": "==", "path": "input.x", "value": "v"}}
+    assert _eval(pred, {"input": {"x": _BoomRepr()}}) == (True, None)

@@ -32,35 +32,17 @@ Evaluation roots (see :mod:`agent_cognition.rules.predicate`):
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
-from functools import lru_cache
 from typing import Any
 
 from agent_cognition.models import Rule, RuleMode, RuleStatus
 from agent_cognition.rules.predicate import (
-    Predicate,
     PredicateError,
     evaluate,
     is_valid_predicate,
     parse_predicate,
     validate_predicate,
 )
-
-
-@lru_cache(maxsize=2048)
-def _parse_cached(canonical: str) -> Predicate:
-    """Parse a canonical-JSON predicate, memoized across calls.
-
-    The enforcement gates run on every agent invocation; an active rule's stored
-    predicate is immutable, so parsing it once and reusing the frozen
-    :class:`Predicate` avoids rebuilding the tree on every call. Keyed on the
-    sorted-key JSON form so equal predicates share a cache entry. ``lru_cache``
-    does not cache exceptions, so a malformed predicate still raises every call
-    (it is the rare fail-closed path).
-    """
-    return parse_predicate(json.loads(canonical))
-
 
 __all__ = [
     "build_rule_prompt_block",
@@ -172,7 +154,7 @@ def _evaluate_phase(
     )
     for rule in applicable:
         try:
-            pred = _parse_cached(json.dumps(rule.predicate, sort_keys=True))
+            pred = parse_predicate(rule.predicate)
         except PredicateError as exc:
             # Fail closed: a malformed enforced predicate blocks rather than allows.
             return False, f"{rule.text}: invalid predicate ({exc})"

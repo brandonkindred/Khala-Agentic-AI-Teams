@@ -8,9 +8,12 @@ registry**: it declares the :data:`SEED_PACKS` catalog and the small
 ``agent_cognition_rules`` rows. The catalog ships intentionally minimal here; the
 full guardrail content is authored in a later step.
 
-Each seed rule carries a stable ``key`` (unique within its pack) so installs are
-idempotent — the store records ``{"seed_pack": <name>, "seed_key": <key>}`` in the
-rule's ``evidence`` and skips a rule already present for the agent.
+Each seed rule carries a stable ``key`` (unique within its pack). The installer
+derives a deterministic rule id from ``(agent_id, pack, key)`` and inserts with
+``ON CONFLICT DO NOTHING``, so a re-install is a race-free no-op (the primary key,
+not a lookup, enforces idempotency). The ``{"seed_pack", "seed_key"}`` marker the
+installer also writes into ``evidence`` is provenance only — it no longer governs
+idempotency, so renaming a pack or key changes the id and re-seeds a fresh rule.
 
 Importing this module has no side effects.
 """

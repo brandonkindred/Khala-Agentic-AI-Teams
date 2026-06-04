@@ -46,6 +46,11 @@ distinct value (not a special fail-closed state that would invert under
 * ``!=`` against a missing path is ``True`` — so ``output.error != "fatal"``
   *allows* when ``error`` is simply absent (the success case), and the same
   result holds whether the check is written directly or wrapped in ``not``.
+  **Corollary:** ``!=`` therefore does **not** assert presence — a rule like
+  ``input.api_key != ""`` allows when ``api_key`` is absent, not only when it is
+  present-and-non-empty. The DSL has no ``exists`` operator yet; to require a
+  field, gate on a positive check (``==`` / ``in`` against the allowed values),
+  which blocks on a missing path.
 * ordered numeric ops (``< <= > >=``) require both operands to be real numbers
   (``bool`` excluded); a missing or non-numeric operand is ``False`` — so a
   ``input.temperature <= 0.7`` precondition blocks when ``temperature`` is
@@ -308,12 +313,11 @@ def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, 
     actual = _resolve_path(node.path, root)
     dotted = ".".join(node.path)
     missing = actual is MISSING
-    shown = "<missing>" if missing else repr(actual)
     op = node.op
     if op == "in":
         if any(_strict_eq(actual, candidate) for candidate in node.value):
             return True, None
-        return False, f"path {dotted!r} value {shown} not in {list(node.value)!r}"
+        return False, f"path {dotted!r} value {_shown(actual, missing)} not in {list(node.value)!r}"
     if op == "==":
         ok = _strict_eq(actual, node.value)
     elif op == "!=":
@@ -323,12 +327,14 @@ def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, 
         ok = not _strict_eq(actual, node.value)
     else:  # numeric: < <= > >=
         if not _is_number(actual) or not _is_number(node.value):
-            detail = "is missing" if missing else f"is not numeric ({actual!r})"
+            detail = "is missing" if missing else f"is not numeric ({_shown(actual, missing)})"
             return False, f"path {dotted!r} {detail}; {op!r} needs numeric operands"
         ok = _NUMERIC_CMP[op](actual, node.value)
     if ok:
         return True, None
-    return False, f"path {dotted!r} value {shown} fails {op} {node.value!r}"
+    # ``_shown`` (repr) is evaluated only on the failure path, never on success,
+    # so a value whose ``__repr__`` raises can't break a passing comparison.
+    return False, f"path {dotted!r} value {_shown(actual, missing)} fails {op} {node.value!r}"
 
 
 def _resolve_path(path: tuple[str, ...], root: Mapping[str, Any]) -> Any:
@@ -357,3 +363,8 @@ def _strict_eq(a: Any, b: Any) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     return a == b
+
+
+def _shown(actual: Any, missing: bool) -> str:
+    """Render a resolved value for a failure reason — only called on failures."""
+    return "<missing>" if missing else repr(actual)

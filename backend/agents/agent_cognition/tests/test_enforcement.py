@@ -219,15 +219,14 @@ def test_postcondition_neq_allows_when_field_absent() -> None:
     assert evaluate_postcondition({"error": "fatal"}, [rule])[0] is False
 
 
-def test_parse_memoized_across_calls() -> None:
-    # Repeated evaluations of the same predicate hit the parse cache (transparent
-    # to behavior; verify the cache is actually exercised).
-    from agent_cognition.rules.enforcement import _parse_cached
-
-    _parse_cached.cache_clear()
+def test_enforced_gate_does_not_raise_on_exotic_value() -> None:
+    # An enforced predicate carrying a non-JSON-serializable value (e.g. a set)
+    # must not crash the gate; it parses and evaluation returns a normal verdict.
     rule = _rule(
-        predicate={"phase": "precondition", "check": {"op": "<=", "path": "input.x", "value": 1}}
+        predicate={
+            "phase": "precondition",
+            "check": {"op": "==", "path": "input.x", "value": {1, 2}},
+        }
     )
-    evaluate_precondition({"input": {"x": 0}}, [rule])
-    evaluate_precondition({"input": {"x": 2}}, [rule])
-    assert _parse_cached.cache_info().hits >= 1
+    holds, _reason = evaluate_precondition({"input": {"x": 5}}, [rule])
+    assert holds is False  # 5 != {1, 2}; no exception raised

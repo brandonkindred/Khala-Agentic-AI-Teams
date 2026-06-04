@@ -408,6 +408,21 @@ def test_install_seed_pack_uses_deterministic_id() -> None:
     assert ids == [store._seed_rule_id("a", "default_guardrails", "no-secrets-in-output")]
 
 
+def test_install_seed_pack_validates_enforced(monkeypatch: pytest.MonkeyPatch) -> None:
+    from agent_cognition.rules.seed_packs import SeedRule
+
+    # An enforced seed with an invalid predicate must be rejected, not installed
+    # inert (the install path is otherwise the only create path that ships rules).
+    monkeypatch.setattr(
+        store,
+        "SEED_PACKS",
+        {"bad_pack": [SeedRule(key="x", text="t", mode=RuleMode.ENFORCED, predicate={})]},
+    )
+    with pytest.raises(store.RuleStoreError):
+        store.install_seed_pack("a", "bad_pack")
+    assert store.list_rules("a") == []  # nothing inserted
+
+
 # ---------------------------------------------------------------------------
 # Validation, lifecycle, and tz guards (review hardening)
 # ---------------------------------------------------------------------------
