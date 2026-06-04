@@ -1,0 +1,210 @@
+"""
+Restart recovery & continuation tests for coding-team branch prep.
+
+Every test runs against real on-disk git repositories in an identity-free
+environment (no global git config, no identity env vars) so the suite
+reproduces the agent container regardless of the developer's machine. The
+"remote" is a sibling local repo added as `origin`.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from typing import Optional
+
+import pytest
+
+
+def _ensure_real_modules() -> None:
+    """Evict synthetic module stubs other test files may have installed.
+
+    test_github_source._stub_heavy_modules() registers a fake
+    software_engineering_team.shared.git_utils in sys.modules with no
+    __file__; these tests need the real implementation (and an api.main
+    bound to it), under any test-execution order.
+    """
+    stale = False
+    for name in (
+        "software_engineering_team.shared.git_utils",
+        "software_engineering_team.shared",
+        "software_engineering_team",
+        "coding_team.orchestrator",
+    ):
+        mod = sys.modules.get(name)
+        if mod is not None and not getattr(mod, "__file__", None):
+            del sys.modules[name]
+            stale = True
+    if stale:
+        sys.modules.pop("coding_team.api.main", None)
+        sys.modules.pop("coding_team.api", None)
+
+
+def _stub_orchestrator_only() -> None:
+    """Keep api.main importable without the heavy agent stack."""
+    import types
+
+    if "coding_team.orchestrator" not in sys.modules:
+        stub = types.ModuleType("coding_team.orchestrator")
+        stub.run_coding_team_orchestrator = lambda *a, **kw: None  # type: ignore[attr-defined]
+        sys.modules["coding_team.orchestrator"] = stub
+
+
+@pytest.fixture
+def api():
+    _ensure_real_modules()
+    _stub_orchestrator_only()
+    from coding_team.api import main as api_main
+
+    return api_main
+
+
+@pytest.fixture
+def identity_free_env(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / "gitconfig-missing"))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    for var in (
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMIT_USER_NAME",
+        "GIT_COMMIT_USER_EMAIL",
+        "EMAIL",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _run(cwd: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(["git", "-C", cwd, *args], capture_output=True, text=True)
+
+
+def _must(cwd: str, *args: str) -> str:
+    r = _run(cwd, *args)
+    assert r.returncode == 0, f"git {' '.join(args)} failed: {r.stderr or r.stdout}"
+    return r.stdout.strip()
+
+
+def _identity_env() -> dict:
+    """Identity for *test fixture* commits that simulate an interrupted run."""
+    return {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Fixture",
+        "GIT_AUTHOR_EMAIL": "fixture@example.com",
+        "GIT_COMMITTER_NAME": "Fixture",
+        "GIT_COMMITTER_EMAIL": "fixture@example.com",
+    }
+
+
+def _commit_file(repo: str, relpath: str, content: str, message: str) -> None:
+    path = os.path.join(repo, relpath)
+    os.makedirs(os.path.dirname(path) or repo, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(content)
+    _must(repo, "add", "-A")
+    r = subprocess.run(
+        ["git", "-C", repo, "commit", "-q", "--no-gpg-sign", "-m", message],
+        capture_output=True,
+        text=True,
+        env=_identity_env(),
+    )
+    assert r.returncode == 0, r.stderr
+
+
+@pytest.fixture
+def repo_pair(tmp_path, identity_free_env):
+    """(remote_path, clone_path): remote has one commit on main; clone tracks it."""
+    remote = str(tmp_path / "remote")
+    os.makedirs(remote)
+    _must(remote, "init", "-q")
+    _must(remote, "config", "commit.gpgsign", "false")
+    _must(remote, "checkout", "-q", "-b", "main")
+    _commit_file(remote, "README.md", "base\n", "base")
+    clone = str(tmp_path / "clone")
+    r = subprocess.run(["git", "clone", "-q", remote, clone], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    _must(clone, "config", "commit.gpgsign", "false")
+    return remote, clone
+
+
+def _branch_exists(repo: str, pattern: str) -> Optional[str]:
+    out = _must(repo, "for-each-ref", "--format=%(refname:short)", f"refs/heads/{pattern}")
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    return lines[-1] if lines else None
+
+
+# ---------------------------------------------------------------------------
+# Marker helpers
+# ---------------------------------------------------------------------------
+
+
+class TestActiveIssueMarker:
+    def test_read_returns_none_when_unset(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        assert api._read_active_issue(clone) is None
+
+    def test_write_then_read_roundtrip(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        api._write_active_issue(clone, 7)
+        assert api._read_active_issue(clone) == 7
+        assert _must(clone, "config", "--local", "khala.active-issue") == "7"
+
+    def test_clear_removes_marker(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        api._write_active_issue(clone, 7)
+        api._clear_active_issue(clone)
+        assert api._read_active_issue(clone) is None
+
+    def test_clear_is_idempotent(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        api._clear_active_issue(clone)  # never set; must not raise
+        assert api._read_active_issue(clone) is None
+
+    def test_read_garbage_value_returns_none(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "config", "--local", "khala.active-issue", "not-a-number")
+        assert api._read_active_issue(clone) is None
+
+
+# ---------------------------------------------------------------------------
+# Git-graph helpers
+# ---------------------------------------------------------------------------
+
+
+class TestGraphHelpers:
+    def test_is_ahead_false_for_missing_ref(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        assert api._is_ahead(clone, "no-such-branch", "origin/main") is False
+
+    def test_is_ahead_false_when_equal(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        assert api._is_ahead(clone, "main", "origin/main") is False
+
+    def test_is_ahead_true_with_extra_commit(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(clone, "work.py", "x = 1\n", "progress")
+        assert api._is_ahead(clone, "khala/issue-7", "origin/main") is True
+
+    def test_rescue_branch_name_tags_issue_and_avoids_collisions(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        monkeypatch.setattr(api, "_utc_timestamp", lambda: "20260101-000000")
+        first = api._rescue_branch_name(clone, 5)
+        assert first == "khala/rescue/issue-5-20260101-000000"
+        _must(clone, "branch", first)
+        second = api._rescue_branch_name(clone, 5)
+        assert second == "khala/rescue/issue-5-20260101-000000-1"
+        untagged = api._rescue_branch_name(clone, None)
+        assert untagged == "khala/rescue/20260101-000000"
+
+    def test_latest_issue_rescue_ref_picks_newest(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "branch", "khala/rescue/issue-7-20260101-000000")
+        _must(clone, "branch", "khala/rescue/issue-7-20260102-000000")
+        _must(clone, "branch", "khala/rescue/issue-9-20260103-000000")
+        assert api._latest_issue_rescue_ref(clone, 7) == "khala/rescue/issue-7-20260102-000000"
+        assert api._latest_issue_rescue_ref(clone, 4) is None

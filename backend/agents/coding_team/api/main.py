@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -43,7 +44,10 @@ from coding_team.job_store import (  # noqa: E402
 from coding_team.models import CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
-from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH  # noqa: E402
+from software_engineering_team.shared.git_utils import (  # noqa: E402
+    DEVELOPMENT_BRANCH,
+    commit_working_tree,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -398,6 +402,97 @@ def _git(
         return 124, f"git {' '.join(args)} timed out after {timeout}s"
     except Exception as e:  # noqa: BLE001
         return 1, scrub_token_from_text(str(e))
+
+
+RESCUE_BRANCH_PREFIX = "khala/rescue/"
+ACTIVE_ISSUE_CONFIG_KEY = "khala.active-issue"
+
+
+def _utc_timestamp() -> str:
+    """Wall-clock UTC stamp used in rescue branch names (patchable in tests)."""
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _read_active_issue(repo_path: str) -> Optional[int]:
+    """Read the repo-local active-issue marker.
+
+    The marker means: a job for that issue was mid-flight on this checkout
+    and terminated abnormally (restart, kill, delete). It is the only state
+    that survives job deletion, so leftover work is attributed through it.
+
+    Postconditions:
+        - Returns the issue number, or None when the marker is absent or
+          unparseable (treated as unattributed).
+    """
+    rc, msg = _git(repo_path, "config", "--local", "--get", ACTIVE_ISSUE_CONFIG_KEY)
+    if rc != 0:
+        return None
+    try:
+        return int(msg.strip())
+    except ValueError:
+        return None
+
+
+def _write_active_issue(repo_path: str, issue_number: int) -> None:
+    """Record that a job for issue_number is mid-flight on this checkout."""
+    _git(repo_path, "config", "--local", ACTIVE_ISSUE_CONFIG_KEY, str(issue_number))
+
+
+def _clear_active_issue(repo_path: str) -> None:
+    """Remove the marker; idempotent (unsetting a missing key is a no-op)."""
+    _git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
+
+
+def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
+    """True if ref resolves to a commit and has commits not reachable from base_ref."""
+    rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if rc != 0:
+        return False
+    rc, out = _git(repo_path, "rev-list", "--count", f"{base_ref}..{ref}")
+    if rc != 0:
+        return False
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return False
+
+
+def _reachable_from(repo_path: str, tip: str, container: str) -> bool:
+    """True if tip is an ancestor of container (resetting container keeps tip reachable)."""
+    rc, _ = _git(repo_path, "merge-base", "--is-ancestor", tip, container)
+    return rc == 0
+
+
+def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
+    """Allocate an unused rescue branch name.
+
+    Postconditions:
+        - Returns `khala/rescue/issue-<issue>-<ts>` (issue known) or
+          `khala/rescue/<ts>`, suffixed `-1`..`-9` on collision; None when
+          all ten candidates exist.
+    """
+    tag = f"issue-{issue}-" if issue is not None else ""
+    base = f"{RESCUE_BRANCH_PREFIX}{tag}{_utc_timestamp()}"
+    for cand in [base] + [f"{base}-{i}" for i in range(1, 10)]:
+        rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"refs/heads/{cand}")
+        if rc != 0:
+            return cand
+    return None
+
+
+def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]:
+    """Newest rescue ref for the issue (timestamps sort lexicographically)."""
+    rc, out = _git(
+        repo_path,
+        "for-each-ref",
+        "--sort=-refname",
+        "--count=1",
+        "--format=%(refname:short)",
+        f"refs/heads/{RESCUE_BRANCH_PREFIX}issue-{issue_number}-*",
+    )
+    if rc != 0 or not out.strip():
+        return None
+    return out.strip().splitlines()[0]
 
 
 def _working_tree_dirty(repo_path: str) -> Tuple[bool, Optional[str]]:
