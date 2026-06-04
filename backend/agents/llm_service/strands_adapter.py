@@ -301,6 +301,21 @@ class LLMClientModel(Model):
         adapter use where attribute access is cleaner."""
         return self._config.as_dict()
 
+    def get_max_context_tokens(self) -> int:
+        """Delegate to the backing client (``LLMClient`` contract).
+
+        Context-sizing and compaction helpers are typed against ``LLMClient``
+        but are routinely handed this adapter (e.g. the SE quality gates'
+        default ``llm_getter`` returns ``get_strands_model(...)``). Without
+        delegation every such call raised ``AttributeError`` — code review
+        failed closed and ``compaction`` silently degraded to a 16384-token
+        assumption behind its ``hasattr`` guard.
+
+        Postconditions:
+            - Returns the backing client's max context tokens.
+        """
+        return self._client.get_max_context_tokens()
+
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
         per-field overrides applied to the config.

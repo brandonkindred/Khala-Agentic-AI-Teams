@@ -439,3 +439,16 @@ def test_run_acceptance_verification_exception(monkeypatch) -> None:
     )
     assert result.accepted is False
     assert "verifier down" in result.reasoning
+
+
+def test_run_code_review_sizes_context_with_strands_adapter() -> None:
+    """Regression: the default llm_getter returns a strands LLMClientModel and
+    run_code_review passes it to compute_code_review_total_chars, which calls
+    get_max_context_tokens on it. Without adapter delegation that raised
+    AttributeError and every review failed closed ("Review failed: ...")."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.strands_adapter import get_strands_model
+    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
+
+    llm = get_strands_model("code_review", client=DummyLLMClient())
+    assert compute_code_review_total_chars(llm) == 150_000

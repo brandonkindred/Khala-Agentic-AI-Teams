@@ -773,3 +773,29 @@ def test_run_json_via_strands_multiple_sequential_calls_succeed() -> None:
         assert isinstance(result, dict), f"call {i} did not return a dict"
         assert "overview" in result, f"call {i} missing overview key"
         assert "components" in result, f"call {i} missing components key"
+
+
+# ---------------------------------------------------------------------------
+# get_max_context_tokens delegation
+# ---------------------------------------------------------------------------
+
+
+class _ContextClient(DummyLLMClient):
+    def get_max_context_tokens(self) -> int:
+        return 262144
+
+
+def test_adapter_delegates_get_max_context_tokens() -> None:
+    """context_sizing helpers receive the adapter where an LLMClient is
+    expected (e.g. quality_gate_tools.run_code_review); the adapter must
+    answer for its backing client instead of raising AttributeError."""
+    model = LLMClientModel(_ContextClient())
+    assert model.get_max_context_tokens() == 262144
+
+
+def test_get_strands_model_exposes_context_for_hasattr_guards() -> None:
+    """llm_service.compaction guards with hasattr and silently degraded the
+    adapter to a 16384-token assumption; delegation makes the guard pass."""
+    model = get_strands_model(client=_ContextClient())
+    assert hasattr(model, "get_max_context_tokens")
+    assert model.get_max_context_tokens() == 262144
