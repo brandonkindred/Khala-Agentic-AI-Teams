@@ -42,9 +42,6 @@ from llm_service import compact_text, get_client
 
 logger = logging.getLogger(__name__)
 
-# Open upper bound for the in-progress event window — any sane event predates it.
-_FAR_FUTURE = datetime(9999, 12, 31, tzinfo=timezone.utc)
-
 # Token→char conversion. The repo uses a conservative ~4-chars-per-token
 # heuristic (see ``llm_service`` clients), reused here so callers express the
 # digest budget in tokens while ``compact_text`` works in characters.
@@ -157,24 +154,27 @@ def _fetch_in_progress_events(
 ) -> list[MemoryEvent]:
     """Top-N salient events the shown summaries don't already cover.
 
-    Two uncovered sources, merged and re-ranked:
+    Two uncovered sources, each fetched bounded+ordered+limited in the store, then
+    merged and re-ranked:
 
-    1. **In-progress window.** The closed, non-stale day/week/month summaries
-       capture everything up to the most recent **non-stale** closed day, so the
-       live section need only carry events at or after that day's ``period_end``.
-       Without this bound, an unbounded top-N-by-salience scan over the agent's
-       whole retained history could resurface a high-salience event from an
-       already-summarized period (duplicating the summary) and evict genuinely
-       current-period events. When no non-stale day summary exists (cold start, or
-       every recent day still stale) every retained event is uncovered, so the
-       unbounded recent-events fetch is used instead.
+    1. **In-progress window.** The shown non-stale summaries cover everything up to
+       the latest ``period_end`` among them, so the live section need only carry
+       events at or after that boundary — fetched as the top-N salient rows with
+       ``occurred_at >= boundary`` (the order and limit run in SQL, never
+       materializing the whole tail). The boundary is the most recent point the
+       shown summaries cover (the max ``period_end``); with current contiguous
+       rollups that is the day's ``period_end``, but a week/month-only digest is
+       still bounded to the week's/month's end rather than scanning all history.
+       Only when **no** summary is shown (cold start) is the bound dropped. Without
+       it, an unbounded scan could let a high-salience already-summarized event
+       evict current activity.
     2. **Late events behind stale days.** A late writeback into an *older* closed
        day marks that day (and its parents) ``stale``; ``_latest_non_stale_summary``
        then skips it and the in-progress window starts *after* it, so the late
-       event would be covered by neither a shown summary nor the window. We surface
-       those events directly from each stale day's *unfolded* tail (the rows that
-       arrived after the summary's fold point) so fresh memory isn't dropped while
-       the rollup catches up.
+       event would be covered by neither a shown summary nor the window. The
+       store's :func:`store.fetch_recent_unfolded_events` returns the top-N salient
+       unfolded rows across all stale days in one query, so fresh memory isn't
+       dropped while the rollup catches up.
 
     Postconditions:
         * At most ``_event_top_n()`` events, deduplicated by id and ordered
@@ -183,45 +183,20 @@ def _fetch_in_progress_events(
           in-progress window or an unfolded late event from a stale day.
     """
     top_n = _event_top_n()
-    day = next((summary for scale, summary in summaries if scale is Scale.DAY), None)
-    if day is None:
-        window = store.fetch_recent_events(agent_id, top_n, by_salience=True)
-    else:
-        window = store.fetch_events_for_period(agent_id, day.period_end, _FAR_FUTURE)
+    # Most recent point the shown (non-stale) summaries cover; None when nothing is
+    # shown (cold start) → no lower bound.
+    boundary = max((summary.period_end for _scale, summary in summaries), default=None)
 
-    merged = _dedupe_by_id(window, _stale_day_late_events(agent_id))
+    window = store.fetch_recent_events(agent_id, top_n, by_salience=True, since=boundary)
+    late = store.fetch_recent_unfolded_events(agent_id, Scale.DAY, top_n, snapshot=_utcnow())
+
+    merged = _dedupe_by_id(window, late)
     # Deterministic (salience DESC, occurred_at DESC, id ASC): a stable id-ASC
     # pre-sort makes equal-(salience, occurred_at) ties resolve by id ascending
     # under the reverse primary sort.
     merged.sort(key=lambda e: e.id)
     merged.sort(key=lambda e: (e.salience, e.occurred_at), reverse=True)
     return merged[:top_n]
-
-
-def _stale_day_late_events(agent_id: str) -> list[MemoryEvent]:
-    """Unfolded late events from every stale **day** summary.
-
-    These are the rows whose late arrival flagged the day ``stale`` — present in
-    the store but not yet folded into the (now-stale, hence un-shown) summary. The
-    rollup will reconcile them; until then they are surfaced as recent activity so
-    a late writeback into an older closed day isn't invisible in the digest.
-
-    Postconditions:
-        * Returns every event in a stale day's window with ``fold_point <
-          recorded_at <= now``; empty when no day summary is stale.
-    """
-    stale_days = store.fetch_stale_summaries(agent_id, Scale.DAY)
-    if not stale_days:
-        return []
-    now = _utcnow()
-    late: list[MemoryEvent] = []
-    for summary in stale_days:
-        late.extend(
-            store.fetch_unfolded_events(
-                agent_id, Scale.DAY, summary.period_start, summary.period_end, snapshot=now
-            )
-        )
-    return late
 
 
 def _dedupe_by_id(*groups: list[MemoryEvent]) -> list[MemoryEvent]:

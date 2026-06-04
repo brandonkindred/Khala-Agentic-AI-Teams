@@ -224,6 +224,93 @@ def test_fetch_recent_events_negative_top_n_raises() -> None:
         store.fetch_recent_events("a", top_n=-1)
 
 
+def test_fetch_recent_events_since_lower_bound() -> None:
+    # ``since`` excludes events before the bound even when they outrank by salience.
+    before = _event("a", run_id="r1", salience=0.9, occurred_at=datetime(2026, 5, 1, tzinfo=_UTC))
+    after = _event("a", run_id="r2", salience=0.1, occurred_at=datetime(2026, 6, 5, tzinfo=_UTC))
+    store.append_event("a", before)
+    store.append_event("a", after)
+
+    got = store.fetch_recent_events("a", top_n=10, since=datetime(2026, 6, 1, tzinfo=_UTC))
+    assert [e.id for e in got] == [after.id]  # only occurred_at >= since
+
+
+# ---------------------------------------------------------------------------
+# fetch_recent_unfolded_events: bounded late-event scan across stale periods
+# ---------------------------------------------------------------------------
+def test_fetch_recent_unfolded_events_returns_late_rows_ranked() -> None:
+    # Stale day summary computed in the far past → every appended event (recorded
+    # ~now) arrived after the fold point, so all are unfolded late rows, salience DESC.
+    _upsert(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_PRECOMPUTED_AT
+    )
+    lo = _event("a", run_id="r1", salience=0.2, occurred_at=_MID_DAY)
+    hi = _event("a", run_id="r2", salience=0.8, occurred_at=datetime(2026, 6, 1, 6, tzinfo=_UTC))
+    store.append_event("a", lo)
+    store.append_event("a", hi)
+
+    got = store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=10, snapshot=_FOLDED_AT)
+    assert [e.id for e in got] == [hi.id, lo.id]
+
+
+def test_fetch_recent_unfolded_events_respects_top_n() -> None:
+    _upsert(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_PRECOMPUTED_AT
+    )
+    for i in range(4):
+        store.append_event("a", _event("a", run_id=f"r{i}", seq=i, salience=i / 10))
+    assert (
+        len(store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=2, snapshot=_FOLDED_AT)) == 2
+    )
+
+
+def test_fetch_recent_unfolded_events_excludes_non_stale_period() -> None:
+    # A non-stale day's events are reconciled, not "late" — never surfaced here.
+    _upsert(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, stale=False), computed_at=_PRECOMPUTED_AT
+    )
+    store.append_event("a", _event("a", occurred_at=_MID_DAY))
+    assert store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=10, snapshot=_FOLDED_AT) == []
+
+
+def test_fetch_recent_unfolded_events_excludes_already_folded() -> None:
+    # Stale day, but the fold point is after every event's arrival → already folded.
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_FOLDED_AT)
+    store.append_event("a", _event("a", occurred_at=_MID_DAY))
+    assert store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=10, snapshot=_FOLDED_AT) == []
+
+
+def test_fetch_recent_unfolded_events_honours_snapshot_upper_bound() -> None:
+    # Events recorded after the snapshot are not yet visible to this read.
+    _upsert(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_PRECOMPUTED_AT
+    )
+    store.append_event("a", _event("a", occurred_at=_MID_DAY))  # recorded ~now
+    assert (
+        store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=10, snapshot=_PRECOMPUTED_AT) == []
+    )
+
+
+def test_fetch_recent_unfolded_events_agent_isolation() -> None:
+    _upsert(
+        "a", _summary("a", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_PRECOMPUTED_AT
+    )
+    _upsert(
+        "b", _summary("b", scale=Scale.DAY, window=_DAY, stale=True), computed_at=_PRECOMPUTED_AT
+    )
+    store.append_event("a", _event("a", occurred_at=_MID_DAY))
+    store.append_event("b", _event("b", occurred_at=_MID_DAY))
+
+    got = store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=10, snapshot=_FOLDED_AT)
+    assert all(e.agent_id == "a" for e in got)
+    assert len(got) == 1
+
+
+def test_fetch_recent_unfolded_events_negative_top_n_raises() -> None:
+    with pytest.raises(AssertionError):
+        store.fetch_recent_unfolded_events("a", Scale.DAY, top_n=-1, snapshot=_FOLDED_AT)
+
+
 # ---------------------------------------------------------------------------
 # Summaries: upsert idempotency + reads
 # ---------------------------------------------------------------------------
