@@ -385,19 +385,92 @@ class TestPrepareIssueBranchContinuation:
         assert ok is True, err
         assert "rescued.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
 
-    def test_local_branch_preferred_over_remote(self, api, repo_pair) -> None:
+    def test_local_preferred_when_it_contains_the_remote_tip(self, api, repo_pair) -> None:
+        """Local strictly newer than remote (job died after fast-forward but
+        before push): continuing locally loses nothing the remote has."""
+        remote, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
+        _commit_file(clone, "pushed.py", "p = 1\n", "pushed work")
+        _must(clone, "push", "-q", "origin", "khala/issue-7")
+        _commit_file(clone, "newer.py", "n = 1\n", "local-only newer work")
+        _must(clone, "checkout", "-q", "main")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert "pushed.py" in files and "newer.py" in files
+        # Nothing needed preserving: the seed contains the remote tip.
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+    def test_stale_local_with_newer_remote_continues_from_remote(self, api, repo_pair) -> None:
+        """The eventual publish is `push --force-with-lease` and prep's own
+        fetch refreshes the lease — seeding from a stale local tip would let
+        the push drop the remote-only commits."""
+        remote, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
+        _commit_file(clone, "shared.py", "s = 1\n", "shared work")
+        _must(clone, "push", "-q", "origin", "khala/issue-7")
+        # The remote moves ahead (e.g. another checkout's job pushed more).
+        _must(remote, "checkout", "-q", "khala/issue-7")
+        _commit_file(remote, "remote_only.py", "r = 1\n", "remote-only progress")
+        _must(remote, "checkout", "-q", "main")
+        # Local stays at the stale tip.
+        _must(clone, "checkout", "-q", "main")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert "shared.py" in files and "remote_only.py" in files
+
+    def test_diverged_local_and_remote_prefers_remote_and_preserves_local(
+        self, api, repo_pair
+    ) -> None:
+        """When the tips diverged, the remote's unique commits would be
+        irrecoverably force-pushed away if not seeded from; the local branch's
+        unique commits are pinned to a rescue ref instead."""
         remote, clone = repo_pair
         _must(remote, "checkout", "-q", "-b", "khala/issue-7")
         _commit_file(remote, "remote.py", "r = 1\n", "remote work")
         _must(remote, "checkout", "-q", "main")
         _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
         _commit_file(clone, "local.py", "l = 1\n", "local work")
+        local_tip = _must(clone, "rev-parse", "khala/issue-7")
         _must(clone, "checkout", "-q", "main")
 
         ok, err, _ = _prep(api, clone)
         assert ok is True, err
         files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
-        assert "local.py" in files
+        assert "remote.py" in files
+        assert "local.py" not in files
+        # The diverged local tip is still reachable via a rescue ref.
+        assert local_tip in _must(clone, "rev-list", "--branches")
+        rescued = _branch_exists(clone, "khala/rescue/*")
+        assert rescued is not None
+        assert "local.py" in _must(clone, "ls-tree", "-r", "--name-only", rescued)
+
+    def test_remote_only_progress_pinned_even_when_marker_tip_wins(self, api, repo_pair) -> None:
+        """Safety net for every seed choice: commits visible only on the
+        fetched remote issue branch must stay locally reachable, because the
+        final --force-with-lease push (lease refreshed by prep's own fetch)
+        will replace them on the remote."""
+        remote, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        # Interrupted run for issue 7: progress on development, marker left set.
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "dev_progress.py", "d = 1\n", "dev progress")
+        # Meanwhile the remote issue branch holds diverged commits.
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "remote_only.py", "r = 1\n", "remote-only progress")
+        _must(remote, "checkout", "-q", "main")
+        remote_tip = _must(remote, "rev-parse", "khala/issue-7")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        # Marker tip wins the seed (freshest same-issue state)…
+        assert "dev_progress.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        # …but the remote-only commits are pinned to a local rescue ref.
+        assert remote_tip in _must(clone, "rev-list", "--branches")
 
 
 class TestOrphanPrevention:

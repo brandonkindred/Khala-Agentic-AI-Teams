@@ -568,15 +568,18 @@ def _recover_dirty_tree(
 def _preserve_if_would_orphan(
     repo_path: str, branch: str, base_ref: str, seed: str, marker: Optional[int]
 ) -> Optional[str]:
-    """Create a rescue ref for `branch` if resetting it would orphan commits.
+    """Create a rescue ref for `branch` (any committish, including a
+    remote-tracking ref) when adopting `seed` would strand its commits.
 
-    Invariant served: no reset performed by branch prep may make a commit
-    unreachable.
+    Invariant served: no commits visible to branch prep may become
+    unreachable — neither through prep's own `checkout -B` resets of local
+    branches, nor through the job's eventual `--force-with-lease` push
+    replacing a remote issue tip the chosen seed does not contain.
 
     Postconditions:
         - Returns None when nothing needed preserving or a rescue ref now
-          holds the branch tip; returns an error string when preservation
-          was needed but failed (callers must fail closed).
+          holds the tip; returns an error string when preservation was
+          needed but failed (callers must fail closed).
     """
     if branch == seed:
         return None
@@ -660,11 +663,19 @@ def _prepare_issue_branch(
     _git(repo_path, "fetch", "--", remote, integration_branch, env=auth_env)
 
     base_ref = f"{remote}/{default_branch}"
+    remote_issue_ref = f"{remote}/{integration_branch}"
     candidates: List[str] = []
     if marker is not None and issue_number is not None and marker == issue_number:
         candidates.append(wip_tip or DEVELOPMENT_BRANCH)
-    candidates.append(integration_branch)
-    candidates.append(f"{remote}/{integration_branch}")
+    # Local-vs-remote issue tip: prefer local only when it already contains
+    # the remote tip. The eventual publish is `push --force-with-lease` and
+    # this function's own fetch refreshes the lease, so seeding from a tip
+    # that lacks remote-only commits would let the push silently drop them.
+    # A diverged local tip is pinned by the orphan-prevention pass below.
+    if _reachable_from(repo_path, remote_issue_ref, integration_branch):
+        candidates.extend((integration_branch, remote_issue_ref))
+    else:
+        candidates.extend((remote_issue_ref, integration_branch))
     if issue_number is not None:
         rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
         if rescue_ref:
@@ -678,9 +689,11 @@ def _prepare_issue_branch(
             f"▶️ Continuing issue from previous progress: `{seed}` ({ahead} commits ahead of `{default_branch}`)."
         )
 
-    # Invariant: no reset below may make commits unreachable.
-    for branch in (DEVELOPMENT_BRANCH, integration_branch):
-        preserve_err = _preserve_if_would_orphan(repo_path, branch, base_ref, seed, marker)
+    # Invariant: no commits visible to prep — on local branches about to be
+    # reset, or on the just-fetched remote issue tip that the final
+    # --force-with-lease push would replace — may become unreachable.
+    for ref in (DEVELOPMENT_BRANCH, integration_branch, remote_issue_ref):
+        preserve_err = _preserve_if_would_orphan(repo_path, ref, base_ref, seed, marker)
         if preserve_err:
             return False, preserve_err, notes
 

@@ -60,6 +60,17 @@ def _sub_payload(number: int, state: str = "open") -> dict[str, Any]:
     return {"number": number, "state": state, "title": f"Sub {number}"}
 
 
+def _expected_basic_header(token: str) -> str:
+    """Expected git auth header for a fake token, built at runtime so a
+    credential-shaped Base64 literal never appears in source — secret
+    scanners (GitGuardian etc.) flag the pattern regardless of how fake
+    the values are (same convention as TestScrubTokenFromText)."""
+    import base64
+
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Authorization: Basic {encoded}"
+
+
 # ---------------------------------------------------------------------------
 # Client: pagination & PR filtering
 # ---------------------------------------------------------------------------
@@ -1053,10 +1064,7 @@ class TestGitCredentialThreading:
         assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
         # GitHub's git smart-HTTP endpoint rejects `Bearer` (401) even for a
         # valid token — only Basic with the x-access-token username works.
-        # b64("x-access-token:secret-tok")
-        assert (
-            env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRvaw=="
-        )
+        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("secret-tok")
         # Disable interactive prompts so a bad credential fails fast.
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         # Inherits the parent environment (PATH etc. survive).
@@ -1081,10 +1089,7 @@ class TestGitCredentialThreading:
         assert len(fetches) == 2
         for _args, env in fetches:
             assert env is not None
-            # b64("x-access-token:tok-123")
-            assert (
-                env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
-            )
+            assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
         # Local-only git ops never carry the credential.
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
@@ -1113,11 +1118,7 @@ class TestGitCredentialThreading:
         ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
         assert ok is True, msg
         assert captured["args"][0] == "push"
-        # b64("x-access-token:tok-xyz")
-        assert (
-            captured["env"]["GIT_CONFIG_VALUE_0"]
-            == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLXh5eg=="
-        )
+        assert captured["env"]["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-xyz")
 
     def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         captured = {}
