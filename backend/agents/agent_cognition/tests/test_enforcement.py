@@ -243,17 +243,35 @@ def test_enforcement_reexports_predicate_validators() -> None:
         validate_predicate({"phase": "bad", "check": {}})
 
 
-def test_postcondition_neq_allows_when_field_absent() -> None:
-    # A 'block when output.error == fatal' rule, written as != , must allow a
-    # successful output that simply has no error key (missing-path semantics).
-    rule = _rule(
+def test_postcondition_neq_fails_closed_on_missing_field() -> None:
+    # An enforced != guard fails closed when its field is absent: missing -> UNKNOWN
+    # -> block. To deliberately allow-on-missing, the author uses not(exists(...)).
+    bare_neq = _rule(
         predicate={
             "phase": "postcondition",
             "check": {"op": "!=", "path": "output.error", "value": "fatal"},
         }
     )
-    assert evaluate_postcondition({"result": 1}, [rule]) == (True, None)
-    assert evaluate_postcondition({"error": "fatal"}, [rule])[0] is False
+    assert evaluate_postcondition({"result": 1}, [bare_neq])[0] is False  # absent -> blocked
+    assert evaluate_postcondition({"error": "warn"}, [bare_neq]) == (True, None)
+    assert evaluate_postcondition({"error": "fatal"}, [bare_neq])[0] is False
+
+    # Escape hatch: allow when error is absent OR not fatal.
+    guarded = _rule(
+        rid="guarded",
+        predicate={
+            "phase": "postcondition",
+            "check": {
+                "op": "any",
+                "of": [
+                    {"op": "not", "of": [{"op": "exists", "path": "output.error"}]},
+                    {"op": "!=", "path": "output.error", "value": "fatal"},
+                ],
+            },
+        },
+    )
+    assert evaluate_postcondition({"result": 1}, [guarded]) == (True, None)  # absent -> allowed
+    assert evaluate_postcondition({"error": "fatal"}, [guarded])[0] is False
 
 
 def test_enforced_gate_does_not_raise_on_exotic_value() -> None:

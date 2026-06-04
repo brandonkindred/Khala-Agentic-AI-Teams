@@ -35,6 +35,7 @@ def test_parse_returns_predicate() -> None:
 def test_parse_valid_constructs() -> None:
     parse_predicate({"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "shell"}})
     parse_predicate({"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": ["a", "b"]}})
+    parse_predicate({"phase": "precondition", "check": {"op": "exists", "path": "input.x"}})
     parse_predicate(
         {
             "phase": "precondition",
@@ -105,6 +106,12 @@ def test_parse_valid_constructs() -> None:
             "phase": "precondition",
             "check": {"op": ">", "path": "input.x", "value": True},
         },  # ordered op, bool value (bool is not a number here)
+        {"phase": "precondition", "check": {"op": "exists"}},  # exists missing path
+        {"phase": "precondition", "check": {"op": "exists", "path": ""}},  # exists empty path
+        {
+            "phase": "precondition",
+            "check": {"op": "exists", "path": "input.x", "value": 1},
+        },  # exists extra key
         {"phase": "precondition", "check": {"op": "all", "of": []}},  # empty of
         {"phase": "precondition", "check": {"op": "all", "of": "x"}},  # of not a list
         {  # not with two children
@@ -347,54 +354,81 @@ def test_validate_and_is_valid() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Missing-path semantics are per-operator (a missing value is a distinct value)
+# Missing/undecidable data is fail-closed (Kleene three-valued logic)
 # ---------------------------------------------------------------------------
-def test_missing_path_per_operator() -> None:
-    root = {"output": {}}  # 'error'/'status' absent
-    # != allows when the path is absent (the success case)
-    assert (
-        _eval(
-            {
-                "phase": "postcondition",
-                "check": {"op": "!=", "path": "output.error", "value": "fatal"},
-            },
-            root,
-        )[0]
-        is True
-    )
-    # == / in block when the required path is absent
-    assert (
-        _eval(
-            {
-                "phase": "postcondition",
-                "check": {"op": "==", "path": "output.status", "value": "ok"},
-            },
-            root,
-        )[0]
-        is False
-    )
-    assert (
-        _eval(
-            {
-                "phase": "postcondition",
-                "check": {"op": "in", "path": "output.status", "value": ["ok"]},
-            },
-            root,
-        )[0]
-        is False
-    )
+def test_missing_path_fails_closed_for_every_operator() -> None:
+    root = {"output": {}}  # field absent
+    cases = [
+        {"op": "!=", "path": "output.error", "value": "fatal"},
+        {"op": "==", "path": "output.status", "value": "ok"},
+        {"op": "in", "path": "output.status", "value": ["ok"]},
+        {"op": "<=", "path": "output.n", "value": 1},
+    ]
+    for check in cases:
+        holds, reason = _eval({"phase": "postcondition", "check": check}, root)
+        assert holds is False  # missing -> UNKNOWN -> block (including !=)
+        assert reason is not None and "missing" in reason
 
 
-def test_missing_path_composes_through_not() -> None:
-    # 'block when approved == true' must ALLOW when 'approved' is absent — the
-    # fail-closed-on-missing of the old design flipped to allow under not; now
-    # the inner == is a concrete False so not(False) == allow, consistently.
+def test_missing_path_composes_through_not_fails_closed() -> None:
+    # 'block when approved == true': when 'approved' is absent the inner == is
+    # UNKNOWN and not(UNKNOWN) is UNKNOWN, so the gate blocks — a not wrapper
+    # cannot invert a missing value into an allow.
     pred = {
         "phase": "postcondition",
         "check": {"op": "not", "of": [{"op": "==", "path": "output.approved", "value": True}]},
     }
-    assert _eval(pred, {"output": {}})[0] is True
+    assert _eval(pred, {"output": {}})[0] is False  # missing -> blocked
     assert _eval(pred, {"output": {"approved": True}})[0] is False
+    assert _eval(pred, {"output": {"approved": False}})[0] is True
+
+
+def test_exists_operator() -> None:
+    present = {"input": {"x": 0}}
+    absent = {"input": {}}
+    ex = {"phase": "precondition", "check": {"op": "exists", "path": "input.x"}}
+    assert _eval(ex, present)[0] is True
+    assert _eval(ex, absent)[0] is False  # absent -> block
+    # not(exists) is the escape hatch: allow only when absent
+    nex = {
+        "phase": "precondition",
+        "check": {"op": "not", "of": [{"op": "exists", "path": "input.x"}]},
+    }
+    assert _eval(nex, absent)[0] is True
+    assert _eval(nex, present)[0] is False
+
+
+def test_exists_allow_on_missing_escape_hatch() -> None:
+    # any(not(exists(error)), error != "fatal"): allow when error is absent OR not
+    # "fatal"; block only when it equals "fatal".
+    pred = {
+        "phase": "postcondition",
+        "check": {
+            "op": "any",
+            "of": [
+                {"op": "not", "of": [{"op": "exists", "path": "output.error"}]},
+                {"op": "!=", "path": "output.error", "value": "fatal"},
+            ],
+        },
+    }
+    assert _eval(pred, {"output": {}})[0] is True  # absent -> allowed via not(exists)
+    assert _eval(pred, {"output": {"error": "warn"}})[0] is True
+    assert _eval(pred, {"output": {"error": "fatal"}})[0] is False
+
+
+def test_kleene_composition_with_unknown() -> None:
+    root = {"input": {"present": 1}}  # 'absent' is missing
+    allow_leaf = {"op": "==", "path": "input.present", "value": 1}
+    block_leaf = {"op": "==", "path": "input.present", "value": 2}
+    unknown_leaf = {"op": "==", "path": "input.absent", "value": 1}
+
+    def _check(op: str, of: list[dict]) -> bool:
+        return _eval({"phase": "precondition", "check": {"op": op, "of": of}}, root)[0]
+
+    assert _check("any", [allow_leaf, unknown_leaf]) is True  # any allow -> allow
+    assert _check("any", [block_leaf, unknown_leaf]) is False  # no allow, unknown -> block
+    assert _check("all", [allow_leaf, unknown_leaf]) is False  # unknown -> block
+    assert _check("all", [allow_leaf, block_leaf]) is False  # a block -> block
 
 
 def test_strict_bool_int_equality() -> None:
@@ -422,12 +456,15 @@ def test_strict_bool_int_equality() -> None:
     )
 
 
-def test_forbid_tool_non_string_tool_id_never_raises() -> None:
-    # Public evaluate must not raise on an unhashable/non-string tool_id; a
-    # non-string id simply cannot match a forbidden string id, so it allows.
+def test_forbid_tool_non_string_tool_id_fails_closed() -> None:
+    # The pre-dispatch tool gate must not raise on a non-string/unhashable
+    # tool_id, and malformed gate input fails closed (blocks), not allows.
     pred = {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "shell"}}
-    assert _eval(pred, {"tool_id": ["shell"], "args": {}})[0] is True
-    assert _eval(pred, {"tool_id": None, "args": {}})[0] is True
+    blocked, reason = _eval(pred, {"tool_id": ["shell"], "args": {}})
+    assert blocked is False and reason is not None and "not a string" in reason
+    assert _eval(pred, {"tool_id": None, "args": {}})[0] is False
+    # a normal string tool that isn't forbidden still allows
+    assert _eval(pred, {"tool_id": "git", "args": {}})[0] is True
 
 
 def test_eval_does_not_repr_on_success_path() -> None:

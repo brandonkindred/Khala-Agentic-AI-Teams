@@ -18,14 +18,14 @@ Schema (stored in ``Rule.predicate`` JSONB)::
 
     comparison leaf : {"op": "<"|"<="|">"|">="|"=="|"!="|"in",
                        "path": "<dotted>", "value": <scalar|array>}
+    exists leaf     : {"op": "exists", "path": "<dotted>"}   # is the path present?
     tool leaf       : {"op": "forbid_tool", "tool_id": "<str>" | ["<str>", ...]}
                       (valid only inside a "tool_gate" predicate)
     composite       : {"op": "all"|"any", "of": [<node>, ...]}   # non-empty
                       {"op": "not", "of": [<node>]}               # exactly one
 
-Semantics are uniform: every node evaluates to ``holds: bool`` meaning "the
-constraint is satisfied ⇒ allow". A phase allows iff *all* applicable rules'
-predicates hold (see :mod:`agent_cognition.rules.enforcement`).
+A phase allows iff *all* applicable rules' predicates allow (see
+:mod:`agent_cognition.rules.enforcement`).
 
 Design by Contract:
 
@@ -36,28 +36,30 @@ Design by Contract:
 * :func:`evaluate` never raises on input *data* shape — and raises only on
   programmer misuse (a non-``Predicate`` argument).
 
-Missing-path semantics are **per-operator**, so a missing value is an ordinary
-distinct value (not a special fail-closed state that would invert under
-``not``):
+Missing/undecidable data is **fail-closed** via three-valued (Kleene) logic. A
+node evaluates to ALLOW / BLOCK / UNKNOWN; :func:`evaluate` collapses UNKNOWN to
+a block, so a predicate that cannot be decided never silently allows:
 
-* ``==`` / ``in`` against a missing path are ``False`` (a missing value equals
-  nothing and is a member of nothing) — so a required ``output.status == "ok"``
-  blocks when ``status`` is absent.
-* ``!=`` against a missing path is ``True`` — so ``output.error != "fatal"``
-  *allows* when ``error`` is simply absent (the success case), and the same
-  result holds whether the check is written directly or wrapped in ``not``.
-  **Corollary:** ``!=`` therefore does **not** assert presence — a rule like
-  ``input.api_key != ""`` allows when ``api_key`` is absent, not only when it is
-  present-and-non-empty. The DSL has no ``exists`` operator yet; to require a
-  field, gate on a positive check (``==`` / ``in`` against the allowed values),
-  which blocks on a missing path.
-* ordered numeric ops (``< <= > >=``) require both operands to be real numbers
-  (``bool`` excluded); a missing or non-numeric operand is ``False`` — so a
-  ``input.temperature <= 0.7`` precondition blocks when ``temperature`` is
-  absent.
+* A missing path, a present-but-non-numeric operand for an ordered op, a
+  non-string ``tool_id`` at a tool gate, or a value whose comparison raises →
+  UNKNOWN (never a guessed True/False).
+* ``not`` / ``all`` / ``any`` propagate UNKNOWN (Kleene): ``not UNKNOWN`` is
+  UNKNOWN; ``all`` blocks if any child blocks, else is UNKNOWN if any child is
+  unknown; ``any`` allows if any child allows, else is UNKNOWN if any child is
+  unknown. So ``output.error != "fatal"`` *blocks* when ``error`` is absent
+  (fail closed), and wrapping a check in ``not`` cannot invert a missing value
+  into an allow.
+
+To deliberately allow when a field is absent, use the ``exists`` leaf — the only
+operator that returns a concrete present/absent verdict (never UNKNOWN). E.g.
+``any(not(exists(output.error)), output.error != "fatal")`` allows when
+``error`` is absent OR is not ``"fatal"``, and blocks only when it equals
+``"fatal"``.
 
 Equality (``==`` / ``!=`` / ``in``) is **strict**: ``bool`` never coerces to or
-from ``int`` (``True`` is not ``1``), matching the ordered ops' bool exclusion.
+from ``int`` (``True`` is not ``1``). Ordered ops (``< <= > >=``) require a
+numeric stored ``value`` (rejected at parse otherwise) and a numeric runtime
+operand (else UNKNOWN).
 """
 
 from __future__ import annotations
@@ -65,6 +67,7 @@ from __future__ import annotations
 import operator
 from collections.abc import Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any
 
 __all__ = [
@@ -90,6 +93,14 @@ class PredicateError(ValueError):
     """A predicate dict is malformed or uses a construct outside the allowlist."""
 
 
+class _Verdict(Enum):
+    """Kleene three-valued evaluation result (UNKNOWN fails closed at the gate)."""
+
+    ALLOW = "allow"
+    BLOCK = "block"
+    UNKNOWN = "unknown"
+
+
 class _Missing:
     """Sentinel for a path that does not resolve in the evaluation root."""
 
@@ -110,6 +121,11 @@ class _Comparison:
     op: str
     path: tuple[str, ...]
     value: Any
+
+
+@dataclass(frozen=True)
+class _Exists:
+    path: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -189,9 +205,11 @@ def _parse_node(node: Any, *, phase: str) -> Any:
         if phase != "tool_gate":
             raise PredicateError("'forbid_tool' is only valid inside a 'tool_gate' predicate")
         return _parse_forbid_tool(node)
+    if op == "exists":
+        return _parse_exists(node)
     if op in _COMPARISON_OPS:
         return _parse_comparison(node, op=op)
-    allowed = sorted(_COMPARISON_OPS | _COMPOSITE_OPS | {"forbid_tool"})
+    allowed = sorted(_COMPARISON_OPS | _COMPOSITE_OPS | {"forbid_tool", "exists"})
     raise PredicateError(f"unknown op {op!r}; allowed: {allowed}")
 
 
@@ -211,12 +229,7 @@ def _parse_comparison(node: dict[str, Any], *, op: str) -> _Comparison:
     extra = set(node) - {"op", "path", "value"}
     if extra:
         raise PredicateError(f"unexpected keys on '{op}' node: {sorted(extra)}")
-    path = node.get("path")
-    if not isinstance(path, str) or not path:
-        raise PredicateError(f"comparison '{op}' requires a non-empty string 'path'")
-    segments = tuple(path.split("."))
-    if any(not seg for seg in segments):
-        raise PredicateError(f"comparison '{op}' path {path!r} has an empty segment")
+    segments = _parse_path(node, op=op)
     if "value" not in node:
         raise PredicateError(f"comparison '{op}' requires a 'value'")
     value = node["value"]
@@ -238,6 +251,23 @@ def _parse_comparison(node: dict[str, Any], *, op: str) -> _Comparison:
     return _Comparison(op=op, path=segments, value=value)
 
 
+def _parse_exists(node: dict[str, Any]) -> _Exists:
+    extra = set(node) - {"op", "path"}
+    if extra:
+        raise PredicateError(f"unexpected keys on 'exists' node: {sorted(extra)}")
+    return _Exists(path=_parse_path(node, op="exists"))
+
+
+def _parse_path(node: dict[str, Any], *, op: str) -> tuple[str, ...]:
+    path = node.get("path")
+    if not isinstance(path, str) or not path:
+        raise PredicateError(f"'{op}' requires a non-empty string 'path'")
+    segments = tuple(path.split("."))
+    if any(not seg for seg in segments):
+        raise PredicateError(f"'{op}' path {path!r} has an empty segment")
+    return segments
+
+
 def _parse_forbid_tool(node: dict[str, Any]) -> _ForbidTool:
     extra = set(node) - {"op", "tool_id"}
     if extra:
@@ -257,7 +287,7 @@ def _parse_forbid_tool(node: dict[str, Any]) -> _ForbidTool:
 
 
 # ---------------------------------------------------------------------------
-# Evaluation (total over data shape — fails closed, never raises on bad data)
+# Evaluation (three-valued, fail-closed; never raises on bad data)
 # ---------------------------------------------------------------------------
 def evaluate(pred: Predicate, root: Mapping[str, Any]) -> tuple[bool, str | None]:
     """Evaluate ``pred`` against ``root``.
@@ -266,96 +296,125 @@ def evaluate(pred: Predicate, root: Mapping[str, Any]) -> tuple[bool, str | None
         * ``pred`` is a :class:`Predicate` from :func:`parse_predicate`.
         * ``root`` is a mapping shaped for ``pred.phase`` (see module docstring).
     Postconditions:
-        * Returns ``(holds, reason)``: ``holds`` is ``True`` when the constraint
-          is satisfied (⇒ allow) and ``reason`` is ``None``; on failure ``holds``
-          is ``False`` and ``reason`` is a short human string. A missing path or
-          a type-incompatible operand resolves per-operator (see the module
-          docstring) and never raises.
+        * Returns ``(allow, reason)``: ``allow`` is ``True`` only when the
+          predicate evaluates to ALLOW (``reason`` is then ``None``). A BLOCK or
+          an undecidable UNKNOWN both collapse to ``(False, reason)`` — UNKNOWN
+          fails **closed**. Never raises on input data shape (a missing path,
+          type mismatch, or a value whose comparison raises → UNKNOWN).
         * Raises ``TypeError`` only on programmer misuse (``pred`` not a
           ``Predicate``).
     """
     if not isinstance(pred, Predicate):
         raise TypeError(f"evaluate expects a parsed Predicate, got {type(pred).__name__}")
-    return _eval_node(pred.check, root)
+    verdict, reason = _eval_node(pred.check, root)
+    if verdict is _Verdict.ALLOW:
+        return True, None
+    return False, reason
 
 
-def _eval_node(node: Any, root: Mapping[str, Any]) -> tuple[bool, str | None]:
+def _eval_node(node: Any, root: Mapping[str, Any]) -> tuple[_Verdict, str | None]:
     if isinstance(node, _Comparison):
         return _eval_comparison(node, root)
+    if isinstance(node, _Exists):
+        return _eval_exists(node, root)
     if isinstance(node, _ForbidTool):
         return _eval_forbid_tool(node, root)
     return _eval_composite(node, root)
 
 
-def _eval_composite(node: _Composite, root: Mapping[str, Any]) -> tuple[bool, str | None]:
+def _eval_composite(node: _Composite, root: Mapping[str, Any]) -> tuple[_Verdict, str | None]:
     if node.op == "not":
-        holds, _reason = _eval_node(node.children[0], root)
-        return (False, "negated condition held") if holds else (True, None)
+        verdict, reason = _eval_node(node.children[0], root)
+        if verdict is _Verdict.ALLOW:
+            return _Verdict.BLOCK, "negated condition held"
+        if verdict is _Verdict.BLOCK:
+            return _Verdict.ALLOW, None
+        return _Verdict.UNKNOWN, reason  # not(unknown) = unknown
     if node.op == "all":
+        # all: block if any child blocks; else unknown if any child is unknown.
+        unknown_reason: str | None = None
         for child in node.children:
-            holds, reason = _eval_node(child, root)
-            if not holds:
-                return False, reason
-        return True, None
-    # "any"
-    reasons: list[str] = []
+            verdict, reason = _eval_node(child, root)
+            if verdict is _Verdict.BLOCK:
+                return _Verdict.BLOCK, reason
+            if verdict is _Verdict.UNKNOWN and unknown_reason is None:
+                unknown_reason = reason
+        if unknown_reason is not None:
+            return _Verdict.UNKNOWN, unknown_reason
+        return _Verdict.ALLOW, None
+    # "any": allow if any child allows; else unknown if any child is unknown.
+    block_reasons: list[str] = []
+    unknown_reason = None
     for child in node.children:
-        holds, reason = _eval_node(child, root)
-        if holds:
-            return True, None
-        reasons.append(reason or "condition not met")
-    return False, "no alternative satisfied: " + "; ".join(reasons)
+        verdict, reason = _eval_node(child, root)
+        if verdict is _Verdict.ALLOW:
+            return _Verdict.ALLOW, None
+        if verdict is _Verdict.UNKNOWN:
+            if unknown_reason is None:
+                unknown_reason = reason
+        else:
+            block_reasons.append(reason or "condition not met")
+    if unknown_reason is not None:
+        return _Verdict.UNKNOWN, unknown_reason
+    return _Verdict.BLOCK, "no alternative satisfied: " + "; ".join(block_reasons)
 
 
-def _eval_forbid_tool(node: _ForbidTool, root: Mapping[str, Any]) -> tuple[bool, str | None]:
+def _eval_exists(node: _Exists, root: Mapping[str, Any]) -> tuple[_Verdict, str | None]:
+    # The only operator with a concrete present/absent verdict (never UNKNOWN),
+    # so authors can deliberately allow-on-missing via not(exists(x)).
+    if _resolve_path(node.path, root) is MISSING:
+        return _Verdict.BLOCK, f"path {'.'.join(node.path)!r} does not exist"
+    return _Verdict.ALLOW, None
+
+
+def _eval_forbid_tool(node: _ForbidTool, root: Mapping[str, Any]) -> tuple[_Verdict, str | None]:
     tool_id = root.get("tool_id") if isinstance(root, Mapping) else None
-    # Only a string tool_id can match a forbidden (string) id; guarding the
-    # type also keeps an unhashable tool_id from raising in the set membership.
-    if isinstance(tool_id, str) and tool_id in node.tool_ids:
-        return False, f"tool {tool_id!r} is forbidden"
-    return True, None
+    if not isinstance(tool_id, str):
+        # Malformed input to the pre-dispatch tool gate. Fail closed (UNKNOWN
+        # collapses to block) rather than miss the forbidden set and allow the
+        # handler to run. Guarding the type also avoids hashing an unhashable id.
+        return _Verdict.UNKNOWN, f"tool_gate: tool_id is not a string ({type(tool_id).__name__})"
+    if tool_id in node.tool_ids:
+        return _Verdict.BLOCK, f"tool {tool_id!r} is forbidden"
+    return _Verdict.ALLOW, None
 
 
-def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, str | None]:
+def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[_Verdict, str | None]:
     actual = _resolve_path(node.path, root)
     dotted = ".".join(node.path)
-    missing = actual is MISSING
+    if actual is MISSING:
+        return _Verdict.UNKNOWN, f"path {dotted!r} is missing"
     op = node.op
     try:
         if op == "in":
-            ok = any(_strict_eq(actual, candidate) for candidate in node.value)
-            if ok:
-                return True, None
+            if any(_strict_eq(actual, candidate) for candidate in node.value):
+                return _Verdict.ALLOW, None
             return (
-                False,
-                f"path {dotted!r} value {_shown(actual, missing)} not in {list(node.value)!r}",
+                _Verdict.BLOCK,
+                f"path {dotted!r} value {_shown(actual)} not in {list(node.value)!r}",
             )
         if op == "==":
             ok = _strict_eq(actual, node.value)
         elif op == "!=":
-            # A missing/distinct value is genuinely "not equal", so this allows when
-            # the path is absent — and composes correctly under ``not`` because the
-            # result is a concrete bool, not a fail-closed sentinel.
             ok = not _strict_eq(actual, node.value)
-        else:  # numeric: < <= > >=
-            if not _is_number(actual) or not _is_number(node.value):
-                detail = "is missing" if missing else f"is not numeric ({_shown(actual, missing)})"
-                return False, f"path {dotted!r} {detail}; {op!r} needs numeric operands"
+        else:  # numeric: < <= > >= (stored value is numeric — enforced at parse)
+            if not _is_number(actual):
+                return (
+                    _Verdict.UNKNOWN,
+                    f"path {dotted!r} value {_shown(actual)} is not numeric for {op!r}",
+                )
             ok = _NUMERIC_CMP[op](actual, node.value)
     except Exception:
-        # A value whose __eq__/comparison raises is malformed runtime data. The
-        # evaluator must never raise on data shape, so fail closed (treat the
-        # constraint as unsatisfied → block) instead of propagating.
+        # A value whose __eq__/comparison raises is malformed runtime data; the
+        # evaluator must never raise on data shape, so it is undecidable → UNKNOWN
+        # (which fails closed at the gate).
         return (
-            False,
-            f"path {dotted!r} value {_shown(actual, missing)} could not be compared with {op!r}",
+            _Verdict.UNKNOWN,
+            f"path {dotted!r} value {_shown(actual)} could not be compared with {op!r}",
         )
     if ok:
-        return True, None
-    # ``_shown`` (repr) runs only on the failure path and is exception-guarded,
-    # so neither a passing comparison nor a value with a raising __repr__ can
-    # turn evaluation into a crash.
-    return False, f"path {dotted!r} value {_shown(actual, missing)} fails {op} {node.value!r}"
+        return _Verdict.ALLOW, None
+    return _Verdict.BLOCK, f"path {dotted!r} value {_shown(actual)} fails {op} {node.value!r}"
 
 
 def _resolve_path(path: tuple[str, ...], root: Mapping[str, Any]) -> Any:
@@ -379,23 +438,20 @@ def _strict_eq(a: Any, b: Any) -> bool:
 
     Mirrors the ordered ops' ``bool`` exclusion so equality/membership checks
     can't be satisfied by a loose ``1``/``True`` (or ``0``/``False``) crossover.
-    A ``MISSING`` operand is just a distinct value: it equals nothing concrete.
     """
     if isinstance(a, bool) or isinstance(b, bool):
         return type(a) is type(b) and a == b
     return a == b
 
 
-def _shown(actual: Any, missing: bool) -> str:
-    """Render a resolved value for a failure reason — only called on failures.
+def _shown(value: Any) -> str:
+    """Render a value for a failure reason; ``repr`` is exception-guarded.
 
-    ``repr`` is guarded so a value whose ``__repr__`` raises can never turn a
-    block decision into an exception: the evaluator must never raise on input
-    data shape, on the failure path as well as the success path.
+    Only called on the BLOCK/UNKNOWN path, and a value whose ``__repr__`` raises
+    can never turn a verdict into an exception (the evaluator never raises on
+    input data shape).
     """
-    if missing:
-        return "<missing>"
     try:
-        return repr(actual)
+        return repr(value)
     except Exception:
         return "<unrepresentable>"
