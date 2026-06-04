@@ -179,7 +179,19 @@ class RiskFilter:
         current_equity: float,
         open_positions: Dict[str, Any],
     ) -> EntryDecision:
-        """Check whether opening a new position would breach any limit."""
+        """Check whether opening a new position would breach any limit.
+
+        ``notional`` is the order's **reference-price** notional (the
+        sizing basis the dispatcher clamps against), not the realised fill
+        notional. Market entries fill at the next bar's open and are then moved
+        by ``slippage_bps``, so the position can open marginally (bounded by the
+        slippage band) above ``max_position_pct``. Enforcing the cap on the
+        post-slippage fill would instead reject orders the dispatcher sized
+        correctly at the reference price, so the cap is intentionally a
+        sizing-time bound; ``max_drawdown_pct`` is the realised-exposure
+        backstop. This mirrors the per-trade loss cap, which bounds the modeled
+        fill-at-stop loss rather than a gapped fill.
+        """
         if len(open_positions) >= self.limits.max_open_positions:
             return EntryDecision(
                 allowed=False,
