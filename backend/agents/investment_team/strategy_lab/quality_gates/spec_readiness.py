@@ -1,7 +1,7 @@
 """Deterministic implementability gate for `StrategySpec`.
 
 Runs in the design phase (before any code is written) and again as the first
-gate of the synthesis phase to confirm the spec wasn't mutated. Eight
+gate of the synthesis phase to confirm the spec wasn't mutated. Nine
 deterministic rules, each unit-testable and failing closed.
 
 Several rules overlap with :class:`StrategySpecValidator`. The overlap is
@@ -11,7 +11,9 @@ escalates a subset of the overlapping items to critical severity.
 
 from __future__ import annotations
 
+import logging
 import math
+import os
 import re
 from dataclasses import dataclass
 from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
@@ -39,6 +41,8 @@ from ..spec_dsl import (
     TakeProfitRule,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
+
+logger = logging.getLogger(__name__)
 
 GATE = "spec_readiness"
 
@@ -73,6 +77,101 @@ _FULL_TIMEFRAME_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "crypto"})
 # the same threshold the gate rejects above — the rule and its repair cannot
 # drift apart.
 MAX_POSITION_PCT_CEILING: float = 25.0
+
+# Relative tolerance for Rule 9's prose-vs-spec position-size comparison. A
+# prose-stated deployment percentage within this band of the spec's actual
+# sizing is treated as agreement (no warning) so rounding / loose wording
+# ("~5%") doesn't churn the design loop. Overridable via
+# ``STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE``; garbage / negative values fall
+# back to the default.
+_DEFAULT_SIZING_COHERENCE_REL_TOL: float = 0.05
+
+
+def _sizing_coherence_rel_tol() -> float:
+    """Resolve ``STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE``.
+
+    Preconditions: env value, when set, parses as a finite non-negative float.
+    Postconditions: returns a finite, non-negative relative tolerance. Unset,
+    non-numeric, non-finite, or negative values fall back to
+    ``_DEFAULT_SIZING_COHERENCE_REL_TOL`` (a WARN is logged for malformed input).
+    """
+    raw = os.environ.get("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE")
+    if not raw:
+        return _DEFAULT_SIZING_COHERENCE_REL_TOL
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "Invalid STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE=%r; using default %.4f",
+            raw,
+            _DEFAULT_SIZING_COHERENCE_REL_TOL,
+        )
+        return _DEFAULT_SIZING_COHERENCE_REL_TOL
+    if not math.isfinite(value) or value < 0:
+        logger.warning(
+            "STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE=%r is out of range; using default %.4f",
+            raw,
+            _DEFAULT_SIZING_COHERENCE_REL_TOL,
+        )
+        return _DEFAULT_SIZING_COHERENCE_REL_TOL
+    return value
+
+
+# Capital-deployment phrasings Rule 9 reconciles against the spec's actual
+# sizing. Per the corrected risk model, "risk X% per trade" denotes the capital
+# *deployed* into a position (a fraction of the account), NOT a loss budget —
+# the stop-loss only bounds the realised loss *below* that deployed amount. Each
+# pattern captures the percentage in group ``pct``. The patterns require an
+# explicit per-trade / position framing so the rule never fires on a stop-loss,
+# take-profit, or drawdown percentage elsewhere in the prose.
+_PROSE_POSITION_PCT_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # "deploy/allocate/use/risk/commit (up to|about|~) X% per trade|position"
+    re.compile(
+        r"\b(?:deploy|allocate|use|risk|commit|invest)(?:ing)?\s+"
+        r"(?:up\s+to\s+|about\s+|around\s+|approximately\s+|~\s*)?"
+        r"(?P<pct>\d+(?:\.\d+)?)\s*%\s+(?:of\s+(?:the\s+)?(?:account|equity|capital|portfolio)\s+)?"
+        r"(?:per[\s-]+trade|per[\s-]+position|in\s+(?:each|a)\s+(?:trade|position))",
+        re.IGNORECASE,
+    ),
+    # "X% per-trade|per-position allocation/sizing/position"
+    re.compile(
+        r"\b(?P<pct>\d+(?:\.\d+)?)\s*%\s+per[\s-]+(?:trade|position)\s+"
+        r"(?:allocation|sizing|position|stake)",
+        re.IGNORECASE,
+    ),
+    # "X% position size" / "position size of X%" / "X% position per trade"
+    re.compile(
+        r"\b(?P<pct>\d+(?:\.\d+)?)\s*%\s+position(?:\s+siz(?:e|ing))?\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\bposition\s+siz(?:e|ing)\s+of\s+(?P<pct>\d+(?:\.\d+)?)\s*%",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _extract_prose_position_pct(text: str) -> Optional[float]:
+    """Extract a prose-stated per-trade capital-deployment percentage.
+
+    Preconditions: ``text`` is a string (may be empty).
+    Postconditions: returns the first matched percentage as a float in percent
+    units (e.g. ``5.0`` for "deploy 5% per trade"), or ``None`` when no
+    capital-deployment phrasing is present. Loss-budget / stop / take-profit /
+    drawdown phrasings are intentionally NOT matched — only capital deployed.
+    """
+    assert isinstance(text, str), "text must be a str"
+    if not text:
+        return None
+    for pattern in _PROSE_POSITION_PCT_PATTERNS:
+        m = pattern.search(text)
+        if m is not None:
+            try:
+                return float(m.group("pct"))
+            except (TypeError, ValueError):  # pragma: no cover - regex guarantees numeric
+                continue
+    return None
+
 
 # Asset classes that trade in whole units (shares / contracts). Crypto and
 # forex accept fractional quantities, so Rule 5's whole-lot check is skipped
@@ -686,6 +785,124 @@ class SpecReadinessGate(GateResultsMixin):
         return out
 
     # ------------------------------------------------------------------
+    # Rule 9: Position-sizing / risk-policy coherence.
+    #
+    # Corrected risk model (do NOT re-introduce the "position = risk / stop"
+    # inversion or a runtime "loss budget"):
+    #   * ``sizing.fraction`` / ``max_position_pct`` = capital DEPLOYED per
+    #     position as a fraction of the account. This is the worst-case loss
+    #     (a trade can lose up to 100% of what was deployed).
+    #   * ``stop_loss.pct`` is a price move off ENTRY measured against the
+    #     trade, so the realised per-trade loss = deployed × stop and can
+    #     NEVER exceed the deployed amount — there is no runtime budget to
+    #     breach.
+    # Three deterministic checks, all using correct algebra:
+    #   A. Deployed capital must not exceed the position cap
+    #      (``sizing.fraction`` ≤ ``max_position_pct``) — critical.
+    #   B. The position cap must not exceed the declared per-trade loss
+    #      tolerance (``max_position_pct`` ≤ ``max_loss_per_trade_pct`` when
+    #      set), keeping the declared policy self-consistent — critical.
+    #   C. A prose-stated per-trade deployment % must agree with the spec's
+    #      sizing / cap — warning (prose hygiene).
+    # ------------------------------------------------------------------
+    def _check_risk_math_reconciliation(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        out: List[QualityGateResult] = []
+        rel_tol = _sizing_coherence_rel_tol()
+
+        kind = getattr(ctx.spec.sizing, "kind", None)
+        # Volatility-target sizing is dynamic (depends on realised vol); the
+        # deployed fraction is unknown at design time, so there is nothing to
+        # reconcile — consistent with Rule 5 abstaining on the same kind.
+        if kind == "volatility_target":
+            return ()
+
+        max_position_pct = float(ctx.spec.risk_limits.max_position_pct)
+
+        # Resolve the deployed fraction (of the account) for the supported
+        # static sizing kinds. ``fixed_notional`` needs initial_capital to
+        # express the notional as a fraction, so it is skipped without config.
+        pos_fraction: Optional[float] = None
+        if kind == "fixed_fraction":
+            pos_fraction = float(ctx.spec.sizing.fraction)
+        elif kind == "fixed_notional":
+            if ctx.config is not None:
+                capital = float(ctx.config.initial_capital)
+                assert capital > 0, "initial_capital must be strictly positive"
+                pos_fraction = float(ctx.spec.sizing.notional_usd) / capital
+
+        # Check A — deployed capital must not exceed the position cap. Both
+        # sides are account-capital fractions, so this is the one genuine
+        # structural contradiction (e.g. fraction=0.10 with max_position_pct=5).
+        if pos_fraction is not None:
+            pos_pct = pos_fraction * 100.0
+            if pos_pct > max_position_pct * (1.0 + rel_tol):
+                fix_hint = (
+                    f"lowering the fraction to <={max_position_pct / 100.0:.4g} "
+                    if kind == "fixed_fraction"
+                    else f"lowering notional_usd to <=initial_capital×{max_position_pct:g}% "
+                )
+                out.append(
+                    self._critical(
+                        f"sizing deploys {pos_pct:.2f}% of equity per position but "
+                        f"max_position_pct={max_position_pct:.2f}% — the sizing rule "
+                        f"commits more capital than the risk limit allows. Resolve by "
+                        f"EITHER {fix_hint}OR raising max_position_pct to "
+                        f">={pos_pct:.2f} (max {MAX_POSITION_PCT_CEILING:g}%).",
+                        rule_id="sizing:position_cap",
+                    )
+                )
+
+        # Check B — the position cap may not put more capital at risk per trade
+        # than the declared per-trade loss tolerance. Worst-case per-trade loss
+        # = capital deployed (a trade can lose up to 100% of its value), so
+        # ``max_position_pct`` must not exceed ``max_loss_per_trade_pct`` when
+        # the latter is declared. (The realised loss is reduced further by the
+        # stop and can never *exceed* the deployed amount — there is no runtime
+        # budget to breach; this keeps the declared policy self-consistent.)
+        max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
+        if max_loss_pct is not None:
+            max_loss_pct = float(max_loss_pct)
+            if max_position_pct > max_loss_pct * (1.0 + rel_tol):
+                out.append(
+                    self._critical(
+                        f"max_position_pct={max_position_pct:.2f}% exceeds "
+                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% — the position cap "
+                        "lets a single trade put more capital at risk than the declared "
+                        "per-trade loss tolerance (worst case is a 100% loss of the "
+                        f"deployed amount). Resolve by lowering max_position_pct to "
+                        f"<={max_loss_pct:.2f} OR raising max_loss_per_trade_pct to "
+                        f">={max_position_pct:.2f}.",
+                        rule_id="risk_limits:loss_tolerance",
+                    )
+                )
+
+        # Check C — prose claim vs actual deployment. "risk/deploy X% per
+        # trade" denotes capital deployed; flag when it disagrees with both the
+        # sizing fraction and the position cap beyond tolerance.
+        prose_pct = _extract_prose_position_pct(ctx.spec.hypothesis or "")
+        if prose_pct is not None:
+            spec_targets: List[tuple[str, float]] = [("max_position_pct", max_position_pct)]
+            if pos_fraction is not None:
+                spec_targets.append(("sizing.fraction", pos_fraction * 100.0))
+            disagrees_all = all(
+                abs(prose_pct - value) > max(rel_tol * max(value, prose_pct), 1e-9)
+                for _, value in spec_targets
+            )
+            if disagrees_all:
+                detail = "; ".join(f"{name}={value:.2f}%" for name, value in spec_targets)
+                out.append(
+                    self._warning(
+                        f"Hypothesis states ~{prose_pct:.2f}% deployed per trade but the "
+                        f"spec sets {detail}. Reconcile the prose with the sizing/limit "
+                        "(per-trade % is capital deployed, not a loss budget).",
+                        rule_id="hypothesis:position_pct",
+                    )
+                )
+
+        return out
+
+    # ------------------------------------------------------------------
     # Rule registry — declarative list iterated by ``validate``. Order is
     # preserved so error messages remain stable across runs.
     # ------------------------------------------------------------------
@@ -698,6 +915,7 @@ class SpecReadinessGate(GateResultsMixin):
         _check_hypothesis_rule_consistency,
         _check_timeframe_availability,
         _check_risk_limit_coherence,
+        _check_risk_math_reconciliation,
     )
 
     # ------------------------------------------------------------------

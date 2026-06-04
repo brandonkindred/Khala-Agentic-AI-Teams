@@ -17,6 +17,8 @@ from investment_team.strategy_lab.quality_gates.spec_readiness import (
     GATE,
     SpecReadinessGate,
     _canonicalize_ticker,
+    _extract_prose_position_pct,
+    _sizing_coherence_rel_tol,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -27,6 +29,7 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    VolatilityTargetSizing,
 )
 
 
@@ -1074,3 +1077,236 @@ def test_custom_market_sample_provider_is_used() -> None:
     gate = SpecReadinessGate(market_sample_provider=lambda sym, asset_class: 1000.0)
     results = gate.validate(spec, backtest_config=_config())
     assert any("qty=" in c for c in _critical(results))
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: Position-sizing / risk-policy coherence
+# ---------------------------------------------------------------------------
+
+
+def _warning(results) -> list[str]:
+    return [r.details for r in results if r.severity == "warning" and not r.passed]
+
+
+def test_rule9_coherent_spec_is_silent() -> None:
+    """fraction=0.05, stop=0.05, cap=5, no loss tolerance, no position prose.
+
+    The corrected core case: a 5% position with a 5% stop and a 5% cap is
+    fully consistent (per-trade loss is 0.25% of equity, well within the
+    deployed 5%). Rule 9 must emit nothing.
+    """
+    spec = _spec(
+        hypothesis="RSI(14) below 30 on AAPL signals long entry.",
+        exit_=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0
+                )
+            ),
+            StopLossRule(pct=0.05),
+        ],
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith(("sizing:", "risk_limits:", "hypothesis:position"))
+        for r in results
+        if not r.passed
+    ), [r.details for r in results if not r.passed]
+
+
+def test_rule9_check_a_fraction_exceeds_cap_is_critical() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "sizing:position_cap"
+    ]
+    assert crit, _critical(results)
+    assert "10.00%" in crit[0] and "max_position_pct=5.00%" in crit[0]
+
+
+def test_rule9_check_a_fraction_equal_cap_is_silent() -> None:
+    """Boundary: fraction == cap is consistent (not a violation)."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_over_cap_is_critical() -> None:
+    # Default capital is $100k; cap 5% → $5,000. $20k notional deploys 20%.
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=20_000.0),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_under_cap_is_silent() -> None:
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=4_000.0),  # 4% of $100k <= 5% cap
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_skipped_without_config() -> None:
+    """No config → notional cannot be expressed as a fraction → Check A skipped."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=90_000.0),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec)  # no backtest_config
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_volatility_target_sizing_is_silent() -> None:
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith(("sizing:", "risk_limits:loss"))
+        for r in results
+        if not r.passed
+    )
+
+
+def test_rule9_check_b_cap_exceeds_loss_tolerance_is_critical() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
+    ]
+    assert crit, _critical(results)
+    assert "max_position_pct=10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
+
+
+def test_rule9_check_b_cap_within_loss_tolerance_is_silent() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+
+
+def test_rule9_check_b_skipped_when_no_loss_tolerance() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 20, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+
+
+def test_rule9_check_c_prose_disagrees_is_warning() -> None:
+    spec = _spec(
+        hypothesis="Allocate 10% per trade to AAPL on RSI mean reversion.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warns = [r.details for r in results if r.rule_id == "hypothesis:position_pct"]
+    assert warns, _warning(results)
+    assert "10.00%" in warns[0]
+    # Prose-only mismatch must not be a critical.
+    assert not any(
+        r.rule_id == "hypothesis:position_pct" and r.severity == "critical" for r in results
+    )
+
+
+def test_rule9_check_c_prose_matches_cap_is_silent() -> None:
+    spec = _spec(
+        hypothesis="Allocate 5% per trade to AAPL.",
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "hypothesis:position_pct" for r in results if not r.passed)
+
+
+def test_rule9_check_c_no_position_prose_is_silent() -> None:
+    """A stop-loss percentage in prose must not be read as a deployment %."""
+    spec = _spec(
+        hypothesis="Exit AAPL on a 5% stop loss after an RSI(14) cross below 30.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "hypothesis:position_pct" for r in results if not r.passed)
+
+
+def test_rule9_details_are_deterministic() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    gate = SpecReadinessGate()
+    first = [r.details for r in gate.validate(spec, backtest_config=_config())]
+    second = [r.details for r in gate.validate(spec, backtest_config=_config())]
+    assert first == second
+
+
+# --- _extract_prose_position_pct unit coverage ---
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("deploy 5% per trade", 5.0),
+        ("Allocate 10% per trade to AAPL", 10.0),
+        ("use up to 7.5% per trade", 7.5),
+        ("risk 5% per trade", 5.0),
+        ("commit ~3% of the account per trade", 3.0),
+        ("invest 8% in each position", 8.0),
+        ("12% per-trade allocation", 12.0),
+        ("4% position size", 4.0),
+        ("position sizing of 6%", 6.0),
+        ("position size of 9%", 9.0),
+    ],
+)
+def test_extract_prose_position_pct_positive(text, expected) -> None:
+    assert _extract_prose_position_pct(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "Exit on a 5% stop loss.",
+        "Take profit at 10%.",
+        "Cap the max drawdown at 25%.",
+        "risks 0.25% of equity per trade",  # a LOSS statement, not deployment
+        "RSI(14) below 30 signals entry.",
+    ],
+)
+def test_extract_prose_position_pct_negative(text) -> None:
+    assert _extract_prose_position_pct(text) is None
+
+
+def test_sizing_coherence_rel_tol_default_and_overrides(monkeypatch) -> None:
+    monkeypatch.delenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", raising=False)
+    assert _sizing_coherence_rel_tol() == 0.05
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "0.2")
+    assert _sizing_coherence_rel_tol() == 0.2
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "garbage")
+    assert _sizing_coherence_rel_tol() == 0.05
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "-1")
+    assert _sizing_coherence_rel_tol() == 0.05

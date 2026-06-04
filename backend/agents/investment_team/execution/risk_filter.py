@@ -36,6 +36,19 @@ class RiskLimits(BaseModel):
     max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
     max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
     max_open_positions: int = Field(default=10, ge=1)
+    max_loss_per_trade_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Per-trade capital-at-risk tolerance as a % of the account. A trade "
+            "can lose at most the capital it deploys (worst case = 100% of the "
+            "position), so this is an upper bound on the deployed position: "
+            "``max_position_pct`` must not exceed it. The stop-loss only reduces "
+            "the realised loss further. ``None`` means no explicit tolerance is "
+            "declared (the readiness gate then skips the cap-vs-tolerance check)."
+        ),
+    )
     target_annual_vol: Optional[float] = Field(
         default=None,
         ge=0,
@@ -74,6 +87,7 @@ _RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
     "max_symbol_concentration_pct": "lower",
     "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
+    "max_loss_per_trade_pct": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
 }
