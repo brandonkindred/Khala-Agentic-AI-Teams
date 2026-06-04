@@ -12,6 +12,8 @@ from pathlib import Path
 from typing import Any, Dict
 
 from strands import Agent
+from strands.tools.tools import PythonAgentTool
+from strands.types.tools import ToolResult, ToolSpec, ToolUse
 
 from agent_git_tools import GIT_TOOL_DEFINITIONS, GitToolContext, build_git_tool_handlers
 from coding_team.models import StackSpec, Task
@@ -28,23 +30,80 @@ def _parse_json_response(raw: str) -> Dict[str, Any]:
     return json.loads(raw)
 
 
+def _make_python_agent_tool(
+    name: str, handler: Any, description: str, parameters: dict
+) -> PythonAgentTool:
+    """Wrap one git tool handler in a Strands ``PythonAgentTool``.
+
+    Preconditions:
+        - ``name`` is non-empty; ``parameters`` is the definition's JSON schema.
+        - ``handler`` accepts the parsed-arguments dict and returns a
+          JSON-serializable value (or a plain string).
+    Postconditions:
+        - The returned tool's spec mirrors the definition verbatim
+          (``parameters`` under ``inputSchema.json``), so the model sees the
+          schema the definitions declare — not one derived from a signature.
+        - Invoking the tool dispatches to ``handler``; a handler exception
+          becomes a ``status="error"`` ToolResult instead of aborting the
+          whole agent invocation.
+    """
+    spec: ToolSpec = {
+        "name": name,
+        "description": description or name,
+        "inputSchema": {"json": parameters},
+    }
+
+    def tool_func(tool_use: ToolUse, **_invocation_state: Any) -> ToolResult:
+        tool_use_id = tool_use.get("toolUseId", "")
+        try:
+            out = handler(tool_use.get("input") or {})
+        except Exception as e:
+            return {
+                "toolUseId": tool_use_id,
+                "status": "error",
+                "content": [{"text": f"{type(e).__name__}: {e}"}],
+            }
+        text = out if isinstance(out, str) else json.dumps(out)
+        return {
+            "toolUseId": tool_use_id,
+            "status": "success",
+            "content": [{"text": text}],
+        }
+
+    return PythonAgentTool(name, spec, tool_func)
+
+
 def _build_strands_tools(handlers: Dict[str, Any], tool_definitions: list) -> list:
-    """Convert git tool definitions + handlers into Strands-compatible tool callables."""
+    """Convert OpenAI-style git tool definitions + handlers into Strands tools.
+
+    The Strands registry only registers recognized tool types (``AgentTool``
+    instances, ``@tool``-decorated functions, modules, ...); a plain closure
+    is dropped with an "unrecognized tool specification" warning and the
+    agent silently runs without git tools. Each definition is therefore
+    wrapped in a ``PythonAgentTool`` carrying the definition's exact schema.
+
+    Preconditions:
+        - ``tool_definitions`` entries are OpenAI-style function definitions
+          (``{"function": {"name", "description", "parameters"}}``).
+        - ``handlers`` maps tool names to callables accepting the parsed
+          arguments dict.
+    Postconditions:
+        - Returns one registrable tool per definition whose name has a
+          handler; definitions without handlers are skipped.
+    """
     tools = []
     for tool_def in tool_definitions:
         func_info = tool_def.get("function", {})
         name = func_info.get("name")
         if name and name in handlers:
-            handler = handlers[name]
-
-            def make_tool(n, h, desc, params):
-                def tool_fn(**kwargs):
-                    return h(kwargs)
-                tool_fn.__name__ = n
-                tool_fn.__doc__ = desc
-                return tool_fn
-
-            tools.append(make_tool(name, handler, func_info.get("description", ""), func_info.get("parameters", {})))
+            tools.append(
+                _make_python_agent_tool(
+                    name,
+                    handlers[name],
+                    func_info.get("description", ""),
+                    func_info.get("parameters", {}),
+                )
+            )
     return tools
 
 
@@ -108,7 +167,9 @@ class SeniorSWEAgent:
                     system_prompt=system,
                     tools=strands_tools,
                 )
-                result = agent(user + "\n\nWhen done, respond with valid JSON only, no markdown fences.")
+                result = agent(
+                    user + "\n\nWhen done, respond with valid JSON only, no markdown fences."
+                )
                 raw = str(result).strip()
                 data = _parse_json_response(raw)
             else:

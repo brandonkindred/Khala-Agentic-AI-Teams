@@ -4,6 +4,7 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import subprocess
@@ -335,7 +336,7 @@ def _truncate_title(title: str, issue_num: int, limit: int = 256) -> str:
 
 
 def _git_auth_env(token: str) -> Dict[str, str]:
-    """Build an env dict that injects a Bearer token via ``GIT_CONFIG_*`` vars.
+    """Build an env dict that injects Basic credentials via ``GIT_CONFIG_*`` vars.
 
     Mirrors the unified API's clone-time auth (``_git_auth_env`` in
     ``unified_api/routes/integrations.py``): the credential is passed
@@ -343,19 +344,26 @@ def _git_auth_env(token: str) -> Dict[str, str]:
     That matters because the checkout lives on the shared ``agents_data``
     volume — a persisted token would outlive the job and leak across runs.
 
+    The scheme must be ``Basic`` with the ``x-access-token`` username:
+    GitHub's git smart-HTTP endpoint rejects a ``Bearer`` header (401
+    ``invalid credentials``) even for a valid token — Bearer is only accepted
+    by the REST API — after which git tries to prompt for a username and
+    fails headless ("terminal prompts disabled").
+
     Preconditions:
         - ``token`` is a non-empty GitHub credential authorizing the operation.
     Postconditions:
         - Returns a copy of ``os.environ`` augmented with a single transient
-          ``http.extraHeader`` git-config entry (Authorization: Bearer) and
+          ``http.extraHeader`` git-config entry (Authorization: Basic) and
           ``GIT_TERMINAL_PROMPT=0`` so a missing/invalid credential fails fast
           instead of blocking on an interactive prompt until the git timeout.
     """
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return {
         **os.environ,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         "GIT_TERMINAL_PROMPT": "0",
     }
 

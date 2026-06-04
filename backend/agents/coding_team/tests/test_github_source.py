@@ -1009,11 +1009,16 @@ class TestGitCredentialThreading:
 
         return api_main
 
-    def test_git_auth_env_injects_transient_bearer_header(self, api) -> None:
+    def test_git_auth_env_injects_transient_basic_header(self, api) -> None:
         env = api._git_auth_env("secret-tok")
         assert env["GIT_CONFIG_COUNT"] == "1"
         assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-        assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer secret-tok"
+        # GitHub's git smart-HTTP endpoint rejects `Bearer` (401) even for a
+        # valid token — only Basic with the x-access-token username works.
+        # b64("x-access-token:secret-tok")
+        assert (
+            env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46c2VjcmV0LXRvaw=="
+        )
         # Disable interactive prompts so a bad credential fails fast.
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         # Inherits the parent environment (PATH etc. survive).
@@ -1034,7 +1039,11 @@ class TestGitCredentialThreading:
         fetch_args, fetch_env = calls[0]
         assert fetch_args[0] == "fetch"
         assert fetch_env is not None
-        assert fetch_env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-123"
+        # b64("x-access-token:tok-123")
+        assert (
+            fetch_env["GIT_CONFIG_VALUE_0"]
+            == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
+        )
         # The local checkouts that follow run without an auth env.
         assert all(env is None for _, env in calls[1:])
 
@@ -1063,7 +1072,11 @@ class TestGitCredentialThreading:
         ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
         assert ok is True, msg
         assert captured["args"][0] == "push"
-        assert captured["env"]["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-xyz"
+        # b64("x-access-token:tok-xyz")
+        assert (
+            captured["env"]["GIT_CONFIG_VALUE_0"]
+            == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLXh5eg=="
+        )
 
     def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         captured = {}

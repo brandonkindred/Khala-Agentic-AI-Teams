@@ -15,6 +15,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -1071,18 +1072,38 @@ def _resolve_repo_path(cfg: dict[str, Any]) -> str:
 
 
 def _git_auth_env(token: str) -> dict[str, str]:
-    """Build env dict that injects a Bearer token via GIT_CONFIG_* env vars.
+    """Build env dict that injects Basic credentials via GIT_CONFIG_* env vars.
 
-    Unlike ``-c http.extraHeader``, environment-based config is transient
-    and never written to ``.git/config`` — safe for clone and fetch alike.
+    GitHub's git smart-HTTP endpoint only accepts ``Basic`` credentials
+    (username ``x-access-token``, password = the token). A ``Bearer`` header —
+    which the REST API accepts — is rejected by the git endpoint with 401
+    ``invalid credentials`` even when the token is valid, after which git
+    tries to prompt for a username and fails headless ("terminal prompts
+    disabled"). Unlike ``-c http.extraHeader``, environment-based config is
+    transient and never written to ``.git/config`` — safe for clone and
+    fetch alike.
     """
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return {
         **os.environ,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         "GIT_TERMINAL_PROMPT": "0",
     }
+
+
+def _scrub_git_secret(text: str, token: str) -> str:
+    """Redact every representation of the credential from git output.
+
+    Preconditions:
+        - ``token`` is non-empty.
+    Postconditions:
+        - Neither the raw token nor its Basic-encoded form (the header value
+          built by ``_git_auth_env``) appears in the returned text.
+    """
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return text.replace(token, "***").replace(encoded, "***")
 
 
 def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
@@ -1128,7 +1149,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
                 env=env,
             )
             if result.returncode != 0:
-                return f"git fetch failed: {result.stderr.replace(token, '***')[:300]}"
+                return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
             return None
 
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1141,7 +1162,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
             env=env,
         )
         if result.returncode != 0:
-            safe_err = result.stderr.replace(token, "***")[:300]
+            safe_err = _scrub_git_secret(result.stderr, token)[:300]
             return f"git clone failed: {safe_err}"
         return None
     except FileNotFoundError:
