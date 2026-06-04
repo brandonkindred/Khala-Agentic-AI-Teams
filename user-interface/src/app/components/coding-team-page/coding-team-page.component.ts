@@ -5,6 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
 import { EMPTY, Subscription, interval } from 'rxjs';
 import { catchError, switchMap, takeWhile } from 'rxjs/operators';
@@ -25,6 +26,7 @@ import type { CodingTeamJobStatus } from '../../models/coding-team.model';
     MatButtonModule,
     MatProgressSpinnerModule,
     MatChipsModule,
+    MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
     TeamAssistantChatComponent,
@@ -52,6 +54,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   issuesLoaded = false;
   issueError: string | null = null;
 
+  // Issue list pagination (client-side over the fully-fetched issue array)
+  readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
+  pageSize = 10;
+  pageIndex = 0;
+
   // Issue selection & confirmation
   selectedIssue: GitHubIssueItem | null = null;
   runningIssue = false;
@@ -77,6 +84,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.githubOwner = cfg.owner;
         this.githubRepo = cfg.repo;
         this.loadingConfig = false;
+        if (this.githubConfigured) {
+          this.loadIssues();
+        }
       },
       error: () => {
         this.githubConfigured = false;
@@ -92,6 +102,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.integrationsApi.getGitHubIssues().subscribe({
       next: (issues) => {
         this.issues = issues;
+        this.pageIndex = 0;
         this.issuesLoaded = true;
         this.loadingIssues = false;
       },
@@ -100,6 +111,17 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.loadingIssues = false;
       },
     });
+  }
+
+  /** The slice of issues visible on the current page. */
+  get pagedIssues(): GitHubIssueItem[] {
+    const start = this.pageIndex * this.pageSize;
+    return this.issues.slice(start, start + this.pageSize);
+  }
+
+  onPageChange(event: PageEvent): void {
+    this.pageIndex = event.pageIndex;
+    this.pageSize = event.pageSize;
   }
 
   selectIssue(issue: GitHubIssueItem): void {

@@ -38,8 +38,18 @@ SCHEMA: TeamSchema = TeamSchema(
             salience        DOUBLE PRECISION NOT NULL DEFAULT 0,
             occurred_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             source_run_id   TEXT NOT NULL,
-            source_seq      INTEGER NOT NULL
+            source_seq      INTEGER NOT NULL,
+            recorded_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        # ``recorded_at`` is the event's arrival (append) time, distinct from
+        # ``occurred_at`` (when it happened). prune_events deletes only events
+        # already folded into the day summary (``recorded_at <=
+        # summaries.computed_at``), so a late event appended after the summary
+        # was computed is never pruned before it can be amended in — even if the
+        # pruner races ahead of the stale-marking. Idempotent ALTER back-fills
+        # clusters provisioned before this column.
+        """ALTER TABLE agent_cognition_events
+            ADD COLUMN IF NOT EXISTS recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()""",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_cognition_events_writeback
             ON agent_cognition_events(agent_id, source_run_id, source_seq)""",
         """CREATE INDEX IF NOT EXISTS idx_agent_cognition_events_agent_occurred
@@ -63,8 +73,34 @@ SCHEMA: TeamSchema = TeamSchema(
             covers_through  TIMESTAMPTZ,
             version         INTEGER NOT NULL DEFAULT 1,
             stale           BOOLEAN NOT NULL DEFAULT FALSE,
+            events_pruned   BOOLEAN NOT NULL DEFAULT FALSE,
+            computed_at     TIMESTAMPTZ,
+            stale_since     TIMESTAMPTZ,
             created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        # ``events_pruned`` is the durable recompute-vs-amend marker: the memory
+        # store latches it TRUE on a day summary when retention deletes that
+        # day's raw events, so a later late arrival is amended onto the existing
+        # summary (not recomputed from an incomplete set) even across a restart.
+        # ALTER form is idempotent and back-fills clusters provisioned before it.
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS events_pruned BOOLEAN NOT NULL DEFAULT FALSE""",
+        # ``computed_at`` records when the rollup last (re)computed this summary.
+        # prune_events compares it against an event's ``recorded_at`` to delete
+        # only events that were folded in (``recorded_at <= computed_at``), so a
+        # not-yet-incorporated late arrival is never pruned. Set by
+        # upsert_summary; idempotent ALTER back-fills existing clusters (NULL
+        # until the next recompute, which conservatively prunes nothing).
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS computed_at TIMESTAMPTZ""",
+        # ``stale_since`` is the time the most recent late arrival flagged this
+        # period stale (refreshed by mark_period_stale). upsert_summary refuses
+        # to clear ``stale`` when ``stale_since > computed_at`` — i.e. a slow
+        # rollup that read before the late event must not overwrite the stale
+        # flag set after its read, which would drop the late event. Idempotent
+        # ALTER back-fills existing clusters.
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS stale_since TIMESTAMPTZ""",
         """CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_cognition_summaries_period
             ON agent_cognition_summaries(agent_id, scale, period_start)""",
         # -----------------------------------------------------------------
