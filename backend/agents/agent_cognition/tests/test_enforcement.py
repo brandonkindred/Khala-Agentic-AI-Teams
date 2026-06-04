@@ -176,6 +176,30 @@ def test_tool_call_requires_tool_id() -> None:
         evaluate_tool_call("", {}, [])
 
 
+def test_phaseless_enforced_rule_fails_closed_at_every_gate() -> None:
+    # An active enforced rule whose predicate declares no recognized phase belongs
+    # to no gate; it must block everywhere (defense in depth), not be silently
+    # dropped — even though the store rejects such a rule on write.
+    orphan = _rule(text="orphan", mode=RuleMode.ENFORCED, predicate={})
+    for holds, reason in (
+        evaluate_precondition({"input": {}}, [orphan]),
+        evaluate_postcondition({}, [orphan]),
+        evaluate_tool_call("t", {}, [orphan]),
+    ):
+        assert holds is False
+        assert reason is not None and "no enforceable phase" in reason
+    # A well-formed enforced rule for a DIFFERENT phase is still skipped (not
+    # blocked) by an unrelated gate.
+    pc = _rule(
+        rid="pc",
+        predicate={
+            "phase": "postcondition",
+            "check": {"op": "==", "path": "output.s", "value": "ok"},
+        },
+    )
+    assert evaluate_precondition({"input": {}}, [pc]) == (True, None)
+
+
 def test_malformed_enforced_predicate_blocks() -> None:
     rule = _rule(
         text="bad",

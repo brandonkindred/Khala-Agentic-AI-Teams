@@ -16,9 +16,11 @@ Three enforced-rule gates and one advisory renderer:
 
 Uniform contract: a phase is allowed iff **every** applicable enforced predicate
 holds; the returned ``reason`` is the first failing rule's text plus the
-predicate's own reason. A stored predicate that fails to parse makes its rule
-**block** (fail closed) — enforced rules are a safety boundary, so a malformed
-one must never silently allow.
+predicate's own reason. A stored predicate that fails to parse — **or that
+declares no recognized phase**, so it belongs to no gate — makes its rule
+**block** (fail closed) at every gate. Enforced rules are a safety boundary, so a
+malformed one must never silently allow, even if it bypassed the store's
+write-time validation.
 
 Evaluation roots (see :mod:`agent_cognition.rules.predicate`):
 
@@ -55,6 +57,10 @@ __all__ = [
 ]
 
 _PROMPT_HEADER = "## Operating rules"
+
+# The phases a predicate may declare; an active enforced rule whose predicate
+# declares none of these is un-enforceable and fails closed (see _evaluate_phase).
+_KNOWN_PHASES = frozenset({"precondition", "postcondition", "tool_gate"})
 
 
 def build_rule_prompt_block(advisory_rules: list[Rule]) -> str:
@@ -140,18 +146,25 @@ def evaluate_tool_call(
 def _evaluate_phase(
     rules: list[Rule], phase: str, root: Mapping[str, Any]
 ) -> tuple[bool, str | None]:
-    """Allow iff every active enforced rule of ``phase`` holds against ``root``."""
-    applicable = sorted(
-        (
-            r
-            for r in rules
-            if r.mode == RuleMode.ENFORCED
-            and r.status == RuleStatus.ACTIVE
-            and isinstance(r.predicate, dict)
-            and r.predicate.get("phase") == phase
-        ),
-        key=lambda r: (-r.priority, r.id),
-    )
+    """Allow iff every active enforced rule of ``phase`` holds against ``root``.
+
+    Defense in depth: an active enforced rule whose predicate declares **no
+    recognized phase** (e.g. an empty/`{}` or otherwise malformed predicate)
+    belongs to no gate, so dropping it would silently un-enforce a safety rule.
+    Such a rule fails **closed** at every gate — the store validates enforced
+    predicates on write, but the boundary must not trust that for a row that was
+    inserted directly or predates the validation.
+    """
+    applicable: list[Rule] = []
+    for rule in rules:
+        if rule.mode != RuleMode.ENFORCED or rule.status != RuleStatus.ACTIVE:
+            continue
+        rule_phase = rule.predicate.get("phase") if isinstance(rule.predicate, dict) else None
+        if rule_phase == phase:
+            applicable.append(rule)
+        elif rule_phase not in _KNOWN_PHASES:
+            return False, f"{rule.text}: enforced rule has no enforceable phase ({rule_phase!r})"
+    applicable.sort(key=lambda r: (-r.priority, r.id))
     for rule in applicable:
         try:
             pred = parse_predicate(rule.predicate)
