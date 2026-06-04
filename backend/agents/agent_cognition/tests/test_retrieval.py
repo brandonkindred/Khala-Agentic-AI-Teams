@@ -107,7 +107,18 @@ def _wire_store(
         return list(events or [])
 
     monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
+    _no_stale_days(monkeypatch)
     return captured
+
+
+def _no_stale_days(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default: no stale day summaries, so no unfolded late events are merged."""
+    monkeypatch.setattr(store, "fetch_stale_summaries", lambda *a, **k: [])
+    monkeypatch.setattr(
+        store,
+        "fetch_unfolded_events",
+        lambda *a, **k: pytest.fail("no unfolded fetch without stale days"),
+    )
 
 
 def _no_llm(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -264,6 +275,7 @@ def test_live_events_bounded_to_after_latest_closed_day(
         return [_event(content="today", salience=0.4)]
 
     monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -287,6 +299,7 @@ def test_live_events_sorted_by_salience_and_capped(monkeypatch: pytest.MonkeyPat
         store, "fetch_summaries", lambda agent_id, scale, **k: [day] if scale is Scale.DAY else []
     )
     monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: list(window_events))
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -312,6 +325,7 @@ def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch)
         return [_event(content="all-history")]
 
     monkeypatch.setattr(store, "fetch_recent_events", _fetch_recent)
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -340,6 +354,7 @@ def test_stale_latest_summary_falls_back_to_non_stale(
         lambda agent_id, scale, **k: [stale_day, older_day] if scale is Scale.DAY else [],
     )
     monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [])
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -359,6 +374,7 @@ def test_all_recent_summaries_stale_contributes_nothing(
         lambda agent_id, scale, **k: [_summary(scale=scale, summary="x", stale=True)],
     )
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -390,6 +406,7 @@ def test_stale_day_does_not_hide_late_events(monkeypatch: pytest.MonkeyPatch) ->
         return [_event(content="late event", salience=0.3)]
 
     monkeypatch.setattr(store, "fetch_events_for_period", _fetch_period)
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -419,6 +436,7 @@ def test_latest_non_stale_summary_pages_past_long_stale_run(
 
     monkeypatch.setattr(store, "fetch_summaries", _fetch)
     monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [])
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -444,6 +462,7 @@ def test_latest_non_stale_summary_stops_at_short_page(
 
     monkeypatch.setattr(store, "fetch_summaries", _fetch)
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
+    _no_stale_days(monkeypatch)
     _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a", 1000)
@@ -452,6 +471,88 @@ def test_latest_non_stale_summary_stops_at_short_page(
     assert "live" in digest
     # Only one DAY fetch (offset 0); the short page ended the scan.
     assert [c for c in calls if c[0] is Scale.DAY] == [(Scale.DAY, 0)]
+
+
+def test_late_event_in_older_stale_day_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A late writeback into an OLDER closed day marks it stale while the newest day
+    # stays non-stale. The in-progress window starts after the newest day, so the
+    # late event must be surfaced from the stale day's unfolded tail instead.
+    newest_day = _summary(scale=Scale.DAY, window=_DAY, summary="today recap")
+    stale_old_day = _summary(
+        scale=Scale.DAY,
+        window=(datetime(2026, 5, 20, tzinfo=_UTC), datetime(2026, 5, 21, tzinfo=_UTC)),
+        summary="old",
+        stale=True,
+    )
+    pinned_now = datetime(2026, 6, 1, 18, tzinfo=_UTC)
+    captured: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        store,
+        "fetch_summaries",
+        lambda agent_id, scale, **k: [newest_day] if scale is Scale.DAY else [],
+    )
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [])  # no live events
+    monkeypatch.setattr(retrieval, "_utcnow", lambda: pinned_now)
+    monkeypatch.setattr(
+        store,
+        "fetch_stale_summaries",
+        lambda agent_id, scale: [stale_old_day] if scale is Scale.DAY else [],
+    )
+
+    def _fetch_unfolded(agent_id, scale, period_start, period_end, *, snapshot):
+        captured["bounds"] = (period_start, period_end)
+        captured["snapshot"] = snapshot
+        return [
+            _event(
+                content="late in old day",
+                salience=0.2,
+                occurred_at=datetime(2026, 5, 20, 9, tzinfo=_UTC),
+            )
+        ]
+
+    monkeypatch.setattr(store, "fetch_unfolded_events", _fetch_unfolded)
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "late in old day" in digest  # surfaced despite being before the live window
+    assert "today recap" in digest  # the non-stale newest day is still shown
+    assert captured["bounds"] == (stale_old_day.period_start, stale_old_day.period_end)
+    assert captured["snapshot"] == pinned_now
+
+
+def test_stale_late_events_merge_dedupe_and_rerank(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Late events from stale days merge with the in-progress window, dedupe by id,
+    # and re-rank by salience DESC across both sources.
+    day = _summary(scale=Scale.DAY, window=_DAY)
+    shared = _event(content="shared", salience=0.5)
+    window = [shared, _event(content="win-hi", salience=0.95)]
+    late = [shared, _event(content="late-mid", salience=0.7)]
+
+    monkeypatch.setattr(
+        store, "fetch_summaries", lambda a, scale, **k: [day] if scale is Scale.DAY else []
+    )
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: list(window))
+    monkeypatch.setattr(retrieval, "_utcnow", lambda: _MID_DAY)
+    monkeypatch.setattr(
+        store,
+        "fetch_stale_summaries",
+        lambda a, scale: [_summary(scale=Scale.DAY, stale=True)],
+    )
+    monkeypatch.setattr(store, "fetch_unfolded_events", lambda *a, **k: list(late))
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    # ``shared`` (same id in both sources) appears once; ordered salience DESC.
+    assert digest.count("shared") == 1
+    assert digest.index("win-hi") < digest.index("late-mid") < digest.index("shared")
+
+
+def test_utcnow_is_timezone_aware_utc() -> None:
+    now = retrieval._utcnow()
+    assert now.tzinfo == timezone.utc
 
 
 # ===========================================================================
