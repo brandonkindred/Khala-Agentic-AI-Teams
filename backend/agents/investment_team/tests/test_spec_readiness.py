@@ -1245,6 +1245,52 @@ def test_rule9_check_b_no_stop_with_tolerance_is_critical() -> None:
     assert "no stop_loss rule" in crit[0] and "50.00%" in crit[0]
 
 
+def test_rule9_check_b_no_stop_small_long_within_tolerance_is_silent() -> None:
+    """An uncovered LONG loses at most its deployed amount, so a small no-stop
+    long whose full deployment fits the tolerance is coherent and must NOT be
+    flagged: 0.5% deployed <= 1% tolerance."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.005),  # 0.5% deployed, no stop
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_long_over_tolerance_is_critical() -> None:
+    """An uncovered LONG whose full deployment exceeds the tolerance is
+    unenforceable. Use max_position_pct=20 so Check A does not also fire (10% <=
+    20%), isolating the loss-tolerance critical."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),  # 10% deployed, no stop
+        risk_limits={"max_position_pct": 20, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "10.00%" in crit[0] and "long" in crit[0]
+
+
+def test_rule9_check_b_no_stop_volatility_target_long_within_cap_is_silent() -> None:
+    """For an uncovered vol-target LONG the worst-case deployment is bounded by
+    max_position_pct; when that cap fits the tolerance the spec is coherent
+    (1% cap <= 5% tolerance), so no critical fires."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 1, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
 def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
     """No stop and no declared tolerance — there is no limit to enforce, so the
     no-stop critical must not fire."""

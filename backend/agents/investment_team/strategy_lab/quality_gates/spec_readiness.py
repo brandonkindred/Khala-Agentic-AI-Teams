@@ -836,16 +836,17 @@ class SpecReadinessGate(GateResultsMixin):
     #      trade, governed by the stop. A stop only caps loss for an entry side
     #      the executor lets it fire on (``trailing_high`` → long,
     #      ``trailing_low`` → short, ``entry_price`` → both). When the tolerance
-    #      is set but some entry side has no effective stop, the realised loss is
-    #      unbounded (an uncovered short especially so) — a declared limit with
-    #      no mechanism to honour it — so that is its own critical
-    #      (``risk_limits:loss_tolerance_no_stop``). That stop-coverage test is
-    #      deployment-independent and so runs for EVERY sizing kind (including
-    #      ``volatility_target``). The realised-loss *magnitude* check
-    #      additionally needs a known deployed fraction, so it is skipped when
-    #      the tolerance is unset or the deployment is dynamic/unknown
-    #      (``volatility_target`` / unconfigured ``fixed_notional``) — runtime
-    #      sizing enforces the tolerance in that case.
+    #      is set but some entry side has no effective stop, that is its own
+    #      critical (``risk_limits:loss_tolerance_no_stop``) — but side-asym­
+    #      metrically: an uncovered SHORT is unbounded (always critical, any
+    #      sizing kind), while an uncovered LONG loses at most its deployed
+    #      amount, so it is critical only when the worst-case deployment (the
+    #      known fraction, else ``max_position_pct``) exceeds the tolerance — a
+    #      small no-stop long that fits the limit is coherent. The realised-loss
+    #      *magnitude* check additionally needs a known deployed fraction, so it
+    #      is skipped when the tolerance is unset or the deployment is
+    #      dynamic/unknown (``volatility_target`` / unconfigured
+    #      ``fixed_notional``) — runtime sizing enforces the tolerance there.
     #   C. A prose-stated per-trade deployment % must agree with the ACTUAL
     #      deployed fraction (``sizing.fraction``) when it is known — warning
     #      (prose hygiene). The cap is an upper bound, not the deployed amount,
@@ -913,15 +914,21 @@ class SpecReadinessGate(GateResultsMixin):
         # if every entry side has a stop the executor will actually fire for it
         # — a stop is side-specific (``trailing_high`` → long, ``trailing_low``
         # → short, ``entry_price`` → both), so a declared/mis-sided stop that
-        # no-ops for the spec's side leaves the loss unbounded. The
-        # stop-coverage test is deployment-INDEPENDENT, so the
-        # unenforceable-tolerance critical runs for EVERY sizing kind (including
-        # ``volatility_target``, where an uncovered short's loss is unbounded) —
-        # a declared limit with no mechanism to honour it is rejected regardless
-        # of whether the deployed fraction is known. The realised-loss magnitude
-        # check additionally requires a known deployed fraction, so it is gated
-        # on ``pos_fraction`` (skipped for ``volatility_target`` / unconfigured
-        # ``fixed_notional`` — runtime sizing enforces the tolerance there).
+        # no-ops for the spec's side leaves that side without an effective stop.
+        # Whether that makes the tolerance UNENFORCEABLE is side-asymmetric:
+        #   * SHORT: loss is unbounded (price can gap up arbitrarily), so NO
+        #     position size can honour the tolerance — always critical,
+        #     regardless of sizing kind.
+        #   * LONG: loss is capped at the deployed amount (price floors at
+        #     zero), so the tolerance IS enforceable when the worst-case
+        #     deployment fits within it; critical only when the worst-case
+        #     deployment exceeds the tolerance. The worst case is the known
+        #     deployed fraction, or — when sizing is dynamic/unknown
+        #     (``volatility_target`` / unconfigured ``fixed_notional``) — the
+        #     position cap (``max_position_pct``), the most the runtime can
+        #     deploy before its loss-clamp binds.
+        # The realised-loss magnitude check (the fully-covered branch)
+        # additionally requires a known deployed fraction.
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
         if max_loss_pct is not None:
             max_loss_pct = float(max_loss_pct)
@@ -930,33 +937,50 @@ class SpecReadinessGate(GateResultsMixin):
             uncovered_sides = sorted(
                 s for s in entry_sides if not any(stop_caps_side(r.basis, s) for r in stop_rules)
             )
-            if uncovered_sides:
-                # Check B-no-stop — a declared per-trade loss tolerance is
-                # meaningless without a stop that can fire for the position: the
-                # trade can lose its entire deployed amount (an uncovered short
-                # is unbounded), so the spec cannot honour the limit. The
-                # exit-completeness rule only requires *some* exit
-                # (signal/take-profit), not an effective stop, so this is the
-                # gate that catches the unenforceable-tolerance case.
-                sides_txt = "/".join(uncovered_sides)
-                deploy_txt = (
-                    f"a position deploying {pos_fraction * 100.0:.2f}% per trade can lose the "
-                    "full deployed amount"
-                    if pos_fraction is not None
-                    else "the position can lose its full deployed amount (an uncovered short is "
-                    "unbounded)"
+            short_uncovered = [s for s in uncovered_sides if s == "short"]
+            long_uncovered = [s for s in uncovered_sides if s == "long"]
+            # An uncovered long's worst case is its full deployed amount: the
+            # known deployed fraction, else the position cap (the most a
+            # dynamic/unconfigured sizing rule can deploy).
+            worst_long_deploy_pct = (
+                pos_fraction * 100.0 if pos_fraction is not None else max_position_pct
+            )
+            long_over_tolerance = bool(long_uncovered) and worst_long_deploy_pct > max_loss_pct * (
+                1.0 + _HARD_LIMIT_REL_EPS
+            )
+            # Check B-no-stop — a declared per-trade loss tolerance with no
+            # mechanism to honour it. Reject the unbounded short(s) and any long
+            # whose worst-case deployment already exceeds the tolerance; an
+            # uncovered long that fits the tolerance is coherent and passes.
+            reject_sides = sorted(
+                set(short_uncovered) | (set(long_uncovered) if long_over_tolerance else set())
+            )
+            if reject_sides:
+                sides_txt = "/".join(reject_sides)
+                reasons: List[str] = []
+                if short_uncovered:
+                    reasons.append("a short with no stop has unbounded loss")
+                if long_over_tolerance:
+                    reasons.append(
+                        f"an uncovered long deploys up to {worst_long_deploy_pct:.2f}% per trade, "
+                        f"more than the {max_loss_pct:.2f}% tolerance"
+                    )
+                fix = (
+                    f", OR lower the deployed size to <={max_loss_pct:.2f}%"
+                    if long_over_tolerance
+                    else ""
                 )
                 out.append(
                     self._critical(
                         f"max_loss_per_trade_pct={max_loss_pct:.2f}% is declared but the spec "
                         f"has no stop_loss rule that can cap its {sides_txt} position(s) — "
-                        f"{deploy_txt}, so the per-trade loss limit cannot be enforced. "
+                        f"{'; '.join(reasons)}, so the per-trade loss limit cannot be enforced. "
                         f"Add a stop_loss rule whose basis fires for {sides_txt} entries "
-                        "(entry_price always works), OR remove max_loss_per_trade_pct.",
+                        f"(entry_price always works){fix}, OR remove max_loss_per_trade_pct.",
                         rule_id="risk_limits:loss_tolerance_no_stop",
                     )
                 )
-            elif pos_fraction is not None:
+            elif not uncovered_sides and pos_fraction is not None:
                 # Each entry side is capped by the stop that fires FIRST against
                 # it. ``evaluate_exit_rules`` closes a position on the first
                 # triggered rule, and the tightest (smallest-pct) stop triggers
