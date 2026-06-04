@@ -113,6 +113,11 @@ class DrawdownBreach:
     limit_pct: float
 
 
+#: Relative epsilon absorbing float noise so an order clamped exactly to
+#: ``max_position_pct`` is not rejected by the choke-point gate.
+_POSITION_CAP_REL_EPS = 1e-9
+
+
 class RiskFilter:
     """Stateless risk-limit enforcer consumed by the simulation engine."""
 
@@ -191,6 +196,23 @@ class RiskFilter:
                 return EntryDecision(
                     allowed=False,
                     reason=f"gross leverage {leverage:.2f} > limit {self.limits.max_gross_leverage}",
+                )
+
+            # max_position_pct is the per-position deployment cap. The engine
+            # dispatcher clamps compiled orders to it, but custom-code specs
+            # bypass the dispatcher (entry_rules/sizing are None), so this gate
+            # is the only place the cap is enforced for custom-code order sizes.
+            # Enforcing it here covers BOTH paths at the single choke point every
+            # entry passes through. Strict comparison with a float-noise epsilon
+            # so a compiled order clamped exactly to the cap is not rejected.
+            position_pct = notional / current_equity * 100
+            if position_pct > self.limits.max_position_pct * (1.0 + _POSITION_CAP_REL_EPS):
+                return EntryDecision(
+                    allowed=False,
+                    reason=(
+                        f"position {position_pct:.1f}% of equity > "
+                        f"max_position_pct {self.limits.max_position_pct}%"
+                    ),
                 )
 
             concentration = notional / current_equity * 100

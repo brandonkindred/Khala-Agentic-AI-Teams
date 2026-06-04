@@ -1291,10 +1291,10 @@ def test_rule9_check_b_no_stop_volatility_target_long_within_cap_is_silent() -> 
     ), _critical(results)
 
 
-def test_rule9_custom_code_dynamic_sizing_is_critical() -> None:
-    """A custom-code spec bypasses the engine dispatcher (no runtime clamp), and
-    vol-target sizing cannot be statically verified — so the declared risk limits
-    are unenforceable. Block it with a custom_code_unenforceable critical."""
+def test_rule9_custom_code_with_max_loss_is_critical() -> None:
+    """A custom-code spec bypasses the dispatcher's per-trade loss clamp, and the
+    order gate cannot enforce a loss tolerance (no stop context). A declared
+    max_loss_per_trade_pct is therefore unenforceable — block it."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
@@ -1307,16 +1307,32 @@ def test_rule9_custom_code_dynamic_sizing_is_critical() -> None:
         if r.severity == "critical" and r.rule_id == "risk_limits:custom_code_unenforceable"
     ]
     assert crit, _critical(results)
-    assert "custom-code" in crit[0] and "volatility_target" in crit[0]
+    assert "custom-code" in crit[0] and "max_loss_per_trade_pct" in crit[0]
 
 
-def test_rule9_custom_code_static_sizing_is_not_blocked() -> None:
-    """A custom-code spec with a STATICALLY-verifiable sizing rule (fixed_fraction)
-    is not blocked by the custom-code guard — Checks A/B can verify the declared
-    sizing against the limits at design time even without a runtime clamp."""
+def test_rule9_custom_code_fixed_fraction_with_max_loss_is_critical() -> None:
+    """Static (fixed_fraction) custom code is blocked too: the spec's sizing rule
+    does not constrain what the generated code submits, so a declared loss
+    tolerance is still unenforceable (the dispatcher loss clamp is bypassed)."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.05),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    spec.requires_custom_code = True
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:custom_code_unenforceable"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_custom_code_without_max_loss_is_not_blocked() -> None:
+    """A custom-code spec that declares NO per-trade loss tolerance is not blocked
+    — max_position_pct is enforced for custom-code orders at the fill-simulator
+    choke point (RiskFilter.can_enter), so there is no unenforceable limit."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},  # no max_loss_per_trade_pct
     )
     spec.requires_custom_code = True
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -1327,10 +1343,10 @@ def test_rule9_custom_code_static_sizing_is_not_blocked() -> None:
     ), _critical(results)
 
 
-def test_rule9_compiled_dynamic_sizing_is_not_blocked() -> None:
-    """A COMPILED (non-custom-code) vol-target spec keeps the runtime dispatcher
-    clamp, so the custom-code guard does not fire — dynamic sizing is enforced at
-    runtime as before."""
+def test_rule9_compiled_with_max_loss_is_not_blocked() -> None:
+    """A COMPILED (non-custom-code) spec keeps the dispatcher's stop-based loss
+    clamp, so a declared max_loss_per_trade_pct is enforceable and the custom-code
+    guard does not fire."""
     spec = _spec(
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},

@@ -93,10 +93,30 @@ def test_can_enter_blocks_on_leverage():
 
 
 def test_can_enter_blocks_on_concentration():
-    rf = RiskFilter(RiskLimits(max_symbol_concentration_pct=10.0))
+    # max_position_pct raised so the concentration cap (10%) is the binding one;
+    # otherwise the tighter max_position_pct gate fires first.
+    rf = RiskFilter(RiskLimits(max_position_pct=100.0, max_symbol_concentration_pct=10.0))
     result = rf.can_enter("A", 20_000.0, 100_000.0, {})
     assert not result.allowed
     assert "concentration" in result.reason
+
+
+def test_can_enter_blocks_on_max_position_pct():
+    # The per-position deployment cap is enforced at the choke point so it covers
+    # custom-code orders (which bypass the engine dispatcher's clamp). A 10%
+    # order under a 6% cap is rejected.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {})
+    assert not result.allowed
+    assert "max_position_pct" in result.reason
+
+
+def test_can_enter_allows_order_at_max_position_pct():
+    # An order clamped exactly to the cap (6% of equity) is allowed — the gate
+    # uses a strict comparison with only a float-noise epsilon.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 6_000.0, 100_000.0, {})
+    assert result.allowed
 
 
 def test_can_enter_allows_within_limits():

@@ -833,7 +833,12 @@ class SpecReadinessGate(GateResultsMixin):
     #      (``sizing.fraction`` × ``stop_loss.pct``) must not exceed the declared
     #      per-trade loss tolerance (``max_loss_per_trade_pct`` when set) —
     #      critical. ``max_loss_per_trade_pct`` is the most you can lose on a
-    #      trade, governed by the stop. A stop only caps loss for an entry side
+    #      trade, governed by the stop. This is a MODELED bound assuming the stop
+    #      fills at its trigger price; engine exits fill at the next bar's open,
+    #      so a gap THROUGH the stop realises more (no finite size bounds a
+    #      gap-to-zero loss — ``max_drawdown_pct`` is the runtime backstop for
+    #      that tail). The check verifies the spec is coherent under the modeled
+    #      fill, not gap-proof. A stop only caps loss for an entry side
     #      the executor lets it fire on (``trailing_high`` → long,
     #      ``trailing_low`` → short, ``entry_price`` → both). When the tolerance
     #      is set but some entry side has no effective stop, that is its own
@@ -878,32 +883,27 @@ class SpecReadinessGate(GateResultsMixin):
 
         # Custom-code guard — a custom-code spec bypasses the engine dispatcher
         # entirely (backtest / paper_trade pass entry_rules=sizing=None when
-        # ``requires_custom_code``), so the deterministic runtime position/loss
-        # clamps never run. With dynamic sizing (``volatility_target`` /
-        # unconfigured ``fixed_notional``) the deployed fraction is also unknown
-        # at design time, so Checks A/B below abstain. That leaves the declared
-        # risk limits enforced by NOTHING the gate can see — not statically
-        # (dynamic sizing) and not at runtime (no dispatcher), only by generated
-        # code readiness cannot verify. Block rather than pass a spec whose risk
-        # limits are unenforceable. (Compiled specs keep the runtime clamp, and a
-        # statically-known deployed fraction is caught by Checks A/B, so this is
-        # scoped to the genuinely-unenforceable intersection.)
-        if pos_fraction is None and getattr(ctx.spec, "requires_custom_code", False):
-            max_loss_pct_val = ctx.spec.risk_limits.max_loss_per_trade_pct
-            max_loss_txt = (
-                f" and max_loss_per_trade_pct={float(max_loss_pct_val):.2f}%"
-                if max_loss_pct_val is not None
-                else ""
-            )
+        # ``requires_custom_code``), so the dispatcher's deterministic per-trade
+        # LOSS clamp never runs and the spec's sizing rule does not constrain
+        # what the generated code actually submits. ``max_position_pct`` is still
+        # enforced for every order — including custom-code orders — at the
+        # fill-simulator choke point (``RiskFilter.can_enter``), but
+        # ``max_loss_per_trade_pct`` cannot be enforced there (the order gate has
+        # no stop context) and the dispatcher loss clamp is bypassed. So a
+        # custom-code spec that DECLARES a per-trade loss tolerance has no
+        # mechanism to honor it — block it rather than pass a limit the runtime
+        # cannot enforce. (Compiled specs keep the dispatcher loss clamp, so they
+        # are unaffected.)
+        max_loss_pct_val = ctx.spec.risk_limits.max_loss_per_trade_pct
+        if max_loss_pct_val is not None and getattr(ctx.spec, "requires_custom_code", False):
             out.append(
                 self._critical(
-                    f"custom-code strategy uses dynamic '{kind}' sizing with a declared "
-                    f"position cap (max_position_pct={max_position_pct:.2f}%{max_loss_txt}), "
-                    "but a custom-code spec bypasses the engine dispatcher's runtime clamp "
-                    "AND a dynamic deployed fraction cannot be verified at design time — so "
-                    "the declared risk limits cannot be enforced. Use a statically-verifiable "
-                    "sizing rule (fixed_fraction, or fixed_notional with initial_capital) so "
-                    "the position cap and per-trade loss are checked at design time.",
+                    f"custom-code strategy declares max_loss_per_trade_pct="
+                    f"{float(max_loss_pct_val):.2f}% but a custom-code spec bypasses the engine "
+                    "dispatcher's per-trade loss clamp and the order gate cannot enforce a loss "
+                    "tolerance (it has no stop context), so the limit cannot be honored. Remove "
+                    "max_loss_per_trade_pct, or use a compiled (non-custom-code) strategy so the "
+                    "dispatcher enforces the stop-based loss cap.",
                     rule_id="risk_limits:custom_code_unenforceable",
                 )
             )

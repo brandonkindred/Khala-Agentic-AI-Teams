@@ -726,6 +726,14 @@ class _EngineEntryDispatcher:
         is ``deployed × stop_factor``, so ``qty`` is capped at
         ``max_loss% × equity / (close × stop_factor)``.
 
+        This is a MODELED bound that assumes the stop fills at its trigger
+        price. Engine exits queue after bar ``t`` and fill at bar ``t+1``'s
+        open, so a gap THROUGH the stop realises more than ``stop_loss.pct`` —
+        and no finite position size can bound a gap-to-zero loss. The cap
+        therefore enforces the modeled per-stop loss, not a gap-proof guarantee;
+        the ``max_drawdown_pct`` circuit breaker is the backstop for that gap
+        tail.
+
         Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
         Postconditions: returns ``qty`` unchanged when no tolerance is set or
         ``qty``/``equity`` <= 0; otherwise a share count whose worst-case
