@@ -144,8 +144,21 @@ def fetch_events_for_period(
 
 
 @timed_query(store=_STORE, op="fetch_recent_events")
-def fetch_recent_events(agent_id: str, top_n: int, by_salience: bool = True) -> list[MemoryEvent]:
+def fetch_recent_events(
+    agent_id: str,
+    top_n: int,
+    by_salience: bool = True,
+    *,
+    since: datetime | None = None,
+) -> list[MemoryEvent]:
     """Return the ``top_n`` most relevant recent events for this agent.
+
+    Args:
+        since: Optional inclusive lower bound on ``occurred_at``. When set, only
+            events with ``occurred_at >= since`` are considered, so a caller can
+            get the top-N salient events *within the in-progress period* — the
+            ordering and limit are applied in SQL, never materializing the whole
+            tail in Python.
 
     Preconditions:
         * ``agent_id`` is non-empty and ``top_n >= 0``.
@@ -153,28 +166,152 @@ def fetch_recent_events(agent_id: str, top_n: int, by_salience: bool = True) -> 
         * Ordered by ``(salience DESC, occurred_at DESC, id)`` when
           ``by_salience`` else ``(occurred_at DESC, id)``; the trailing ``id``
           breaks ties so the order is deterministic. At most ``top_n`` rows,
-          all owned by ``agent_id``.
+          all owned by ``agent_id`` and, when ``since`` is given, with
+          ``occurred_at >= since``.
     """
     assert agent_id, "fetch_recent_events: agent_id must be non-empty"
     assert top_n >= 0, "fetch_recent_events: top_n must be non-negative"
     order_by = (
         "salience DESC, occurred_at DESC, id ASC" if by_salience else "occurred_at DESC, id ASC"
     )
+    sql = f"SELECT {_EVENT_COLS} FROM agent_cognition_events WHERE agent_id = %s"
+    params: list[object] = [agent_id]
+    if since is not None:
+        sql += " AND occurred_at >= %s"
+        params.append(since)
+    sql += f" ORDER BY {order_by} LIMIT %s"
+    params.append(top_n)
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="fetch_unfolded_events")
+def fetch_unfolded_events(
+    agent_id: str,
+    scale: Scale,
+    period_start: datetime,
+    period_end: datetime,
+    *,
+    snapshot: datetime,
+) -> list[MemoryEvent]:
+    """Return events in ``[start, end)`` not yet folded into the period summary.
+
+    For the incremental-amend path on a pruned period: an event is *unfolded*
+    when it arrived (``recorded_at``) **after** the matching summary's last
+    ``computed_at`` fold point and at or before ``snapshot``. This is the exact
+    complement of :func:`prune_events`' folded set (``recorded_at <=
+    computed_at``), so an event already amended in on a previous pass — but not
+    yet pruned — is never re-folded, which would otherwise double-count
+    ``source_count`` and duplicate digest content.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open; ``snapshot`` is
+          the rollup's read-time.
+    Postconditions:
+        * Ordered by ``(occurred_at, id)`` ascending; only this agent's events
+          with ``period_start <= occurred_at < period_end`` and ``fold_point <
+          recorded_at <= snapshot``, where ``fold_point`` is the matching
+          summary's ``computed_at`` (treated as ``-infinity`` when the summary
+          is absent or never computed, so every event qualifies).
+    """
+    assert agent_id, "fetch_unfolded_events: agent_id must be non-empty"
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             f"""SELECT {_EVENT_COLS}
-                FROM agent_cognition_events
-                WHERE agent_id = %s
-                ORDER BY {order_by}
-                LIMIT %s""",
-            (agent_id, top_n),
+                FROM agent_cognition_events e
+                WHERE e.agent_id = %s
+                  AND e.occurred_at >= %s AND e.occurred_at < %s
+                  AND e.recorded_at <= %s
+                  AND e.recorded_at > COALESCE(
+                      (SELECT s.computed_at FROM agent_cognition_summaries s
+                       WHERE s.agent_id = e.agent_id AND s.scale = %s
+                         AND s.period_start = %s),
+                      '-infinity'::timestamptz)
+                ORDER BY e.occurred_at ASC, e.id ASC""",
+            (agent_id, period_start, period_end, snapshot, scale.value, period_start),
         )
         return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
 
 
-# ---------------------------------------------------------------------------
-# Rollup summaries
-# ---------------------------------------------------------------------------
+@timed_query(store=_STORE, op="fetch_recent_unfolded_events")
+def fetch_recent_unfolded_events(
+    agent_id: str, scale: Scale, top_n: int, *, snapshot: datetime
+) -> list[MemoryEvent]:
+    """Top-N salient unfolded events across *all* stale summaries at ``scale``.
+
+    The bounded, single-query counterpart to calling :func:`fetch_unfolded_events`
+    once per stale period: it joins events to this agent's ``stale`` ``scale``
+    summaries and returns the late-arriving rows not yet folded
+    (``fold_point < recorded_at <= snapshot``), ranked by salience and capped — so
+    a backlog of stale periods costs one ordered, limited query instead of an N+1
+    scan. ``fold_point`` is the matching summary's ``computed_at`` (``-infinity``
+    when never computed, so every event in the period qualifies). Periods at a
+    given scale are non-overlapping, so each event matches at most one summary.
+
+    Preconditions:
+        * ``agent_id`` is non-empty and ``top_n >= 0``; ``snapshot`` is the
+          read-time bound.
+    Postconditions:
+        * At most ``top_n`` events owned by ``agent_id``, each inside a ``stale``
+          ``scale`` summary's half-open window with ``fold_point < recorded_at <=
+          snapshot``, ordered ``(salience DESC, occurred_at DESC, id ASC)``.
+    """
+    assert agent_id, "fetch_recent_unfolded_events: agent_id must be non-empty"
+    assert top_n >= 0, "fetch_recent_unfolded_events: top_n must be non-negative"
+    event_cols = ", ".join(f"e.{col}" for col in _EVENT_COLS.split(", "))
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {event_cols}
+                FROM agent_cognition_events e
+                JOIN agent_cognition_summaries s
+                  ON s.agent_id = e.agent_id AND s.scale = %s AND s.stale = TRUE
+                 AND e.occurred_at >= s.period_start AND e.occurred_at < s.period_end
+                WHERE e.agent_id = %s
+                  AND e.recorded_at <= %s
+                  AND e.recorded_at > COALESCE(s.computed_at, '-infinity'::timestamptz)
+                ORDER BY e.salience DESC, e.occurred_at DESC, e.id ASC
+                LIMIT %s""",
+            (scale.value, agent_id, snapshot, top_n),
+        )
+        return [MemoryEvent.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="has_events_recorded_after")
+def has_events_recorded_after(
+    agent_id: str, period_start: datetime, period_end: datetime, *, after: datetime
+) -> bool:
+    """True iff an event in ``[start, end)`` was *recorded* after ``after``.
+
+    The rollup's first-summary re-probe: when a period gets its very first
+    summary, an event appended after the rollup's read snapshot but before the
+    summary row existed cannot be flagged stale by the writeback's
+    :func:`mark_period_stale` (there is no row yet). After inserting the first
+    summary the engine calls this with ``after = computed_at`` (the read
+    snapshot); a ``True`` result means such a concurrent append happened, so the
+    engine self-flags the just-created period stale and a later pass folds it.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open.
+    Postconditions:
+        * ``True`` iff at least one event owned by ``agent_id`` has
+          ``period_start <= occurred_at < period_end`` **and** ``recorded_at >
+          after``; no rows are modified.
+    """
+    assert agent_id, "has_events_recorded_after: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """SELECT EXISTS (
+                   SELECT 1 FROM agent_cognition_events
+                   WHERE agent_id = %s
+                     AND occurred_at >= %s AND occurred_at < %s
+                     AND recorded_at > %s
+               )""",
+            (agent_id, period_start, period_end, after),
+        )
+        return bool(cur.fetchone()[0])
+
+
 @timed_query(store=_STORE, op="upsert_summary")
 def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: datetime) -> None:
     """Insert or replace one rollup, idempotent on the period unique key.
@@ -335,6 +472,147 @@ def get_last_summary(agent_id: str, scale: Scale) -> PeriodSummary | None:
         return PeriodSummary.model_validate(row) if row else None
 
 
+@timed_query(store=_STORE, op="get_existing_summary")
+def get_existing_summary(
+    agent_id: str, scale: Scale, period_start: datetime
+) -> PeriodSummary | None:
+    """Return the summary for one exact ``(scale, period_start)`` key, or None.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * The unique row for ``(agent_id, scale, period_start)`` or ``None``;
+          the store-managed ``events_pruned`` regime flag is surfaced so the
+          rollup engine can choose recompute vs. amend.
+    """
+    assert agent_id, "get_existing_summary: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s AND period_start = %s""",
+            (agent_id, scale.value, period_start),
+        )
+        row = cur.fetchone()
+        return PeriodSummary.model_validate(row) if row else None
+
+
+@timed_query(store=_STORE, op="fetch_stale_summaries")
+def fetch_stale_summaries(agent_id: str, scale: Scale) -> list[PeriodSummary]:
+    """Return this agent's ``stale`` summaries at ``scale``, oldest period first.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * Only rows owned by ``agent_id`` at ``scale`` with ``stale = TRUE``,
+          ordered by ``period_start`` ascending so a bottom-up rollup processes
+          children before parents.
+    """
+    assert agent_id, "fetch_stale_summaries: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s AND stale = TRUE
+                ORDER BY period_start ASC""",
+            (agent_id, scale.value),
+        )
+        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="fetch_summaries_in_window")
+def fetch_summaries_in_window(
+    agent_id: str, scale: Scale, window_start: datetime, window_end: datetime
+) -> list[PeriodSummary]:
+    """Return summaries at ``scale`` whose period_start is in ``[start, end)``.
+
+    Used to gather the calendar-correct child inputs of an aggregate rollup
+    (a week/month reads its day summaries; a year reads its month summaries).
+
+    Preconditions:
+        * ``agent_id`` is non-empty; the window is half-open.
+    Postconditions:
+        * Only rows owned by ``agent_id`` at ``scale`` with ``window_start <=
+          period_start < window_end``, ordered by ``period_start`` ascending.
+    """
+    assert agent_id, "fetch_summaries_in_window: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            f"""SELECT {_SUMMARY_READ_COLS}
+                FROM agent_cognition_summaries
+                WHERE agent_id = %s AND scale = %s
+                  AND period_start >= %s AND period_start < %s
+                ORDER BY period_start ASC""",
+            (agent_id, scale.value, window_start, window_end),
+        )
+        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
+
+
+@timed_query(store=_STORE, op="flag_stale_proposals")
+def flag_stale_proposals(agent_id: str, summary_id: str, new_version: int) -> int:
+    """Flag pending proposals whose evidence cites an outdated summary version.
+
+    Evidence is a JSONB array of ``{"summary_id": <str>, "version": <int>}``
+    refs (the cross-step cognition contract). A recompute that advances a
+    summary's ``version`` leaves any proposal citing the older version stale.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; ``new_version >= 1``.
+    Postconditions:
+        * Every ``pending`` proposal owned by ``agent_id`` whose ``evidence``
+          references ``summary_id`` at a version below ``new_version`` has
+          ``stale_evidence = TRUE`` (idempotent — re-flagging is a no-op).
+          Returns the number of rows updated.
+    """
+    assert agent_id, "flag_stale_proposals: agent_id must be non-empty"
+    assert new_version >= 1, "flag_stale_proposals: new_version must be >= 1"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_rule_proposals
+               SET stale_evidence = TRUE
+               WHERE agent_id = %s AND status = 'pending' AND stale_evidence = FALSE
+                 AND EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(evidence) e
+                     WHERE e->>'summary_id' = %s AND (e->>'version')::int < %s
+                 )""",
+            (agent_id, summary_id, new_version),
+        )
+        return cur.rowcount
+
+
+@timed_query(store=_STORE, op="flag_rules_needing_review")
+def flag_rules_needing_review(agent_id: str, summary_id: str, new_version: int) -> int:
+    """Flag active derived rules whose evidence cites an outdated version.
+
+    Companion to :func:`flag_stale_proposals` for already-active rules: an
+    ``active`` rule with ``source = 'derived'`` that cited the recomputed
+    summary at an older version resurfaces in the operator review queue.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; ``new_version >= 1``.
+    Postconditions:
+        * Every ``active`` ``derived`` rule owned by ``agent_id`` whose
+          ``evidence`` references ``summary_id`` at a version below
+          ``new_version`` has ``needs_review = TRUE`` (idempotent). Returns the
+          number of rows updated.
+    """
+    assert agent_id, "flag_rules_needing_review: agent_id must be non-empty"
+    assert new_version >= 1, "flag_rules_needing_review: new_version must be >= 1"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_rules
+               SET needs_review = TRUE
+               WHERE agent_id = %s AND status = 'active' AND source = 'derived'
+                 AND needs_review = FALSE
+                 AND EXISTS (
+                     SELECT 1 FROM jsonb_array_elements(evidence) e
+                     WHERE e->>'summary_id' = %s AND (e->>'version')::int < %s
+                 )""",
+            (agent_id, summary_id, new_version),
+        )
+        return cur.rowcount
+
+
 @timed_query(store=_STORE, op="mark_period_stale")
 def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
     """Flag every summary that contains ``occurred_at`` for recompute.
@@ -395,6 +673,39 @@ def mark_period_stale(agent_id: str, occurred_at: datetime) -> bool:
         if day is None:
             return True
         return not day[0]
+
+
+@timed_query(store=_STORE, op="mark_summary_stale")
+def mark_summary_stale(agent_id: str, scale: Scale, period_start: datetime) -> bool:
+    """Flag exactly one summary ``(agent_id, scale, period_start)`` stale.
+
+    The targeted complement of :func:`mark_period_stale` (which flags *every*
+    scale containing a timestamp). Used by the rollup's first-aggregate
+    re-probe to re-stale just the parent it consumes — without the cascade
+    re-staling the parent's own child rows, which would force a needless child
+    recompute. Idempotent on the stale flag exactly like ``mark_period_stale``:
+    only the non-stale → stale transition bumps ``version``.
+
+    Preconditions:
+        * ``agent_id`` is non-empty.
+    Postconditions:
+        * If a row for ``(agent_id, scale, period_start)`` exists it is now
+          ``stale`` with ``stale_since = NOW()``; ``version`` advances by one
+          only on the non-stale → stale transition. No other row is touched.
+    Returns:
+        ``True`` iff a matching row existed and was updated.
+    """
+    assert agent_id, "mark_summary_stale: agent_id must be non-empty"
+    with _conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """UPDATE agent_cognition_summaries
+               SET stale = TRUE,
+                   stale_since = NOW(),
+                   version = version + (CASE WHEN stale THEN 0 ELSE 1 END)
+               WHERE agent_id = %s AND scale = %s AND period_start = %s""",
+            (agent_id, scale.value, period_start),
+        )
+        return cur.rowcount > 0
 
 
 @timed_query(store=_STORE, op="prune_events")

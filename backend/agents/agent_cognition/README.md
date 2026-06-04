@@ -16,6 +16,36 @@ never in the ephemeral per-agent sandbox. Agents consume an injected `cognition`
 invoke and emit a `cognition_writeback` on return, so sandboxed agents never need direct
 store access.
 
-> **Status: design only.** This directory currently contains the design specification.
-> See [`DESIGN.md`](DESIGN.md) for the full Feature Specification, including architecture,
-> use-case, logic-flow, rule-lifecycle, and security diagrams.
+See [`DESIGN.md`](DESIGN.md) for the full Feature Specification, including architecture,
+use-case, logic-flow, rule-lifecycle, and security diagrams.
+
+## Status
+
+The persistence and memory foundation is built; the rules and tools layers remain design.
+
+- **Built** — Postgres schema + domain models (`postgres/`, `models.py`); the episodic
+  memory data-access layer (`memory/store.py`); the **calendar rollup engine**
+  (`memory/rollup.py`).
+- **Design only** — rules store / reflection / enforcement, the tools layer, the
+  `CognitiveContext` facade, the scheduler, and the invoke-proxy integration.
+
+## Rollup engine
+
+`memory/rollup.py` summarizes an agent's episodic events into compact, hierarchical
+summaries — one per closed UTC calendar period at four scales. `ensure_rollups_current(
+agent_id, now)` is the single idempotent entry point: it (re)summarizes every period that is
+missing or flagged `stale`, oldest-first and bottom-up, so a parent scale always reads
+freshly-rebuilt children. A day summarizes its raw events; a week and a **month** each
+summarize that period's **day** summaries (months are built from days, never weeks, because
+ISO weeks straddle month boundaries); a year summarizes its **month** summaries. Late events
+in a retained period trigger a recompute; once a day's events have been pruned the late event
+is folded in by an incremental amend of the existing summary. When a recompute supersedes the
+`version` a learned rule or proposal cited as evidence, the dependent rows are flagged for
+review (evidence refs are `{"summary_id": <id>, "version": <int>}` objects).
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `AGENT_COGNITION_ROLLUP_INPUT_CHARS` | `12000` | Character budget passed to `compact_text` for one period's input block before the summarization LLM call. Unset/garbage/non-positive values fall back to the default. |
+| `AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS` | `400` | Upper bound on the cold-start / gap backfill walk (>1 year so a yearly rollup of the prior year is always reachable). Unset/garbage/non-positive values fall back to the default. |

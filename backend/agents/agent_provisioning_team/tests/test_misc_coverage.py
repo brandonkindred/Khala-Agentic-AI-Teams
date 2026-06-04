@@ -289,6 +289,61 @@ def test_credential_store_load_key_with_blank_env(tmp_path: Path, monkeypatch) -
     assert store.fernet is not None
 
 
+@pytest.mark.parametrize("partial", [b"", b"   ", b"not-a-valid-fernet-key"])
+def test_credential_store_tolerates_partial_key_file(tmp_path: Path, monkeypatch, partial) -> None:
+    """A present-but-invalid key file (the concurrent-write race window) is
+    replaced rather than crashing the store with an invalid Fernet key."""
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+    sdir = tmp_path / "store"
+    sdir.mkdir()
+    (sdir / ".encryption_key").write_bytes(partial)  # simulate a half-written file
+
+    store = CredentialStore(storage_dir=sdir)  # must not raise
+    store.store_credentials("a1", "pg", {"password": "secret"})
+    assert store.get_credentials("a1", "pg") == {"password": "secret"}
+
+
+def test_credential_store_concurrent_init_converges_on_one_key(tmp_path: Path, monkeypatch) -> None:
+    """Concurrent first-time inits converge on a single key and never clobber
+    a key a peer has already published and encrypted credentials under."""
+    import threading
+
+    from agent_provisioning_team.shared.credential_store import CredentialStore
+
+    monkeypatch.delenv("PROVISION_CREDENTIAL_KEY", raising=False)
+    monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
+    monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
+    sdir = tmp_path / "shared"
+    n = 12
+    errors: list[Exception] = []
+    barrier = threading.Barrier(n)
+
+    def _build(i: int) -> None:
+        try:
+            barrier.wait()  # release all threads into key-init at once
+            store = CredentialStore(storage_dir=sdir)
+            store.store_credentials(f"agent{i}", "pg", {"password": f"p{i}"})
+        except Exception as exc:  # pragma: no cover - only on regression
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_build, args=(i,)) for i in range(n)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert not errors, f"concurrent init raised: {errors}"
+    # If any init had clobbered another's published key, the credentials that
+    # peer encrypted would now be undecryptable. A fresh store must decrypt all.
+    fresh = CredentialStore(storage_dir=sdir)
+    for i in range(n):
+        assert fresh.get_credentials(f"agent{i}", "pg") == {"password": f"p{i}"}
+
+
 # ---------------------------------------------------------------------------
 # documentation phase — LLM path (mock LLMClient.is_configured)
 # ---------------------------------------------------------------------------
