@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 from investment_team.execution.risk_filter import RiskLimits
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
@@ -368,6 +370,32 @@ def test_cap_qty_to_loss_short_with_effective_stop_sizes_down():
     )
     # 1% / 5% stop = 20% deployable -> 200 shares @ $100 on $100k.
     assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 200.0
+
+
+def test_compute_qty_fractional_asset_preserves_capped_sub1_order():
+    """For a fractional asset class (crypto/forex), a risk-capped order below one
+    unit is a valid fractional trade, not a no-op. With 50% of $100k deployed on
+    a $60k asset (0.833 units raw) and a 5% stop under a 1% loss tolerance, the
+    loss cap clamps to 0.333 units — a crypto run submits 0.333, while the
+    whole-share path would skip it (return 0)."""
+    common = dict(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    bar = _make_bar(close=60000.0)
+    port = _make_portfolio(capital=100000.0)
+
+    crypto = _EngineEntryDispatcher(asset_class="crypto", **common)
+    assert crypto._compute_qty("long", bar, port, {}) == pytest.approx(1.0 / 3.0)
+
+    forex = _EngineEntryDispatcher(asset_class="forex", **common)
+    assert forex._compute_qty("long", bar, port, {}) == pytest.approx(1.0 / 3.0)
+
+    # Whole-share (equities) skips the sub-1 capped order, as before.
+    equity_disp = _EngineEntryDispatcher(asset_class="stocks", **common)
+    assert equity_disp._compute_qty("long", bar, port, {}) == 0
 
 
 def test_compute_qty_fixed_notional_clamped_to_position_cap_on_equity_drop():

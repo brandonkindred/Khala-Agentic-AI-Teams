@@ -56,6 +56,7 @@ from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio, Position
+from .providers.registry import canonical_asset_class
 from .strategy.contract import (
     OrderRequest,
     OrderSide,
@@ -513,6 +514,10 @@ class _EngineExitDispatcher:
 
 ENGINE_ENTRY_REASON_PREFIX = "engine_entry:"
 
+#: Canonical asset classes that trade in fractional units (no whole-share
+#: floor). Equities are whole-share and so are excluded.
+_FRACTIONAL_ASSET_CLASSES = frozenset({"crypto", "fx"})
+
 
 @dataclass
 class _EngineEntryDispatcher:
@@ -538,6 +543,11 @@ class _EngineEntryDispatcher:
     #: ``None`` (the default) disables both clamps — used by unit tests that
     #: exercise raw sizing.
     risk_limits: Optional[RiskLimits] = None
+    #: Canonical asset class of the run. Determines whether ``_compute_qty``
+    #: produces whole-share (equities) or fractional (crypto / forex) order
+    #: sizes. Empty (the default, used by raw-sizing unit tests) is treated as
+    #: whole-share.
+    asset_class: str = ""
     _next_seq: int = 0
 
     def maybe_emit(
@@ -611,7 +621,7 @@ class _EngineEntryDispatcher:
         cur_bar,
         portfolio: Portfolio,
         views: Dict[str, StreamingHistoryView],
-    ) -> int:
+    ) -> float:
         equity = portfolio.mark_to_market()
         close = cur_bar.close
         if close <= 0:
@@ -655,12 +665,28 @@ class _EngineEntryDispatcher:
         if cap_position:
             qty = self._cap_qty_to_position(qty, equity=equity, close=close)
         qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
+        if self._trades_fractional():
+            # Crypto / forex trade in fractional units, so a risk-capped sub-1
+            # order is a valid trade — submit the fractional size as-is, with no
+            # whole-share floor or skip. A cap that drove qty to ~0 (or an
+            # uncovered-short skip) is dropped.
+            return qty if qty > 0.0 else 0.0
         if qty < 1.0 and qty < raw_qty:
-            # A runtime risk cap reduced the order below one whole share. Flooring
-            # to 1 would breach the declared cap, so skip the entry instead. (A
-            # sub-1 raw size that no cap touched keeps the legacy 1-share floor.)
-            return 0
-        return max(1, int(qty))
+            # A runtime risk cap reduced a whole-share order below one share.
+            # Flooring to 1 would breach the declared cap, so skip the entry
+            # instead. (A sub-1 raw size that no cap touched keeps the legacy
+            # 1-share floor.)
+            return 0.0
+        return float(max(1, int(qty)))
+
+    def _trades_fractional(self) -> bool:
+        """Whether this dispatcher's asset class trades in fractional units.
+
+        Crypto and forex are fractional-quantity venues; equities are
+        whole-share. Postconditions: returns True only for canonical
+        ``"crypto"`` / ``"fx"`` asset classes.
+        """
+        return canonical_asset_class(self.asset_class) in _FRACTIONAL_ASSET_CLASSES
 
     def _cap_qty_to_position(self, qty: float, *, equity: float, close: float) -> float:
         """Clamp ``qty`` so its notional does not exceed ``max_position_pct``.
@@ -1175,6 +1201,7 @@ class TradingService:
             exit_rules=self._exit_rules,
             target_symbols=self._target_symbols,
             risk_limits=self._risk.limits,
+            asset_class=getattr(self.config, "asset_class", "") or "",
         )
         execution_model = build_execution_model(
             self.config.execution_model,

@@ -876,6 +876,38 @@ class SpecReadinessGate(GateResultsMixin):
                 assert capital > 0, "initial_capital must be strictly positive"
                 pos_fraction = float(ctx.spec.sizing.notional_usd) / capital
 
+        # Custom-code guard — a custom-code spec bypasses the engine dispatcher
+        # entirely (backtest / paper_trade pass entry_rules=sizing=None when
+        # ``requires_custom_code``), so the deterministic runtime position/loss
+        # clamps never run. With dynamic sizing (``volatility_target`` /
+        # unconfigured ``fixed_notional``) the deployed fraction is also unknown
+        # at design time, so Checks A/B below abstain. That leaves the declared
+        # risk limits enforced by NOTHING the gate can see — not statically
+        # (dynamic sizing) and not at runtime (no dispatcher), only by generated
+        # code readiness cannot verify. Block rather than pass a spec whose risk
+        # limits are unenforceable. (Compiled specs keep the runtime clamp, and a
+        # statically-known deployed fraction is caught by Checks A/B, so this is
+        # scoped to the genuinely-unenforceable intersection.)
+        if pos_fraction is None and getattr(ctx.spec, "requires_custom_code", False):
+            max_loss_pct_val = ctx.spec.risk_limits.max_loss_per_trade_pct
+            max_loss_txt = (
+                f" and max_loss_per_trade_pct={float(max_loss_pct_val):.2f}%"
+                if max_loss_pct_val is not None
+                else ""
+            )
+            out.append(
+                self._critical(
+                    f"custom-code strategy uses dynamic '{kind}' sizing with a declared "
+                    f"position cap (max_position_pct={max_position_pct:.2f}%{max_loss_txt}), "
+                    "but a custom-code spec bypasses the engine dispatcher's runtime clamp "
+                    "AND a dynamic deployed fraction cannot be verified at design time — so "
+                    "the declared risk limits cannot be enforced. Use a statically-verifiable "
+                    "sizing rule (fixed_fraction, or fixed_notional with initial_capital) so "
+                    "the position cap and per-trade loss are checked at design time.",
+                    rule_id="risk_limits:custom_code_unenforceable",
+                )
+            )
+
         # Check A — deployed capital must not exceed the position cap. Both
         # sides are account-capital fractions, so this is the one genuine
         # structural contradiction (e.g. fraction=0.10 with max_position_pct=5).
