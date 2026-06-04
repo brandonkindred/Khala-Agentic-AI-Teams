@@ -86,6 +86,13 @@ MAX_POSITION_PCT_CEILING: float = 25.0
 # back to the default.
 _DEFAULT_SIZING_COHERENCE_REL_TOL: float = 0.05
 
+# Negligible relative epsilon for the *hard* sizing/cap comparisons (Checks A
+# and B of Rule 9). These are structural limit breaches, not prose rounding, so
+# they must be strict — the prose tolerance above must not let a spec deploy
+# more than its declared cap. This epsilon only absorbs float-representation
+# noise (e.g. 0.10 * 100 == 10.000000000000002), never a real overage.
+_HARD_LIMIT_REL_EPS: float = 1e-9
+
 
 def _sizing_coherence_rel_tol() -> float:
     """Resolve ``STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE``.
@@ -839,10 +846,12 @@ class SpecReadinessGate(GateResultsMixin):
         # sides are account-capital fractions, so this is the one genuine
         # structural contradiction (e.g. fraction=0.10 with max_position_pct=5).
         # Skipped when the deployed fraction is unknown (volatility_target /
-        # unconfigured fixed_notional).
+        # unconfigured fixed_notional). This is a HARD cap, so the comparison is
+        # strict (``_HARD_LIMIT_REL_EPS`` only absorbs float noise) — the prose
+        # tolerance must not let the spec deploy more than the declared limit.
         if pos_fraction is not None:
             pos_pct = pos_fraction * 100.0
-            if pos_pct > max_position_pct * (1.0 + rel_tol):
+            if pos_pct > max_position_pct * (1.0 + _HARD_LIMIT_REL_EPS):
                 fix_hint = (
                     f"lowering the fraction to <={max_position_pct / 100.0:.4g} "
                     if kind == "fixed_fraction"
@@ -868,11 +877,12 @@ class SpecReadinessGate(GateResultsMixin):
         # budget to breach; this keeps the declared policy self-consistent.)
         # Both operands are static risk-limit fields, independent of the sizing
         # kind, so this fires for every spec — including volatility_target,
-        # whose dynamic deployed fraction does not affect this comparison.
+        # whose dynamic deployed fraction does not affect this comparison. Like
+        # Check A this is a HARD limit, so the comparison is strict.
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
         if max_loss_pct is not None:
             max_loss_pct = float(max_loss_pct)
-            if max_position_pct > max_loss_pct * (1.0 + rel_tol):
+            if max_position_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
                 out.append(
                     self._critical(
                         f"max_position_pct={max_position_pct:.2f}% exceeds "

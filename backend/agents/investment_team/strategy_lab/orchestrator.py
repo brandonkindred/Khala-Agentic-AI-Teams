@@ -329,6 +329,10 @@ def _spec_readiness_signature(spec: StrategySpec) -> tuple:
         spec.risk_limits.model_dump_json(),
         tuple(r.model_dump_json() for r in spec.entry_rules),
         tuple(r.model_dump_json() for r in spec.exit_rules),
+        # Rule 9's prose-vs-deployment check (``hypothesis:position_pct``) reads
+        # ``hypothesis``, so a reviser that fixes only the prose percentage must
+        # re-validate — otherwise the loop reuses a stale warning.
+        spec.hypothesis,
     )
 
 

@@ -1217,6 +1217,42 @@ def test_rule9_check_b_cap_exceeds_loss_tolerance_is_critical() -> None:
     assert "max_position_pct=10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
 
 
+def test_rule9_check_a_small_overage_is_critical_not_tolerated() -> None:
+    """The prose tolerance must not slacken the hard sizing cap: a fraction
+    just over the cap (10.5% vs 10%) is a real breach and must be critical."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.105),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(r.severity == "critical" and r.rule_id == "sizing:position_cap" for r in results), (
+        _critical(results)
+    )
+
+
+def test_rule9_check_a_exactly_at_cap_is_silent() -> None:
+    """Deploying exactly the cap (10% == 10%) is allowed — float noise only."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_b_small_overage_is_critical_not_tolerated() -> None:
+    """A cap just over the loss tolerance (5.2% vs 5%, within the old 5% band)
+    is a real breach and must be critical now that A/B are strict."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5.2, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance" for r in results
+    ), _critical(results)
+
+
 def test_rule9_check_b_cap_within_loss_tolerance_is_silent() -> None:
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.05),
@@ -1302,6 +1338,21 @@ def test_rule9_details_are_deterministic() -> None:
     first = [r.details for r in gate.validate(spec, backtest_config=_config())]
     second = [r.details for r in gate.validate(spec, backtest_config=_config())]
     assert first == second
+
+
+def test_readiness_signature_changes_with_hypothesis() -> None:
+    """Rule 9 reads ``hypothesis``, so the design-loop cache signature must
+    change when only the prose changes — otherwise a prose-only revision reuses
+    a stale ``hypothesis:position_pct`` verdict."""
+    from investment_team.strategy_lab.orchestrator import _spec_readiness_signature
+
+    base = _spec(hypothesis="Allocate 10% per trade to AAPL.")
+    revised = _spec(hypothesis="Allocate 2% per trade to AAPL.")
+    assert _spec_readiness_signature(base) != _spec_readiness_signature(revised)
+    # And identical specs still produce identical signatures (cache hits).
+    assert _spec_readiness_signature(base) == _spec_readiness_signature(
+        _spec(hypothesis="Allocate 10% per trade to AAPL.")
+    )
 
 
 # --- _extract_prose_position_pct unit coverage ---
