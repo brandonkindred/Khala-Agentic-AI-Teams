@@ -269,3 +269,58 @@ def test_compute_qty_vol_target_clamped_to_position_cap():
     view = _build_view([float(100 + i * 0.1) for i in range(40)])
     qty = disp._compute_qty("long", bar, portfolio, {"AAA": view})
     assert qty == 50
+
+
+def test_compute_qty_returns_zero_when_cap_below_one_share():
+    """When a risk cap reduces the order below one whole share, skip the entry
+    rather than floor to 1 (which would breach the declared cap). $1k equity,
+    $500 stock, 1% loss tolerance, no stop -> 0.02 shares -> skip."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_rules=[],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
+    )
+    bar = _make_bar(close=500.0)
+    portfolio = _make_portfolio(capital=1000.0)
+    assert disp._compute_qty("long", bar, portfolio, {}) == 0
+
+
+def test_compute_qty_sub_one_raw_without_cap_keeps_legacy_floor():
+    """A sub-1 raw size that no risk cap touched keeps the legacy 1-share floor
+    (no risk_limits attached)."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.50),
+    )  # risk_limits None -> no caps
+    bar = _make_bar(close=500.0)
+    portfolio = _make_portfolio(capital=100.0)  # 0.1 shares raw
+    assert disp._compute_qty("long", bar, portfolio, {}) == 1
+
+
+def test_compute_qty_vol_target_warmup_fallback_is_capped():
+    """The vol-target ATR-warmup fallback (no view yet) is a 1-share probe, but
+    it still runs through the caps: a 1% loss tolerance with no stop on a
+    high-priced stock forbids even one share, so the entry is skipped."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        exit_rules=[],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
+    )
+    bar = _make_bar(close=500.0)
+    portfolio = _make_portfolio(capital=1000.0)
+    # No view -> ATR warmup fallback (raw 1 share); loss cap -> 0.02 -> skip.
+    assert disp._compute_qty("long", bar, portfolio, {}) == 0
+
+
+def test_compute_qty_vol_target_warmup_fallback_emits_one_when_within_caps():
+    """When the 1-share warmup probe is within the caps, it still emits 1."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits=RiskLimits(max_position_pct=50),  # no loss tolerance
+    )
+    bar = _make_bar(close=100.0)
+    portfolio = _make_portfolio(capital=100000.0)
+    assert disp._compute_qty("long", bar, portfolio, {}) == 1

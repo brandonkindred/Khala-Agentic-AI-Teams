@@ -617,30 +617,44 @@ class _EngineEntryDispatcher:
         if close <= 0:
             return 0
         sizing = self.sizing
+        # ``cap_position`` is only true for vol-target sizing: its deployment is
+        # data-dependent so the readiness gate cannot bound it statically, and
+        # the position cap is the only enforcement point. Fixed sizing skips the
+        # position clamp — its deployment is explicit and the gate already
+        # bounds it — but every kind still goes through the loss clamp.
+        cap_position = False
         if isinstance(sizing, FixedFractionSizing):
-            qty = equity * float(sizing.fraction) / close
+            raw_qty = equity * float(sizing.fraction) / close
         elif isinstance(sizing, FixedNotionalSizing):
-            qty = float(sizing.notional_usd) / close
+            raw_qty = float(sizing.notional_usd) / close
         elif isinstance(sizing, VolatilityTargetSizing):
+            cap_position = True
             atr_ref = self._find_atr_ref()
             view = views.get(cur_bar.symbol)
             if view is None or view.length() == 0:
-                return 1
-            atr_val = view.indicator(atr_ref, view.length() - 1)
+                atr_val = None
+            else:
+                atr_val = view.indicator(atr_ref, view.length() - 1)
             if atr_val is None or atr_val <= 0:
-                return 1
-            qty = equity * float(sizing.target_annual_vol) / (close * atr_val)
-            # Vol-target sizing is unbounded in low-ATR regimes; clamp to the
-            # position cap so a low-vol symbol cannot deploy past
-            # ``max_position_pct``. Deployment here is data-dependent, so the
-            # readiness gate cannot check it statically — runtime is the only
-            # enforcement point. Fixed sizing skips this clamp: its deployment
-            # is explicit and the readiness gate already bounds it.
-            qty = self._cap_qty_to_position(qty, equity=equity, close=close)
+                # ATR not yet available (warmup / missing view): fall back to a
+                # one-share probe, but still run it through the caps below so an
+                # early bar cannot emit an unclamped order that breaches the
+                # position cap or loss tolerance.
+                raw_qty = 1.0
+            else:
+                raw_qty = equity * float(sizing.target_annual_vol) / (close * atr_val)
         else:
-            qty = 1.0
+            raw_qty = 1.0
 
+        qty = raw_qty
+        if cap_position:
+            qty = self._cap_qty_to_position(qty, equity=equity, close=close)
         qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
+        if qty < 1.0 and qty < raw_qty:
+            # A runtime risk cap reduced the order below one whole share. Flooring
+            # to 1 would breach the declared cap, so skip the entry instead. (A
+            # sub-1 raw size that no cap touched keeps the legacy 1-share floor.)
+            return 0
         return max(1, int(qty))
 
     def _cap_qty_to_position(self, qty: float, *, equity: float, close: float) -> float:
