@@ -11,7 +11,7 @@ Two layers, mirroring the rest of the package:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -26,6 +26,7 @@ from shared_postgres import is_postgres_enabled, register_team_schemas
 from shared_postgres.testing import truncate_team_tables
 
 _UTC = timezone.utc
+_ONE_DAY = timedelta(days=1)
 
 
 def _dt(year: int, month: int, day: int, hour: int = 12) -> datetime:
@@ -189,6 +190,62 @@ def test_periods_to_process_skips_open_period(monkeypatch: pytest.MonkeyPatch) -
     # The current (open) day is excluded; the prior closed day is present.
     assert rollup._day_bounds(now)[0] not in starts
     assert _dt(2026, 5, 9, 0) in starts
+
+
+def _child(start: datetime, *, stale: bool, source_count: int = 3) -> PeriodSummary:
+    return PeriodSummary(
+        id=uuid4().hex,
+        agent_id="a",
+        scale=Scale.DAY,
+        period_start=start,
+        period_end=rollup._day_bounds(start)[1],
+        summary="a day",
+        highlights=["h"],
+        source_count=source_count,
+        stale=stale,
+        created_at=start,
+    )
+
+
+def test_build_summary_defers_aggregate_when_a_child_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A parent whose child is still stale is left for a later pass: no summary
+    is produced and ``report.deferred`` is bumped. Building now would fold the
+    child's pre-amend content and clear the parent's stale flag, losing the
+    late event upward."""
+    week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
+    children = [_child(week_start, stale=False), _child(week_start + _ONE_DAY, stale=True)]
+    monkeypatch.setattr(store, "fetch_summaries_in_window", lambda *a, **k: children)
+    report = rollup.RollupReport(agent_id="a")
+
+    out = rollup._build_summary(
+        "a", Scale.WEEK, week_start, week_end, None, _dt(2026, 5, 12), CannedLLM(), report
+    )
+
+    assert out is None
+    assert report.deferred[Scale.WEEK.value] == 1
+
+
+def test_build_summary_builds_aggregate_when_all_children_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """With every child current the parent is built and not deferred."""
+    week_start, week_end = rollup._week_bounds(_dt(2026, 5, 6))
+    children = [
+        _child(week_start, stale=False, source_count=2),
+        _child(week_start + _ONE_DAY, stale=False, source_count=5),
+    ]
+    monkeypatch.setattr(store, "fetch_summaries_in_window", lambda *a, **k: children)
+    report = rollup.RollupReport(agent_id="a")
+
+    out = rollup._build_summary(
+        "a", Scale.WEEK, week_start, week_end, None, _dt(2026, 5, 12), CannedLLM(), report
+    )
+
+    assert out is not None and out.stale is False
+    assert out.source_count == 7  # summed across current children
+    assert Scale.WEEK.value not in report.deferred
 
 
 # ===========================================================================

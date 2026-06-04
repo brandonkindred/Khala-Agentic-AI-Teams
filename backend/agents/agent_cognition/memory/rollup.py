@@ -110,6 +110,10 @@ class RollupReport(BaseModel):
 
     ``recomputed`` / ``amended`` map a ``Scale.value`` to the number of
     periods rebuilt-from-inputs / incrementally-amended in this pass;
+    ``deferred`` maps a ``Scale.value`` to the number of aggregate periods
+    left for a later pass because a child summary they consume was still
+    stale (recomputing then would fold pre-amend child content and clear the
+    parent's stale flag, permanently losing the late event upward);
     ``skipped_open`` counts still-open (not-yet-closed) periods deliberately
     left alone; ``evidence_flagged`` counts proposals + rules flagged for
     review because a cited summary's version was superseded.
@@ -118,6 +122,7 @@ class RollupReport(BaseModel):
     agent_id: str
     recomputed: dict[str, int] = Field(default_factory=dict)
     amended: dict[str, int] = Field(default_factory=dict)
+    deferred: dict[str, int] = Field(default_factory=dict)
     skipped_open: int = 0
     evidence_flagged: int = 0
 
@@ -323,7 +328,9 @@ def _rollup_one_period(
         return
 
     # Regime (a): never-summarized or stale-with-events — recompute.
-    summary = _build_summary(agent_id, scale, period_start, period_end, existing, snapshot, llm)
+    summary = _build_summary(
+        agent_id, scale, period_start, period_end, existing, snapshot, llm, report
+    )
     if summary is None:
         return
     store.upsert_summary(agent_id, summary, computed_at=snapshot)
@@ -340,6 +347,7 @@ def _build_summary(
     existing: PeriodSummary | None,
     snapshot: datetime,
     llm,
+    report: RollupReport,
 ) -> PeriodSummary | None:
     """Recompute a period summary from its calendar-correct inputs.
 
@@ -347,10 +355,13 @@ def _build_summary(
         * ``[period_start, period_end)`` is a closed period at ``scale``.
     Postconditions:
         * Returns a fresh ``PeriodSummary`` (``stale=False``) assembled around
-          the LLM digest, or ``None`` when the period has no inputs and no
-          existing summary (empty-history no-op). ``version`` is left at the
-          existing value (monotonicity is owned by ``upsert_summary``); ``id``
-          and ``created_at`` are preserved on recompute.
+          the LLM digest, or ``None`` when (a) the period has no inputs and no
+          existing summary (empty-history no-op), or (b) an aggregate period is
+          *deferred* because a child summary it consumes is still ``stale``
+          (``report.deferred[scale]`` is bumped and the parent is left
+          missing/stale for a later pass). ``version`` is left at the existing
+          value (monotonicity is owned by ``upsert_summary``); ``id`` and
+          ``created_at`` are preserved on recompute.
     """
     if scale is Scale.DAY:
         events = store.fetch_events_for_period(
@@ -366,6 +377,24 @@ def _build_summary(
         children = store.fetch_summaries_in_window(
             agent_id, _CHILD_SCALE[scale], period_start, period_end
         )
+        # Defer if any consumed child is still stale. Building now would fold
+        # the child's pre-amend content and then clear THIS parent's stale flag;
+        # because a child recompute/amend does not re-stale its parents, nothing
+        # would re-mark the parent when the child later resolves — so the late
+        # event would be lost from week/month/year permanently. Leaving the
+        # parent missing/stale makes a later pass rebuild it once all children
+        # are current (children are processed before parents within a pass, so a
+        # still-stale child here is one this pass could not resolve).
+        stale_children = [c for c in children if c.stale]
+        if stale_children:
+            logger.debug(
+                "rollup defer: %s %s has %d still-stale child summaries; leaving parent for a later pass",
+                scale.value,
+                period_start.isoformat(),
+                len(stale_children),
+            )
+            report.deferred[scale.value] = report.deferred.get(scale.value, 0) + 1
+            return None
         if not children and existing is None:
             return None
         text = _render_children_text(children)

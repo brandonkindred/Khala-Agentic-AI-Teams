@@ -110,39 +110,79 @@ class CredentialStore:
         """Load the dev-fallback key, generating it once, race-safely.
 
         ``storage_dir`` can be shared by concurrent processes (e.g. parallel
-        test workers, or multiple workers of the same service). The old
-        check-then-``write_bytes`` sequence let one process observe the file a
-        peer had just created but not finished writing, reading an empty/partial
-        value and raising ``Fernet key must be 32 url-safe base64-encoded
-        bytes``. Publication is now atomic: a fresh key is written to a unique
-        temp file and ``os.replace``d into place, so a concurrent reader sees
-        either the previous key or the complete new one — never a partial file.
+        test workers, or multiple workers of the same service). Two correctness
+        hazards are handled:
+
+        * **Partial read.** The old check-then-``write_bytes`` sequence let one
+          process observe the file a peer had just created but not finished
+          writing, reading an empty/partial value and raising ``Fernet key must
+          be 32 url-safe base64-encoded bytes``. Publication is now atomic — a
+          fresh key is written to a unique temp file and ``os.replace``d into
+          place, so a concurrent reader sees either the previous key or the
+          complete new one, never a partial file.
+        * **Clobbering a published key.** Two first-time processes could each
+          pass the initial read, generate *different* keys, and both publish —
+          the second replace would overwrite the first's key after that process
+          had already encrypted credentials under it, making them permanently
+          undecryptable. Generation is therefore serialized by an advisory lock
+          and re-checks the key under the lock: whoever wins publishes; everyone
+          else returns the published key and never overwrites it.
+
         A present-but-invalid file (empty/stale/partial) is treated as absent
-        and replaced.
+        and repaired under the same lock (no valid key is ever overwritten).
 
         Postconditions:
             * Returns a syntactically valid url-safe base64 Fernet key.
-            * No caller ever observes a partially-written key file.
+            * No caller observes a partially-written key file.
+            * A valid key already published by a concurrent process is never
+              overwritten (on hosts where the advisory lock is honoured).
         """
         key_file = self.storage_dir / ".encryption_key"
 
+        # Fast path: a valid key already exists — no lock needed.
         existing = self._read_valid_key(key_file)
         if existing is not None:
             return existing
 
-        key = Fernet.generate_key()
-        tmp = self.storage_dir / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
-        try:
-            tmp.write_bytes(key)
-            tmp.chmod(0o600)
-            os.replace(tmp, key_file)  # atomic within the same filesystem
-        finally:
-            tmp.unlink(missing_ok=True)  # no-op after a successful replace
+        # First-time creation (or repair of an invalid/partial file). Serialize
+        # across processes sharing storage_dir so peers cannot each generate a
+        # different key and clobber the other's.
+        lock_file = self.storage_dir / ".encryption_key.lock"
+        with open(lock_file, "w") as handle:
+            self._lock_exclusive(handle)
+            # Re-check under the lock: a peer may have published while we waited.
+            existing = self._read_valid_key(key_file)
+            if existing is not None:
+                return existing
 
-        # A racing writer may have published first; converge on whatever valid
-        # key is now persisted, falling back to ours if the read briefly fails.
-        published = self._read_valid_key(key_file)
-        return published if published is not None else key
+            key = Fernet.generate_key()
+            tmp = self.storage_dir / f".encryption_key.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+            try:
+                tmp.write_bytes(key)
+                tmp.chmod(0o600)
+                os.replace(tmp, key_file)  # atomic within the same filesystem
+            finally:
+                tmp.unlink(missing_ok=True)  # no-op after a successful replace
+            return key
+
+    @staticmethod
+    def _lock_exclusive(handle) -> None:
+        """Best-effort exclusive advisory lock on an open file ``handle``.
+
+        Serializes first-time key creation across processes that share the
+        storage dir on a single host. Degrades to a no-op where flock is
+        unavailable (non-POSIX, or a filesystem that does not support it); the
+        atomic ``os.replace`` publication still prevents partial reads there,
+        leaving only the pre-existing dev-fallback write-write race.
+        """
+        try:
+            import fcntl
+        except ImportError:  # pragma: no cover - non-POSIX platform
+            return
+        try:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        except OSError:  # pragma: no cover - lock unsupported on this filesystem
+            pass
 
     @staticmethod
     def _read_valid_key(key_file: Path) -> Optional[bytes]:

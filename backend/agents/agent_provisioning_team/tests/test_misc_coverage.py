@@ -307,8 +307,9 @@ def test_credential_store_tolerates_partial_key_file(tmp_path: Path, monkeypatch
     assert store.get_credentials("a1", "pg") == {"password": "secret"}
 
 
-def test_credential_store_concurrent_init_never_reads_partial_key(tmp_path: Path, monkeypatch) -> None:
-    """Many stores built concurrently against one shared dir all succeed."""
+def test_credential_store_concurrent_init_converges_on_one_key(tmp_path: Path, monkeypatch) -> None:
+    """Concurrent first-time inits converge on a single key and never clobber
+    a key a peer has already published and encrypted credentials under."""
     import threading
 
     from agent_provisioning_team.shared.credential_store import CredentialStore
@@ -317,25 +318,30 @@ def test_credential_store_concurrent_init_never_reads_partial_key(tmp_path: Path
     monkeypatch.delenv("PA_CREDENTIAL_KEY_FILE", raising=False)
     monkeypatch.delenv("PROVISION_REQUIRE_KEY", raising=False)
     sdir = tmp_path / "shared"
+    n = 12
     errors: list[Exception] = []
-    barrier = threading.Barrier(12)
+    barrier = threading.Barrier(n)
 
-    def _build() -> None:
+    def _build(i: int) -> None:
         try:
-            barrier.wait()
-            CredentialStore(storage_dir=sdir)
+            barrier.wait()  # release all threads into key-init at once
+            store = CredentialStore(storage_dir=sdir)
+            store.store_credentials(f"agent{i}", "pg", {"password": f"p{i}"})
         except Exception as exc:  # pragma: no cover - only on regression
             errors.append(exc)
 
-    threads = [threading.Thread(target=_build) for _ in range(12)]
+    threads = [threading.Thread(target=_build, args=(i,)) for i in range(n)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
 
     assert not errors, f"concurrent init raised: {errors}"
-    # A single valid key persisted; a fresh store loads it without error.
-    assert CredentialStore(storage_dir=sdir).fernet is not None
+    # If any init had clobbered another's published key, the credentials that
+    # peer encrypted would now be undecryptable. A fresh store must decrypt all.
+    fresh = CredentialStore(storage_dir=sdir)
+    for i in range(n):
+        assert fresh.get_credentials(f"agent{i}", "pg") == {"password": f"p{i}"}
 
 
 # ---------------------------------------------------------------------------
