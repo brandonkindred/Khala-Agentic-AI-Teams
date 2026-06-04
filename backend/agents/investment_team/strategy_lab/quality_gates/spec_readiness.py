@@ -39,6 +39,7 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    stop_caps_side,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -181,30 +182,6 @@ def _extract_prose_position_pct(text: str) -> Optional[float]:
             except (TypeError, ValueError):  # pragma: no cover - regex guarantees numeric
                 continue
     return None
-
-
-# Stop-loss side compatibility — mirrors the executor's ``_stop_loss_triggers``,
-# which no-ops a stop that is the wrong way round for the position: a
-# ``trailing_high`` stop only caps a LONG (it tracks the running high and floors
-# below it), ``trailing_low`` only caps a SHORT, and ``entry_price`` caps both.
-# A spec can therefore declare a stop that never fires for its entry side,
-# leaving the per-trade loss uncapped despite a stop_loss rule being present.
-def _stop_caps_side(basis: str, side: str) -> bool:
-    """Whether a ``StopLossRule`` ``basis`` can actually trigger for an entry ``side``.
-
-    Preconditions: ``side`` is ``"long"`` or ``"short"``.
-    Postconditions: returns ``True`` iff the executor would let a stop with this
-    ``basis`` fire for a position on ``side`` (``entry_price`` → both sides;
-    ``trailing_high`` → long only; ``trailing_low`` → short only).
-    """
-    assert side in ("long", "short"), "side must be 'long' or 'short'"
-    if basis == "entry_price":
-        return True
-    if basis == "trailing_high":
-        return side == "long"
-    if basis == "trailing_low":
-        return side == "short"
-    return False  # pragma: no cover - DSL Literal forbids other bases
 
 
 # Asset classes that trade in whole units (shares / contracts). Crypto and
@@ -927,7 +904,7 @@ class SpecReadinessGate(GateResultsMixin):
             entry_sides = {r.side for r in ctx.spec.entry_rules} or {"long"}
             stop_rules = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
             uncovered_sides = sorted(
-                s for s in entry_sides if not any(_stop_caps_side(r.basis, s) for r in stop_rules)
+                s for s in entry_sides if not any(stop_caps_side(r.basis, s) for r in stop_rules)
             )
             if uncovered_sides:
                 # Check B-no-stop — a declared per-trade loss tolerance is
@@ -958,7 +935,7 @@ class SpecReadinessGate(GateResultsMixin):
                 # realised loss. The spec's worst per-trade loss is then the
                 # loosest of those per-side caps.
                 per_side_stop_pct = {
-                    s: min(float(r.pct) for r in stop_rules if _stop_caps_side(r.basis, s))
+                    s: min(float(r.pct) for r in stop_rules if stop_caps_side(r.basis, s))
                     for s in entry_sides
                 }
                 worst_stop_pct = max(per_side_stop_pct.values())

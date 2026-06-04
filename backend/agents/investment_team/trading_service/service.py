@@ -47,7 +47,9 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
+    StopLossRule,
     VolatilityTargetSizing,
+    stop_caps_side,
 )
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
@@ -530,6 +532,12 @@ class _EngineEntryDispatcher:
     sizing: Any
     exit_rules: Sequence[Any] = ()
     target_symbols: frozenset[str] = frozenset()
+    #: Runtime risk limits. When set, ``_compute_qty`` clamps order sizes so
+    #: vol-target sizing never deploys past ``max_position_pct`` and the
+    #: worst-case realised per-trade loss respects ``max_loss_per_trade_pct``.
+    #: ``None`` (the default) disables both clamps — used by unit tests that
+    #: exercise raw sizing.
+    risk_limits: Optional[RiskLimits] = None
     _next_seq: int = 0
 
     def maybe_emit(
@@ -610,10 +618,10 @@ class _EngineEntryDispatcher:
             return 0
         sizing = self.sizing
         if isinstance(sizing, FixedFractionSizing):
-            return max(1, int(equity * float(sizing.fraction) / close))
-        if isinstance(sizing, FixedNotionalSizing):
-            return max(1, int(float(sizing.notional_usd) / close))
-        if isinstance(sizing, VolatilityTargetSizing):
+            qty = equity * float(sizing.fraction) / close
+        elif isinstance(sizing, FixedNotionalSizing):
+            qty = float(sizing.notional_usd) / close
+        elif isinstance(sizing, VolatilityTargetSizing):
             atr_ref = self._find_atr_ref()
             view = views.get(cur_bar.symbol)
             if view is None or view.length() == 0:
@@ -621,8 +629,57 @@ class _EngineEntryDispatcher:
             atr_val = view.indicator(atr_ref, view.length() - 1)
             if atr_val is None or atr_val <= 0:
                 return 1
-            return max(1, int(equity * float(sizing.target_annual_vol) / (close * atr_val)))
-        return 1
+            qty = equity * float(sizing.target_annual_vol) / (close * atr_val)
+            # Vol-target sizing is unbounded in low-ATR regimes; clamp to the
+            # position cap so a low-vol symbol cannot deploy past
+            # ``max_position_pct``. Deployment here is data-dependent, so the
+            # readiness gate cannot check it statically — runtime is the only
+            # enforcement point. Fixed sizing skips this clamp: its deployment
+            # is explicit and the readiness gate already bounds it.
+            qty = self._cap_qty_to_position(qty, equity=equity, close=close)
+        else:
+            qty = 1.0
+
+        qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
+        return max(1, int(qty))
+
+    def _cap_qty_to_position(self, qty: float, *, equity: float, close: float) -> float:
+        """Clamp ``qty`` so its notional does not exceed ``max_position_pct``.
+
+        Preconditions: ``close`` > 0. Postconditions: returns ``qty`` unchanged
+        when no risk limits are attached or ``qty`` <= 0; otherwise a share
+        count whose notional is <= ``equity × max_position_pct%``.
+        """
+        limits = self.risk_limits
+        if limits is None or qty <= 0:
+            return qty
+        max_qty = equity * float(limits.max_position_pct) / 100.0 / close
+        return min(qty, max_qty)
+
+    def _cap_qty_to_loss(self, qty: float, *, side: str, equity: float, close: float) -> float:
+        """Clamp ``qty`` so the worst-case realised per-trade loss respects ``max_loss_per_trade_pct``.
+
+        The position exits on the tightest stop that can fire for ``side``
+        (``stop_caps_side``); with no such stop the entire deployed amount is at
+        risk (stop factor 1.0). The realised loss is ``deployed × stop_factor``,
+        so ``qty`` is capped at ``max_loss% × equity / (close × stop_factor)``.
+
+        Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
+        Postconditions: returns ``qty`` unchanged when no tolerance is set or
+        ``qty``/``equity`` <= 0; otherwise a share count whose worst-case
+        realised loss is <= ``max_loss_per_trade_pct%`` of equity.
+        """
+        limits = self.risk_limits
+        if limits is None or limits.max_loss_per_trade_pct is None or qty <= 0 or equity <= 0:
+            return qty
+        stop_pcts = [
+            float(r.pct)
+            for r in self.exit_rules
+            if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side)
+        ]
+        stop_factor = min(stop_pcts) if stop_pcts else 1.0
+        max_qty = float(limits.max_loss_per_trade_pct) / 100.0 * equity / (close * stop_factor)
+        return min(qty, max_qty)
 
     def _find_atr_ref(self):
         """Find an ATR IndicatorRef from the spec's entry or exit rules.
@@ -1077,6 +1134,7 @@ class TradingService:
             sizing=self._sizing,
             exit_rules=self._exit_rules,
             target_symbols=self._target_symbols,
+            risk_limits=self._risk.limits,
         )
         execution_model = build_execution_model(
             self.config.execution_model,

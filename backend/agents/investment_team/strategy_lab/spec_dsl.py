@@ -319,6 +319,29 @@ class SignalExitRule(_SpecNode):
     note: str = ""
 
 
+def stop_caps_side(basis: str, side: str) -> bool:
+    """Whether a ``StopLossRule`` ``basis`` can cap loss for an entry ``side``.
+
+    Mirrors the executor's stop-trigger semantics (``rule_compiler._stop_loss_triggers``):
+    a ``trailing_high`` stop only fires for a LONG (it tracks the running high
+    and floors below it), ``trailing_low`` only fires for a SHORT, and
+    ``entry_price`` fires for both. A stop whose basis cannot fire for the
+    position's side never caps that side's loss — the executor no-ops it.
+
+    Preconditions: ``side`` is ``"long"`` or ``"short"``.
+    Postconditions: returns ``True`` iff a stop with ``basis`` can trigger for a
+    position on ``side``.
+    """
+    assert side in ("long", "short"), "side must be 'long' or 'short'"
+    if basis == "entry_price":
+        return True
+    if basis == "trailing_high":
+        return side == "long"
+    if basis == "trailing_low":
+        return side == "short"
+    return False  # pragma: no cover - DSL Literal forbids other bases
+
+
 # Exit rules: structured close conditions the engine enforces (stop-loss /
 # take-profit) plus signal-based exits.  The union is intentionally limited
 # to price-, P&L-, and signal-based exits.

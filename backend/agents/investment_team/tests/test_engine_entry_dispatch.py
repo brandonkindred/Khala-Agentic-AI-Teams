@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+from investment_team.execution.risk_filter import RiskLimits
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
@@ -13,6 +14,8 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedFractionSizing,
     FixedNotionalSizing,
     Predicate,
+    StopLossRule,
+    VolatilityTargetSizing,
 )
 from investment_team.trading_service.service import (
     TradingServiceResult,
@@ -170,3 +173,99 @@ def test_sizing_fixed_notional():
     )
     assert len(pending) == 1
     assert pending[0].qty == 50  # 5000 / 100
+
+
+# --- Runtime risk-limit enforcement in _compute_qty / cap helpers ---
+
+
+def test_cap_qty_to_position_clamps_to_max_position_pct():
+    """A raw share count whose notional exceeds max_position_pct is clamped."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        risk_limits=RiskLimits(max_position_pct=5),
+    )
+    # equity=100k, close=100, cap 5% -> max notional 5000 -> 50 shares.
+    assert disp._cap_qty_to_position(300.0, equity=100000.0, close=100.0) == 50.0
+
+
+def test_cap_qty_to_position_noop_without_limits():
+    disp = _EngineEntryDispatcher(entry_rules=[], sizing=None)  # risk_limits None
+    assert disp._cap_qty_to_position(300.0, equity=100000.0, close=100.0) == 300.0
+
+
+def test_cap_qty_to_loss_sizes_down_to_tolerance_with_stop():
+    """qty is capped so deployed x tightest stop <= max_loss_per_trade_pct."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    # max_loss 1% / (stop 5%) = 20% deployable -> 200 shares @ $100 on $100k.
+    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 200.0
+
+
+def test_cap_qty_to_loss_no_stop_caps_full_deployment():
+    """Without an effective stop the whole position is at risk, so deployment
+    is capped at max_loss_per_trade_pct itself (stop factor 1.0)."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    # 1% of $100k = $1000 -> 10 shares @ $100.
+    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 10.0
+
+
+def test_cap_qty_to_loss_ignores_side_incompatible_stop():
+    """A trailing_low stop cannot fire for a long, so it does not cap the loss
+    and the full-deployment (stop factor 1.0) cap applies."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[StopLossRule(basis="trailing_low", pct=0.05)],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 10.0
+
+
+def test_cap_qty_to_loss_noop_without_tolerance():
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits=RiskLimits(),  # max_loss_per_trade_pct defaults to None
+    )
+    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 1000.0
+
+
+def test_compute_qty_applies_loss_cap_for_fixed_fraction():
+    """End-to-end: a 50% fixed fraction with a 5% stop and a 1% loss tolerance
+    is sized down from 500 to 200 shares."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
+    )
+    bar = _make_bar(close=100.0)
+    portfolio = _make_portfolio(capital=100000.0)
+    assert disp._compute_qty("long", bar, portfolio, {}) == 200
+
+
+def test_compute_qty_vol_target_clamped_to_position_cap():
+    """End-to-end: vol-target sizing that would deploy past max_position_pct is
+    clamped to the cap (50 shares = 5% of $100k @ $100)."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits=RiskLimits(max_position_pct=5),
+    )
+    bar = _make_bar(close=100.0)
+    portfolio = _make_portfolio(capital=100000.0)
+    # Build a view with a small ATR so raw vol-target sizing is large.
+    view = _build_view([float(100 + i * 0.1) for i in range(40)])
+    qty = disp._compute_qty("long", bar, portfolio, {"AAA": view})
+    assert qty == 50
