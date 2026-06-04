@@ -1271,6 +1271,54 @@ def test_rule9_check_b_no_stop_volatility_target_is_silent() -> None:
     )
 
 
+def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
+    """A long-only spec whose only stop is ``trailing_low`` has no effective stop
+    (the executor no-ops trailing_low for longs), so the declared loss tolerance
+    is unenforceable — flag it exactly as if no stop were present."""
+    long_entry = [
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+        )
+    ]
+    spec = _spec(
+        entry=long_entry,
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_=[StopLossRule(basis="trailing_low", pct=0.05)],
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "long" in crit[0] and "no stop_loss rule that can cap" in crit[0]
+
+
+def test_rule9_check_b_side_compatible_short_stop_is_covered() -> None:
+    """A short spec with a ``trailing_low`` stop IS covered (the executor fires
+    trailing_low for shorts), so the realised-loss check runs and a coherent spec
+    (10% deployed × 5% stop = 0.5% ≤ 5% tolerance) passes."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[StopLossRule(basis="trailing_low", pct=0.05)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
 def test_rule9_check_a_small_overage_is_critical_not_tolerated() -> None:
     """The prose tolerance must not slacken the hard sizing cap: a fraction
     just over the cap (10.5% vs 10%) is a real breach and must be critical."""
