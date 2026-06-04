@@ -679,11 +679,16 @@ class _EngineEntryDispatcher:
             # stock admits 0 shares, not 1). Probe the caps at one share: if any
             # clips it below 1, skip the entry. This is independent of whether a
             # cap reduced ``qty`` — a naturally-sub-1 raw order under a sub-1 cap
-            # still must not floor to a cap-breaching whole share. With no caps
-            # the probe is a no-op and the legacy 1-share floor stands.
-            one_share = 1.0
-            if cap_position:
-                one_share = self._cap_qty_to_position(one_share, equity=equity, close=close)
+            # still must not floor to a cap-breaching whole share. The position
+            # cap is probed UNCONDITIONALLY (not gated on ``cap_position``):
+            # ``fixed_fraction`` skips the main-path position clamp because it
+            # deploys exactly its readiness-verified fraction, but flooring a
+            # sub-1 fixed-fraction order up to one share can still exceed
+            # ``max_position_pct`` (high price / low equity), so one share must be
+            # checked against it here or the order would be emitted only to be
+            # rejected by ``RiskFilter.can_enter``. With no caps the probe is a
+            # no-op and the legacy 1-share floor stands.
+            one_share = self._cap_qty_to_position(1.0, equity=equity, close=close)
             one_share = self._cap_qty_to_loss(one_share, side=side, equity=equity, close=close)
             if one_share < 1.0:
                 return 0.0

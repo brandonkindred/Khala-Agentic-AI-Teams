@@ -178,17 +178,24 @@ class RiskFilter:
         notional: float,
         current_equity: float,
         open_positions: Dict[str, Any],
+        *,
+        position_cap_notional: Optional[float] = None,
     ) -> EntryDecision:
         """Check whether opening a new position would breach any limit.
 
-        ``notional`` is the order's **reference-price** notional (the
-        sizing basis the dispatcher clamps against), not the realised fill
-        notional. Market entries fill at the next bar's open and are then moved
-        by ``slippage_bps``, so the position can open marginally (bounded by the
-        slippage band) above ``max_position_pct``. Enforcing the cap on the
-        post-slippage fill would instead reject orders the dispatcher sized
-        correctly at the reference price, so the cap is intentionally a
-        sizing-time bound; ``max_drawdown_pct`` is the realised-exposure
+        ``notional`` is the post-fill exposure used for the leverage and
+        concentration checks. ``position_cap_notional`` is the
+        **reference-price** notional used for the ``max_position_pct`` check
+        (defaults to ``notional``); the cap is intentionally a sizing-time bound
+        evaluated on the order's reference price so it stays consistent across
+        the initial fill and REQUEUE/TWAP continuation slices — passing the
+        post-slippage notional there would reject continuation slices of an order
+        the dispatcher sized exactly to the cap. Market entries fill at the next
+        bar's open and are then moved by ``slippage_bps``, so the realised
+        position can open marginally (bounded by the slippage band) above
+        ``max_position_pct``; enforcing the cap on the post-slippage fill would
+        instead reject orders the dispatcher sized correctly, so the cap is a
+        sizing-time bound and ``max_drawdown_pct`` is the realised-exposure
         backstop. This mirrors the per-trade loss cap, which bounds the modeled
         fill-at-stop loss rather than a gapped fill.
         """
@@ -215,9 +222,13 @@ class RiskFilter:
             # bypass the dispatcher (entry_rules/sizing are None), so this gate
             # is the only place the cap is enforced for custom-code order sizes.
             # Enforcing it here covers BOTH paths at the single choke point every
-            # entry passes through. Strict comparison with a float-noise epsilon
-            # so a compiled order clamped exactly to the cap is not rejected.
-            position_pct = notional / current_equity * 100
+            # entry passes through. Evaluated on the reference-price notional
+            # (``position_cap_notional``) so it stays a sizing-time bound across
+            # initial and continuation fills. Strict comparison with a float-noise
+            # epsilon so a compiled order clamped exactly to the cap is not
+            # rejected.
+            cap_notional = position_cap_notional if position_cap_notional is not None else notional
+            position_pct = cap_notional / current_equity * 100
             if position_pct > self.limits.max_position_pct * (1.0 + _POSITION_CAP_REL_EPS):
                 return EntryDecision(
                     allowed=False,

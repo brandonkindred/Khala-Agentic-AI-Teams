@@ -119,6 +119,30 @@ def test_can_enter_allows_order_at_max_position_pct():
     assert result.allowed
 
 
+def test_can_enter_position_cap_uses_reference_notional_not_post_slippage():
+    # The max_position_pct check uses ``position_cap_notional`` (reference price)
+    # so a continuation slice of an order sized exactly to the cap is not rejected
+    # just because entry slippage nudged the post-fill notional over. Here the
+    # post-slippage notional (6_006 = 6.006%) would breach a 6% cap, but the
+    # reference-price notional (6_000 = 6%) is exactly at the cap -> allowed.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter(
+        "A", 6_006.0, 100_000.0, {}, position_cap_notional=6_000.0
+    )
+    assert result.allowed
+
+
+def test_can_enter_position_cap_notional_still_enforced_when_over_cap():
+    # When the reference-price notional itself is over the cap, the gate rejects
+    # regardless of the (smaller) post-fill notional passed for leverage.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter(
+        "A", 5_000.0, 100_000.0, {}, position_cap_notional=10_000.0
+    )
+    assert not result.allowed
+    assert "max_position_pct" in result.reason
+
+
 def test_can_enter_allows_within_limits():
     rf = RiskFilter(RiskLimits())
     result = rf.can_enter("A", 5_000.0, 100_000.0, {})

@@ -275,6 +275,37 @@ def test_compute_qty_applies_loss_cap_for_fixed_fraction():
     assert disp._compute_qty("long", bar, portfolio, {}) == 200
 
 
+def test_compute_qty_fixed_fraction_sub1_skips_when_one_share_breaches_position_cap():
+    """fixed_fraction is exempt from the main-path position clamp, but flooring a
+    sub-1 fixed-fraction order up to one share can still exceed max_position_pct.
+    The one-share probe checks the position cap unconditionally, so the
+    dispatcher skips the entry (0) rather than emitting a 1-share order that
+    RiskFilter.can_enter would reject. fraction=5% (<= the 6% cap) on a $500
+    stock at $1k equity is 0.1 shares raw; one share ($500) is 50% of equity,
+    far above the 6% cap -> skip."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits=RiskLimits(max_position_pct=6),
+    )
+    bar = _make_bar(close=500.0)
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=1000.0), {}) == 0
+
+
+def test_compute_qty_fixed_fraction_sub1_floors_when_one_share_fits_position_cap():
+    """When one share fits the position cap, the legacy 1-share floor still
+    stands for a sub-1 fixed-fraction order. fraction=5% on a $100 stock at $1k
+    equity is 0.5 shares raw; one share ($100) is 10% of equity, within a roomy
+    50% cap -> floors to 1."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits=RiskLimits(max_position_pct=50),
+    )
+    bar = _make_bar(close=100.0)
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=1000.0), {}) == 1
+
+
 def test_compute_qty_vol_target_clamped_to_position_cap():
     """End-to-end: vol-target sizing that would deploy past max_position_pct is
     clamped to the cap (50 shares = 5% of $100k @ $100)."""
