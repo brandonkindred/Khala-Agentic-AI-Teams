@@ -48,14 +48,20 @@ def git_identity_env() -> Dict[str, str]:
     Postconditions:
         - Returned dict contains all parent environment entries.
         - GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL are present and
-          non-empty; values already exported by the operator are unchanged.
+          non-empty; non-blank values exported by the operator are unchanged,
+          while blank exports are replaced (git rejects empty idents with
+          "fatal: empty ident name ... not allowed").
     """
     name, email = _configured_commit_identity()
     env = dict(os.environ)
-    env.setdefault("GIT_AUTHOR_NAME", name)
-    env.setdefault("GIT_AUTHOR_EMAIL", email)
-    env.setdefault("GIT_COMMITTER_NAME", name)
-    env.setdefault("GIT_COMMITTER_EMAIL", email)
+    for key, value in (
+        ("GIT_AUTHOR_NAME", name),
+        ("GIT_AUTHOR_EMAIL", email),
+        ("GIT_COMMITTER_NAME", name),
+        ("GIT_COMMITTER_EMAIL", email),
+    ):
+        if not (env.get(key) or "").strip():
+            env[key] = value
     return env
 
 

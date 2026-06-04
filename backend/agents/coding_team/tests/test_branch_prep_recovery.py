@@ -653,3 +653,52 @@ class TestFailureMatrix:
         ok, err, _ = _prep(api, clone)
         assert ok is False
         assert "integration checkout exploded" in err
+
+
+class TestMarkerLifecycleInPrep:
+    """A stale marker must not outlive its purpose (attributing the previous
+    abnormal job's leftovers), even when prep fails after recovery."""
+
+    def test_prep_failure_after_recovery_clears_stale_marker(self, api, repo_pair) -> None:
+        """Marker's attribution is spent once the tree is clean; a later prep
+        failure (e.g. fetch/auth) must not leave it behind to misattribute
+        unrelated future work."""
+        import shutil
+
+        remote, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        assert api._read_active_issue(clone) == 7  # job died: marker left set
+        shutil.rmtree(remote)  # next prep's fetch will fail
+
+        ok, err, _ = _prep(api, clone, issue=9)
+        assert ok is False
+        assert api._read_active_issue(clone) is None
+
+    def test_status_failure_retains_marker_for_attribution(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
+        """Recovery never ran — the marker is still the only attribution for
+        whatever is in the tree; it must survive the fail-closed exit."""
+        _, clone = repo_pair
+        api._write_active_issue(clone, 7)
+        monkeypatch.setattr(
+            api, "_working_tree_dirty", lambda p: (False, True, "git status failed")
+        )
+        ok, _, _ = _prep(api, clone, issue=9)
+        assert ok is False
+        assert api._read_active_issue(clone) == 7
+
+    def test_recovery_failure_retains_marker_for_attribution(
+        self, api, repo_pair, monkeypatch
+    ) -> None:
+        """Dirt is still on disk after a failed recovery commit; the marker
+        must stay so the retry can attribute it."""
+        _, clone = repo_pair
+        api._write_active_issue(clone, 7)
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        monkeypatch.setattr(api, "commit_working_tree", lambda *_a, **_kw: (False, "boom"))
+        ok, _, _ = _prep(api, clone, issue=9)
+        assert ok is False
+        assert api._read_active_issue(clone) == 7

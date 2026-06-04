@@ -111,3 +111,25 @@ def test_initialize_new_repo_writes_configured_identity(identity_free_env, tmp_p
         ["git", "config", "--local", "user.email"], cwd=repo, capture_output=True, text=True
     ).stdout.strip()
     assert (name, email) == ("Custom Bot", "bot@example.com")
+
+
+def test_identity_env_replaces_blank_native_vars(identity_free_env, monkeypatch):
+    """A deployment exporting GIT_AUTHOR_NAME="" must not survive into the
+    subprocess env — git rejects empty idents ("fatal: empty ident name")."""
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "")
+    monkeypatch.setenv("GIT_COMMITTER_EMAIL", "   ")
+    env = git_identity_env()
+    assert env["GIT_AUTHOR_NAME"] == "Khala"
+    assert env["GIT_COMMITTER_EMAIL"] == "brandon.kindred@gmail.com"
+
+
+def test_commit_succeeds_with_blank_identity_exports(identity_free_env, tmp_path, monkeypatch):
+    monkeypatch.setenv("GIT_AUTHOR_NAME", "")
+    monkeypatch.setenv("GIT_AUTHOR_EMAIL", "")
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True)
+    (repo / "a.txt").write_text("hello\n", encoding="utf-8")
+    ok, msg = commit_working_tree(str(repo), "test commit")
+    assert ok is True, msg

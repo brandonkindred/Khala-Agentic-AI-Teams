@@ -645,6 +645,14 @@ def _prepare_issue_branch(
         if note:
             notes.append(note)
 
+    # The marker's purpose — attributing the previous abnormal job's
+    # leftovers — is spent once the tree is clean. Clear it here so a later
+    # prep failure (fetch, ref validation, checkout) cannot leave a stale
+    # marker that misattributes unrelated future work; the fail-closed exits
+    # above keep it precisely because their dirt still needs attribution.
+    if marker is not None:
+        _clear_active_issue(repo_path)
+
     # Defense-in-depth: reject ref names that could be parsed as git options.
     if not _is_safe_ref(default_branch):
         return False, f"unsafe default_branch ref: {default_branch!r}", notes
