@@ -49,7 +49,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 
 from strands.models.model import Model
 from strands.types.content import Messages
@@ -86,7 +86,7 @@ class LLMClientConfig:
     model_id: Optional[str] = None
     temperature: float = 0.0
     max_tokens: Optional[int] = None
-    think: bool = False
+    think: Optional[Union[bool, str]] = None
     response_format: ResponseFormat = "json"
 
     def __post_init__(self) -> None:
@@ -256,7 +256,7 @@ class LLMClientModel(Model):
         model_id: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
-        think: bool = False,
+        think: Optional[Union[bool, str]] = None,
         response_format: ResponseFormat = "json",
     ) -> None:
         assert client is not None, "client is required"
@@ -395,13 +395,17 @@ class LLMClientModel(Model):
         try:
             call_cfg = dataclasses.replace(
                 cfg,
-                **{k: state[k] for k in ("temperature", "max_tokens", "think", "response_format") if k in state},
+                **{
+                    k: state[k]
+                    for k in ("temperature", "max_tokens", "think", "response_format")
+                    if k in state
+                },
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invocation_state contains invalid override: {exc}") from exc
         temperature = float(call_cfg.temperature or 0.0)
         max_tokens = call_cfg.max_tokens
-        think = bool(call_cfg.think)
+        think = call_cfg.think  # bool | str | None — never coerce; levels must survive
         response_format = call_cfg.response_format
 
         logger.debug(
@@ -491,7 +495,7 @@ class LLMClientModel(Model):
         text_prompt = "\n\n".join(p for p in user_parts if p)
 
         temperature = float(self._config.temperature or 0.0)
-        think = bool(self._config.think)
+        think = self._config.think  # bool | str | None — never coerce; levels must survive
 
         data = await asyncio.to_thread(
             self._client.complete_json,
@@ -521,7 +525,7 @@ def get_strands_model(
     *,
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
-    think: bool = False,
+    think: Optional[Union[bool, str]] = None,
     model_id: Optional[str] = None,
     client: Optional[LLMClient] = None,
     response_format: str = "json",
@@ -561,7 +565,7 @@ def run_json_via_strands(
     user_prompt: str,
     agent_key: Optional[str] = None,
     temperature: float = 0.0,
-    think: bool = False,
+    think: Optional[Union[bool, str]] = None,
 ) -> Dict[str, Any]:
     """Single-shot LLM call through a fresh Strands ``Agent``, returning a
     JSON-parsed dict.

@@ -799,3 +799,26 @@ def test_get_strands_model_exposes_context_for_hasattr_guards() -> None:
     model = get_strands_model(client=_ContextClient())
     assert hasattr(model, "get_max_context_tokens")
     assert model.get_max_context_tokens() == 262144
+
+
+# ---------------------------------------------------------------------------
+# Thinking levels through the adapter
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_passes_think_level_string_through() -> None:
+    """A level string configured on the model must reach the client verbatim —
+    a bool() coercion would silently turn "medium" into True."""
+    client = _RecordingClient({"summary": "done"})
+    model = LLMClientModel(client, think="medium")
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert client.chat_calls[0]["think"] == "medium"
+
+
+def test_adapter_default_think_is_none_for_client_side_resolution() -> None:
+    """None defers to the client, which resolves the platform default
+    (max thinking level for registered models)."""
+    client = _RecordingClient({"summary": "done"})
+    model = LLMClientModel(client)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert client.chat_calls[0]["think"] is None

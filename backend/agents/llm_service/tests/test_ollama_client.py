@@ -374,3 +374,54 @@ def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.Monke
     monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
     client = OllamaLLMClient(model="deepseek-v4-pro:cloud")
     assert client.get_max_context_tokens() == 1_000_000
+
+
+# ---------------------------------------------------------------------------
+# Thinking-level resolution on the wire
+# ---------------------------------------------------------------------------
+
+
+def _captured_payload_client(monkeypatch: pytest.MonkeyPatch, model: str) -> tuple:
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    client = OllamaLLMClient(model=model)
+    captured: dict = {}
+
+    def fake_post(payload, *args, **kwargs):
+        captured.update(payload)
+        return '{"ok": true}'
+
+    monkeypatch.setattr(client, "_ollama_post", fake_post)
+    return client, captured
+
+
+def test_complete_json_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi")
+    assert captured["think"] == "high"
+
+
+def test_complete_json_explicit_think_false_respected(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi", think=False)
+    assert captured["think"] is False
+
+
+def test_complete_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete("hi")
+    assert captured["think"] == "high"
+
+
+def test_chat_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.chat([{"role": "user", "content": "hi"}])
+    assert captured["think"] == "high"
+
+
+def test_complete_json_boolean_think_for_unregistered_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
+    client.complete_json("hi")
+    assert captured["think"] is True

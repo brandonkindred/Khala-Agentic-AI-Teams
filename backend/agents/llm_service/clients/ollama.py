@@ -562,16 +562,16 @@ class OllamaLLMClient(LLMClient):
             response_preview=text[:500],
         )
 
-    def _should_enable_thinking(self) -> bool:
-        """Global default: enable thinking for all models; disable via LLM_ENABLE_THINKING=false."""
-        env_val = (os.environ.get(llm_config.ENV_LLM_ENABLE_THINKING) or "").lower()
-        return env_val != "false"
+    def _resolve_think(self, think: "bool | str | None") -> "bool | str":
+        """Resolve the caller's think request into the wire value for this model.
 
-    def _resolve_think(self, think: Optional[bool]) -> bool:
-        """Resolve per-call think override against global default."""
-        if think is not None:
-            return think
-        return self._should_enable_thinking()
+        Delegates to ``llm_config.resolve_think_for_model``: explicit values
+        win (string level verbatim, False off); True/None upgrade to the
+        model's highest registered thinking level ("max thinking"), or plain
+        True for models with no registered levels; None respects the
+        LLM_ENABLE_THINKING global default.
+        """
+        return llm_config.resolve_think_for_model(self.model, think)
 
     def _parse_response_content(self, data: dict) -> str:
         """Extract content or tool_calls from OpenAI-compatible response.
@@ -1002,10 +1002,16 @@ class OllamaLLMClient(LLMClient):
         *,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Run the model with JSON mode and return a decoded dict."""
+        """Run the model with JSON mode and return a decoded dict.
+
+        ``think=None`` (default) resolves to the platform default — the
+        model's max registered thinking level when known; ``False`` disables;
+        a string selects a specific level.
+        """
+        think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
@@ -1142,7 +1148,7 @@ class OllamaLLMClient(LLMClient):
         backoff_base: float,
         backoff_max: float,
         sem: threading.BoundedSemaphore,
-        use_think: bool,
+        use_think: "bool | str",
     ) -> Dict[str, Any]:
         """On truncation: continue via multi-turn conversation, then parse JSON (same as SE team)."""
         accumulated = initial_partial
@@ -1195,9 +1201,15 @@ class OllamaLLMClient(LLMClient):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
     ) -> str:
-        """Return raw text from the model (no JSON mode). Pass tools for function/tool calling."""
+        """Return raw text from the model (no JSON mode). Pass tools for function/tool calling.
+
+        ``think=None`` (default) resolves to the platform default — the
+        model's max registered thinking level when known; ``False`` disables;
+        a string selects a specific level.
+        """
+        think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
@@ -1262,7 +1274,7 @@ class OllamaLLMClient(LLMClient):
         backoff_base: float,
         backoff_max: float,
         sem: threading.BoundedSemaphore,
-        use_think: bool,
+        use_think: "bool | str",
     ) -> str:
         """On truncation: continue via multi-turn conversation, return merged text."""
         accumulated = initial_partial
@@ -1315,7 +1327,7 @@ class OllamaLLMClient(LLMClient):
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -1326,10 +1338,12 @@ class OllamaLLMClient(LLMClient):
         ``response_format=json_object`` when no tools are present, and the
         assistant content is parsed via ``_extract_json`` instead of being
         returned raw. Tool-invocation envelopes are returned identically in
-        both modes.
+        both modes. ``think=None`` (default) resolves to the platform default
+        (max registered thinking level when known).
         """
         if response_format not in ("json", "text"):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
+        think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         sem = _get_ollama_semaphore()
         self._current_caller = _caller_tag()

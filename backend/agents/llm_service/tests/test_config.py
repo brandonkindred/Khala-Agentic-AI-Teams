@@ -57,3 +57,64 @@ def test_resolve_context_size_for_default_deepseek_model(monkeypatch: pytest.Mon
 def test_resolve_context_size_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_CONTEXT_SIZE", "100000")
     assert config.resolve_context_size_for_model("unknown-model") == 100000
+
+
+# ---------------------------------------------------------------------------
+# Thinking-level resolution
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def clean_thinking_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+
+
+def test_resolve_think_none_upgrades_registered_model_to_max_level(clean_thinking_env) -> None:
+    """Platform default: thinking on, at the model's highest registered level."""
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
+
+
+def test_resolve_think_none_stays_boolean_for_unregistered_model(clean_thinking_env) -> None:
+    """Models with no registered levels get plain boolean thinking."""
+    assert config.resolve_think_for_model("qwen3.5:cloud", None) is True
+
+
+def test_resolve_think_explicit_false_stays_off(clean_thinking_env) -> None:
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", False) is False
+
+
+def test_resolve_think_explicit_level_passes_through(clean_thinking_env) -> None:
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", "medium") == "medium"
+
+
+def test_resolve_think_global_disable_respected_for_default(
+    clean_thinking_env, monkeypatch
+) -> None:
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) is False
+
+
+def test_resolve_think_explicit_true_wins_over_global_disable(
+    clean_thinking_env, monkeypatch
+) -> None:
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", True) == "high"
+
+
+def test_resolve_think_env_level_override(clean_thinking_env, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_THINKING_LEVEL", "medium")
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "medium"
+
+
+def test_resolve_think_env_garbage_falls_back_to_max(clean_thinking_env, monkeypatch) -> None:
+    monkeypatch.setenv("LLM_THINKING_LEVEL", "banana")
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
+
+
+def test_resolve_think_env_level_ignored_for_unregistered_model(
+    clean_thinking_env, monkeypatch
+) -> None:
+    """A level string would be rejected by models that only support boolean think."""
+    monkeypatch.setenv("LLM_THINKING_LEVEL", "high")
+    assert config.resolve_think_for_model("qwen3.5:cloud", None) is True
