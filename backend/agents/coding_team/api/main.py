@@ -495,17 +495,73 @@ def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]
     return out.strip().splitlines()[0]
 
 
-def _working_tree_dirty(repo_path: str) -> Tuple[bool, Optional[str]]:
-    """Return (True, listing) if the working tree has uncommitted changes.
+def _working_tree_dirty(repo_path: str) -> Tuple[bool, bool, Optional[str]]:
+    """Inspect the working tree.
 
-    The listing is bounded (up to 500 chars of porcelain output) so we can
-    surface the conflicting paths in the failure comment without dumping
-    arbitrary file contents.
+    Postconditions:
+        - Returns (status_ok, dirty, listing). status_ok=False means
+          `git status` itself failed (state unknowable — callers must fail
+          closed, never attempt recovery); listing then carries the error.
+        - When status_ok, listing is bounded porcelain output (or None when
+          clean) so conflicting paths can be surfaced without dumping file
+          contents.
     """
     rc, msg = _git(repo_path, "status", "--porcelain")
     if rc != 0:
-        return True, msg or "git status failed"
-    return (bool(msg.strip()), msg if msg.strip() else None)
+        return False, True, msg or "git status failed"
+    return True, bool(msg.strip()), msg if msg.strip() else None
+
+
+def _recover_dirty_tree(
+    repo_path: str, marker: Optional[int], issue_number: Optional[int], listing: str
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Commit or preserve a dirty working tree before branch prep.
+
+    Same-issue work (marker == issue_number, HEAD on a real branch) is
+    committed in place so it can seed continuation; anything else — foreign
+    issue, unknown attribution, detached HEAD — is moved onto a rescue
+    branch. Work is never deleted.
+
+    Preconditions:
+        - The working tree is dirty and `git status` succeeded (callers
+          gate on _working_tree_dirty's status_ok).
+    Postconditions:
+        - On success (error is None) the working tree is clean and the prior
+          dirty state is committed on the returned-or-noted branch; wip_tip
+          names the continuation seed candidate when the work belongs to
+          issue_number, else None; note is operator-facing.
+        - On failure (error set) nothing has been deleted.
+    """
+    same_issue = marker is not None and issue_number is not None and marker == issue_number
+    rc, head = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    head_branch = head.strip() if rc == 0 else "HEAD"
+    on_branch = head_branch not in ("", "HEAD")
+
+    if same_issue and on_branch:
+        ok, msg = commit_working_tree(
+            repo_path,
+            f"wip: recover uncommitted changes from interrupted run (issue {issue_number})",
+        )
+        if not ok:
+            return None, None, msg
+        note = f"♻️ Recovered uncommitted changes from an interrupted run (committed on `{head_branch}`)."
+        return head_branch, note, None
+
+    rescue = _rescue_branch_name(repo_path, marker)
+    if rescue is None:
+        return None, None, "could not allocate a rescue branch name"
+    rc, msg = _git(repo_path, "checkout", "-b", rescue, "--")
+    if rc != 0:
+        return None, None, f"rescue branch creation failed: {msg}"
+    was = f" (was on `{head_branch}`)" if on_branch else ""
+    ok, msg = commit_working_tree(
+        repo_path, f"wip: rescue uncommitted changes from interrupted run{was}\n\n{listing}".rstrip()
+    )
+    if not ok:
+        return None, None, f"rescue commit failed: {msg}"
+    wip_tip = rescue if same_issue else None
+    note = f"♻️ Recovered uncommitted changes from an interrupted run; preserved on local branch `{rescue}`."
+    return wip_tip, note, None
 
 
 def _prepare_issue_branch(
@@ -518,7 +574,7 @@ def _prepare_issue_branch(
     # Refuse to overwrite the operator's in-flight work. Without this check,
     # `git checkout -B` happily carries unrelated dirty files across the
     # branch switch and they leak into the issue's PR.
-    dirty, listing = _working_tree_dirty(repo_path)
+    _status_ok, dirty, listing = _working_tree_dirty(repo_path)
     if dirty:
         return False, f"working tree has uncommitted changes; clean it before retrying:\n{listing}"
 

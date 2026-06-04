@@ -1031,7 +1031,7 @@ class TestGitCredentialThreading:
             calls.append((args, env))
             return 0, ""
 
-        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
         ok, msg = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
         assert ok is True, msg
@@ -1054,7 +1054,7 @@ class TestGitCredentialThreading:
             calls.append((args, env))
             return 0, ""
 
-        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
         ok, _ = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
         assert ok is True

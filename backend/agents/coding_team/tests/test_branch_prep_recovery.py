@@ -208,3 +208,76 @@ class TestGraphHelpers:
         _must(clone, "branch", "khala/rescue/issue-9-20260103-000000")
         assert api._latest_issue_rescue_ref(clone, 7) == "khala/rescue/issue-7-20260102-000000"
         assert api._latest_issue_rescue_ref(clone, 4) is None
+
+
+# ---------------------------------------------------------------------------
+# Dirty-tree recovery
+# ---------------------------------------------------------------------------
+
+
+class TestRecoverDirtyTree:
+    def test_same_issue_commits_in_place(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "development")
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("in progress\n")
+        tip, note, err = api._recover_dirty_tree(clone, 7, 7, "?? wip.txt")
+        assert err is None
+        assert tip == "development"
+        assert "development" in note
+        ok, _, listing = api._working_tree_dirty(clone)
+        assert ok is True and listing is None
+        assert "wip.txt" in _must(clone, "show", "--stat", "--name-only", "development")
+
+    def test_foreign_issue_rescued_to_tagged_branch(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("other issue\n")
+        tip, note, err = api._recover_dirty_tree(clone, 5, 7, "?? wip.txt")
+        assert err is None
+        assert tip is None  # foreign work is preserved, not a continuation seed
+        rescued = _branch_exists(clone, "khala/rescue/issue-5-*")
+        assert rescued is not None and rescued in note
+        assert "wip.txt" in _must(clone, "show", "--stat", "--name-only", rescued)
+
+    def test_no_marker_rescued_to_untagged_branch(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("who knows\n")
+        tip, note, err = api._recover_dirty_tree(clone, None, 7, "?? wip.txt")
+        assert err is None and tip is None
+        rescued = _branch_exists(clone, "khala/rescue/2*")
+        assert rescued is not None
+        assert "issue-" not in rescued
+
+    def test_commit_failure_reported(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        monkeypatch.setattr(api, "commit_working_tree", lambda *_a, **_kw: (False, "boom"))
+        tip, note, err = api._recover_dirty_tree(clone, None, 7, "?? wip.txt")
+        assert tip is None and note is None
+        assert "boom" in err
+        # Nothing was deleted: the dirty file is still there.
+        assert os.path.exists(os.path.join(clone, "wip.txt"))
+
+
+class TestWorkingTreeDirtyTriple:
+    def test_clean(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        assert api._working_tree_dirty(clone) == (True, False, None)
+
+    def test_dirty(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "x.txt"), "w", encoding="utf-8") as fh:
+            fh.write("d\n")
+        ok, dirty, listing = api._working_tree_dirty(clone)
+        assert (ok, dirty) == (True, True)
+        assert "x.txt" in listing
+
+    def test_status_failure(self, api, tmp_path) -> None:
+        not_a_repo = str(tmp_path / "empty")
+        os.makedirs(not_a_repo)
+        ok, dirty, listing = api._working_tree_dirty(not_a_repo)
+        assert ok is False and dirty is True
+        assert listing
