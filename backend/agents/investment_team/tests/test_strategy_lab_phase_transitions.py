@@ -480,10 +480,16 @@ def test_failed_design_attempt_does_not_poison_next_attempt_drift(
     real_run_design_attempt = orch._run_design_attempt
     # (attempt_index, collector_id, spec_history_len_on_entry)
     entries: List[Tuple[int, int, int]] = []
+    # Hold a strong reference to every collector for the test's lifetime.
+    # ``id()`` is only unique among *live* objects, so without this a failed
+    # attempt's collector could be GC'd and its address reused by a later
+    # attempt's collector, collapsing two genuinely-distinct objects to one id.
+    collectors: List[Any] = []
 
     def _flaky_run_design_attempt(**kwargs: Any) -> Any:
         collector = kwargs["drift_collector"]
         attempt = kwargs["design_attempt"]
+        collectors.append(collector)
         entries.append((attempt, id(collector), len(collector.spec_history)))
         if attempt < 2:
             _record_attempt_drift(orch, collector, attempt)
