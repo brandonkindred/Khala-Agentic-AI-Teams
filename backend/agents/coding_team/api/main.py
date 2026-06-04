@@ -555,7 +555,8 @@ def _recover_dirty_tree(
         return None, None, f"rescue branch creation failed: {msg}"
     was = f" (was on `{head_branch}`)" if on_branch else ""
     ok, msg = commit_working_tree(
-        repo_path, f"wip: rescue uncommitted changes from interrupted run{was}\n\n{listing}".rstrip()
+        repo_path,
+        f"wip: rescue uncommitted changes from interrupted run{was}\n\n{listing}".rstrip(),
     )
     if not ok:
         return None, None, f"rescue commit failed: {msg}"
@@ -628,7 +629,9 @@ def _prepare_issue_branch(
         return False, f"cannot inspect working tree: {listing}", notes
     wip_tip: Optional[str] = None
     if dirty:
-        wip_tip, note, recover_err = _recover_dirty_tree(repo_path, marker, issue_number, listing or "")
+        wip_tip, note, recover_err = _recover_dirty_tree(
+            repo_path, marker, issue_number, listing or ""
+        )
         if recover_err:
             return (
                 False,

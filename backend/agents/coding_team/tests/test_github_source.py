@@ -1071,7 +1071,9 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
-        ok, msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
+        ok, msg, _notes = api._prepare_issue_branch(
+            "/repo", "origin", "main", "khala/issue-1", "tok-123"
+        )
         assert ok is True, msg
         # Both fetches (base branch + issue-branch continuation candidate)
         # must carry the auth env.
@@ -1080,7 +1082,9 @@ class TestGitCredentialThreading:
         for _args, env in fetches:
             assert env is not None
             # b64("x-access-token:tok-123")
-            assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
+            assert (
+                env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
+            )
         # Local-only git ops never carry the credential.
         assert all(env is None for args, env in calls if args[0] != "fetch")
 
