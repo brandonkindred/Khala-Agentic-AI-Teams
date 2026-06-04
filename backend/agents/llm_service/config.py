@@ -44,7 +44,7 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:cloud": 262144,
     "qwen3-coder:480b-cloud": 262144,
     "qwen3-coder:480b": 262144,
-    "deepseek-v4-pro:cloud": 1_000_000,
+    "deepseek-v4-pro:cloud": 1000000,
 }
 
 # ---------------------------------------------------------------------------

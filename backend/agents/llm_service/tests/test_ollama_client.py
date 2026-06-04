@@ -46,7 +46,7 @@ def test_ollama_known_default_model_skips_api_show(monkeypatch: pytest.MonkeyPat
         client = OllamaLLMClient(
             model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
         )
-        assert client.get_max_context_tokens() == 1_000_000
+        assert client.get_max_context_tokens() == 1000000
     mock_client_cls.assert_not_called()
 
 
@@ -373,7 +373,7 @@ def test_ollama_get_max_context_tokens_deepseek_v4_pro(monkeypatch: pytest.Monke
     a quarter of it."""
     monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
     client = OllamaLLMClient(model="deepseek-v4-pro:cloud")
-    assert client.get_max_context_tokens() == 1_000_000
+    assert client.get_max_context_tokens() == 1000000
 
 
 # ---------------------------------------------------------------------------
@@ -425,3 +425,39 @@ def test_complete_json_boolean_think_for_unregistered_model(
     client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
     client.complete_json("hi")
     assert captured["think"] is True
+
+
+def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The client posts to the OpenAI-compatible /v1/chat/completions, which
+    controls reasoning via reasoning_effort; the native think field is kept
+    for proxies that honor it, but levels must also reach reasoning_effort."""
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi")
+    assert captured["think"] == "high"
+    assert captured["reasoning_effort"] == "high"
+
+
+def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.MonkeyPatch) -> None:
+    """reasoning_effort has no boolean form; unregistered models keep think only."""
+    client, captured = _captured_payload_client(monkeypatch, "qwen3.5:cloud")
+    client.complete_json("hi")
+    assert captured["think"] is True
+    assert "reasoning_effort" not in captured
+
+
+def test_payload_omits_reasoning_effort_when_thinking_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi", think=False)
+    assert captured["think"] is False
+    assert "reasoning_effort" not in captured
+
+
+def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.chat([{"role": "user", "content": "hi"}])
+    assert captured["reasoning_effort"] == "high"
+    client2, captured2 = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client2.complete("hi")
+    assert captured2["reasoning_effort"] == "high"

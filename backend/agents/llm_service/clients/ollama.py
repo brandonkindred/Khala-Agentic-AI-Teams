@@ -109,6 +109,29 @@ _EXPECTED_KEYS = frozenset(
 _JSON_NOISE_RE = re.compile(r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f\uFFFD]")
 
 
+def _think_payload_fields(think: "bool | str") -> dict:
+    """Wire fields for reasoning controls.
+
+    The client posts to the OpenAI-compatible /v1/chat/completions, where
+    Ollama controls reasoning via ``reasoning_effort`` and documents the
+    native ``think`` field as ignored. ``think`` is kept for native proxies
+    and forward compatibility, and level strings are mirrored into
+    ``reasoning_effort`` so requested levels actually reach the model.
+    Boolean values stay on ``think`` only (``reasoning_effort`` has no
+    boolean form).
+
+    Preconditions:
+        - ``think`` has been resolved (bool or level string, never None).
+    Postconditions:
+        - Returns a dict carrying ``think`` and, for level strings,
+          ``reasoning_effort``.
+    """
+    fields: dict = {"think": think}
+    if isinstance(think, str):
+        fields["reasoning_effort"] = think
+    return fields
+
+
 def _parse_retry_config() -> tuple[int, float, float]:
     """Parse retry env vars. Returns (max_retries, initial_backoff_seconds, backoff_max_seconds).
 
@@ -1047,7 +1070,7 @@ class OllamaLLMClient(LLMClient):
                 {"role": "system", "content": system_message},
                 {"role": "user", "content": prompt},
             ],
-            "think": think,
+            **_think_payload_fields(think),
         }
         if tools:
             payload["tools"] = tools
@@ -1171,7 +1194,7 @@ class OllamaLLMClient(LLMClient):
                 "max_tokens": max_tokens,
                 "response_format": {"type": "json_object"},
                 "messages": messages,
-                "think": use_think,
+                **_think_payload_fields(use_think),
             }
 
             try:
@@ -1235,7 +1258,7 @@ class OllamaLLMClient(LLMClient):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "messages": [{"role": "user", "content": prompt}],
-            "think": think,
+            **_think_payload_fields(think),
         }
         if system_prompt:
             payload["messages"] = [
@@ -1299,7 +1322,7 @@ class OllamaLLMClient(LLMClient):
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "messages": messages,
-                "think": use_think,
+                **_think_payload_fields(use_think),
             }
             try:
                 next_content = self._ollama_post(
@@ -1362,7 +1385,7 @@ class OllamaLLMClient(LLMClient):
             "temperature": temperature,
             "max_tokens": max_tokens,
             "messages": messages,
-            "think": think,
+            **_think_payload_fields(think),
         }
         if tools:
             payload["tools"] = tools
