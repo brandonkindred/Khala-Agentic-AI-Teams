@@ -264,6 +264,7 @@
       "orders_rejected": 0,
       "orders_rejection_reasons": {},
       "orders_unfilled": 120,
+      "risk_capped_entries": 0,
       "summary": "Backtest closed 9 trade(s) across 504 post-warmup bar(s).",
       "warmup_orders_dropped": 0,
       "zero_trade_category": null

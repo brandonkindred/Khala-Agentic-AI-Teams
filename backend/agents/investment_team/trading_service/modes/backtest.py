@@ -185,7 +185,14 @@ def run_backtest(
             exit_rules=list(strategy.exit_rules),
             entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
             sizing=strategy.sizing if not strategy.requires_custom_code else None,
-            target_symbols=list(strategy.target_symbols) if not strategy.requires_custom_code else None,
+            target_symbols=list(strategy.target_symbols)
+            if not strategy.requires_custom_code
+            else None,
+            # Asset class drives fractional (crypto/forex) vs whole-share
+            # (equities) sizing in the engine dispatcher. BacktestConfig has no
+            # asset_class field, so source it from the resolved provider class
+            # (falls back to the spec's own asset_class).
+            asset_class=asset_class or strategy.asset_class,
         )
         outcome = service.run(stream)
         run_metrics = compute_metrics(

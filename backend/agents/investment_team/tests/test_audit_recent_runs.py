@@ -1019,3 +1019,22 @@ class TestMain:
 
         rc = main([])
         assert rc == 0
+
+
+class TestRiskLimitWhitelistSync:
+    """The audit script replicates the risk-limit tighten-direction map (it
+    avoids a runtime import to stay decoupled). This guard keeps the replica
+    byte-for-byte in sync with the source of truth so a new risk-limit field
+    (e.g. max_loss_per_trade_pct) can't be accepted by the orchestrator's
+    refinement merge while audits still mis-report it as a non-risk field."""
+
+    def test_audit_replica_matches_source_tighten_direction(self) -> None:
+        from investment_team.execution.risk_filter import _RISK_LIMIT_TIGHTEN_DIRECTION
+        from investment_team.scripts.audit_recent_runs import _RISK_LIMIT_TIGHTEN_DIR
+
+        assert _RISK_LIMIT_TIGHTEN_DIR == _RISK_LIMIT_TIGHTEN_DIRECTION
+
+    def test_audit_keys_include_max_loss_per_trade_pct(self) -> None:
+        from investment_team.scripts.audit_recent_runs import _RISK_LIMIT_KEYS
+
+        assert "max_loss_per_trade_pct" in _RISK_LIMIT_KEYS
