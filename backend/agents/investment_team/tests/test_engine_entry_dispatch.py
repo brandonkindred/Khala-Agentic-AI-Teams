@@ -324,3 +324,29 @@ def test_compute_qty_vol_target_warmup_fallback_emits_one_when_within_caps():
     bar = _make_bar(close=100.0)
     portfolio = _make_portfolio(capital=100000.0)
     assert disp._compute_qty("long", bar, portfolio, {}) == 1
+
+
+def test_cap_qty_to_loss_uncovered_short_is_skipped():
+    """A short with no effective stop has unbounded loss, so no size honours the
+    tolerance — the entry is skipped (qty 0) rather than sized at full
+    deployment."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[],  # no stop
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 0.0
+
+
+def test_cap_qty_to_loss_short_with_effective_stop_sizes_down():
+    """A short WITH a side-compatible stop (trailing_low) is bounded, so it is
+    sized down rather than skipped."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[StopLossRule(basis="trailing_low", pct=0.05)],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    # 1% / 5% stop = 20% deployable -> 200 shares @ $100 on $100k.
+    assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 200.0

@@ -691,7 +691,20 @@ class _EngineEntryDispatcher:
             for r in self.exit_rules
             if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side)
         ]
-        stop_factor = min(stop_pcts) if stop_pcts else 1.0
+        if stop_pcts:
+            stop_factor = min(stop_pcts)
+        elif side == "short":
+            # A short with no effective stop has unbounded loss — price can gap
+            # up arbitrarily, so the realised loss is not capped at the deployed
+            # notional and NO position size can honour the declared per-trade
+            # loss tolerance. Skip the entry rather than emit an unenforceable
+            # one.
+            return 0.0
+        else:
+            # An uncovered long loses at most its full deployed amount (price
+            # floors at zero), so the deployed notional itself is the worst-case
+            # loss (stop factor 1.0).
+            stop_factor = 1.0
         max_qty = float(limits.max_loss_per_trade_pct) / 100.0 * equity / (close * stop_factor)
         return min(qty, max_qty)
 
