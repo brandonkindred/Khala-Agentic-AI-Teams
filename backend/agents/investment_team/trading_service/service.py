@@ -671,13 +671,24 @@ class _EngineEntryDispatcher:
             # whole-share floor or skip. A cap that drove qty to ~0 (or an
             # uncovered-short skip) is dropped.
             return qty if qty > 0.0 else 0.0
-        if qty < 1.0 and qty < raw_qty:
-            # A runtime risk cap reduced a whole-share order below one share.
-            # Flooring to 1 would breach the declared cap, so skip the entry
-            # instead. (A sub-1 raw size that no cap touched keeps the legacy
-            # 1-share floor.)
-            return 0.0
-        return float(max(1, int(qty)))
+        if qty < 1.0:
+            # Whole-share asset: a sub-1 capped order cannot be submitted as a
+            # fraction. Flooring up to one share is only safe when one share is
+            # itself within every active risk cap — otherwise a whole share
+            # breaches the declared limit (e.g. an $80 position cap on a $100
+            # stock admits 0 shares, not 1). Probe the caps at one share: if any
+            # clips it below 1, skip the entry. This is independent of whether a
+            # cap reduced ``qty`` — a naturally-sub-1 raw order under a sub-1 cap
+            # still must not floor to a cap-breaching whole share. With no caps
+            # the probe is a no-op and the legacy 1-share floor stands.
+            one_share = 1.0
+            if cap_position:
+                one_share = self._cap_qty_to_position(one_share, equity=equity, close=close)
+            one_share = self._cap_qty_to_loss(one_share, side=side, equity=equity, close=close)
+            if one_share < 1.0:
+                return 0.0
+            return 1.0
+        return float(int(qty))
 
     def _trades_fractional(self) -> bool:
         """Whether this dispatcher's asset class trades in fractional units.
@@ -1129,9 +1140,15 @@ class TradingService:
         entry_rules: Optional[List[EntryRule]] = None,
         sizing: Optional[Any] = None,
         target_symbols: Optional[List[str]] = None,
+        asset_class: str = "",
     ) -> None:
         self.strategy_code = strategy_code
         self.config = config
+        # Canonical asset class of the run, threaded to the engine dispatcher so
+        # ``_compute_qty`` sizes crypto/forex fractionally and equities
+        # whole-share. ``BacktestConfig`` carries no asset_class, so callers pass
+        # it explicitly (from ``StrategySpec.asset_class`` / the paper config).
+        self._asset_class = asset_class or ""
         # #450: opt-in coverage-probe mode. Off by default so all
         # existing callers keep the zero-overhead path.
         self._coverage_probe_mode = coverage_probe_mode
@@ -1201,7 +1218,7 @@ class TradingService:
             exit_rules=self._exit_rules,
             target_symbols=self._target_symbols,
             risk_limits=self._risk.limits,
-            asset_class=getattr(self.config, "asset_class", "") or "",
+            asset_class=self._asset_class,
         )
         execution_model = build_execution_model(
             self.config.execution_model,

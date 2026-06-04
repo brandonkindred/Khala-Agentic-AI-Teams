@@ -398,6 +398,36 @@ def test_compute_qty_fractional_asset_preserves_capped_sub1_order():
     assert equity_disp._compute_qty("long", bar, port, {}) == 0
 
 
+def test_compute_qty_skips_sub1_whole_share_when_one_share_breaches_cap():
+    """A whole-share order below one share must not floor up to a full share when
+    one share would breach a cap — even if the cap did not reduce qty. A $50
+    fixed-notional order on a $100 stock is 0.5 shares raw; with a position cap
+    admitting only 0.8 shares ($80), one whole share ($100) breaches it, so the
+    entry is skipped (0) rather than floored to 1."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedNotionalSizing(notional_usd=50.0),  # 0.5 shares @ $100 raw
+        # 0.8% of $10k = $80 cap = 0.8 shares @ $100 (below one share).
+        risk_limits=RiskLimits(max_position_pct=0.8),
+    )
+    bar = _make_bar(close=100.0)
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=10000.0), {}) == 0
+
+
+def test_compute_qty_floors_sub1_to_one_share_when_one_share_fits_caps():
+    """A naturally-sub-1 whole-share order still floors to one share when one
+    share is within the caps (legacy behaviour preserved). A $50 notional on a
+    $100 stock with a roomy 50% cap admits well over one share, so the 0.5-share
+    raw order floors to 1."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=FixedNotionalSizing(notional_usd=50.0),
+        risk_limits=RiskLimits(max_position_pct=50),
+    )
+    bar = _make_bar(close=100.0)
+    assert disp._compute_qty("long", bar, _make_portfolio(capital=10000.0), {}) == 1
+
+
 def test_compute_qty_fixed_notional_clamped_to_position_cap_on_equity_drop():
     """A fixed-notional order that fit max_position_pct at initial capital can
     breach it after equity falls (notional is a fixed $ amount, so its share of
