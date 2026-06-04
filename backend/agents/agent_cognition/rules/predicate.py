@@ -332,8 +332,9 @@ def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, 
         ok = _NUMERIC_CMP[op](actual, node.value)
     if ok:
         return True, None
-    # ``_shown`` (repr) is evaluated only on the failure path, never on success,
-    # so a value whose ``__repr__`` raises can't break a passing comparison.
+    # ``_shown`` (repr) runs only on the failure path and is exception-guarded,
+    # so neither a passing comparison nor a value with a raising __repr__ can
+    # turn evaluation into a crash.
     return False, f"path {dotted!r} value {_shown(actual, missing)} fails {op} {node.value!r}"
 
 
@@ -366,5 +367,15 @@ def _strict_eq(a: Any, b: Any) -> bool:
 
 
 def _shown(actual: Any, missing: bool) -> str:
-    """Render a resolved value for a failure reason — only called on failures."""
-    return "<missing>" if missing else repr(actual)
+    """Render a resolved value for a failure reason — only called on failures.
+
+    ``repr`` is guarded so a value whose ``__repr__`` raises can never turn a
+    block decision into an exception: the evaluator must never raise on input
+    data shape, on the failure path as well as the success path.
+    """
+    if missing:
+        return "<missing>"
+    try:
+        return repr(actual)
+    except Exception:
+        return "<unrepresentable>"

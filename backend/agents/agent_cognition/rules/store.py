@@ -503,25 +503,31 @@ def install_seed_pack(agent_id: str, pack_name: str, *, now: datetime | None = N
     if pack_name not in SEED_PACKS:
         raise RuleStoreError(f"unknown seed pack {pack_name!r}")
     created_at = now or _now()
+    # Build and validate every seed rule before opening the connection, so a
+    # statically-invalid pack (e.g. an enforced seed with a bad predicate) fails
+    # fast without acquiring a connection or partially inserting then rolling back.
+    rules: list[Rule] = []
+    for seed in SEED_PACKS[pack_name]:
+        rule = Rule(
+            id=_seed_rule_id(agent_id, pack_name, seed.key),
+            agent_id=agent_id,
+            text=seed.text,
+            mode=seed.mode,
+            status=RuleStatus.ACTIVE,
+            predicate=dict(seed.predicate),
+            rationale=seed.rationale,
+            source=RuleSource.SEED,
+            evidence=[{"seed_pack": pack_name, "seed_key": seed.key}],
+            needs_review=False,
+            priority=seed.priority,
+            created_at=created_at,
+            updated_at=created_at,
+        )
+        _assert_storable_rule(rule)  # an enforced seed must carry a valid predicate
+        rules.append(rule)
     new_ids: list[str] = []
     with _conn() as conn:
-        for seed in SEED_PACKS[pack_name]:
-            rule = Rule(
-                id=_seed_rule_id(agent_id, pack_name, seed.key),
-                agent_id=agent_id,
-                text=seed.text,
-                mode=seed.mode,
-                status=RuleStatus.ACTIVE,
-                predicate=dict(seed.predicate),
-                rationale=seed.rationale,
-                source=RuleSource.SEED,
-                evidence=[{"seed_pack": pack_name, "seed_key": seed.key}],
-                needs_review=False,
-                priority=seed.priority,
-                created_at=created_at,
-                updated_at=created_at,
-            )
-            _assert_storable_rule(rule)  # an enforced seed must carry a valid predicate
+        for rule in rules:
             if _insert_rule(conn, rule, ignore_conflict=True) == 1:
                 new_ids.append(rule.id)
     return new_ids

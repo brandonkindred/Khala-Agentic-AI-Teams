@@ -32,8 +32,9 @@ __all__ = ["SeedRule", "SEED_PACKS"]
 class SeedRule:
     """One rule in a seed pack.
 
-    Invariant: ``key`` is unique within its pack and stable across releases — it
-    is the idempotency identity the installer records in ``evidence``.
+    Invariant: ``key`` is unique within its pack and stable across releases — the
+    installer derives the rule's deterministic primary key from it, which is what
+    makes a re-install idempotent (the ``evidence`` marker is provenance only).
     """
 
     key: str

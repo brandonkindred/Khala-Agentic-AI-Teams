@@ -434,3 +434,19 @@ def test_eval_does_not_repr_on_success_path() -> None:
 
     pred = {"phase": "precondition", "check": {"op": "==", "path": "input.x", "value": "v"}}
     assert _eval(pred, {"input": {"x": _BoomRepr()}}) == (True, None)
+
+
+def test_eval_failure_reason_survives_unrepresentable_value() -> None:
+    # On the FAILURE path the reason builds repr(actual); a value whose __repr__
+    # raises must still yield (False, reason), never an exception.
+    class _BoomRepr:
+        def __eq__(self, other: object) -> bool:
+            return False  # force the comparison to fail
+
+        def __repr__(self) -> str:
+            raise RuntimeError("boom")
+
+    pred = {"phase": "precondition", "check": {"op": "==", "path": "input.x", "value": "v"}}
+    holds, reason = _eval(pred, {"input": {"x": _BoomRepr()}})
+    assert holds is False
+    assert reason is not None and "unrepresentable" in reason
