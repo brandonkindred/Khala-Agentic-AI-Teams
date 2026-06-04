@@ -262,6 +262,153 @@ class TestRecoverDirtyTree:
         assert os.path.exists(os.path.join(clone, "wip.txt"))
 
 
+# ---------------------------------------------------------------------------
+# _prepare_issue_branch: recovery + continuation end to end
+# ---------------------------------------------------------------------------
+
+
+def _prep(api, clone: str, issue: int = 7):
+    return api._prepare_issue_branch(clone, "origin", "main", f"khala/issue-{issue}", None, issue_number=issue)
+
+
+class TestPrepareIssueBranchRecovery:
+    def test_fresh_clean_checkout_unchanged_behavior(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        assert notes == []
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "khala/issue-7"
+        assert _must(clone, "rev-parse", "khala/issue-7") == _must(clone, "rev-parse", "origin/main")
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+    def test_marker_written_on_success(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        assert api._read_active_issue(clone) == 7
+
+    def test_dirty_same_issue_recovers_and_continues(self, api, repo_pair) -> None:
+        """The headline scenario: interrupted mid-run, job deleted, new job started."""
+        _, clone = repo_pair
+        # Simulate the interrupted run: prep'd for issue 7, progressed on development.
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "src/progress.py", "x = 1\n", "task progress")
+        os.makedirs(os.path.join(clone, "specs"), exist_ok=True)
+        with open(os.path.join(clone, "specs/notes.md"), "w", encoding="utf-8") as fh:
+            fh.write("open questions\n")
+        # (no _clear_active_issue: the job died)
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert "src/progress.py" in files
+        assert "specs/notes.md" in files
+        assert any("Recovered" in n for n in notes)
+        assert any("Continuing" in n for n in notes)
+        assert api._working_tree_dirty(clone) == (True, False, None)
+
+    def test_dirty_foreign_issue_rescued_not_continued(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone, issue=5)
+        assert ok is True
+        with open(os.path.join(clone, "foreign.txt"), "w", encoding="utf-8") as fh:
+            fh.write("issue 5 work\n")
+
+        ok, err, notes = _prep(api, clone, issue=7)
+        assert ok is True, err
+        assert "foreign.txt" not in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        rescued = _branch_exists(clone, "khala/rescue/issue-5-*")
+        assert rescued is not None
+        assert "foreign.txt" in _must(clone, "ls-tree", "-r", "--name-only", rescued)
+
+    def test_status_failure_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, True, "git status failed"))
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "git status failed" in err
+
+    def test_recovery_failure_fails_closed_with_both_messages(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("x\n")
+        monkeypatch.setattr(api, "commit_working_tree", lambda *_a, **_kw: (False, "boom"))
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "uncommitted changes" in err and "boom" in err
+        assert os.path.exists(os.path.join(clone, "wip.txt"))
+
+
+class TestPrepareIssueBranchContinuation:
+    def test_continues_from_local_issue_branch(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
+        _commit_file(clone, "done.py", "ok = True\n", "finished work")
+        _must(clone, "checkout", "-q", "main")
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        assert "done.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert any("Continuing" in n for n in notes)
+
+    def test_continues_from_remote_issue_branch(self, api, repo_pair) -> None:
+        remote, clone = repo_pair
+        # Previous job pushed khala/issue-7 then died; local checkout knows nothing.
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "pushed.py", "ok = True\n", "pushed work")
+        _must(remote, "checkout", "-q", "main")
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        assert "pushed.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert any("Continuing" in n for n in notes)
+
+    def test_continues_from_issue_rescue_ref(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        _must(clone, "checkout", "-q", "-b", "khala/rescue/issue-7-20260101-000000", "origin/main")
+        _commit_file(clone, "rescued.py", "ok = True\n", "rescued work")
+        _must(clone, "checkout", "-q", "main")
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        assert "rescued.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+
+    def test_local_branch_preferred_over_remote(self, api, repo_pair) -> None:
+        remote, clone = repo_pair
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "remote.py", "r = 1\n", "remote work")
+        _must(remote, "checkout", "-q", "main")
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
+        _commit_file(clone, "local.py", "l = 1\n", "local work")
+        _must(clone, "checkout", "-q", "main")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert "local.py" in files
+
+
+class TestOrphanPrevention:
+    def test_foreign_development_progress_preserved_before_reset(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone, issue=5)
+        assert ok is True
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "issue5.py", "x = 5\n", "issue 5 progress")
+        dev_tip = _must(clone, "rev-parse", "development")
+
+        ok, err, _ = _prep(api, clone, issue=7)
+        assert ok is True, err
+        # development was re-seeded from origin/main…
+        assert _must(clone, "rev-parse", "development") == _must(clone, "rev-parse", "origin/main")
+        # …but the old tip is still reachable from a rescue ref.
+        reachable = _must(clone, "rev-list", "--all")
+        assert dev_tip in reachable
+        assert _branch_exists(clone, "khala/rescue/issue-5-*") is not None
+
+
 class TestWorkingTreeDirtyTriple:
     def test_clean(self, api, repo_pair) -> None:
         _, clone = repo_pair

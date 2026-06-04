@@ -478,6 +478,38 @@ def _stub_heavy_modules() -> None:
         gu.DEVELOPMENT_BRANCH = "development"  # type: ignore[attr-defined]
         sys.modules["software_engineering_team.shared.git_utils"] = gu
 
+    gu_mod = sys.modules["software_engineering_team.shared.git_utils"]
+    if not hasattr(gu_mod, "commit_working_tree"):
+        # Functional stand-in: api.main imports commit_working_tree for dirty-tree
+        # recovery, and TestPrepareIssueBranch exercises that path against real
+        # repos — a (True, "...") no-op stub would leave the tree dirty and make
+        # those tests order-dependent on whether the real module loaded first.
+        def _stub_commit_working_tree(repo_path, message):
+            import subprocess as sp
+
+            sp.run(["git", "-C", str(repo_path), "add", "-A"], capture_output=True)
+            r = sp.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_path),
+                    "-c",
+                    "user.name=Stub",
+                    "-c",
+                    "user.email=stub@example.com",
+                    "commit",
+                    "--no-gpg-sign",
+                    "-m",
+                    message,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            ok = r.returncode == 0 or "nothing to commit" in (r.stdout + r.stderr)
+            return ok, (r.stdout + r.stderr).strip()[:200]
+
+        gu_mod.commit_working_tree = _stub_commit_working_tree  # type: ignore[attr-defined]
+
 
 @pytest.fixture
 def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
@@ -521,7 +553,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     )
 
     # Git helpers: success by default.
-    monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None))
+    monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None, []))
     monkeypatch.setattr(api_main, "_fast_forward", lambda *a, **kw: (True, None))
     monkeypatch.setattr(api_main, "_push_branch", lambda *a, **kw: (True, None))
 
@@ -796,7 +828,7 @@ class TestEndpointFailures:
         monkeypatch.setattr(
             patched_app["api"],
             "_prepare_issue_branch",
-            lambda *a, **kw: (False, "no remote"),
+            lambda *a, **kw: (False, "no remote", []),
         )
         resp = patched_app["client"].post(
             "/run-from-github",
@@ -953,20 +985,26 @@ class TestPrepareIssueBranch:
 
         return api_main
 
-    def test_dirty_tree_aborts(self, api, tmp_path) -> None:
-        """Uncommitted changes must prevent the branch reset."""
+    def test_dirty_tree_recovered_to_rescue_branch(self, api, tmp_path) -> None:
+        """Uncommitted unattributed changes are preserved, then prep proceeds."""
         repo = self._init_repo(tmp_path)
         with open(f"{repo}/README.md", "a") as fh:
             fh.write("dirty\n")
 
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
-        assert ok is False
-        assert "uncommitted changes" in (msg or "")
+        ok, msg, notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+        assert any("khala/rescue/" in n for n in notes)
+        import subprocess
+
+        status = subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+        assert status == ""
 
     def test_clean_tree_succeeds(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
         self._git(repo, "fetch", "origin", "main")
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
         import subprocess
 
@@ -980,13 +1018,13 @@ class TestPrepareIssueBranch:
 
     def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
-        ok, msg = api._prepare_issue_branch(repo, "origin", "--exec=evil", "khala/issue-9")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "--exec=evil", "khala/issue-9")
         assert ok is False
         assert "unsafe" in (msg or "")
 
     def test_unsafe_integration_branch_rejected(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
         assert ok is False
         assert "unsafe" in (msg or "")
 
@@ -1033,19 +1071,18 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
-        ok, msg = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
+        ok, msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
         assert ok is True, msg
-        # First git op is the fetch — it must carry the auth env.
-        fetch_args, fetch_env = calls[0]
-        assert fetch_args[0] == "fetch"
-        assert fetch_env is not None
-        # b64("x-access-token:tok-123")
-        assert (
-            fetch_env["GIT_CONFIG_VALUE_0"]
-            == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
-        )
-        # The local checkouts that follow run without an auth env.
-        assert all(env is None for _, env in calls[1:])
+        # Both fetches (base branch + issue-branch continuation candidate)
+        # must carry the auth env.
+        fetches = [(args, env) for args, env in calls if args[0] == "fetch"]
+        assert len(fetches) == 2
+        for _args, env in fetches:
+            assert env is not None
+            # b64("x-access-token:tok-123")
+            assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Basic eC1hY2Nlc3MtdG9rZW46dG9rLTEyMw=="
+        # Local-only git ops never carry the credential.
+        assert all(env is None for args, env in calls if args[0] != "fetch")
 
     def test_prepare_issue_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         calls = []
@@ -1056,7 +1093,7 @@ class TestGitCredentialThreading:
 
         monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
-        ok, _ = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
+        ok, _msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
         assert ok is True
         assert all(env is None for _, env in calls)
 

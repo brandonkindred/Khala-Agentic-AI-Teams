@@ -564,25 +564,86 @@ def _recover_dirty_tree(
     return wip_tip, note, None
 
 
+def _preserve_if_would_orphan(
+    repo_path: str, branch: str, base_ref: str, seed: str, marker: Optional[int]
+) -> Optional[str]:
+    """Create a rescue ref for `branch` if resetting it would orphan commits.
+
+    Invariant served: no reset performed by branch prep may make a commit
+    unreachable.
+
+    Postconditions:
+        - Returns None when nothing needed preserving or a rescue ref now
+          holds the branch tip; returns an error string when preservation
+          was needed but failed (callers must fail closed).
+    """
+    if branch == seed:
+        return None
+    if not _is_ahead(repo_path, branch, base_ref):
+        return None
+    if _reachable_from(repo_path, branch, seed):
+        return None
+    name = _rescue_branch_name(repo_path, marker)
+    if name is None:
+        return f"could not allocate a rescue branch to preserve `{branch}`"
+    rc, msg = _git(repo_path, "branch", name, branch)
+    if rc != 0:
+        return f"failed to preserve `{branch}` before reset: {msg}"
+    logger.warning("Preserved %s on %s before reset (ahead of %s)", branch, name, base_ref)
+    return None
+
+
 def _prepare_issue_branch(
     repo_path: str,
     remote: str,
     default_branch: str,
     integration_branch: str,
     token: Optional[str] = None,
-) -> Tuple[bool, Optional[str]]:
-    # Refuse to overwrite the operator's in-flight work. Without this check,
-    # `git checkout -B` happily carries unrelated dirty files across the
-    # branch switch and they leak into the issue's PR.
-    _status_ok, dirty, listing = _working_tree_dirty(repo_path)
+    issue_number: Optional[int] = None,
+) -> Tuple[bool, Optional[str], List[str]]:
+    """Prepare development + integration branches, recovering interrupted state.
+
+    Dirty trees are recovered (same-issue work committed in place, foreign
+    work preserved on khala/rescue/* branches), the integration branch is
+    seeded from the best prior-progress tip so a new job picks up where the
+    previous one left off, and no reset may orphan commits.
+
+    Preconditions:
+        - repo_path is a git checkout; ref arguments may be untrusted.
+    Postconditions (success):
+        - integration_branch is checked out with a clean working tree;
+          khala.active-issue records issue_number when provided; every commit
+          reachable from a local branch on entry is still reachable from some
+          local or remote ref; the returned notes describe recovery and
+          continuation actions for operator-facing reporting.
+    Postconditions (failure):
+        - No uncommitted work has been deleted and no commit that was
+          reachable on entry has become unreachable.
+    """
+    notes: List[str] = []
+    marker = _read_active_issue(repo_path)
+
+    status_ok, dirty, listing = _working_tree_dirty(repo_path)
+    if not status_ok:
+        return False, f"cannot inspect working tree: {listing}", notes
+    wip_tip: Optional[str] = None
     if dirty:
-        return False, f"working tree has uncommitted changes; clean it before retrying:\n{listing}"
+        wip_tip, note, recover_err = _recover_dirty_tree(repo_path, marker, issue_number, listing or "")
+        if recover_err:
+            return (
+                False,
+                "working tree has uncommitted changes; clean it before retrying:\n"
+                f"{listing}\n(automatic recovery failed: {recover_err})",
+                notes,
+            )
+        if note:
+            notes.append(note)
 
     # Defense-in-depth: reject ref names that could be parsed as git options.
     if not _is_safe_ref(default_branch):
-        return False, f"unsafe default_branch ref: {default_branch!r}"
+        return False, f"unsafe default_branch ref: {default_branch!r}", notes
     if not _is_safe_ref(integration_branch):
-        return False, f"unsafe integration_branch ref: {integration_branch!r}"
+        return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
 
     # `fetch` is the only network op here (the checkouts below are local), so it
     # needs the credential. The clone was authenticated transiently by the
@@ -590,21 +651,45 @@ def _prepare_issue_branch(
     auth_env = _git_auth_env(token) if token else None
     rc, msg = _git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
     if rc != 0:
-        return False, msg
-    rc, msg = _git(
-        repo_path,
-        "checkout",
-        "-B",
-        DEVELOPMENT_BRANCH,
-        f"{remote}/{default_branch}",
-        "--",
-    )
+        return False, msg, notes
+    # The issue branch may exist remotely from a previous job that pushed
+    # before dying; fetch it as a continuation candidate (absence is fine).
+    _git(repo_path, "fetch", "--", remote, integration_branch, env=auth_env)
+
+    base_ref = f"{remote}/{default_branch}"
+    candidates: List[str] = []
+    if marker is not None and issue_number is not None and marker == issue_number:
+        candidates.append(wip_tip or DEVELOPMENT_BRANCH)
+    candidates.append(integration_branch)
+    candidates.append(f"{remote}/{integration_branch}")
+    if issue_number is not None:
+        rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
+        if rescue_ref:
+            candidates.append(rescue_ref)
+    seed = next((c for c in candidates if _is_ahead(repo_path, c, base_ref)), base_ref)
+
+    if seed != base_ref:
+        rc, count = _git(repo_path, "rev-list", "--count", f"{base_ref}..{seed}")
+        ahead = count.strip() if rc == 0 else "?"
+        notes.append(
+            f"▶️ Continuing issue from previous progress: `{seed}` ({ahead} commits ahead of `{default_branch}`)."
+        )
+
+    # Invariant: no reset below may make commits unreachable.
+    for branch in (DEVELOPMENT_BRANCH, integration_branch):
+        preserve_err = _preserve_if_would_orphan(repo_path, branch, base_ref, seed, marker)
+        if preserve_err:
+            return False, preserve_err, notes
+
+    rc, msg = _git(repo_path, "checkout", "-B", DEVELOPMENT_BRANCH, seed, "--")
     if rc != 0:
-        return False, msg
+        return False, msg, notes
     rc, msg = _git(repo_path, "checkout", "-B", integration_branch, "--")
     if rc != 0:
-        return False, msg
-    return True, None
+        return False, msg, notes
+    if issue_number is not None:
+        _write_active_issue(repo_path, issue_number)
+    return True, None, notes
 
 
 def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, Optional[str]]:
@@ -660,7 +745,7 @@ def _run_with_github_hooks(
 
         _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
 
-        prep_ok, prep_err = _prepare_issue_branch(
+        prep_ok, prep_err, _prep_notes = _prepare_issue_branch(
             request.repo_path, request.remote, base, integration_branch, token
         )
         if not prep_ok:
