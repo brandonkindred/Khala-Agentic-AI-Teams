@@ -336,3 +336,87 @@ def test_validate_and_is_valid() -> None:
     with pytest.raises(PredicateError):
         validate_predicate(bad)
     assert is_valid_predicate(bad) is False
+
+
+# ---------------------------------------------------------------------------
+# Missing-path semantics are per-operator (a missing value is a distinct value)
+# ---------------------------------------------------------------------------
+def test_missing_path_per_operator() -> None:
+    root = {"output": {}}  # 'error'/'status' absent
+    # != allows when the path is absent (the success case)
+    assert (
+        _eval(
+            {
+                "phase": "postcondition",
+                "check": {"op": "!=", "path": "output.error", "value": "fatal"},
+            },
+            root,
+        )[0]
+        is True
+    )
+    # == / in block when the required path is absent
+    assert (
+        _eval(
+            {
+                "phase": "postcondition",
+                "check": {"op": "==", "path": "output.status", "value": "ok"},
+            },
+            root,
+        )[0]
+        is False
+    )
+    assert (
+        _eval(
+            {
+                "phase": "postcondition",
+                "check": {"op": "in", "path": "output.status", "value": ["ok"]},
+            },
+            root,
+        )[0]
+        is False
+    )
+
+
+def test_missing_path_composes_through_not() -> None:
+    # 'block when approved == true' must ALLOW when 'approved' is absent — the
+    # fail-closed-on-missing of the old design flipped to allow under not; now
+    # the inner == is a concrete False so not(False) == allow, consistently.
+    pred = {
+        "phase": "postcondition",
+        "check": {"op": "not", "of": [{"op": "==", "path": "output.approved", "value": True}]},
+    }
+    assert _eval(pred, {"output": {}})[0] is True
+    assert _eval(pred, {"output": {"approved": True}})[0] is False
+
+
+def test_strict_bool_int_equality() -> None:
+    # == / != / in never coerce bool <-> int (True is not 1).
+    assert (
+        _eval(
+            {"phase": "tool_gate", "check": {"op": "==", "path": "args.dry_run", "value": True}},
+            {"tool_id": "t", "args": {"dry_run": 1}},
+        )[0]
+        is False
+    )
+    assert (
+        _eval(
+            {"phase": "tool_gate", "check": {"op": "==", "path": "args.dry_run", "value": True}},
+            {"tool_id": "t", "args": {"dry_run": True}},
+        )[0]
+        is True
+    )
+    assert (
+        _eval(
+            {"phase": "precondition", "check": {"op": "in", "path": "input.n", "value": [1, 2]}},
+            {"input": {"n": True}},
+        )[0]
+        is False
+    )
+
+
+def test_forbid_tool_non_string_tool_id_never_raises() -> None:
+    # Public evaluate must not raise on an unhashable/non-string tool_id; a
+    # non-string id simply cannot match a forbidden string id, so it allows.
+    pred = {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "shell"}}
+    assert _eval(pred, {"tool_id": ["shell"], "args": {}})[0] is True
+    assert _eval(pred, {"tool_id": None, "args": {}})[0] is True

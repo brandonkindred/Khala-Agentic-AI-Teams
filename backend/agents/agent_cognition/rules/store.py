@@ -39,7 +39,7 @@ import logging
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4, uuid5
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
@@ -84,6 +84,40 @@ class RuleStoreError(RuntimeError):
     """
 
 
+# Fixed namespace for deterministic seed-rule ids so install is idempotent and
+# concurrency-safe via the primary key (no check-then-insert race).
+_SEED_NAMESPACE = UUID("6f3b9e7a-1c2d-4e8f-9a0b-5d6c7e8f9a0b")
+
+
+def _require_aware(now: datetime | None) -> None:
+    """A caller-supplied ``now`` must be timezone-aware (TIMESTAMPTZ columns).
+
+    A naive datetime would be bound against the Postgres session time zone, not
+    UTC, silently shifting every stored instant relative to ``_now()`` rows.
+    """
+    assert now is None or now.tzinfo is not None, "now must be timezone-aware (UTC)"
+
+
+def _assert_storable_rule(rule: Rule) -> None:
+    """An ``enforced`` rule must carry a valid, enforceable predicate.
+
+    The enforcement gate only applies an enforced rule whose predicate declares
+    the matching ``phase``; a malformed/missing-phase predicate would be silently
+    inert (fail open). Reject it at the write boundary, mirroring the approve gate.
+    Advisory rules carry no enforced predicate, so they are not validated.
+    """
+    if rule.mode == RuleMode.ENFORCED:
+        try:
+            validate_predicate(rule.predicate)
+        except PredicateError as exc:
+            raise RuleStoreError(f"enforced rule has an invalid predicate: {exc}") from exc
+
+
+def _seed_rule_id(agent_id: str, pack_name: str, seed_key: str) -> str:
+    """Stable rule id for a seed rule, so re-install collides on the primary key."""
+    return str(uuid5(_SEED_NAMESPACE, f"{agent_id}\x00{pack_name}\x00{seed_key}"))
+
+
 # ---------------------------------------------------------------------------
 # Rules — reads/writes
 # ---------------------------------------------------------------------------
@@ -94,6 +128,8 @@ def create_rule(agent_id: str, rule: Rule) -> None:
     Preconditions:
         * ``agent_id`` is non-empty and ``rule.agent_id == agent_id``.
         * ``rule.id`` is caller-minted (the store never mints it).
+        * an ``enforced`` rule carries a valid predicate (else
+          :class:`RuleStoreError` — an inert enforced rule would fail open).
     Postconditions:
         * A row is inserted with all columns; ``predicate``/``evidence`` persist
           as JSONB and enums as their ``.value``. A duplicate ``id`` surfaces the
@@ -101,6 +137,7 @@ def create_rule(agent_id: str, rule: Rule) -> None:
     """
     assert agent_id, "create_rule: agent_id must be non-empty"
     assert rule.agent_id == agent_id, "create_rule: rule.agent_id must match agent_id"
+    _assert_storable_rule(rule)
     with _conn() as conn:
         _insert_rule(conn, rule)
 
@@ -289,6 +326,7 @@ def approve_proposal(
     """
     assert agent_id, "approve_proposal: agent_id must be non-empty"
     assert decided_by, "approve_proposal: decided_by must be non-empty"
+    _require_aware(now)
     decided_at = now or _now()
     with _conn() as conn:
         proposal = _fetch_proposal_for_update(conn, agent_id, proposal_id)
@@ -327,6 +365,7 @@ def reject_proposal(
     """
     assert agent_id, "reject_proposal: agent_id must be non-empty"
     assert decided_by, "reject_proposal: decided_by must be non-empty"
+    _require_aware(now)
     decided_at = now or _now()
     with _conn() as conn:
         proposal = _fetch_proposal_for_update(conn, agent_id, proposal_id)
@@ -369,14 +408,14 @@ def _apply_approval(
     new_rule = _build_rule_from_spec(
         agent_id, proposal.proposed_rule, rule_id=new_rule_id, now=decided_at
     )
-    if new_rule.mode == RuleMode.ENFORCED:
-        try:
-            validate_predicate(new_rule.predicate)
-        except PredicateError as exc:
-            raise RuleStoreError(f"enforced rule has an invalid predicate: {exc}") from exc
+    _assert_storable_rule(new_rule)
 
     if proposal.action == ProposalAction.AMEND:
         target = _require_target(conn, agent_id, proposal.target_rule_id)
+        if new_rule.id == target.id:
+            raise RuleStoreError(
+                f"amend replacement id {new_rule.id!r} collides with the target rule id"
+            )
         _set_rule_status(conn, agent_id, target.id, RuleStatus.RETIRED, decided_at)
         lineage = f"amends {target.id}"
         rationale = f"{lineage}: {new_rule.rationale}" if new_rule.rationale else lineage
@@ -419,12 +458,19 @@ def _build_rule_from_spec(
 
 
 def _require_target(conn: Any, agent_id: str, target_rule_id: str | None) -> Rule:
-    """Return the agent-owned target rule, or raise :class:`RuleStoreError`."""
+    """Return the agent-owned **active** target rule, locked for update.
+
+    Locks the target row ``FOR UPDATE`` so two proposals targeting the same rule
+    serialize, and requires it to be ``active`` so a second concurrent (or stale)
+    approval cannot retire/amend an already-retired rule a second time.
+    """
     if not target_rule_id:
         raise RuleStoreError("retire/amend proposal has no target_rule_id")
-    target = _fetch_rule(conn, agent_id, target_rule_id)
+    target = _fetch_rule(conn, agent_id, target_rule_id, for_update=True)
     if target is None:
         raise RuleStoreError(f"target rule {target_rule_id!r} not found for agent {agent_id!r}")
+    if target.status != RuleStatus.ACTIVE:
+        raise RuleStoreError(f"target rule {target_rule_id!r} is {target.status.value}, not active")
     return target
 
 
@@ -439,23 +485,22 @@ def install_seed_pack(agent_id: str, pack_name: str, *, now: datetime | None = N
         * ``agent_id`` non-empty; ``pack_name`` is a known pack (else
           :class:`RuleStoreError`).
     Postconditions:
-        * Each seed rule not already present (matched by ``source='seed'`` and an
-          ``evidence`` containment marker ``{"seed_pack", "seed_key"}``) is
-          inserted ``active`` with ``source='seed'``. Returns the newly-created
-          rule ids — empty on a re-run (idempotent at the application level).
+        * Each seed rule is inserted ``active`` with ``source='seed'`` under a
+          deterministic id derived from ``(agent_id, pack, seed_key)``, via
+          ``INSERT … ON CONFLICT (id) DO NOTHING``. Returns the ids actually
+          inserted — empty on a re-run. Idempotent and concurrency-safe (the
+          primary key, not a check-then-insert, enforces single-install).
     """
     assert agent_id, "install_seed_pack: agent_id must be non-empty"
+    _require_aware(now)
     if pack_name not in SEED_PACKS:
         raise RuleStoreError(f"unknown seed pack {pack_name!r}")
     created_at = now or _now()
     new_ids: list[str] = []
     with _conn() as conn:
         for seed in SEED_PACKS[pack_name]:
-            marker = [{"seed_pack": pack_name, "seed_key": seed.key}]
-            if _seed_rule_exists(conn, agent_id, marker):
-                continue
             rule = Rule(
-                id=str(uuid4()),
+                id=_seed_rule_id(agent_id, pack_name, seed.key),
                 agent_id=agent_id,
                 text=seed.text,
                 mode=seed.mode,
@@ -463,36 +508,32 @@ def install_seed_pack(agent_id: str, pack_name: str, *, now: datetime | None = N
                 predicate=dict(seed.predicate),
                 rationale=seed.rationale,
                 source=RuleSource.SEED,
-                evidence=marker,
+                evidence=[{"seed_pack": pack_name, "seed_key": seed.key}],
                 needs_review=False,
                 priority=seed.priority,
                 created_at=created_at,
                 updated_at=created_at,
             )
-            _insert_rule(conn, rule)
-            new_ids.append(rule.id)
+            if _insert_rule(conn, rule, ignore_conflict=True) == 1:
+                new_ids.append(rule.id)
     return new_ids
-
-
-def _seed_rule_exists(conn: Any, agent_id: str, marker: list[dict[str, str]]) -> bool:
-    with conn.cursor() as cur:
-        cur.execute(
-            """SELECT 1 FROM agent_cognition_rules
-               WHERE agent_id = %s AND source = 'seed' AND evidence @> %s::jsonb
-               LIMIT 1""",
-            (agent_id, Json(marker)),
-        )
-        return cur.fetchone() is not None
 
 
 # ---------------------------------------------------------------------------
 # Shared row helpers (operate on an open connection — used inside transactions)
 # ---------------------------------------------------------------------------
-def _insert_rule(conn: Any, rule: Rule) -> None:
+def _insert_rule(conn: Any, rule: Rule, *, ignore_conflict: bool = False) -> int:
+    """Insert a rule row; return the number of rows inserted (0 or 1).
+
+    With ``ignore_conflict`` an ``ON CONFLICT (id) DO NOTHING`` makes a duplicate
+    primary key a no-op (returns 0) — used by seed install for race-free
+    idempotency. Without it a duplicate ``id`` raises the unique violation.
+    """
+    conflict = " ON CONFLICT (id) DO NOTHING" if ignore_conflict else ""
     with conn.cursor() as cur:
         cur.execute(
             f"""INSERT INTO agent_cognition_rules ({_RULE_COLS})
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s){conflict}""",
             (
                 rule.id,
                 rule.agent_id,
@@ -509,14 +550,15 @@ def _insert_rule(conn: Any, rule: Rule) -> None:
                 rule.updated_at,
             ),
         )
+        return cur.rowcount
 
 
-def _fetch_rule(conn: Any, agent_id: str, rule_id: str) -> Rule | None:
+def _fetch_rule(conn: Any, agent_id: str, rule_id: str, *, for_update: bool = False) -> Rule | None:
+    sql = f"SELECT {_RULE_COLS} FROM agent_cognition_rules WHERE agent_id = %s AND id = %s"
+    if for_update:
+        sql += " FOR UPDATE"
     with conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            f"SELECT {_RULE_COLS} FROM agent_cognition_rules WHERE agent_id = %s AND id = %s",
-            (agent_id, rule_id),
-        )
+        cur.execute(sql, (agent_id, rule_id))
         row = cur.fetchone()
         return Rule.model_validate(row) if row else None
 

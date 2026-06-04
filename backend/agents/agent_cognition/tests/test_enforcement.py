@@ -204,3 +204,30 @@ def test_enforcement_reexports_predicate_validators() -> None:
     )
     with pytest.raises(PredicateError):
         validate_predicate({"phase": "bad", "check": {}})
+
+
+def test_postcondition_neq_allows_when_field_absent() -> None:
+    # A 'block when output.error == fatal' rule, written as != , must allow a
+    # successful output that simply has no error key (missing-path semantics).
+    rule = _rule(
+        predicate={
+            "phase": "postcondition",
+            "check": {"op": "!=", "path": "output.error", "value": "fatal"},
+        }
+    )
+    assert evaluate_postcondition({"result": 1}, [rule]) == (True, None)
+    assert evaluate_postcondition({"error": "fatal"}, [rule])[0] is False
+
+
+def test_parse_memoized_across_calls() -> None:
+    # Repeated evaluations of the same predicate hit the parse cache (transparent
+    # to behavior; verify the cache is actually exercised).
+    from agent_cognition.rules.enforcement import _parse_cached
+
+    _parse_cached.cache_clear()
+    rule = _rule(
+        predicate={"phase": "precondition", "check": {"op": "<=", "path": "input.x", "value": 1}}
+    )
+    evaluate_precondition({"input": {"x": 0}}, [rule])
+    evaluate_precondition({"input": {"x": 2}}, [rule])
+    assert _parse_cached.cache_info().hits >= 1

@@ -149,9 +149,13 @@ def test_list_rules_negative_args_assert() -> None:
 
 
 def test_list_active_enforced_rules() -> None:
-    store.create_rule("a", _rule("a", rid="e1", mode=RuleMode.ENFORCED, priority=2))
+    pred = {"phase": "precondition", "check": {"op": "==", "path": "input.x", "value": 1}}
+    store.create_rule("a", _rule("a", rid="e1", mode=RuleMode.ENFORCED, predicate=pred, priority=2))
     store.create_rule("a", _rule("a", rid="adv", mode=RuleMode.ADVISORY))
-    store.create_rule("a", _rule("a", rid="ret", mode=RuleMode.ENFORCED, status=RuleStatus.RETIRED))
+    store.create_rule(
+        "a",
+        _rule("a", rid="ret", mode=RuleMode.ENFORCED, predicate=pred, status=RuleStatus.RETIRED),
+    )
     assert [r.id for r in store.list_active_enforced_rules("a")] == ["e1"]
 
 
@@ -397,6 +401,71 @@ def test_install_seed_pack_and_idempotent() -> None:
 def test_install_unknown_pack_raises() -> None:
     with pytest.raises(store.RuleStoreError):
         store.install_seed_pack("a", "nope")
+
+
+def test_install_seed_pack_uses_deterministic_id() -> None:
+    ids = store.install_seed_pack("a", "default_guardrails")
+    assert ids == [store._seed_rule_id("a", "default_guardrails", "no-secrets-in-output")]
+
+
+# ---------------------------------------------------------------------------
+# Validation, lifecycle, and tz guards (review hardening)
+# ---------------------------------------------------------------------------
+def test_create_rule_validates_enforced_predicate() -> None:
+    # An enforced rule with a missing/invalid phase would be silently inert in the
+    # enforcement gate (fail open); reject it at the write boundary.
+    with pytest.raises(store.RuleStoreError):
+        store.create_rule("a", _rule("a", mode=RuleMode.ENFORCED, predicate={}))
+    with pytest.raises(store.RuleStoreError):
+        store.create_rule("a", _rule("a", mode=RuleMode.ENFORCED, predicate={"phase": "nope"}))
+    # Valid enforced predicate and an advisory empty predicate both persist.
+    store.create_rule(
+        "a",
+        _rule(
+            "a",
+            rid="ok",
+            mode=RuleMode.ENFORCED,
+            predicate={
+                "phase": "precondition",
+                "check": {"op": "==", "path": "input.x", "value": 1},
+            },
+        ),
+    )
+    store.create_rule("a", _rule("a", rid="adv", mode=RuleMode.ADVISORY))
+    assert {r.id for r in store.list_rules("a")} == {"ok", "adv"}
+
+
+def test_approve_amend_new_rule_id_collision_raises() -> None:
+    store.create_rule("a", _rule("a", rid="t1", status=RuleStatus.ACTIVE))
+    proposal = _proposal(
+        "a", ProposalAction.AMEND, target_rule_id="t1", proposed_rule=_add_spec(text="v2")
+    )
+    store.create_proposal("a", proposal)
+    with pytest.raises(store.RuleStoreError):
+        store.approve_proposal("a", proposal.id, decided_by="op", new_rule_id="t1")
+    assert (
+        store.get_rule("a", "t1").status == RuleStatus.ACTIVE
+    )  # not retired  # type: ignore[union-attr]
+    assert store.get_proposal("a", proposal.id).status == ProposalStatus.PENDING  # type: ignore[union-attr]
+
+
+def test_retire_non_active_target_raises() -> None:
+    store.create_rule("a", _rule("a", rid="t1", status=RuleStatus.RETIRED))
+    proposal = _proposal("a", ProposalAction.RETIRE, target_rule_id="t1")
+    store.create_proposal("a", proposal)
+    with pytest.raises(store.RuleStoreError):
+        store.approve_proposal("a", proposal.id, decided_by="op")
+    assert store.get_proposal("a", proposal.id).status == ProposalStatus.PENDING  # type: ignore[union-attr]
+
+
+def test_naive_now_asserts() -> None:
+    naive = datetime(2026, 6, 1, 12, 0)  # no tzinfo
+    with pytest.raises(AssertionError):
+        store.approve_proposal("a", "p", decided_by="op", now=naive)
+    with pytest.raises(AssertionError):
+        store.reject_proposal("a", "p", decided_by="op", now=naive)
+    with pytest.raises(AssertionError):
+        store.install_seed_pack("a", "default_guardrails", now=naive)
 
 
 # ---------------------------------------------------------------------------

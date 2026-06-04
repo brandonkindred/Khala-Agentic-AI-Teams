@@ -33,10 +33,26 @@ Design by Contract:
   :class:`PredicateError` on any malformed/unknown construct, with **no
   evaluation and no side effects** — so an enforced rule can be validated at
   approve time before it is ever stored active.
-* :func:`evaluate` never raises on input *data* shape — a missing path or a
-  type-incompatible comparison yields ``(False, reason)`` so an enforced rule
-  fails **closed** — and raises only on programmer misuse (a non-``Predicate``
-  argument).
+* :func:`evaluate` never raises on input *data* shape — and raises only on
+  programmer misuse (a non-``Predicate`` argument).
+
+Missing-path semantics are **per-operator**, so a missing value is an ordinary
+distinct value (not a special fail-closed state that would invert under
+``not``):
+
+* ``==`` / ``in`` against a missing path are ``False`` (a missing value equals
+  nothing and is a member of nothing) — so a required ``output.status == "ok"``
+  blocks when ``status`` is absent.
+* ``!=`` against a missing path is ``True`` — so ``output.error != "fatal"``
+  *allows* when ``error`` is simply absent (the success case), and the same
+  result holds whether the check is written directly or wrapped in ``not``.
+* ordered numeric ops (``< <= > >=``) require both operands to be real numbers
+  (``bool`` excluded); a missing or non-numeric operand is ``False`` — so a
+  ``input.temperature <= 0.7`` precondition blocks when ``temperature`` is
+  absent.
+
+Equality (``==`` / ``!=`` / ``in``) is **strict**: ``bool`` never coerces to or
+from ``int`` (``True`` is not ``1``), matching the ordered ops' bool exclusion.
 """
 
 from __future__ import annotations
@@ -241,8 +257,8 @@ def evaluate(pred: Predicate, root: Mapping[str, Any]) -> tuple[bool, str | None
         * Returns ``(holds, reason)``: ``holds`` is ``True`` when the constraint
           is satisfied (⇒ allow) and ``reason`` is ``None``; on failure ``holds``
           is ``False`` and ``reason`` is a short human string. A missing path or
-          a type-incompatible comparison yields ``(False, reason)`` (fail closed),
-          never an exception.
+          a type-incompatible operand resolves per-operator (see the module
+          docstring) and never raises.
         * Raises ``TypeError`` only on programmer misuse (``pred`` not a
           ``Predicate``).
     """
@@ -281,7 +297,9 @@ def _eval_composite(node: _Composite, root: Mapping[str, Any]) -> tuple[bool, st
 
 def _eval_forbid_tool(node: _ForbidTool, root: Mapping[str, Any]) -> tuple[bool, str | None]:
     tool_id = root.get("tool_id") if isinstance(root, Mapping) else None
-    if tool_id in node.tool_ids:
+    # Only a string tool_id can match a forbidden (string) id; guarding the
+    # type also keeps an unhashable tool_id from raising in the set membership.
+    if isinstance(tool_id, str) and tool_id in node.tool_ids:
         return False, f"tool {tool_id!r} is forbidden"
     return True, None
 
@@ -289,24 +307,28 @@ def _eval_forbid_tool(node: _ForbidTool, root: Mapping[str, Any]) -> tuple[bool,
 def _eval_comparison(node: _Comparison, root: Mapping[str, Any]) -> tuple[bool, str | None]:
     actual = _resolve_path(node.path, root)
     dotted = ".".join(node.path)
-    if actual is MISSING:
-        return False, f"path {dotted!r} is missing"
+    missing = actual is MISSING
+    shown = "<missing>" if missing else repr(actual)
     op = node.op
     if op == "in":
-        ok = actual in node.value
-        return ok, None if ok else f"path {dotted!r} value {actual!r} not in {list(node.value)!r}"
+        if any(_strict_eq(actual, candidate) for candidate in node.value):
+            return True, None
+        return False, f"path {dotted!r} value {shown} not in {list(node.value)!r}"
     if op == "==":
-        ok = actual == node.value
+        ok = _strict_eq(actual, node.value)
     elif op == "!=":
-        ok = actual != node.value
+        # A missing/distinct value is genuinely "not equal", so this allows when
+        # the path is absent — and composes correctly under ``not`` because the
+        # result is a concrete bool, not a fail-closed sentinel.
+        ok = not _strict_eq(actual, node.value)
     else:  # numeric: < <= > >=
         if not _is_number(actual) or not _is_number(node.value):
-            return (
-                False,
-                f"path {dotted!r} needs numeric operands for {op!r} (got {actual!r} {op} {node.value!r})",
-            )
+            detail = "is missing" if missing else f"is not numeric ({actual!r})"
+            return False, f"path {dotted!r} {detail}; {op!r} needs numeric operands"
         ok = _NUMERIC_CMP[op](actual, node.value)
-    return ok, None if ok else f"path {dotted!r} value {actual!r} fails {op} {node.value!r}"
+    if ok:
+        return True, None
+    return False, f"path {dotted!r} value {shown} fails {op} {node.value!r}"
 
 
 def _resolve_path(path: tuple[str, ...], root: Mapping[str, Any]) -> Any:
@@ -323,3 +345,15 @@ def _resolve_path(path: tuple[str, ...], root: Mapping[str, Any]) -> Any:
 def _is_number(value: Any) -> bool:
     """Numeric for ordered comparison — ``bool`` is excluded (it is an ``int``)."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _strict_eq(a: Any, b: Any) -> bool:
+    """Equality that never coerces ``bool`` to/from ``int`` (``True`` is not ``1``).
+
+    Mirrors the ordered ops' ``bool`` exclusion so equality/membership checks
+    can't be satisfied by a loose ``1``/``True`` (or ``0``/``False``) crossover.
+    A ``MISSING`` operand is just a distinct value: it equals nothing concrete.
+    """
+    if isinstance(a, bool) or isinstance(b, bool):
+        return type(a) is type(b) and a == b
+    return a == b
