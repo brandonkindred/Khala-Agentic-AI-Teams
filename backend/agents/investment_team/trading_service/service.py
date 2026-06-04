@@ -678,10 +678,16 @@ class _EngineEntryDispatcher:
     def _cap_qty_to_loss(self, qty: float, *, side: str, equity: float, close: float) -> float:
         """Clamp ``qty`` so the worst-case realised per-trade loss respects ``max_loss_per_trade_pct``.
 
-        The position exits on the tightest stop that can fire for ``side``
-        (``stop_caps_side``); with no such stop the entire deployed amount is at
-        risk (stop factor 1.0). The realised loss is ``deployed × stop_factor``,
-        so ``qty`` is capped at ``max_loss% × equity / (close × stop_factor)``.
+        The position exits on the FIRST side-compatible stop in spec order
+        (``evaluate_exit_rules`` breaks on the first triggered rule). On a gap
+        that crosses several stops at once an earlier-but-looser stop wins, so
+        the worst-case realised loss is governed by the first side-compatible
+        stop's pct — NOT the tightest. (A later stop only wins when nothing
+        earlier triggered, which for a monotonic move means it is tighter than
+        every earlier stop, so it can only realise LESS.) With no such stop the
+        entire deployed amount is at risk (stop factor 1.0). The realised loss
+        is ``deployed × stop_factor``, so ``qty`` is capped at
+        ``max_loss% × equity / (close × stop_factor)``.
 
         Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
         Postconditions: returns ``qty`` unchanged when no tolerance is set or
@@ -697,7 +703,9 @@ class _EngineEntryDispatcher:
             if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side)
         ]
         if stop_pcts:
-            stop_factor = min(stop_pcts)
+            # First side-compatible stop in spec order — the one the engine can
+            # actually fire on a multi-stop gap (see docstring).
+            stop_factor = stop_pcts[0]
         elif side == "short":
             # A short with no effective stop has unbounded loss — price can gap
             # up arbitrarily, so the realised loss is not capped at the deployed

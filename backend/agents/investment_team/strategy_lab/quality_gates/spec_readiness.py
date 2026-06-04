@@ -988,16 +988,20 @@ class SpecReadinessGate(GateResultsMixin):
             # spec. Needs a known deployed fraction.
             covered_sides = [s for s in entry_sides if s not in uncovered_sides]
             if covered_sides and pos_fraction is not None:
-                # Each covered side is capped by the stop that fires FIRST
-                # against it. ``evaluate_exit_rules`` closes a position on the
-                # first triggered rule, and the tightest (smallest-pct) stop
-                # triggers on the earliest adverse bar — so it is the TIGHTEST
-                # effective stop per side that bounds the realised loss, not the
-                # widest. A looser catastrophic stop behind a tight one never
-                # sets the realised loss. The spec's worst per-trade loss is the
-                # loosest of those per-side caps.
+                # Each covered side's realised loss is governed by the FIRST
+                # side-compatible stop in spec order. ``evaluate_exit_rules``
+                # closes a position on the first triggered rule (it breaks on
+                # the first match), so on a gap that crosses several stops at
+                # once an earlier-but-looser stop wins — the worst-case loss is
+                # the first side-compatible stop's pct, NOT the tightest. Using
+                # the tightest (min) would under-state the loss and pass a spec
+                # whose emitted size breaches the tolerance on a gap. (A later
+                # stop only wins when no earlier one triggered, which for a
+                # monotonic move means it is tighter, so it can only realise
+                # less.) The spec's worst per-trade loss is the loosest of those
+                # per-side caps.
                 per_side_stop_pct = {
-                    s: min(float(r.pct) for r in stop_rules if stop_caps_side(r.basis, s))
+                    s: next(float(r.pct) for r in stop_rules if stop_caps_side(r.basis, s))
                     for s in covered_sides
                 }
                 worst_stop_pct = max(per_side_stop_pct.values())

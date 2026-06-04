@@ -206,6 +206,24 @@ def test_cap_qty_to_loss_sizes_down_to_tolerance_with_stop():
     assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 200.0
 
 
+def test_cap_qty_to_loss_uses_first_stop_in_spec_order_not_tightest():
+    """The engine fires the FIRST side-compatible stop in spec order, so a
+    looser stop ahead of a tighter one governs the worst-case loss (it wins on
+    a gap crossing both). With [20%, 5%], the 20% stop sets the cap: max_loss 1%
+    / 20% = 5% deployable = 50 shares @ $100 on $100k — NOT 200 (which the 5%
+    min would wrongly allow, breaching the tolerance on a gap)."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[],
+        sizing=None,
+        exit_rules=[
+            StopLossRule(basis="entry_price", pct=0.20),  # loose FIRST
+            StopLossRule(basis="entry_price", pct=0.05),
+        ],
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 50.0
+
+
 def test_cap_qty_to_loss_no_stop_caps_full_deployment():
     """Without an effective stop the whole position is at risk, so deployment
     is capped at max_loss_per_trade_pct itself (stop factor 1.0)."""

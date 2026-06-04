@@ -1403,15 +1403,15 @@ def test_rule9_check_b_covered_side_checked_despite_uncovered_fitting_long() -> 
     ), _critical(results)
 
 
-def test_rule9_check_b_uses_tightest_stop_not_widest() -> None:
-    """When a side has multiple effective stops, the position exits on the first
-    (tightest) one, so the realised loss uses the tightest stop. A 5% entry_price
-    stop behind a 20% catastrophic stop at 10% sizing realises 0.5%, not 2%, so a
-    1% tolerance passes — using the widest stop would falsely reject it."""
+def test_rule9_check_b_uses_first_stop_in_spec_order_tight_first() -> None:
+    """The realised loss uses the FIRST side-compatible stop in spec order (the
+    one the engine fires first). With the tight 5% stop ordered first, a 20%
+    catastrophic stop behind it never wins, so 10% sizing realises 0.5%, not 2%
+    — a 1% tolerance passes (using the widest stop would falsely reject it)."""
     spec = _spec(
         sizing=FixedFractionSizing(fraction=0.10),
         exit_=[
-            StopLossRule(basis="entry_price", pct=0.05),
+            StopLossRule(basis="entry_price", pct=0.05),  # tight FIRST -> fires first
             StopLossRule(basis="entry_price", pct=0.20),
         ],
         risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
@@ -1420,6 +1420,30 @@ def test_rule9_check_b_uses_tightest_stop_not_widest() -> None:
     assert not any(
         (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
     )
+
+
+def test_rule9_check_b_uses_first_stop_in_spec_order_loose_first_is_critical() -> None:
+    """When a LOOSER stop precedes a tighter one, ``evaluate_exit_rules`` fires
+    the looser stop first on a gap that crosses both — so the realised loss is
+    governed by the looser (first) stop, not the tighter (min) one. A 20% stop
+    ahead of a 5% stop at 10% sizing realises 2% > 1% tolerance — sizing against
+    the tightest would let this breach slip through."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[
+            StopLossRule(basis="entry_price", pct=0.20),  # loose FIRST -> fires on a gap
+            StopLossRule(basis="entry_price", pct=0.05),
+        ],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
+    ]
+    assert crit, _critical(results)
+    assert "2.00%" in crit[0] and "20.00%" in crit[0]
 
 
 def test_rule9_check_b_side_compatible_short_stop_is_covered() -> None:
