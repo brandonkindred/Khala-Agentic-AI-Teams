@@ -52,11 +52,11 @@ _CHARS_PER_TOKEN = 4
 # Read at call time so operators/tests can override via the env var below.
 _DEFAULT_EVENT_TOP_N = 20
 
-# How many recent summaries to scan per scale when skipping ``stale`` rows to find
-# the latest still-current one. Staleness is rare and transient (the lazy/central
-# rollup reconciles it), so consecutive stale summaries past this bound are not
-# expected; if they occur, that scale simply contributes no long-range context.
-_STALE_SCAN_LIMIT = 8
+# Page size for scanning summaries (newest first) when skipping ``stale`` rows to
+# find the latest still-current one. The scan pages through as far as needed — a
+# long run of stale summaries can never hide an older valid one — while never
+# materializing the agent's entire summary history in a single read.
+_SUMMARY_PAGE_SIZE = 32
 
 # Closed-period summary scales folded into the digest, broadest first so the
 # rendered block reads long-range → short-range before the live events. Year is
@@ -131,17 +131,23 @@ def _latest_non_stale_summary(agent_id: str, scale: Scale) -> PeriodSummary | No
     memory and — for the day scale, whose ``period_end`` bounds the live event
     window — hide the late events behind a boundary that no longer reflects them.
     So skip stale rows (newest first) and return the latest summary the memory
-    subsystem still considers current.
+    subsystem still considers current, paging past an arbitrarily long run of
+    stale rows so a transient stale cascade never hides an older valid summary.
 
     Postconditions:
-        * Returns the non-stale summary with the maximal ``period_start`` among the
-          most recent ``_STALE_SCAN_LIMIT`` summaries at ``scale``, or ``None`` if
-          none of them is current.
+        * Returns the non-stale summary with the maximal ``period_start`` at
+          ``scale`` (regardless of how many stale summaries precede it), or
+          ``None`` if the agent has no non-stale summary at that scale.
     """
-    for summary in store.fetch_summaries(agent_id, scale, limit=_STALE_SCAN_LIMIT):
-        if not summary.stale:
-            return summary
-    return None
+    offset = 0
+    while True:
+        page = store.fetch_summaries(agent_id, scale, limit=_SUMMARY_PAGE_SIZE, offset=offset)
+        for summary in page:
+            if not summary.stale:
+                return summary
+        if len(page) < _SUMMARY_PAGE_SIZE:
+            return None
+        offset += len(page)
 
 
 def _fetch_in_progress_events(

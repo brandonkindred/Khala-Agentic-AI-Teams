@@ -402,6 +402,58 @@ def test_stale_day_does_not_hide_late_events(monkeypatch: pytest.MonkeyPatch) ->
     assert "stale" not in digest
 
 
+def test_latest_non_stale_summary_pages_past_long_stale_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A run of stale summaries longer than one page must not hide the older
+    # still-current summary: the scan pages until it finds a non-stale row.
+    monkeypatch.setattr(retrieval, "_SUMMARY_PAGE_SIZE", 2)
+    backing = [_summary(scale=Scale.DAY, summary=f"stale{i}", stale=True) for i in range(3)] + [
+        _summary(scale=Scale.DAY, summary="current", stale=False)
+    ]
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(agent_id, scale, limit=None, offset=0):
+        calls.append((limit, offset))
+        return backing[offset : offset + limit] if scale is Scale.DAY else []
+
+    monkeypatch.setattr(store, "fetch_summaries", _fetch)
+    monkeypatch.setattr(store, "fetch_events_for_period", lambda *a, **k: [])
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "current" in digest
+    assert "stale" not in digest
+    # Paged past the first full (all-stale) page into the second.
+    assert (2, 0) in calls and (2, 2) in calls
+
+
+def test_latest_non_stale_summary_stops_at_short_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An all-stale history that ends on a short page terminates (returns None)
+    # without an extra empty fetch.
+    monkeypatch.setattr(retrieval, "_SUMMARY_PAGE_SIZE", 2)
+    backing = [_summary(scale=Scale.DAY, summary="s", stale=True)]  # 1 row < page size
+    calls: list[tuple[int, int]] = []
+
+    def _fetch(agent_id, scale, limit=None, offset=0):
+        calls.append((scale, offset))
+        return backing[offset : offset + limit] if scale is Scale.DAY else []
+
+    monkeypatch.setattr(store, "fetch_summaries", _fetch)
+    monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
+    _no_llm(monkeypatch)
+
+    digest = retrieval.build_memory_digest("a", 1000)
+
+    assert "## Long-term memory" not in digest
+    assert "live" in digest
+    # Only one DAY fetch (offset 0); the short page ended the scan.
+    assert [c for c in calls if c[0] is Scale.DAY] == [(Scale.DAY, 0)]
+
+
 # ===========================================================================
 # Budget enforcement
 # ===========================================================================
