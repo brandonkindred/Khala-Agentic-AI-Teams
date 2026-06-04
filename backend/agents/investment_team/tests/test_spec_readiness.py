@@ -1371,6 +1371,38 @@ def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
     assert "long" in crit[0] and "no stop_loss rule that can cap" in crit[0]
 
 
+def test_rule9_check_b_covered_side_checked_despite_uncovered_fitting_long() -> None:
+    """In a mixed-side spec, a non-rejected uncovered long (small enough to fit
+    the tolerance) must NOT suppress the realised-loss check for the covered
+    short. The covered side is evaluated over ``covered_sides`` only, so the
+    per-side stop computation does not blow up on the stop-less long and the
+    coherent short passes cleanly. (With ``StopLossRule.pct <= 1.0`` and shared
+    sizing the covered side cannot actually breach when the long fits, so this
+    guards the structure, not a breach.)"""
+    mixed_entry = [
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+        ),
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        ),
+    ]
+    spec = _spec(
+        entry=mixed_entry,
+        sizing=FixedFractionSizing(fraction=0.005),  # 0.5% deployed, fits 1% tol
+        exit_=[StopLossRule(basis="trailing_low", pct=0.20)],  # covers short only
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    # The uncovered long fits the tolerance, the covered short's realised loss
+    # (0.5% x 20% = 0.1%) is within it — neither loss-tolerance critical fires.
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
 def test_rule9_check_b_uses_tightest_stop_not_widest() -> None:
     """When a side has multiple effective stops, the position exits on the first
     (tightest) one, so the realised loss uses the tightest stop. A 5% entry_price
