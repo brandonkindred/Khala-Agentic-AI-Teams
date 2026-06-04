@@ -1690,6 +1690,20 @@ def test_readiness_signature_changes_with_hypothesis() -> None:
     )
 
 
+def test_readiness_signature_changes_with_requires_custom_code() -> None:
+    """Rule 9's custom_code_unenforceable critical depends on
+    ``requires_custom_code``; the mechanical trial-compile can flip it without
+    touching any other field, so the design-loop cache signature must change —
+    otherwise the flip rides a stale (pre-flip) readiness verdict and the
+    critical never fires."""
+    from investment_team.strategy_lab.orchestrator import _spec_readiness_signature
+
+    base = _spec()
+    flipped = _spec()
+    flipped.requires_custom_code = True
+    assert _spec_readiness_signature(base) != _spec_readiness_signature(flipped)
+
+
 # --- _extract_prose_position_pct unit coverage ---
 
 

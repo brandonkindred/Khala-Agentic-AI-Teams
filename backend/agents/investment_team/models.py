@@ -558,6 +558,11 @@ OrderLifecycleEventType = Literal[
     "warmup_dropped",
     "entry_filled",
     "exit_filled",
+    # A matched entry signal that the engine dispatcher's risk sizing reduced to
+    # zero (uncovered short, or a sub-1 whole-share order one share would push
+    # past a cap). Recorded so a zero-trade run is explainable rather than a
+    # silent no-emit; carries no order (it never reached the order book).
+    "risk_capped_skip",
 ]
 
 ZeroTradeCategory = Literal[

@@ -47,16 +47,15 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
-    StopLossRule,
     VolatilityTargetSizing,
-    stop_caps_side,
+    first_side_stop_factor,
 )
+from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
 from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio, Position
-from .providers.registry import canonical_asset_class
 from .strategy.contract import (
     OrderRequest,
     OrderSide,
@@ -514,10 +513,6 @@ class _EngineExitDispatcher:
 
 ENGINE_ENTRY_REASON_PREFIX = "engine_entry:"
 
-#: Canonical asset classes that trade in fractional units (no whole-share
-#: floor). Equities are whole-share and so are excluded.
-_FRACTIONAL_ASSET_CLASSES = frozenset({"crypto", "fx"})
-
 
 @dataclass
 class _EngineEntryDispatcher:
@@ -550,6 +545,19 @@ class _EngineEntryDispatcher:
     asset_class: str = ""
     _next_seq: int = 0
 
+    def __post_init__(self) -> None:
+        # Derive the per-run sizing constants once: asset_class, exit_rules, and
+        # risk_limits are all fixed at construction, so the fractional-venue flag
+        # and the worst-case per-side stop factor never change across bars. The
+        # sizing hot loop (``_compute_qty`` / ``_cap_qty_to_loss``) reads these
+        # cached values instead of re-normalizing the asset class and re-scanning
+        # the exit rules on every entry.
+        self._fractional: bool = is_fractional_asset_class(self.asset_class)
+        self._stop_factor_by_side: Dict[str, Optional[float]] = {
+            "long": first_side_stop_factor(self.exit_rules, "long"),
+            "short": first_side_stop_factor(self.exit_rules, "short"),
+        }
+
     def maybe_emit(
         self,
         *,
@@ -580,6 +588,19 @@ class _EngineEntryDispatcher:
         rule, rule_idx = match
         qty = self._compute_qty(rule.side, cur_bar, portfolio, views)
         if qty <= 0:
+            # A matched entry signal that risk-sizing reduced to zero — an
+            # uncovered short (unbounded loss), or a sub-1 whole-share order that
+            # one share would push past a cap. Record it so a zero-trade run is
+            # distinguishable from "no signal" rather than a silent no-emit.
+            _record_event(
+                result.execution_diagnostics,
+                "risk_capped_skip",
+                timestamp=cur_bar.timestamp,
+                symbol=sym,
+                side=rule.side,
+                reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
+                detail="entry sized to 0 by max_position_pct / max_loss_per_trade_pct",
+            )
             return
         self._next_seq += 1
         side = OrderSide.LONG if rule.side == "long" else OrderSide.SHORT
@@ -591,6 +612,11 @@ class _EngineEntryDispatcher:
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
             reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
+            # The dispatcher has already clamped this order to max_position_pct
+            # at the sizing price; mark it so RiskFilter.can_enter does not
+            # re-reject it on a gap-up / slippage basis mismatch (the gate
+            # enforces the cap only for non-presized custom-code orders).
+            risk_presized=True,
         )
         try:
             req.validate_prices()
@@ -665,55 +691,67 @@ class _EngineEntryDispatcher:
         if cap_position:
             qty = self._cap_qty_to_position(qty, equity=equity, close=close)
         qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
-        if self._trades_fractional():
+        if self._fractional:
             # Crypto / forex trade in fractional units, so a risk-capped sub-1
             # order is a valid trade — submit the fractional size as-is, with no
             # whole-share floor or skip. A cap that drove qty to ~0 (or an
             # uncovered-short skip) is dropped.
             return qty if qty > 0.0 else 0.0
-        if qty < 1.0:
-            # Whole-share asset: a sub-1 capped order cannot be submitted as a
-            # fraction. Flooring up to one share is only safe when one share is
-            # itself within every active risk cap — otherwise a whole share
-            # breaches the declared limit (e.g. an $80 position cap on a $100
-            # stock admits 0 shares, not 1). Probe the caps at one share: if any
-            # clips it below 1, skip the entry. This is independent of whether a
-            # cap reduced ``qty`` — a naturally-sub-1 raw order under a sub-1 cap
-            # still must not floor to a cap-breaching whole share. The position
-            # cap is probed UNCONDITIONALLY (not gated on ``cap_position``):
-            # ``fixed_fraction`` skips the main-path position clamp because it
-            # deploys exactly its readiness-verified fraction, but flooring a
-            # sub-1 fixed-fraction order up to one share can still exceed
-            # ``max_position_pct`` (high price / low equity), so one share must be
-            # checked against it here or the order would be emitted only to be
-            # rejected by ``RiskFilter.can_enter``. With no caps the probe is a
-            # no-op and the legacy 1-share floor stands.
-            one_share = self._cap_qty_to_position(1.0, equity=equity, close=close)
-            one_share = self._cap_qty_to_loss(one_share, side=side, equity=equity, close=close)
-            if one_share < 1.0:
-                return 0.0
-            return 1.0
-        return float(int(qty))
+        return self._floor_or_skip_whole_share(qty, side=side, equity=equity, close=close)
+
+    def _floor_or_skip_whole_share(
+        self, qty: float, *, side: str, equity: float, close: float
+    ) -> float:
+        """Resolve a whole-share order size from a (possibly capped) ``qty``.
+
+        ``qty >= 1`` floors down to ``int(qty)`` (always within the caps). A
+        sub-1 ``qty`` cannot be submitted as a fraction on a whole-share venue;
+        flooring up to one share is only safe when one share is itself within
+        every active risk cap, so the caps are re-probed at exactly one share and
+        the entry is skipped (``0.0``) when any cap would clip it below one. The
+        position cap is probed UNCONDITIONALLY — ``fixed_fraction`` skips the
+        main-path position clamp (it deploys its readiness-verified fraction),
+        but flooring a sub-1 fixed-fraction order up to one share can still
+        exceed ``max_position_pct`` (high price / low equity), which would emit
+        an order only to be rejected by ``RiskFilter.can_enter``. With no caps
+        the probe is a no-op and the legacy 1-share floor stands.
+
+        Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
+        Postconditions: returns ``0.0`` (skip) or a positive whole number of
+        shares whose one-share floor respects every active cap.
+        """
+        if qty >= 1.0:
+            return float(int(qty))
+        one_share = self._cap_qty_to_position(1.0, equity=equity, close=close)
+        one_share = self._cap_qty_to_loss(one_share, side=side, equity=equity, close=close)
+        return 1.0 if one_share >= 1.0 else 0.0
 
     def _trades_fractional(self) -> bool:
         """Whether this dispatcher's asset class trades in fractional units.
 
-        Crypto and forex are fractional-quantity venues; equities are
-        whole-share. Postconditions: returns True only for canonical
-        ``"crypto"`` / ``"fx"`` asset classes.
+        Reads the flag derived once in ``__post_init__`` from the shared
+        ``is_fractional_asset_class`` predicate (crypto / forex are fractional;
+        equities / futures / commodities are whole-lot).
         """
-        return canonical_asset_class(self.asset_class) in _FRACTIONAL_ASSET_CLASSES
+        return self._fractional
 
     def _cap_qty_to_position(self, qty: float, *, equity: float, close: float) -> float:
         """Clamp ``qty`` so its notional does not exceed ``max_position_pct``.
 
         Preconditions: ``close`` > 0. Postconditions: returns ``qty`` unchanged
-        when no risk limits are attached or ``qty`` <= 0; otherwise a share
-        count whose notional is <= ``equity × max_position_pct%``.
+        when no risk limits are attached or ``qty`` <= 0; returns ``0.0`` when a
+        cap is set but ``equity`` <= 0 (no capital to deploy — no positive size
+        can satisfy a percent-of-equity cap); otherwise a share count whose
+        notional is <= ``equity × max_position_pct%``.
         """
         limits = self.risk_limits
         if limits is None or qty <= 0:
             return qty
+        if equity <= 0:
+            # A percent-of-equity cap admits no positive position on a non-
+            # positive account; computing equity*pct/close would yield a
+            # negative max_qty (a broken clamp). Skip the entry instead.
+            return 0.0
         max_qty = equity * float(limits.max_position_pct) / 100.0 / close
         return min(qty, max_qty)
 
@@ -747,23 +785,19 @@ class _EngineEntryDispatcher:
         limits = self.risk_limits
         if limits is None or limits.max_loss_per_trade_pct is None or qty <= 0 or equity <= 0:
             return qty
-        stop_pcts = [
-            float(r.pct)
-            for r in self.exit_rules
-            if isinstance(r, StopLossRule) and stop_caps_side(r.basis, side)
-        ]
-        if stop_pcts:
-            # First side-compatible stop in spec order — the one the engine can
-            # actually fire on a multi-stop gap (see docstring).
-            stop_factor = stop_pcts[0]
-        elif side == "short":
-            # A short with no effective stop has unbounded loss — price can gap
-            # up arbitrarily, so the realised loss is not capped at the deployed
-            # notional and NO position size can honour the declared per-trade
-            # loss tolerance. Skip the entry rather than emit an unenforceable
-            # one.
-            return 0.0
-        else:
+        # First side-compatible stop in spec order (precomputed in __post_init__
+        # via the shared ``first_side_stop_factor`` — the same primitive the
+        # readiness gate uses, so the two cannot drift). It is the stop the engine
+        # can actually fire on a multi-stop gap.
+        stop_factor = self._stop_factor_by_side[side]
+        if stop_factor is None:
+            if side == "short":
+                # A short with no effective stop has unbounded loss — price can
+                # gap up arbitrarily, so the realised loss is not capped at the
+                # deployed notional and NO position size can honour the declared
+                # per-trade loss tolerance. Skip the entry rather than emit an
+                # unenforceable one.
+                return 0.0
             # An uncovered long loses at most its full deployed amount (price
             # floors at zero), so the deployed notional itself is the worst-case
             # loss (stop factor 1.0).

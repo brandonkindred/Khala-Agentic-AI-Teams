@@ -119,28 +119,41 @@ def test_can_enter_allows_order_at_max_position_pct():
     assert result.allowed
 
 
-def test_can_enter_position_cap_uses_reference_notional_not_post_slippage():
-    # The max_position_pct check uses ``position_cap_notional`` (reference price)
-    # so a continuation slice of an order sized exactly to the cap is not rejected
-    # just because entry slippage nudged the post-fill notional over. Here the
-    # post-slippage notional (6_006 = 6.006%) would breach a 6% cap, but the
-    # reference-price notional (6_000 = 6%) is exactly at the cap -> allowed.
+def test_can_enter_skips_position_cap_for_presized_orders():
+    # Dispatcher-presized orders (enforce_position_cap=False) skip the
+    # max_position_pct check: the dispatcher already clamped them to the cap at
+    # the sizing price, so re-checking at the fill price would falsely reject an
+    # order that gapped up. A 10%-of-equity order passes when presized.
     rf = RiskFilter(RiskLimits(max_position_pct=6.0))
-    result = rf.can_enter(
-        "A", 6_006.0, 100_000.0, {}, position_cap_notional=6_000.0
-    )
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {}, enforce_position_cap=False)
     assert result.allowed
 
 
-def test_can_enter_position_cap_notional_still_enforced_when_over_cap():
-    # When the reference-price notional itself is over the cap, the gate rejects
-    # regardless of the (smaller) post-fill notional passed for leverage.
+def test_can_enter_enforces_position_cap_for_custom_code_orders():
+    # Non-presized (custom-code) orders (the default) are the gate's sole
+    # position-cap enforcement point, so a 10% order under a 6% cap is rejected.
     rf = RiskFilter(RiskLimits(max_position_pct=6.0))
-    result = rf.can_enter(
-        "A", 5_000.0, 100_000.0, {}, position_cap_notional=10_000.0
-    )
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {})
     assert not result.allowed
     assert "max_position_pct" in result.reason
+
+
+def test_can_enter_rejects_non_positive_equity_when_enforcing_cap():
+    # A custom-code order on a ruined account (equity <= 0) is rejected rather
+    # than slipping through the equity>0-gated ratio checks to allowed=True.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 1_000.0, 0.0, {})
+    assert not result.allowed
+    assert "non-positive equity" in result.reason
+
+
+def test_can_enter_presized_order_allowed_on_non_positive_equity():
+    # A presized (dispatcher) order does not trip the non-positive-equity
+    # rejection — the dispatcher's own sizing already handled equity (it would
+    # produce qty<=0 and skip), and the gate must not double-reject.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 1_000.0, 0.0, {}, enforce_position_cap=False)
+    assert result.allowed
 
 
 def test_can_enter_allows_within_limits():

@@ -88,6 +88,62 @@ def test_entry_fires_when_predicate_satisfied():
     assert pending[0].reason.startswith("engine_entry:")
 
 
+def test_entry_emits_risk_presized_order():
+    """Dispatcher-emitted entries are flagged risk_presized so RiskFilter does
+    not re-reject them on a gap-up (the dispatcher already clamped to the cap)."""
+    rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+    dispatcher = _EngineEntryDispatcher(entry_rules=rules, sizing=FixedFractionSizing(fraction=0.02))
+    pending: list = []
+    result = TradingServiceResult()
+    dispatcher.maybe_emit(
+        cur_bar=_make_bar(close=100.0),
+        portfolio=_make_portfolio(),
+        pending_for_prev=pending,
+        views={"AAA": _build_view([80.0, 90.0, 100.0])},
+        result=result,
+    )
+    assert len(pending) == 1
+    assert pending[0].risk_presized is True
+
+
+def test_maybe_emit_records_risk_capped_skip_for_uncovered_short():
+    """A matched signal that risk-sizing reduces to zero (uncovered short with a
+    declared loss tolerance) is recorded as a 'risk_capped_skip' diagnostic event
+    rather than a silent no-emit, so a zero-trade run is explainable."""
+    rules = [EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+    dispatcher = _EngineEntryDispatcher(
+        entry_rules=rules,
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_rules=[],  # no stop -> uncovered short -> sized to 0
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+    )
+    pending: list = []
+    result = TradingServiceResult()
+    dispatcher.maybe_emit(
+        cur_bar=_make_bar(close=100.0),
+        portfolio=_make_portfolio(),
+        pending_for_prev=pending,
+        views={"AAA": _build_view([80.0, 90.0, 100.0])},
+        result=result,
+    )
+    assert len(pending) == 0
+    events = result.execution_diagnostics.last_order_events
+    assert any(e.event_type == "risk_capped_skip" for e in events)
+
+
+def test_cap_qty_to_position_skips_on_non_positive_equity():
+    """A percent-of-equity cap admits no positive position on a non-positive
+    account, so _cap_qty_to_position returns 0 (skip) rather than a negative
+    max_qty. Without risk limits it returns qty unchanged regardless."""
+    disp = _EngineEntryDispatcher(
+        entry_rules=[], sizing=None, risk_limits=RiskLimits(max_position_pct=6)
+    )
+    assert disp._cap_qty_to_position(100.0, equity=0.0, close=100.0) == 0.0
+    assert disp._cap_qty_to_position(100.0, equity=-5000.0, close=100.0) == 0.0
+    no_limits = _EngineEntryDispatcher(entry_rules=[], sizing=None, risk_limits=None)
+    assert no_limits._cap_qty_to_position(100.0, equity=-5000.0, close=100.0) == 100.0
+
+
 def test_entry_skipped_when_position_exists():
     rules = [
         EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0)),

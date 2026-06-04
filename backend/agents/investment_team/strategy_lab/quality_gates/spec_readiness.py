@@ -20,7 +20,11 @@ from typing import Callable, ClassVar, Iterable, Iterator, List, Optional
 
 from ...market_data_service import _max_universe_symbols
 from ...models import BacktestConfig, StrategySpec
-from ...strategy_lab_context import normalize_asset_class, normalize_asset_class_strict
+from ...strategy_lab_context import (
+    WHOLE_LOT_ASSET_CLASSES,
+    normalize_asset_class,
+    normalize_asset_class_strict,
+)
 from ...symbols import (
     COMMODITY_SYMBOLS,
     CRYPTO_SYMBOLS,
@@ -39,6 +43,7 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    first_side_stop_factor,
     stop_caps_side,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
@@ -201,10 +206,11 @@ def _extract_prose_position_pct(text: str) -> Optional[float]:
     return None
 
 
-# Asset classes that trade in whole units (shares / contracts). Crypto and
-# forex accept fractional quantities, so Rule 5's whole-lot check is skipped
+# Whole-lot asset classes are sourced from ``strategy_lab_context`` (single
+# source of truth shared with the runtime sizing dispatcher) so the readiness
+# whole-lot gate and the engine's fractional-sizing path never disagree. Crypto
+# and forex accept fractional quantities, so Rule 5's whole-lot check is skipped
 # for them — the runtime contract takes ``qty: float = Field(gt=0)``.
-_WHOLE_LOT_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "futures", "commodities"})
 
 # Authoritative set of DSL indicator names. A constructed IndicatorRef always
 # satisfies this set; the gate enforces it again as defense-in-depth against
@@ -616,7 +622,7 @@ class SpecReadinessGate(GateResultsMixin):
             return ()
         capital = config.initial_capital
         assert capital > 0, "initial_capital must be strictly positive"
-        enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in _WHOLE_LOT_ASSET_CLASSES
+        enforce_whole_lot = normalize_asset_class(ctx.spec.asset_class) in WHOLE_LOT_ASSET_CLASSES
         threshold = 1.0 if enforce_whole_lot else 0.0
 
         # Notional is symbol-independent for both supported kinds, so resolve
@@ -1014,9 +1020,13 @@ class SpecReadinessGate(GateResultsMixin):
                 # monotonic move means it is tighter, so it can only realise
                 # less.) The spec's worst per-trade loss is the loosest of those
                 # per-side caps.
+                # Shared with the runtime loss-clamp (``_cap_qty_to_loss``) via
+                # ``first_side_stop_factor`` so the gate and the engine cannot
+                # drift on which stop bounds the loss. ``covered_sides`` only
+                # contains sides with a compatible stop, so the result is never
+                # ``None`` here.
                 per_side_stop_pct = {
-                    s: next(float(r.pct) for r in stop_rules if stop_caps_side(r.basis, s))
-                    for s in covered_sides
+                    s: first_side_stop_factor(ctx.spec.exit_rules, s) for s in covered_sides
                 }
                 worst_stop_pct = max(per_side_stop_pct.values())
                 realised_loss_pct = pos_fraction * worst_stop_pct * 100.0
