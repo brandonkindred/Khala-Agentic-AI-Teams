@@ -964,6 +964,22 @@ class SpecReadinessGate(GateResultsMixin):
         max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
         if max_loss_pct is not None:
             max_loss_pct = float(max_loss_pct)
+            # A zero per-trade loss tolerance is degenerate: the runtime
+            # loss-clamp sizes EVERY entry to deploy at most ``max_loss%`` (an
+            # uncovered long) or ``max_loss% / stop`` (a covered side), both of
+            # which are 0 when the tolerance is 0 — so no entry can ever execute,
+            # for any side or sizing kind. The schema permits 0 (``ge=0``), so
+            # catch it here before it passes as coherent and stalls at runtime.
+            if max_loss_pct == 0.0:
+                out.append(
+                    self._critical(
+                        "max_loss_per_trade_pct=0 makes every entry size to zero "
+                        "(the runtime loss-clamp deploys nothing at a 0% tolerance), so the "
+                        "strategy can never open a position. Set a positive "
+                        "max_loss_per_trade_pct, or remove it.",
+                        rule_id="risk_limits:zero_loss_tolerance",
+                    )
+                )
             entry_sides = {r.side for r in ctx.spec.entry_rules} or {"long"}
             stop_rules = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
             uncovered_sides = sorted(

@@ -553,6 +553,14 @@ class _EngineEntryDispatcher:
         # cached values instead of re-normalizing the asset class and re-scanning
         # the exit rules on every entry.
         self._fractional: bool = is_fractional_asset_class(self.asset_class)
+        # Whether the dispatcher applies the runtime position clamp for this
+        # sizing kind. ``fixed_fraction`` is exempt (it deploys exactly its
+        # readiness-verified fraction); ``fixed_notional`` / ``volatility_target``
+        # are clamped. This also gates ``risk_presized``: only a genuinely
+        # clamped order may tell ``RiskFilter.can_enter`` to skip the cap.
+        self._cap_position: bool = isinstance(
+            self.sizing, (FixedNotionalSizing, VolatilityTargetSizing)
+        )
         self._stop_factor_by_side: Dict[str, Optional[float]] = {
             "long": first_side_stop_factor(self.exit_rules, "long"),
             "short": first_side_stop_factor(self.exit_rules, "short"),
@@ -590,8 +598,10 @@ class _EngineEntryDispatcher:
         if qty <= 0:
             # A matched entry signal that risk-sizing reduced to zero — an
             # uncovered short (unbounded loss), or a sub-1 whole-share order that
-            # one share would push past a cap. Record it so a zero-trade run is
-            # distinguishable from "no signal" rather than a silent no-emit.
+            # one share would push past a cap. Bump a counter AND record an event
+            # so a zero-trade run driven by risk-capping is distinguishable in the
+            # final category/summary from a dead entry predicate ("no signal").
+            result.execution_diagnostics.risk_capped_entries += 1
             _record_event(
                 result.execution_diagnostics,
                 "risk_capped_skip",
@@ -612,11 +622,13 @@ class _EngineEntryDispatcher:
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
             reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
-            # The dispatcher has already clamped this order to max_position_pct
-            # at the sizing price; mark it so RiskFilter.can_enter does not
-            # re-reject it on a gap-up / slippage basis mismatch (the gate
-            # enforces the cap only for non-presized custom-code orders).
-            risk_presized=True,
+            # Mark presized ONLY when the dispatcher actually applied the
+            # position clamp (fixed_notional / volatility_target). fixed_fraction
+            # is NOT clamped at runtime (it trusts the readiness gate), so it must
+            # stay un-presized — otherwise a fixed_fraction spec that bypassed
+            # readiness and over-deploys would skip RiskFilter's position-cap
+            # check. can_enter is the cap backstop for those.
+            risk_presized=self._cap_position,
         )
         try:
             req.validate_prices()
@@ -653,23 +665,20 @@ class _EngineEntryDispatcher:
         if close <= 0:
             return 0
         sizing = self.sizing
-        # ``cap_position`` gates the runtime position clamp. ``fixed_fraction``
-        # is exempt: it deploys exactly ``fraction`` of CURRENT equity every
-        # bar, so a readiness-verified ``fraction <= max_position_pct`` holds at
-        # any equity level. ``fixed_notional`` and ``volatility_target`` are NOT
-        # exempt — their fraction OF EQUITY drifts as equity moves (a fixed
-        # dollar notional becomes a larger share of a shrunken account; vol-
-        # target is data-dependent), so the readiness check against initial
+        # ``self._cap_position`` (precomputed) gates the runtime position clamp.
+        # ``fixed_fraction`` is exempt: it deploys exactly ``fraction`` of CURRENT
+        # equity every bar, so a readiness-verified ``fraction <= max_position_pct``
+        # holds at any equity level. ``fixed_notional`` and ``volatility_target``
+        # are NOT exempt — their fraction OF EQUITY drifts as equity moves (a
+        # fixed dollar notional becomes a larger share of a shrunken account;
+        # vol-target is data-dependent), so the readiness check against initial
         # capital can be breached on later entries. Both go through the position
         # clamp at runtime; every kind still goes through the loss clamp.
-        cap_position = False
         if isinstance(sizing, FixedFractionSizing):
             raw_qty = equity * float(sizing.fraction) / close
         elif isinstance(sizing, FixedNotionalSizing):
-            cap_position = True
             raw_qty = float(sizing.notional_usd) / close
         elif isinstance(sizing, VolatilityTargetSizing):
-            cap_position = True
             atr_ref = self._find_atr_ref()
             view = views.get(cur_bar.symbol)
             if view is None or view.length() == 0:
@@ -688,7 +697,7 @@ class _EngineEntryDispatcher:
             raw_qty = 1.0
 
         qty = raw_qty
-        if cap_position:
+        if self._cap_position:
             qty = self._cap_qty_to_position(qty, equity=equity, close=close)
         qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
         if self._fractional:
@@ -1128,6 +1137,14 @@ def _finalize_diagnostics(result: TradingServiceResult) -> TradingServiceResult:
         diagnostics.summary = (
             f"Backtest closed zero trades; dropped {diagnostics.warmup_orders_dropped} "
             f"warm-up order(s) across {diagnostics.bars_processed} post-warmup bar(s)."
+        )
+    elif diagnostics.orders_emitted == 0 and diagnostics.risk_capped_entries > 0:
+        diagnostics.zero_trade_category = "ALL_ENTRIES_RISK_CAPPED"
+        diagnostics.summary = (
+            f"Backtest closed zero trades; {diagnostics.risk_capped_entries} matched "
+            "entry signal(s) were sized to zero by max_position_pct / "
+            f"max_loss_per_trade_pct across {diagnostics.bars_processed} post-warmup "
+            "bar(s) — risk sizing suppressed every entry, not a dead predicate."
         )
     elif diagnostics.orders_emitted == 0:
         diagnostics.zero_trade_category = "NO_ORDERS_EMITTED"

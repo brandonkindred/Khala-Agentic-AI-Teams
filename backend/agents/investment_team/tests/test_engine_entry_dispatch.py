@@ -88,22 +88,34 @@ def test_entry_fires_when_predicate_satisfied():
     assert pending[0].reason.startswith("engine_entry:")
 
 
-def test_entry_emits_risk_presized_order():
-    """Dispatcher-emitted entries are flagged risk_presized so RiskFilter does
-    not re-reject them on a gap-up (the dispatcher already clamped to the cap)."""
+def _emit_one(sizing):
     rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
-    dispatcher = _EngineEntryDispatcher(entry_rules=rules, sizing=FixedFractionSizing(fraction=0.02))
+    dispatcher = _EngineEntryDispatcher(entry_rules=rules, sizing=sizing)
     pending: list = []
-    result = TradingServiceResult()
     dispatcher.maybe_emit(
         cur_bar=_make_bar(close=100.0),
         portfolio=_make_portfolio(),
         pending_for_prev=pending,
         views={"AAA": _build_view([80.0, 90.0, 100.0])},
-        result=result,
+        result=TradingServiceResult(),
     )
-    assert len(pending) == 1
-    assert pending[0].risk_presized is True
+    return pending
+
+
+def test_entry_clamped_sizing_marked_risk_presized():
+    """fixed_notional / vol-target orders ARE clamped to the cap by the
+    dispatcher, so they are flagged risk_presized — RiskFilter skips its cap
+    check (avoiding a gap-up false rejection)."""
+    pending = _emit_one(FixedNotionalSizing(notional_usd=2000.0))
+    assert len(pending) == 1 and pending[0].risk_presized is True
+
+
+def test_entry_fixed_fraction_not_marked_risk_presized():
+    """fixed_fraction is NOT clamped at runtime (it trusts the readiness gate),
+    so it must stay un-presized — otherwise a readiness-bypassing over-cap
+    fixed_fraction order would skip RiskFilter's position-cap backstop."""
+    pending = _emit_one(FixedFractionSizing(fraction=0.02))
+    assert len(pending) == 1 and pending[0].risk_presized is False
 
 
 def test_maybe_emit_records_risk_capped_skip_for_uncovered_short():
@@ -129,6 +141,26 @@ def test_maybe_emit_records_risk_capped_skip_for_uncovered_short():
     assert len(pending) == 0
     events = result.execution_diagnostics.last_order_events
     assert any(e.event_type == "risk_capped_skip" for e in events)
+
+
+def test_zero_trade_category_distinguishes_risk_capped_from_no_orders():
+    """A zero-trade run where every matched signal was risk-sized to zero is
+    categorized ALL_ENTRIES_RISK_CAPPED (not the generic NO_ORDERS_EMITTED), so
+    operators can tell risk-suppression from a dead entry predicate."""
+    from investment_team.trading_service.service import _finalize_diagnostics
+
+    result = TradingServiceResult()
+    result.bars_processed = 10
+    result.execution_diagnostics.risk_capped_entries = 3
+    _finalize_diagnostics(result)
+    assert result.execution_diagnostics.zero_trade_category == "ALL_ENTRIES_RISK_CAPPED"
+    assert "3 matched" in result.execution_diagnostics.summary
+
+    # With no risk-capped entries it still falls through to NO_ORDERS_EMITTED.
+    plain = TradingServiceResult()
+    plain.bars_processed = 10
+    _finalize_diagnostics(plain)
+    assert plain.execution_diagnostics.zero_trade_category == "NO_ORDERS_EMITTED"
 
 
 def test_cap_qty_to_position_skips_on_non_positive_equity():

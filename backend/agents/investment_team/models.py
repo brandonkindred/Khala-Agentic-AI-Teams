@@ -567,6 +567,7 @@ OrderLifecycleEventType = Literal[
 
 ZeroTradeCategory = Literal[
     "NO_ORDERS_EMITTED",
+    "ALL_ENTRIES_RISK_CAPPED",
     "ONLY_WARMUP_ORDERS",
     "ORDERS_REJECTED",
     "ORDERS_UNFILLED",
@@ -615,6 +616,11 @@ class BacktestExecutionDiagnostics(BaseModel):
     orders_rejection_reasons: Dict[str, int] = Field(default_factory=dict)
     orders_unfilled: int = Field(default=0, ge=0)
     warmup_orders_dropped: int = Field(default=0, ge=0)
+    # Matched entry signals the engine dispatcher's risk sizing reduced to zero
+    # (uncovered short, or a sub-1 whole-share order one share would push past a
+    # cap). Drives the ``ALL_ENTRIES_RISK_CAPPED`` zero-trade category so a run
+    # suppressed by risk sizing is not mis-triaged as a dead entry predicate.
+    risk_capped_entries: int = Field(default=0, ge=0)
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
     closed_trades: int = Field(default=0, ge=0)

@@ -1380,6 +1380,37 @@ def test_rule9_compiled_with_max_loss_is_not_blocked() -> None:
     ), _critical(results)
 
 
+def test_rule9_zero_loss_tolerance_is_critical() -> None:
+    """max_loss_per_trade_pct=0 (schema-valid, ge=0) makes the runtime loss-clamp
+    size every entry to zero, so the strategy can never trade. Flag it critical
+    rather than let it pass as coherent and stall at runtime."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        exit_=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 0, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:zero_loss_tolerance"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_zero_loss_tolerance_uncovered_long_is_critical() -> None:
+    """The zero-tolerance critical also catches an uncovered long (no stop),
+    which the no-stop check otherwise lets through for positive tolerances —
+    at a 0% tolerance the runtime deploys nothing, so the long never trades."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),  # uncovered long (signal-only exit)
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 0, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:zero_loss_tolerance"
+        for r in results
+    ), _critical(results)
+
+
 def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
     """No stop and no declared tolerance — there is no limit to enforce, so the
     no-stop critical must not fire."""
