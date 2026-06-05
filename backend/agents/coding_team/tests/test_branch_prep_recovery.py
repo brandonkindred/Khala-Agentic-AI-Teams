@@ -448,17 +448,19 @@ class TestPrepareIssueBranchContinuation:
         assert rescued is not None
         assert "local.py" in _must(clone, "ls-tree", "-r", "--name-only", rescued)
 
-    def test_remote_only_progress_pinned_even_when_marker_tip_wins(self, api, repo_pair) -> None:
-        """Safety net for every seed choice: commits visible only on the
-        fetched remote issue branch must stay locally reachable, because the
-        final --force-with-lease push (lease refreshed by prep's own fetch)
-        will replace them on the remote."""
+    def test_remote_floor_beats_marker_tip_for_publishable_line(self, api, repo_pair) -> None:
+        """The remote floor applies to every candidate, including the marker
+        tip: the published line must contain the live remote-only commits
+        (the force-with-lease push would otherwise drop them — a local pin is
+        no substitute for commits the remote is expected to keep), while the
+        local development progress stays reachable on a rescue ref."""
         remote, clone = repo_pair
         ok, _, _ = _prep(api, clone)
         assert ok is True
         # Interrupted run for issue 7: progress on development, marker left set.
         _must(clone, "checkout", "-q", "development")
         _commit_file(clone, "dev_progress.py", "d = 1\n", "dev progress")
+        dev_tip = _must(clone, "rev-parse", "development")
         # Meanwhile the remote issue branch holds diverged commits.
         _must(remote, "checkout", "-q", "-b", "khala/issue-7")
         _commit_file(remote, "remote_only.py", "r = 1\n", "remote-only progress")
@@ -467,10 +469,12 @@ class TestPrepareIssueBranchContinuation:
 
         ok, err, _ = _prep(api, clone)
         assert ok is True, err
-        # Marker tip wins the seed (freshest same-issue state)…
-        assert "dev_progress.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
-        # …but the remote-only commits are pinned to a local rescue ref.
+        # The remote-only commits are in the publishable line…
+        assert "remote_only.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
         assert remote_tip in _must(clone, "rev-list", "--branches")
+        # …and the local development progress stays reachable on a rescue ref.
+        assert dev_tip in _must(clone, "rev-list", "--branches")
+        assert _branch_exists(clone, "khala/rescue/issue-7-*") is not None
 
 
 class TestOrphanPrevention:
@@ -859,3 +863,75 @@ class TestStaleRemoteTrackingRef:
         ok, err, _ = _prep(api, clone)
         assert ok is True, err
         assert "pushed.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+
+
+class TestSameIssueContinuationPicksRichestTip:
+    """When the interrupted run's HEAD was not on development, the wip commit
+    lands elsewhere — development's merged progress must still drive the seed
+    instead of being demoted to a rescue ref by a 1-commit wip tip."""
+
+    def test_dev_progress_wins_when_head_crashed_off_development(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        # Orchestrator merged real work into development…
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "progress1.py", "a = 1\n", "task 1 merged")
+        _commit_file(clone, "progress2.py", "b = 2\n", "task 2 merged")
+        # …then a later step left HEAD on the integration branch (still at
+        # base) and crashed with a dirty tree.
+        _must(clone, "checkout", "-q", "khala/issue-7")
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("partial\n")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        # The merged development progress is the continuation line…
+        assert "progress1.py" in files and "progress2.py" in files
+        # …and the diverged wip commit stays reachable on a local ref.
+        assert _branch_exists(clone, "khala/rescue/issue-7-*") is not None
+
+    def test_wip_tip_wins_when_it_contains_development(self, api, repo_pair) -> None:
+        """HEAD on development at crash time (the common case) is unchanged."""
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "progress.py", "a = 1\n", "merged work")
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("partial\n")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert "progress.py" in files and "wip.txt" in files
+
+
+class TestRemoteFloorOnSeedSelection:
+    """No seed choice may let the final force-with-lease push (lease refreshed
+    by prep's own fetch) drop commits that exist only on the live remote
+    issue branch: any candidate that does not contain the live remote tip is
+    ineligible."""
+
+    def test_marker_tip_skipped_when_it_lacks_remote_only_commits(self, api, repo_pair) -> None:
+        remote, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        # Interrupted local run: progress on development, marker retained.
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "local_only.py", "l = 1\n", "local progress")
+        # Meanwhile the remote issue branch gained commits this checkout never saw.
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "remote_only.py", "r = 1\n", "remote-only progress")
+        _must(remote, "checkout", "-q", "main")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        # The publishable line must contain the remote-only commits…
+        assert "remote_only.py" in files
+        # …and the local development progress stays reachable locally.
+        rescued = _branch_exists(clone, "khala/rescue/issue-7-*")
+        assert rescued is not None
+        assert "local_only.py" in _must(clone, "ls-tree", "-r", "--name-only", rescued)

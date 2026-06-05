@@ -1261,3 +1261,50 @@ class TestStatusResponseSurfacing:
         body = status.json()
         assert body["github_context"]["issue_number"] == 1
         assert body["github_pr_url"] == "https://example/pr/42"
+
+
+class TestBusyCheckoutGuard:
+    """Auto-recovery must never mutate a sibling job's live working tree:
+    prep on a checkout with another non-terminal job fails fast (the old
+    dirty-guard behavior for the live case), while crashed-job leftovers
+    (no running sibling) still recover."""
+
+    def test_running_sibling_on_same_checkout_fails_job(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import create_job, update_job
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="sibling-1", repo_path=repo_path, plan_input=None)
+        update_job(
+            "sibling-1",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "issue_number": 99},
+        )
+        prep_calls: list = []
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "busy" in (job["error"] or "").lower()
+        assert prep_calls == []  # the sibling's tree was never touched
+
+    def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import create_job, update_job
+
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="sibling-2", repo_path=repo_path, plan_input=None)
+        update_job("sibling-2", status="completed")
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"

@@ -214,6 +214,29 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
     return None
 
 
+def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Dict[str, Any]]:
+    """Return another non-terminal job using this checkout, if any.
+
+    Branch prep mutates the working tree (dirty-tree recovery commits files,
+    `checkout -B` switches branches). Doing that under a job that is actively
+    working would corrupt its run — the pre-recovery code's fail-fast dirty
+    guard prevented this by accident, and recovery must not regress it. The
+    job store can answer liveness (a deleted job is not running) even though
+    it cannot answer leftover attribution — that remains the marker's job.
+
+    Postconditions:
+        - Returns the sibling job dict when one exists with a non-terminal
+          status and the same ``repo_path``; None otherwise. The caller's own
+          job (``own_job_id``) is never reported.
+    """
+    for j in list_jobs(running_only=True):
+        if not j or j.get("job_id") == own_job_id:
+            continue
+        if j.get("repo_path") == repo_path:
+            return j
+    return None
+
+
 def _start_hook_thread(
     job_id: str,
     request: RunFromGitHubRequest,
@@ -735,7 +758,19 @@ def _prepare_issue_branch(
         _git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
     candidates: List[str] = []
     if marker is not None and issue_number is not None and marker == issue_number:
-        candidates.append(wip_tip or DEVELOPMENT_BRANCH)
+        # Same-issue continuation: the interrupted run's progress may live on
+        # BOTH the wip tip (wherever HEAD was at crash time) and development
+        # (merged task work). Order graph-aware — a tip containing the other
+        # goes first; diverged tips put development first (the canonical
+        # integration line; the wip branch is never reset, and a diverged
+        # integration-branch wip is pinned by the orphan-prevention pass).
+        if wip_tip and wip_tip != DEVELOPMENT_BRANCH:
+            if _reachable_from(repo_path, DEVELOPMENT_BRANCH, wip_tip):
+                candidates.extend((wip_tip, DEVELOPMENT_BRANCH))
+            else:
+                candidates.extend((DEVELOPMENT_BRANCH, wip_tip))
+        else:
+            candidates.append(DEVELOPMENT_BRANCH)
     # Local-vs-remote issue tip: prefer local only when it already contains
     # the remote tip. The eventual publish is `push --force-with-lease` and
     # this function's own fetch refreshes the lease, so seeding from a tip
@@ -749,7 +784,21 @@ def _prepare_issue_branch(
         rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
         if rescue_ref:
             candidates.append(rescue_ref)
-    seed = next((c for c in candidates if _is_ahead(repo_path, c, base_ref)), base_ref)
+    # Remote floor: when the remote issue branch is live and ahead, no
+    # candidate that lacks its commits may seed — the force-with-lease push
+    # (lease refreshed by this function's own fetch) would silently drop the
+    # remote-only commits from the published PR. Locally-pinned rescue refs
+    # are no substitute for commits the remote is expected to keep.
+    remote_floor = _is_ahead(repo_path, remote_issue_ref, base_ref)
+
+    def _eligible(candidate: str) -> bool:
+        if not _is_ahead(repo_path, candidate, base_ref):
+            return False
+        if not remote_floor or candidate == remote_issue_ref:
+            return True
+        return _reachable_from(repo_path, remote_issue_ref, candidate)
+
+    seed = next((c for c in candidates if _eligible(c)), base_ref)
 
     if seed != base_ref:
         rc, count = _git(repo_path, "rev-list", "--count", f"{base_ref}..{seed}")
@@ -835,6 +884,24 @@ def _run_with_github_hooks(
             _record_failure(client, owner, repo, num, job_id, f"github get_repo: {e}")
             return
         base = request.base_branch or default_branch
+
+        # Branch prep mutates the shared checkout; never do that under a
+        # sibling job that is actively working it. Leftovers from DEAD jobs
+        # are recovered below — live work is not a leftover.
+        sibling = _running_sibling_on_checkout(request.repo_path, job_id)
+        if sibling is not None:
+            sib_ctx = sibling.get("github_context") or {}
+            _record_failure(
+                client,
+                owner,
+                repo,
+                num,
+                job_id,
+                f"checkout busy: job `{sibling.get('job_id')}` "
+                f"(issue #{sib_ctx.get('issue_number', '?')}) is still running on this "
+                f"checkout; retry after it finishes",
+            )
+            return
 
         _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
 
