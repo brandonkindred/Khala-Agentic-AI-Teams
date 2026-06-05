@@ -235,18 +235,27 @@ def canonical_symbol(symbol: str, asset_class: object) -> str:
 
     Only the ``-USD`` suffix is stripped (it matches Yahoo's convention and the
     ``YAHOO_CRYPTO_TICKERS`` lookup keys). Other quote suffixes (``-USDT``,
-    ``-USDC``) are intentionally left untouched.
+    ``-USDC``) are intentionally left untouched. Stacked ``-USD`` suffixes are
+    fully collapsed (``"DOGE-USD-USD" → "DOGE"``) so a compound-suffixed input
+    can never re-emerge once a provider re-applies its own suffix.
 
     Preconditions:
         * ``symbol`` is a non-empty ticker string.
         * ``asset_class`` is any value accepted by ``normalize_asset_class``.
 
     Postconditions:
-        * For crypto: returns ``symbol`` uppercased with a single trailing
-          ``-USD`` removed (``"btc-usd" → "BTC"``, ``"BTC" → "BTC"``).
+        * For crypto: returns ``symbol`` uppercased with *every* trailing
+          ``-USD`` removed (``"btc-usd" → "BTC"``, ``"DOGE-USD-USD" → "DOGE"``,
+          ``"BTC" → "BTC"``).
         * For every other asset class: returns ``symbol`` unchanged.
         * Idempotent — ``canonical_symbol(canonical_symbol(s, ac), ac) ==
           canonical_symbol(s, ac)``.
+
+    Raises:
+        * ``ValueError`` if a crypto ``symbol`` is nothing but ``-USD``
+          suffix(es) and collapses to an empty alias (e.g. ``"-USD"``,
+          ``"-USD-USD"``) — a precondition violation, surfaced rather than
+          letting a malformed bare ticker reach a provider.
     """
     # Local import mirrors ``asset_class_default_universe`` — avoids a circular
     # dependency at module-import time.
@@ -255,6 +264,8 @@ def canonical_symbol(symbol: str, asset_class: object) -> str:
     if normalize_asset_class(asset_class) != "crypto":
         return symbol
     bare = symbol.upper()
-    if bare.endswith("-USD"):
+    while bare.endswith("-USD"):
         bare = bare[: -len("-USD")]
+    if not bare:
+        raise ValueError(f"invalid crypto symbol: {symbol!r}")
     return bare
