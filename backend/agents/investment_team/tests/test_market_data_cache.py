@@ -651,3 +651,56 @@ def test_caching_stream_miss_path_preserves_warmup_flag_on_coercion(cache: Marke
     # Volume coerced, warm-up flag preserved.
     assert miss_events[0].bar.volume == 0.0
     assert miss_events[0].is_warmup is True
+
+
+def test_record_snapshot_normalizes_nonfinite_volume_at_write(cache: MarketDataCache) -> None:
+    """A writer that bypasses the live-path coercion — e.g. paper-trade warm-up
+    builds OHLCVBars straight from raw live bars and calls record_bars_snapshot
+    — must still persist a finite volume. The write boundary coerces, so the
+    stored snapshot, its content hash, and the dataset fingerprint match what a
+    replay reads back instead of diverging on a first-run NaN.
+    """
+    pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _hash_bars, compute_dataset_fingerprint
+
+    raw = [
+        OHLCVBar(
+            date="2024-01-01", open=100.0, high=101.0, low=99.0, close=100.5, volume=float("nan")
+        ),
+        OHLCVBar(date="2024-01-02", open=101.0, high=102.0, low=100.0, close=101.5, volume=2000.0),
+    ]
+    # First-run fingerprint, computed before anything is persisted.
+    write_fp = compute_dataset_fingerprint({"AAA": raw})
+
+    meta = cache.record_bars_snapshot(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        provider="papertrade",
+        bars=raw,
+        start="2024-01-01",
+        end="2024-01-02",
+    )
+    assert meta is not None
+    read_back = cache.read_snapshot(meta)
+    assert read_back is not None
+
+    # The persisted (and therefore replayed) volume is finite.
+    assert [b.volume for b in read_back] == [0.0, 2000.0]
+    # First-run fingerprint (raw NaN) equals the cached-replay fingerprint (0.0).
+    assert compute_dataset_fingerprint({"AAA": read_back}) == write_fp
+    # The stored per-snapshot content hash is consistent with the read-back bars.
+    assert meta.sha256 == _hash_bars(read_back)
+
+
+def test_hash_bars_coerces_nonfinite_volume() -> None:
+    """_hash_bars treats a non-finite volume as the 0.0 it is persisted/replayed
+    as, but still distinguishes genuinely different finite volumes."""
+    from investment_team.market_data_cache.store import _hash_bars
+
+    def _bar(vol: float) -> OHLCVBar:
+        return OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=vol)
+
+    assert _hash_bars([_bar(float("nan"))]) == _hash_bars([_bar(0.0)])
+    assert _hash_bars([_bar(float("inf"))]) == _hash_bars([_bar(0.0)])
+    assert _hash_bars([_bar(5.0)]) != _hash_bars([_bar(0.0)])

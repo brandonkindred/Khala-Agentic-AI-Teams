@@ -121,6 +121,30 @@ that as a miss and does not write a snapshot.
 # ---------------------------------------------------------------------------
 
 
+def _finite_volume(volume: Any) -> float:
+    """Coerce a non-finite (NaN/±inf) or ``None`` volume to the 0.0 sentinel.
+
+    ``OHLCVBar`` is a permissive transport, so a non-finite volume can reach the
+    cache from any snapshot writer (live fetch, streaming ingest, paper-trade
+    warm-up, …). Applying this one coercion at every persistence boundary — the
+    parquet writer, the content hash / dataset fingerprint, and read-back —
+    guarantees the stored bytes, the fingerprint, and a replayed bar are all
+    finite and byte-identical regardless of which writer produced the snapshot,
+    so a first run and its cached replay never diverge on bad volume.
+
+    Preconditions:
+        ``volume`` is a float-coercible value or ``None``.
+    Postconditions:
+        Returns a finite float. Non-finite or ``None`` input returns ``0.0``
+        (the zero-volume sentinel ADV/liquidity math already excludes); a finite
+        input round-trips unchanged, so fingerprints of clean data are stable.
+    """
+    if volume is None:
+        return 0.0
+    v = float(volume)
+    return v if math.isfinite(v) else 0.0
+
+
 def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     """SHA256 over a deterministic byte stream of bars.
 
@@ -139,9 +163,13 @@ def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     """
     h = hashlib.sha256()
     for bar in sorted(bars, key=lambda b: b.date):
+        # Coerce volume so a writer that persisted a non-finite volume hashes
+        # to the same fingerprint a replay (which read it back as 0.0) produces.
+        # Finite volumes round-trip unchanged, so clean snapshots keep their
+        # existing fingerprint / derived-ADV cache key.
         h.update(
             f"{bar.date}|{repr(bar.open)}|{repr(bar.high)}|"
-            f"{repr(bar.low)}|{repr(bar.close)}|{repr(bar.volume)}\n".encode()
+            f"{repr(bar.low)}|{repr(bar.close)}|{repr(_finite_volume(bar.volume))}\n".encode()
         )
     return h.hexdigest()
 
@@ -176,7 +204,10 @@ def _bars_to_table(bars: Sequence[OHLCVBar]) -> "pa.Table":
             "high": [float(b.high) for b in bars],
             "low": [float(b.low) for b in bars],
             "close": [float(b.close) for b in bars],
-            "volume": [float(b.volume) for b in bars],
+            # Coerce at the write boundary so no writer can persist a non-finite
+            # volume into the parquet snapshot, regardless of how it built the
+            # bars (live fetch, streaming ingest, paper-trade warm-up, …).
+            "volume": [_finite_volume(b.volume) for b in bars],
             "is_imputed": [bool(b.is_imputed) for b in bars],
         },
         schema=_get_parquet_schema(),
@@ -219,10 +250,10 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
         l_fixed = min(o, h, ll, c)
         if h_fixed != h or l_fixed != ll:
             repairs += 1
-        vol = cols["volume"][i]
-        if vol is None or not math.isfinite(vol):
-            vol = 0.0
+        raw_vol = cols["volume"][i]
+        if raw_vol is None or not math.isfinite(raw_vol):
             vol_repairs += 1
+        vol = _finite_volume(raw_vol)
         bars.append(
             OHLCVBar(
                 date=cols["date"][i],
