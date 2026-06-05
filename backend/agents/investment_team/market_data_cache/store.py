@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -199,9 +200,16 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
     # time still contain inconsistent bars (Yahoo / Alpha Vantage / Twelve
     # Data daily FX aggregates intraday snapshots across counterparties,
     # producing H < max(O, C) or L > min(O, C)). Repairing on read makes
-    # the cache self-healing without forcing a global re-fetch.
+    # the cache self-healing without forcing a global re-fetch. The same
+    # self-healing applies to non-finite volume: snapshots persisted before
+    # market_data_service started neutralising NaN/inf volume at fetch time
+    # would otherwise replay it straight past the OHLCVBar transport (which
+    # is intentionally permissive) into ADV / cost-model arithmetic. Coerce
+    # to 0.0 here — the zero-volume sentinel ADV/liquidity math excludes —
+    # mirroring _normalize_ohlc_bar on the live path.
     bars: List[OHLCVBar] = []
     repairs = 0
+    vol_repairs = 0
     for i in range(table.num_rows):
         o = cols["open"][i]
         h = cols["high"][i]
@@ -211,6 +219,10 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
         l_fixed = min(o, h, ll, c)
         if h_fixed != h or l_fixed != ll:
             repairs += 1
+        vol = cols["volume"][i]
+        if vol is None or not math.isfinite(vol):
+            vol = 0.0
+            vol_repairs += 1
         bars.append(
             OHLCVBar(
                 date=cols["date"][i],
@@ -218,7 +230,7 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
                 high=h_fixed,
                 low=l_fixed,
                 close=c,
-                volume=cols["volume"][i],
+                volume=vol,
                 is_imputed=bool(imputed[i]),
             )
         )
@@ -226,6 +238,12 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
         logger.warning(
             "market_data_cache: repaired OHLC invariants on %d/%d bars at read",
             repairs,
+            table.num_rows,
+        )
+    if vol_repairs > 0:
+        logger.warning(
+            "market_data_cache: coerced non-finite volume to 0.0 on %d/%d bars at read",
+            vol_repairs,
             table.num_rows,
         )
     return bars

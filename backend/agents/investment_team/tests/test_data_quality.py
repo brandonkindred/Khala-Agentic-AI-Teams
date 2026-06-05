@@ -728,6 +728,35 @@ def test_cache_table_to_bars_repairs_ohlc_invariants() -> None:
         assert b.low <= min(b.open, b.high, b.close)
 
 
+def test_cache_table_to_bars_coerces_nonfinite_volume() -> None:
+    """Parquet snapshots persisted before fetch-time volume neutralisation
+    landed can still carry NaN/inf volume. ``_table_to_bars`` coerces it to
+    0.0 on read — mirroring the live ``_normalize_ohlc_bar`` path — so a
+    cache hit can't replay a non-finite volume into downstream ADV math.
+    """
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _get_parquet_schema, _table_to_bars
+
+    table = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-02", "2024-01-03", "2024-01-04"],
+            "open": [1.05, 1.06, 1.07],
+            "high": [1.06, 1.07, 1.08],
+            "low": [1.04, 1.05, 1.06],
+            "close": [1.055, 1.065, 1.075],
+            # NaN and +inf are legacy corruption; the finite value is kept.
+            "volume": [float("nan"), float("inf"), 1234.0],
+            "is_imputed": [False, False, False],
+        },
+        schema=_get_parquet_schema(),
+    )
+    bars = _table_to_bars(table)
+    assert [b.volume for b in bars] == [0.0, 0.0, 1234.0]
+    assert all(math.isfinite(b.volume) for b in bars)
+    # OHLC is untouched by the volume coercion.
+    assert bars[2].close == 1.075
+
+
 def test_cache_table_to_bars_defaults_is_imputed_for_legacy_schema() -> None:
     """Snapshots written before the ``is_imputed`` column existed read back
     with the flag defaulted to ``False`` rather than raising KeyError."""
