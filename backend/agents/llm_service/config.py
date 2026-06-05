@@ -28,6 +28,7 @@ ENV_LLM_BACKOFF_BASE = "LLM_BACKOFF_BASE"
 ENV_LLM_BACKOFF_MAX = "LLM_BACKOFF_MAX"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
+ENV_LLM_THINKING_LEVEL = "LLM_THINKING_LEVEL"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
 
 # Default cap for max_tokens (many APIs limit output to 32K even when context is 256K)
@@ -43,8 +44,75 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
     "qwen3.5:cloud": 262144,
     "qwen3-coder:480b-cloud": 262144,
     "qwen3-coder:480b": 262144,
-    "deepseek-v4-pro:cloud": 262144,
+    "deepseek-v4-pro:cloud": 1000000,
 }
+
+# ---------------------------------------------------------------------------
+# Known model thinking levels — ordered lowest → highest; resolution picks the
+# last entry as the platform's "max thinking" default. Models not listed here
+# only support boolean think on the wire.
+# ---------------------------------------------------------------------------
+
+KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
+    # DeepSeek's thinking-mode docs list reasoning_effort "high" and "max"
+    # (the true maximum), with compatibility mapping low/medium → high and
+    # xhigh → max — so all four registered names are accepted on the wire
+    # and "max" is the platform default for this model.
+    "deepseek-v4-pro:cloud": ("low", "medium", "high", "max"),
+}
+
+
+def thinking_enabled_by_default() -> bool:
+    """Global thinking default: enabled unless LLM_ENABLE_THINKING is falsy.
+
+    Postconditions:
+        - Returns False only for explicit "false"/"0"/"no" (case-insensitive);
+          unset or any other value means enabled.
+    """
+    return (os.environ.get(ENV_LLM_ENABLE_THINKING) or "").strip().lower() not in (
+        "false",
+        "0",
+        "no",
+    )
+
+
+def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | str":
+    """Resolve a caller's think request into the wire value for ``model``.
+
+    Preconditions:
+        - ``think`` is None, a bool, or a thinking-level string.
+    Postconditions:
+        - Explicit values win: a string passes through verbatim and False
+          stays False. True — or None when the global default is enabled —
+          upgrades to the model's highest registered thinking level;
+          LLM_THINKING_LEVEL overrides that when it names one of the model's
+          registered levels, and garbage values fall back to the max.
+          Models with no registered levels resolve to plain True (level
+          strings would be rejected on the wire). None with the global
+          default disabled resolves to False.
+    """
+    if isinstance(think, str):
+        return think
+    if think is False:
+        return False
+    if think is None and not thinking_enabled_by_default():
+        return False
+    levels = KNOWN_MODEL_THINKING_LEVELS.get(model)
+    if not levels:
+        return True
+    override = (os.environ.get(ENV_LLM_THINKING_LEVEL) or "").strip().lower()
+    if override:
+        if override in levels:
+            return override
+        logger.warning(
+            "LLM_THINKING_LEVEL=%r is not a known level for %s %r; using max level %r",
+            override,
+            model,
+            levels,
+            levels[-1],
+        )
+    return levels[-1]
+
 
 # ---------------------------------------------------------------------------
 # Per-agent default model when LLM_MODEL_<agent_key> and LLM_MODEL are unset
