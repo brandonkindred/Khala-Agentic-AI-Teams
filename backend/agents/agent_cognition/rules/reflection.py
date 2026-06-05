@@ -29,6 +29,7 @@ and memory stores.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from datetime import datetime
@@ -203,12 +204,10 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     active_rules = rules_store.list_rules(agent_id, status=RuleStatus.ACTIVE)
     pending = rules_store.list_proposals(agent_id, status=ProposalStatus.PENDING)
 
-    llm = get_client("cognition")
-    result = _propose(summaries, active_rules, llm)
-    report.llm_calls = 1
-
-    # Retire stale-evidence pending proposals so a fresh proposal can replace
-    # them; only *fresh* pending proposals gate the dedupe below.
+    # Retire stale-evidence pending proposals first — this is recompute cleanup
+    # that needs no model output, so it must run *before* the LLM call and stay
+    # decoupled from LLM availability (a provider outage can't strand them as
+    # unapprovable pending rows). Only *fresh* pending proposals gate the dedupe.
     fresh_pending: list[RuleProposal] = []
     for proposal in pending:
         if proposal.stale_evidence:
@@ -216,6 +215,10 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
             report.superseded += 1
         else:
             fresh_pending.append(proposal)
+
+    llm = get_client("cognition")
+    result = _propose(summaries, active_rules, llm)
+    report.llm_calls = 1
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
     active_by_id = {r.id: r for r in active_rules}
@@ -447,30 +450,60 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split()).casefold()
 
 
-def _dedupe_key_of(proposal: RuleProposal) -> tuple[str, str | None, str | None]:
+def _predicate_fingerprint(predicate: Any) -> str | None:
+    """Stable identity of an enforced rule's predicate for dedupe.
+
+    Returns canonical JSON (sorted keys) for a non-empty predicate dict, else
+    ``None`` — advisory rules carry no predicate, so they fingerprint to ``None``.
+    """
+    if isinstance(predicate, dict) and predicate:
+        return json.dumps(predicate, sort_keys=True, separators=(",", ":"))
+    return None
+
+
+# (action, target_rule_id, normalized_text, mode, predicate_fingerprint)
+_DedupeKey = tuple[str, str | None, str | None, str | None, str | None]
+
+
+def _dedupe_key_of(proposal: RuleProposal) -> _DedupeKey:
     """Identity used to suppress re-proposing the same change.
 
-    Two proposals collide when they share an action, a target rule, and (for
-    add/amend) the same whitespace-normalized, case-folded rule text. Retire
-    proposals carry no text, so they collide on ``(action, target, None)``.
+    Two proposals collide when they share an action, a target rule, and — for
+    add/amend — the same normalized text, ``mode``, and (enforced only) predicate.
+    ``mode``/predicate are part of the identity so an advisory and an enforced
+    rule with identical text are *not* treated as duplicates (they have different
+    runtime behavior). Retire proposals carry no rule body, so they collide on
+    ``(action, target, None, None, None)``.
     """
     text: str | None = None
+    mode: str | None = None
+    predicate_fp: str | None = None
     if isinstance(proposal.proposed_rule, dict):
         candidate = proposal.proposed_rule.get("text")
         if isinstance(candidate, str):
             text = _normalize_text(candidate)
-    return (proposal.action.value, proposal.target_rule_id, text)
+        mode = proposal.proposed_rule.get("mode") or RuleMode.ADVISORY.value
+        predicate_fp = _predicate_fingerprint(proposal.proposed_rule.get("predicate"))
+    return (proposal.action.value, proposal.target_rule_id, text, mode, predicate_fp)
 
 
-def _active_rule_add_key(rule: Rule) -> tuple[str, None, str]:
+def _active_rule_add_key(rule: Rule) -> _DedupeKey:
     """Dedupe key under which an active rule already 'occupies' the ADD space.
 
-    An ADD whose normalized text matches an active rule is a restatement of an
-    existing guardrail (the untrusted model ignoring the prompt's "do not restate"
-    instruction); seeding ``seen`` with this key drops it before it can become a
-    duplicate rule on approval.
+    An ADD whose normalized text, ``mode``, and predicate match an active rule is
+    a restatement of an existing guardrail (the untrusted model ignoring the
+    prompt's "do not restate" instruction); seeding ``seen`` with this key drops
+    it before it can become a duplicate rule on approval. Mode/predicate are part
+    of the key so proposing an *enforced* guardrail is never suppressed by an
+    *advisory* rule of the same text.
     """
-    return (ProposalAction.ADD.value, None, _normalize_text(rule.text))
+    return (
+        ProposalAction.ADD.value,
+        None,
+        _normalize_text(rule.text),
+        rule.mode.value,
+        _predicate_fingerprint(rule.predicate),
+    )
 
 
 # ---------------------------------------------------------------------------

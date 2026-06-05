@@ -430,6 +430,47 @@ def test_add_with_target_is_dropped_as_incoherent(monkeypatch: pytest.MonkeyPatc
     assert report.proposed == 0 and report.dropped_invalid == 1 and created == []
 
 
+def test_enforced_add_not_deduped_by_advisory_active_rule(monkeypatch: pytest.MonkeyPatch) -> None:
+    advisory = _rule(rid="r1", text="validate input", mode=RuleMode.ADVISORY)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[
+            {
+                "action": "add",
+                "text": "validate input",
+                "mode": "enforced",
+                "predicate": _GOOD_PREDICATE,
+            }
+        ],
+        rules=[advisory],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Same text but different mode → a real new (enforced) guardrail, not a dup.
+    assert report.proposed == 1 and report.deduped == 0
+    assert created[0].proposed_rule["mode"] == "enforced"
+
+
+def test_stale_supersede_runs_before_llm_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stale-proposal cleanup is decoupled from LLM availability."""
+    stale = _pending(action=ProposalAction.ADD, text="obsolete", stale_evidence=True)
+    _wire(monkeypatch, proposals=[], pending=[stale])
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        reflection.rules_store,
+        "supersede_proposal",
+        lambda aid, pid, now=None: superseded.append(pid),
+    )
+
+    def _boom_propose(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("LLM provider down")
+
+    monkeypatch.setattr(reflection, "_propose", _boom_propose)
+    with pytest.raises(RuntimeError):
+        reflection.reflect("a", _NOW)
+    # Supersession committed even though the LLM call then failed.
+    assert superseded == [stale.id]
+
+
 def test_stale_pending_is_superseded_and_does_not_block_fresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -558,13 +599,24 @@ def test_render_rules_text_empty_and_populated() -> None:
     assert "id=r9 [advisory, priority=3] t" in text
 
 
-def test_dedupe_key_normalizes_text_and_handles_retire() -> None:
+def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
     add = reflection._build_proposal(
         "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "Be   KIND"}
     )
+    enforced = reflection._build_proposal(
+        "a",
+        ProposalAction.ADD,
+        [],
+        _NOW,
+        proposed_rule={"text": "be kind", "mode": "enforced", "predicate": _GOOD_PREDICATE},
+    )
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
-    assert reflection._dedupe_key_of(add) == ("add", None, "be kind")
-    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None)
+    # add (advisory default): mode folded in, no predicate fingerprint.
+    assert reflection._dedupe_key_of(add) == ("add", None, "be kind", "advisory", None)
+    # same text but enforced + predicate → a distinct key (not a duplicate of add).
+    assert reflection._dedupe_key_of(enforced) != reflection._dedupe_key_of(add)
+    assert reflection._dedupe_key_of(enforced)[3] == "enforced"
+    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None, None, None)
 
 
 @pytest.mark.parametrize(
