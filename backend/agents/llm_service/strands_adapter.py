@@ -49,7 +49,7 @@ import asyncio
 import dataclasses
 import json
 import logging
-from typing import Any, AsyncGenerator, Dict, List, Literal, Optional
+from typing import Any, AsyncGenerator, Dict, List, Literal, Optional, Union
 
 from strands.models.model import Model
 from strands.types.content import Messages
@@ -86,7 +86,7 @@ class LLMClientConfig:
     model_id: Optional[str] = None
     temperature: float = 0.0
     max_tokens: Optional[int] = None
-    think: bool = False
+    think: Optional[Union[bool, str]] = None
     response_format: ResponseFormat = "json"
 
     def __post_init__(self) -> None:
@@ -129,13 +129,17 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
     * ``{toolUse: ...}`` blocks emit ``tool_calls`` on an assistant message.
     * ``{toolResult: ...}`` blocks are flushed as their own ``role="tool"``
       messages (OpenAI's contract puts tool responses in a distinct message).
-    * Unknown block types (image, document, reasoningContent, etc.) are
-      skipped with a debug log — this adapter is text-and-tools only.
+    * ``{reasoningContent: ...}`` blocks are replayed as ``reasoning_content``
+      on the assistant tool-call message (DeepSeek thinking mode requires it
+      on subsequent requests).
+    * Unknown block types (image, document, etc.) are skipped with a debug
+      log — this adapter is text, reasoning, and tools only.
     """
     out: List[Dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role", "user")
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
 
         for block in msg.get("content", []) or []:
@@ -165,6 +169,14 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
                         "content": _tool_result_content_to_text(tr.get("content", [])),
                     }
                 )
+            elif "reasoningContent" in block:
+                # DeepSeek thinking mode requires the tool-call turn's
+                # reasoning to be replayed on subsequent requests (400
+                # otherwise) — collect it instead of dropping the block.
+                rc = block.get("reasoningContent") or {}
+                text = ((rc.get("reasoningText") or {}).get("text")) or ""
+                if text:
+                    reasoning_parts.append(str(text))
             else:
                 logger.debug(
                     "strands_adapter: skipping unsupported content block %r", list(block.keys())
@@ -174,13 +186,19 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
             # Assistant turns with tool calls must be emitted as assistant
             # regardless of the incoming ``role``. Strands only sets
             # ``toolUse`` content on assistant messages, so this is defensive.
-            out.append(
-                {
-                    "role": "assistant",
-                    "content": "\n".join(text_parts),
-                    "tool_calls": tool_calls,
-                }
-            )
+            assistant_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": "\n".join(text_parts),
+                "tool_calls": tool_calls,
+            }
+            if reasoning_parts:
+                # Both dialects: Ollama's OpenAI-compatible endpoint reads
+                # `reasoning` (openai.go); DeepSeek-native reads
+                # `reasoning_content`. Each backend ignores the other's key.
+                joined_reasoning = "\n".join(reasoning_parts)
+                assistant_msg["reasoning"] = joined_reasoning
+                assistant_msg["reasoning_content"] = joined_reasoning
+            out.append(assistant_msg)
         elif text_parts:
             out.append({"role": role, "content": "\n".join(text_parts)})
 
@@ -256,7 +274,7 @@ class LLMClientModel(Model):
         model_id: Optional[str] = None,
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
-        think: bool = False,
+        think: Optional[Union[bool, str]] = None,
         response_format: ResponseFormat = "json",
     ) -> None:
         assert client is not None, "client is required"
@@ -300,6 +318,21 @@ class LLMClientModel(Model):
         ``LLMClientConfig`` is available on ``self._config`` for internal
         adapter use where attribute access is cleaner."""
         return self._config.as_dict()
+
+    def get_max_context_tokens(self) -> int:
+        """Delegate to the backing client (``LLMClient`` contract).
+
+        Context-sizing and compaction helpers are typed against ``LLMClient``
+        but are routinely handed this adapter (e.g. the SE quality gates'
+        default ``llm_getter`` returns ``get_strands_model(...)``). Without
+        delegation every such call raised ``AttributeError`` — code review
+        failed closed and ``compaction`` silently degraded to a 16384-token
+        assumption behind its ``hasattr`` guard.
+
+        Postconditions:
+            - Returns the backing client's max context tokens.
+        """
+        return self._client.get_max_context_tokens()
 
     def clone(self, **overrides: Any) -> "LLMClientModel":
         """Return a new ``LLMClientModel`` sharing the backing client but with
@@ -380,13 +413,17 @@ class LLMClientModel(Model):
         try:
             call_cfg = dataclasses.replace(
                 cfg,
-                **{k: state[k] for k in ("temperature", "max_tokens", "think", "response_format") if k in state},
+                **{
+                    k: state[k]
+                    for k in ("temperature", "max_tokens", "think", "response_format")
+                    if k in state
+                },
             )
         except (TypeError, ValueError) as exc:
             raise ValueError(f"invocation_state contains invalid override: {exc}") from exc
         temperature = float(call_cfg.temperature or 0.0)
         max_tokens = call_cfg.max_tokens
-        think = bool(call_cfg.think)
+        think = call_cfg.think  # bool | str | None — never coerce; levels must survive
         response_format = call_cfg.response_format
 
         logger.debug(
@@ -418,6 +455,17 @@ class LLMClientModel(Model):
                 tool_calls = tc
 
         if tool_calls is not None:
+            # Surface the tool-call turn's reasoning as a strands
+            # reasoningContent block so the Agent's message history carries
+            # it back through _strands_messages_to_openai on the next turn —
+            # DeepSeek thinking mode 400s when it is omitted.
+            reasoning = result.get("__reasoning_content__") if isinstance(result, dict) else None
+            if reasoning:
+                yield {"contentBlockStart": {"start": {}}}
+                yield {
+                    "contentBlockDelta": {"delta": {"reasoningContent": {"text": str(reasoning)}}}
+                }
+                yield {"contentBlockStop": {}}
             for idx, call in enumerate(tool_calls):
                 fn = (call or {}).get("function") or {}
                 tool_name = str(fn.get("name") or call.get("name") or f"tool_{idx}")
@@ -476,7 +524,7 @@ class LLMClientModel(Model):
         text_prompt = "\n\n".join(p for p in user_parts if p)
 
         temperature = float(self._config.temperature or 0.0)
-        think = bool(self._config.think)
+        think = self._config.think  # bool | str | None — never coerce; levels must survive
 
         data = await asyncio.to_thread(
             self._client.complete_json,
@@ -506,7 +554,7 @@ def get_strands_model(
     *,
     temperature: float = 0.0,
     max_tokens: Optional[int] = None,
-    think: bool = False,
+    think: Optional[Union[bool, str]] = None,
     model_id: Optional[str] = None,
     client: Optional[LLMClient] = None,
     response_format: str = "json",
@@ -546,7 +594,7 @@ def run_json_via_strands(
     user_prompt: str,
     agent_key: Optional[str] = None,
     temperature: float = 0.0,
-    think: bool = False,
+    think: Optional[Union[bool, str]] = None,
 ) -> Dict[str, Any]:
     """Single-shot LLM call through a fresh Strands ``Agent``, returning a
     JSON-parsed dict.

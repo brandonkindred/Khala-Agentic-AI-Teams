@@ -259,7 +259,7 @@ class DummyLLMClient(LLMClient, Model):
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
     ) -> str:
         self._request_count += 1
         return "Dummy text completion (no LLM)."
@@ -271,7 +271,7 @@ class DummyLLMClient(LLMClient, Model):
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         # Pattern-match against the user prompt only. Callers (including
@@ -775,7 +775,7 @@ class DummyLLMClient(LLMClient, Model):
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -794,9 +794,7 @@ class DummyLLMClient(LLMClient, Model):
            so callers exercising the prose path see deterministic text.
         """
         if response_format not in ("json", "text"):
-            raise ValueError(
-                f"response_format must be 'json' or 'text', got {response_format!r}"
-            )
+            raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         self._request_count += 1
         system_prompt = None
         user_prompt = ""
