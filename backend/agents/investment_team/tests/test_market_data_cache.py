@@ -559,3 +559,67 @@ def test_streaming_write_and_cache_read_agree_on_nonfinite_volume() -> None:
 
     assert write_bars[0].volume == read_bars[0].volume == 0.0
     assert write_fp == read_fp
+
+
+class _NaNVolProvider:
+    """Historical-only provider that emits a single NaN-volume bar."""
+
+    def __init__(self, name: str = "nanvol") -> None:
+        self.capabilities = type("C", (), {"name": name})()
+
+    def historical(self, *, symbols, asset_class, start, end, timeframe) -> Iterator[BarEvent]:
+        for sym in symbols:
+            yield BarEvent(
+                bar=Bar(
+                    symbol=sym,
+                    timestamp="2024-01-01",
+                    timeframe=timeframe,
+                    open=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.5,
+                    volume=float("nan"),
+                )
+            )
+
+
+def test_caching_stream_miss_path_sanitizes_live_event_volume(cache: MarketDataCache) -> None:
+    """On a cache miss the engine consumes the live stream directly, so a
+    NaN-volume provider bar must be yielded with volume coerced to 0.0 — the
+    same value the cached replay later emits — so miss and hit paths drive
+    identical execution rather than leaking NaN into fill math on the first run.
+    """
+    provider = _NaNVolProvider()
+    miss_events = [
+        e
+        for e in CachingProviderHistoricalStream(
+            provider=provider,
+            symbols=["AAA"],
+            asset_class="stocks",
+            start="2024-01-01",
+            end="2024-01-01",
+            timeframe="1d",
+            cache=cache,
+        )
+        if isinstance(e, BarEvent)
+    ]
+    assert len(miss_events) == 1
+    # The live (miss-path) event the engine sees is sanitized, never NaN.
+    assert miss_events[0].bar.volume == 0.0
+    # Other Bar fields are preserved by the surgical coercion.
+    assert (miss_events[0].bar.close, miss_events[0].bar.timeframe) == (100.5, "1d")
+
+    # The cached replay emits the same coerced volume from the snapshot.
+    stream2 = CachingProviderHistoricalStream(
+        provider=provider,
+        symbols=["AAA"],
+        asset_class="stocks",
+        start="2024-01-01",
+        end="2024-01-01",
+        timeframe="1d",
+        cache=cache,
+    )
+    hit_events = [e for e in stream2 if isinstance(e, BarEvent)]
+    assert stream2.cache_hit is True
+    # Identical provider data → identical volume on miss and hit paths.
+    assert hit_events[0].bar.volume == miss_events[0].bar.volume == 0.0

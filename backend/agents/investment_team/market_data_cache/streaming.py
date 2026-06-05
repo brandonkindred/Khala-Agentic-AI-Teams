@@ -114,7 +114,16 @@ class CachingProviderHistoricalStream:
         for event in upstream:
             if isinstance(event, BarEvent):
                 bar = event.bar
-                buffers.setdefault(bar.symbol, []).append(_bar_to_ohlcv(bar))
+                norm = _bar_to_ohlcv(bar)
+                buffers.setdefault(bar.symbol, []).append(norm)
+                # The engine consumes this live stream on a cache miss; a
+                # later cached replay re-emits the persisted (coerced) volume
+                # via _interleave_bars. Yield the same coerced volume here so
+                # a NaN/inf provider volume drives identical execution on the
+                # miss and hit paths, instead of leaking a non-finite value
+                # into fill/participation math on the first run only.
+                if not math.isfinite(float(getattr(bar, "volume", 0.0))):
+                    event = BarEvent(bar=bar.model_copy(update={"volume": norm.volume}))
                 yield event
             elif isinstance(event, EndOfStreamEvent):
                 self._persist_buffers(buffers, provider_name)
