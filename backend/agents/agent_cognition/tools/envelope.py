@@ -101,8 +101,8 @@ def try_unwrap_request(body: Any) -> UnwrappedRequest | None:
         * ``None`` when ``body`` is not a mapping or lacks the marker — the caller
           passes the body through to the entrypoint unchanged.
         * An :class:`UnwrappedRequest` when the marker is present and the envelope
-          is well-formed (``input`` present, ``cognition`` an object, no stray
-          keys).
+          is well-formed (``input`` and ``cognition`` both present, ``cognition``
+          an object, no stray keys).
         * Raises :class:`EnvelopeError` when the marker is present but the
           envelope is malformed — a forged or corrupt envelope is rejected, never
           forwarded to the entrypoint as if it were user input.
@@ -111,7 +111,13 @@ def try_unwrap_request(body: Any) -> UnwrappedRequest | None:
         return None
     if "input" not in body:
         raise EnvelopeError("cognition envelope is missing 'input'")
-    cognition = body.get("cognition", {})
+    # The contract is marker + input + cognition; a marked body that omits
+    # cognition is malformed (corrupt/forged), not a request to unwrap with an
+    # empty side channel — reject it so the shim returns 400 rather than invoking
+    # the entrypoint with the nested input and no cognition.
+    if "cognition" not in body:
+        raise EnvelopeError("cognition envelope is missing 'cognition'")
+    cognition = body["cognition"]
     if not isinstance(cognition, Mapping):
         raise EnvelopeError(
             f"cognition envelope 'cognition' must be an object, got {type(cognition).__name__}"

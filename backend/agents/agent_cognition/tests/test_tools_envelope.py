@@ -81,8 +81,8 @@ def test_marked_with_stray_keys_raises() -> None:
         try_unwrap_request({ENVELOPE_MARKER: 1, "input": {}, "cognition": {}, "smuggled": "x"})
 
 
-def test_missing_cognition_defaults_to_empty() -> None:
-    # cognition is optional in shape; absent → empty block (still a valid envelope).
-    unwrapped = try_unwrap_request({ENVELOPE_MARKER: 1, "input": {"a": 1}})
-    assert unwrapped is not None
-    assert unwrapped.cognition == {}
+def test_marked_but_missing_cognition_raises() -> None:
+    # The contract is marker + input + cognition; a marked body without cognition
+    # is malformed (rejected), not silently unwrapped with an empty block.
+    with pytest.raises(EnvelopeError):
+        try_unwrap_request({ENVELOPE_MARKER: 1, "input": {"a": 1}})
