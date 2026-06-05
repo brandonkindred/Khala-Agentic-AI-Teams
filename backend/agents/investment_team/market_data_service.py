@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from .data_providers.symbol_maps import (
     resolve_alphavantage_forex,
@@ -82,6 +82,11 @@ class OHLCVBar(BaseModel):
     liquidity math can exclude synthetic bars consistently on either path.
     Snapshots written before the column existed read back with the flag
     defaulted to ``False``.
+
+    Invariant: ``volume`` is always finite. A non-finite volume (NaN/±inf,
+    which providers emit on early-listing/low-liquidity sessions) is coerced
+    to ``0.0`` on construction so it can never be persisted to the cache or
+    reach ADV / cost-model arithmetic.
     """
 
     date: str
@@ -91,6 +96,20 @@ class OHLCVBar(BaseModel):
     close: float
     volume: float
     is_imputed: bool = False
+
+    @field_validator("volume", mode="after")
+    @classmethod
+    def _coerce_nonfinite_volume(cls, v: float) -> float:
+        """Coerce a non-finite volume (NaN/±inf) to 0.0.
+
+        Postconditions:
+            Returns a finite float. Non-finite input becomes ``0.0`` — the
+            documented zero-volume sentinel ADV/liquidity math already excludes
+            — so a malformed value can never be persisted to the Parquet cache
+            or reach cost-model arithmetic. Finite inputs pass through
+            unchanged.
+        """
+        return v if math.isfinite(v) else 0.0
 
 
 # Type alias for a fetch function used in the provider chain.
@@ -867,7 +886,11 @@ class MarketDataService:
             Returns ``(None, False)`` when any of O/H/L/C is non-finite (the
             caller forward-fills or drops). Otherwise returns
             ``(bar, repaired)`` where ``repaired`` is True iff the H/L envelope
-            had to be widened.
+            had to be widened. A non-finite ``volume`` (NaN/±inf) accompanying
+            finite OHLC does not drop the bar — the real price data is
+            preserved and only the volume is coerced to ``0.0`` (the documented
+            zero-volume sentinel ADV/liquidity math already excludes), logged
+            at WARNING.
         """
         o = round(float(open), 4)
         h = round(float(high), 4)
@@ -875,6 +898,15 @@ class MarketDataService:
         c = round(float(close), 4)
         if not (math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)):
             return (None, False)
+        # Volume can be non-finite (NaN on early-listing/low-liquidity sessions)
+        # while OHLC is perfectly good. Preserve the real price bar — indicators
+        # index OHLC positionally — and neutralise only the volume to 0.0, which
+        # ADV/liquidity math already excludes via its ``volume > 0`` filter.
+        # Dropping the whole row would discard valid price data.
+        v = float(volume)
+        if not math.isfinite(v):
+            logger.warning("non-finite volume %r on %s bar; coercing to 0.0", volume, date)
+            v = 0.0
         h_fixed = max(o, h, ll, c)
         l_fixed = min(o, h, ll, c)
         repaired = h_fixed != h or l_fixed != ll
@@ -884,7 +916,7 @@ class MarketDataService:
             high=h_fixed,
             low=l_fixed,
             close=c,
-            volume=float(volume),
+            volume=v,
         )
         return (bar, repaired)
 
