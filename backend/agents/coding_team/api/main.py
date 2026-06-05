@@ -471,6 +471,22 @@ def _clear_active_issue(repo_path: str) -> None:
     _git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
 
 
+def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
+    """Remove the marker only when it belongs to this job's issue.
+
+    Two different issues may legitimately run against the same checkout (the
+    duplicate guard is per-issue); an older job publishing after a newer job
+    prepped must not unset the newer job's marker, or a crash of the newer
+    job would lose its development-work attribution.
+
+    Postconditions:
+        - The marker is unset iff it equaled ``issue_number``; any other
+          value (or no marker) is left untouched.
+    """
+    if _read_active_issue(repo_path) == issue_number:
+        _clear_active_issue(repo_path)
+
+
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
     rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
@@ -727,8 +743,16 @@ def _prepare_issue_branch(
     # Invariant: no commits visible to prep — on local branches about to be
     # reset, or on the just-fetched remote issue tip that the final
     # --force-with-lease push would replace — may become unreachable.
-    for ref in (DEVELOPMENT_BRANCH, integration_branch, remote_issue_ref):
-        preserve_err = _preserve_if_would_orphan(repo_path, ref, base_ref, seed, marker)
+    # Rescue-tag attribution is per ref: work on the issue branch (local or
+    # remote tip) belongs to the issue being prepared by construction, so its
+    # rescue ref is issue-tagged for _latest_issue_rescue_ref continuation;
+    # development work is only attributable through the marker.
+    for ref, owner_issue in (
+        (DEVELOPMENT_BRANCH, marker),
+        (integration_branch, issue_number),
+        (remote_issue_ref, issue_number),
+    ):
+        preserve_err = _preserve_if_would_orphan(repo_path, ref, base_ref, seed, owner_issue)
         if preserve_err:
             return False, preserve_err, notes
 
@@ -881,5 +905,7 @@ def _run_with_github_hooks(
         # remote PR branch, so the checkout no longer holds unpublished work
         # for this issue. Every earlier return (orchestrator failure, no
         # merged tasks, fast-forward/push/PR failure) retains the marker so a
-        # retry continues from development instead of starting over.
-        _clear_active_issue(request.repo_path)
+        # retry continues from development instead of starting over. Scoped
+        # to this job's issue: a sibling job for another issue may have
+        # re-marked the checkout since this job prepped.
+        _clear_active_issue_if_matches(request.repo_path, num)

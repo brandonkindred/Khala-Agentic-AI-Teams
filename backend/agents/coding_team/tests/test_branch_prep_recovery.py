@@ -757,3 +757,58 @@ class TestGitOutputCredentialScrubbing:
         rc, msg = api._git("/repo", "status")
         assert rc == 1
         assert msg == "fatal: ordinary failure"
+
+
+class TestRescueTagAttribution:
+    """Preserved work must carry the tag of the issue it belongs to, so
+    _latest_issue_rescue_ref can offer it as a continuation candidate later."""
+
+    def test_diverged_local_issue_branch_rescue_is_issue_tagged(self, api, repo_pair) -> None:
+        """A khala/issue-N branch is issue-N work by construction — its rescue
+        ref must be issue-N-tagged even when the marker is absent/foreign."""
+        remote, clone = repo_pair
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "remote.py", "r = 1\n", "remote work")
+        _must(remote, "checkout", "-q", "main")
+        _must(clone, "checkout", "-q", "-b", "khala/issue-7", "origin/main")
+        _commit_file(clone, "local.py", "l = 1\n", "local work")
+        _must(clone, "checkout", "-q", "main")
+        assert api._read_active_issue(clone) is None  # no marker at all
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        rescued = _branch_exists(clone, "khala/rescue/issue-7-*")
+        assert rescued is not None
+        assert "local.py" in _must(clone, "ls-tree", "-r", "--name-only", rescued)
+        # And the continuation lookup for issue 7 can actually find it.
+        assert api._latest_issue_rescue_ref(clone, 7) == rescued
+
+    def test_foreign_development_rescue_keeps_marker_tag(self, api, repo_pair) -> None:
+        """development work is attributable only via the marker — unchanged."""
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone, issue=5)
+        assert ok is True
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "issue5.py", "x = 5\n", "issue 5 progress")
+
+        ok, err, _ = _prep(api, clone, issue=7)
+        assert ok is True, err
+        assert _branch_exists(clone, "khala/rescue/issue-5-*") is not None
+
+
+class TestScopedMarkerClear:
+    """Two different issues may run against the same checkout; a job must
+    only clear its own marker, never a sibling's."""
+
+    def test_clear_if_matches_only_clears_own_marker(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        api._write_active_issue(clone, 9)
+        api._clear_active_issue_if_matches(clone, 5)  # older job publishing
+        assert api._read_active_issue(clone) == 9  # newer job's marker survives
+        api._clear_active_issue_if_matches(clone, 9)
+        assert api._read_active_issue(clone) is None
+
+    def test_publish_clear_is_scoped_to_the_jobs_issue(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        api._clear_active_issue_if_matches(clone, 5)  # no marker set: no-op, no raise
+        assert api._read_active_issue(clone) is None

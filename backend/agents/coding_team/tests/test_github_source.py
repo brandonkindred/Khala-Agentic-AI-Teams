@@ -1156,7 +1156,7 @@ class TestActiveIssueMarkerLifecycle:
     def _run(self, patched_app, monkeypatch, github_client, orchestrator=None):
         api = patched_app["api"]
         cleared: list[str] = []
-        monkeypatch.setattr(api, "_clear_active_issue", lambda p: cleared.append(p))
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: cleared.append(p))
         if orchestrator is not None:
             monkeypatch.setattr(api, "run_coding_team_orchestrator", orchestrator)
         patched_app["set_github"](github_client)
@@ -1213,7 +1213,7 @@ class TestActiveIssueMarkerLifecycle:
 
     def test_prep_notes_posted_as_issue_comments(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
-        monkeypatch.setattr(api, "_clear_active_issue", lambda p: None)
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
         monkeypatch.setattr(
             api,
             "_prepare_issue_branch",
@@ -1237,7 +1237,7 @@ class TestActiveIssueMarkerLifecycle:
             seen["issue_number"] = kwargs.get("issue_number")
             return True, None, []
 
-        monkeypatch.setattr(api, "_clear_active_issue", lambda p: None)
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
         monkeypatch.setattr(api, "_prepare_issue_branch", fake_prep)
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         patched_app["set_github"](client)
