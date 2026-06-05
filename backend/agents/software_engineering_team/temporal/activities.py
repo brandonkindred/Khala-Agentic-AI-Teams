@@ -519,7 +519,7 @@ def execute_coding_team_activity(
         from llm_service import get_client
         from software_engineering_team.shared.job_store import JOB_STATUS_COMPLETED, get_job
 
-        run_coding_team_orchestrator(
+        ct_status = run_coding_team_orchestrator(
             job_id,
             str(path),
             plan_input,
@@ -527,7 +527,15 @@ def execute_coding_team_activity(
             get_job_fn=lambda jid: get_job(jid),
             get_llm=get_client,
         )
-        update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+        # Honor the coding team's terminal status: a guardrail failure
+        # (budget / round ceiling / no merges) must not be marked completed,
+        # and a cancellation keeps its status.
+        if ct_status is None:
+            pass  # cancelled — status already set via the callback
+        elif ct_status.startswith("failed"):
+            update_job(job_id, status=JOB_STATUS_FAILED, phase="completed")
+        else:
+            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
 
         return ExecutionResult(merged_count=0).model_dump()
 

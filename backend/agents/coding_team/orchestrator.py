@@ -90,11 +90,23 @@ def run_coding_team_orchestrator(
     get_job_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     get_llm: Optional[Callable[[str], Any]] = None,
-) -> None:
+) -> Optional[str]:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
     Uses in-process job store (coding_team/job_store) for task graph persistence.
     update_job_fn / get_job_fn: if provided (e.g. from software_engineering_team), used for phase/status and cancel check.
+
+    Postconditions:
+      Returns the job's terminal status so integration callers (e.g. the SE
+      orchestrator / Temporal activity) can map it without re-reading the job
+      store and must not blindly mark the job completed:
+        * ``"completed"`` — the swarm completed with at least one merged task.
+        * ``"failed: budget_exhausted"`` / ``"failed: max_rounds_exhausted"`` /
+          ``"failed: no_tasks_merged"`` — explicit guardrail failures.
+        * ``None`` — the job was cancelled (the cancelled status is already
+          set via the callback; callers must not override it).
+      The same status was already pushed through ``update_job_fn`` before
+      returning.
     """
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
@@ -207,13 +219,15 @@ def run_coding_team_orchestrator(
                 "(raise CODING_TEAM_MAX_LLM_CALLS)"
             ),
         )
-        return
+        return "failed: budget_exhausted"
 
     merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
     decision = terminal_status(run_reason, merged_count, run_max_rounds)
-    if decision is not None:
-        status, status_text = decision
-        _update(status=status, phase="completed", status_text=status_text)
+    if decision is None:
+        return None  # cancelled — status already set via the callback
+    status, status_text = decision
+    _update(status=status, phase="completed", status_text=status_text)
+    return status
 
 
 class CodingTeamSwarm:

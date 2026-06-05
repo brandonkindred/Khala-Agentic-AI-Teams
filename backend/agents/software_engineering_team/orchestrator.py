@@ -2808,7 +2808,7 @@ def run_orchestrator(
             )
             from coding_team.orchestrator import run_coding_team_orchestrator
 
-            run_coding_team_orchestrator(
+            ct_status = run_coding_team_orchestrator(
                 job_id,
                 str(path),
                 plan_input,
@@ -2816,7 +2816,16 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
-            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+            # Honor the coding team's terminal status instead of blindly
+            # marking the SE job completed: a guardrail failure (budget /
+            # round ceiling / no merges) must not be reported as success, and
+            # a cancellation must keep its status.
+            if ct_status is None:
+                pass  # cancelled — status already set via the callback
+            elif ct_status.startswith("failed"):
+                update_job(job_id, status=JOB_STATUS_FAILED, phase="completed")
+            else:
+                update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
             return
 
         # Legacy path (deprecated for main path): tech_lead_agent, backend_code_v2_team,

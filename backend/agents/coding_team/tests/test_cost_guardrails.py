@@ -300,8 +300,12 @@ def _run_orchestrator(
     quality_gate_ok: bool = True,
     cancel: bool = False,
     inject_llm: bool = True,
-) -> List[Dict[str, Any]]:
-    """Drive run_coding_team_orchestrator with stubs; return captured updates."""
+) -> "tuple[List[Dict[str, Any]], Optional[str]]":
+    """Drive run_coding_team_orchestrator with stubs.
+
+    Returns ``(captured_update_kwargs, return_value)`` — the return value is
+    the terminal status the SE/Temporal callers now branch on.
+    """
     _FakeSWE.instances = []
     updates: List[Dict[str, Any]] = []
 
@@ -325,7 +329,7 @@ def _run_orchestrator(
         model = "fake"
 
     get_llm = (lambda key: _FakeClient()) if inject_llm else None
-    orch.run_coding_team_orchestrator(
+    ret = orch.run_coding_team_orchestrator(
         "job-1",
         "/tmp/repo",
         plan,
@@ -333,7 +337,7 @@ def _run_orchestrator(
         get_job_fn=lambda jid: {orch.CANCEL_KEY: True} if cancel else {},
         get_llm=get_llm,
     )
-    return updates
+    return updates, ret
 
 
 def _final_status(updates: List[Dict[str, Any]]) -> Optional[str]:
@@ -346,16 +350,18 @@ def _final_status(updates: List[Dict[str, Any]]) -> Optional[str]:
 def test_orchestrator_completes_when_tasks_merge(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "4")
     tl = _make_fake_tech_lead(tasks=[{"id": "t1", "title": "T1"}], approve=True)
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
     assert _final_status(updates) == "completed"
+    assert ret == "completed"
 
 
 def test_orchestrator_fails_max_rounds_when_never_merges(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "2")
     monkeypatch.setenv("CODING_TEAM_ROUND_MULTIPLIER", "1")
     tl = _make_fake_tech_lead(tasks=[{"id": "t1", "title": "T1"}], approve=False)
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
     assert _final_status(updates) == "failed: max_rounds_exhausted"
+    assert ret == "failed: max_rounds_exhausted"
     # The false-success message can never be produced.
     assert all("0 tasks merged" not in (kw.get("status_text") or "") for kw in updates)
 
@@ -365,15 +371,17 @@ def test_orchestrator_fails_no_tasks_merged_when_empty_plan(
 ) -> None:
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "3")
     tl = _make_fake_tech_lead(tasks=[], approve=True)
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
     assert _final_status(updates) == "failed: no_tasks_merged"
+    assert ret == "failed: no_tasks_merged"
 
 
 def test_orchestrator_fails_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODING_TEAM_MAX_LLM_CALLS", "1")
     tl = _make_fake_tech_lead(tasks=[{"id": "t1"}], approve=True, plan_charges=2)
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl)
     assert _final_status(updates) == "failed: budget_exhausted"
+    assert ret == "failed: budget_exhausted"
     last = updates[-1]
     assert "CODING_TEAM_MAX_LLM_CALLS" in last["status_text"]
 
@@ -381,18 +389,21 @@ def test_orchestrator_fails_budget_exhausted(monkeypatch: pytest.MonkeyPatch) ->
 def test_orchestrator_cancelled_keeps_cancelled_status(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "4")
     tl = _make_fake_tech_lead(tasks=[{"id": "t1", "title": "T1"}], approve=True)
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl, cancel=True)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl, cancel=True)
     # The swarm sets "cancelled"; terminal_status returns None so the
-    # orchestrator must not overwrite it with completed/failed.
+    # orchestrator must not overwrite it — and signals cancellation to callers
+    # by returning None so they do not re-mark the job completed.
     assert _final_status(updates) == "cancelled"
+    assert ret is None
 
 
 def test_orchestrator_default_getter_without_injected_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     """With no get_llm, the orchestrator resolves clients via the factory."""
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "4")
     tl = _make_fake_tech_lead(tasks=[], approve=True)  # empty plan → quick exit
-    updates = _run_orchestrator(monkeypatch, tech_lead_cls=tl, inject_llm=False)
+    updates, ret = _run_orchestrator(monkeypatch, tech_lead_cls=tl, inject_llm=False)
     assert _final_status(updates) == "failed: no_tasks_merged"
+    assert ret == "failed: no_tasks_merged"
 
 
 def test_swarm_run_derives_max_rounds_when_none(tmp_path) -> None:
@@ -416,7 +427,6 @@ def test_orchestrator_applies_per_role_thinking(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("CODING_TEAM_MIN_ROUNDS", "4")
     tl = _make_fake_tech_lead(tasks=[{"id": "t1", "title": "T1"}], approve=True)
     _run_orchestrator(monkeypatch, tech_lead_cls=tl)
-
     tech_lead = tl.instances[-1]
     # Planning keeps the high (platform-default) level; the mechanical model
     # (assignment / review) runs with reasoning disabled.
