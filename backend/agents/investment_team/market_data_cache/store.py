@@ -145,6 +145,29 @@ def _finite_volume(volume: Any) -> float:
     return v if math.isfinite(v) else 0.0
 
 
+def _canonicalize_bar_volumes(bars: Sequence[OHLCVBar]) -> List[OHLCVBar]:
+    """Return ``bars`` with any non-finite volume replaced by 0.0.
+
+    Applied to the bars a cache miss both persists and returns, so first-run
+    consumption matches the 0.0 a later replay reads back from the snapshot —
+    the provider-agnostic cache canonicalises volume on behalf of callers that
+    did not pre-normalise, instead of persisting 0.0 but handing back the raw
+    NaN/inf on the miss path.
+
+    Postconditions:
+        Returns a list the same length/order as ``bars``; bars with a finite
+        volume are returned unchanged (same object), non-finite ones are
+        replaced by a copy with ``volume=0.0``.
+    """
+    out: List[OHLCVBar] = []
+    for b in bars:
+        if math.isfinite(b.volume):
+            out.append(b)
+        else:
+            out.append(b.model_copy(update={"volume": 0.0}))
+    return out
+
+
 def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     """SHA256 over a deterministic byte stream of bars.
 
@@ -601,6 +624,11 @@ class MarketDataCache:
         bars, provider = fetch_fn(symbol, asset_class, start, end)
         if not bars or not provider:
             return [], None
+        # Canonicalise volume before persisting *and* returning so the miss-path
+        # bars the caller consumes match the 0.0 a later cache hit replays from
+        # the snapshot — a fetch_fn that returns a non-finite volume can't make
+        # first-run and replay diverge.
+        bars = _canonicalize_bar_volumes(bars)
         meta = self._write_snapshot(
             symbol=symbol,
             asset_class=asset_class,

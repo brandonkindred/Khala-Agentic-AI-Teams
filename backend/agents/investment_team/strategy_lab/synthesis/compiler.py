@@ -356,7 +356,13 @@ def _emit_source_helper() -> str:
             if source == "open":
                 return bar.open
             if source == "volume":
-                return bar.volume
+                # Canonicalise a non-finite volume to 0.0 (the sentinel the data
+                # boundaries and dataset fingerprint use) so a NaN/inf volume
+                # can't make a predicate behave differently from the 0.0 dataset
+                # it shares a fingerprint with. Self-contained: v == v is False
+                # only for NaN.
+                v = bar.volume
+                return v if v == v and v != float("inf") and v != float("-inf") else 0.0
             if source == "hl2":
                 return (bar.high + bar.low) / 2.0
             if source == "ohlc4":

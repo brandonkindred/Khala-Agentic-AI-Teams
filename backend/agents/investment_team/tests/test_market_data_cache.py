@@ -704,3 +704,46 @@ def test_hash_bars_coerces_nonfinite_volume() -> None:
     assert _hash_bars([_bar(float("nan"))]) == _hash_bars([_bar(0.0)])
     assert _hash_bars([_bar(float("inf"))]) == _hash_bars([_bar(0.0)])
     assert _hash_bars([_bar(5.0)]) != _hash_bars([_bar(0.0)])
+
+
+def test_get_or_fetch_miss_returns_canonicalized_volume(cache: MarketDataCache) -> None:
+    """A fetch_fn returning a non-finite volume must not make the miss-path
+    return diverge from the cached replay. get_or_fetch canonicalizes volume on
+    both the persisted snapshot and the bars it hands back, so first-run
+    consumption matches the 0.0 a later cache hit reads from the snapshot.
+    """
+    raw = [
+        OHLCVBar(
+            date="2024-01-01", open=100.0, high=101.0, low=99.0, close=100.5, volume=float("nan")
+        ),
+        OHLCVBar(date="2024-01-02", open=101.0, high=102.0, low=100.0, close=101.5, volume=2000.0),
+    ]
+
+    def fetch(symbol, ac, start, end):
+        return list(raw), "yahoo"
+
+    miss_bars, meta = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=fetch,
+    )
+    assert meta is not None
+    # The miss-path return is canonicalized, not the raw NaN.
+    assert [b.volume for b in miss_bars] == [0.0, 2000.0]
+
+    # A cache hit (fetch_fn must not run) replays the same canonical volume.
+    def _no_call(symbol, ac, start, end):  # pragma: no cover - must not be called
+        raise AssertionError("fetch_fn must not be called on cache hit")
+
+    hit_bars, _ = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=_no_call,
+    )
+    assert [b.volume for b in hit_bars] == [b.volume for b in miss_bars]
