@@ -1,0 +1,61 @@
+"""Seed rule packs for the Agent Cognition Core (install mechanism).
+
+A *seed pack* is a named set of rules installed onto an agent at provision time
+so it has sensible day-one guardrails. This module is the **mechanism +
+registry**: it declares the :data:`SEED_PACKS` catalog and the small
+:class:`SeedRule` shape the installer
+(:func:`agent_cognition.rules.store.install_seed_pack`) materializes into
+``agent_cognition_rules`` rows. The catalog ships intentionally minimal here; the
+full guardrail content is authored in a later step.
+
+Each seed rule carries a stable ``key`` (unique within its pack). The installer
+derives a deterministic rule id from ``(agent_id, pack, key)`` and inserts with
+``ON CONFLICT DO NOTHING``, so a re-install is a race-free no-op (the primary key,
+not a lookup, enforces idempotency). The ``{"seed_pack", "seed_key"}`` marker the
+installer also writes into ``evidence`` is provenance only — it no longer governs
+idempotency, so renaming a pack or key changes the id and re-seeds a fresh rule.
+
+Importing this module has no side effects.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Any
+
+from agent_cognition.models import RuleMode
+
+__all__ = ["SeedRule", "SEED_PACKS"]
+
+
+@dataclass(frozen=True)
+class SeedRule:
+    """One rule in a seed pack.
+
+    Invariant: ``key`` is unique within its pack and stable across releases — the
+    installer derives the rule's deterministic primary key from it, which is what
+    makes a re-install idempotent (the ``evidence`` marker is provenance only).
+    """
+
+    key: str
+    text: str
+    mode: RuleMode = RuleMode.ADVISORY
+    predicate: dict[str, Any] = field(default_factory=dict)
+    rationale: str | None = None
+    priority: int = 0
+
+
+# Named catalog. Keep entries minimal and obviously safe — the comprehensive
+# guardrail content lands in a later step; this exists so the install mechanism
+# is exercisable today against the pack name agents reference in their manifest.
+SEED_PACKS: dict[str, list[SeedRule]] = {
+    "default_guardrails": [
+        SeedRule(
+            key="no-secrets-in-output",
+            text="Never include credentials, API keys, tokens, or other secrets in your output.",
+            mode=RuleMode.ADVISORY,
+            rationale="Prevents leaking sensitive material into persisted memory or responses.",
+            priority=100,
+        ),
+    ],
+}
