@@ -231,6 +231,7 @@ class AgentRegistry:
             has_output_schema=bool(m.outputs and m.outputs.schema_ref),
             has_invoke=m.invoke is not None,
             has_sandbox=m.sandbox is not None,
+            has_cognition=m.cognition is not None,
         )
 
     @staticmethod

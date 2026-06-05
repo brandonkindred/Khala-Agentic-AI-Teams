@@ -1,0 +1,29 @@
+# Illustrative agent manifest showing the optional `cognition:` block.
+#
+# This file documents the schema ONLY. It is deliberately placed outside any
+# team's `agent_console/manifests/` directory, so the Agent Registry loader does
+# not discover it — that keeps it from emitting an orphan-team warning and avoids
+# implying that any live agent is cognition-enabled before the runtime wiring for
+# the Agent Cognition Core exists.
+#
+# The `cognition:` block is metadata: nothing reads it at registry-load time.
+# Later phases consume it — the tools layer resolves `tools`, the invoke proxy
+# honours `requires_idempotency_key`, the seed-pack installer reads `rule_packs`,
+# and the central scheduler prunes memory per `memory.retention_days_events`. The
+# agent generator stamps an equivalent block onto every newly generated agent.
+schema_version: 1
+id: example.cognition_demo
+team: agentic_team_provisioning
+name: Cognition Demo Agent
+summary: Example agent illustrating the optional cognition manifest block.
+description: |
+  Reference manifest for the optional `cognition:` block. Not a real, runnable agent.
+tags: [example, cognition]
+source:
+  entrypoint: example.module:ExampleAgent
+cognition:
+  memory:
+    retention_days_events: 90       # raw episodic events pruned after N days (>= 1)
+  tools: [git, http_api]            # tool ids resolved against the cognition tool registries
+  rule_packs: [default_guardrails]  # seed rule packs installed on first provision
+  requires_idempotency_key: false   # true => side-effecting; reject invokes lacking a caller key
