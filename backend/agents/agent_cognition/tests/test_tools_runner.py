@@ -84,6 +84,31 @@ def _toolset(
     )
 
 
+def _multi_fn_toolset(tool_id: str, function_name: str, handler) -> BoundToolset:
+    """A tool whose declared id differs from its advertised function name.
+
+    Mirrors `git` (tool_id=`git`, functions `git_status` / `git_commit` / …).
+    """
+    definition = {
+        "type": "function",
+        "function": {
+            "name": function_name,
+            "description": "test tool",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+        },
+    }
+    return BoundToolset(
+        (
+            BoundTool(
+                tool_id=tool_id,
+                site=ExecutionSite.SANDBOX_LOCAL,
+                definitions=(definition,),
+                handlers={function_name: handler},
+            ),
+        )
+    )
+
+
 def _run(llm, toolset, enforced_rules=None, **kw):
     return run_tool_loop(
         llm,
@@ -157,6 +182,47 @@ def test_forbidden_tool_refused_before_dispatch() -> None:
     # The model was handed a structured refusal as the tool result.
     tool_msgs = [m for round_ in llm.seen_messages for m in round_ if m.get("role") == "tool"]
     assert any("forbidden_by_rule" in m["content"] for m in tool_msgs)
+
+
+def test_forbid_tool_matches_declared_id_not_function_name() -> None:
+    # Regression: enforced predicates name the declared tool id (`git`), while the
+    # advertised handler is a function (`git_write_files_and_commit`). Gating on
+    # the function name would let the forbidden call dispatch.
+    side_effects = []
+
+    def git_write(args):
+        side_effects.append(args)
+        return {"committed": True}
+
+    rule = _enforced_rule(
+        {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "git"}},
+        text="no git writes",
+    )
+    llm = ScriptedLLM([_tool_call("git_write_files_and_commit", {"files": {}}), {"final": True}])
+    result, audit = _run(
+        llm,
+        _multi_fn_toolset("git", "git_write_files_and_commit", git_write),
+        enforced_rules=[rule],
+    )
+
+    assert side_effects == []  # the forbidden git function never dispatched
+    assert result == {"final": True}
+    assert audit.events[0].data["blocked"] is True
+    # The trusted audit carries the declared tool id (the gate identity) and the
+    # specific function that was attempted.
+    assert audit.tool_calls[0].tool_id == "git"
+    assert audit.events[0].content == "git_write_files_and_commit"
+    assert audit.events[0].data["tool_id"] == "git"
+
+
+def test_allowed_call_records_declared_tool_id_and_function() -> None:
+    llm = ScriptedLLM([_tool_call("git_status", {}), {"final": True}])
+    _result, audit = _run(llm, _multi_fn_toolset("git", "git_status", lambda a: {"clean": True}))
+    outcome = audit.events[-1]
+    assert outcome.kind is EventKind.OUTCOME
+    assert outcome.content == "git_status"  # function name preserved
+    assert outcome.data["tool_id"] == "git"  # declared id in the record
+    assert audit.tool_calls[0].tool_id == "git"
 
 
 def test_unrelated_enforced_rule_does_not_block() -> None:

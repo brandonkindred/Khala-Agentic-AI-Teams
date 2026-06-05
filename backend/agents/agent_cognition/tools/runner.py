@@ -4,7 +4,10 @@ Wraps :func:`llm_service.tool_loop.complete_json_with_tool_loop` with a *broker*
 around every declared handler. Before dispatching each call the broker:
 
 1. **Gates the call pre-dispatch** against the active enforced ``forbid_tool``
-   predicates (:func:`agent_cognition.rules.enforcement.evaluate_tool_call`). A
+   predicates (:func:`agent_cognition.rules.enforcement.evaluate_tool_call`),
+   evaluating against the **declared tool id** (e.g. ``git``) the manifest and
+   predicates are written against — not the advertised function name (e.g.
+   ``git_status``) — so ``forbid_tool: git`` blocks every git function. A
    forbidden call is refused **before the handler runs**, so its side effect never
    happens — a postcondition on the final output would be too late.
 2. **Logs the call to memory** as ``tool_call`` + ``outcome``/``error``
@@ -116,19 +119,24 @@ def run_tool_loop(
     tick = clock or _utcnow
     audit = ToolAudit()
     counter = _SeqCounter(source_seq_start)
-    brokered = {
-        name: _make_broker(
-            name,
-            handler,
-            agent_id=agent_id,
-            source_run_id=source_run_id,
-            enforced_rules=enforced_rules,
-            audit=audit,
-            counter=counter,
-            clock=tick,
-        )
-        for name, handler in toolset.handlers().items()
-    }
+    # Broker per *function*, but bound to its owning *declared* tool id so the
+    # enforced gate matches `forbid_tool: <tool_id>` (e.g. `git`) rather than the
+    # advertised function name (e.g. `git_status`). bind_tools guarantees function
+    # names are unique across tools, so this mapping is unambiguous.
+    brokered: dict[str, Callable[[dict[str, Any]], Any]] = {}
+    for tool in toolset.tools:
+        for fn_name, handler in tool.handlers.items():
+            brokered[fn_name] = _make_broker(
+                fn_name,
+                handler,
+                tool_id=tool.tool_id,
+                agent_id=agent_id,
+                source_run_id=source_run_id,
+                enforced_rules=enforced_rules,
+                audit=audit,
+                counter=counter,
+                clock=tick,
+            )
     result = complete_json_with_tool_loop(
         llm,
         user_prompt=user_prompt,
@@ -199,6 +207,7 @@ def _make_broker(
     name: str,
     handler: Callable[[dict[str, Any]], Any],
     *,
+    tool_id: str,
     agent_id: str,
     source_run_id: str,
     enforced_rules: list[Rule],
@@ -206,17 +215,25 @@ def _make_broker(
     counter: _SeqCounter,
     clock: Callable[[], datetime],
 ) -> Callable[[dict[str, Any]], Any]:
-    """Wrap one handler with the gate + memory-logging broker."""
+    """Wrap one handler with the gate + memory-logging broker.
+
+    ``name`` is the advertised function (e.g. ``git_status``); ``tool_id`` is the
+    owning declared tool (e.g. ``git``). The enforced gate evaluates against
+    ``tool_id`` — the identifier predicates and the manifest are written against —
+    while the function name is preserved in the memory record for provenance.
+    """
 
     def _run(args: dict[str, Any]) -> Any:
         started = clock()
         safe_args = _sanitize(args)
-        allow, reason = evaluate_tool_call(name, args or {}, enforced_rules)
+        # Gate on the DECLARED tool id, not the function name, so a rule like
+        # `forbid_tool: git` blocks every git function (git_status, git_commit, …).
+        allow, reason = evaluate_tool_call(tool_id, args or {}, enforced_rules)
         if not allow:
             # Refuse BEFORE the handler runs — no side effect. Record a blocked
             # tool_call (trusted) and hand the model a structured refusal.
             blocked = ToolCall(
-                tool_id=name, args=safe_args, ok=False, error=reason, occurred_at=started
+                tool_id=tool_id, args=safe_args, ok=False, error=reason, occurred_at=started
             )
             _emit_event(
                 audit,
@@ -225,7 +242,7 @@ def _make_broker(
                 source_run_id=source_run_id,
                 kind=EventKind.TOOL_CALL,
                 content=name,
-                data={"blocked": True, "reason": reason, "args": safe_args},
+                data={"tool_id": tool_id, "blocked": True, "reason": reason, "args": safe_args},
                 salience=_SALIENCE_BLOCKED,
                 occurred_at=started,
             )
@@ -234,7 +251,8 @@ def _make_broker(
                 "success": False,
                 "error": "forbidden_by_rule",
                 "message": reason,
-                "tool_id": name,
+                "tool_id": tool_id,
+                "function": name,
             }
 
         _emit_event(
@@ -244,7 +262,7 @@ def _make_broker(
             source_run_id=source_run_id,
             kind=EventKind.TOOL_CALL,
             content=name,
-            data={"args": safe_args},
+            data={"tool_id": tool_id, "args": safe_args},
             salience=_SALIENCE_INTENT,
             occurred_at=started,
         )
@@ -252,7 +270,7 @@ def _make_broker(
             result = handler(args)
         except Exception as exc:  # handler raised — record an error event, keep looping
             err = ToolCall(
-                tool_id=name, args=safe_args, ok=False, error=str(exc), occurred_at=started
+                tool_id=tool_id, args=safe_args, ok=False, error=str(exc), occurred_at=started
             )
             _emit_event(
                 audit,
@@ -261,7 +279,7 @@ def _make_broker(
                 source_run_id=source_run_id,
                 kind=EventKind.ERROR,
                 content=name,
-                data={"error": str(exc)},
+                data={"tool_id": tool_id, "error": str(exc)},
                 salience=_SALIENCE_ERROR,
                 occurred_at=clock(),
             )
@@ -270,12 +288,13 @@ def _make_broker(
                 "success": False,
                 "error": "handler_exception",
                 "message": str(exc),
-                "tool_id": name,
+                "tool_id": tool_id,
+                "function": name,
             }
 
         ok = _result_ok(result)
         call = ToolCall(
-            tool_id=name,
+            tool_id=tool_id,
             args=safe_args,
             ok=ok,
             result=_sanitize(result),
@@ -288,7 +307,7 @@ def _make_broker(
             source_run_id=source_run_id,
             kind=EventKind.OUTCOME if ok else EventKind.ERROR,
             content=name,
-            data={"ok": ok, "result": _sanitize(result)},
+            data={"tool_id": tool_id, "ok": ok, "result": _sanitize(result)},
             salience=_SALIENCE_OUTCOME if ok else _SALIENCE_ERROR,
             occurred_at=clock(),
         )
