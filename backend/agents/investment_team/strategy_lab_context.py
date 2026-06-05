@@ -73,6 +73,24 @@ def normalize_asset_class(ac: object) -> str:
     return "stocks"
 
 
+# Asset classes whose venues trade in whole units (shares / contracts); all
+# others (forex, crypto) accept fractional quantities. Single source of truth
+# shared by the readiness whole-lot gate and the runtime sizing dispatcher so
+# the two never disagree on whether a class is fractional.
+WHOLE_LOT_ASSET_CLASSES: frozenset[str] = frozenset({"stocks", "futures", "commodities"})
+
+
+def is_fractional_asset_class(ac: object) -> bool:
+    """True when the normalized asset class trades in fractional quantities.
+
+    Preconditions: none — ``ac`` may be any value (``None``/unknown normalize to
+    ``"stocks"`` → whole-lot → ``False``).
+    Postconditions: returns ``True`` iff ``normalize_asset_class(ac)`` is not in
+    ``WHOLE_LOT_ASSET_CLASSES``.
+    """
+    return normalize_asset_class(ac) not in WHOLE_LOT_ASSET_CLASSES
+
+
 def normalize_asset_class_strict(ac: object) -> str:
     """Strict variant of :func:`normalize_asset_class`.
 

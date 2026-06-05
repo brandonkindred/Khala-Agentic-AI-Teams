@@ -775,6 +775,20 @@ def _merge_risk_limits_tighten_only(
                 loosened.append(key)
                 continue
 
+        # Ordinary numeric limits: ``None`` means "no limit" — the loosest
+        # possible setting. Introducing a value from ``None`` adds a constraint
+        # (a tightening) and is accepted regardless of direction; clearing a
+        # value to ``None`` removes the constraint (a loosening). Without this,
+        # a refinement that tightens a previously-unset cap (e.g.
+        # ``max_loss_per_trade_pct``) would be silently dropped by the
+        # ``cmp_current is None`` guard below.
+        if current_value is None and new_value is not None:
+            merged_data[key] = new_value
+            continue
+        if current_value is not None and new_value is None:
+            loosened.append(key)
+            continue
+
         try:
             cmp_current = float(current_value) if current_value is not None else None
             cmp_new = float(new_value) if new_value is not None else None

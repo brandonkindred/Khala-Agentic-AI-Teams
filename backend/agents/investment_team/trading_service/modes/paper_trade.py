@@ -246,6 +246,9 @@ def run_paper_trade(
         entry_rules=list(strategy.entry_rules) if not strategy.requires_custom_code else None,
         sizing=strategy.sizing if not strategy.requires_custom_code else None,
         target_symbols=list(strategy.target_symbols) if not strategy.requires_custom_code else None,
+        # Fractional (crypto/forex) vs whole-share (equities) sizing in the
+        # engine dispatcher keys off the canonical asset class.
+        asset_class=paper_config.asset_class,
     )
 
     # First attempt: primary provider.

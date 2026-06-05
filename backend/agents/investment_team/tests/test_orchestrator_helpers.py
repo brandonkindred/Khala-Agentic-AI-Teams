@@ -63,9 +63,7 @@ def test_merge_returns_current_when_proposed_not_dict() -> None:
 
 def test_merge_tightens_lower_direction_field() -> None:
     rl = RiskLimits(max_position_pct=20.0)
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"max_position_pct": 5.0}
-    )
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_position_pct": 5.0})
     assert merged.max_position_pct == 5.0
     assert loosened == []
     assert unknown == []
@@ -73,9 +71,7 @@ def test_merge_tightens_lower_direction_field() -> None:
 
 def test_merge_records_loosen_for_lower_direction_increased() -> None:
     rl = RiskLimits(max_position_pct=5.0)
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"max_position_pct": 20.0}
-    )
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_position_pct": 20.0})
     # Original kept; loosened tracked.
     assert merged.max_position_pct == 5.0
     assert "max_position_pct" in loosened
@@ -83,50 +79,60 @@ def test_merge_records_loosen_for_lower_direction_increased() -> None:
 
 def test_merge_target_annual_vol_none_to_value_is_loosened() -> None:
     rl = RiskLimits(target_annual_vol=None)
-    _merged, loosened, _unknown = _merge_risk_limits_tighten_only(
-        rl, {"target_annual_vol": 0.15}
-    )
+    _merged, loosened, _unknown = _merge_risk_limits_tighten_only(rl, {"target_annual_vol": 0.15})
     assert "target_annual_vol" in loosened
 
 
 def test_merge_target_annual_vol_value_to_none_is_loosened() -> None:
     rl = RiskLimits(target_annual_vol=0.10)
-    _merged, loosened, _unknown = _merge_risk_limits_tighten_only(
-        rl, {"target_annual_vol": None}
-    )
+    _merged, loosened, _unknown = _merge_risk_limits_tighten_only(rl, {"target_annual_vol": None})
     assert "target_annual_vol" in loosened
 
 
 def test_merge_target_annual_vol_lowering_is_tightening() -> None:
     rl = RiskLimits(target_annual_vol=0.20)
-    merged, loosened, _unknown = _merge_risk_limits_tighten_only(
-        rl, {"target_annual_vol": 0.10}
-    )
+    merged, loosened, _unknown = _merge_risk_limits_tighten_only(rl, {"target_annual_vol": 0.10})
     assert merged.target_annual_vol == 0.10
     assert loosened == []
 
 
+def test_merge_introduces_loss_tolerance_from_unset_is_tightening() -> None:
+    """Introducing a previously-unset cap (None → value) adds a constraint and
+    must be accepted, not silently dropped by the ``cmp_current is None`` guard."""
+    rl = RiskLimits()
+    assert rl.max_loss_per_trade_pct is None
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_loss_per_trade_pct": 5.0})
+    assert merged.max_loss_per_trade_pct == 5.0
+    assert loosened == []
+    assert unknown == []
+
+
+def test_merge_clearing_loss_tolerance_to_none_is_loosened() -> None:
+    """Clearing a set cap to None removes the constraint — a loosening."""
+    rl = RiskLimits(max_loss_per_trade_pct=5.0)
+    merged, loosened, _unknown = _merge_risk_limits_tighten_only(
+        rl, {"max_loss_per_trade_pct": None}
+    )
+    # Original kept; loosening tracked so the caller can raise.
+    assert merged.max_loss_per_trade_pct == 5.0
+    assert "max_loss_per_trade_pct" in loosened
+
+
 def test_merge_records_unknown_for_immutable_field() -> None:
     rl = RiskLimits()
-    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"vol_lookback_days": 30}
-    )
+    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(rl, {"vol_lookback_days": 30})
     assert "vol_lookback_days" in unknown
 
 
 def test_merge_records_unknown_for_schema_missing_field() -> None:
     rl = RiskLimits()
-    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"made_up_key": 1.0}
-    )
+    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(rl, {"made_up_key": 1.0})
     assert "made_up_key" in unknown
 
 
 def test_merge_returns_unknown_when_non_numeric_value() -> None:
     rl = RiskLimits(max_position_pct=10.0)
-    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"max_position_pct": "abc"}
-    )
+    _merged, _loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_position_pct": "abc"})
     assert "max_position_pct" in unknown
 
 
@@ -134,9 +140,7 @@ def test_merge_invalid_merged_data_falls_back_to_current() -> None:
     """When pydantic validation of the merged dict fails, return current unchanged."""
     rl = RiskLimits(max_position_pct=10.0)
     # Propose a tight value that's negative — pydantic should reject.
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(
-        rl, {"max_position_pct": -1.0}
-    )
+    merged, loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_position_pct": -1.0})
     # The current limits are preserved.
     assert merged.max_position_pct == 10.0
     # The proposed key surfaces as unknown (recovery path).
