@@ -42,6 +42,54 @@ class SandboxSpec(BaseModel):
     extra_pip: list[str] = Field(default_factory=list)
 
 
+class CognitionMemorySpec(BaseModel):
+    """Per-agent memory-retention knobs for the Agent Cognition Core.
+
+    Preconditions:
+        - ``retention_days_events`` >= 1. A sub-day retention is meaningless for a
+          daily-rollup pruner; enforced by the ``ge=1`` field constraint, so a manifest
+          declaring ``0`` (or negative) fails validation and is skipped by the loader.
+    """
+
+    retention_days_events: int = Field(
+        default=90,
+        ge=1,
+        description="Raw episodic memory events older than this many days are pruned by the "
+        "central cognition scheduler, but only after they have been folded into a non-stale "
+        "day summary (rollup summaries are retained long-term). Must be >= 1.",
+    )
+
+
+class CognitionSpec(BaseModel):
+    """Declarative per-agent cognition config for the Agent Cognition Core.
+
+    Metadata only — the registry never consumes it. Later phases do: the tools layer
+    resolves ``tools``, the invoke proxy honours ``requires_idempotency_key``, the seed-pack
+    installer reads ``rule_packs``, and the central scheduler prunes memory per
+    ``memory.retention_days_events``.
+
+    Invariants:
+        - A manifest may omit the whole block (``AgentManifest.cognition is None``). When the
+          block is present every sub-field carries a safe default, so partial blocks always
+          validate — mirroring the lazy ``InvokeSpec`` / ``SandboxSpec`` pattern.
+    """
+
+    memory: CognitionMemorySpec = Field(default_factory=CognitionMemorySpec)
+    tools: list[str] = Field(
+        default_factory=list,
+        description="Tool ids resolved against LlmToolsService + IntegrationRegistry + agent_git_tools.",
+    )
+    rule_packs: list[str] = Field(
+        default_factory=list,
+        description="Seed rule-pack names installed on first provision, e.g. 'default_guardrails'.",
+    )
+    requires_idempotency_key: bool = Field(
+        default=False,
+        description="When true the agent is side-effecting; invokes without a caller "
+        "idempotency key are rejected.",
+    )
+
+
 class SourceInfo(BaseModel):
     """Traceability — where the agent lives in the codebase."""
 
@@ -70,6 +118,7 @@ class AgentManifest(BaseModel):
     outputs: IOSchema | None = None
     invoke: InvokeSpec | None = None
     sandbox: SandboxSpec | None = None
+    cognition: CognitionSpec | None = None
     source: SourceInfo
 
 
@@ -85,6 +134,7 @@ class AgentSummary(BaseModel):
     has_output_schema: bool = False
     has_invoke: bool = False
     has_sandbox: bool = False
+    has_cognition: bool = False
 
 
 class AgentDetail(BaseModel):

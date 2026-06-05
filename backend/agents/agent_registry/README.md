@@ -64,10 +64,19 @@ sandbox:                         # consumed by the per-agent sandbox lifecycle
     FEATURE_FLAG_X: "true"
   extra_pip:                     # optional: extra pip packages baked into the image
     - pandas==2.2.*
+cognition:                       # consumed by the Agent Cognition Core (later phases)
+  memory:
+    retention_days_events: 90    # raw episodic events pruned after N days (>= 1)
+  tools: [git, http_api]         # tool ids resolved against the cognition tool registries
+  rule_packs: [default_guardrails]  # seed rule packs installed on first provision
+  requires_idempotency_key: false   # true => side-effecting; reject invokes lacking a caller key
 source:
   entrypoint: blogging.blog_planning_agent.agent:BlogPlanningAgent
   anatomy_ref: backend/agents/blogging/blog_planning_agent/ANATOMY.md
 ```
+
+A fully-annotated standalone example lives at
+[`agent_cognition/examples/cognition_manifest.example.yaml`](../agent_cognition/examples/cognition_manifest.example.yaml).
 
 ### Field rules
 
@@ -80,6 +89,7 @@ source:
 | `source.entrypoint` | yes | `module.path:Symbol` pointing to the agent's class/factory. **Not imported** at registry load — it's metadata. |
 | `inputs.schema_ref` / `outputs.schema_ref` | no | `module.path:ClassName`. Resolved **lazily** by the `/schema/input` and `/schema/output` endpoints via `TypeAdapter.json_schema()`. If the import fails (e.g. the unified_api container doesn't have team code), the endpoint returns 404 — the UI handles this gracefully. |
 | `invoke`, `sandbox` | no | Metadata for later phases. UI shows indicators when present. |
+| `cognition` | no | Per-agent cognition config (memory retention, tools, rule packs, idempotency requirement). Consumed by the Agent Cognition Core; UI shows an indicator when present. |
 
 ### Path conventions
 
