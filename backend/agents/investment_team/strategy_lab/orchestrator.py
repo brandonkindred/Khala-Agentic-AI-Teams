@@ -329,6 +329,15 @@ def _spec_readiness_signature(spec: StrategySpec) -> tuple:
         spec.risk_limits.model_dump_json(),
         tuple(r.model_dump_json() for r in spec.entry_rules),
         tuple(r.model_dump_json() for r in spec.exit_rules),
+        # Rule 9's prose-vs-deployment check (``hypothesis:position_pct``) reads
+        # ``hypothesis``, so a reviser that fixes only the prose percentage must
+        # re-validate — otherwise the loop reuses a stale warning.
+        spec.hypothesis,
+        # Rule 9's ``risk_limits:custom_code_unenforceable`` critical depends on
+        # ``requires_custom_code``; the Stage-2 mechanical trial-compile can flip
+        # it without touching any other field, so it must be part of the
+        # signature or that flip would reuse a stale (pre-flip) readiness verdict.
+        bool(spec.requires_custom_code),
     )
 
 
@@ -1225,6 +1234,24 @@ class StrategyLabOrchestrator:
                             pre_repair_spec = spec.model_copy(deep=True)
                         spec = spec.model_copy(update={"requires_custom_code": True})
                         repair_actions.append(compile_action)
+                        # Flipping ``requires_custom_code`` changes the readiness
+                        # verdict (Rule 9's ``custom_code_unenforceable`` critical
+                        # fires when a custom-code spec declares
+                        # ``max_loss_per_trade_pct``), so re-validate against the
+                        # flipped spec rather than ride the stale pre-flip verdict.
+                        repaired_signature = _spec_readiness_signature(spec)
+                        if repaired_signature != last_readiness_signature:
+                            readiness_results = self.spec_readiness_gate.validate(
+                                spec, phase="design", backtest_config=config
+                            )
+                            self.record_gates(
+                                readiness_results, all_gate_results, refinement_round=-1
+                            )
+                            last_readiness_signature = repaired_signature
+                            deterministic_ready = not any(
+                                (not r.passed) and r.severity == "critical"
+                                for r in readiness_results
+                            )
 
                 if repair_actions:
                     mechanical_repair_count += len(repair_actions)

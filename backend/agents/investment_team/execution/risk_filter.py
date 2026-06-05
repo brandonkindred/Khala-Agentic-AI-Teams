@@ -36,6 +36,20 @@ class RiskLimits(BaseModel):
     max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
     max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
     max_open_positions: int = Field(default=10, ge=1)
+    max_loss_per_trade_pct: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=100,
+        description=(
+            "Maximum realised loss on a single trade as a % of the account — the "
+            "loss when the stop fires, i.e. deployed fraction × ``stop_loss.pct`` "
+            "(e.g. a 10% position with a 5% stop realises 0.5%). The readiness "
+            "gate flags a critical when the spec's actual realised loss "
+            "(sizing.fraction × stop_loss.pct) exceeds this tolerance. ``None`` "
+            "means no explicit tolerance is declared (the check is then skipped); "
+            "the check is also skipped when the spec has no stop_loss rule."
+        ),
+    )
     target_annual_vol: Optional[float] = Field(
         default=None,
         ge=0,
@@ -74,6 +88,7 @@ _RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
     "max_symbol_concentration_pct": "lower",
     "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
+    "max_loss_per_trade_pct": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
 }
@@ -96,6 +111,11 @@ class DrawdownBreach:
     breached: bool
     current_drawdown_pct: float
     limit_pct: float
+
+
+#: Relative epsilon absorbing float noise so an order clamped exactly to
+#: ``max_position_pct`` is not rejected by the choke-point gate.
+_POSITION_CAP_REL_EPS = 1e-9
 
 
 class RiskFilter:
@@ -158,12 +178,40 @@ class RiskFilter:
         notional: float,
         current_equity: float,
         open_positions: Dict[str, Any],
+        *,
+        enforce_position_cap: bool = True,
     ) -> EntryDecision:
-        """Check whether opening a new position would breach any limit."""
+        """Check whether opening a new position would breach any limit.
+
+        ``enforce_position_cap`` controls the ``max_position_pct`` check only.
+        It is ``False`` for orders the engine dispatcher already clamped to the
+        cap at the sizing price (``OrderRequest.risk_presized``): re-checking
+        those at the fill price would falsely reject an order the dispatcher
+        sized correctly whenever the fill gaps above the sizing price (the cap is
+        a sizing-time bound; ``max_drawdown_pct`` is the realised-exposure
+        backstop). It is ``True`` for custom-code orders, which bypass the
+        dispatcher, so this gate is their sole position-cap enforcement point.
+        The leverage and concentration checks always run on ``notional``.
+        """
         if len(open_positions) >= self.limits.max_open_positions:
             return EntryDecision(
                 allowed=False,
                 reason=f"max_open_positions ({self.limits.max_open_positions}) reached",
+            )
+
+        # A non-positive-equity (ruined) account can never safely add exposure:
+        # a percent-of-equity cap admits no positive position there, and the
+        # leverage/concentration ratios below are undefined. Reject
+        # UNCONDITIONALLY — including for presized orders, whose sizing was
+        # decided on an earlier bar when equity was still positive; that stale
+        # decision does not make a now-bankrupt account safe to fill into.
+        # Without this, a presized order (enforce_position_cap=False) would skip
+        # this guard AND the equity>0-gated ratio checks and fall through to
+        # allowed=True.
+        if current_equity <= 0:
+            return EntryDecision(
+                allowed=False,
+                reason=f"non-positive equity ({current_equity:.2f}); cannot open a position",
             )
 
         total_notional = (
@@ -177,6 +225,24 @@ class RiskFilter:
                     allowed=False,
                     reason=f"gross leverage {leverage:.2f} > limit {self.limits.max_gross_leverage}",
                 )
+
+            # max_position_pct is the per-position deployment cap, enforced here
+            # only for orders NOT already presized by the dispatcher (i.e.
+            # custom-code orders, which bypass the dispatcher's clamp — this gate
+            # is their sole enforcement point). Dispatcher-presized orders skip
+            # this check: the dispatcher clamped them to the cap at the sizing
+            # price, and re-checking at the fill price would falsely reject them
+            # on a gap-up. Strict comparison with a float-noise epsilon.
+            if enforce_position_cap:
+                position_pct = notional / current_equity * 100
+                if position_pct > self.limits.max_position_pct * (1.0 + _POSITION_CAP_REL_EPS):
+                    return EntryDecision(
+                        allowed=False,
+                        reason=(
+                            f"position {position_pct:.1f}% of equity > "
+                            f"max_position_pct {self.limits.max_position_pct}%"
+                        ),
+                    )
 
             concentration = notional / current_equity * 100
             if concentration > self.limits.max_symbol_concentration_pct:

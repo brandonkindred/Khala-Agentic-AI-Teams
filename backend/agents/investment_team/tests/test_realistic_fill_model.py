@@ -399,7 +399,11 @@ def _make_sim(*, participation_cap: float = 0.10) -> tuple:
     """
     portfolio = Portfolio(initial_capital=100_000.0)
     order_book = OrderBook()
-    risk = RiskFilter(RiskLimits())
+    # These tests exercise fill mechanics (participation-cap partials) with
+    # deliberately large orders, so lift the per-position deployment cap out of
+    # the way — the choke-point max_position_pct gate is covered in
+    # test_risk_filter.py.
+    risk = RiskFilter(RiskLimits(max_position_pct=100.0))
     sim = FillSimulator(
         portfolio=portfolio,
         order_book=order_book,
