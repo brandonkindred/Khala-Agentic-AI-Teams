@@ -55,4 +55,3 @@ Build a web-based todo app where users can:
 - **Check for infinite loops**: Ensure the LLM isn't generating repetitive content that never terminates naturally.
 
 ---
-
