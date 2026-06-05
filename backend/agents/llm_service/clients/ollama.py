@@ -765,9 +765,14 @@ class OllamaLLMClient(LLMClient):
                                             content_parts.append(piece)
                                         # Track reasoning tokens so we can distinguish
                                         # "model thought but produced no answer" from
-                                        # "model returned nothing at all".
-                                        reasoning = delta.get("reasoning_content") or delta.get(
-                                            "thinking"
+                                        # "model returned nothing at all". Ollama's
+                                        # OpenAI-compatible endpoint streams thinking
+                                        # as delta.reasoning (openai.go); DeepSeek's
+                                        # native dialect uses reasoning_content.
+                                        reasoning = (
+                                            delta.get("reasoning")
+                                            or delta.get("reasoning_content")
+                                            or delta.get("thinking")
                                         )
                                         if reasoning:
                                             has_reasoning = True

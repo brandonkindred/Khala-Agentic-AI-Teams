@@ -508,3 +508,24 @@ def test_tool_call_envelope_omits_empty_reasoning(monkeypatch: pytest.MonkeyPatc
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("run status", temperature=0)
     assert "__reasoning_content__" not in result
+
+
+def test_parser_accumulates_ollama_reasoning_delta_field(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ollama's OpenAI-compatible endpoint streams thinking as
+    delta.reasoning (openai.go: json:"reasoning,omitempty") — the parser must
+    accumulate that dialect too, or the envelope stays empty on the very
+    endpoint this client posts to."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning":"ollama-style "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"reasoning":"thinking"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"git_status","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("run status", temperature=0)
+    assert result["__reasoning_content__"] == "ollama-style thinking"

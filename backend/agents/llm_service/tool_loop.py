@@ -91,10 +91,13 @@ def complete_json_with_tool_loop(
                 "content": "",
                 "tool_calls": _normalize_tool_calls_for_api(tcalls),
             }
-            # DeepSeek thinking mode requires the tool-call turn's
-            # reasoning_content to be echoed back on subsequent requests
-            # (the API 400s without it).
+            # DeepSeek thinking mode requires the tool-call turn's reasoning
+            # to be echoed back on subsequent requests (the API 400s without
+            # it). Emit both dialects: Ollama's OpenAI-compatible endpoint
+            # reads `reasoning` (openai.go); DeepSeek-native reads
+            # `reasoning_content`. Each backend ignores the other's key.
             if result.get("__reasoning_content__"):
+                assistant_msg["reasoning"] = result["__reasoning_content__"]
                 assistant_msg["reasoning_content"] = result["__reasoning_content__"]
             messages.append(assistant_msg)
             for tc in tcalls:

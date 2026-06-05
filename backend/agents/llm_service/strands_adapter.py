@@ -192,7 +192,12 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
                 "tool_calls": tool_calls,
             }
             if reasoning_parts:
-                assistant_msg["reasoning_content"] = "\n".join(reasoning_parts)
+                # Both dialects: Ollama's OpenAI-compatible endpoint reads
+                # `reasoning` (openai.go); DeepSeek-native reads
+                # `reasoning_content`. Each backend ignores the other's key.
+                joined_reasoning = "\n".join(reasoning_parts)
+                assistant_msg["reasoning"] = joined_reasoning
+                assistant_msg["reasoning_content"] = joined_reasoning
             out.append(assistant_msg)
         elif text_parts:
             out.append({"role": role, "content": "\n".join(text_parts)})

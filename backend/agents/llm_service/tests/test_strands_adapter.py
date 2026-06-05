@@ -875,4 +875,7 @@ def test_messages_to_openai_maps_reasoning_block_onto_tool_call_message() -> Non
     ]
     out = _strands_messages_to_openai(messages)
     assistant = next(m for m in out if m["role"] == "assistant" and m.get("tool_calls"))
+    # Both dialects must be present: Ollama-compat reads `reasoning`,
+    # DeepSeek-native reads `reasoning_content`.
+    assert assistant["reasoning"] == "thought hard"
     assert assistant["reasoning_content"] == "thought hard"

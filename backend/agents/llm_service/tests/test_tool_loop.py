@@ -120,4 +120,7 @@ def test_tool_loop_echoes_reasoning_content_on_assistant_turn() -> None:
     assistant = next(
         m for m in second_round if m.get("role") == "assistant" and m.get("tool_calls")
     )
+    # Both dialects must be present: Ollama-compat reads `reasoning`,
+    # DeepSeek-native reads `reasoning_content`.
+    assert assistant.get("reasoning") == "thought about it"
     assert assistant.get("reasoning_content") == "thought about it"
