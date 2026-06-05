@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from .cognition_envelope import (
     CognitionEnvelopeError,
+    maybe_drive_tool_loop,
     open_cognition_runtime,
     unwrap_cognition_request,
 )
@@ -108,9 +109,11 @@ def mount_invoke_shim(app: FastAPI) -> None:
             with ExitStack() as stack:
                 stack.enter_context(redirect_stdout(stdout_buf))
                 stack.enter_context(redirect_stderr(stderr_buf))
-                stack.enter_context(open_cognition_runtime(cognition_block, tool_audit))
-                output = await asyncio.wait_for(
-                    invoke_entrypoint(manifest.source.entrypoint, agent_body),
+                stack.enter_context(open_cognition_runtime(cognition_block))
+                output, tool_audit = await asyncio.wait_for(
+                    _invoke_and_drive(
+                        manifest.source.entrypoint, agent_body, agent_id, trace_id, cognition_block
+                    ),
                     timeout=timeout_s,
                 )
         except AgentNotRunnableError as exc:
@@ -180,6 +183,31 @@ def mount_invoke_shim(app: FastAPI) -> None:
         if error:
             raise HTTPException(status_code=422, detail=envelope.model_dump())
         return envelope
+
+
+async def _invoke_and_drive(
+    entrypoint: str,
+    body: Any,
+    agent_id: str,
+    source_run_id: str,
+    cognition: dict[str, Any] | None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Invoke the entrypoint, then drive the tool loop if it returned a plan.
+
+    Returns ``(output, tool_audit)``. When the entrypoint returns a cognition
+    ``ToolLoopPlan``, the brokered loop is driven **here** (off the event loop, in
+    a worker thread, since it makes blocking LLM calls) so the trusted audit is
+    produced in the shim's frame — never reachable to agent code. A normal agent's
+    result passes through with an empty audit.
+    """
+    result = await invoke_entrypoint(entrypoint, body)
+    return await asyncio.to_thread(
+        maybe_drive_tool_loop,
+        result,
+        agent_id=agent_id,
+        source_run_id=source_run_id,
+        cognition=cognition,
+    )
 
 
 _MAX_LOG_LINES = 50

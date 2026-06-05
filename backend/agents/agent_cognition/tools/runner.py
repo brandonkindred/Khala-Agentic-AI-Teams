@@ -49,14 +49,15 @@ from uuid import uuid4
 from agent_cognition.models import EventKind, MemoryEvent, Rule, ToolCall
 from agent_cognition.rules.enforcement import evaluate_tool_call
 from agent_cognition.tools.binding import BoundToolset, ExecutionSite
-from agent_cognition.tools.channel import _record_brokered, _recording_window
 from llm_service.tool_loop import complete_json_with_tool_loop
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
     "ToolAudit",
+    "ToolLoopPlan",
     "run_tool_loop",
+    "execute_plan",
     "drive_platform_bound_loop",
 ]
 
@@ -95,6 +96,64 @@ class ToolAudit:
 
     events: list[MemoryEvent] = field(default_factory=list)
     tool_calls: list[ToolCall] = field(default_factory=list)
+
+
+@dataclass
+class ToolLoopPlan:
+    """A declarative request for the *shim* to drive a brokered tool loop.
+
+    A cognition tool-using agent's entrypoint **returns** this instead of running
+    the loop itself: it describes *what* to run (the LLM, prompts, and pre-bound
+    toolset) and the shim executes it via :func:`execute_plan`. Because the shim
+    creates the :class:`ToolAudit` and runs the loop in its own frame, the trusted
+    audit never passes through agent-reachable state — agent code has no audit
+    object to forge into.
+
+    The agent does **not** supply ``enforced_rules``: the shim sources the active
+    rules from the platform-injected cognition block, so a compromised harness
+    cannot disable its own ``forbid_tool`` gate.
+
+    Invariant: ``toolset`` is already bound (``bind_tools`` is audit-free — it
+    produces no records — so binding in agent code is safe).
+    """
+
+    llm: Any
+    system_prompt: str
+    user_prompt: str
+    toolset: BoundToolset
+    max_rounds: int = 16
+    temperature: float = 0.2
+    think: bool = False
+
+
+def execute_plan(
+    plan: ToolLoopPlan,
+    *,
+    agent_id: str,
+    source_run_id: str,
+    enforced_rules: list[Rule],
+) -> tuple[dict[str, Any], ToolAudit]:
+    """Run a :class:`ToolLoopPlan` and return ``(final_output, audit)``.
+
+    The shim-side entry point: the shim (never agent code) calls this, so the
+    returned :class:`ToolAudit` is held only in the shim's frame.
+
+    Preconditions: ``agent_id`` / ``source_run_id`` are non-empty; ``enforced_rules``
+    are the platform's active rules (the gate is authoritative, not agent-supplied).
+    Postconditions: see :func:`run_tool_loop`.
+    """
+    return run_tool_loop(
+        plan.llm,
+        agent_id=agent_id,
+        source_run_id=source_run_id,
+        user_prompt=plan.user_prompt,
+        system_prompt=plan.system_prompt,
+        toolset=plan.toolset,
+        enforced_rules=enforced_rules,
+        max_rounds=plan.max_rounds,
+        temperature=plan.temperature,
+        think=plan.think,
+    )
 
 
 def run_tool_loop(
@@ -366,15 +425,14 @@ def _emit_event(
 
 
 def _finish_call(audit: ToolAudit, call: ToolCall) -> None:
-    """Append the per-call summary and mirror it to the trusted audit sink.
+    """Append the per-call summary to the loop's :class:`ToolAudit`.
 
-    The sink write is wrapped in :func:`_recording_window` — the only sanctioned
-    way to populate the trusted audit — so agent code cannot forge entries
-    through the channel (the writer is module-private to the runner↔channel pair).
+    The audit lives only on the returned object — there is no ambient/importable
+    sink — so the audit is only ever trusted when the *shim* drives the loop and
+    reads it off this return value in its own frame (see :class:`ToolLoopPlan`),
+    never reachable to in-sandbox agent code.
     """
     audit.tool_calls.append(call)
-    with _recording_window():
-        _record_brokered(call.model_dump(mode="json"))
 
 
 def _result_ok(result: Any) -> bool:

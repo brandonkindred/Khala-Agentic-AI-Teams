@@ -12,6 +12,7 @@ than ``SANDBOX_AGENT_ID``) is enforced by middleware in
 
 from .cognition_envelope import (
     CognitionEnvelopeError,
+    maybe_drive_tool_loop,
     open_cognition_runtime,
     unwrap_cognition_request,
 )
@@ -21,6 +22,7 @@ __all__ = [
     "InvokeEnvelope",
     "mount_invoke_shim",
     "CognitionEnvelopeError",
+    "maybe_drive_tool_loop",
     "open_cognition_runtime",
     "unwrap_cognition_request",
 ]

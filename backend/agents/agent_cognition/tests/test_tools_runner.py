@@ -20,7 +20,6 @@ from agent_cognition.models import (
     RuleStatus,
 )
 from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
-from agent_cognition.tools.channel import collect_tool_audit
 from agent_cognition.tools.runner import drive_platform_bound_loop, run_tool_loop
 
 _NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
@@ -320,27 +319,61 @@ def test_secrets_are_stripped_from_memory() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Trusted audit reaches the channel sink even when the writeback is dropped
+# Audit is a return value only — no ambient channel
 # ---------------------------------------------------------------------------
-def test_tool_calls_reach_channel_sink() -> None:
+def test_audit_is_returned_not_ambient() -> None:
+    # The audit lives only on the return value; there is no module-level sink the
+    # loop writes to (so agent code has nothing to forge into).
+    import agent_cognition.tools.channel as ch
+
     llm = ScriptedLLM([_tool_call("echo", {"x": 1}), {"final": True}])
-    with collect_tool_audit() as sink:
-        _result, audit = _run(llm, _toolset("echo", lambda a: a))
-    # The sink (what the shim collects out-of-band) carries every brokered call,
-    # independent of the model's self-reported writeback.
-    assert len(sink) == 1
-    assert sink[0]["tool_id"] == "echo"
-    assert sink[0]["ok"] is True
-    # And it matches the in-process audit return value.
-    assert sink[0]["tool_id"] == audit.tool_calls[0].tool_id
-
-
-def test_runner_works_without_an_open_channel() -> None:
-    # No collect_tool_audit context: record_tool_audit is a no-op, loop still runs.
-    llm = ScriptedLLM([_tool_call("echo", {}), {"final": True}])
     result, audit = _run(llm, _toolset("echo", lambda a: a))
     assert result == {"final": True}
     assert len(audit.tool_calls) == 1
+    assert audit.tool_calls[0].tool_id == "echo"
+    assert not hasattr(ch, "_record_brokered")  # no ambient writer exists
+
+
+def test_execute_plan_drives_the_loop_and_returns_audit() -> None:
+    from agent_cognition.tools.runner import ToolLoopPlan, execute_plan
+
+    calls = []
+
+    def echo(args):
+        calls.append(args)
+        return {"echoed": args}
+
+    plan = ToolLoopPlan(
+        llm=ScriptedLLM([_tool_call("echo", {"x": 1}), {"final": True}]),
+        system_prompt="sys",
+        user_prompt="do",
+        toolset=_toolset("echo", echo),
+    )
+    out, audit = execute_plan(plan, agent_id="a", source_run_id="r", enforced_rules=[])
+    assert out == {"final": True}
+    assert calls == [{"x": 1}]
+    assert audit.tool_calls[0].tool_id == "echo"
+
+
+def test_execute_plan_enforces_caller_rules_not_agent_supplied() -> None:
+    # The gate is authoritative: enforced rules come from the caller (the shim,
+    # sourced from cognition), never from the agent's plan — so a forbidden tool
+    # is blocked even though the plan can't carry rules.
+    from agent_cognition.tools.runner import ToolLoopPlan, execute_plan
+
+    forbid = _enforced_rule(
+        {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "echo"}}
+    )
+    side: list = []
+    plan = ToolLoopPlan(
+        llm=ScriptedLLM([_tool_call("echo", {}), {"final": True}]),
+        system_prompt="s",
+        user_prompt="u",
+        toolset=_toolset("echo", lambda a: side.append(a) or {"ran": True}),
+    )
+    _out, audit = execute_plan(plan, agent_id="a", source_run_id="r", enforced_rules=[forbid])
+    assert side == []  # forbidden tool never dispatched
+    assert audit.tool_calls[0].ok is False
 
 
 # ---------------------------------------------------------------------------

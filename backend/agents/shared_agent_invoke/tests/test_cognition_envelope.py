@@ -1,8 +1,8 @@
-"""Integration tests for the shim's cognition envelope handling (Step 7).
+"""Integration tests for the shim's cognition envelope + shim-driven tool loop.
 
-Verifies the marker-gated unwrap, the side channel, the trusted tool-audit, and
-that an unmarked body — even one with its own top-level ``input`` key — passes
-through untouched.
+Verifies the marker-gated unwrap, the cognition side channel, and that the shim
+(not agent code) drives a returned ``ToolLoopPlan`` so the trusted ``tool_audit``
+is produced in the shim's frame — agent code never holds the audit object.
 """
 
 from __future__ import annotations
@@ -79,90 +79,54 @@ def client(tmp_path: Path):
             )
         )
 
-    def _run_brokered_probe():
-        from agent_cognition.tools.runner import run_tool_loop
-
-        run_tool_loop(
-            _ScriptedLLM(),
-            agent_id="blogging.cog",
-            source_run_id="r1",
-            user_prompt="",
-            system_prompt="",
-            toolset=_probe_toolset(),
-            enforced_rules=[],
-        )
-
-    class CognitionAgent:
-        """Runs a brokered tool call (which feeds the audit) and reflects input."""
+    class ReflectAgent:
+        """A normal (non-plan) agent: reflects its input and the cognition block."""
 
         def run(self, body):
             import agent_cognition.tools.channel as ch
 
-            _run_brokered_probe()
             return {"received": body, "cognition_seen": ch.get_cognition_context()}
 
-    class RaisingCognitionAgent:
-        """Runs a brokered tool call, then fails (writeback would be dropped)."""
+    class PlanAgent:
+        """Returns a ToolLoopPlan — the shim drives the loop and owns the audit."""
 
         def run(self, body):
-            _run_brokered_probe()
-            raise RuntimeError("boom after a tool call")
+            from agent_cognition.tools.runner import ToolLoopPlan
 
-    class ForgingAgent:
-        """Tries to forge an audit entry outside the broker path (must be a no-op)."""
+            return ToolLoopPlan(
+                llm=_ScriptedLLM(),
+                system_prompt="sys",
+                user_prompt="go",
+                toolset=_probe_toolset(),
+            )
 
+    class RaisingAgent:
         def run(self, body):
-            import agent_cognition.tools.channel as ch
+            raise RuntimeError("user-space failure")
 
-            # No public writer exists; the private path refuses writes outside a
-            # broker recording window, so this must NOT pollute the audit.
-            ch._record_brokered({"tool_id": "forged", "ok": True})
-            return {"received": body}
-
-    mod.CognitionAgent = CognitionAgent
-    mod.RaisingCognitionAgent = RaisingCognitionAgent
-    mod.ForgingAgent = ForgingAgent
+    mod.ReflectAgent = ReflectAgent
+    mod.PlanAgent = PlanAgent
+    mod.RaisingAgent = RaisingAgent
     sys.modules["_cog_shim_test"] = mod
 
-    _write_manifest(
-        tmp_path,
-        "cog.yaml",
-        """
-        schema_version: 1
-        id: blogging.cog
-        team: blogging
-        name: Cog
-        summary: cognition agent
-        source:
-          entrypoint: _cog_shim_test:CognitionAgent
-        """,
-    )
-    _write_manifest(
-        tmp_path,
-        "cog_raises.yaml",
-        """
-        schema_version: 1
-        id: blogging.cog_raises
-        team: blogging
-        name: Cog Raises
-        summary: cognition agent that raises
-        source:
-          entrypoint: _cog_shim_test:RaisingCognitionAgent
-        """,
-    )
-    _write_manifest(
-        tmp_path,
-        "cog_forge.yaml",
-        """
-        schema_version: 1
-        id: blogging.cog_forge
-        team: blogging
-        name: Cog Forge
-        summary: cognition agent that tries to forge the audit
-        source:
-          entrypoint: _cog_shim_test:ForgingAgent
-        """,
-    )
+    for fname, agent_id, entry in (
+        ("reflect.yaml", "blogging.reflect", "ReflectAgent"),
+        ("plan.yaml", "blogging.plan", "PlanAgent"),
+        ("raises.yaml", "blogging.raises", "RaisingAgent"),
+    ):
+        _write_manifest(
+            tmp_path,
+            fname,
+            f"""
+            schema_version: 1
+            id: {agent_id}
+            team: blogging
+            name: {entry}
+            summary: cognition test agent
+            source:
+              entrypoint: _cog_shim_test:{entry}
+            """,
+        )
 
     import agent_registry
     from agent_registry import loader
@@ -189,7 +153,7 @@ def client(tmp_path: Path):
 
 def test_marked_envelope_delivers_input_only_and_side_channel(client: TestClient) -> None:
     resp = client.post(
-        "/_agents/blogging.cog/invoke",
+        "/_agents/blogging.reflect/invoke",
         json={
             ENVELOPE_MARKER: 1,
             "input": {"q": "hi"},
@@ -202,55 +166,52 @@ def test_marked_envelope_delivers_input_only_and_side_channel(client: TestClient
     assert body["output"]["received"] == {"q": "hi"}
     # Cognition rode the side channel.
     assert body["output"]["cognition_seen"] == {"rules": [], "memory_digest": "remember this"}
-    # The broker's trusted audit came back out-of-band (one ToolCall dump).
-    assert len(body["tool_audit"]) == 1
-    assert body["tool_audit"][0]["tool_id"] == "probe"
-    assert body["tool_audit"][0]["ok"] is True
+    # A non-tool agent produces no audit, and there's no way for it to inject one.
+    assert body["tool_audit"] == []
 
 
 def test_unmarked_body_with_input_key_passes_through(client: TestClient) -> None:
     # A real agent whose own schema has a top-level `input` must not be unwrapped.
     payload = {"input": {"user": "data"}, "other": 7}
-    resp = client.post("/_agents/blogging.cog/invoke", json=payload)
+    resp = client.post("/_agents/blogging.reflect/invoke", json=payload)
     assert resp.status_code == 200
     body = resp.json()
     assert body["output"]["received"] == payload  # whole body forwarded verbatim
     assert body["output"]["cognition_seen"] is None
-    # Audit sink is still opened (so sandbox-local tools are audited even without
-    # an injected cognition block).
+    assert body["tool_audit"] == []
+
+
+def test_shim_drives_tool_loop_plan_and_returns_trusted_audit(client: TestClient) -> None:
+    resp = client.post(
+        "/_agents/blogging.plan/invoke",
+        json={ENVELOPE_MARKER: 1, "input": {"q": "hi"}, "cognition": {"rules": []}},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    # The output is the loop's final result, produced by the shim-driven loop.
+    assert body["output"] == {"done": True}
+    # The trusted audit — produced in the shim's frame — carries the brokered call.
     assert len(body["tool_audit"]) == 1
     assert body["tool_audit"][0]["tool_id"] == "probe"
+    assert body["tool_audit"][0]["function"] == "probe"
+    assert body["tool_audit"][0]["ok"] is True
 
 
 def test_malformed_envelope_returns_400(client: TestClient) -> None:
     resp = client.post(
-        "/_agents/blogging.cog/invoke",
+        "/_agents/blogging.reflect/invoke",
         json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {}, "smuggled": "x"},
     )
     assert resp.status_code == 400
     assert "Malformed cognition envelope" in resp.json()["detail"]
 
 
-def test_audit_survives_a_dropped_writeback(client: TestClient) -> None:
-    # The agent raises after a tool call: the 422 envelope must still carry the
-    # trusted tool-audit (the blocked/failed run audit guarantee).
+def test_agent_exception_returns_422(client: TestClient) -> None:
     resp = client.post(
-        "/_agents/blogging.cog_raises/invoke",
+        "/_agents/blogging.raises/invoke",
         json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {}},
     )
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert detail["error"].startswith("RuntimeError:")
-    assert len(detail["tool_audit"]) == 1
-    assert detail["tool_audit"][0]["tool_id"] == "probe"
-
-
-def test_agent_cannot_forge_audit_outside_the_broker(client: TestClient) -> None:
-    # An agent calling the private writer outside a broker recording window must
-    # not be able to inject a forged entry into the trusted audit.
-    resp = client.post(
-        "/_agents/blogging.cog_forge/invoke",
-        json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {}},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["tool_audit"] == []
+    assert detail["tool_audit"] == []

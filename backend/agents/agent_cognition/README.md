@@ -104,27 +104,30 @@ loop and logged to memory.
   **broker** around every handler. Before dispatch it evaluates the active enforced
   `forbid_tool` predicates (`rules/enforcement.evaluate_tool_call`) and **refuses a
   forbidden call before the handler runs** (no side effect). Every call writes a `tool_call`
-  + `outcome`/`error` `MemoryEvent` and emits a trusted, out-of-band `ToolCall` audit (to
-  the returned `ToolAudit` *and* the shim's audit sink), so the platform's record stays
-  honest even when the model's writeback is dropped. Args/results are secret-stripped before
-  they touch memory. `drive_platform_bound_loop(runtime, …)` is the proxy-driven entry for
-  `platform_bound` tools — handlers (holding secrets) run platform-side and only their
-  results cross back to the sandbox; live use for *generated* agents is gated on the
-  multi-turn runtime scaffold (a later step).
+  + `outcome`/`error` `MemoryEvent` and a `ToolCall` audit entry **onto the returned
+  `ToolAudit`** (which records both the declared `tool_id` and the specific `function`);
+  args/results are secret-stripped and handler exceptions are reduced to their type before
+  anything crosses the boundary. A cognition tool-using agent returns a **`ToolLoopPlan`**
+  (LLM + prompts + pre-bound toolset) and the **shim drives the loop** via `execute_plan(…)`,
+  so the trusted audit is produced in the shim's frame and is never reachable to agent code.
+  `drive_platform_bound_loop(runtime, …)` is the proxy-driven entry for `platform_bound`
+  tools — handlers (holding secrets) run platform-side and only their results cross back to
+  the sandbox; live use for *generated* agents is gated on the multi-turn runtime scaffold.
 - **`tools/envelope.py`** — the namespaced `__khala_cognition_envelope__` marker plus
   `wrap_request` / `try_unwrap_request`. The proxy wraps the request as
-  `{marker, input, cognition}`; the sandbox shim unwraps **only** on a well-formed marker,
-  invokes the entrypoint with `input` exactly as declared, and exposes `cognition` via a
-  side channel. An unmarked body — even one with its own top-level `input` key — is passed
-  through unchanged; a marked-but-malformed body is rejected.
-- **`tools/channel.py`** — the `ContextVar`-backed runtime channels: the cognition side
-  channel (`get_cognition_context`, read by the agent runtime to render advisory rules) and
-  the trusted tool-audit sink (collected by the shim). The audit *writer* is deliberately
-  not public — entries are only appended through the runner's broker path (a private
-  recording window), so agent code can't forge the trusted record; a write attempted outside
-  a brokered dispatch is a no-op.
+  `{marker, input, cognition}` (and rejects a caller body that already carries the marker);
+  the sandbox shim unwraps **only** on a well-formed marker, invokes the entrypoint with
+  `input` exactly as declared, and exposes `cognition` via a side channel. An unmarked body —
+  even one with its own top-level `input` key — is passed through unchanged; a
+  marked-but-malformed body is rejected.
+- **`tools/channel.py`** — the `ContextVar`-backed **cognition side channel**
+  (`get_cognition_context`, read by the agent runtime to render advisory rules). There is no
+  audit channel: the trusted audit is **not** carried through any ambient/importable state
+  (a leading underscore is not an access boundary in a shared process). Instead the shim
+  drives the loop and reads the audit off the runner's return value, so agent code has
+  nothing to forge into; integrity-critical tools additionally use `platform_bound`.
 
 The invoke shim (`shared_agent_invoke`) consumes these lazily — it unwraps the envelope,
-opens the runtime channel, and returns the collected `tool_audit` on its response envelope —
-without a hard dependency on this package (an image without cognition simply runs the agent
-unwrapped).
+opens the cognition side channel, drives a returned `ToolLoopPlan`, and returns the trusted
+`tool_audit` on its response envelope — without a hard dependency on this package (an image
+without cognition simply runs the agent unwrapped).

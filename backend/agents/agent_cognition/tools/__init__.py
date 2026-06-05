@@ -18,7 +18,6 @@ import importlib
 from typing import TYPE_CHECKING, Any
 
 from agent_cognition.tools.channel import (
-    collect_tool_audit,
     get_cognition_context,
     runtime_channel,
 )
@@ -39,7 +38,9 @@ _LAZY: dict[str, str] = {
     "ToolBindingError": "binding",
     "bind_tools": "binding",
     "ToolAudit": "runner",
+    "ToolLoopPlan": "runner",
     "drive_platform_bound_loop": "runner",
+    "execute_plan": "runner",
     "run_tool_loop": "runner",
 }
 
@@ -53,7 +54,9 @@ if TYPE_CHECKING:  # pragma: no cover - import surface for type checkers only
     )
     from agent_cognition.tools.runner import (
         ToolAudit,
+        ToolLoopPlan,
         drive_platform_bound_loop,
+        execute_plan,
         run_tool_loop,
     )
 
@@ -85,11 +88,12 @@ __all__ = [
     "try_unwrap_request",
     "wrap_request",
     # channel
-    "collect_tool_audit",
     "get_cognition_context",
     "runtime_channel",
     # runner (lazy)
     "ToolAudit",
+    "ToolLoopPlan",
     "drive_platform_bound_loop",
+    "execute_plan",
     "run_tool_loop",
 ]

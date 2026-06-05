@@ -1,12 +1,12 @@
-"""Shim-side bridge to the cognition invoke envelope + runtime channels.
+"""Shim-side bridge to the cognition invoke envelope + tool loop.
 
-The sandbox shim must unwrap a cognition-wrapped request and carry the trusted
-tool-audit channel — but ``shared_agent_invoke`` is a thin boundary component that
-should *not* hard-depend on the ``agent_cognition`` package (an image without
-cognition still runs agents). So every touchpoint here imports
-``agent_cognition.tools`` **lazily** and degrades to a pass-through when it is
-absent. Only the dependency-free ``envelope`` / ``channel`` submodules are pulled
-in, never the heavy git/LLM tool stack.
+The sandbox shim must unwrap a cognition-wrapped request, expose the cognition
+side channel, and — when the agent returns a :class:`ToolLoopPlan` — **drive the
+brokered tool loop itself** so the trusted audit never passes through
+agent-reachable state. But ``shared_agent_invoke`` is a thin boundary component
+that should *not* hard-depend on ``agent_cognition`` (an image without cognition
+still runs agents), so every touchpoint here imports it **lazily** and degrades
+to a pass-through when it is absent.
 
 Design by Contract:
 
@@ -14,9 +14,12 @@ Design by Contract:
   cognition_or_None)``; an unmarked body (or no cognition package) yields ``(body,
   None)`` unchanged, a well-formed envelope yields its ``input`` + ``cognition``,
   and a marked-but-malformed envelope raises :class:`CognitionEnvelopeError`.
-* :func:`open_cognition_runtime` — Postcondition: a context manager that, within
-  its block, exposes ``cognition`` to the agent runtime and routes broker
-  tool-audit entries into ``sink``; a no-op context when cognition is unavailable.
+* :func:`open_cognition_runtime` — Postcondition: a context manager exposing
+  ``cognition`` to the agent runtime; a no-op when cognition is unavailable.
+* :func:`maybe_drive_tool_loop` — Postcondition: returns ``(output, tool_audit)``.
+  When the entrypoint returned a :class:`ToolLoopPlan`, the loop is driven here and
+  ``tool_audit`` is the trusted per-call record (read off the runner's return value
+  in this frame); otherwise the result passes through with an empty audit.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ __all__ = [
     "CognitionEnvelopeError",
     "unwrap_cognition_request",
     "open_cognition_runtime",
+    "maybe_drive_tool_loop",
 ]
 
 
@@ -57,19 +61,57 @@ def unwrap_cognition_request(body: Any) -> tuple[Any, dict[str, Any] | None]:
 
 
 @contextmanager
-def open_cognition_runtime(
-    cognition: dict[str, Any] | None,
-    sink: list[dict[str, Any]] | None,
-) -> Iterator[None]:
-    """Open the cognition side channel + trusted audit sink for one invoke.
+def open_cognition_runtime(cognition: dict[str, Any] | None) -> Iterator[None]:
+    """Open the cognition side channel for one invoke.
 
     A no-op context when the cognition package is unavailable (the agent simply
-    runs without a channel and ``sink`` stays empty).
+    runs without a channel).
     """
     try:
         from agent_cognition.tools.channel import runtime_channel
     except Exception:
         yield
         return
-    with runtime_channel(cognition, sink):
+    with runtime_channel(cognition):
         yield
+
+
+def maybe_drive_tool_loop(
+    result: Any,
+    *,
+    agent_id: str,
+    source_run_id: str,
+    cognition: dict[str, Any] | None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Drive the brokered loop when the entrypoint returned a ``ToolLoopPlan``.
+
+    The shim — not agent code — calls this, so the runner's :class:`ToolAudit`
+    lives only in this frame. The active ``forbid_tool`` rules are sourced from
+    the platform-injected ``cognition`` block (not the agent's plan), so a
+    compromised harness cannot disable its own gate. Synchronous (the loop makes
+    blocking LLM calls); the shim runs it off the event loop.
+
+    Returns ``(result, [])`` unchanged when the result is not a plan, or when the
+    cognition package is unavailable.
+    """
+    try:
+        from agent_cognition.models import Rule
+        from agent_cognition.tools.runner import ToolLoopPlan, execute_plan
+    except Exception:
+        return result, []
+    if not isinstance(result, ToolLoopPlan):
+        return result, []
+
+    enforced_rules = []
+    for raw in (cognition or {}).get("rules", []) or []:
+        try:
+            enforced_rules.append(Rule.model_validate(raw))
+        except Exception:
+            continue  # a malformed rule never blocks the run; the gate just skips it
+    final, audit = execute_plan(
+        result,
+        agent_id=agent_id,
+        source_run_id=source_run_id,
+        enforced_rules=enforced_rules,
+    )
+    return final, [tc.model_dump(mode="json") for tc in audit.tool_calls]
