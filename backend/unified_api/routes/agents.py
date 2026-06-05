@@ -48,6 +48,7 @@ from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared_agent_invoke.limits import (
     max_output_bytes,
     max_payload_bytes,
+    max_writeback_bytes,
     read_json_capped,
 )
 from unified_api.config import TEAM_CONFIGS
@@ -205,8 +206,13 @@ async def invoke_agent(
 
     # Cap the upstream response body. A runaway sandbox that returns 10 GB
     # should not blow up the proxy or the UI — surface a 502 with a preview.
+    # The sandbox envelope carries the user `output` (bounded by max_output_bytes)
+    # and the cognition tool-audit (bounded by max_writeback_bytes) as independent
+    # per-field caps, so the combined response budget is their sum — capping at the
+    # output budget alone would 502 otherwise-valid tool-using runs whose output
+    # and audit are each near their own limit.
     raw_len = len(upstream.content)
-    cap = max_output_bytes()
+    cap = max_output_bytes() + max_writeback_bytes()
     if raw_len > cap:
         logger.warning("upstream response for %s exceeded %d bytes (got %d)", agent_id, cap, raw_len)
         return JSONResponse(

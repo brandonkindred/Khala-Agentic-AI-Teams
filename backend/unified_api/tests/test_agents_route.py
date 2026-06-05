@@ -160,3 +160,72 @@ def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
         headers={"Content-Type": "application/json"},
     )
     assert resp.status_code == 413
+
+
+def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
+    """Mock the sandbox acquire + httpx upstream so the proxy sees ``body_bytes``."""
+    import types
+
+    import unified_api.routes.agents as agents_route_mod
+    from agent_provisioning_team.sandbox import SandboxStatus
+
+    handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
+
+    async def _acquire(agent_id: str):
+        return handle
+
+    async def _note_activity(agent_id: str):
+        return None
+
+    class _Resp:
+        def __init__(self) -> None:
+            self.content = body_bytes
+            self.status_code = 200
+            self.text = body_bytes.decode("utf-8", "replace")
+
+        def json(self):
+            import json as _json
+
+            return _json.loads(self.content)
+
+    class _FakeClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            return _Resp()
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
+    monkeypatch.setattr(agents_route_mod, "note_activity", _note_activity)
+    monkeypatch.setattr(agents_route_mod, "_persist_run", lambda **k: None)
+    monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)
+
+
+def test_invoke_proxy_cap_accounts_for_output_plus_writeback(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The proxy cap must be output + writeback, so a tool-using envelope whose
+    `output` and `tool_audit` are each near their own cap is not falsely 502'd."""
+    monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "1000")
+    monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "1000")
+
+    # Between the output cap (1000) and the combined budget (2000): must pass.
+    ok_body = b'{"output":"' + b"x" * 1400 + b'"}'
+    assert 1000 < len(ok_body) <= 2000
+    _patch_upstream(monkeypatch, body_bytes=ok_body)
+    resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
+    assert resp.status_code == 200
+
+    # Over the combined budget: still rejected with a 502 preview.
+    big_body = b'{"output":"' + b"x" * 2500 + b'"}'
+    assert len(big_body) > 2000
+    _patch_upstream(monkeypatch, body_bytes=big_body)
+    resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
+    assert resp.status_code == 502
+    assert "exceeds" in resp.json()["error"]

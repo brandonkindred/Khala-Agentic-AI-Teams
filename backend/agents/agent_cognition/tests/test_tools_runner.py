@@ -397,6 +397,16 @@ def test_sanitize_covers_all_branches() -> None:
     assert "<truncated:depth>" in repr(out["deep"])
 
 
+def test_sanitize_bounds_large_collections_to_max_items() -> None:
+    from agent_cognition.tools.runner import _MAX_ITEMS, _sanitize
+
+    big_dict = {f"k{i}": i for i in range(_MAX_ITEMS + 25)}
+    big_list = list(range(_MAX_ITEMS + 25))
+    # The cap is applied during traversal (islice), so the output is bounded.
+    assert len(_sanitize(big_dict)) == _MAX_ITEMS
+    assert len(_sanitize(big_list)) == _MAX_ITEMS
+
+
 def test_drive_platform_bound_rejects_non_platform_tool() -> None:
     toolset = _toolset("echo", lambda a: a, site=ExecutionSite.SANDBOX_LOCAL)
     with pytest.raises(AssertionError, match="not platform_bound"):

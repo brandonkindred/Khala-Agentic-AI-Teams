@@ -42,6 +42,7 @@ import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from itertools import islice
 from typing import Any
 from uuid import uuid4
 
@@ -382,7 +383,9 @@ def _sanitize(value: Any, *, _depth: int = 0) -> Any:
         return "<truncated:depth>"
     if isinstance(value, Mapping):
         out: dict[str, Any] = {}
-        for key, item in list(value.items())[:_MAX_ITEMS]:
+        # islice bounds the traversal to _MAX_ITEMS without first materialising
+        # every item of a large mapping (which would defeat the cap).
+        for key, item in islice(value.items(), _MAX_ITEMS):
             key_s = str(key)
             if _is_secret_key(key_s):
                 out[key_s] = "***"
@@ -390,7 +393,7 @@ def _sanitize(value: Any, *, _depth: int = 0) -> Any:
                 out[key_s] = _sanitize(item, _depth=_depth + 1)
         return out
     if isinstance(value, (list, tuple)):
-        return [_sanitize(item, _depth=_depth + 1) for item in list(value)[:_MAX_ITEMS]]
+        return [_sanitize(item, _depth=_depth + 1) for item in islice(value, _MAX_ITEMS)]
     if isinstance(value, str) and len(value) > _MAX_STR:
         return value[:_MAX_STR] + "…<truncated>"
     if isinstance(value, (str, int, float, bool)) or value is None:
