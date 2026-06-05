@@ -92,6 +92,40 @@ def test_compute_adv_averages_close_times_volume() -> None:
     assert val == 100_000_000.0
 
 
+def test_compute_adv_unaffected_by_coerced_volume() -> None:
+    """Bars whose bad volume was coerced to 0.0 never poison ADV with NaN.
+
+    A window mixing real-volume bars with coerced-to-zero bars yields the mean
+    over the positive-volume bars (zeros are excluded), never ``NaN``.
+    """
+    bars = [_bar(close=100.0, volume=1_000_000.0)] * 18 + [_bar(close=100.0, volume=0.0)] * 2
+    val = compute_adv_from_bars(bars, lookback=20)
+    assert val == 100_000_000.0
+    assert val is not None and math.isfinite(val)
+    # Every bar zero-volume → None (documented), still never NaN.
+    assert compute_adv_from_bars([_bar(volume=0.0)] * 20, lookback=20) is None
+
+
+def test_compute_adv_excludes_nonfinite_volume() -> None:
+    """A non-finite volume is treated as zero (excluded), so the ADV value
+    matches the coerced derived-ADV cache key and a cached replay.
+
+    Without excluding ``+inf`` (``inf > 0`` passes the raw filter) the compute
+    path would return ``inf`` while the cache key hashed it as ``0.0`` — storing
+    ``inf`` under the zero-volume fingerprint and serving it to a later genuine
+    zero-volume window.
+    """
+    # All-inf and all-NaN windows behave like all-zero: no real volume → None.
+    assert compute_adv_from_bars([_bar(volume=float("inf"))] * 20, lookback=20) is None
+    assert compute_adv_from_bars([_bar(volume=float("nan"))] * 20, lookback=20) is None
+    # A +inf bar mixed with finite-volume bars is excluded, never poisoning the
+    # mean with inf; ADV is the mean over the finite bars only.
+    mixed = [_bar(close=100.0, volume=1_000_000.0)] * 19 + [_bar(close=100.0, volume=float("inf"))]
+    val = compute_adv_from_bars(mixed, lookback=20)
+    assert val == 100_000_000.0
+    assert val is not None and math.isfinite(val)
+
+
 # ---------------------------------------------------------------------------
 # Provider chain
 # ---------------------------------------------------------------------------
@@ -313,6 +347,58 @@ def test_df_to_bars_filters_nan_rows() -> None:
         and math.isfinite(b.close)
         for b in bars
     )
+
+
+def test_df_to_bars_finite_ohlc_nan_volume_kept() -> None:
+    """A row with good OHLC but NaN volume stays a real bar; only volume → 0.0.
+
+    Distinct from the non-finite-OHLC case (which forward-fills): the price
+    data is valid, so the bar must NOT be dropped/imputed — indicators index
+    OHLC positionally. Only the malformed volume is neutralised.
+    """
+
+    class _Row:
+        def __init__(self, data: Dict[str, float]) -> None:
+            self._d = data
+
+        def __getitem__(self, key: str) -> float:
+            return self._d[key]
+
+        def get(self, key: str, default: float = 0.0) -> float:
+            return self._d.get(key, default)
+
+    class _Index:
+        def __init__(self, label: str) -> None:
+            self._label = label
+
+        def strftime(self, fmt: str) -> str:  # noqa: ARG002 — accept arbitrary fmt
+            return self._label
+
+    class _DF:
+        def __init__(self, rows: List[Tuple[_Index, _Row]]) -> None:
+            self._rows = rows
+
+        def iterrows(self):
+            return iter(self._rows)
+
+    rows = [
+        (
+            _Index("2024-01-01"),
+            _Row({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # Finite OHLC, NaN volume — kept as a real bar with volume coerced to 0.0.
+        (
+            _Index("2024-01-02"),
+            _Row({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": float("nan")}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_DF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02"]
+    # The NaN-volume bar is a real bar (not forward-filled) with its OHLC intact.
+    assert bars[1].is_imputed is False
+    assert (bars[1].open, bars[1].high, bars[1].low, bars[1].close) == (102, 103, 101, 102)
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.volume) for b in bars)
 
 
 def test_df_to_bars_falls_back_when_index_has_no_strftime() -> None:
@@ -878,6 +964,25 @@ def test_normalize_ohlc_bar_clean_row_not_flagged_repaired() -> None:
     assert bar.high == 1.5
     assert bar.low == 0.5
     assert bar.volume == 10.0
+
+
+@pytest.mark.parametrize("bad_volume", [float("nan"), float("inf"), float("-inf")])
+def test_normalize_ohlc_bar_coerces_nonfinite_volume(bad_volume: float, caplog) -> None:
+    """Finite OHLC with non-finite volume keeps the price bar; volume → 0.0."""
+    with caplog.at_level("WARNING"):
+        bar, repaired = MarketDataService._normalize_ohlc_bar(
+            date="2024-01-02", open=1.0, high=1.5, low=0.5, close=1.2, volume=bad_volume
+        )
+    # The real price bar is preserved (not dropped) — only volume is neutralised.
+    assert bar is not None
+    assert repaired is False
+    assert bar.high == 1.5
+    assert bar.low == 0.5
+    assert bar.volume == 0.0
+    assert math.isfinite(bar.volume)
+    assert any(
+        "non-finite volume" in r.message and "2024-01-02" in r.message for r in caplog.records
+    )
 
 
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:

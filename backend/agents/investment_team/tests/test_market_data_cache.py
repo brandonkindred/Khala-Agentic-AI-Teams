@@ -470,3 +470,369 @@ def test_snapshot_meta_round_trip_in_memory_index(cache: MarketDataCache) -> Non
     assert meta.fetch_ts.tzinfo is not None
     # Comparable as a UTC datetime.
     assert meta.fetch_ts <= datetime.now(tz=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite volume: write side (streaming ingest) and read side (cache
+# read-back) must coerce identically so first-run and replay fingerprints
+# agree for the same provider data.
+# ---------------------------------------------------------------------------
+
+
+def test_bar_to_ohlcv_coerces_nonfinite_volume(caplog) -> None:
+    from investment_team.market_data_cache.streaming import _bar_to_ohlcv
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar = Bar(
+            symbol="AAA",
+            timestamp="2024-01-02",
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
+            volume=bad,
+        )
+        with caplog.at_level("WARNING"):
+            out = _bar_to_ohlcv(bar)
+        assert out.volume == 0.0
+        # OHLC is preserved (and invariant-repaired) regardless.
+        assert (out.open, out.high, out.low, out.close) == (10.0, 11.0, 9.0, 10.5)
+    assert any("non-finite volume" in r.message for r in caplog.records)
+    # A finite volume passes through untouched.
+    clean = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=1234.0,
+    )
+    assert _bar_to_ohlcv(clean).volume == 1234.0
+
+
+def test_streaming_write_and_cache_read_agree_on_nonfinite_volume() -> None:
+    """A NaN-volume provider bar must produce the same dataset fingerprint on
+    the first-run (write) path and the cached replay (read) path.
+
+    Regression: the read side coerces non-finite volume to 0.0 in
+    ``_table_to_bars``; without the matching write-side coercion in
+    ``_bar_to_ohlcv`` the first-run fingerprint (raw NaN) would diverge from
+    the replay fingerprint (0.0) for identical data.
+    """
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import (
+        _get_parquet_schema,
+        _table_to_bars,
+        compute_dataset_fingerprint,
+    )
+    from investment_team.market_data_cache.streaming import _bar_to_ohlcv
+
+    # Write side: provider streams a NaN-volume bar → buffered OHLCVBar.
+    raw = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=float("nan"),
+    )
+    write_bars = [_bar_to_ohlcv(raw)]
+    write_fp = compute_dataset_fingerprint({"AAA": write_bars})
+
+    # Read side: the same row persisted to parquet and read back.
+    table = pa.Table.from_pydict(
+        {
+            "date": [write_bars[0].date],
+            "open": [write_bars[0].open],
+            "high": [write_bars[0].high],
+            "low": [write_bars[0].low],
+            "close": [write_bars[0].close],
+            "volume": [write_bars[0].volume],
+            "is_imputed": [write_bars[0].is_imputed],
+        },
+        schema=_get_parquet_schema(),
+    )
+    read_bars = _table_to_bars(table)
+    read_fp = compute_dataset_fingerprint({"AAA": read_bars})
+
+    assert write_bars[0].volume == read_bars[0].volume == 0.0
+    assert write_fp == read_fp
+
+
+class _NaNVolProvider:
+    """Historical-only provider that emits a single NaN-volume bar."""
+
+    def __init__(self, name: str = "nanvol", *, is_warmup: bool = False) -> None:
+        self.capabilities = type("C", (), {"name": name})()
+        self._is_warmup = is_warmup
+
+    def historical(self, *, symbols, asset_class, start, end, timeframe) -> Iterator[BarEvent]:
+        for sym in symbols:
+            yield BarEvent(
+                bar=Bar(
+                    symbol=sym,
+                    timestamp="2024-01-01",
+                    timeframe=timeframe,
+                    open=100.0,
+                    high=101.0,
+                    low=99.0,
+                    close=100.5,
+                    volume=float("nan"),
+                ),
+                is_warmup=self._is_warmup,
+            )
+
+
+def test_caching_stream_miss_path_sanitizes_live_event_volume(cache: MarketDataCache) -> None:
+    """On a cache miss the engine consumes the live stream directly, so a
+    NaN-volume provider bar must be yielded with volume coerced to 0.0 — the
+    same value the cached replay later emits — so miss and hit paths drive
+    identical execution rather than leaking NaN into fill math on the first run.
+    """
+    provider = _NaNVolProvider()
+    miss_events = [
+        e
+        for e in CachingProviderHistoricalStream(
+            provider=provider,
+            symbols=["AAA"],
+            asset_class="stocks",
+            start="2024-01-01",
+            end="2024-01-01",
+            timeframe="1d",
+            cache=cache,
+        )
+        if isinstance(e, BarEvent)
+    ]
+    assert len(miss_events) == 1
+    # The live (miss-path) event the engine sees is sanitized, never NaN.
+    assert miss_events[0].bar.volume == 0.0
+    # Other Bar fields are preserved by the surgical coercion.
+    assert (miss_events[0].bar.close, miss_events[0].bar.timeframe) == (100.5, "1d")
+
+    # The cached replay emits the same coerced volume from the snapshot.
+    stream2 = CachingProviderHistoricalStream(
+        provider=provider,
+        symbols=["AAA"],
+        asset_class="stocks",
+        start="2024-01-01",
+        end="2024-01-01",
+        timeframe="1d",
+        cache=cache,
+    )
+    hit_events = [e for e in stream2 if isinstance(e, BarEvent)]
+    assert stream2.cache_hit is True
+    # Identical provider data → identical volume on miss and hit paths.
+    assert hit_events[0].bar.volume == miss_events[0].bar.volume == 0.0
+
+
+def test_caching_stream_miss_path_preserves_warmup_flag_on_coercion(cache: MarketDataCache) -> None:
+    """Coercing a non-finite volume on the live miss path must not drop the
+    BarEvent's ``is_warmup`` flag — the trading service uses it to suppress
+    fills during warm-up, so turning a warm-up bar into a live bar (only in
+    the NaN-volume case) would let it execute orders it should not.
+    """
+    provider = _NaNVolProvider(is_warmup=True)
+    miss_events = [
+        e
+        for e in CachingProviderHistoricalStream(
+            provider=provider,
+            symbols=["AAA"],
+            asset_class="stocks",
+            start="2024-01-01",
+            end="2024-01-01",
+            timeframe="1d",
+            cache=cache,
+        )
+        if isinstance(e, BarEvent)
+    ]
+    assert len(miss_events) == 1
+    # Volume coerced, warm-up flag preserved.
+    assert miss_events[0].bar.volume == 0.0
+    assert miss_events[0].is_warmup is True
+
+
+def test_record_snapshot_normalizes_nonfinite_volume_at_write(cache: MarketDataCache) -> None:
+    """A writer that bypasses the live-path coercion — e.g. paper-trade warm-up
+    builds OHLCVBars straight from raw live bars and calls record_bars_snapshot
+    — must still persist a finite volume. The write boundary coerces, so the
+    stored snapshot, its content hash, and the dataset fingerprint match what a
+    replay reads back instead of diverging on a first-run NaN.
+    """
+    pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import _hash_bars, compute_dataset_fingerprint
+
+    raw = [
+        OHLCVBar(
+            date="2024-01-01", open=100.0, high=101.0, low=99.0, close=100.5, volume=float("nan")
+        ),
+        OHLCVBar(date="2024-01-02", open=101.0, high=102.0, low=100.0, close=101.5, volume=2000.0),
+    ]
+    # First-run fingerprint, computed before anything is persisted.
+    write_fp = compute_dataset_fingerprint({"AAA": raw})
+
+    meta = cache.record_bars_snapshot(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        provider="papertrade",
+        bars=raw,
+        start="2024-01-01",
+        end="2024-01-02",
+    )
+    assert meta is not None
+    read_back = cache.read_snapshot(meta)
+    assert read_back is not None
+
+    # The persisted (and therefore replayed) volume is finite.
+    assert [b.volume for b in read_back] == [0.0, 2000.0]
+    # First-run fingerprint (raw NaN) equals the cached-replay fingerprint (0.0).
+    assert compute_dataset_fingerprint({"AAA": read_back}) == write_fp
+    # The stored per-snapshot content hash is consistent with the read-back bars.
+    assert meta.sha256 == _hash_bars(read_back)
+
+
+def test_hash_bars_coerces_nonfinite_volume() -> None:
+    """_hash_bars treats a non-finite volume as the 0.0 it is persisted/replayed
+    as, but still distinguishes genuinely different finite volumes."""
+    from investment_team.market_data_cache.store import _hash_bars
+
+    def _bar(vol: float) -> OHLCVBar:
+        return OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=vol)
+
+    assert _hash_bars([_bar(float("nan"))]) == _hash_bars([_bar(0.0)])
+    assert _hash_bars([_bar(float("inf"))]) == _hash_bars([_bar(0.0)])
+    assert _hash_bars([_bar(5.0)]) != _hash_bars([_bar(0.0)])
+
+
+def test_get_or_fetch_miss_returns_canonicalized_volume(cache: MarketDataCache) -> None:
+    """A fetch_fn returning a non-finite volume must not make the miss-path
+    return diverge from the cached replay. get_or_fetch canonicalizes volume on
+    both the persisted snapshot and the bars it hands back, so first-run
+    consumption matches the 0.0 a later cache hit reads from the snapshot.
+    """
+    raw = [
+        OHLCVBar(
+            date="2024-01-01", open=100.0, high=101.0, low=99.0, close=100.5, volume=float("nan")
+        ),
+        OHLCVBar(date="2024-01-02", open=101.0, high=102.0, low=100.0, close=101.5, volume=2000.0),
+    ]
+
+    def fetch(symbol, ac, start, end):
+        return list(raw), "yahoo"
+
+    miss_bars, meta = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=fetch,
+    )
+    assert meta is not None
+    # The miss-path return is canonicalized, not the raw NaN.
+    assert [b.volume for b in miss_bars] == [0.0, 2000.0]
+
+    # A cache hit (fetch_fn must not run) replays the same canonical volume.
+    def _no_call(symbol, ac, start, end):  # pragma: no cover - must not be called
+        raise AssertionError("fetch_fn must not be called on cache hit")
+
+    hit_bars, _ = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=_no_call,
+    )
+    assert [b.volume for b in hit_bars] == [b.volume for b in miss_bars]
+
+
+def test_reconcile_snapshot_hash() -> None:
+    from investment_team.market_data_cache.store import _hash_bars, _reconcile_snapshot_hash
+
+    bars = [OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=5.0)]
+
+    def _meta(sha: str) -> SnapshotMeta:
+        return SnapshotMeta(
+            symbol="AAA",
+            asset_class="stocks",
+            frequency="1d",
+            provider="p",
+            fetch_ts=datetime.now(timezone.utc),
+            start_date="2024-01-01",
+            end_date="2024-01-01",
+            row_count=1,
+            sha256=sha,
+            parquet_path="/x",
+        )
+
+    # Stale hash → corrected copy matching the bars.
+    fixed = _reconcile_snapshot_hash(_meta("stale"), bars)
+    assert fixed.sha256 == _hash_bars(bars)
+    # Already-consistent meta → same object, no churn.
+    consistent = _meta(_hash_bars(bars))
+    assert _reconcile_snapshot_hash(consistent, bars) is consistent
+
+
+def test_get_or_fetch_reconciles_legacy_snapshot_hash(cache: MarketDataCache) -> None:
+    """A legacy snapshot persisted with raw NaN volume carries a stored sha256
+    over the unrepaired data. On a cache hit the bars are repaired to 0.0, so
+    the returned meta's sha256 must be reconciled to match the bars the caller
+    gets — otherwise meta.sha256 and compute_dataset_fingerprint(read_bars)
+    identify two different datasets for the same replay.
+    """
+    pa = pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    from investment_team.market_data_cache.store import _get_parquet_schema, _hash_bars
+
+    # Write a legacy parquet with raw NaN volume (bypassing _bars_to_table,
+    # which would coerce), then index it with a deliberately stale sha256.
+    parquet_path = cache._resolved_root() / "legacy.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-01"],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [float("nan")],
+            "is_imputed": [False],
+        },
+        schema=_get_parquet_schema(),
+    )
+    pq.write_table(table, parquet_path)
+    legacy = SnapshotMeta(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        provider="legacy",
+        fetch_ts=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        start_date="2024-01-01",
+        end_date="2024-01-02",
+        row_count=1,
+        sha256="stale-raw-nan-hash",
+        parquet_path=str(parquet_path),
+    )
+    cache._memory_index.append(legacy)
+
+    def _no_call(symbol, ac, start, end):  # pragma: no cover - must not be called
+        raise AssertionError("fetch_fn must not be called on cache hit")
+
+    bars, meta = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=_no_call,
+        as_of="2024-06-01",
+    )
+    # Read-repaired to 0.0, and the meta hash now describes the repaired bars.
+    assert [b.volume for b in bars] == [0.0]
+    assert meta is not None
+    assert meta.sha256 != "stale-raw-nan-hash"
+    assert meta.sha256 == _hash_bars(bars)

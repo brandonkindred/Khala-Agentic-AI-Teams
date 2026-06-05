@@ -1062,3 +1062,57 @@ def test_partial_fill_defaults_flag_default_is_on(monkeypatch) -> None:
     from investment_team.trading_service.service import _partial_fill_defaults_enabled
 
     assert _partial_fill_defaults_enabled() is True
+
+
+def test_historical_replay_canonicalizes_nonfinite_volume() -> None:
+    """The replay stream feeds the strategy/predicates, so a non-finite volume
+    in the market-data dict must be coerced to 0.0 — the same value the dataset
+    fingerprint collapses NaN/inf to — so a backtest can't behave differently
+    for a NaN-volume dataset than for the 0.0 it shares a fingerprint with.
+    """
+    import math
+
+    market_data: Dict[str, List[OHLCVBar]] = {
+        "AAA": [
+            OHLCVBar(
+                date="2024-01-01", open=10.0, high=11.0, low=9.0, close=10.5, volume=float("nan")
+            ),
+            OHLCVBar(date="2024-01-02", open=10.5, high=11.5, low=9.5, close=11.0, volume=1234.0),
+        ]
+    }
+    bars = [
+        e.bar
+        for e in HistoricalReplayStream(market_data, timeframe="1d")
+        if isinstance(e, BarEvent)
+    ]
+    assert [b.volume for b in bars] == [0.0, 1234.0]
+    assert all(math.isfinite(b.volume) for b in bars)
+    # OHLC is untouched.
+    assert (bars[0].open, bars[0].close) == (10.0, 10.5)
+
+
+def test_compiled_src_helper_canonicalizes_nonfinite_volume() -> None:
+    """The generated ``_src`` helper that strategies use to read ``bar.volume``
+    must coerce a non-finite volume to 0.0 so a predicate over volume can't
+    diverge from the 0.0 dataset it shares a fingerprint with."""
+    import math
+    from types import SimpleNamespace
+
+    from investment_team.strategy_lab.synthesis.compiler import _emit_source_helper
+
+    ns: dict = {}
+    # The helper is a method body; exec it into a namespace and bind to a stub.
+    exec(_emit_source_helper(), ns)  # noqa: S102 — exercising generated helper
+    src = ns["_src"]
+    stub = SimpleNamespace()
+
+    nan_bar = SimpleNamespace(open=1.0, high=1.0, low=1.0, close=1.0, volume=float("nan"))
+    inf_bar = SimpleNamespace(open=1.0, high=1.0, low=1.0, close=1.0, volume=float("inf"))
+    good_bar = SimpleNamespace(open=1.0, high=1.0, low=1.0, close=1.0, volume=4321.0)
+
+    assert src(stub, nan_bar, "volume") == 0.0
+    assert src(stub, inf_bar, "volume") == 0.0
+    assert src(stub, good_bar, "volume") == 4321.0
+    assert math.isfinite(src(stub, nan_bar, "volume"))
+    # Non-volume sources are unaffected.
+    assert src(stub, good_bar, "close") == 1.0
