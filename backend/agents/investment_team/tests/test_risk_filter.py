@@ -93,10 +93,61 @@ def test_can_enter_blocks_on_leverage():
 
 
 def test_can_enter_blocks_on_concentration():
-    rf = RiskFilter(RiskLimits(max_symbol_concentration_pct=10.0))
+    # max_position_pct raised so the concentration cap (10%) is the binding one;
+    # otherwise the tighter max_position_pct gate fires first.
+    rf = RiskFilter(RiskLimits(max_position_pct=100.0, max_symbol_concentration_pct=10.0))
     result = rf.can_enter("A", 20_000.0, 100_000.0, {})
     assert not result.allowed
     assert "concentration" in result.reason
+
+
+def test_can_enter_blocks_on_max_position_pct():
+    # The per-position deployment cap is enforced at the choke point so it covers
+    # custom-code orders (which bypass the engine dispatcher's clamp). A 10%
+    # order under a 6% cap is rejected.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {})
+    assert not result.allowed
+    assert "max_position_pct" in result.reason
+
+
+def test_can_enter_allows_order_at_max_position_pct():
+    # An order clamped exactly to the cap (6% of equity) is allowed — the gate
+    # uses a strict comparison with only a float-noise epsilon.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 6_000.0, 100_000.0, {})
+    assert result.allowed
+
+
+def test_can_enter_skips_position_cap_for_presized_orders():
+    # Dispatcher-presized orders (enforce_position_cap=False) skip the
+    # max_position_pct check: the dispatcher already clamped them to the cap at
+    # the sizing price, so re-checking at the fill price would falsely reject an
+    # order that gapped up. A 10%-of-equity order passes when presized.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {}, enforce_position_cap=False)
+    assert result.allowed
+
+
+def test_can_enter_enforces_position_cap_for_custom_code_orders():
+    # Non-presized (custom-code) orders (the default) are the gate's sole
+    # position-cap enforcement point, so a 10% order under a 6% cap is rejected.
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    result = rf.can_enter("A", 10_000.0, 100_000.0, {})
+    assert not result.allowed
+    assert "max_position_pct" in result.reason
+
+
+def test_can_enter_rejects_non_positive_equity_unconditionally():
+    # A ruined account (equity <= 0) can never add exposure — rejected for both
+    # custom-code orders AND presized orders (whose sizing was decided on an
+    # earlier, still-solvent bar; that stale decision doesn't make a bankrupt
+    # account safe to fill into).
+    rf = RiskFilter(RiskLimits(max_position_pct=6.0))
+    custom = rf.can_enter("A", 1_000.0, 0.0, {})
+    assert not custom.allowed and "non-positive equity" in custom.reason
+    presized = rf.can_enter("A", 1_000.0, -500.0, {}, enforce_position_cap=False)
+    assert not presized.allowed and "non-positive equity" in presized.reason
 
 
 def test_can_enter_allows_within_limits():

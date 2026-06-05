@@ -1421,3 +1421,57 @@ def test_finalize_loop_telemetry_stores_non_conforming_flag() -> None:
         _non_conforming_ctx(), [], _CustomSpec(), code="def on_bar(): ..."
     )
     assert default["ran_on_non_conforming_code"] is False
+
+
+def test_readiness_sizing_coherence_critical_stalls_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real Rule 9 (Check A) critical — sizing.fraction > max_position_pct —
+    drives the deterministic synthetic-critique path and, when the reviser
+    keeps returning the same incoherent spec, the existing stall guard
+    short-circuits with ``status="failed: design_stalled"`` instead of
+    churning to the round cap. The LLM reviewer is never consulted (the
+    deterministic gate already failed the round)."""
+    from investment_team.strategy_lab.spec_dsl import FixedFractionSizing
+
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_ROUNDS", "20")
+    monkeypatch.setenv("STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS", "3")
+    orch = StrategyLabOrchestrator()
+
+    incoherent = _spec_dict()
+    incoherent["sizing"] = FixedFractionSizing(fraction=0.10).model_dump()
+    incoherent["risk_limits"] = {"max_position_pct": 5, "max_drawdown_pct": 10}
+
+    monkeypatch.setattr(orch.design_agent, "run", lambda **_kw: (dict(incoherent), "scripted"))
+
+    def _reviewer_must_not_run(*_a, **_kw):
+        raise AssertionError("LLM reviewer must not run when readiness fails critical")
+
+    monkeypatch.setattr(orch.design_review_agent, "run", _reviewer_must_not_run)
+
+    revise_counter = {"n": 0}
+
+    def _revise(*_a, **_kw):
+        revise_counter["n"] += 1
+        return dict(incoherent), "revised"
+
+    monkeypatch.setattr(orch.design_agent, "revise", _revise)
+
+    def _market_must_not_run(self, *_a, **_kw):
+        raise AssertionError("synthesis loop must not be entered on a stall")
+
+    monkeypatch.setattr(StrategyLabOrchestrator, "_fetch_market_data", _market_must_not_run)
+
+    record = orch.run_cycle(prior_records=[], config=_config())
+
+    assert record.backtest.status == "failed: design_stalled"
+    assert record.is_winning is False
+    assert record.design_rounds == 3
+    assert revise_counter["n"] == 2
+    assert record.loop_telemetry["stop_reason"] == "stalled"
+    # The synthetic critique carried the deterministic sizing-coherence finding.
+    assert any(
+        "max_position_pct" in str(i.get("description", ""))
+        for c in record.critiques
+        for i in c.get("issues", [])
+    ), record.critiques

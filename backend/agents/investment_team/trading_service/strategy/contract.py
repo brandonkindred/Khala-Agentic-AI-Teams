@@ -142,6 +142,13 @@ class OrderRequest(BaseModel):
     trail_offset_kind: Literal["abs", "bps"] = "abs"
     tif: TimeInForce = TimeInForce.DAY
     reason: str = ""  # free-form annotation; surfaced in logs / fills
+    # True when the engine entry dispatcher already clamped this order to
+    # ``max_position_pct`` at the sizing price. ``RiskFilter.can_enter`` then
+    # skips its position-cap check for this order (the dispatcher owns it),
+    # avoiding a false rejection when the fill price gaps above the sizing
+    # price. Custom-code orders submitted by the strategy subprocess leave this
+    # False, so the gate remains their sole position-cap enforcement point.
+    risk_presized: bool = False
     unfilled_policy: Optional[UnfilledPolicy] = None
     twap_slices: Optional[int] = None
     attached_stop_loss: Optional[StopAttachment] = None

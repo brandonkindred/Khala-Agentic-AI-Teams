@@ -383,7 +383,10 @@ def test_requeue_on_partial_fill_refreshes_submitted_at() -> None:
     """
     portfolio = Portfolio(initial_capital=100_000.0)
     order_book = OrderBook()
-    risk = RiskFilter(RiskLimits())
+    # Large order to trigger the participation-cap partial; lift the per-position
+    # deployment cap so the choke-point max_position_pct gate doesn't reject it
+    # (that gate is covered in test_risk_filter.py).
+    risk = RiskFilter(RiskLimits(max_position_pct=100.0))
     sim = FillSimulator(
         portfolio=portfolio,
         order_book=order_book,
