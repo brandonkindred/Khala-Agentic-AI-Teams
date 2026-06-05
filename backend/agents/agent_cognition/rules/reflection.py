@@ -219,7 +219,11 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
     active_by_id = {r.id: r for r in active_rules}
+    # Dedupe against both fresh pending proposals and active rules: an ADD that
+    # restates an already-active rule's text is suppressed so approval can't
+    # activate a duplicate guardrail.
     seen = {_dedupe_key_of(p) for p in fresh_pending}
+    seen |= {_active_rule_add_key(r) for r in active_rules}
     cap = _max_proposals()
 
     for raw in result.proposals:
@@ -275,16 +279,18 @@ def _recent_summaries(agent_id: str) -> list[PeriodSummary]:
     ``version``; citing it as evidence would produce a proposal the post-recompute
     evidence check never flags (it flags only versions *below* the recomputed one,
     and the recompute keeps the bumped version), leaving an approvable proposal
-    derived from stale memory. The scheduler runs ``ensure_rollups_current`` before
-    reflection, so fresh summaries are normally available; if every recent summary
-    is stale this returns empty and reflection defers to the next run. Empty when
-    the agent has no fresh summaries yet.
+    derived from stale memory. Staleness is filtered in the store query (before the
+    limit), so ``limit`` fresh summaries are returned even when the most recent
+    periods are stale but older ones are fresh. The scheduler runs
+    ``ensure_rollups_current`` before reflection, so fresh summaries are normally
+    available; if no fresh summary exists this returns empty and reflection defers
+    to the next run.
     """
     limit = _summary_limit()
     gathered: list[PeriodSummary] = []
     for scale in _REFLECTION_SCALES:
         gathered.extend(
-            s for s in memory_store.fetch_summaries(agent_id, scale, limit=limit) if not s.stale
+            memory_store.fetch_summaries(agent_id, scale, limit=limit, exclude_stale=True)
         )
     return gathered
 
@@ -344,6 +350,15 @@ def _materialize(
             )
             return None
         return _build_proposal(agent_id, action, evidence, now, target_rule_id=item.target_rule_id)
+
+    # An ADD that carries a target is incoherent (the model likely meant amend);
+    # drop it rather than silently discarding the target and forking a new rule.
+    if action == ProposalAction.ADD and item.target_rule_id:
+        logger.warning(
+            "reflection: add proposal carries target_rule_id %r (incoherent); dropping",
+            item.target_rule_id,
+        )
+        return None
 
     # ADD or AMEND require rule text; AMEND additionally needs an active target.
     if not item.text or not item.text.strip():
@@ -427,6 +442,11 @@ def _build_proposal(
     )
 
 
+def _normalize_text(text: str) -> str:
+    """Whitespace-collapsed, case-folded rule text for stable dedupe identity."""
+    return " ".join(text.split()).casefold()
+
+
 def _dedupe_key_of(proposal: RuleProposal) -> tuple[str, str | None, str | None]:
     """Identity used to suppress re-proposing the same change.
 
@@ -438,8 +458,19 @@ def _dedupe_key_of(proposal: RuleProposal) -> tuple[str, str | None, str | None]
     if isinstance(proposal.proposed_rule, dict):
         candidate = proposal.proposed_rule.get("text")
         if isinstance(candidate, str):
-            text = " ".join(candidate.split()).casefold()
+            text = _normalize_text(candidate)
     return (proposal.action.value, proposal.target_rule_id, text)
+
+
+def _active_rule_add_key(rule: Rule) -> tuple[str, None, str]:
+    """Dedupe key under which an active rule already 'occupies' the ADD space.
+
+    An ADD whose normalized text matches an active rule is a restatement of an
+    existing guardrail (the untrusted model ignoring the prompt's "do not restate"
+    instruction); seeding ``seen`` with this key drops it before it can become a
+    duplicate rule on approval.
+    """
+    return (ProposalAction.ADD.value, None, _normalize_text(rule.text))
 
 
 # ---------------------------------------------------------------------------

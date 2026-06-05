@@ -187,8 +187,19 @@ def _wire(
     created: list[RuleProposal] = []
     summaries = [_summary()] if summaries is None else summaries
 
-    def _fetch(agent_id: str, scale: Scale, *, limit: int | None = None) -> list[PeriodSummary]:
-        return list(summaries) if scale is Scale.DAY else []
+    def _fetch(
+        agent_id: str,
+        scale: Scale,
+        *,
+        limit: int | None = None,
+        exclude_stale: bool = False,
+    ) -> list[PeriodSummary]:
+        # Mirror the real store: stale rows are filtered in the query (before the
+        # limit), so reflection never sees them when it passes exclude_stale=True.
+        rows = list(summaries) if scale is Scale.DAY else []
+        if exclude_stale:
+            rows = [s for s in rows if not s.stale]
+        return rows
 
     monkeypatch.setattr(reflection, "get_client", lambda key: canned)
     monkeypatch.setattr(reflection.memory_store, "fetch_summaries", _fetch)
@@ -393,6 +404,30 @@ def test_duplicate_within_batch_is_skipped(monkeypatch: pytest.MonkeyPatch) -> N
     )
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 1 and report.deduped == 1 and len(created) == 1
+
+
+def test_add_restating_an_active_rule_is_deduped(monkeypatch: pytest.MonkeyPatch) -> None:
+    active = _rule(rid="r1", text="Always   LINT before merge")  # spacing/case differ
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "always lint before merge"}],
+        rules=[active],
+    )
+    report = reflection.reflect("a", _NOW)
+    # An ADD that restates an already-active rule is suppressed, not re-proposed.
+    assert report.proposed == 0 and report.deduped == 1 and created == []
+
+
+def test_add_with_target_is_dropped_as_incoherent(monkeypatch: pytest.MonkeyPatch) -> None:
+    rule = _rule(rid="r1")
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "target_rule_id": "r1", "text": "tied to r1"}],
+        rules=[rule],
+    )
+    report = reflection.reflect("a", _NOW)
+    # An add carrying a target is incoherent — dropped, not coerced into a new rule.
+    assert report.proposed == 0 and report.dropped_invalid == 1 and created == []
 
 
 def test_stale_pending_is_superseded_and_does_not_block_fresh(
