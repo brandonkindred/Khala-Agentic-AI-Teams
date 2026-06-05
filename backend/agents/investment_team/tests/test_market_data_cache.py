@@ -470,3 +470,92 @@ def test_snapshot_meta_round_trip_in_memory_index(cache: MarketDataCache) -> Non
     assert meta.fetch_ts.tzinfo is not None
     # Comparable as a UTC datetime.
     assert meta.fetch_ts <= datetime.now(tz=timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Non-finite volume: write side (streaming ingest) and read side (cache
+# read-back) must coerce identically so first-run and replay fingerprints
+# agree for the same provider data.
+# ---------------------------------------------------------------------------
+
+
+def test_bar_to_ohlcv_coerces_nonfinite_volume(caplog) -> None:
+    from investment_team.market_data_cache.streaming import _bar_to_ohlcv
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar = Bar(
+            symbol="AAA",
+            timestamp="2024-01-02",
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
+            volume=bad,
+        )
+        with caplog.at_level("WARNING"):
+            out = _bar_to_ohlcv(bar)
+        assert out.volume == 0.0
+        # OHLC is preserved (and invariant-repaired) regardless.
+        assert (out.open, out.high, out.low, out.close) == (10.0, 11.0, 9.0, 10.5)
+    assert any("non-finite volume" in r.message for r in caplog.records)
+    # A finite volume passes through untouched.
+    clean = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=1234.0,
+    )
+    assert _bar_to_ohlcv(clean).volume == 1234.0
+
+
+def test_streaming_write_and_cache_read_agree_on_nonfinite_volume() -> None:
+    """A NaN-volume provider bar must produce the same dataset fingerprint on
+    the first-run (write) path and the cached replay (read) path.
+
+    Regression: the read side coerces non-finite volume to 0.0 in
+    ``_table_to_bars``; without the matching write-side coercion in
+    ``_bar_to_ohlcv`` the first-run fingerprint (raw NaN) would diverge from
+    the replay fingerprint (0.0) for identical data.
+    """
+    pa = pytest.importorskip("pyarrow")
+    from investment_team.market_data_cache.store import (
+        _get_parquet_schema,
+        _table_to_bars,
+        compute_dataset_fingerprint,
+    )
+    from investment_team.market_data_cache.streaming import _bar_to_ohlcv
+
+    # Write side: provider streams a NaN-volume bar → buffered OHLCVBar.
+    raw = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=float("nan"),
+    )
+    write_bars = [_bar_to_ohlcv(raw)]
+    write_fp = compute_dataset_fingerprint({"AAA": write_bars})
+
+    # Read side: the same row persisted to parquet and read back.
+    table = pa.Table.from_pydict(
+        {
+            "date": [write_bars[0].date],
+            "open": [write_bars[0].open],
+            "high": [write_bars[0].high],
+            "low": [write_bars[0].low],
+            "close": [write_bars[0].close],
+            "volume": [write_bars[0].volume],
+            "is_imputed": [write_bars[0].is_imputed],
+        },
+        schema=_get_parquet_schema(),
+    )
+    read_bars = _table_to_bars(table)
+    read_fp = compute_dataset_fingerprint({"AAA": read_bars})
+
+    assert write_bars[0].volume == read_bars[0].volume == 0.0
+    assert write_fp == read_fp

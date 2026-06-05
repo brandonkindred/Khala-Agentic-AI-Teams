@@ -25,6 +25,7 @@ which matches what the provider would have produced anyway.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Dict, Iterator, List, Optional
 
 from ..market_data_service import OHLCVBar
@@ -211,18 +212,30 @@ def _bar_to_ohlcv(bar) -> OHLCVBar:
     counterparties and can produce H < max(O, C) or L > min(O, C).
     Repair here so cached parquet snapshots and downstream consumers
     always see coherent bars regardless of provider quirks.
+
+    A non-finite volume (NaN/inf, which providers emit on
+    early-listing/low-liquidity sessions) is coerced to 0.0 — the same
+    neutralisation ``_normalize_ohlc_bar`` applies on the fetch path and
+    ``_table_to_bars`` applies on cache read. Doing it here keeps the
+    write side (the first-run buffered bars and the snapshot/fingerprint
+    persisted from them) byte-identical to the read side, so a cache
+    replay yields the same ``dataset_fingerprint`` as the original run.
     """
     o = float(bar.open)
     h = float(bar.high)
     ll = float(bar.low)
     c = float(bar.close)
+    vol = float(getattr(bar, "volume", 0.0))
+    if not math.isfinite(vol):
+        logger.warning("non-finite volume %r on %s bar; coercing to 0.0", vol, bar.timestamp)
+        vol = 0.0
     return OHLCVBar(
         date=str(bar.timestamp),
         open=o,
         high=max(o, h, ll, c),
         low=min(o, h, ll, c),
         close=c,
-        volume=float(getattr(bar, "volume", 0.0)),
+        volume=vol,
     )
 
 
