@@ -24,6 +24,7 @@ from agent_cognition.rules.predicate import (
     parse_predicate,
     validate_predicate,
 )
+from agent_cognition.rules.reflection import ReflectionReport, reflect
 from agent_cognition.rules.seed_packs import SEED_PACKS, SeedRule
 from agent_cognition.rules.store import (
     RuleStoreError,
@@ -37,6 +38,7 @@ from agent_cognition.rules.store import (
     list_proposals,
     list_rules,
     reject_proposal,
+    supersede_proposal,
 )
 
 __all__ = [
@@ -52,6 +54,7 @@ __all__ = [
     "list_proposals",
     "list_rules",
     "reject_proposal",
+    "supersede_proposal",
     # enforcement
     "build_rule_prompt_block",
     "evaluate_postcondition",
@@ -64,6 +67,9 @@ __all__ = [
     "is_valid_predicate",
     "parse_predicate",
     "validate_predicate",
+    # reflection (rule learning)
+    "ReflectionReport",
+    "reflect",
     # seed packs
     "SEED_PACKS",
     "SeedRule",
