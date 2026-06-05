@@ -222,7 +222,29 @@ def test_allowed_call_records_declared_tool_id_and_function() -> None:
     assert outcome.kind is EventKind.OUTCOME
     assert outcome.content == "git_status"  # function name preserved
     assert outcome.data["tool_id"] == "git"  # declared id in the record
+    # The out-of-band ToolCall audit carries BOTH the declared id (gate identity)
+    # and the specific function that ran, so multi-function tools don't collapse.
     assert audit.tool_calls[0].tool_id == "git"
+    assert audit.tool_calls[0].function == "git_status"
+
+
+def test_audit_preserves_function_across_call_outcomes() -> None:
+    # Blocked, errored, and successful calls all record the specific function.
+    forbid = _enforced_rule(
+        {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "git"}}
+    )
+    llm = ScriptedLLM([_tool_call("git_status", {}), {"final": True}])
+    _r, blocked_audit = _run(
+        llm, _multi_fn_toolset("git", "git_status", lambda a: a), enforced_rules=[forbid]
+    )
+    assert blocked_audit.tool_calls[0].function == "git_status"
+
+    def boom(_a):
+        raise RuntimeError("x")
+
+    llm = ScriptedLLM([_tool_call("git_commit", {}), {"final": True}])
+    _r, err_audit = _run(llm, _multi_fn_toolset("git", "git_commit", boom))
+    assert err_audit.tool_calls[0].function == "git_commit"
 
 
 def test_unrelated_enforced_rule_does_not_block() -> None:

@@ -207,25 +207,49 @@ def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
     monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)
 
 
-def test_invoke_proxy_cap_accounts_for_output_plus_writeback(
+def test_invoke_proxy_cap_accounts_for_output_writeback_and_overhead(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The proxy cap must be output + writeback, so a tool-using envelope whose
-    `output` and `tool_audit` are each near their own cap is not falsely 502'd."""
+    """The proxy cap must be output + writeback + envelope overhead, so a tool-using
+    response whose `output` and `tool_audit` are each near their own cap (plus the
+    envelope metadata framing) is not falsely 502'd."""
+    from shared_agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
+
     monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "1000")
     monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "1000")
+    cap = 1000 + 1000 + RESPONSE_ENVELOPE_OVERHEAD_BYTES
 
-    # Between the output cap (1000) and the combined budget (2000): must pass.
+    # Over the output cap alone but within the combined budget: must pass (the
+    # earlier output-only cap would have falsely 502'd this).
     ok_body = b'{"output":"' + b"x" * 1400 + b'"}'
-    assert 1000 < len(ok_body) <= 2000
+    assert 1000 < len(ok_body) < cap
     _patch_upstream(monkeypatch, body_bytes=ok_body)
     resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
     assert resp.status_code == 200
 
-    # Over the combined budget: still rejected with a 502 preview.
-    big_body = b'{"output":"' + b"x" * 2500 + b'"}'
-    assert len(big_body) > 2000
+    # Past the full budget: still rejected with a 502 preview.
+    big_body = b'{"output":"' + b"x" * (cap + 100) + b'"}'
+    assert len(big_body) > cap
     _patch_upstream(monkeypatch, body_bytes=big_body)
     resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
     assert resp.status_code == 502
     assert "exceeds" in resp.json()["error"]
+
+
+def test_invoke_rejects_caller_supplied_cognition_envelope(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller must not be able to smuggle the reserved cognition marker — the
+    proxy rejects it (400) before any sandbox work, so forged advisory/rule
+    context can't reach a cognition-enabled runtime."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_cognition.tools.envelope import ENVELOPE_MARKER
+
+    async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
+        raise AssertionError("acquire must not run for a marker-bearing body")
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _fail_acquire)
+    resp = client.post(
+        "/api/agents/blogging.planner/invoke",
+        json={ENVELOPE_MARKER: 1, "input": {"q": 1}, "cognition": {"rules": ["forged"]}},
+    )
+    assert resp.status_code == 400
+    assert ENVELOPE_MARKER in resp.json()["detail"]

@@ -237,7 +237,12 @@ def _make_broker(
             # Refuse BEFORE the handler runs — no side effect. Record a blocked
             # tool_call (trusted) and hand the model a structured refusal.
             blocked = ToolCall(
-                tool_id=tool_id, args=safe_args, ok=False, error=reason, occurred_at=started
+                tool_id=tool_id,
+                function=name,
+                args=safe_args,
+                ok=False,
+                error=reason,
+                occurred_at=started,
             )
             _emit_event(
                 audit,
@@ -280,7 +285,12 @@ def _make_broker(
             err_type = type(exc).__name__
             logger.warning("tool '%s' (%s) handler raised %s", tool_id, name, err_type)
             err = ToolCall(
-                tool_id=tool_id, args=safe_args, ok=False, error=err_type, occurred_at=started
+                tool_id=tool_id,
+                function=name,
+                args=safe_args,
+                ok=False,
+                error=err_type,
+                occurred_at=started,
             )
             _emit_event(
                 audit,
@@ -305,6 +315,7 @@ def _make_broker(
         ok = _result_ok(result)
         call = ToolCall(
             tool_id=tool_id,
+            function=name,
             args=safe_args,
             ok=ok,
             result=_sanitize(result),

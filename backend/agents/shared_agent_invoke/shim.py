@@ -143,6 +143,10 @@ def mount_invoke_shim(app: FastAPI) -> None:
         # `output` cap — so a large audit can't blow the response size and neither
         # field starves the other.
         capped_audit, _ = cap_tool_audit(tool_audit, max_bytes=max_writeback_bytes())
+        # Keep the metadata within the proxy's per-response overhead budget: the
+        # last 50 lines, each truncated, so a chatty agent can't push the envelope
+        # past output_cap + writeback_cap + RESPONSE_ENVELOPE_OVERHEAD_BYTES.
+        bounded_logs = _bounded_logs(logs_tail)
 
         if dispatch_error is not None:
             # Infrastructure/config failure — must NOT return 200. Clients
@@ -154,7 +158,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 output=None,
                 duration_ms=duration_ms,
                 trace_id=trace_id,
-                logs_tail=logs_tail[-50:],
+                logs_tail=bounded_logs,
                 error=f"AgentNotRunnable: {dispatch_error}",
                 tool_audit=capped_audit,
             )
@@ -165,7 +169,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
             output=capped_output,
             duration_ms=duration_ms,
             trace_id=trace_id,
-            logs_tail=logs_tail[-50:],
+            logs_tail=bounded_logs,
             error=error,
             truncated=truncated,
             timeout_hit=timeout_hit,
@@ -176,6 +180,23 @@ def mount_invoke_shim(app: FastAPI) -> None:
         if error:
             raise HTTPException(status_code=422, detail=envelope.model_dump())
         return envelope
+
+
+_MAX_LOG_LINES = 50
+_MAX_LOG_LINE_CHARS = 1000
+
+
+def _bounded_logs(lines: list[str]) -> list[str]:
+    """Return the last ``_MAX_LOG_LINES`` lines, each truncated to a max length.
+
+    Bounds ``logs_tail`` to a deterministic size so the response envelope's
+    metadata stays within the proxy's per-response overhead budget regardless of
+    how chatty the agent is.
+    """
+    out: list[str] = []
+    for line in lines[-_MAX_LOG_LINES:]:
+        out.append(line if len(line) <= _MAX_LOG_LINE_CHARS else line[:_MAX_LOG_LINE_CHARS] + "…")
+    return out
 
 
 def _resolve_exec_timeout(manifest: Any) -> float:

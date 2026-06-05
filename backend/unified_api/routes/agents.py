@@ -28,6 +28,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from agent_cognition.tools.envelope import ENVELOPE_MARKER
 from agent_console import (
     AgentConsoleStorageUnavailable,
     RunRecord,
@@ -46,6 +47,7 @@ from agent_provisioning_team.sandbox.state import COLD_START_LOG_PREFIX
 from agent_registry import AgentDetail, AgentSummary, TeamGroup, get_registry
 from agent_registry.schema_resolver import SchemaResolutionError, resolve_schema
 from shared_agent_invoke.limits import (
+    RESPONSE_ENVELOPE_OVERHEAD_BYTES,
     max_output_bytes,
     max_payload_bytes,
     max_writeback_bytes,
@@ -156,6 +158,16 @@ async def invoke_agent(
     # on overflow and returns {} on empty/malformed JSON.
     body = await read_json_capped(request, max_bytes=max_payload_bytes())
 
+    # Cognition context is injected by the platform, never accepted from the
+    # untrusted caller: reject a body that already carries the reserved envelope
+    # marker (DESIGN §10). Without this guard a caller could smuggle forged
+    # advisory rules / memory into a cognition-enabled runtime's side channel.
+    if isinstance(body, dict) and ENVELOPE_MARKER in body:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Request body must not contain the reserved key {ENVELOPE_MARKER!r}.",
+        )
+
     try:
         handle = await acquire(agent_id)
     except DockerUnavailableError as exc:
@@ -212,7 +224,7 @@ async def invoke_agent(
     # output budget alone would 502 otherwise-valid tool-using runs whose output
     # and audit are each near their own limit.
     raw_len = len(upstream.content)
-    cap = max_output_bytes() + max_writeback_bytes()
+    cap = max_output_bytes() + max_writeback_bytes() + RESPONSE_ENVELOPE_OVERHEAD_BYTES
     if raw_len > cap:
         logger.warning("upstream response for %s exceeded %d bytes (got %d)", agent_id, cap, raw_len)
         return JSONResponse(

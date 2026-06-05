@@ -24,6 +24,14 @@ DEFAULT_MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB
 DEFAULT_MAX_WRITEBACK_BYTES = 1 * 1024 * 1024  # 1 MiB
 DEFAULT_EXEC_TIMEOUT_S = 60.0
 
+# Headroom for the response envelope's framing + scalar metadata fields
+# (``duration_ms``, ``trace_id``, ``error``, ``truncated``, ``timeout_hit``) and
+# the line-bounded ``logs_tail`` (capped at 50 lines). The proxy's whole-response
+# cap adds this to the per-field budgets (output + writeback) so a response whose
+# ``output`` and ``tool_audit`` are each at their own cap is not falsely rejected
+# by the framing overhead. 64 KiB comfortably covers 50 typical log lines + JSON.
+RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
+
 
 def max_payload_bytes() -> int:
     return int(os.getenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", str(DEFAULT_MAX_PAYLOAD_BYTES)))
