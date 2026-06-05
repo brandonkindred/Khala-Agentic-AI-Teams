@@ -712,6 +712,40 @@ def test_fetch_yahoo_crypto_unknown_symbol_appends_usd_once(
     assert captured["sym"] == "DOGE-USD"
 
 
+def test_fetch_yahoo_crypto_compound_suffix_does_not_double(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compound-suffixed crypto input (``DOGE-USD-USD``) collapses to the bare
+    alias and the fallback appends ``-USD`` exactly once — never ``DOGE-USD-USD``.
+
+    ``DOGE`` is absent from ``YAHOO_CRYPTO_TICKERS`` so this exercises the
+    rebuild branch, the exact spot the single-pass strip re-produced the bug.
+    """
+    captured: Dict[str, str] = {}
+
+    class _DF:
+        empty = True
+
+        def iterrows(self):
+            return iter([])
+
+    class _Ticker:
+        def __init__(self, sym):
+            captured["sym"] = sym
+
+        def history(self, **kwargs):
+            return _DF()
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = _Ticker  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    MarketDataService()._fetch_yahoo(
+        "DOGE-USD-USD", "crypto", "2024-01-01", "2024-01-31", max_retries=1
+    )
+    assert captured["sym"] == "DOGE-USD"
+
+
 # ---------------------------------------------------------------------------
 # _fetch_twelve_data (httpx stub)
 # ---------------------------------------------------------------------------
@@ -923,6 +957,45 @@ def test_fetch_coingecko_success(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(bars) >= 1
     # Volume defaults to 0.0 for the synthesised OHLCV.
     assert all(b.volume == 0.0 for b in bars)
+
+
+def test_fetch_coingecko_compound_suffix_resolves_coin_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A compound-suffixed crypto input (``BTC-USD-USD``) collapses to ``BTC``
+    and resolves to the ``bitcoin`` coin id rather than missing the lookup."""
+    requested: Dict[str, str] = {}
+
+    payload = {"prices": [[1704153600000, 100.0], [1704240000000, 101.0]]}
+
+    class _CapturingResp(_StubResp):
+        def __init__(self) -> None:
+            super().__init__(payload)
+
+    class _StubClient:
+        def __init__(self, timeout=None):  # noqa: ARG002
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a, **k):
+            return False
+
+        def get(self, url: str, params: Optional[Dict[str, Any]] = None) -> _StubResp:
+            requested["url"] = url
+            return _CapturingResp()
+
+    import httpx
+
+    monkeypatch.setattr(httpx, "Client", _StubClient)
+    bars = MarketDataService()._fetch_coingecko(
+        "BTC-USD-USD", "crypto", "2024-01-02", "2024-01-04", max_retries=1
+    )
+    # The coin id is keyed by the bare alias; a missed lookup would short-circuit
+    # to an empty result before any HTTP call.
+    assert "/coins/bitcoin/" in requested["url"]
+    assert len(bars) >= 1
 
 
 def test_fetch_coingecko_forward_fills_nan_rows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1360,6 +1433,37 @@ def test_canonical_symbol_leaves_non_crypto_untouched() -> None:
     assert canonical_symbol("AAPL", "stocks") == "AAPL"
     assert canonical_symbol("EURUSD=X", "forex") == "EURUSD=X"
     assert canonical_symbol("ES=F", "futures") == "ES=F"
+
+
+def test_canonical_symbol_collapses_compound_usd_suffix() -> None:
+    """A doubled ``-USD`` suffix collapses fully to the bare alias.
+
+    Without this, a single-pass strip leaves ``DOGE-USD`` which the Yahoo
+    fallback re-suffixes back to the malformed ``DOGE-USD-USD``.
+    """
+    from investment_team.symbols import canonical_symbol
+
+    assert canonical_symbol("DOGE-USD-USD", "crypto") == "DOGE"
+    assert canonical_symbol("btc-usd-usd", "crypto") == "BTC"
+    assert canonical_symbol("ETH-USD-USD-USD", "crypto") == "ETH"
+
+
+def test_canonical_symbol_is_idempotent_on_compound_suffix() -> None:
+    from investment_team.symbols import canonical_symbol
+
+    once = canonical_symbol("DOGE-USD-USD", "crypto")
+    assert canonical_symbol(once, "crypto") == once == "DOGE"
+
+
+def test_canonical_symbol_raises_on_empty_after_strip() -> None:
+    """A symbol that is nothing but ``-USD`` suffix(es) is invalid input —
+    surfaced as ``ValueError`` rather than a malformed bare ticker."""
+    from investment_team.symbols import canonical_symbol
+
+    with pytest.raises(ValueError, match="invalid crypto symbol"):
+        canonical_symbol("-USD", "crypto")
+    with pytest.raises(ValueError, match="invalid crypto symbol"):
+        canonical_symbol("-usd-usd", "crypto")
 
 
 def test_crypto_usd_suffix_resolves_to_same_provider_tickers_as_bare_alias() -> None:
