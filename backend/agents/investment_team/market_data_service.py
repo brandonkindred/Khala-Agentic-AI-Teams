@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import math
 import os
+import sys
 import time
 from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
@@ -861,30 +862,56 @@ class MarketDataService:
     _FILL_LOG_MAX_DATES = 10
 
     @staticmethod
+    def _is_missing_sentinel(value: object) -> bool:
+        """True iff ``value`` is an explicit missing-value sentinel.
+
+        Recognises ``None`` and pandas ``NA``. pandas is detected via
+        ``sys.modules`` rather than imported: ``pd.NA`` is a singleton that can
+        only exist once pandas is loaded, so if pandas is not in ``sys.modules``
+        the value cannot be ``pd.NA`` — and this module keeps its hard import
+        surface pandas-free.
+
+        Postconditions:
+            Returns ``True`` only for ``None`` / pandas ``NA``; ``False`` for
+            every other value (including numbers, strings, and malformed
+            non-scalar cells such as dicts/lists).
+        """
+        if value is None:
+            return True
+        pd = sys.modules.get("pandas")
+        return pd is not None and value is pd.NA
+
+    @staticmethod
     def _coerce_finite_or_nan(value: float | str | int | None) -> float:
         """Coerce a raw provider value to float, mapping missing sentinels to NaN.
 
         Preconditions:
             ``value`` is a number, a numeric string, or a missing-value sentinel
-            (``None`` or a pandas ``NA``). A non-numeric string is still a caller
-            bug.
+            (``None`` or a pandas ``NA``). A non-numeric string or a malformed
+            non-scalar cell is still a caller bug.
 
         Postconditions:
             Returns ``float(value)`` for numeric input. Returns ``float("nan")``
             for a missing-value sentinel (``None`` / pandas ``NA``) so the
             caller's finite check treats the row as a gap — identical handling to
-            an upstream ``numpy.nan``. A non-numeric string still raises
-            ``ValueError``.
+            an upstream ``numpy.nan``. A non-numeric string (``ValueError``) and a
+            malformed non-scalar cell — e.g. a dict/list/object from a bad JSON
+            schema or an object-dtype column (``TypeError``) — both propagate, so
+            the provider fails and the chain falls back rather than silently
+            imputing a fabricated price.
         """
         try:
             return float(value)  # type: ignore[arg-type]
         except TypeError:
-            # ``None`` and pandas ``NA`` are missing-value sentinels whose
-            # ``float()`` raises TypeError (a malformed numeric string raises
-            # ValueError instead and is left to propagate). Treat them as a
-            # non-finite gap so the existing forward-fill/drop path handles them
-            # exactly like an upstream numpy.nan.
-            return float("nan")
+            # float() raises TypeError for BOTH missing-value sentinels
+            # (None / pd.NA) and malformed non-scalar cells (dict/list/object).
+            # Only the explicit sentinels are a non-finite gap the forward-fill/
+            # drop path should absorb like an upstream numpy.nan; a malformed
+            # value is a genuine data defect and must propagate so this provider
+            # fails and the chain falls back rather than imputing a fake price.
+            if MarketDataService._is_missing_sentinel(value):
+                return float("nan")
+            raise
 
     @staticmethod
     def _normalize_ohlc_bar(
@@ -911,9 +938,10 @@ class MarketDataService:
             / pandas ``NA``). This helper owns the coercion and rounding to 4 dp;
             callers pass the extracted values through verbatim. A missing-value
             sentinel is treated as a non-finite value (the row is forward-filled
-            or dropped, like an upstream ``numpy.nan``); only a genuinely
-            non-numeric string is a caller (precondition) bug and surfaces as a
-            ``ValueError`` rather than being silently coerced.
+            or dropped, like an upstream ``numpy.nan``); a genuinely non-numeric
+            string (``ValueError``) or a malformed non-scalar cell such as a
+            dict/list/object (``TypeError``) is a caller (precondition) bug and
+            propagates rather than being silently coerced.
 
         Postconditions:
             Returns ``(None, False)`` when any of O/H/L/C is non-finite (the

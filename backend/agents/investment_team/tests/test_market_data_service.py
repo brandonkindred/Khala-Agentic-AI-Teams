@@ -1189,6 +1189,22 @@ def test_normalize_ohlc_bar_malformed_string_still_raises() -> None:
         )
 
 
+@pytest.mark.parametrize("malformed", [{"a": 1}, [1, 2], object()])
+def test_normalize_ohlc_bar_malformed_non_scalar_still_raises(malformed: Any) -> None:
+    """A malformed non-scalar cell is a data defect, not a missing value.
+
+    ``float()`` raises ``TypeError`` for a dict/list/object just like it does
+    for ``None``/``pd.NA``, but only the explicit missing sentinels may be
+    mapped to NaN. A malformed value must propagate so the provider fails and
+    the fetch chain falls back, rather than being silently forward-filled as a
+    fabricated price.
+    """
+    with pytest.raises(TypeError):
+        MarketDataService._normalize_ohlc_bar(
+            date="2024-01-02", open=malformed, high=1.5, low=0.5, close=1.2, volume=10.0
+        )
+
+
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 
