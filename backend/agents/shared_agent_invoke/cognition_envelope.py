@@ -82,25 +82,32 @@ def maybe_drive_tool_loop(
     agent_id: str,
     source_run_id: str,
     cognition: dict[str, Any] | None,
-) -> tuple[Any, list[dict[str, Any]]]:
+    deadline: float | None = None,
+) -> dict[str, Any]:
     """Drive the brokered loop when the entrypoint returned a ``ToolLoopPlan``.
 
-    The shim — not agent code — calls this, so the runner's :class:`ToolAudit`
-    lives only in this frame. The active ``forbid_tool`` rules are sourced from
-    the platform-injected ``cognition`` block (not the agent's plan), so a
-    compromised harness cannot disable its own gate. Synchronous (the loop makes
-    blocking LLM calls); the shim runs it off the event loop.
+    The shim — not agent code — calls this, so the runner's ``ToolAudit`` lives
+    only in this frame. The active ``forbid_tool`` rules are sourced from the
+    platform-injected ``cognition`` block (not the agent's plan), so a compromised
+    harness cannot disable its own gate. ``deadline`` (a ``time.monotonic()``
+    instant) bounds handler side effects to the invoke timeout. Synchronous (the
+    loop makes blocking LLM calls); the shim runs it off the event loop.
 
-    Returns ``(result, [])`` unchanged when the result is not a plan, or when the
-    cognition package is unavailable.
+    Returns ``{"output", "tool_calls", "events", "error"}``:
+        * a non-plan result (or no cognition package) → the result passes through
+          with empty audit/events and no error;
+        * a successful loop → the final output plus the trusted ``tool_calls`` and
+          episodic ``events`` (both as JSON dumps);
+        * a loop that fails mid-flight → ``error`` set, with the **partial**
+          ``tool_calls``/``events`` of the side effects that already ran preserved.
     """
     try:
         from agent_cognition.models import Rule
-        from agent_cognition.tools.runner import ToolLoopPlan, execute_plan
+        from agent_cognition.tools.runner import ToolLoopError, ToolLoopPlan, execute_plan
     except Exception:
-        return result, []
+        return {"output": result, "tool_calls": [], "events": [], "error": None}
     if not isinstance(result, ToolLoopPlan):
-        return result, []
+        return {"output": result, "tool_calls": [], "events": [], "error": None}
 
     enforced_rules = []
     for raw in (cognition or {}).get("rules", []) or []:
@@ -108,10 +115,22 @@ def maybe_drive_tool_loop(
             enforced_rules.append(Rule.model_validate(raw))
         except Exception:
             continue  # a malformed rule never blocks the run; the gate just skips it
-    final, audit = execute_plan(
-        result,
-        agent_id=agent_id,
-        source_run_id=source_run_id,
-        enforced_rules=enforced_rules,
-    )
-    return final, [tc.model_dump(mode="json") for tc in audit.tool_calls]
+    try:
+        final, audit = execute_plan(
+            result,
+            agent_id=agent_id,
+            source_run_id=source_run_id,
+            enforced_rules=enforced_rules,
+            deadline=deadline,
+        )
+        error = None
+    except ToolLoopError as exc:
+        # The loop failed after partial execution — surface the error but keep the
+        # trusted audit of the side effects that already happened.
+        final, audit, error = None, exc.audit, str(exc)
+    return {
+        "output": final,
+        "tool_calls": [tc.model_dump(mode="json") for tc in audit.tool_calls],
+        "events": [ev.model_dump(mode="json") for ev in audit.events],
+        "error": error,
+    }

@@ -104,15 +104,50 @@ def client(tmp_path: Path):
         def run(self, body):
             raise RuntimeError("user-space failure")
 
+    class _FailingLLM:
+        """Calls `probe` once (a real side effect), then the loop errors out."""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def chat(self, messages, **_kwargs):
+            self.n += 1
+            if self.n == 1:
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {"name": "probe", "arguments": {}},
+                        }
+                    ]
+                }
+            raise RuntimeError("loop failed on round 2")
+
+    class FailingPlanAgent:
+        """A plan whose loop fails mid-flight after a brokered call."""
+
+        def run(self, body):
+            from agent_cognition.tools.runner import ToolLoopPlan
+
+            return ToolLoopPlan(
+                llm=_FailingLLM(),
+                system_prompt="sys",
+                user_prompt="go",
+                toolset=_probe_toolset(),
+            )
+
     mod.ReflectAgent = ReflectAgent
     mod.PlanAgent = PlanAgent
     mod.RaisingAgent = RaisingAgent
+    mod.FailingPlanAgent = FailingPlanAgent
     sys.modules["_cog_shim_test"] = mod
 
     for fname, agent_id, entry in (
         ("reflect.yaml", "blogging.reflect", "ReflectAgent"),
         ("plan.yaml", "blogging.plan", "PlanAgent"),
         ("raises.yaml", "blogging.raises", "RaisingAgent"),
+        ("plan_fail.yaml", "blogging.plan_fail", "FailingPlanAgent"),
     ):
         _write_manifest(
             tmp_path,
@@ -195,6 +230,23 @@ def test_shim_drives_tool_loop_plan_and_returns_trusted_audit(client: TestClient
     assert body["tool_audit"][0]["tool_id"] == "probe"
     assert body["tool_audit"][0]["function"] == "probe"
     assert body["tool_audit"][0]["ok"] is True
+    # The episodic memory events are returned too (for the proxy to persist).
+    assert body["memory_events"]
+    assert any(ev["content"] == "probe" for ev in body["memory_events"])
+
+
+def test_failing_tool_loop_returns_422_with_partial_audit(client: TestClient) -> None:
+    # The loop fails after a real side effect: 422, but the trusted partial audit
+    # (the brokered probe call) and its memory events must still come back.
+    resp = client.post(
+        "/_agents/blogging.plan_fail/invoke",
+        json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {"rules": []}},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "loop failed" in detail["error"]
+    assert detail["tool_audit"] and detail["tool_audit"][0]["tool_id"] == "probe"
+    assert detail["memory_events"]
 
 
 def test_malformed_envelope_returns_400(client: TestClient) -> None:

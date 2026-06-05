@@ -76,22 +76,21 @@ def test_open_runtime_exposes_cognition_side_channel() -> None:
 def test_maybe_drive_passes_through_non_plan_result() -> None:
     from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
-    out, audit = maybe_drive_tool_loop(
+    driven = maybe_drive_tool_loop(
         {"normal": "output"}, agent_id="a", source_run_id="r", cognition=None
     )
-    assert out == {"normal": "output"}
-    assert audit == []
+    assert driven == {"output": {"normal": "output"}, "tool_calls": [], "events": [], "error": None}
 
 
 def test_maybe_drive_degrades_without_cognition(_no_cognition) -> None:
     from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     # Cognition package unavailable → pass the result through with an empty audit.
-    out, audit = maybe_drive_tool_loop(
+    driven = maybe_drive_tool_loop(
         {"x": 1}, agent_id="a", source_run_id="r", cognition={"rules": []}
     )
-    assert out == {"x": 1}
-    assert audit == []
+    assert driven["output"] == {"x": 1}
+    assert driven["tool_calls"] == [] and driven["events"] == [] and driven["error"] is None
 
 
 def _probe_plan(side: list):
@@ -143,12 +142,86 @@ def test_maybe_drive_skips_malformed_cognition_rules() -> None:
     side: list = []
     plan = _probe_plan(side)
     # A malformed rule dict must be skipped (never block the run), so the tool runs.
-    out, audit = maybe_drive_tool_loop(
+    driven = maybe_drive_tool_loop(
         plan, agent_id="a", source_run_id="r", cognition={"rules": [{"bad": "rule"}]}
     )
-    assert out == {"done": True}
+    assert driven["output"] == {"done": True}
     assert side == [{}]  # the tool ran — the bad rule was ignored, not enforced
-    assert audit[0]["ok"] is True
+    assert driven["tool_calls"][0]["ok"] is True
+    # The episodic memory events are returned for the proxy to persist (not dropped).
+    assert driven["events"], "brokered memory events must be returned to the shim"
+    assert any(ev["content"] == "echo" for ev in driven["events"])
+    assert driven["error"] is None
+
+
+def test_maybe_drive_preserves_partial_audit_on_loop_failure() -> None:
+    from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
+    from agent_cognition.tools.runner import ToolLoopPlan
+    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+
+    side: list = []
+
+    class _LLM:
+        def __init__(self) -> None:
+            self.n = 0
+
+        def chat(self, messages, **_kw):
+            self.n += 1
+            if self.n == 1:
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {"name": "echo", "arguments": {}},
+                        }
+                    ]
+                }
+            raise RuntimeError("loop blew up after a side effect")
+
+    defn = {
+        "type": "function",
+        "function": {
+            "name": "echo",
+            "description": "e",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+        },
+    }
+    toolset = BoundToolset(
+        (
+            BoundTool(
+                tool_id="echo",
+                site=ExecutionSite.SANDBOX_LOCAL,
+                definitions=(defn,),
+                handlers={"echo": lambda a: side.append(a) or {"ok": True}},
+            ),
+        )
+    )
+    plan = ToolLoopPlan(llm=_LLM(), system_prompt="s", user_prompt="u", toolset=toolset)
+
+    driven = maybe_drive_tool_loop(plan, agent_id="a", source_run_id="r", cognition=None)
+    # The loop failed, but the side effect already happened — its trusted audit
+    # must survive (not be dropped) so the platform records what actually ran.
+    assert side == [{}]
+    assert driven["error"] and "loop failed" in driven["error"]
+    assert driven["tool_calls"] and driven["tool_calls"][0]["tool_id"] == "echo"
+    assert driven["events"]
+
+
+def test_maybe_drive_deadline_blocks_dispatch() -> None:
+    import time
+
+    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+
+    side: list = []
+    plan = _probe_plan(side)
+    # A deadline already in the past → the broker refuses to dispatch the handler.
+    driven = maybe_drive_tool_loop(
+        plan, agent_id="a", source_run_id="r", cognition=None, deadline=time.monotonic() - 1
+    )
+    assert side == []  # no handler ran after the deadline
+    assert driven["tool_calls"][0]["ok"] is False
+    assert "deadline" in (driven["tool_calls"][0]["error"] or "")
 
 
 def test_maybe_drive_runs_a_tool_loop_plan_and_sources_rules_from_cognition() -> None:
@@ -215,7 +288,8 @@ def test_maybe_drive_runs_a_tool_loop_plan_and_sources_rules_from_cognition() ->
             }
         ]
     }
-    out, audit = maybe_drive_tool_loop(plan, agent_id="a", source_run_id="r", cognition=cognition)
-    assert out == {"done": True}
+    driven = maybe_drive_tool_loop(plan, agent_id="a", source_run_id="r", cognition=cognition)
+    assert driven["output"] == {"done": True}
     assert side == []  # the forbidden tool never ran
-    assert audit and audit[0]["ok"] is False and audit[0]["function"] == "echo"
+    calls = driven["tool_calls"]
+    assert calls and calls[0]["ok"] is False and calls[0]["function"] == "echo"

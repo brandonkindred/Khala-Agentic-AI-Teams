@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 import time
 import uuid
@@ -54,9 +55,11 @@ class InvokeEnvelope(BaseModel):
     error: str | None = None
     truncated: bool = False
     timeout_hit: bool = False
-    # Trusted, out-of-band record of every tool call the cognition broker
-    # actually dispatched — populated even when the agent's writeback is dropped.
+    # Trusted, out-of-band record the shim-driven tool loop produced: per-call
+    # `tool_audit` (ToolCall dumps) + episodic `memory_events` (MemoryEvent dumps),
+    # populated in the shim's frame so agent code can't forge or drop them.
     tool_audit: list[dict[str, Any]] = Field(default_factory=list)
+    memory_events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def mount_invoke_shim(app: FastAPI) -> None:
@@ -100,6 +103,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
         start = time.perf_counter()
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
         tool_audit: list[dict[str, Any]] = []
+        memory_events: list[dict[str, Any]] = []
         error: str | None = None
         output: Any | None = None
         dispatch_error: AgentNotRunnableError | None = None
@@ -110,12 +114,24 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 stack.enter_context(redirect_stdout(stdout_buf))
                 stack.enter_context(redirect_stderr(stderr_buf))
                 stack.enter_context(open_cognition_runtime(cognition_block))
-                output, tool_audit = await asyncio.wait_for(
+                driven = await asyncio.wait_for(
                     _invoke_and_drive(
-                        manifest.source.entrypoint, agent_body, agent_id, trace_id, cognition_block
+                        manifest.source.entrypoint,
+                        agent_body,
+                        agent_id,
+                        trace_id,
+                        cognition_block,
+                        time.monotonic() + timeout_s,
                     ),
                     timeout=timeout_s,
                 )
+            output = driven["output"]
+            tool_audit = driven["tool_calls"]
+            memory_events = driven["events"]
+            # A mid-flight tool-loop failure surfaces as a 422 while keeping the
+            # partial trusted audit of the side effects that already ran.
+            if driven["error"]:
+                error = driven["error"]
         except AgentNotRunnableError as exc:
             # Config / deployment problem — bad entrypoint, missing symbol,
             # non-zero-arg constructor. Defer the raise until after `finally`
@@ -142,10 +158,13 @@ def mount_invoke_shim(app: FastAPI) -> None:
 
         duration_ms = int((time.perf_counter() - start) * 1000)
 
-        # Bound the trusted audit on its own budget — independent of the per-field
-        # `output` cap — so a large audit can't blow the response size and neither
-        # field starves the other.
-        capped_audit, _ = cap_tool_audit(tool_audit, max_bytes=max_writeback_bytes())
+        # Bound the cognition control data (tool audit + episodic events) within
+        # the writeback budget — independent of the per-field `output` cap — so it
+        # can't blow the response size and neither field starves the other. The
+        # trusted per-call `tool_audit` is kept first; `events` take the remainder.
+        capped_audit, capped_events = _cap_writeback(
+            tool_audit, memory_events, max_bytes=max_writeback_bytes()
+        )
         # Keep the metadata within the proxy's per-response overhead budget: the
         # last 50 lines, each truncated, so a chatty agent can't push the envelope
         # past output_cap + writeback_cap + RESPONSE_ENVELOPE_OVERHEAD_BYTES.
@@ -164,6 +183,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 logs_tail=bounded_logs,
                 error=f"AgentNotRunnable: {dispatch_error}",
                 tool_audit=capped_audit,
+                memory_events=capped_events,
             )
             raise HTTPException(status_code=500, detail=envelope.model_dump())
 
@@ -177,6 +197,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
             truncated=truncated,
             timeout_hit=timeout_hit,
             tool_audit=capped_audit,
+            memory_events=capped_events,
         )
         if timeout_hit:
             raise HTTPException(status_code=504, detail=envelope.model_dump())
@@ -191,14 +212,17 @@ async def _invoke_and_drive(
     agent_id: str,
     source_run_id: str,
     cognition: dict[str, Any] | None,
-) -> tuple[Any, list[dict[str, Any]]]:
+    deadline: float | None,
+) -> dict[str, Any]:
     """Invoke the entrypoint, then drive the tool loop if it returned a plan.
 
-    Returns ``(output, tool_audit)``. When the entrypoint returns a cognition
+    Returns ``maybe_drive_tool_loop``'s dict (``output`` / ``tool_calls`` /
+    ``events`` / ``error``). When the entrypoint returns a cognition
     ``ToolLoopPlan``, the brokered loop is driven **here** (off the event loop, in
     a worker thread, since it makes blocking LLM calls) so the trusted audit is
-    produced in the shim's frame — never reachable to agent code. A normal agent's
-    result passes through with an empty audit.
+    produced in the shim's frame — never reachable to agent code. ``deadline``
+    (a ``time.monotonic()`` instant) bounds handler side effects: the worker thread
+    can outlive a cancelled await, so the broker stops dispatching past it.
     """
     result = await invoke_entrypoint(entrypoint, body)
     return await asyncio.to_thread(
@@ -207,7 +231,26 @@ async def _invoke_and_drive(
         agent_id=agent_id,
         source_run_id=source_run_id,
         cognition=cognition,
+        deadline=deadline,
     )
+
+
+def _cap_writeback(
+    tool_audit: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    *,
+    max_bytes: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Bound the combined cognition writeback (audit + events) to ``max_bytes``.
+
+    The per-call ``tool_audit`` (the trusted record) is capped first and kept;
+    ``events`` get whatever budget remains, so the two together never exceed the
+    writeback budget the proxy reserves.
+    """
+    capped_audit, _ = cap_tool_audit(tool_audit, max_bytes=max_bytes)
+    remaining = max(0, max_bytes - len(json.dumps(capped_audit, default=str)))
+    capped_events, _ = cap_tool_audit(events, max_bytes=remaining)
+    return capped_audit, capped_events
 
 
 _MAX_LOG_LINES = 50

@@ -376,6 +376,46 @@ def test_execute_plan_enforces_caller_rules_not_agent_supplied() -> None:
     assert audit.tool_calls[0].ok is False
 
 
+def test_loop_failure_raises_with_partial_audit() -> None:
+    # The loop raises after a handler already ran — the partial audit must survive
+    # on the raised ToolLoopError so the caller can persist what actually happened.
+    from agent_cognition.tools.runner import ToolLoopError
+
+    side: list = []
+
+    class _LLM:
+        def __init__(self):
+            self.n = 0
+
+        def chat(self, messages, **_kw):
+            self.n += 1
+            if self.n == 1:
+                return _tool_call("echo", {})
+            raise RuntimeError("boom on round 2")
+
+    with pytest.raises(ToolLoopError) as ei:
+        _run(_LLM(), _toolset("echo", lambda a: side.append(a) or {"ok": True}))
+    assert side == [{}]  # the side effect happened
+    assert ei.value.audit.tool_calls and ei.value.audit.tool_calls[0].tool_id == "echo"
+
+
+def test_deadline_refuses_dispatch_after_timeout() -> None:
+    import time
+
+    side: list = []
+    # A deadline already in the past → the broker refuses to dispatch the handler.
+    llm = ScriptedLLM([_tool_call("echo", {}), {"final": True}])
+    result, audit = _run(
+        llm,
+        _toolset("echo", lambda a: side.append(a) or {"ran": True}),
+        deadline=time.monotonic() - 1,
+    )
+    assert side == []  # no side effect after the deadline
+    assert result == {"final": True}
+    assert audit.tool_calls[0].ok is False
+    assert "deadline" in (audit.tool_calls[0].error or "")
+
+
 # ---------------------------------------------------------------------------
 # Platform-bound proxy-driven loop (stubbed runtime) — no secret exposure
 # ---------------------------------------------------------------------------

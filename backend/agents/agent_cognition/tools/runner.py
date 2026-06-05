@@ -39,6 +39,7 @@ Design by Contract:
 from __future__ import annotations
 
 import logging
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -55,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ToolAudit",
+    "ToolLoopError",
     "ToolLoopPlan",
     "run_tool_loop",
     "execute_plan",
@@ -98,6 +100,22 @@ class ToolAudit:
     tool_calls: list[ToolCall] = field(default_factory=list)
 
 
+class ToolLoopError(RuntimeError):
+    """A tool loop failed *after* partially executing — carries the partial audit.
+
+    The loop (``complete_json_with_tool_loop``) can raise mid-flight (max rounds
+    exceeded, a later LLM/API error) once one or more handlers have already run
+    their side effects. Raising a plain exception would lose the trusted record of
+    those calls, so the runner wraps the failure in this error with the
+    :class:`ToolAudit` accumulated so far, letting the caller persist/return the
+    partial audit instead of dropping it.
+    """
+
+    def __init__(self, audit: ToolAudit, cause: BaseException) -> None:
+        super().__init__(f"tool loop failed: {type(cause).__name__}: {cause}")
+        self.audit = audit
+
+
 @dataclass
 class ToolLoopPlan:
     """A declarative request for the *shim* to drive a brokered tool loop.
@@ -132,15 +150,21 @@ def execute_plan(
     agent_id: str,
     source_run_id: str,
     enforced_rules: list[Rule],
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], ToolAudit]:
     """Run a :class:`ToolLoopPlan` and return ``(final_output, audit)``.
 
     The shim-side entry point: the shim (never agent code) calls this, so the
     returned :class:`ToolAudit` is held only in the shim's frame.
 
+    Args:
+        deadline: optional ``time.monotonic()`` instant past which no further tool
+            handler is dispatched (the invoke timeout — see :func:`run_tool_loop`).
+
     Preconditions: ``agent_id`` / ``source_run_id`` are non-empty; ``enforced_rules``
     are the platform's active rules (the gate is authoritative, not agent-supplied).
-    Postconditions: see :func:`run_tool_loop`.
+    Postconditions: see :func:`run_tool_loop` (incl. :class:`ToolLoopError` on a
+    mid-flight loop failure).
     """
     return run_tool_loop(
         plan.llm,
@@ -153,6 +177,7 @@ def execute_plan(
         max_rounds=plan.max_rounds,
         temperature=plan.temperature,
         think=plan.think,
+        deadline=deadline,
     )
 
 
@@ -170,11 +195,22 @@ def run_tool_loop(
     temperature: float = 0.2,
     think: bool = False,
     clock: Callable[[], datetime] = None,  # type: ignore[assignment]
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any], ToolAudit]:
     """Run the brokered tool loop and return ``(final_output, audit)``.
 
-    See module docstring for the full contract. ``clock`` is injectable for
-    deterministic tests; it defaults to UTC ``now``.
+    Args:
+        clock: injectable wall clock for deterministic event timestamps (defaults
+            to UTC ``now``).
+        deadline: optional ``time.monotonic()`` instant past which the broker
+            refuses to dispatch any further handler (a cooperative invoke-timeout
+            bound — a worker thread can't be force-killed, so this stops *new* side
+            effects once the deadline passes).
+
+    Postconditions: returns ``(final_output, audit)`` on success. If the loop
+    raises after one or more handlers ran, raises :class:`ToolLoopError` carrying
+    the partial :class:`ToolAudit`, so the caller can still persist the trusted
+    record of the side effects that already happened.
     """
     assert agent_id, "run_tool_loop: agent_id must be non-empty"
     assert source_run_id, "run_tool_loop: source_run_id must be non-empty"
@@ -199,17 +235,23 @@ def run_tool_loop(
                 audit=audit,
                 counter=counter,
                 clock=tick,
+                deadline=deadline,
             )
-    result = complete_json_with_tool_loop(
-        llm,
-        user_prompt=user_prompt,
-        system_prompt=system_prompt,
-        tools=toolset.definitions(),
-        tool_handlers=brokered,
-        max_rounds=max_rounds,
-        temperature=temperature,
-        think=think,
-    )
+    try:
+        result = complete_json_with_tool_loop(
+            llm,
+            user_prompt=user_prompt,
+            system_prompt=system_prompt,
+            tools=toolset.definitions(),
+            tool_handlers=brokered,
+            max_rounds=max_rounds,
+            temperature=temperature,
+            think=think,
+        )
+    except Exception as exc:
+        # The loop failed after partial execution — don't lose the audit of the
+        # side effects that already ran.
+        raise ToolLoopError(audit, exc) from exc
     return result, audit
 
 
@@ -277,6 +319,7 @@ def _make_broker(
     audit: ToolAudit,
     counter: _SeqCounter,
     clock: Callable[[], datetime],
+    deadline: float | None = None,
 ) -> Callable[[dict[str, Any]], Any]:
     """Wrap one handler with the gate + memory-logging broker.
 
@@ -284,11 +327,45 @@ def _make_broker(
     owning declared tool (e.g. ``git``). The enforced gate evaluates against
     ``tool_id`` — the identifier predicates and the manifest are written against —
     while the function name is preserved in the memory record for provenance.
+    ``deadline`` (a ``time.monotonic()`` instant) bounds side effects: once it
+    passes, the broker refuses to dispatch — no handler runs after the timeout.
     """
 
     def _run(args: dict[str, Any]) -> Any:
         started = clock()
         safe_args = _sanitize(args)
+        # Cooperative timeout: refuse to start a new side effect once the invoke
+        # deadline has passed (the worker thread can't be force-killed, so this is
+        # how we stop handlers mutating state after the shim has timed out).
+        if deadline is not None and time.monotonic() >= deadline:
+            reason = "invoke deadline exceeded"
+            timed_out = ToolCall(
+                tool_id=tool_id,
+                function=name,
+                args=safe_args,
+                ok=False,
+                error=reason,
+                occurred_at=started,
+            )
+            _emit_event(
+                audit,
+                counter,
+                agent_id=agent_id,
+                source_run_id=source_run_id,
+                kind=EventKind.ERROR,
+                content=name,
+                data={"tool_id": tool_id, "deadline_exceeded": True, "args": safe_args},
+                salience=_SALIENCE_ERROR,
+                occurred_at=started,
+            )
+            _finish_call(audit, timed_out)
+            return {
+                "success": False,
+                "error": "deadline_exceeded",
+                "message": reason,
+                "tool_id": tool_id,
+                "function": name,
+            }
         # Gate on the DECLARED tool id, not the function name, so a rule like
         # `forbid_tool: git` blocks every git function (git_status, git_commit, …).
         allow, reason = evaluate_tool_call(tool_id, args or {}, enforced_rules)
