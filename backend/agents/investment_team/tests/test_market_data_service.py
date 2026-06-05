@@ -401,6 +401,161 @@ def test_df_to_bars_finite_ohlc_nan_volume_kept() -> None:
     assert all(math.isfinite(b.volume) for b in bars)
 
 
+class _MockRow:
+    """Minimal stand-in for a pandas row: ``row[key]`` + ``row.get(key, default)``."""
+
+    def __init__(self, data: Dict[str, Any]) -> None:
+        self._d = data
+
+    def __getitem__(self, key: str) -> Any:
+        return self._d[key]
+
+    def get(self, key: str, default: Any = 0.0) -> Any:
+        return self._d.get(key, default)
+
+
+class _MockIndex:
+    def __init__(self, label: str) -> None:
+        self._label = label
+
+    def strftime(self, fmt: str) -> str:  # noqa: ARG002 — accept arbitrary fmt
+        return self._label
+
+
+class _MockDF:
+    def __init__(self, rows: List[Tuple[_MockIndex, _MockRow]]) -> None:
+        self._rows = rows
+
+    def iterrows(self):
+        return iter(self._rows)
+
+
+def test_df_to_bars_none_ohlc_forward_filled() -> None:
+    """A ``None`` in an OHLC column is a missing-value gap, not a crash.
+
+    Object/nullable dtypes (a pyarrow-backed yfinance frame, a transient
+    object-dtype column, or a hand-built adapter frame) carry ``None`` rather
+    than ``numpy.nan``. ``float(None)`` raises ``TypeError``; left unguarded it
+    aborts the whole fetch. It must instead forward-fill like an upstream NaN.
+    """
+    rows = [
+        (
+            _MockIndex("2024-01-01"),
+            _MockRow({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # None Close — non-finite gap, forward-filled from the prior close.
+        (
+            _MockIndex("2024-01-02"),
+            _MockRow({"Open": 100, "High": 101, "Low": 99, "Close": None, "Volume": 1000}),
+        ),
+        (
+            _MockIndex("2024-01-03"),
+            _MockRow({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": 2000}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_MockDF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02", "2024-01-03"]
+    assert [b.is_imputed for b in bars] == [False, True, False]
+    # Imputed bar carries the prior valid close (100) as a flat, zero-volume bar.
+    assert bars[1].open == bars[1].high == bars[1].low == bars[1].close == 100
+    assert bars[1].volume == 0.0
+    assert all(
+        math.isfinite(b.open)
+        and math.isfinite(b.high)
+        and math.isfinite(b.low)
+        and math.isfinite(b.close)
+        for b in bars
+    )
+
+
+def test_df_to_bars_pd_na_ohlc_forward_filled() -> None:
+    """A pandas ``NA`` in an OHLC column forward-fills identically to ``None``.
+
+    This is the nullable/pyarrow-dtype migration scenario: ``float(pd.NA)``
+    raises ``TypeError`` exactly like ``float(None)``.
+    """
+    pd = pytest.importorskip("pandas")
+    rows = [
+        (
+            _MockIndex("2024-01-01"),
+            _MockRow({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # pd.NA Open — non-finite gap, forward-filled.
+        (
+            _MockIndex("2024-01-02"),
+            _MockRow({"Open": pd.NA, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        (
+            _MockIndex("2024-01-03"),
+            _MockRow({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": 2000}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_MockDF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02", "2024-01-03"]
+    assert [b.is_imputed for b in bars] == [False, True, False]
+    assert bars[1].open == bars[1].high == bars[1].low == bars[1].close == 100
+    assert bars[1].volume == 0.0
+
+
+def test_df_to_bars_none_volume_kept() -> None:
+    """Finite OHLC with a ``None`` volume keeps the real price bar; volume → 0.0.
+
+    Mirrors the NaN-volume case — a missing volume must not drop the bar, since
+    indicators index OHLC positionally.
+    """
+    rows = [
+        (
+            _MockIndex("2024-01-01"),
+            _MockRow({"Open": 100, "High": 101, "Low": 99, "Close": 100, "Volume": 1000}),
+        ),
+        # Finite OHLC, None volume — kept as a real bar with volume coerced to 0.0.
+        (
+            _MockIndex("2024-01-02"),
+            _MockRow({"Open": 102, "High": 103, "Low": 101, "Close": 102, "Volume": None}),
+        ),
+    ]
+    bars = MarketDataService._df_to_bars(_MockDF(rows))
+    assert [b.date for b in bars] == ["2024-01-01", "2024-01-02"]
+    assert bars[1].is_imputed is False
+    assert (bars[1].open, bars[1].high, bars[1].low, bars[1].close) == (102, 103, 101, 102)
+    assert bars[1].volume == 0.0
+    assert all(math.isfinite(b.volume) for b in bars)
+
+
+def test_fetch_yahoo_conversion_error_returns_empty(
+    monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A conversion error on a non-empty frame degrades to ``[]`` — never aborts.
+
+    Defense in depth: the price-data fetch must fall through to the next
+    provider rather than propagating an unexpected error from frame conversion.
+    """
+
+    class _DF:
+        empty = False
+
+        def iterrows(self):
+            raise RuntimeError("boom")
+
+    class _Ticker:
+        def __init__(self, sym):
+            self.sym = sym
+
+        def history(self, **kwargs):
+            return _DF()
+
+    fake_yf = types.ModuleType("yfinance")
+    fake_yf.Ticker = _Ticker  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "yfinance", fake_yf)
+
+    with caplog.at_level("WARNING"):
+        bars = MarketDataService()._fetch_yahoo(
+            "AAA", "stocks", "2024-01-01", "2024-01-31", max_retries=1
+        )
+    assert bars == []
+    assert any("failed to convert yfinance frame" in r.message for r in caplog.records)
+
+
 def test_df_to_bars_falls_back_when_index_has_no_strftime() -> None:
     """Indexes without strftime are stringified and truncated to 10 chars."""
 
@@ -983,6 +1138,55 @@ def test_normalize_ohlc_bar_coerces_nonfinite_volume(bad_volume: float, caplog) 
     assert any(
         "non-finite volume" in r.message and "2024-01-02" in r.message for r in caplog.records
     )
+
+
+def _missing_sentinels() -> List[Any]:
+    """``None`` plus pandas ``NA`` when pandas is importable."""
+    sentinels: List[Any] = [None]
+    try:
+        import pandas as pd
+
+        sentinels.append(pd.NA)
+    except ImportError:  # pragma: no cover - pandas is a transitive dep
+        pass
+    return sentinels
+
+
+@pytest.mark.parametrize("sentinel", _missing_sentinels())
+def test_normalize_ohlc_bar_missing_ohlc_is_dropped(sentinel: Any) -> None:
+    """A missing-value sentinel (``None`` / ``pd.NA``) in OHLC → ``(None, False)``.
+
+    The row is reported as a non-finite gap (the caller forward-fills/drops it)
+    rather than raising ``TypeError`` from ``float(sentinel)``.
+    """
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=sentinel, high=1.5, low=0.5, close=1.2, volume=10.0
+    )
+    assert bar is None
+    assert repaired is False
+
+
+@pytest.mark.parametrize("sentinel", _missing_sentinels())
+def test_normalize_ohlc_bar_missing_volume_coerced(sentinel: Any) -> None:
+    """A missing-value sentinel volume with finite OHLC keeps the bar; volume → 0.0."""
+    bar, repaired = MarketDataService._normalize_ohlc_bar(
+        date="2024-01-02", open=1.0, high=1.5, low=0.5, close=1.2, volume=sentinel
+    )
+    assert bar is not None
+    assert bar.volume == 0.0
+    assert math.isfinite(bar.volume)
+
+
+def test_normalize_ohlc_bar_malformed_string_still_raises() -> None:
+    """A genuinely non-numeric string is still a caller bug → ``ValueError``.
+
+    Only missing-value sentinels (TypeError on ``float()``) are tolerated; a
+    malformed numeric string raises ``ValueError`` and must propagate.
+    """
+    with pytest.raises(ValueError):
+        MarketDataService._normalize_ohlc_bar(
+            date="2024-01-02", open="abc", high=1.5, low=0.5, close=1.2, volume=10.0
+        )
 
 
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:

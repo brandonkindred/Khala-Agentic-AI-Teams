@@ -588,7 +588,14 @@ class MarketDataService:
                 return []
 
             if df is not None and not df.empty:
-                return self._df_to_bars(df)
+                try:
+                    return self._df_to_bars(df)
+                except Exception as exc:
+                    # Defense in depth: a malformed frame must never abort the
+                    # whole fetch. Degrade to an empty result (the caller falls
+                    # back to the next provider) rather than propagating.
+                    logger.warning("failed to convert yfinance frame for %s: %s", yf_symbol, exc)
+                    return []
 
             if attempt < max_retries - 1:
                 wait = 2 ** (attempt + 1)
@@ -854,14 +861,40 @@ class MarketDataService:
     _FILL_LOG_MAX_DATES = 10
 
     @staticmethod
+    def _coerce_finite_or_nan(value: float | str | int | None) -> float:
+        """Coerce a raw provider value to float, mapping missing sentinels to NaN.
+
+        Preconditions:
+            ``value`` is a number, a numeric string, or a missing-value sentinel
+            (``None`` or a pandas ``NA``). A non-numeric string is still a caller
+            bug.
+
+        Postconditions:
+            Returns ``float(value)`` for numeric input. Returns ``float("nan")``
+            for a missing-value sentinel (``None`` / pandas ``NA``) so the
+            caller's finite check treats the row as a gap — identical handling to
+            an upstream ``numpy.nan``. A non-numeric string still raises
+            ``ValueError``.
+        """
+        try:
+            return float(value)  # type: ignore[arg-type]
+        except TypeError:
+            # ``None`` and pandas ``NA`` are missing-value sentinels whose
+            # ``float()`` raises TypeError (a malformed numeric string raises
+            # ValueError instead and is left to propagate). Treat them as a
+            # non-finite gap so the existing forward-fill/drop path handles them
+            # exactly like an upstream numpy.nan.
+            return float("nan")
+
+    @staticmethod
     def _normalize_ohlc_bar(
         *,
         date: str,
-        open: float | str | int,
-        high: float | str | int,
-        low: float | str | int,
-        close: float | str | int,
-        volume: float | str | int,
+        open: float | str | int | None,
+        high: float | str | int | None,
+        low: float | str | int | None,
+        close: float | str | int | None,
+        volume: float | str | int | None,
     ) -> Tuple[Optional[OHLCVBar], bool]:
         """Round, finite-check, and H/L-envelope-repair a single OHLC row.
 
@@ -873,12 +906,14 @@ class MarketDataService:
 
         Preconditions:
             ``open``/``high``/``low``/``close``/``volume`` are raw provider
-            values coercible by ``float(...)`` — numeric, or numeric strings
-            such as the JSON values Twelve Data and Alpha Vantage return. This
-            helper owns the coercion and rounding to 4 dp; callers pass the
-            extracted values through verbatim. A value that is ``None`` or a
+            values — numeric, numeric strings (such as the JSON values Twelve
+            Data and Alpha Vantage return), or a missing-value sentinel (``None``
+            / pandas ``NA``). This helper owns the coercion and rounding to 4 dp;
+            callers pass the extracted values through verbatim. A missing-value
+            sentinel is treated as a non-finite value (the row is forward-filled
+            or dropped, like an upstream ``numpy.nan``); only a genuinely
             non-numeric string is a caller (precondition) bug and surfaces as a
-            ``TypeError``/``ValueError`` rather than being silently coerced.
+            ``ValueError`` rather than being silently coerced.
 
         Postconditions:
             Returns ``(None, False)`` when any of O/H/L/C is non-finite (the
@@ -890,10 +925,10 @@ class MarketDataService:
             zero-volume sentinel ADV/liquidity math already excludes), logged
             at WARNING.
         """
-        o = round(float(open), 4)
-        h = round(float(high), 4)
-        ll = round(float(low), 4)
-        c = round(float(close), 4)
+        o = round(MarketDataService._coerce_finite_or_nan(open), 4)
+        h = round(MarketDataService._coerce_finite_or_nan(high), 4)
+        ll = round(MarketDataService._coerce_finite_or_nan(low), 4)
+        c = round(MarketDataService._coerce_finite_or_nan(close), 4)
         if not (math.isfinite(o) and math.isfinite(h) and math.isfinite(ll) and math.isfinite(c)):
             return (None, False)
         # Volume can be non-finite (NaN on early-listing/low-liquidity sessions)
@@ -901,7 +936,7 @@ class MarketDataService:
         # index OHLC positionally — and neutralise only the volume to 0.0, which
         # ADV/liquidity math already excludes via its ``volume > 0`` filter.
         # Dropping the whole row would discard valid price data.
-        v = float(volume)
+        v = MarketDataService._coerce_finite_or_nan(volume)
         if not math.isfinite(v):
             logger.warning("non-finite volume %r on %s bar; coercing to 0.0", volume, date)
             v = 0.0
