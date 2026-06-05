@@ -38,6 +38,7 @@ Design by Contract:
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -49,6 +50,8 @@ from agent_cognition.rules.enforcement import evaluate_tool_call
 from agent_cognition.tools.binding import BoundToolset, ExecutionSite
 from agent_cognition.tools.channel import _record_brokered, _recording_window
 from llm_service.tool_loop import complete_json_with_tool_loop
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "ToolAudit",
@@ -269,8 +272,14 @@ def _make_broker(
         try:
             result = handler(args)
         except Exception as exc:  # handler raised — record an error event, keep looping
+            # Never surface the raw exception text to the model or the audit: an
+            # SDK error can echo a credential (API token, Authorization header),
+            # and in the sandbox even captured logs ride back in the response. Only
+            # the exception *type* (which carries no secret) crosses the boundary.
+            err_type = type(exc).__name__
+            logger.warning("tool '%s' (%s) handler raised %s", tool_id, name, err_type)
             err = ToolCall(
-                tool_id=tool_id, args=safe_args, ok=False, error=str(exc), occurred_at=started
+                tool_id=tool_id, args=safe_args, ok=False, error=err_type, occurred_at=started
             )
             _emit_event(
                 audit,
@@ -279,7 +288,7 @@ def _make_broker(
                 source_run_id=source_run_id,
                 kind=EventKind.ERROR,
                 content=name,
-                data={"tool_id": tool_id, "error": str(exc)},
+                data={"tool_id": tool_id, "error_type": err_type},
                 salience=_SALIENCE_ERROR,
                 occurred_at=clock(),
             )
@@ -287,7 +296,7 @@ def _make_broker(
             return {
                 "success": False,
                 "error": "handler_exception",
-                "message": str(exc),
+                "error_type": err_type,
                 "tool_id": tool_id,
                 "function": name,
             }

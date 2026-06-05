@@ -94,38 +94,40 @@ def cap_output(value: Any, *, max_bytes: int) -> tuple[Any, bool]:
 def cap_tool_audit(entries: list, *, max_bytes: int) -> tuple[list, bool]:
     """Bound a list of audit entries to ``max_bytes`` of serialised JSON.
 
-    Returns ``(entries, False)`` when the whole list fits. Otherwise keeps as many
-    leading entries as fit (oldest-first, so the start of the call sequence is
-    preserved) and appends a single ``{"__truncated__": True, ...}`` marker
-    recording how many entries were dropped, returning ``(capped, True)``. Applied
+    Returns ``(entries, False)`` when the whole list fits. Otherwise keeps the
+    longest leading prefix (oldest-first, so the start of the call sequence is
+    preserved) whose serialisation *including* a trailing ``{"__truncated__":
+    True, ...}`` marker still fits, returning ``(capped, True)``. Applied
     independently of the ``output`` cap so neither field can starve the other.
+
+    The fit test serialises the actual candidate list each step (rather than
+    hand-accounting separators), and uses ``json.dumps`` defaults — whose ``", "``
+    item separators are *wider* than the compact separators Starlette emits — so
+    the measured size is a conservative upper bound on the real response and the
+    capped result is guaranteed to serialise within ``max_bytes``.
+    """
+    if _safe_len(entries, max_bytes) <= max_bytes:
+        return entries, False
+    kept: list = []
+    n = len(entries)
+    for i, entry in enumerate(entries):
+        marker = {"__truncated__": True, "dropped": n - i, "original_count": n}
+        if _safe_len([*kept, entry, marker], max_bytes) > max_bytes:
+            return [*kept, marker], True
+        kept.append(entry)
+    # Unreachable: the whole list exceeded the cap, but adding a marker only grows
+    # the payload, so the final entry's candidate must have overflowed and returned.
+    return entries, False  # pragma: no cover - the loop always returns when over cap
+
+
+def _safe_len(obj: Any, over: int) -> int:
+    """Serialised length of ``obj``; ``over + 1`` if it can't be serialised.
+
+    The fallback forces an unserialisable candidate to be treated as over-budget
+    (so it is dropped) rather than raising — audit entries are JSON-safe ToolCall
+    dumps, so this is purely defensive.
     """
     try:
-        if len(json.dumps(entries, default=str)) <= max_bytes:
-            return entries, False
-    except (
-        TypeError,
-        ValueError,
-    ):  # pragma: no cover - defensive: audit entries are ToolCall dumps
-        # Unserialisable entries shouldn't happen; fall through to the rebuild.
-        pass
-    kept: list = []
-    used = 2  # the enclosing "[]"
-    for i, entry in enumerate(entries):
-        try:
-            piece = len(json.dumps(entry, default=str)) + 1  # +1 for the comma
-        except (TypeError, ValueError):  # pragma: no cover - defensive (always serialisable)
-            piece = max_bytes + 1  # force-drop an unserialisable entry
-        marker = {
-            "__truncated__": True,
-            "dropped": len(entries) - i,
-            "original_count": len(entries),
-        }
-        reserve = len(json.dumps(marker)) + 1
-        if used + piece + reserve > max_bytes:
-            kept.append(marker)
-            return kept, True
-        kept.append(entry)
-        used += piece
-    # Reached only if the whole-list dump raised but the per-entry rebuild fit.
-    return kept, False  # pragma: no cover - unreachable when the whole-list dump succeeds
+        return len(json.dumps(obj, default=str))
+    except (TypeError, ValueError):  # pragma: no cover - defensive: entries are JSON-safe
+        return over + 1

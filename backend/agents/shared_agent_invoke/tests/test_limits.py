@@ -34,6 +34,18 @@ def test_audit_over_cap_keeps_leading_entries_and_marks_truncation() -> None:
     assert marker["dropped"] >= 1
 
 
+def test_many_small_entries_stay_within_byte_budget() -> None:
+    # Regression: separator accounting must not undercount, or json.dumps(capped)
+    # could exceed the cap. Many small entries near the boundary.
+    entries = [{"i": i, "ok": True} for i in range(200)]
+    for cap in (120, 200, 333, 512, 1024):
+        capped, truncated = cap_tool_audit(entries, max_bytes=cap)
+        assert truncated is True
+        # The actual serialized size must respect the budget.
+        assert len(json.dumps(capped)) <= cap, f"cap={cap}"
+        assert capped[-1]["__truncated__"] is True
+
+
 def test_audit_first_entry_too_big_still_bounds() -> None:
     entries = [{"tool_id": "huge", "blob": "x" * 10_000}]
     capped, truncated = cap_tool_audit(entries, max_bytes=200)

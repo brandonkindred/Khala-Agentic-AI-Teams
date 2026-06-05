@@ -247,7 +247,28 @@ def test_handler_exception_records_error_event() -> None:
     assert result == {"final": True}
     assert [e.kind for e in audit.events] == [EventKind.TOOL_CALL, EventKind.ERROR]
     assert audit.tool_calls[0].ok is False
-    assert "kaboom" in (audit.tool_calls[0].error or "")
+    # Only the exception *type* is recorded — never the raw message.
+    assert audit.tool_calls[0].error == "RuntimeError"
+
+
+def test_handler_exception_message_is_not_leaked() -> None:
+    # A handler whose exception text embeds a secret must not leak it to the
+    # model (the tool result) or the trusted audit.
+    secret = "token=SECRET-LEAK-123"
+
+    def boom(_args):
+        raise RuntimeError(secret)
+
+    llm = ScriptedLLM([_tool_call("boom", {}), {"final": True}])
+    _result, audit = _run(llm, _toolset("boom", boom))
+    blob = json.dumps([e.model_dump(mode="json") for e in audit.events])
+    blob += json.dumps([tc.model_dump(mode="json") for tc in audit.tool_calls])
+    assert "SECRET-LEAK-123" not in blob
+    # The model only sees a generic, type-tagged refusal — not the raw message.
+    tool_msgs = [m for round_ in llm.seen_messages for m in round_ if m.get("role") == "tool"]
+    joined = "".join(m["content"] for m in tool_msgs)
+    assert "SECRET-LEAK-123" not in joined
+    assert "handler_exception" in joined and "RuntimeError" in joined
 
 
 def test_handler_failure_result_marks_outcome_not_ok() -> None:
