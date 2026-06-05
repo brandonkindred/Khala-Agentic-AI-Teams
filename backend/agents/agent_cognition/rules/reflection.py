@@ -255,16 +255,26 @@ def _coerce_item(raw: Any) -> _ProposedAction | None:
 # Input gathering + LLM call
 # ---------------------------------------------------------------------------
 def _recent_summaries(agent_id: str) -> list[PeriodSummary]:
-    """Gather the agent's most recent summaries across the reflection scales.
+    """Gather the agent's most recent *fresh* summaries across reflection scales.
 
     Postconditions: returns up to ``_summary_limit()`` summaries per scale
-    (month, then week, then day), most-recent first within each scale; empty
-    when the agent has no summaries yet.
+    (month, then week, then day), most-recent first within each scale, **excluding
+    any summary flagged ``stale``**. A stale summary's text is outdated pending the
+    rollup's recompute, yet ``mark_period_stale`` has already bumped its
+    ``version``; citing it as evidence would produce a proposal the post-recompute
+    evidence check never flags (it flags only versions *below* the recomputed one,
+    and the recompute keeps the bumped version), leaving an approvable proposal
+    derived from stale memory. The scheduler runs ``ensure_rollups_current`` before
+    reflection, so fresh summaries are normally available; if every recent summary
+    is stale this returns empty and reflection defers to the next run. Empty when
+    the agent has no fresh summaries yet.
     """
     limit = _summary_limit()
     gathered: list[PeriodSummary] = []
     for scale in _REFLECTION_SCALES:
-        gathered.extend(memory_store.fetch_summaries(agent_id, scale, limit=limit))
+        gathered.extend(
+            s for s in memory_store.fetch_summaries(agent_id, scale, limit=limit) if not s.stale
+        )
     return gathered
 
 

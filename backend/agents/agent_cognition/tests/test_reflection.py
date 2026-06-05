@@ -104,6 +104,7 @@ def _summary(
     summary: str = "did work; one task failed twice",
     start: datetime | None = None,
     highlights: list | None = None,
+    stale: bool = False,
 ) -> PeriodSummary:
     start = start or _dt(2026, 5, 1)
     return PeriodSummary(
@@ -116,6 +117,7 @@ def _summary(
         highlights=["retry storm on task-7"] if highlights is None else highlights,
         source_count=5,
         version=version,
+        stale=stale,
         created_at=start,
     )
 
@@ -217,6 +219,32 @@ def test_empty_history_makes_no_llm_call_and_no_write(monkeypatch: pytest.Monkey
     report = reflection.reflect("a", _NOW)
     assert report.proposed == 0 and report.llm_calls == 0
     assert canned.json_calls == [] and created == []
+
+
+def test_all_stale_summaries_make_no_llm_call_and_no_write(monkeypatch: pytest.MonkeyPatch) -> None:
+    canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "x"}],
+        summaries=[_summary(sid="s1", stale=True), _summary(sid="s2", stale=True)],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Stale summaries are excluded → looks like empty history (defer to next run).
+    assert report.proposed == 0 and report.llm_calls == 0
+    assert canned.json_calls == [] and created == []
+
+
+def test_stale_summaries_excluded_from_input_and_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    fresh = _summary(sid="fresh", version=3)
+    stale = _summary(sid="stale", version=9, stale=True)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "derived"}],
+        summaries=[fresh, stale],
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1
+    # Evidence cites only the fresh summary; the stale one is never referenced.
+    assert created[0].evidence == [{"summary_id": "fresh", "version": 3}]
 
 
 def test_add_proposal_is_materialized_pending_derived_with_evidence(
