@@ -747,3 +747,92 @@ def test_get_or_fetch_miss_returns_canonicalized_volume(cache: MarketDataCache) 
         fetch_fn=_no_call,
     )
     assert [b.volume for b in hit_bars] == [b.volume for b in miss_bars]
+
+
+def test_reconcile_snapshot_hash() -> None:
+    from investment_team.market_data_cache.store import _hash_bars, _reconcile_snapshot_hash
+
+    bars = [OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=5.0)]
+
+    def _meta(sha: str) -> SnapshotMeta:
+        return SnapshotMeta(
+            symbol="AAA",
+            asset_class="stocks",
+            frequency="1d",
+            provider="p",
+            fetch_ts=datetime.now(timezone.utc),
+            start_date="2024-01-01",
+            end_date="2024-01-01",
+            row_count=1,
+            sha256=sha,
+            parquet_path="/x",
+        )
+
+    # Stale hash → corrected copy matching the bars.
+    fixed = _reconcile_snapshot_hash(_meta("stale"), bars)
+    assert fixed.sha256 == _hash_bars(bars)
+    # Already-consistent meta → same object, no churn.
+    consistent = _meta(_hash_bars(bars))
+    assert _reconcile_snapshot_hash(consistent, bars) is consistent
+
+
+def test_get_or_fetch_reconciles_legacy_snapshot_hash(cache: MarketDataCache) -> None:
+    """A legacy snapshot persisted with raw NaN volume carries a stored sha256
+    over the unrepaired data. On a cache hit the bars are repaired to 0.0, so
+    the returned meta's sha256 must be reconciled to match the bars the caller
+    gets — otherwise meta.sha256 and compute_dataset_fingerprint(read_bars)
+    identify two different datasets for the same replay.
+    """
+    pa = pytest.importorskip("pyarrow")
+    import pyarrow.parquet as pq
+
+    from investment_team.market_data_cache.store import _get_parquet_schema, _hash_bars
+
+    # Write a legacy parquet with raw NaN volume (bypassing _bars_to_table,
+    # which would coerce), then index it with a deliberately stale sha256.
+    parquet_path = cache._resolved_root() / "legacy.parquet"
+    parquet_path.parent.mkdir(parents=True, exist_ok=True)
+    table = pa.Table.from_pydict(
+        {
+            "date": ["2024-01-01"],
+            "open": [1.0],
+            "high": [1.0],
+            "low": [1.0],
+            "close": [1.0],
+            "volume": [float("nan")],
+            "is_imputed": [False],
+        },
+        schema=_get_parquet_schema(),
+    )
+    pq.write_table(table, parquet_path)
+    legacy = SnapshotMeta(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        provider="legacy",
+        fetch_ts=datetime(2024, 1, 2, tzinfo=timezone.utc),
+        start_date="2024-01-01",
+        end_date="2024-01-02",
+        row_count=1,
+        sha256="stale-raw-nan-hash",
+        parquet_path=str(parquet_path),
+    )
+    cache._memory_index.append(legacy)
+
+    def _no_call(symbol, ac, start, end):  # pragma: no cover - must not be called
+        raise AssertionError("fetch_fn must not be called on cache hit")
+
+    bars, meta = cache.get_or_fetch(
+        symbol="AAA",
+        asset_class="stocks",
+        frequency="1d",
+        start="2024-01-01",
+        end="2024-01-02",
+        fetch_fn=_no_call,
+        as_of="2024-06-01",
+    )
+    # Read-repaired to 0.0, and the meta hash now describes the repaired bars.
+    assert [b.volume for b in bars] == [0.0]
+    assert meta is not None
+    assert meta.sha256 != "stale-raw-nan-hash"
+    assert meta.sha256 == _hash_bars(bars)

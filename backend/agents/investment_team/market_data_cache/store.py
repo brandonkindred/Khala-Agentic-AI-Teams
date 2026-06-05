@@ -32,7 +32,7 @@ import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -166,6 +166,27 @@ def _canonicalize_bar_volumes(bars: Sequence[OHLCVBar]) -> List[OHLCVBar]:
         else:
             out.append(b.model_copy(update={"volume": 0.0}))
     return out
+
+
+def _reconcile_snapshot_hash(meta: SnapshotMeta, bars: Sequence[OHLCVBar]) -> SnapshotMeta:
+    """Return ``meta`` with ``sha256`` recomputed to match read-repaired ``bars``.
+
+    A legacy snapshot persisted before volume canonicalisation carries a stored
+    ``sha256`` over the raw (possibly non-finite) volume, but ``_table_to_bars``
+    repairs that volume to ``0.0`` on read. Recompute the per-snapshot hash from
+    the bars actually returned so a client's reproducibility / derived-cache key
+    (``meta.sha256``) agrees with ``compute_dataset_fingerprint(read_bars)``
+    instead of identifying the stale unrepaired dataset.
+
+    Postconditions:
+        Returns ``meta`` unchanged (same object) when the recomputed hash already
+        matches — the common case for snapshots written with finite volume, so
+        there is no churn. Otherwise returns a copy with the corrected ``sha256``.
+    """
+    recomputed = _hash_bars(bars)
+    if recomputed == meta.sha256:
+        return meta
+    return replace(meta, sha256=recomputed)
 
 
 def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
@@ -618,6 +639,10 @@ class MarketDataCache:
         if existing is not None:
             cached = self._read_snapshot(existing)
             if cached is not None:
+                # A legacy snapshot's stored sha256 is over the raw volume, but
+                # _read_snapshot repaired it to 0.0; reconcile so the returned
+                # meta describes the bars the caller actually gets.
+                existing = _reconcile_snapshot_hash(existing, cached)
                 trimmed = [b for b in cached if start <= b.date <= end]
                 return trimmed, existing
 
