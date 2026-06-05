@@ -9,6 +9,7 @@ the GitHubClient and helper functions on the api module.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 import httpx
@@ -58,6 +59,17 @@ def _issue_payload(number: int, **overrides: Any) -> dict[str, Any]:
 
 def _sub_payload(number: int, state: str = "open") -> dict[str, Any]:
     return {"number": number, "state": state, "title": f"Sub {number}"}
+
+
+def _expected_basic_header(token: str) -> str:
+    """Expected git auth header for a fake token, built at runtime so a
+    credential-shaped Base64 literal never appears in source — secret
+    scanners (GitGuardian etc.) flag the pattern regardless of how fake
+    the values are (same convention as TestScrubTokenFromText)."""
+    import base64
+
+    encoded = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    return f"Authorization: Basic {encoded}"
 
 
 # ---------------------------------------------------------------------------
@@ -478,6 +490,55 @@ def _stub_heavy_modules() -> None:
         gu.DEVELOPMENT_BRANCH = "development"  # type: ignore[attr-defined]
         sys.modules["software_engineering_team.shared.git_utils"] = gu
 
+    gu_mod = sys.modules["software_engineering_team.shared.git_utils"]
+    if not hasattr(gu_mod, "git_identity_env"):
+        # Functional stand-in mirroring the real helper: api.main imports it
+        # for the recovered-WIP merge, which needs a complete commit identity
+        # in identity-free environments.
+        def _stub_git_identity_env():
+            env = dict(os.environ)
+            for key in (
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ):
+                if not (env.get(key) or "").strip():
+                    env[key] = "stub@example.com" if key.endswith("EMAIL") else "Stub"
+            return env
+
+        gu_mod.git_identity_env = _stub_git_identity_env  # type: ignore[attr-defined]
+    if not hasattr(gu_mod, "commit_working_tree"):
+        # Functional stand-in: api.main imports commit_working_tree for dirty-tree
+        # recovery, and TestPrepareIssueBranch exercises that path against real
+        # repos — a (True, "...") no-op stub would leave the tree dirty and make
+        # those tests order-dependent on whether the real module loaded first.
+        def _stub_commit_working_tree(repo_path, message):
+            import subprocess as sp
+
+            sp.run(["git", "-C", str(repo_path), "add", "-A"], capture_output=True)
+            r = sp.run(
+                [
+                    "git",
+                    "-C",
+                    str(repo_path),
+                    "-c",
+                    "user.name=Stub",
+                    "-c",
+                    "user.email=stub@example.com",
+                    "commit",
+                    "--no-gpg-sign",
+                    "-m",
+                    message,
+                ],
+                capture_output=True,
+                text=True,
+            )
+            ok = r.returncode == 0 or "nothing to commit" in (r.stdout + r.stderr)
+            return ok, (r.stdout + r.stderr).strip()[:200]
+
+        gu_mod.commit_working_tree = _stub_commit_working_tree  # type: ignore[attr-defined]
+
 
 @pytest.fixture
 def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
@@ -521,7 +582,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     )
 
     # Git helpers: success by default.
-    monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None))
+    monkeypatch.setattr(api_main, "_prepare_issue_branch", lambda *a, **kw: (True, None, []))
     monkeypatch.setattr(api_main, "_fast_forward", lambda *a, **kw: (True, None))
     monkeypatch.setattr(api_main, "_push_branch", lambda *a, **kw: (True, None))
 
@@ -796,7 +857,7 @@ class TestEndpointFailures:
         monkeypatch.setattr(
             patched_app["api"],
             "_prepare_issue_branch",
-            lambda *a, **kw: (False, "no remote"),
+            lambda *a, **kw: (False, "no remote", []),
         )
         resp = patched_app["client"].post(
             "/run-from-github",
@@ -953,20 +1014,26 @@ class TestPrepareIssueBranch:
 
         return api_main
 
-    def test_dirty_tree_aborts(self, api, tmp_path) -> None:
-        """Uncommitted changes must prevent the branch reset."""
+    def test_dirty_tree_recovered_to_rescue_branch(self, api, tmp_path) -> None:
+        """Uncommitted unattributed changes are preserved, then prep proceeds."""
         repo = self._init_repo(tmp_path)
         with open(f"{repo}/README.md", "a") as fh:
             fh.write("dirty\n")
 
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
-        assert ok is False
-        assert "uncommitted changes" in (msg or "")
+        ok, msg, notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        assert ok is True, msg
+        assert any("khala/rescue/" in n for n in notes)
+        import subprocess
+
+        status = subprocess.run(
+            ["git", "-C", repo, "status", "--porcelain"], capture_output=True, text=True
+        ).stdout.strip()
+        assert status == ""
 
     def test_clean_tree_succeeds(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
         self._git(repo, "fetch", "origin", "main")
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "khala/issue-9")
         assert ok is True, msg
         import subprocess
 
@@ -980,13 +1047,13 @@ class TestPrepareIssueBranch:
 
     def test_unsafe_default_branch_rejected(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
-        ok, msg = api._prepare_issue_branch(repo, "origin", "--exec=evil", "khala/issue-9")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "--exec=evil", "khala/issue-9")
         assert ok is False
         assert "unsafe" in (msg or "")
 
     def test_unsafe_integration_branch_rejected(self, api, tmp_path) -> None:
         repo = self._init_repo(tmp_path)
-        ok, msg = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
+        ok, msg, _notes = api._prepare_issue_branch(repo, "origin", "main", "-evil-name")
         assert ok is False
         assert "unsafe" in (msg or "")
 
@@ -1009,11 +1076,13 @@ class TestGitCredentialThreading:
 
         return api_main
 
-    def test_git_auth_env_injects_transient_bearer_header(self, api) -> None:
+    def test_git_auth_env_injects_transient_basic_header(self, api) -> None:
         env = api._git_auth_env("secret-tok")
         assert env["GIT_CONFIG_COUNT"] == "1"
         assert env["GIT_CONFIG_KEY_0"] == "http.extraHeader"
-        assert env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer secret-tok"
+        # GitHub's git smart-HTTP endpoint rejects `Bearer` (401) even for a
+        # valid token — only Basic with the x-access-token username works.
+        assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("secret-tok")
         # Disable interactive prompts so a bad credential fails fast.
         assert env["GIT_TERMINAL_PROMPT"] == "0"
         # Inherits the parent environment (PATH etc. survive).
@@ -1026,17 +1095,21 @@ class TestGitCredentialThreading:
             calls.append((args, env))
             return 0, ""
 
-        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
-        ok, msg = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1", "tok-123")
+        ok, msg, _notes = api._prepare_issue_branch(
+            "/repo", "origin", "main", "khala/issue-1", "tok-123"
+        )
         assert ok is True, msg
-        # First git op is the fetch — it must carry the auth env.
-        fetch_args, fetch_env = calls[0]
-        assert fetch_args[0] == "fetch"
-        assert fetch_env is not None
-        assert fetch_env["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-123"
-        # The local checkouts that follow run without an auth env.
-        assert all(env is None for _, env in calls[1:])
+        # Both fetches (base branch + issue-branch continuation candidate)
+        # must carry the auth env.
+        fetches = [(args, env) for args, env in calls if args[0] == "fetch"]
+        assert len(fetches) == 2
+        for _args, env in fetches:
+            assert env is not None
+            assert env["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-123")
+        # Local-only git ops never carry the credential.
+        assert all(env is None for args, env in calls if args[0] != "fetch")
 
     def test_prepare_issue_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         calls = []
@@ -1045,9 +1118,9 @@ class TestGitCredentialThreading:
             calls.append((args, env))
             return 0, ""
 
-        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (False, None))
+        monkeypatch.setattr(api, "_working_tree_dirty", lambda p: (True, False, None))
         monkeypatch.setattr(api, "_git", fake_git)
-        ok, _ = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
+        ok, _msg, _notes = api._prepare_issue_branch("/repo", "origin", "main", "khala/issue-1")
         assert ok is True
         assert all(env is None for _, env in calls)
 
@@ -1063,7 +1136,7 @@ class TestGitCredentialThreading:
         ok, msg = api._push_branch("/repo", "origin", "khala/issue-1", "tok-xyz")
         assert ok is True, msg
         assert captured["args"][0] == "push"
-        assert captured["env"]["GIT_CONFIG_VALUE_0"] == "Authorization: Bearer tok-xyz"
+        assert captured["env"]["GIT_CONFIG_VALUE_0"] == _expected_basic_header("tok-xyz")
 
     def test_push_branch_without_token_uses_no_auth_env(self, api, monkeypatch) -> None:
         captured = {}
@@ -1091,6 +1164,108 @@ class TestGitCredentialThreading:
         assert called["ran"] is False
 
 
+class TestActiveIssueMarkerLifecycle:
+    """The marker means "this checkout holds unpublished work for issue N":
+    it is cleared only once the work is published (PR recorded). Every
+    unpublished terminal path — orchestrator exception, no merged tasks,
+    fast-forward/push/PR failure — must retain it so a retry continues from
+    `development` instead of rescuing the finished work and starting over."""
+
+    def _run(self, patched_app, monkeypatch, github_client, orchestrator=None):
+        api = patched_app["api"]
+        cleared: list[str] = []
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: cleared.append(p))
+        if orchestrator is not None:
+            monkeypatch.setattr(api, "run_coding_team_orchestrator", orchestrator)
+        patched_app["set_github"](github_client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        return cleared
+
+    def test_cleared_on_publish_success(self, patched_app, monkeypatch) -> None:
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_retained_when_orchestrator_raises(self, patched_app, monkeypatch) -> None:
+        def boom(*_a, **_kw):
+            raise RuntimeError("orchestrator died")
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=boom)
+        assert cleared == []
+
+    def test_retained_when_no_merged_tasks(self, patched_app, monkeypatch) -> None:
+        def no_merge(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](status="completed", task_graph_snapshot=[])
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
+        assert cleared == []
+
+    def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (False, "remote hung up"))
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
+
+    def test_retained_when_fast_forward_fails(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (False, "not possible"))
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
+
+    def test_retained_when_pr_creation_fails(self, patched_app, monkeypatch) -> None:
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+
+        def _raise_create(**_kw):
+            raise GitHubAPIError(422, "validation")
+
+        client.create_pull_request = _raise_create  # type: ignore[assignment]
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
+
+    def test_prep_notes_posted_as_issue_comments(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
+        monkeypatch.setattr(
+            api,
+            "_prepare_issue_branch",
+            lambda *a, **kw: (True, None, ["♻️ recovered", "▶️ continuing"]),
+        )
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        bodies = [body for _n, body in client.comments]
+        assert "♻️ recovered" in bodies
+        assert "▶️ continuing" in bodies
+
+    def test_prep_receives_issue_number(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        seen: dict = {}
+
+        def fake_prep(*args, **kwargs):
+            seen["issue_number"] = kwargs.get("issue_number")
+            return True, None, []
+
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
+        monkeypatch.setattr(api, "_prepare_issue_branch", fake_prep)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post(
+            "/run-from-github", json=_body(3, repo_path=patched_app["repo_path"])
+        )
+        assert resp.status_code == 200
+        assert seen["issue_number"] == 3
+
+
 class TestStatusResponseSurfacing:
     def test_status_returns_github_fields(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
@@ -1104,3 +1279,118 @@ class TestStatusResponseSurfacing:
         body = status.json()
         assert body["github_context"]["issue_number"] == 1
         assert body["github_pr_url"] == "https://example/pr/42"
+
+
+class TestBusyCheckoutGuard:
+    """Auto-recovery must never mutate a sibling job's live working tree:
+    prep on a checkout with another non-terminal job fails fast (the old
+    dirty-guard behavior for the live case), while crashed-job leftovers
+    (no running sibling) still recover."""
+
+    def test_running_sibling_on_same_checkout_fails_job(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import create_job, update_job
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="sibling-1", repo_path=repo_path, plan_input=None)
+        update_job(
+            "sibling-1",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "issue_number": 99},
+        )
+        prep_calls: list = []
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "busy" in (job["error"] or "").lower()
+        assert prep_calls == []  # the sibling's tree was never touched
+
+    def test_sibling_under_alias_spelling_still_blocks(self, patched_app, monkeypatch) -> None:
+        """The guard compares canonical paths: a sibling registered under a
+        different spelling of the same checkout (symlink, `/.` suffix) must
+        still block — string equality would fail open exactly where the
+        guard matters."""
+        from coding_team.job_store import create_job, update_job
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        alias = os.path.join(os.path.dirname(repo_path), "repo-alias")
+        os.symlink(repo_path, alias)
+        create_job(job_id="sibling-3", repo_path=os.path.join(alias, "."), plan_input=None)
+        update_job(
+            "sibling-3",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "issue_number": 99},
+        )
+        prep_calls: list = []
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "busy" in (job["error"] or "").lower()
+        assert prep_calls == []
+
+    def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import create_job, update_job
+
+        repo_path = patched_app["repo_path"]
+        create_job(job_id="sibling-2", repo_path=repo_path, plan_input=None)
+        update_job("sibling-2", status="completed")
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+
+
+class TestPublishWindowLiveness:
+    """A job must not report a terminal status while the hook is still
+    mutating the checkout (fast-forward, push, PR creation, marker clear):
+    the busy-checkout guard keys liveness off pending/running, so a terminal
+    status during the publish window would let a sibling job reset the shared
+    checkout mid-publish."""
+
+    def test_job_stays_running_during_publish_window(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import list_jobs as store_list_jobs
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        seen: dict = {}
+
+        def spy_push(repo, remote, branch, token=None):
+            jobs = store_list_jobs()
+            assert len(jobs) == 1
+            seen["status_at_push"] = jobs[0]["status"]
+            seen["phase_at_push"] = jobs[0].get("phase")
+            return True, None
+
+        monkeypatch.setattr(api, "_push_branch", spy_push)
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        # The orchestrator declared success before the push, but the job must
+        # still be non-terminal (and visible to the busy-checkout guard)…
+        assert seen["status_at_push"] == "running"
+        assert seen["phase_at_push"] == "publishing"
+        # …and only goes terminal once the hook is fully done.
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job.get("phase") == "completed"
