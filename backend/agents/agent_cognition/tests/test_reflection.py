@@ -154,9 +154,15 @@ def _pending(
     action: ProposalAction = ProposalAction.ADD,
     target_rule_id: str | None = None,
     text: str | None = "be kind",
+    priority: int = 0,
     stale_evidence: bool = False,
 ) -> RuleProposal:
-    proposed = {"text": text, "mode": "advisory", "source": "derived"} if text is not None else None
+    # Mirror what _build_proposed_rule persists (incl. priority) so dedupe keys match.
+    proposed = (
+        {"text": text, "mode": "advisory", "source": "derived", "priority": priority}
+        if text is not None
+        else None
+    )
     return RuleProposal(
         id=str(uuid4()),
         agent_id=agent_id,
@@ -471,6 +477,65 @@ def test_stale_supersede_runs_before_llm_failure(monkeypatch: pytest.MonkeyPatch
     assert superseded == [stale.id]
 
 
+def test_stale_supersede_runs_when_history_is_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """All-stale memory must not strand stale pending rows on the fast path."""
+    stale = _pending(action=ProposalAction.ADD, text="obsolete", stale_evidence=True)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "x"}],
+        summaries=[_summary(stale=True)],  # excluded → empty history
+        pending=[stale],
+    )
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        reflection.rules_store,
+        "supersede_proposal",
+        lambda aid, pid, now=None: superseded.append(pid),
+    )
+    report = reflection.reflect("a", _NOW)
+    # No fresh memory → no LLM call / no proposals, but cleanup still ran.
+    assert report.llm_calls == 0 and created == []
+    assert report.superseded == 1 and superseded == [stale.id]
+
+
+def test_same_text_different_priority_both_reach_review(monkeypatch: pytest.MonkeyPatch) -> None:
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[
+            {"action": "add", "text": "be kind", "priority": 0},
+            {"action": "add", "text": "be kind", "priority": 5},
+        ],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Priority is part of the change identity → a priority correction is not a dup.
+    assert report.proposed == 2 and report.deduped == 0 and len(created) == 2
+
+
+def test_add_restating_active_rule_suppressed_regardless_of_priority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    active = _rule(rid="r1", text="be kind", priority=0)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "be kind", "priority": 9}],  # different priority
+        rules=[active],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Re-adding an active rule's content is suppressed even at a new priority —
+    # re-prioritizing an existing rule is an amend, not a duplicate add.
+    assert report.proposed == 0 and report.deduped == 1 and created == []
+
+
+def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Tiny budget forces compact_text to make a model call before the proposal call.
+    monkeypatch.setenv("AGENT_COGNITION_REFLECTION_INPUT_CHARS", "10")
+    canned, created = _wire(monkeypatch, proposals=[{"action": "add", "text": "x"}])
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1 and len(created) == 1
+    # 1 compaction call (input over budget) + 1 proposal call.
+    assert report.llm_calls == 2 and canned.text_calls
+
+
 def test_stale_pending_is_superseded_and_does_not_block_fresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -612,11 +677,26 @@ def test_dedupe_key_normalizes_text_mode_and_handles_retire() -> None:
     )
     retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
     # add (advisory default): mode folded in, no predicate fingerprint.
-    assert reflection._dedupe_key_of(add) == ("add", None, "be kind", "advisory", None)
+    assert reflection._dedupe_key_of(add) == ("add", None, "be kind", "advisory", None, None)
     # same text but enforced + predicate → a distinct key (not a duplicate of add).
     assert reflection._dedupe_key_of(enforced) != reflection._dedupe_key_of(add)
     assert reflection._dedupe_key_of(enforced)[3] == "enforced"
-    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None, None, None)
+    assert reflection._dedupe_key_of(retire) == ("retire", "r1", None, None, None, None)
+
+
+def test_restates_active_rule_matches_add_content_only() -> None:
+    content = {("be kind", "advisory", None)}
+    retire = reflection._build_proposal("a", ProposalAction.RETIRE, [], _NOW, target_rule_id="r1")
+    bad_text = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": 123}
+    )
+    add_match = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "Be  Kind", "priority": 7}
+    )
+    # Only a content-matching ADD is a restatement; non-ADD and non-str text are not.
+    assert reflection._restates_active_rule(retire, content) is False
+    assert reflection._restates_active_rule(bad_text, content) is False
+    assert reflection._restates_active_rule(add_match, content) is True  # priority ignored
 
 
 @pytest.mark.parametrize(

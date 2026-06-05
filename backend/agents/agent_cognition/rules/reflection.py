@@ -139,7 +139,9 @@ class ReflectionReport(BaseModel):
     ``deduped`` counts suggestions skipped as duplicates of an existing *fresh*
     pending proposal (or of an earlier suggestion in the same batch);
     ``superseded`` counts stale-evidence pending proposals retired this run;
-    ``llm_calls`` is ``0`` on the empty-history fast path and ``1`` otherwise.
+    ``llm_calls`` is ``0`` on the empty-history fast path, otherwise the true
+    count of model calls made (the proposal call plus any compaction or
+    structured-output retry calls).
     """
 
     agent_id: str
@@ -148,6 +150,36 @@ class ReflectionReport(BaseModel):
     deduped: int = 0
     superseded: int = 0
     llm_calls: int = 0
+
+
+class _CallCountingClient:
+    """Wrap an ``LLMClient`` and count every model call routed through it.
+
+    ``compact_text`` may call the model one or more times before the proposal
+    call, and ``complete_validated`` may retry on a schema miss; counting all of
+    them keeps ``ReflectionReport.llm_calls`` honest. Only ``complete`` and
+    ``complete_json`` are intercepted; every other attribute delegates unchanged.
+
+    Invariant: ``calls`` equals the number of ``complete`` + ``complete_json``
+    invocations made through this wrapper.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+        self.calls = 0
+
+    def complete(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._inner.complete(*args, **kwargs)
+
+    def complete_json(self, *args: Any, **kwargs: Any) -> Any:
+        self.calls += 1
+        return self._inner.complete_json(*args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        # Reached only for attributes not defined on the wrapper (e.g.
+        # get_max_context_tokens); delegate them to the wrapped client.
+        return getattr(self._inner, name)
 
 
 def reflect(agent_id: str, now: datetime) -> ReflectionReport:
@@ -197,17 +229,12 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
 
     report = ReflectionReport(agent_id=agent_id)
 
-    summaries = _recent_summaries(agent_id)
-    if not summaries:
-        return report  # empty history → no LLM call, no proposals
-
-    active_rules = rules_store.list_rules(agent_id, status=RuleStatus.ACTIVE)
+    # Retire stale-evidence pending proposals first. This is recompute cleanup that
+    # needs no model output or fresh memory, so it runs before *any* fast-path
+    # return (all-stale history below, or an LLM outage during _propose) — an
+    # unapprovable stale row must never be stranded in the HITL queue waiting on a
+    # rollup or the provider. Only *fresh* pending proposals gate the dedupe.
     pending = rules_store.list_proposals(agent_id, status=ProposalStatus.PENDING)
-
-    # Retire stale-evidence pending proposals first — this is recompute cleanup
-    # that needs no model output, so it must run *before* the LLM call and stay
-    # decoupled from LLM availability (a provider outage can't strand them as
-    # unapprovable pending rows). Only *fresh* pending proposals gate the dedupe.
     fresh_pending: list[RuleProposal] = []
     for proposal in pending:
         if proposal.stale_evidence:
@@ -216,17 +243,31 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
         else:
             fresh_pending.append(proposal)
 
-    llm = get_client("cognition")
+    summaries = _recent_summaries(agent_id)
+    if not summaries:
+        return report  # no fresh memory → cleanup done, but no LLM call / proposals
+
+    active_rules = rules_store.list_rules(agent_id, status=RuleStatus.ACTIVE)
+
+    # Count *every* model call (compaction can call the LLM before the proposal
+    # call, and structured-output validation can retry) so the report reflects
+    # true usage for schedulers/budgets/observability rather than a hard-coded 1.
+    llm = _CallCountingClient(get_client("cognition"))
     result = _propose(summaries, active_rules, llm)
-    report.llm_calls = 1
+    report.llm_calls = llm.calls
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
     active_by_id = {r.id: r for r in active_rules}
-    # Dedupe against both fresh pending proposals and active rules: an ADD that
-    # restates an already-active rule's text is suppressed so approval can't
-    # activate a duplicate guardrail.
+    # Two distinct suppressions, deliberately separated:
+    #  * ``seen`` is the full proposed-change identity (incl. priority) — an
+    #    identical pending proposal is deduped, but a priority-only correction is
+    #    a different change and still reaches review.
+    #  * ``active_content`` suppresses an ADD that restates an *active* rule's
+    #    content (text/mode/predicate, priority-independent) so approval can't
+    #    activate a duplicate guardrail; re-prioritizing an existing rule is an
+    #    amend, never a duplicate add.
     seen = {_dedupe_key_of(p) for p in fresh_pending}
-    seen |= {_active_rule_add_key(r) for r in active_rules}
+    active_content = {_rule_content_id(r) for r in active_rules}
     cap = _max_proposals()
 
     for raw in result.proposals:
@@ -241,7 +282,7 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
             report.dropped_invalid += 1
             continue
         key = _dedupe_key_of(proposal)
-        if key in seen:
+        if key in seen or _restates_active_rule(proposal, active_content):
             report.deduped += 1
             continue
         rules_store.create_proposal(agent_id, proposal)
@@ -461,49 +502,61 @@ def _predicate_fingerprint(predicate: Any) -> str | None:
     return None
 
 
-# (action, target_rule_id, normalized_text, mode, predicate_fingerprint)
-_DedupeKey = tuple[str, str | None, str | None, str | None, str | None]
+# (action, target_rule_id, normalized_text, mode, predicate_fingerprint, priority)
+_DedupeKey = tuple[str, str | None, str | None, str | None, str | None, int | None]
+# (normalized_text, mode, predicate_fingerprint) — priority-independent rule content
+_ContentId = tuple[str, str, str | None]
 
 
 def _dedupe_key_of(proposal: RuleProposal) -> _DedupeKey:
     """Identity used to suppress re-proposing the same change.
 
     Two proposals collide when they share an action, a target rule, and — for
-    add/amend — the same normalized text, ``mode``, and (enforced only) predicate.
-    ``mode``/predicate are part of the identity so an advisory and an enforced
-    rule with identical text are *not* treated as duplicates (they have different
-    runtime behavior). Retire proposals carry no rule body, so they collide on
-    ``(action, target, None, None, None)``.
+    add/amend — the same normalized text, ``mode``, (enforced only) predicate, and
+    ``priority``. ``mode``/predicate are part of the identity so an advisory and an
+    enforced rule with identical text are *not* duplicates (different runtime
+    behavior); ``priority`` is included because it is persisted on approval and
+    affects rule ordering, so a proposal that only corrects priority is a distinct
+    change that must still reach review. Retire proposals carry no rule body, so
+    they collide on ``(action, target, None, None, None, None)``.
     """
     text: str | None = None
     mode: str | None = None
     predicate_fp: str | None = None
+    priority: int | None = None
     if isinstance(proposal.proposed_rule, dict):
         candidate = proposal.proposed_rule.get("text")
         if isinstance(candidate, str):
             text = _normalize_text(candidate)
         mode = proposal.proposed_rule.get("mode") or RuleMode.ADVISORY.value
         predicate_fp = _predicate_fingerprint(proposal.proposed_rule.get("predicate"))
-    return (proposal.action.value, proposal.target_rule_id, text, mode, predicate_fp)
+        priority = proposal.proposed_rule.get("priority")
+    return (proposal.action.value, proposal.target_rule_id, text, mode, predicate_fp, priority)
 
 
-def _active_rule_add_key(rule: Rule) -> _DedupeKey:
-    """Dedupe key under which an active rule already 'occupies' the ADD space.
+def _rule_content_id(rule: Rule) -> _ContentId:
+    """Priority-independent content identity of an active rule for ADD suppression.
 
-    An ADD whose normalized text, ``mode``, and predicate match an active rule is
-    a restatement of an existing guardrail (the untrusted model ignoring the
-    prompt's "do not restate" instruction); seeding ``seen`` with this key drops
-    it before it can become a duplicate rule on approval. Mode/predicate are part
-    of the key so proposing an *enforced* guardrail is never suppressed by an
-    *advisory* rule of the same text.
+    An ADD whose text/mode/predicate match an active rule restates an existing
+    guardrail (the untrusted model ignoring the prompt's "do not restate"
+    instruction). Priority is intentionally excluded: re-prioritizing an existing
+    rule is an *amend*, never a duplicate add, so an ADD at any priority is still
+    suppressed. Mode/predicate are included so an *enforced* guardrail is never
+    suppressed by an *advisory* rule of the same text.
     """
-    return (
-        ProposalAction.ADD.value,
-        None,
-        _normalize_text(rule.text),
-        rule.mode.value,
-        _predicate_fingerprint(rule.predicate),
-    )
+    return (_normalize_text(rule.text), rule.mode.value, _predicate_fingerprint(rule.predicate))
+
+
+def _restates_active_rule(proposal: RuleProposal, active_content: set[_ContentId]) -> bool:
+    """True when ``proposal`` is an ADD restating an active rule's content."""
+    if proposal.action != ProposalAction.ADD or not isinstance(proposal.proposed_rule, dict):
+        return False
+    text = proposal.proposed_rule.get("text")
+    if not isinstance(text, str):
+        return False
+    mode = proposal.proposed_rule.get("mode") or RuleMode.ADVISORY.value
+    predicate_fp = _predicate_fingerprint(proposal.proposed_rule.get("predicate"))
+    return (_normalize_text(text), mode, predicate_fp) in active_content
 
 
 # ---------------------------------------------------------------------------
