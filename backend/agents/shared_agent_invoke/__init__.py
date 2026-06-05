@@ -10,6 +10,17 @@ than ``SANDBOX_AGENT_ID``) is enforced by middleware in
 ``agent_sandbox_runtime/entrypoint.py``.
 """
 
+from .cognition_envelope import (
+    CognitionEnvelopeError,
+    open_cognition_runtime,
+    unwrap_cognition_request,
+)
 from .shim import InvokeEnvelope, mount_invoke_shim
 
-__all__ = ["InvokeEnvelope", "mount_invoke_shim"]
+__all__ = [
+    "InvokeEnvelope",
+    "mount_invoke_shim",
+    "CognitionEnvelopeError",
+    "open_cognition_runtime",
+    "unwrap_cognition_request",
+]

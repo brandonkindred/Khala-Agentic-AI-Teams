@@ -18,12 +18,17 @@ import io
 import logging
 import time
 import uuid
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from .cognition_envelope import (
+    CognitionEnvelopeError,
+    open_cognition_runtime,
+    unwrap_cognition_request,
+)
 from .dispatch import AgentNotRunnableError, invoke_entrypoint
 from .limits import (
     cap_output,
@@ -46,6 +51,9 @@ class InvokeEnvelope(BaseModel):
     error: str | None = None
     truncated: bool = False
     timeout_hit: bool = False
+    # Trusted, out-of-band record of every tool call the cognition broker
+    # actually dispatched — populated even when the agent's writeback is dropped.
+    tool_audit: list[dict[str, Any]] = Field(default_factory=list)
 
 
 def mount_invoke_shim(app: FastAPI) -> None:
@@ -72,6 +80,15 @@ def mount_invoke_shim(app: FastAPI) -> None:
 
         body: Any = await read_json_capped(request, max_bytes=max_payload_bytes())
 
+        # Unwrap a cognition-wrapped request: the entrypoint receives only its
+        # declared `input`; advisory rules + memory digest ride a side channel and
+        # the broker's tool calls land in `tool_audit`. An unmarked body (or an
+        # image without the cognition package) passes through unchanged.
+        try:
+            agent_body, cognition_block = unwrap_cognition_request(body)
+        except CognitionEnvelopeError as exc:
+            raise HTTPException(status_code=400, detail=f"Malformed cognition envelope: {exc}")
+
         trace_id = str(uuid.uuid4())
         logs_tail: list[str] = []
         handler = _InMemoryLogHandler(logs_tail)
@@ -79,15 +96,19 @@ def mount_invoke_shim(app: FastAPI) -> None:
         root.addHandler(handler)
         start = time.perf_counter()
         stdout_buf, stderr_buf = io.StringIO(), io.StringIO()
+        tool_audit: list[dict[str, Any]] = []
         error: str | None = None
         output: Any | None = None
         dispatch_error: AgentNotRunnableError | None = None
         timeout_hit = False
         timeout_s = _resolve_exec_timeout(manifest)
         try:
-            with redirect_stdout(stdout_buf), redirect_stderr(stderr_buf):
+            with ExitStack() as stack:
+                stack.enter_context(redirect_stdout(stdout_buf))
+                stack.enter_context(redirect_stderr(stderr_buf))
+                stack.enter_context(open_cognition_runtime(cognition_block, tool_audit))
                 output = await asyncio.wait_for(
-                    invoke_entrypoint(manifest.source.entrypoint, body),
+                    invoke_entrypoint(manifest.source.entrypoint, agent_body),
                     timeout=timeout_s,
                 )
         except AgentNotRunnableError as exc:
@@ -128,6 +149,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 trace_id=trace_id,
                 logs_tail=logs_tail[-50:],
                 error=f"AgentNotRunnable: {dispatch_error}",
+                tool_audit=tool_audit,
             )
             raise HTTPException(status_code=500, detail=envelope.model_dump())
 
@@ -140,6 +162,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
             error=error,
             truncated=truncated,
             timeout_hit=timeout_hit,
+            tool_audit=tool_audit,
         )
         if timeout_hit:
             raise HTTPException(status_code=504, detail=envelope.model_dump())

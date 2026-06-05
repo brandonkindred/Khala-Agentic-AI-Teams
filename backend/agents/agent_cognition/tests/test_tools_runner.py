@@ -1,0 +1,324 @@
+"""Tests for the brokered tool loop (Step 7).
+
+Uses a scripted fake LLM (the ``chat`` protocol of
+``llm_service.tool_loop.complete_json_with_tool_loop``) and fake handlers — no
+Postgres, no real model.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timezone
+
+import pytest
+
+from agent_cognition.models import (
+    EventKind,
+    Rule,
+    RuleMode,
+    RuleSource,
+    RuleStatus,
+)
+from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
+from agent_cognition.tools.channel import collect_tool_audit
+from agent_cognition.tools.runner import drive_platform_bound_loop, run_tool_loop
+
+_NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+class ScriptedLLM:
+    """Returns scripted ``chat`` results and records the messages it was sent."""
+
+    def __init__(self, script: list[dict]) -> None:
+        self._script = list(script)
+        self.seen_messages: list[list[dict]] = []
+
+    def chat(self, messages, **_kwargs):
+        self.seen_messages.append([dict(m) for m in messages])
+        return self._script.pop(0)
+
+
+def _tool_call(name: str, args: dict, call_id: str = "c1") -> dict:
+    return {
+        "__tool_calls__": [
+            {
+                "id": call_id,
+                "type": "function",
+                "function": {"name": name, "arguments": args},
+            }
+        ]
+    }
+
+
+def _enforced_rule(predicate: dict, *, rid: str = "r1", text: str = "rule") -> Rule:
+    return Rule(
+        id=rid,
+        agent_id="agent-x",
+        text=text,
+        mode=RuleMode.ENFORCED,
+        status=RuleStatus.ACTIVE,
+        predicate=predicate,
+        rationale=None,
+        source=RuleSource.OPERATOR,
+        evidence=[],
+        needs_review=False,
+        priority=0,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
+def _toolset(
+    name: str, handler, *, site: ExecutionSite = ExecutionSite.SANDBOX_LOCAL
+) -> BoundToolset:
+    definition = {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": "test tool",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+        },
+    }
+    return BoundToolset(
+        (BoundTool(tool_id=name, site=site, definitions=(definition,), handlers={name: handler}),)
+    )
+
+
+def _run(llm, toolset, enforced_rules=None, **kw):
+    return run_tool_loop(
+        llm,
+        agent_id="agent-x",
+        source_run_id="run-1",
+        user_prompt="do it",
+        system_prompt="be good",
+        toolset=toolset,
+        enforced_rules=enforced_rules or [],
+        clock=lambda: _NOW,
+        **kw,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Each tool call writes memory events
+# ---------------------------------------------------------------------------
+def test_tool_call_writes_memory_events() -> None:
+    calls = []
+
+    def echo(args):
+        calls.append(args)
+        return {"echoed": args}
+
+    llm = ScriptedLLM([_tool_call("echo", {"x": 1}), {"final": True}])
+    result, audit = _run(llm, _toolset("echo", echo))
+
+    assert result == {"final": True}
+    assert calls == [{"x": 1}]
+    # One tool_call (intent) + one outcome event; one ToolCall summary.
+    kinds = [e.kind for e in audit.events]
+    assert kinds == [EventKind.TOOL_CALL, EventKind.OUTCOME]
+    assert [e.source_seq for e in audit.events] == [0, 1]
+    assert len(audit.tool_calls) == 1
+    tc = audit.tool_calls[0]
+    assert tc.tool_id == "echo" and tc.ok is True
+    assert tc.result == {"echoed": {"x": 1}}
+
+
+def test_source_seq_starts_at_offset() -> None:
+    llm = ScriptedLLM([_tool_call("echo", {}), {"final": True}])
+    _result, audit = _run(llm, _toolset("echo", lambda a: a), source_seq_start=10)
+    assert [e.source_seq for e in audit.events] == [10, 11]
+
+
+# ---------------------------------------------------------------------------
+# forbid_tool is refused BEFORE the handler runs (no side effect)
+# ---------------------------------------------------------------------------
+def test_forbidden_tool_refused_before_dispatch() -> None:
+    side_effects = []
+
+    def dangerous(args):
+        side_effects.append(args)  # must never run
+        return {"ran": True}
+
+    rule = _enforced_rule(
+        {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "dangerous"}},
+        text="never run dangerous",
+    )
+    # The model calls the forbidden tool, sees the refusal, then returns final.
+    llm = ScriptedLLM([_tool_call("dangerous", {"k": 1}), {"final": True}])
+    result, audit = _run(llm, _toolset("dangerous", dangerous), enforced_rules=[rule])
+
+    assert side_effects == []  # handler never dispatched
+    assert result == {"final": True}
+    # The blocked call is recorded (trusted audit) as a single tool_call event.
+    assert [e.kind for e in audit.events] == [EventKind.TOOL_CALL]
+    assert audit.events[0].data["blocked"] is True
+    assert audit.tool_calls[0].ok is False
+    assert "never run dangerous" in (audit.tool_calls[0].error or "")
+    # The model was handed a structured refusal as the tool result.
+    tool_msgs = [m for round_ in llm.seen_messages for m in round_ if m.get("role") == "tool"]
+    assert any("forbidden_by_rule" in m["content"] for m in tool_msgs)
+
+
+def test_unrelated_enforced_rule_does_not_block() -> None:
+    rule = _enforced_rule(
+        {"phase": "tool_gate", "check": {"op": "forbid_tool", "tool_id": "something_else"}}
+    )
+    llm = ScriptedLLM([_tool_call("echo", {"x": 1}), {"final": True}])
+    result, audit = _run(llm, _toolset("echo", lambda a: {"ok": a}), enforced_rules=[rule])
+    assert result == {"final": True}
+    assert any(e.kind is EventKind.OUTCOME for e in audit.events)
+
+
+# ---------------------------------------------------------------------------
+# Handler exceptions become error events, loop continues
+# ---------------------------------------------------------------------------
+def test_handler_exception_records_error_event() -> None:
+    def boom(_args):
+        raise RuntimeError("kaboom")
+
+    llm = ScriptedLLM([_tool_call("boom", {}), {"final": True}])
+    result, audit = _run(llm, _toolset("boom", boom))
+    assert result == {"final": True}
+    assert [e.kind for e in audit.events] == [EventKind.TOOL_CALL, EventKind.ERROR]
+    assert audit.tool_calls[0].ok is False
+    assert "kaboom" in (audit.tool_calls[0].error or "")
+
+
+def test_handler_failure_result_marks_outcome_not_ok() -> None:
+    llm = ScriptedLLM([_tool_call("op", {}), {"final": True}])
+    result, audit = _run(llm, _toolset("op", lambda a: {"success": False, "error": "nope"}))
+    assert result == {"final": True}
+    # A {"success": False} result is logged as an error-kind outcome.
+    assert audit.events[-1].kind is EventKind.ERROR
+    assert audit.tool_calls[0].ok is False
+
+
+# ---------------------------------------------------------------------------
+# Secret stripping
+# ---------------------------------------------------------------------------
+def test_secrets_are_stripped_from_memory() -> None:
+    def login(args):
+        return {"token": "super-secret-value", "ok": True}
+
+    llm = ScriptedLLM(
+        [_tool_call("login", {"password": "hunter2", "user": "bob"}), {"final": True}]
+    )
+    _result, audit = _run(llm, _toolset("login", login))
+    blob = json.dumps([e.model_dump(mode="json") for e in audit.events])
+    assert "hunter2" not in blob
+    assert "super-secret-value" not in blob
+    assert "bob" in blob  # non-secret args are retained
+
+
+# ---------------------------------------------------------------------------
+# Trusted audit reaches the channel sink even when the writeback is dropped
+# ---------------------------------------------------------------------------
+def test_tool_calls_reach_channel_sink() -> None:
+    llm = ScriptedLLM([_tool_call("echo", {"x": 1}), {"final": True}])
+    with collect_tool_audit() as sink:
+        _result, audit = _run(llm, _toolset("echo", lambda a: a))
+    # The sink (what the shim collects out-of-band) carries every brokered call,
+    # independent of the model's self-reported writeback.
+    assert len(sink) == 1
+    assert sink[0]["tool_id"] == "echo"
+    assert sink[0]["ok"] is True
+    # And it matches the in-process audit return value.
+    assert sink[0]["tool_id"] == audit.tool_calls[0].tool_id
+
+
+def test_runner_works_without_an_open_channel() -> None:
+    # No collect_tool_audit context: record_tool_audit is a no-op, loop still runs.
+    llm = ScriptedLLM([_tool_call("echo", {}), {"final": True}])
+    result, audit = _run(llm, _toolset("echo", lambda a: a))
+    assert result == {"final": True}
+    assert len(audit.tool_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# Platform-bound proxy-driven loop (stubbed runtime) — no secret exposure
+# ---------------------------------------------------------------------------
+def test_platform_bound_loop_keeps_secret_platform_side() -> None:
+    secret = "PLATFORM-ONLY-API-KEY"
+
+    def http_call(args):
+        # The handler *uses* the secret internally but never returns it.
+        assert secret  # platform-side credential
+        return {"status": 200, "body": f"fetched {args.get('url')}"}
+
+    toolset = _toolset("http__call", http_call, site=ExecutionSite.PLATFORM_BOUND)
+    runtime = ScriptedLLM([_tool_call("http__call", {"url": "/data"}), {"final": "done"}])
+    result, audit = drive_platform_bound_loop(
+        runtime,
+        agent_id="agent-x",
+        source_run_id="run-1",
+        user_prompt="fetch",
+        system_prompt="sys",
+        toolset=toolset,
+        enforced_rules=[],
+        clock=lambda: _NOW,
+    )
+    assert result == {"final": "done"}
+    assert audit.tool_calls[0].ok is True
+    # The secret never crossed back to the (sandbox) runtime in any message.
+    exchanged = json.dumps(runtime.seen_messages)
+    assert secret not in exchanged
+    # But the tool genuinely ran (its result reached the runtime).
+    assert "fetched /data" in exchanged
+
+
+def test_default_clock_is_used_when_not_injected() -> None:
+    # Exercise the real _utcnow default (no clock= override).
+    llm = ScriptedLLM([_tool_call("echo", {}), {"final": True}])
+    _result, audit = run_tool_loop(
+        llm,
+        agent_id="agent-x",
+        source_run_id="run-1",
+        user_prompt="do it",
+        system_prompt="be good",
+        toolset=_toolset("echo", lambda a: a),
+        enforced_rules=[],
+    )
+    assert audit.events[0].occurred_at.tzinfo is not None
+
+
+# ---------------------------------------------------------------------------
+# _sanitize internals
+# ---------------------------------------------------------------------------
+def test_sanitize_covers_all_branches() -> None:
+    from agent_cognition.tools.runner import _MAX_STR, _sanitize
+
+    class Weird:
+        def __repr__(self) -> str:
+            return "W" * (_MAX_STR + 10)
+
+    out = _sanitize(
+        {
+            "password": "secret",  # redacted
+            "keep": "ok",  # plain str
+            "items": [1, 2, {"token": "x"}],  # list + nested secret
+            "long": "a" * (_MAX_STR + 5),  # truncated string
+            "obj": Weird(),  # unknown object → truncated repr
+            "deep": {"a": {"b": {"c": {"d": {"e": 1}}}}},  # exceeds depth
+        }
+    )
+    assert out["password"] == "***"
+    assert out["keep"] == "ok"
+    assert out["items"][2]["token"] == "***"
+    assert out["long"].endswith("…<truncated>")
+    assert out["obj"].endswith("…<truncated>")
+    # The deepest level is replaced with the depth sentinel.
+    assert "<truncated:depth>" in repr(out["deep"])
+
+
+def test_drive_platform_bound_rejects_non_platform_tool() -> None:
+    toolset = _toolset("echo", lambda a: a, site=ExecutionSite.SANDBOX_LOCAL)
+    with pytest.raises(AssertionError, match="not platform_bound"):
+        drive_platform_bound_loop(
+            ScriptedLLM([{"final": True}]),
+            agent_id="agent-x",
+            source_run_id="run-1",
+            user_prompt="x",
+            system_prompt="y",
+            toolset=toolset,
+            enforced_rules=[],
+        )
