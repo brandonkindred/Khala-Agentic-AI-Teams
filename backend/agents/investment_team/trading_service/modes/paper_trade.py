@@ -386,8 +386,9 @@ def _translate(
 
     for event in live_events:
         if isinstance(event, WarmupBarEvent):
-            warmup_buffer.setdefault(event.bar.symbol, []).append(_bar_to_ohlcv(event.bar))
-            yield BarEvent(bar=event.bar, is_warmup=True)
+            bar = _sanitize_bar_volume(event.bar)
+            warmup_buffer.setdefault(bar.symbol, []).append(_bar_to_ohlcv(bar))
+            yield BarEvent(bar=bar, is_warmup=True)
         elif isinstance(event, CutoverEvent):
             cutover_seen["ts"] = event.cutover_ts
             # Issue #375 — validate the warm-up window now that we have
@@ -445,7 +446,7 @@ def _translate(
             warning = gap_monitor.observe(event.bar.symbol, ts)
             if warning is not None and warning not in warnings:
                 warnings.append(warning)
-            yield BarEvent(bar=event.bar, is_warmup=False)
+            yield BarEvent(bar=_sanitize_bar_volume(event.bar), is_warmup=False)
         elif isinstance(event, LiveStreamEnd):
             # Preserve the reason the _should_stop closure already recorded;
             # LiveStream only knows a generic "stopped"-style label.
@@ -462,6 +463,24 @@ def _translate(
 
     # Upstream iterator exhausted without a terminal event.
     yield EndOfStreamEvent(reason="upstream_end")
+
+
+def _sanitize_bar_volume(bar):
+    """Return ``bar`` with a non-finite volume (NaN/±inf) coerced to 0.0.
+
+    The engine and strategy consume the ``Bar`` this stream yields directly, so
+    a provider's non-finite volume must be neutralised here too — not only on
+    the ``OHLCVBar`` copy buffered for the snapshot/fingerprint. Otherwise a
+    paper session executes against NaN/inf volume while the cached snapshot
+    records 0.0, and session behaviour diverges from the sanitized replay.
+
+    Postconditions:
+        Returns the same ``Bar`` when its volume is finite; otherwise a copy
+        with ``volume=0.0`` and every other field preserved.
+    """
+    if math.isfinite(bar.volume):
+        return bar
+    return bar.model_copy(update={"volume": 0.0})
 
 
 def _bar_to_ohlcv(bar) -> OHLCVBar:
