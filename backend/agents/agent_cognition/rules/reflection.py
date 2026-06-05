@@ -95,11 +95,15 @@ _TASK_INSTRUCTION = (
     "- `text`: the rule's instruction text (required for add and amend; omit "
     "for retire).\n"
     '- `mode`: "advisory" (prompt guidance) or "enforced" (a hard, '
-    'machine-checked pre/postcondition); default "advisory".\n'
+    'machine-checked pre/postcondition). For add, default "advisory"; for amend, '
+    "omit to keep the existing rule's mode.\n"
     '- `predicate`: required only when mode is "enforced" — the rule\'s '
-    'machine-checkable predicate as a JSON object {"phase": ..., "check": ...}.\n'
+    'machine-checkable predicate as a JSON object {"phase": ..., "check": ...}. '
+    "On an amend that keeps an enforced rule enforced, omit it to inherit the "
+    "rule's current predicate (shown above); supply it only to change it.\n"
     "- `rationale`: a short why, citing what in the memory motivates it.\n"
-    "- `priority`: integer, higher applies first (default 0).\n"
+    "- `priority`: integer, higher applies first (add default 0; on amend, omit "
+    "to keep the existing priority).\n"
     "No other keys."
 )
 
@@ -107,18 +111,21 @@ _TASK_INSTRUCTION = (
 class _ProposedAction(BaseModel):
     """One model-authored proposed rule change (narrow LLM output schema).
 
-    ``action``/``mode`` are plain strings (not enums) so a single out-of-range
-    value from the model is dropped during materialization rather than failing
-    validation of the whole batch.
+    ``action`` is a plain string (not an enum) so a single out-of-range value
+    from the model is dropped during materialization rather than failing
+    validation of the whole batch. ``mode`` and ``priority`` are optional —
+    ``None`` means "unspecified", which on an AMEND inherits the target rule's
+    current value (so an ordinary text amend can't silently downgrade an enforced
+    guardrail or reset priority) and on an ADD falls back to the default.
     """
 
     action: str = ""
     target_rule_id: str | None = None
     text: str | None = None
-    mode: str = RuleMode.ADVISORY.value
+    mode: str | None = None
     predicate: dict[str, Any] | None = None
     rationale: str | None = None
-    priority: int = 0
+    priority: int | None = None
 
 
 class _ReflectionResult(BaseModel):
@@ -288,7 +295,11 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
             report.dropped_invalid += 1
             continue
         key = _dedupe_key_of(proposal)
-        if key in seen or _restates_active_rule(proposal, active_content):
+        if (
+            key in seen
+            or _restates_active_rule(proposal, active_content)
+            or _is_noop_amend(proposal, active_by_id)
+        ):
             report.deduped += 1
             continue
         rules_store.create_proposal(agent_id, proposal)
@@ -420,9 +431,12 @@ def _materialize(
         )
         return None
 
-    proposed_rule = _build_proposed_rule(item)
+    # For an amend the target is guaranteed active (checked above); pass it so
+    # _build_proposed_rule can inherit unspecified mode/predicate/priority.
+    target_rule = active_by_id.get(item.target_rule_id) if action == ProposalAction.AMEND else None
+    proposed_rule = _build_proposed_rule(item, target_rule)
     if proposed_rule is None:
-        return None  # invalid/absent enforced predicate (already logged)
+        return None  # invalid/absent enforced predicate or out-of-range priority
 
     target = item.target_rule_id if action == ProposalAction.AMEND else None
     return _build_proposal(
@@ -435,43 +449,64 @@ def _is_active_target(target_rule_id: str | None, active_by_id: dict[str, Rule])
     return bool(target_rule_id) and target_rule_id in active_by_id
 
 
-def _build_proposed_rule(item: _ProposedAction) -> dict[str, Any] | None:
+def _build_proposed_rule(
+    item: _ProposedAction, target_rule: Rule | None = None
+) -> dict[str, Any] | None:
     """Build the ``proposed_rule`` dict consumed by the store's approve path.
 
     Emits only the keys ``store._build_rule_from_spec`` reads and stamps
-    ``source='derived'``. Returns ``None`` (the caller counts a drop) when the
-    model proposes an enforced rule whose predicate is absent or fails
-    :func:`is_valid_predicate`, or a ``priority`` outside the signed 32-bit range
-    of the ``agent_cognition_rules.priority`` INTEGER column — either could never
-    be approved (the approve gate re-validates / the DB write would overflow), so
-    it is dropped at the source rather than parked unapprovable in the queue.
+    ``source='derived'``. Unspecified (``None``) ``mode``/``priority`` and an
+    omitted enforced predicate are **inherited from** ``target_rule`` on an amend
+    (else defaulted), so an ordinary text amend can't silently downgrade an
+    enforced guardrail to advisory, drop for a missing predicate, or reset
+    priority. Returns ``None`` (the caller counts a drop) when the resolved rule
+    is enforced but its predicate is absent or fails :func:`is_valid_predicate`,
+    or the resolved ``priority`` is outside the signed 32-bit range of the
+    ``agent_cognition_rules.priority`` INTEGER column — either could never be
+    approved (the approve gate re-validates / the DB write would overflow), so it
+    is dropped at the source rather than parked unapprovable in the queue.
+
+    Preconditions: when ``item`` is an amend, ``target_rule`` is its active target.
     """
+    raw_mode = (
+        item.mode
+        if item.mode is not None
+        else (target_rule.mode.value if target_rule else RuleMode.ADVISORY.value)
+    )
     try:
-        mode = RuleMode(item.mode)
+        mode = RuleMode(raw_mode)
     except ValueError:
-        logger.warning("reflection: unknown rule mode %r; dropping", item.mode)
+        logger.warning("reflection: unknown rule mode %r; dropping", raw_mode)
         return None
-    if not (_PG_INT32_MIN <= item.priority <= _PG_INT32_MAX):
+    priority = (
+        item.priority if item.priority is not None else (target_rule.priority if target_rule else 0)
+    )
+    if not (_PG_INT32_MIN <= priority <= _PG_INT32_MAX):
         logger.warning(
             "reflection: priority %d is outside the INT32 rule-column range; dropping",
-            item.priority,
+            priority,
         )
         return None
     spec: dict[str, Any] = {
         "text": item.text,
         "mode": mode.value,
         "source": RuleSource.DERIVED.value,
-        "priority": item.priority,
+        "priority": priority,
     }
     if item.rationale:
         spec["rationale"] = item.rationale
     if mode == RuleMode.ENFORCED:
-        if not isinstance(item.predicate, dict) or not is_valid_predicate(item.predicate):
+        # Inherit the target's predicate when the model omits it on an amend that
+        # keeps the rule enforced; otherwise the model must supply a valid one.
+        predicate = item.predicate
+        if predicate is None and target_rule is not None and target_rule.mode == RuleMode.ENFORCED:
+            predicate = target_rule.predicate
+        if not isinstance(predicate, dict) or not is_valid_predicate(predicate):
             logger.warning(
                 "reflection: enforced proposal has an absent/invalid predicate; dropping"
             )
             return None
-        spec["predicate"] = item.predicate
+        spec["predicate"] = predicate
     return spec
 
 
@@ -573,6 +608,28 @@ def _restates_active_rule(proposal: RuleProposal, active_content: set[_ContentId
     return (_normalize_text(text), mode, predicate_fp) in active_content
 
 
+def _is_noop_amend(proposal: RuleProposal, active_by_id: dict[str, Rule]) -> bool:
+    """True when an AMEND would replace its target with identical content.
+
+    The resolved text/mode/predicate/priority all equal the active target's, so
+    approving it would retire the rule and insert an identical replacement —
+    needless churn and lineage/evidence change for no behavior change. Such a
+    no-op is suppressed (counted ``deduped``) before it reaches the queue.
+    """
+    if proposal.action != ProposalAction.AMEND or not isinstance(proposal.proposed_rule, dict):
+        return False
+    target = active_by_id.get(proposal.target_rule_id)
+    if target is None:
+        return False
+    pr = proposal.proposed_rule
+    return (
+        _normalize_text(pr.get("text") or "") == _normalize_text(target.text)
+        and (pr.get("mode") or RuleMode.ADVISORY.value) == target.mode.value
+        and _predicate_fingerprint(pr.get("predicate")) == _predicate_fingerprint(target.predicate)
+        and pr.get("priority") == target.priority
+    )
+
+
 # ---------------------------------------------------------------------------
 # Rendering helpers (pure)
 # ---------------------------------------------------------------------------
@@ -586,12 +643,20 @@ def _render_summaries_text(summaries: list[PeriodSummary]) -> str:
 
 
 def _render_rules_text(rules: list[Rule]) -> str:
-    """One line per active rule, including its id so the model can target it."""
+    """One line per active rule, including its id so the model can target it.
+
+    Enforced rules also render their predicate so an amend can keep (or knowingly
+    change) it instead of guessing — without it the model can only see the text
+    and would drop the amend for a missing predicate or downgrade it to advisory.
+    """
     if not rules:
         return "## Current rules\n(none)"
     lines = ["## Current rules"]
     for r in rules:
-        lines.append(f"- id={r.id} [{r.mode.value}, priority={r.priority}] {r.text}")
+        suffix = ""
+        if r.mode == RuleMode.ENFORCED and r.predicate:
+            suffix = f" predicate={json.dumps(r.predicate, sort_keys=True, separators=(',', ':'))}"
+        lines.append(f"- id={r.id} [{r.mode.value}, priority={r.priority}] {r.text}{suffix}")
     return "\n".join(lines)
 
 

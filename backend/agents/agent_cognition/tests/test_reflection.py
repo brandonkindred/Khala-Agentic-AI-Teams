@@ -130,6 +130,7 @@ def _rule(
     mode: RuleMode = RuleMode.ADVISORY,
     status: RuleStatus = RuleStatus.ACTIVE,
     priority: int = 0,
+    predicate: dict[str, Any] | None = None,
 ) -> Rule:
     return Rule(
         id=rid or str(uuid4()),
@@ -137,7 +138,7 @@ def _rule(
         text=text,
         mode=mode,
         status=status,
-        predicate={},
+        predicate=predicate or {},
         rationale=None,
         source=RuleSource.OPERATOR,
         evidence=[],
@@ -336,6 +337,59 @@ def test_amend_requires_active_target_and_text(monkeypatch: pytest.MonkeyPatch) 
         proposal.proposed_rule is not None
         and proposal.proposed_rule["text"] == "lint AND test before merge"
     )
+
+
+def test_amend_enforced_rule_inherits_mode_and_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    enforced = _rule(rid="r1", text="validate x", mode=RuleMode.ENFORCED, predicate=_GOOD_PREDICATE)
+    _canned, created = _wire(
+        monkeypatch,
+        # Ordinary text amend that omits mode/predicate (the danger case).
+        proposals=[{"action": "amend", "target_rule_id": "r1", "text": "validate x carefully"}],
+        rules=[enforced],
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1
+    pr = created[0].proposed_rule
+    # Mode/predicate/priority inherited → the enforced guardrail is preserved,
+    # not silently downgraded to advisory or dropped for a missing predicate.
+    assert pr["mode"] == "enforced" and pr["predicate"] == _GOOD_PREDICATE
+    assert pr["text"] == "validate x carefully" and pr["priority"] == enforced.priority
+
+
+def test_amend_can_change_priority_without_being_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    rule = _rule(rid="r1", text="be kind", priority=2)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "amend", "target_rule_id": "r1", "text": "be kind", "priority": 7}],
+        rules=[rule],
+    )
+    report = reflection.reflect("a", _NOW)
+    # A real priority change is not a no-op → reaches review.
+    assert report.proposed == 1 and report.deduped == 0
+    assert created[0].proposed_rule["priority"] == 7
+
+
+def test_noop_amend_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    rule = _rule(rid="r1", text="be kind", priority=2)
+    _canned, created = _wire(
+        monkeypatch,
+        # Restates the target verbatim (spacing/case differ, priority equal) → no change.
+        proposals=[{"action": "amend", "target_rule_id": "r1", "text": "Be  Kind", "priority": 2}],
+        rules=[rule],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Approving it would retire+reinsert an identical rule (churn) → suppressed.
+    assert report.proposed == 0 and report.deduped == 1 and created == []
+
+
+def test_render_rules_shows_enforced_predicate_only() -> None:
+    advisory = _rule(rid="r1", text="be kind")
+    enforced = _rule(rid="r2", text="validate x", mode=RuleMode.ENFORCED, predicate=_GOOD_PREDICATE)
+    lines = reflection._render_rules_text([advisory, enforced]).splitlines()
+    r1_line = next(line for line in lines if "id=r1" in line)
+    r2_line = next(line for line in lines if "id=r2" in line)
+    assert "predicate=" not in r1_line  # advisory rules render no predicate
+    assert "predicate=" in r2_line  # enforced rules render their predicate for amends
 
 
 def test_add_missing_text_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -713,6 +767,28 @@ def test_restates_active_rule_matches_add_content_only() -> None:
     assert reflection._restates_active_rule(retire, content) is False
     assert reflection._restates_active_rule(bad_text, content) is False
     assert reflection._restates_active_rule(add_match, content) is True  # priority ignored
+
+
+def test_is_noop_amend_guards_non_amend_and_missing_target() -> None:
+    target = _rule(rid="r1", text="be kind", priority=3)
+    by_id = {"r1": target}
+    add = reflection._build_proposal(
+        "a", ProposalAction.ADD, [], _NOW, proposed_rule={"text": "be kind"}
+    )
+    ghost = reflection._build_proposal(
+        "a", ProposalAction.AMEND, [], _NOW, target_rule_id="gone", proposed_rule={"text": "x"}
+    )
+    same = reflection._build_proposal(
+        "a",
+        ProposalAction.AMEND,
+        [],
+        _NOW,
+        target_rule_id="r1",
+        proposed_rule={"text": "Be Kind", "mode": "advisory", "priority": 3},
+    )
+    assert reflection._is_noop_amend(add, by_id) is False  # not an amend
+    assert reflection._is_noop_amend(ghost, by_id) is False  # target not active
+    assert reflection._is_noop_amend(same, by_id) is True  # identical content
 
 
 @pytest.mark.parametrize(
