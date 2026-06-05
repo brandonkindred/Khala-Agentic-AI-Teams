@@ -12,6 +12,17 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from coding_team._guardrails import (
+    CodingTeamBudgetExhausted,
+    CodingTeamLLMBudget,
+    _BudgetedClient,
+    max_llm_calls_from_env,
+    max_rounds_for,
+    mechanical_think_value,
+    role_think,
+    terminal_status,
+    use_budget,
+)
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -88,11 +99,29 @@ def run_coding_team_orchestrator(
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
-    llm_getter = get_llm or (
-        lambda key: __import__("llm_service.strands_provider", fromlist=["get_strands_model"]).get_strands_model(
-            key or "coding_team"
-        )
-    )
+
+    # Every model handed to a coding-team agent is built from a budget-charging
+    # client and tagged with a per-role thinking level. ``_resolve_base_client``
+    # normalises whatever ``get_llm`` yields to a backing ``LLMClient``: the SE
+    # integration passes ``llm_service.get_client`` (already a client); a caller
+    # that passes a pre-built ``LLMClientModel`` is unwrapped via its ``_client``.
+    def _resolve_base_client(key: str) -> Any:
+        if get_llm is not None:
+            obj = get_llm(key)
+            inner = getattr(obj, "_client", None)
+            return inner if inner is not None else obj
+        return __import__("llm_service.factory", fromlist=["get_client"]).get_client(key)
+
+    def _make_model(key: str, think: Any) -> Any:
+        get_strands_model = __import__(
+            "llm_service.strands_provider", fromlist=["get_strands_model"]
+        ).get_strands_model
+        budgeted = _BudgetedClient(_resolve_base_client(key))
+        return get_strands_model(key, client=budgeted, think=think)
+
+    def llm_getter(key: Optional[str] = None) -> Any:
+        resolved = key or "coding_team"
+        return _make_model(resolved, role_think(resolved))
 
     def _check_cancel() -> bool:
         data = _get_job(job_id)
@@ -108,60 +137,83 @@ def run_coding_team_orchestrator(
     phase = "task_graph"
     status_text = "Building task graph from plan"
 
-    # Tech Lead: plan → tasks + stacks
-    llm = llm_getter("tech_lead")
-    tech_lead = TechLeadAgent(llm)
-    out = tech_lead.run_plan_to_task_graph(plan_input)
-    tasks_raw = out.get("tasks") or []
-    stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
+    # Per-job LLM-call budget, bound for the whole LLM-using region. The
+    # budgeted clients built by ``_make_model`` charge it before every model
+    # call; an exhausted budget raises ``CodingTeamBudgetExhausted`` (a
+    # BaseException, so it is not swallowed by the agents' broad handlers) and
+    # short-circuits the job with an explicit ``failed: budget_exhausted``.
+    budget = CodingTeamLLMBudget(max_llm_calls_from_env())
+    try:
+        with use_budget(budget):
+            # Tech Lead: plan → tasks + stacks. Planning keeps the high
+            # thinking level; the per-round mechanical calls (assignment,
+            # review) use a reduced-thinking model.
+            tech_lead = TechLeadAgent(
+                llm_getter("tech_lead"),
+                mechanical_model=_make_model("tech_lead", mechanical_think_value()),
+            )
+            out = tech_lead.run_plan_to_task_graph(plan_input)
+            tasks_raw = out.get("tasks") or []
+            stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
 
-    for t in tasks_raw:
-        graph.add_task(
-            task_id=t["id"],
-            title=t.get("title", t["id"]),
-            description=t.get("description", ""),
-            dependencies=t.get("dependencies", []),
+            for t in tasks_raw:
+                graph.add_task(
+                    task_id=t["id"],
+                    title=t.get("title", t["id"]),
+                    description=t.get("description", ""),
+                    dependencies=t.get("dependencies", []),
+                )
+            _persist_graph()
+
+            # Build Senior SWE agents (one per stack)
+            stack_specs: List[StackSpec] = []
+            for i, s in enumerate(stacks_raw):
+                name = s.get("name") or f"stack_{i}"
+                tools = s.get("tools_services") or []
+                stack_specs.append(StackSpec(name=name, tools_services=tools))
+            agent_ids = [s.name or f"agent_{i}" for i, s in enumerate(stack_specs)]
+            senior_swes: List[SeniorSWEAgent] = []
+            for i, spec in enumerate(stack_specs):
+                aid = agent_ids[i]
+                llm_swe = llm_getter("coding_team")
+                senior_swes.append(SeniorSWEAgent(agent_id=aid, stack_spec=spec, llm=llm_swe))
+
+            phase = "coding"
+            status_text = "Assigning and implementing tasks"
+            _update(phase=phase, status_text=status_text, status="running")
+
+            # Run the swarm: coordinator (Tech Lead) + workers (Senior SWEs)
+            swarm = CodingTeamSwarm(
+                tech_lead=tech_lead,
+                workers=senior_swes,
+                graph=graph,
+                path=path,
+                agent_ids=agent_ids,
+                llm_getter=llm_getter,
+            )
+            run_max_rounds = max_rounds_for(len(graph.get_tasks()))
+            run_reason = swarm.run(
+                max_rounds=run_max_rounds,
+                check_cancel=_check_cancel,
+                persist_fn=_persist_graph,
+                update_fn=_update,
+            )
+    except CodingTeamBudgetExhausted as exc:
+        _update(
+            status="failed: budget_exhausted",
+            phase="completed",
+            status_text=(
+                f"LLM-call budget exhausted: {exc.calls_made}/{exc.limit} calls "
+                "(raise CODING_TEAM_MAX_LLM_CALLS)"
+            ),
         )
-    _persist_graph()
-
-    # Build Senior SWE agents (one per stack)
-    stack_specs: List[StackSpec] = []
-    for i, s in enumerate(stacks_raw):
-        name = s.get("name") or f"stack_{i}"
-        tools = s.get("tools_services") or []
-        stack_specs.append(StackSpec(name=name, tools_services=tools))
-    agent_ids = [s.name or f"agent_{i}" for i, s in enumerate(stack_specs)]
-    senior_swes: List[SeniorSWEAgent] = []
-    for i, spec in enumerate(stack_specs):
-        aid = agent_ids[i]
-        llm_swe = llm_getter("coding_team")
-        senior_swes.append(SeniorSWEAgent(agent_id=aid, stack_spec=spec, llm=llm_swe))
-
-    phase = "coding"
-    status_text = "Assigning and implementing tasks"
-    _update(phase=phase, status_text=status_text, status="running")
-
-    # Run the swarm: coordinator (Tech Lead) + workers (Senior SWEs)
-    swarm = CodingTeamSwarm(
-        tech_lead=tech_lead,
-        workers=senior_swes,
-        graph=graph,
-        path=path,
-        agent_ids=agent_ids,
-        llm_getter=llm_getter,
-    )
-    swarm.run(
-        check_cancel=_check_cancel,
-        persist_fn=_persist_graph,
-        update_fn=_update,
-    )
+        return
 
     merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
-    _update(
-        status="completed",
-        phase="completed",
-        status_text=f"Completed: {merged_count} tasks merged",
-    )
+    decision = terminal_status(run_reason, merged_count, run_max_rounds)
+    if decision is not None:
+        status, status_text = decision
+        _update(status=status, phase="completed", status_text=status_text)
 
 
 class CodingTeamSwarm:
@@ -333,19 +385,32 @@ class CodingTeamSwarm:
 
     def run(
         self,
-        max_rounds: int = 500,
+        max_rounds: Optional[int] = None,
         check_cancel: Optional[Callable[[], bool]] = None,
         persist_fn: Optional[Callable] = None,
         update_fn: Optional[Callable] = None,
-    ) -> None:
-        """Main swarm loop: assign → implement + quality gates → review → merge."""
+    ) -> str:
+        """Main swarm loop: assign → implement + quality gates → review → merge.
+
+        Preconditions:
+          ``max_rounds``, when given, is ``>= 1``. When ``None`` the ceiling is
+          derived from the task count via :func:`max_rounds_for`.
+        Postconditions:
+          Returns the terminal reason — ``"complete"`` when the graph reached
+          a terminal state, ``"cancelled"`` when ``check_cancel`` fired (the
+          cancelled status is also set on the job), or ``"max_rounds_exhausted"``
+          when the loop ran the full ceiling without completing. Never returns
+          ``None``, so the caller can always map the outcome to a status.
+        """
         _update = update_fn or (lambda **kw: None)
         _persist = persist_fn or (lambda: None)
+        if max_rounds is None:
+            max_rounds = max_rounds_for(len(self.graph.get_tasks()))
 
         for round_num in range(max_rounds):
             if check_cancel and check_cancel():
                 _update(status="cancelled", status_text="Cancelled by user")
-                return
+                return "cancelled"
 
             # Coordinator: assign ready tasks to free workers
             ready = self._find_ready_tasks()
@@ -363,4 +428,6 @@ class CodingTeamSwarm:
             _persist()
 
             if self._is_complete():
-                break
+                return "complete"
+
+        return "max_rounds_exhausted"

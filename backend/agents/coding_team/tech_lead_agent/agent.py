@@ -47,12 +47,27 @@ def _agent_call_json(agent: Agent, prompt: str) -> Dict[str, Any]:
 class TechLeadAgent:
     """Tech Lead: given plan, produce tasks + stacks; groom tasks; suggest assignments; code review."""
 
-    def __init__(self, model: Any) -> None:
+    def __init__(self, model: Any, *, mechanical_model: Any = None) -> None:
+        """Build the Tech Lead's role agents.
+
+        Preconditions:
+          ``model`` is a Strands-compatible model (or any object the Strands
+          ``Agent`` accepts). ``mechanical_model``, when supplied, is the same
+          shape and is used for the per-round mechanical calls (assignment,
+          code review) so they can run at a reduced thinking level while
+          planning keeps ``model``'s level. When ``None`` the mechanical
+          agents fall back to ``model`` (no behavioural change).
+        Postconditions:
+          ``self._plan_agent`` / ``self._groom_agent`` use ``model``;
+          ``self._assignment_agent`` / ``self._review_agent`` use
+          ``mechanical_model or model``.
+        """
         self._model = model
+        mech = mechanical_model if mechanical_model is not None else model
         self._plan_agent = Agent(model=model, system_prompt=prompts.PLAN_TO_TASK_GRAPH_SYSTEM)
         self._groom_agent = Agent(model=model, system_prompt=prompts.GROOM_TASK_SYSTEM)
-        self._assignment_agent = Agent(model=model, system_prompt=prompts.ASSIGNMENT_SYSTEM)
-        self._review_agent = Agent(model=model, system_prompt=prompts.CODE_REVIEW_SYSTEM)
+        self._assignment_agent = Agent(model=mech, system_prompt=prompts.ASSIGNMENT_SYSTEM)
+        self._review_agent = Agent(model=mech, system_prompt=prompts.CODE_REVIEW_SYSTEM)
 
     def run_plan_to_task_graph(self, plan: CodingTeamPlanInput) -> Dict[str, Any]:
         """

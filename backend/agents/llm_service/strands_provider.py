@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional
+from typing import Optional, Union
 
 from .factory import get_client
 from .interface import LLMClient
@@ -23,7 +23,7 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-_model_cache: dict[tuple[str, str, str], LLMClientModel] = {}
+_model_cache: dict[tuple[str, str, str, str], LLMClientModel] = {}
 _cache_lock = threading.Lock()
 
 
@@ -31,6 +31,7 @@ def get_strands_model(
     agent_key: Optional[str] = None,
     *,
     response_format: str = "json",
+    think: Optional[Union[bool, str]] = None,
     client: Optional[LLMClient] = None,
 ) -> LLMClientModel:
     """Return a Strands-compatible model backed by the centralized LLM service.
@@ -48,6 +49,13 @@ def get_strands_model(
     for Strands agents that ask for JSON in their system prompt and then
     ``json.loads`` the assistant content. ``"text"`` opts into ``chat(response_format="text")``
     for free-form prose (conversational agents, template-based phases).
+
+    ``think`` sets the default reasoning control applied to every call the
+    returned model makes (``None`` → platform default; ``False`` → disable
+    reasoning; a level string selects that level). It lets callers give a
+    mechanical agent reduced thinking without threading per-call state, and is
+    part of the cache key so a ``think=False`` model is never aliased to the
+    default-thinking one for the same ``(model_id, base_url, response_format)``.
 
     ``client`` lets callers wrap a specific ``LLMClient`` instance (e.g. a
     pre-configured ``OllamaLLMClient``, a ``DummyLLMClient`` for tests, or a
@@ -82,12 +90,13 @@ def get_strands_model(
             client,
             agent_key=agent_key,
             model_id=client_model or llm_config.resolve_model(agent_key),
+            think=think,
             response_format=response_format,
         )
 
     model_id = llm_config.resolve_model(agent_key)
 
-    cache_key = (model_id, base_url, response_format)
+    cache_key = (model_id, base_url, response_format, str(think))
 
     with _cache_lock:
         if cache_key not in _model_cache:
@@ -96,6 +105,7 @@ def get_strands_model(
                 backing_client,
                 agent_key=agent_key,
                 model_id=model_id,
+                think=think,
                 response_format=response_format,
             )
             logger.info(
