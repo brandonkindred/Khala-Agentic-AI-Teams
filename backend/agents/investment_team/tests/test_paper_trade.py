@@ -516,3 +516,49 @@ def test_missing_strategy_code_raises() -> None:
             paper_config=_paper_config(),
             registry=_registry_with(provider),
         )
+
+
+def test_bar_to_ohlcv_coerces_nonfinite_volume(caplog) -> None:
+    """The paper-trade Bar→OHLCVBar adapter is a direct-construction site that
+    bypasses _normalize_ohlc_bar, so it must coerce a non-finite volume to 0.0
+    itself — otherwise a provider NaN/inf reaches warm-up execution, the
+    dataset fingerprint, and the persisted snapshot on the first run.
+    """
+    import math
+
+    from investment_team.trading_service.modes.paper_trade import _bar_to_ohlcv
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar = Bar(
+            symbol="AAA",
+            timestamp="2024-01-02",
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
+            volume=bad,
+        )
+        with caplog.at_level("WARNING"):
+            out = _bar_to_ohlcv(bar)
+        assert out.volume == 0.0
+        assert math.isfinite(out.volume)
+        # Other fields pass through unchanged.
+        assert (out.open, out.high, out.low, out.close, out.date) == (
+            10.0,
+            11.0,
+            9.0,
+            10.5,
+            "2024-01-02",
+        )
+    assert any("non-finite volume" in r.message for r in caplog.records)
+    # A finite volume is preserved.
+    clean = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=1234.0,
+    )
+    assert _bar_to_ohlcv(clean).volume == 1234.0

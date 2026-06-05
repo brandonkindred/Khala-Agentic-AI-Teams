@@ -20,6 +20,7 @@ See ``system_design/pr2_live_data_and_paper_cutover.md`` §5.
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import time
 from dataclasses import dataclass, field, replace
@@ -469,14 +470,23 @@ def _bar_to_ohlcv(bar) -> OHLCVBar:
     The two share the same fields modulo the timestamp / date naming;
     keeping a thin adapter here avoids leaking ``OHLCVBar`` semantics
     into the live-stream protocol module.
+
+    A non-finite volume (NaN/±inf) is coerced to 0.0 — the same neutralisation
+    the fetch, streaming-ingest, and cache boundaries apply — so a provider bar
+    with bad volume cannot reach warm-up execution, the dataset fingerprint, or
+    the persisted snapshot on the first paper-trade run.
     """
+    vol = float(bar.volume)
+    if not math.isfinite(vol):
+        logger.warning("non-finite volume %r on %s bar; coercing to 0.0", vol, bar.timestamp)
+        vol = 0.0
     return OHLCVBar(
         date=bar.timestamp,
         open=bar.open,
         high=bar.high,
         low=bar.low,
         close=bar.close,
-        volume=bar.volume,
+        volume=vol,
     )
 
 
