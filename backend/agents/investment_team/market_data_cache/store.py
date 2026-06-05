@@ -28,10 +28,11 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
@@ -120,6 +121,74 @@ that as a miss and does not write a snapshot.
 # ---------------------------------------------------------------------------
 
 
+def _finite_volume(volume: Any) -> float:
+    """Coerce a non-finite (NaN/±inf) or ``None`` volume to the 0.0 sentinel.
+
+    ``OHLCVBar`` is a permissive transport, so a non-finite volume can reach the
+    cache from any snapshot writer (live fetch, streaming ingest, paper-trade
+    warm-up, …). Applying this one coercion at every persistence boundary — the
+    parquet writer, the content hash / dataset fingerprint, and read-back —
+    guarantees the stored bytes, the fingerprint, and a replayed bar are all
+    finite and byte-identical regardless of which writer produced the snapshot,
+    so a first run and its cached replay never diverge on bad volume.
+
+    Preconditions:
+        ``volume`` is a float-coercible value or ``None``.
+    Postconditions:
+        Returns a finite float. Non-finite or ``None`` input returns ``0.0``
+        (the zero-volume sentinel ADV/liquidity math already excludes); a finite
+        input round-trips unchanged, so fingerprints of clean data are stable.
+    """
+    if volume is None:
+        return 0.0
+    v = float(volume)
+    return v if math.isfinite(v) else 0.0
+
+
+def _canonicalize_bar_volumes(bars: Sequence[OHLCVBar]) -> List[OHLCVBar]:
+    """Return ``bars`` with any non-finite volume replaced by 0.0.
+
+    Applied to the bars a cache miss both persists and returns, so first-run
+    consumption matches the 0.0 a later replay reads back from the snapshot —
+    the provider-agnostic cache canonicalises volume on behalf of callers that
+    did not pre-normalise, instead of persisting 0.0 but handing back the raw
+    NaN/inf on the miss path.
+
+    Postconditions:
+        Returns a list the same length/order as ``bars``; bars with a finite
+        volume are returned unchanged (same object), non-finite ones are
+        replaced by a copy with ``volume=0.0``.
+    """
+    out: List[OHLCVBar] = []
+    for b in bars:
+        if math.isfinite(b.volume):
+            out.append(b)
+        else:
+            out.append(b.model_copy(update={"volume": 0.0}))
+    return out
+
+
+def _reconcile_snapshot_hash(meta: SnapshotMeta, bars: Sequence[OHLCVBar]) -> SnapshotMeta:
+    """Return ``meta`` with ``sha256`` recomputed to match read-repaired ``bars``.
+
+    A legacy snapshot persisted before volume canonicalisation carries a stored
+    ``sha256`` over the raw (possibly non-finite) volume, but ``_table_to_bars``
+    repairs that volume to ``0.0`` on read. Recompute the per-snapshot hash from
+    the bars actually returned so a client's reproducibility / derived-cache key
+    (``meta.sha256``) agrees with ``compute_dataset_fingerprint(read_bars)``
+    instead of identifying the stale unrepaired dataset.
+
+    Postconditions:
+        Returns ``meta`` unchanged (same object) when the recomputed hash already
+        matches — the common case for snapshots written with finite volume, so
+        there is no churn. Otherwise returns a copy with the corrected ``sha256``.
+    """
+    recomputed = _hash_bars(bars)
+    if recomputed == meta.sha256:
+        return meta
+    return replace(meta, sha256=recomputed)
+
+
 def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     """SHA256 over a deterministic byte stream of bars.
 
@@ -138,9 +207,13 @@ def _hash_bars(bars: Sequence[OHLCVBar]) -> str:
     """
     h = hashlib.sha256()
     for bar in sorted(bars, key=lambda b: b.date):
+        # Coerce volume so a writer that persisted a non-finite volume hashes
+        # to the same fingerprint a replay (which read it back as 0.0) produces.
+        # Finite volumes round-trip unchanged, so clean snapshots keep their
+        # existing fingerprint / derived-ADV cache key.
         h.update(
             f"{bar.date}|{repr(bar.open)}|{repr(bar.high)}|"
-            f"{repr(bar.low)}|{repr(bar.close)}|{repr(bar.volume)}\n".encode()
+            f"{repr(bar.low)}|{repr(bar.close)}|{repr(_finite_volume(bar.volume))}\n".encode()
         )
     return h.hexdigest()
 
@@ -175,7 +248,10 @@ def _bars_to_table(bars: Sequence[OHLCVBar]) -> "pa.Table":
             "high": [float(b.high) for b in bars],
             "low": [float(b.low) for b in bars],
             "close": [float(b.close) for b in bars],
-            "volume": [float(b.volume) for b in bars],
+            # Coerce at the write boundary so no writer can persist a non-finite
+            # volume into the parquet snapshot, regardless of how it built the
+            # bars (live fetch, streaming ingest, paper-trade warm-up, …).
+            "volume": [_finite_volume(b.volume) for b in bars],
             "is_imputed": [bool(b.is_imputed) for b in bars],
         },
         schema=_get_parquet_schema(),
@@ -199,9 +275,16 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
     # time still contain inconsistent bars (Yahoo / Alpha Vantage / Twelve
     # Data daily FX aggregates intraday snapshots across counterparties,
     # producing H < max(O, C) or L > min(O, C)). Repairing on read makes
-    # the cache self-healing without forcing a global re-fetch.
+    # the cache self-healing without forcing a global re-fetch. The same
+    # self-healing applies to non-finite volume: snapshots persisted before
+    # market_data_service started neutralising NaN/inf volume at fetch time
+    # would otherwise replay it straight past the OHLCVBar transport (which
+    # is intentionally permissive) into ADV / cost-model arithmetic. Coerce
+    # to 0.0 here — the zero-volume sentinel ADV/liquidity math excludes —
+    # mirroring _normalize_ohlc_bar on the live path.
     bars: List[OHLCVBar] = []
     repairs = 0
+    vol_repairs = 0
     for i in range(table.num_rows):
         o = cols["open"][i]
         h = cols["high"][i]
@@ -211,6 +294,10 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
         l_fixed = min(o, h, ll, c)
         if h_fixed != h or l_fixed != ll:
             repairs += 1
+        raw_vol = cols["volume"][i]
+        if raw_vol is None or not math.isfinite(raw_vol):
+            vol_repairs += 1
+        vol = _finite_volume(raw_vol)
         bars.append(
             OHLCVBar(
                 date=cols["date"][i],
@@ -218,7 +305,7 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
                 high=h_fixed,
                 low=l_fixed,
                 close=c,
-                volume=cols["volume"][i],
+                volume=vol,
                 is_imputed=bool(imputed[i]),
             )
         )
@@ -226,6 +313,12 @@ def _table_to_bars(table: "pa.Table") -> List[OHLCVBar]:
         logger.warning(
             "market_data_cache: repaired OHLC invariants on %d/%d bars at read",
             repairs,
+            table.num_rows,
+        )
+    if vol_repairs > 0:
+        logger.warning(
+            "market_data_cache: coerced non-finite volume to 0.0 on %d/%d bars at read",
+            vol_repairs,
             table.num_rows,
         )
     return bars
@@ -546,12 +639,21 @@ class MarketDataCache:
         if existing is not None:
             cached = self._read_snapshot(existing)
             if cached is not None:
+                # A legacy snapshot's stored sha256 is over the raw volume, but
+                # _read_snapshot repaired it to 0.0; reconcile so the returned
+                # meta describes the bars the caller actually gets.
+                existing = _reconcile_snapshot_hash(existing, cached)
                 trimmed = [b for b in cached if start <= b.date <= end]
                 return trimmed, existing
 
         bars, provider = fetch_fn(symbol, asset_class, start, end)
         if not bars or not provider:
             return [], None
+        # Canonicalise volume before persisting *and* returning so the miss-path
+        # bars the caller consumes match the 0.0 a later cache hit replays from
+        # the snapshot — a fetch_fn that returns a non-finite volume can't make
+        # first-run and replay diverge.
+        bars = _canonicalize_bar_volumes(bars)
         meta = self._write_snapshot(
             symbol=symbol,
             asset_class=asset_class,

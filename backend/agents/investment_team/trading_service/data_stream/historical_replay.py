@@ -13,6 +13,7 @@ strategy subprocess.
 
 from __future__ import annotations
 
+import math
 from typing import Dict, Iterator, List, Optional
 
 from ...market_data_service import OHLCVBar
@@ -55,7 +56,12 @@ class HistoricalReplayStream:
                     high=bar.high,
                     low=bar.low,
                     close=bar.close,
-                    volume=bar.volume,
+                    # Canonicalise a non-finite volume to 0.0 so the strategy and
+                    # its predicates see the same value the cache fingerprint
+                    # collapses NaN/inf to — a backtest can't behave differently
+                    # for a NaN-volume dataset than for the 0.0 it shares a
+                    # dataset_fingerprint with.
+                    volume=bar.volume if math.isfinite(bar.volume) else 0.0,
                 )
             )
         yield EndOfStreamEvent()

@@ -516,3 +516,136 @@ def test_missing_strategy_code_raises() -> None:
             paper_config=_paper_config(),
             registry=_registry_with(provider),
         )
+
+
+def test_bar_to_ohlcv_coerces_nonfinite_volume(caplog) -> None:
+    """The paper-trade Bar→OHLCVBar adapter is a direct-construction site that
+    bypasses _normalize_ohlc_bar, so it must coerce a non-finite volume to 0.0
+    itself — otherwise a provider NaN/inf reaches warm-up execution, the
+    dataset fingerprint, and the persisted snapshot on the first run.
+    """
+    import math
+
+    from investment_team.trading_service.modes.paper_trade import _bar_to_ohlcv
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar = Bar(
+            symbol="AAA",
+            timestamp="2024-01-02",
+            open=10.0,
+            high=11.0,
+            low=9.0,
+            close=10.5,
+            volume=bad,
+        )
+        with caplog.at_level("WARNING"):
+            out = _bar_to_ohlcv(bar)
+        assert out.volume == 0.0
+        assert math.isfinite(out.volume)
+        # Other fields pass through unchanged.
+        assert (out.open, out.high, out.low, out.close, out.date) == (
+            10.0,
+            11.0,
+            9.0,
+            10.5,
+            "2024-01-02",
+        )
+    assert any("non-finite volume" in r.message for r in caplog.records)
+    # A finite volume is preserved.
+    clean = Bar(
+        symbol="AAA",
+        timestamp="2024-01-02",
+        open=10.0,
+        high=11.0,
+        low=9.0,
+        close=10.5,
+        volume=1234.0,
+    )
+    assert _bar_to_ohlcv(clean).volume == 1234.0
+
+
+def test_sanitize_bar_volume_coerces_nonfinite() -> None:
+    from investment_team.trading_service.modes.paper_trade import _sanitize_bar_volume
+
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        bar = Bar(
+            symbol="BTC",
+            timestamp="2024-01-01",
+            timeframe="1m",
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=bad,
+        )
+        out = _sanitize_bar_volume(bar)
+        assert out.volume == 0.0
+        # Other fields preserved.
+        assert (out.open, out.close, out.symbol, out.timestamp) == (
+            100.0,
+            100.5,
+            "BTC",
+            "2024-01-01",
+        )
+    good = Bar(
+        symbol="BTC",
+        timestamp="2024-01-01",
+        timeframe="1m",
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=5.0,
+    )
+    # Finite volume → same object, no copy.
+    assert _sanitize_bar_volume(good) is good
+
+
+def test_translate_sanitizes_yielded_bar_volume() -> None:
+    """Both the warm-up and live branches of _translate must yield Bars with
+    finite volume — the engine consumes the yielded Bar directly, so a provider
+    NaN/inf can't reach execution even though only the buffered OHLCVBar copy is
+    persisted/fingerprinted.
+    """
+    from investment_team.trading_service.data_stream.live_stream import (
+        LiveBarEvent,
+        WarmupBarEvent,
+    )
+    from investment_team.trading_service.data_stream.protocol import BarEvent
+    from investment_team.trading_service.modes.paper_trade import _FillCounter, _translate
+
+    def _bar(ts: str, vol: float) -> Bar:
+        return Bar(
+            symbol="BTC",
+            timestamp=ts,
+            timeframe="1m",
+            open=100.0,
+            high=101.0,
+            low=99.0,
+            close=100.5,
+            volume=vol,
+        )
+
+    # No CutoverEvent → no snapshot persistence side effect; both branches still
+    # exercised (live bars are not dropped while cutover_seen["ts"] is None).
+    events = [
+        WarmupBarEvent(bar=_bar("2024-01-01T00:00:00Z", float("nan"))),
+        LiveBarEvent(bar=_bar("2024-01-01T00:01:00Z", float("inf"))),
+    ]
+    out = list(
+        _translate(
+            iter(events),
+            fill_counter=_FillCounter(),
+            cutover_seen={"ts": None},
+            terminated_reason={"reason": "unknown"},
+            paper_config=_paper_config(),
+            warnings=[],
+            quality_state={},
+            provider_id="test",
+        )
+    )
+    bar_events = [e for e in out if isinstance(e, BarEvent)]
+    assert len(bar_events) == 2
+    # Warm-up bar (NaN) and live bar (inf) are both yielded with finite 0.0.
+    assert bar_events[0].is_warmup is True and bar_events[0].bar.volume == 0.0
+    assert bar_events[1].is_warmup is False and bar_events[1].bar.volume == 0.0
