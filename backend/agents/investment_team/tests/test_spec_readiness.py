@@ -17,6 +17,8 @@ from investment_team.strategy_lab.quality_gates.spec_readiness import (
     GATE,
     SpecReadinessGate,
     _canonicalize_ticker,
+    _extract_prose_position_pct,
+    _sizing_coherence_rel_tol,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -27,6 +29,7 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    VolatilityTargetSizing,
 )
 
 
@@ -1074,3 +1077,722 @@ def test_custom_market_sample_provider_is_used() -> None:
     gate = SpecReadinessGate(market_sample_provider=lambda sym, asset_class: 1000.0)
     results = gate.validate(spec, backtest_config=_config())
     assert any("qty=" in c for c in _critical(results))
+
+
+# ---------------------------------------------------------------------------
+# Rule 9: Position-sizing / risk-policy coherence
+# ---------------------------------------------------------------------------
+
+
+def _warning(results) -> list[str]:
+    return [r.details for r in results if r.severity == "warning" and not r.passed]
+
+
+def test_rule9_coherent_spec_is_silent() -> None:
+    """fraction=0.05, stop=0.05, cap=5, no loss tolerance, no position prose.
+
+    The corrected core case: a 5% position with a 5% stop and a 5% cap is
+    fully consistent (per-trade loss is 0.25% of equity, well within the
+    deployed 5%). Rule 9 must emit nothing.
+    """
+    spec = _spec(
+        hypothesis="RSI(14) below 30 on AAPL signals long entry.",
+        exit_=[
+            SignalExitRule(
+                when=Predicate(
+                    lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0
+                )
+            ),
+            StopLossRule(pct=0.05),
+        ],
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith(("sizing:", "risk_limits:", "hypothesis:position"))
+        for r in results
+        if not r.passed
+    ), [r.details for r in results if not r.passed]
+
+
+def test_rule9_check_a_fraction_exceeds_cap_is_critical() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "sizing:position_cap"
+    ]
+    assert crit, _critical(results)
+    assert "10.00%" in crit[0] and "max_position_pct=5.00%" in crit[0]
+
+
+def test_rule9_check_a_fraction_equal_cap_is_silent() -> None:
+    """Boundary: fraction == cap is consistent (not a violation)."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_over_cap_is_critical() -> None:
+    # Default capital is $100k; cap 5% → $5,000. $20k notional deploys 20%.
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=20_000.0),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_under_cap_is_silent() -> None:
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=4_000.0),  # 4% of $100k <= 5% cap
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_a_fixed_notional_skipped_without_config() -> None:
+    """No config → notional cannot be expressed as a fraction → Check A skipped."""
+    spec = _spec(
+        sizing=FixedNotionalSizing(notional_usd=90_000.0),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec)  # no backtest_config
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_volatility_target_sizing_is_silent() -> None:
+    """Vol-target sizing has no static deployed fraction, so Checks A and C
+    abstain. With no per-trade loss tolerance declared, Check B is also silent."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith(("sizing:", "risk_limits:loss"))
+        for r in results
+        if not r.passed
+    )
+
+
+def test_rule9_check_b_realised_loss_exceeds_tolerance_is_critical() -> None:
+    """Critical when the realised loss (deployed × stop) exceeds the tolerance:
+    50% deployed × 20% stop = 10% realised vs a 5% per-trade loss tolerance."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_=[StopLossRule(pct=0.20)],
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
+    ]
+    assert crit, _critical(results)
+    assert "10.00%" in crit[0] and "max_loss_per_trade_pct=5.00%" in crit[0]
+
+
+def test_rule9_check_b_realised_loss_within_tolerance_is_silent() -> None:
+    """A coherent spec (10% deployed × 5% stop = 0.5% realised, tolerance 5%)
+    passes Check B."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[StopLossRule(pct=0.05)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+
+
+def test_rule9_check_b_skipped_for_volatility_target_sizing() -> None:
+    """Vol-target deployment is dynamic/unknown, so a realised per-trade loss
+    cannot be computed — Check B abstains rather than guessing."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        exit_=[StopLossRule(pct=0.20)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+
+
+def test_rule9_check_b_no_stop_short_with_tolerance_is_critical() -> None:
+    """A declared per-trade loss tolerance on a SHORT entry with no effective stop
+    is unenforceable: a short's loss is unbounded, so the runtime sizes it to
+    zero and it never executes — flag it as critical."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=FixedFractionSizing(fraction=0.50),  # default exit is signal-only
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "no stop_loss rule" in crit[0] and "short" in crit[0]
+
+
+def test_rule9_check_b_no_stop_long_with_tolerance_is_silent() -> None:
+    """A LONG entry with a declared loss tolerance and no stop is NOT critical:
+    the runtime loss-clamp caps an uncovered long to deploy at most
+    max_loss_per_trade_pct, so the limit is honoured without a stop (gap-proof —
+    a long bottoms at zero) regardless of the declared deployed fraction."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.50),  # default exit is signal-only
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_small_long_within_tolerance_is_silent() -> None:
+    """An uncovered LONG loses at most its deployed amount, so a small no-stop
+    long whose full deployment fits the tolerance is coherent and must NOT be
+    flagged: 0.5% deployed <= 1% tolerance."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.005),  # 0.5% deployed, no stop
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_long_over_tolerance_is_silent() -> None:
+    """An uncovered LONG whose declared deployment exceeds the tolerance is still
+    NOT critical: the runtime loss-clamp sizes it down to max_loss_per_trade_pct,
+    so the realised worst-case loss equals the tolerance. The earlier
+    'deployment > tolerance' rejection was a false positive (it ignored the
+    runtime clamp). max_position_pct=20 keeps Check A from firing (10% <= 20%)."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),  # 10% deployed, no stop
+        risk_limits={"max_position_pct": 20, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_volatility_target_long_within_cap_is_silent() -> None:
+    """For an uncovered vol-target LONG the worst-case deployment is bounded by
+    max_position_pct; when that cap fits the tolerance the spec is coherent
+    (1% cap <= 5% tolerance), so no critical fires."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 1, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_custom_code_with_max_loss_is_critical() -> None:
+    """A custom-code spec bypasses the dispatcher's per-trade loss clamp, and the
+    order gate cannot enforce a loss tolerance (no stop context). A declared
+    max_loss_per_trade_pct is therefore unenforceable — block it."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    spec.requires_custom_code = True
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:custom_code_unenforceable"
+    ]
+    assert crit, _critical(results)
+    assert "custom-code" in crit[0] and "max_loss_per_trade_pct" in crit[0]
+
+
+def test_rule9_custom_code_fixed_fraction_with_max_loss_is_critical() -> None:
+    """Static (fixed_fraction) custom code is blocked too: the spec's sizing rule
+    does not constrain what the generated code submits, so a declared loss
+    tolerance is still unenforceable (the dispatcher loss clamp is bypassed)."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    spec.requires_custom_code = True
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:custom_code_unenforceable"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_custom_code_without_max_loss_is_not_blocked() -> None:
+    """A custom-code spec that declares NO per-trade loss tolerance is not blocked
+    — max_position_pct is enforced for custom-code orders at the fill-simulator
+    choke point (RiskFilter.can_enter), so there is no unenforceable limit."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},  # no max_loss_per_trade_pct
+    )
+    spec.requires_custom_code = True
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "") == "risk_limits:custom_code_unenforceable"
+        for r in results
+        if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_compiled_with_max_loss_is_not_blocked() -> None:
+    """A COMPILED (non-custom-code) spec keeps the dispatcher's stop-based loss
+    clamp, so a declared max_loss_per_trade_pct is enforceable and the custom-code
+    guard does not fire."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    # requires_custom_code defaults to False (compiled path).
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "") == "risk_limits:custom_code_unenforceable"
+        for r in results
+        if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_zero_loss_tolerance_is_critical() -> None:
+    """max_loss_per_trade_pct=0 (schema-valid, ge=0) makes the runtime loss-clamp
+    size every entry to zero, so the strategy can never trade. Flag it critical
+    rather than let it pass as coherent and stall at runtime."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),
+        exit_=[StopLossRule(basis="entry_price", pct=0.05)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 0, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:zero_loss_tolerance"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_zero_loss_tolerance_uncovered_long_is_critical() -> None:
+    """The zero-tolerance critical also catches an uncovered long (no stop),
+    which the no-stop check otherwise lets through for positive tolerances —
+    at a 0% tolerance the runtime deploys nothing, so the long never trades."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.05),  # uncovered long (signal-only exit)
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 0, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:zero_loss_tolerance"
+        for r in results
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_without_tolerance_is_silent() -> None:
+    """No stop and no declared tolerance — there is no limit to enforce, so the
+    no-stop critical must not fire."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.50),
+        risk_limits={"max_position_pct": 50, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
+def test_rule9_check_b_no_stop_volatility_target_long_is_silent() -> None:
+    """A vol-target LONG with a declared loss tolerance and no stop is NOT
+    critical: the runtime clamps an uncovered long to deploy at most
+    max_loss_per_trade_pct, honouring the limit without a stop even though the
+    deployed fraction is dynamic/unknown at design time."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_no_stop_volatility_target_short_is_critical() -> None:
+    """A short vol-target spec with a declared loss tolerance and no effective
+    stop is unbounded-loss; it must be rejected even though deployment is
+    dynamic (the realised-loss magnitude check abstains, but stop coverage does
+    not)."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "short" in crit[0]
+
+
+def test_rule9_check_b_side_incompatible_stop_is_critical() -> None:
+    """A short-only spec whose only stop is ``trailing_high`` has no effective
+    stop (the executor no-ops trailing_high for shorts), so the short's loss is
+    unbounded and the declared tolerance is unenforceable — flag it exactly as if
+    no stop were present. (An uncovered long would NOT be critical; the runtime
+    clamps it. Shorts are the unbounded side.)"""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=FixedFractionSizing(fraction=0.50),
+        exit_=[StopLossRule(basis="trailing_high", pct=0.05)],  # no-ops for shorts
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance_no_stop"
+    ]
+    assert crit, _critical(results)
+    assert "short" in crit[0] and "no stop_loss rule that can cap" in crit[0]
+
+
+def test_rule9_check_b_covered_side_checked_despite_uncovered_fitting_long() -> None:
+    """In a mixed-side spec, a non-rejected uncovered long (small enough to fit
+    the tolerance) must NOT suppress the realised-loss check for the covered
+    short. The covered side is evaluated over ``covered_sides`` only, so the
+    per-side stop computation does not blow up on the stop-less long and the
+    coherent short passes cleanly. (With ``StopLossRule.pct <= 1.0`` and shared
+    sizing the covered side cannot actually breach when the long fits, so this
+    guards the structure, not a breach.)"""
+    mixed_entry = [
+        EntryRule(
+            side="long",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+        ),
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        ),
+    ]
+    spec = _spec(
+        entry=mixed_entry,
+        sizing=FixedFractionSizing(fraction=0.005),  # 0.5% deployed, fits 1% tol
+        exit_=[StopLossRule(basis="trailing_low", pct=0.20)],  # covers short only
+        risk_limits={"max_position_pct": 50, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    # The uncovered long fits the tolerance, the covered short's realised loss
+    # (0.5% x 20% = 0.1%) is within it — neither loss-tolerance critical fires.
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    ), _critical(results)
+
+
+def test_rule9_check_b_uses_first_stop_in_spec_order_tight_first() -> None:
+    """The realised loss uses the FIRST side-compatible stop in spec order (the
+    one the engine fires first). With the tight 5% stop ordered first, a 20%
+    catastrophic stop behind it never wins, so 10% sizing realises 0.5%, not 2%
+    — a 1% tolerance passes (using the widest stop would falsely reject it)."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[
+            StopLossRule(basis="entry_price", pct=0.05),  # tight FIRST -> fires first
+            StopLossRule(basis="entry_price", pct=0.20),
+        ],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
+def test_rule9_check_b_uses_first_stop_in_spec_order_loose_first_is_critical() -> None:
+    """When a LOOSER stop precedes a tighter one, ``evaluate_exit_rules`` fires
+    the looser stop first on a gap that crosses both — so the realised loss is
+    governed by the looser (first) stop, not the tighter (min) one. A 20% stop
+    ahead of a 5% stop at 10% sizing realises 2% > 1% tolerance — sizing against
+    the tightest would let this breach slip through."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[
+            StopLossRule(basis="entry_price", pct=0.20),  # loose FIRST -> fires on a gap
+            StopLossRule(basis="entry_price", pct=0.05),
+        ],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 1, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance"
+    ]
+    assert crit, _critical(results)
+    assert "2.00%" in crit[0] and "20.00%" in crit[0]
+
+
+def test_rule9_check_b_side_compatible_short_stop_is_covered() -> None:
+    """A short spec with a ``trailing_low`` stop IS covered (the executor fires
+    trailing_low for shorts), so the realised-loss check runs and a coherent spec
+    (10% deployed × 5% stop = 0.5% ≤ 5% tolerance) passes."""
+    short_entry = [
+        EntryRule(
+            side="short",
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0),
+        )
+    ]
+    spec = _spec(
+        entry=short_entry,
+        sizing=FixedFractionSizing(fraction=0.10),
+        exit_=[StopLossRule(basis="trailing_low", pct=0.05)],
+        risk_limits={"max_position_pct": 10, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(
+        (r.rule_id or "").startswith("risk_limits:loss_tolerance") for r in results if not r.passed
+    )
+
+
+def test_rule9_check_a_small_overage_is_critical_not_tolerated() -> None:
+    """The prose tolerance must not slacken the hard sizing cap: a fraction
+    just over the cap (10.5% vs 10%) is a real breach and must be critical."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.105),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(r.severity == "critical" and r.rule_id == "sizing:position_cap" for r in results), (
+        _critical(results)
+    )
+
+
+def test_rule9_check_a_exactly_at_cap_is_silent() -> None:
+    """Deploying exactly the cap (10% == 10%) is allowed — float noise only."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
+
+
+def test_rule9_check_b_small_realised_overage_is_critical_not_tolerated() -> None:
+    """A realised loss just over the tolerance (52% deployed × 10% stop = 5.2%
+    vs 5%, within the old 5% band) is a real breach and must be critical."""
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.52),
+        exit_=[StopLossRule(pct=0.10)],
+        risk_limits={"max_position_pct": 52, "max_loss_per_trade_pct": 5, "max_drawdown_pct": 30},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any(
+        r.severity == "critical" and r.rule_id == "risk_limits:loss_tolerance" for r in results
+    ), _critical(results)
+
+
+def test_rule9_check_b_skipped_when_no_loss_tolerance() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_=[StopLossRule(pct=0.20)],
+        risk_limits={"max_position_pct": 20, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "risk_limits:loss_tolerance" for r in results if not r.passed)
+
+
+def test_rule9_check_c_prose_disagrees_is_warning() -> None:
+    spec = _spec(
+        hypothesis="Allocate 10% per trade to AAPL on RSI mean reversion.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warns = [r.details for r in results if r.rule_id == "hypothesis:position_pct"]
+    assert warns, _warning(results)
+    assert "10.00%" in warns[0]
+    # Prose-only mismatch must not be a critical.
+    assert not any(
+        r.rule_id == "hypothesis:position_pct" and r.severity == "critical" for r in results
+    )
+
+
+def test_rule9_check_c_prose_matches_actual_deployment_is_silent() -> None:
+    """Prose agrees with the actual deployed fraction (sizing.fraction=5%),
+    which also happens to equal the cap — no warning."""
+    spec = _spec(
+        hypothesis="Allocate 5% per trade to AAPL.",
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "hypothesis:position_pct" for r in results if not r.passed)
+
+
+def test_rule9_check_c_prose_matches_cap_not_fraction_warns() -> None:
+    """Prose matching the cap must not suppress the warning when it disagrees
+    with the ACTUAL deployed fraction — the engine deploys sizing.fraction, not
+    the cap, so 'allocate 10%' with fraction=0.02 (2% deployed) and cap=10 is a
+    real prose↔deployment contradiction."""
+    spec = _spec(
+        hypothesis="Allocate 10% per trade to AAPL on RSI mean reversion.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 10, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warns = [r.details for r in results if r.rule_id == "hypothesis:position_pct"]
+    assert warns, _warning(results)
+    assert "10.00%" in warns[0] and "2.00%" in warns[0]
+    assert not any(
+        r.rule_id == "hypothesis:position_pct" and r.severity == "critical" for r in results
+    )
+
+
+def test_rule9_check_c_no_position_prose_is_silent() -> None:
+    """A stop-loss percentage in prose must not be read as a deployment %."""
+    spec = _spec(
+        hypothesis="Exit AAPL on a 5% stop loss after an RSI(14) cross below 30.",
+        sizing=FixedFractionSizing(fraction=0.02),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any(r.rule_id == "hypothesis:position_pct" for r in results if not r.passed)
+
+
+def test_rule9_details_are_deterministic() -> None:
+    spec = _spec(
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
+    )
+    gate = SpecReadinessGate()
+    first = [r.details for r in gate.validate(spec, backtest_config=_config())]
+    second = [r.details for r in gate.validate(spec, backtest_config=_config())]
+    assert first == second
+
+
+def test_readiness_signature_changes_with_hypothesis() -> None:
+    """Rule 9 reads ``hypothesis``, so the design-loop cache signature must
+    change when only the prose changes — otherwise a prose-only revision reuses
+    a stale ``hypothesis:position_pct`` verdict."""
+    from investment_team.strategy_lab.orchestrator import _spec_readiness_signature
+
+    base = _spec(hypothesis="Allocate 10% per trade to AAPL.")
+    revised = _spec(hypothesis="Allocate 2% per trade to AAPL.")
+    assert _spec_readiness_signature(base) != _spec_readiness_signature(revised)
+    # And identical specs still produce identical signatures (cache hits).
+    assert _spec_readiness_signature(base) == _spec_readiness_signature(
+        _spec(hypothesis="Allocate 10% per trade to AAPL.")
+    )
+
+
+def test_readiness_signature_changes_with_requires_custom_code() -> None:
+    """Rule 9's custom_code_unenforceable critical depends on
+    ``requires_custom_code``; the mechanical trial-compile can flip it without
+    touching any other field, so the design-loop cache signature must change —
+    otherwise the flip rides a stale (pre-flip) readiness verdict and the
+    critical never fires."""
+    from investment_team.strategy_lab.orchestrator import _spec_readiness_signature
+
+    base = _spec()
+    flipped = _spec()
+    flipped.requires_custom_code = True
+    assert _spec_readiness_signature(base) != _spec_readiness_signature(flipped)
+
+
+# --- _extract_prose_position_pct unit coverage ---
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("deploy 5% per trade", 5.0),
+        ("Allocate 10% per trade to AAPL", 10.0),
+        ("use up to 7.5% per trade", 7.5),
+        ("commit ~3% of the account per trade", 3.0),
+        ("invest 8% in each position", 8.0),
+        ("12% per-trade allocation", 12.0),
+        ("4% position size", 4.0),
+        ("position sizing of 6%", 6.0),
+        ("position size of 9%", 9.0),
+        # "risk X% per trade" without an "of equity/capital" qualifier is the
+        # deployment rendering emitted by format_sizing_rule(), so it parses as
+        # a deployed-size claim.
+        ("risk 10% per trade", 10.0),
+        ("risk up to 2% per trade", 2.0),
+        ("risking 5% in each trade", 5.0),
+    ],
+)
+def test_extract_prose_position_pct_positive(text, expected) -> None:
+    assert _extract_prose_position_pct(text) == expected
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "",
+        "Exit on a 5% stop loss.",
+        "Take profit at 10%.",
+        "Cap the max drawdown at 25%.",
+        # Loss-budget phrasings are the realised per-trade loss, not the
+        # deployed position. "risk X% OF equity/capital per trade" is the loss
+        # form (the bare "risk X% per trade" deployment form is a positive
+        # above); "lose X%" is always a loss claim.
+        "risk 0.25% of equity per trade",
+        "risks 0.25% of equity per trade",
+        "lose at most 0.5% per trade",
+        # "X% position" without an explicit size/sizing qualifier is not a
+        # deployment claim — e.g. a profit-target phrasing.
+        "take profit after a 10% position gain",
+        "exit on a 10% position loss",
+        "RSI(14) below 30 signals entry.",
+    ],
+)
+def test_extract_prose_position_pct_negative(text) -> None:
+    assert _extract_prose_position_pct(text) is None
+
+
+def test_sizing_coherence_rel_tol_default_and_overrides(monkeypatch) -> None:
+    monkeypatch.delenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", raising=False)
+    assert _sizing_coherence_rel_tol() == 0.05
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "0.2")
+    assert _sizing_coherence_rel_tol() == 0.2
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "garbage")
+    assert _sizing_coherence_rel_tol() == 0.05
+    monkeypatch.setenv("STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE", "-1")
+    assert _sizing_coherence_rel_tol() == 0.05
