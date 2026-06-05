@@ -557,10 +557,11 @@ class MarketDataService:
             return []
 
         # Map crypto symbols to Yahoo tickers (e.g. BTC → BTC-USD). Callers
-        # may pass either the bare alias (``"BTC"``) or the already-suffixed
-        # Yahoo form (``"BTC-USD"``); ``canonical_symbol`` collapses both to
-        # the bare alias the lookup is keyed by, so the fallback branch can't
-        # double the suffix to ``"BTC-USD-USD"``.
+        # may pass the bare alias (``"BTC"``), the Yahoo-suffixed form
+        # (``"BTC-USD"``), or even a compound-suffixed spelling
+        # (``"BTC-USD-USD"``); ``canonical_symbol`` collapses every trailing
+        # ``-USD`` to the bare alias the lookup is keyed by, so the fallback
+        # branch can never double the suffix back to ``"BTC-USD-USD"``.
         if asset_class == "crypto":
             bare = canonical_symbol(symbol, asset_class)
             yf_symbol = YAHOO_CRYPTO_TICKERS.get(bare, f"{bare}-USD")
