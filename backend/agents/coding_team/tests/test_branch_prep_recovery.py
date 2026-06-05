@@ -812,3 +812,50 @@ class TestScopedMarkerClear:
         _, clone = repo_pair
         api._clear_active_issue_if_matches(clone, 5)  # no marker set: no-op, no raise
         assert api._read_active_issue(clone) is None
+
+
+class TestStaleRemoteTrackingRef:
+    """A deleted remote issue branch must not be resurrected: the failed
+    fetch leaves a stale origin/khala/issue-N tracking ref behind, and
+    seeding from it would let the final force push republish commits that
+    no longer exist on the remote."""
+
+    def test_stale_tracking_ref_not_used_as_seed(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        # Fabricate the post-deletion state: a stale remote-tracking ref
+        # pointing at commits the remote no longer has.
+        _must(clone, "checkout", "-q", "-b", "tmp", "origin/main")
+        _commit_file(clone, "stale.py", "s = 1\n", "stale remote work")
+        stale_tip = _must(clone, "rev-parse", "tmp")
+        _must(clone, "update-ref", "refs/remotes/origin/khala/issue-7", stale_tip)
+        _must(clone, "checkout", "-q", "main")
+        _must(clone, "branch", "-D", "tmp")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        # Fresh seed from base — the stale ref must not have been chosen…
+        assert _must(clone, "rev-parse", "khala/issue-7") == _must(
+            clone, "rev-parse", "origin/main"
+        )
+        # …the stale tracking ref is gone so later preps can't trip on it…
+        r = _run(clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/khala/issue-7")
+        assert r.returncode != 0
+        # …and its commits remain locally reachable (never-lose-work invariant)
+        # on an UNTAGGED rescue ref: a remote deletion is an explicit signal
+        # not to continue, so the preserved state must not become an
+        # automatic continuation candidate.
+        assert stale_tip in _must(clone, "rev-list", "--branches")
+        assert _branch_exists(clone, "khala/rescue/issue-7-*") is None
+        assert _branch_exists(clone, "khala/rescue/2*") is not None
+        assert api._latest_issue_rescue_ref(clone, 7) is None
+
+    def test_live_remote_branch_still_fetched_and_used(self, api, repo_pair) -> None:
+        """Guard: the stale-ref handling must not regress live-remote continuation."""
+        remote, clone = repo_pair
+        _must(remote, "checkout", "-q", "-b", "khala/issue-7")
+        _commit_file(remote, "pushed.py", "ok = True\n", "pushed work")
+        _must(remote, "checkout", "-q", "main")
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is True, err
+        assert "pushed.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")

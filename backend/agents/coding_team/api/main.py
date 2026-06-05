@@ -711,10 +711,28 @@ def _prepare_issue_branch(
         return False, msg, notes
     # The issue branch may exist remotely from a previous job that pushed
     # before dying; fetch it as a continuation candidate (absence is fine).
-    _git(repo_path, "fetch", "--", remote, integration_branch, env=auth_env)
-
     base_ref = f"{remote}/{default_branch}"
     remote_issue_ref = f"{remote}/{integration_branch}"
+    rc_issue_fetch, _ = _git(repo_path, "fetch", "--", remote, integration_branch, env=auth_env)
+    if rc_issue_fetch != 0:
+        # The remote branch is absent (deleted/pruned — the base-branch fetch
+        # just succeeded, so the remote itself is reachable). A stale
+        # remote-tracking ref from an earlier fetch would otherwise pose as
+        # live remote state: candidate selection could seed from it and the
+        # final force push would republish commits the remote deliberately no
+        # longer has. Pin its tip first (never-lose-work invariant), then
+        # drop the tracking ref. The rescue is deliberately UNTAGGED: a
+        # remote deletion is an explicit signal not to continue this state,
+        # so it is preserved for manual recovery without becoming an
+        # automatic continuation candidate (unlike preserved local
+        # divergence, which the system itself was still carrying).
+        if _is_ahead(repo_path, remote_issue_ref, base_ref):
+            preserve_err = _preserve_if_would_orphan(
+                repo_path, remote_issue_ref, base_ref, base_ref, None
+            )
+            if preserve_err:
+                return False, preserve_err, notes
+        _git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
     candidates: List[str] = []
     if marker is not None and issue_number is not None and marker == issue_number:
         candidates.append(wip_tip or DEVELOPMENT_BRANCH)
