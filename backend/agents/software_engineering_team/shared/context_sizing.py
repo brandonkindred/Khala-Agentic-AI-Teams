@@ -24,6 +24,7 @@ def compute_max_chunk_chars(
     chars_per_token: float = CHARS_PER_TOKEN,
     min_chars: int = 8000,
     num_chunks: int = 1,
+    max_fraction_of_context: float = 0.4,
 ) -> int:
     """
     Compute max chars for analysis chunk(s) given model context size.
@@ -35,11 +36,19 @@ def compute_max_chunk_chars(
         chars_per_token: Conservative chars-per-token (~3.5 for code/spec).
         min_chars: Minimum chunk size (fallback for small models).
         num_chunks: When >1, divides available space so multiple chunks fit in one prompt.
+        max_fraction_of_context: Per-section ceiling as a fraction of the model
+            context. Sections are sized independently but agents combine
+            several in one prompt (e.g. spec content + existing code in
+            BackendAgent._plan_task); without this ceiling, large-context
+            models (1M tokens) let each section claim nearly the whole window
+            and the combination overflows. 0.4 guarantees any two sections
+            plus reserves fit.
 
     Returns:
         Max chars to use per chunk.
     """
     available_tokens = context_tokens - reserved_prompt_tokens - reserved_response_tokens
+    available_tokens = min(available_tokens, int(context_tokens * max_fraction_of_context))
     if available_tokens < 512:
         available_tokens = 512  # ensure some room for tiny models
     if num_chunks > 1:

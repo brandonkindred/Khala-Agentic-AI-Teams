@@ -773,3 +773,109 @@ def test_run_json_via_strands_multiple_sequential_calls_succeed() -> None:
         assert isinstance(result, dict), f"call {i} did not return a dict"
         assert "overview" in result, f"call {i} missing overview key"
         assert "components" in result, f"call {i} missing components key"
+
+
+# ---------------------------------------------------------------------------
+# get_max_context_tokens delegation
+# ---------------------------------------------------------------------------
+
+
+class _ContextClient(DummyLLMClient):
+    def get_max_context_tokens(self) -> int:
+        return 262144
+
+
+def test_adapter_delegates_get_max_context_tokens() -> None:
+    """context_sizing helpers receive the adapter where an LLMClient is
+    expected (e.g. quality_gate_tools.run_code_review); the adapter must
+    answer for its backing client instead of raising AttributeError."""
+    model = LLMClientModel(_ContextClient())
+    assert model.get_max_context_tokens() == 262144
+
+
+def test_get_strands_model_exposes_context_for_hasattr_guards() -> None:
+    """llm_service.compaction guards with hasattr and silently degraded the
+    adapter to a 16384-token assumption; delegation makes the guard pass."""
+    model = get_strands_model(client=_ContextClient())
+    assert hasattr(model, "get_max_context_tokens")
+    assert model.get_max_context_tokens() == 262144
+
+
+# ---------------------------------------------------------------------------
+# Thinking levels through the adapter
+# ---------------------------------------------------------------------------
+
+
+def test_adapter_passes_think_level_string_through() -> None:
+    """A level string configured on the model must reach the client verbatim —
+    a bool() coercion would silently turn "medium" into True."""
+    client = _RecordingClient({"summary": "done"})
+    model = LLMClientModel(client, think="medium")
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert client.chat_calls[0]["think"] == "medium"
+
+
+def test_adapter_default_think_is_none_for_client_side_resolution() -> None:
+    """None defers to the client, which resolves the platform default
+    (max thinking level for registered models)."""
+    client = _RecordingClient({"summary": "done"})
+    model = LLMClientModel(client)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert client.chat_calls[0]["think"] is None
+
+
+# ---------------------------------------------------------------------------
+# Reasoning round-trip on tool-call turns
+# ---------------------------------------------------------------------------
+
+
+def test_stream_emits_reasoning_block_before_tool_use() -> None:
+    """The envelope's reasoning must surface as a strands reasoningContent
+    block so the Agent's history carries it back on the next turn."""
+    client = _RecordingClient(
+        {
+            "__tool_calls__": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "git_status", "arguments": "{}"},
+                }
+            ],
+            "__reasoning_content__": "thinking...",
+        }
+    )
+    model = LLMClientModel(client)
+    events = _drain(model.stream(messages=[{"role": "user", "content": [{"text": "go"}]}]))
+    reasoning_deltas = [
+        e["contentBlockDelta"]["delta"]["reasoningContent"]["text"]
+        for e in events
+        if "contentBlockDelta" in e and "reasoningContent" in e["contentBlockDelta"]["delta"]
+    ]
+    assert reasoning_deltas == ["thinking..."]
+    assert events[-1] == {"messageStop": {"stopReason": "tool_use"}}
+
+
+def test_messages_to_openai_maps_reasoning_block_onto_tool_call_message() -> None:
+    """DeepSeek requires the tool-call turn's reasoning_content on the wire
+    when the history is replayed; reasoningContent blocks must not be dropped."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"reasoningContent": {"reasoningText": {"text": "thought hard"}}},
+                {
+                    "toolUse": {
+                        "toolUseId": "c1",
+                        "name": "git_status",
+                        "input": {},
+                    }
+                },
+            ],
+        }
+    ]
+    out = _strands_messages_to_openai(messages)
+    assistant = next(m for m in out if m["role"] == "assistant" and m.get("tool_calls"))
+    # Both dialects must be present: Ollama-compat reads `reasoning`,
+    # DeepSeek-native reads `reasoning_content`.
+    assert assistant["reasoning"] == "thought hard"
+    assert assistant["reasoning_content"] == "thought hard"

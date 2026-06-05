@@ -127,7 +127,7 @@ class LLMClient(ABC):
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """
@@ -138,7 +138,9 @@ class LLMClient(ABC):
         value is a list of tool-call objects (id, type, function.name, function.arguments).
         Optional kwargs may include expected_keys, decomposition_hints for PA-style robust extraction.
 
-        ``think`` controls chain-of-thought / reasoning mode (default ``False``).
+        ``think`` controls chain-of-thought / reasoning mode: ``None`` (default)
+        resolves to the platform default — the model's max registered thinking
+        level when known; ``False`` disables; a string selects a specific level.
         """
         ...
 
@@ -150,7 +152,7 @@ class LLMClient(ABC):
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
     ) -> str:
         """
         Run the model and return raw text.
@@ -158,7 +160,7 @@ class LLMClient(ABC):
         Override in implementations that support it. Default uses complete_json and extracts text.
         Pass ``tools`` for function/tool calling; tool-call responses are returned as JSON strings.
 
-        ``think`` controls chain-of-thought / reasoning mode (default ``False``).
+        ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
         """
         result = self.complete_json(
             prompt,
@@ -181,7 +183,9 @@ class LLMClient(ABC):
         return 16384
 
     # Alias for SE code that uses complete_text
-    def complete_text(self, prompt: str, *, temperature: float = 0.0, think: bool = False) -> str:
+    def complete_text(
+        self, prompt: str, *, temperature: float = 0.0, think: "bool | str | None" = None
+    ) -> str:
         """Alias for complete() for backward compatibility with SE team."""
         return self.complete(
             prompt, temperature=temperature, max_tokens=None, system_prompt=None, think=think
@@ -194,7 +198,7 @@ class LLMClient(ABC):
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
-        think: bool = False,
+        think: "bool | str | None" = None,
         max_tokens: Optional[int] = None,
         **kwargs: Any,
     ) -> Any:
@@ -216,4 +220,3 @@ class LLMClient(ABC):
         Default implementation: not supported — override in Ollama / Dummy.
         """
         raise LLMPermanentError(f"{type(self).__name__} does not implement chat")
-
