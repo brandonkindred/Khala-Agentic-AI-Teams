@@ -564,8 +564,9 @@ def test_streaming_write_and_cache_read_agree_on_nonfinite_volume() -> None:
 class _NaNVolProvider:
     """Historical-only provider that emits a single NaN-volume bar."""
 
-    def __init__(self, name: str = "nanvol") -> None:
+    def __init__(self, name: str = "nanvol", *, is_warmup: bool = False) -> None:
         self.capabilities = type("C", (), {"name": name})()
+        self._is_warmup = is_warmup
 
     def historical(self, *, symbols, asset_class, start, end, timeframe) -> Iterator[BarEvent]:
         for sym in symbols:
@@ -579,7 +580,8 @@ class _NaNVolProvider:
                     low=99.0,
                     close=100.5,
                     volume=float("nan"),
-                )
+                ),
+                is_warmup=self._is_warmup,
             )
 
 
@@ -623,3 +625,29 @@ def test_caching_stream_miss_path_sanitizes_live_event_volume(cache: MarketDataC
     assert stream2.cache_hit is True
     # Identical provider data → identical volume on miss and hit paths.
     assert hit_events[0].bar.volume == miss_events[0].bar.volume == 0.0
+
+
+def test_caching_stream_miss_path_preserves_warmup_flag_on_coercion(cache: MarketDataCache) -> None:
+    """Coercing a non-finite volume on the live miss path must not drop the
+    BarEvent's ``is_warmup`` flag — the trading service uses it to suppress
+    fills during warm-up, so turning a warm-up bar into a live bar (only in
+    the NaN-volume case) would let it execute orders it should not.
+    """
+    provider = _NaNVolProvider(is_warmup=True)
+    miss_events = [
+        e
+        for e in CachingProviderHistoricalStream(
+            provider=provider,
+            symbols=["AAA"],
+            asset_class="stocks",
+            start="2024-01-01",
+            end="2024-01-01",
+            timeframe="1d",
+            cache=cache,
+        )
+        if isinstance(e, BarEvent)
+    ]
+    assert len(miss_events) == 1
+    # Volume coerced, warm-up flag preserved.
+    assert miss_events[0].bar.volume == 0.0
+    assert miss_events[0].is_warmup is True

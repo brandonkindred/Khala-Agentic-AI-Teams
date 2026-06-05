@@ -121,9 +121,14 @@ class CachingProviderHistoricalStream:
                 # via _interleave_bars. Yield the same coerced volume here so
                 # a NaN/inf provider volume drives identical execution on the
                 # miss and hit paths, instead of leaking a non-finite value
-                # into fill/participation math on the first run only.
+                # into fill/participation math on the first run only. Copy/
+                # update the existing event so BarEvent-level state (e.g.
+                # is_warmup, which suppresses fills) is preserved — only the
+                # bar's volume changes.
                 if not math.isfinite(float(getattr(bar, "volume", 0.0))):
-                    event = BarEvent(bar=bar.model_copy(update={"volume": norm.volume}))
+                    event = event.model_copy(
+                        update={"bar": bar.model_copy(update={"volume": norm.volume})}
+                    )
                 yield event
             elif isinstance(event, EndOfStreamEvent):
                 self._persist_buffers(buffers, provider_name)
