@@ -8,6 +8,7 @@ create it from main if it does not exist.
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -17,9 +18,60 @@ logger = logging.getLogger(__name__)
 DEVELOPMENT_BRANCH = "development"
 MAIN_BRANCH = "main"
 
+DEFAULT_COMMIT_USER_NAME = "Khala"
+DEFAULT_COMMIT_USER_EMAIL = "brandon.kindred@gmail.com"
+
+
+def _configured_commit_identity() -> Tuple[str, str]:
+    """Resolve the configured platform commit identity.
+
+    Postconditions:
+        - Returns (name, email), both non-empty; blank or unset
+          GIT_COMMIT_USER_NAME / GIT_COMMIT_USER_EMAIL fall back to the
+          platform defaults.
+    """
+    name = (os.environ.get("GIT_COMMIT_USER_NAME") or "").strip() or DEFAULT_COMMIT_USER_NAME
+    email = (os.environ.get("GIT_COMMIT_USER_EMAIL") or "").strip() or DEFAULT_COMMIT_USER_EMAIL
+    return name, email
+
+
+def git_identity_env() -> Dict[str, str]:
+    """Process environment for git subprocesses with a complete commit identity.
+
+    GitHub-cloned checkouts have no repo-local user.name/user.email and the
+    agent containers set no global git config, so a bare `git commit` fails
+    with "Author identity unknown". Filling git's native identity variables
+    here makes identity ambient for every command routed through _run_git
+    without persisting anything into the checkout.
+
+    Preconditions: none.
+    Postconditions:
+        - Returned dict contains all parent environment entries.
+        - GIT_AUTHOR_NAME/EMAIL and GIT_COMMITTER_NAME/EMAIL are present and
+          non-empty; non-blank values exported by the operator are unchanged,
+          while blank exports are replaced (git rejects empty idents with
+          "fatal: empty ident name ... not allowed").
+    """
+    name, email = _configured_commit_identity()
+    env = dict(os.environ)
+    for key, value in (
+        ("GIT_AUTHOR_NAME", name),
+        ("GIT_AUTHOR_EMAIL", email),
+        ("GIT_COMMITTER_NAME", name),
+        ("GIT_COMMITTER_EMAIL", email),
+    ):
+        if not (env.get(key) or "").strip():
+            env[key] = value
+    return env
+
 
 def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, str]:
-    """Run git command in repo. Returns (returncode, stdout+stderr)."""
+    """Run git command in repo. Returns (returncode, stdout+stderr).
+
+    Postconditions:
+        - The spawned git process observes a complete author/committer
+          identity (see git_identity_env).
+    """
     try:
         result = subprocess.run(
             cmd,
@@ -27,6 +79,7 @@ def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, s
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=git_identity_env(),
         )
         return result.returncode, (result.stdout or "") + (result.stderr or "")
     except subprocess.TimeoutExpired:
@@ -327,8 +380,9 @@ def initialize_new_repo(
     _run_git(path, ["git", "config", "commit.gpgsign", "false"])
     # Set a default local identity so commits work even when no global git config is set
     # (e.g. in CI environments). Local config is repo-scoped and does not affect global settings.
-    _run_git(path, ["git", "config", "user.email", "agent@khala.local"])
-    _run_git(path, ["git", "config", "user.name", "Khala Agent"])
+    name, email = _configured_commit_identity()
+    _run_git(path, ["git", "config", "user.email", email])
+    _run_git(path, ["git", "config", "user.name", name])
 
     # 2. .gitignore, README.md, CONTRIBUTORS.md, docs/ (only if missing)
     gitignore_path = path / ".gitignore"
