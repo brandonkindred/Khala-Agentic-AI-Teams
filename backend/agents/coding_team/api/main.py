@@ -47,6 +47,7 @@ from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
+    git_identity_env,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -741,14 +742,48 @@ def _prepare_issue_branch(
     # before dying; fetch it as a continuation candidate (absence is fine).
     base_ref = f"{remote}/{default_branch}"
     remote_issue_ref = f"{remote}/{integration_branch}"
-    rc_issue_fetch, _ = _git(repo_path, "fetch", "--", remote, integration_branch, env=auth_env)
+    rc_issue_fetch, issue_fetch_msg = _git(
+        repo_path, "fetch", "--", remote, integration_branch, env=auth_env
+    )
     if rc_issue_fetch != 0:
-        # The remote branch is absent (deleted/pruned — the base-branch fetch
-        # just succeeded, so the remote itself is reachable). A stale
-        # remote-tracking ref from an earlier fetch would otherwise pose as
-        # live remote state: candidate selection could seed from it and the
-        # final force push would republish commits the remote deliberately no
-        # longer has. Pin its tip first (never-lose-work invariant), then
+        # `fetch` exit codes do not distinguish "no such remote ref" from a
+        # transient transport failure, and only confirmed absence may take
+        # the deletion path below — dropping the tracking ref on a network
+        # blip would hide live remote progress from candidate selection and
+        # let the final force-with-lease push race against it. Probe absence
+        # explicitly: `ls-remote --exit-code` exits 2 when the remote has no
+        # matching head, 0 when it does, anything else on transport failure.
+        rc_probe, probe_out = _git(
+            repo_path,
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--",
+            remote,
+            integration_branch,
+            env=auth_env,
+        )
+        if rc_probe == 0:
+            return (
+                False,
+                f"could not fetch remote issue branch {integration_branch!r} "
+                f"(it exists on the remote — transient failure?): {issue_fetch_msg}",
+                notes,
+            )
+        if rc_probe != 2:
+            return (
+                False,
+                f"cannot verify whether remote issue branch {integration_branch!r} still "
+                f"exists (fetch failed: {issue_fetch_msg}; probe failed: {probe_out})",
+                notes,
+            )
+        # The remote branch is absent (deleted/pruned — the probe confirmed
+        # it, and the base-branch fetch succeeded so the remote itself is
+        # reachable). A stale remote-tracking ref from an earlier fetch would
+        # otherwise pose as live remote state: candidate selection could seed
+        # from it and the final force push would republish commits the remote
+        # deliberately no longer has. Pin its tip first (never-lose-work
+        # invariant), then
         # drop the tracking ref. The rescue is deliberately UNTAGGED: a
         # remote deletion is an explicit signal not to continue this state,
         # so it is preserved for manual recovery without becoming an
@@ -831,6 +866,40 @@ def _prepare_issue_branch(
     rc, msg = _git(repo_path, "checkout", "-B", DEVELOPMENT_BRANCH, seed, "--")
     if rc != 0:
         return False, msg, notes
+
+    if (
+        wip_tip
+        and _is_safe_ref(wip_tip)
+        and not _reachable_from(repo_path, wip_tip, DEVELOPMENT_BRANCH)
+    ):
+        # Same-issue WIP was recovered onto a branch that diverged from the
+        # chosen seed (e.g. a feature branch cut before other work merged
+        # into development). Recovery reported that WIP as continuation
+        # state, so it must reach the resumed line — left only on a side
+        # branch the orchestrator never reads, "recovered" would be a lie.
+        # Merge it in; on conflict, abort and tell the operator rather than
+        # guessing a resolution (the WIP branch itself is never reset, so
+        # nothing is lost either way).
+        rc, msg = _git(repo_path, "merge", "--no-edit", wip_tip, env=git_identity_env())
+        if rc == 0:
+            notes.append(
+                f"🔀 Merged recovered work-in-progress from `{wip_tip}` into the continuation line."
+            )
+        else:
+            _git(repo_path, "merge", "--abort")
+            status_ok, still_dirty, _ = _working_tree_dirty(repo_path)
+            if not status_ok or still_dirty:
+                return (
+                    False,
+                    f"merge of recovered work-in-progress `{wip_tip}` failed and could not "
+                    f"be cleanly aborted: {msg}",
+                    notes,
+                )
+            notes.append(
+                f"⚠️ Recovered work-in-progress on `{wip_tip}` conflicts with the continuation "
+                f"line; left unmerged on that branch for manual integration."
+            )
+
     rc, msg = _git(repo_path, "checkout", "-B", integration_branch, "--")
     if rc != 0:
         return False, msg, notes

@@ -491,6 +491,23 @@ def _stub_heavy_modules() -> None:
         sys.modules["software_engineering_team.shared.git_utils"] = gu
 
     gu_mod = sys.modules["software_engineering_team.shared.git_utils"]
+    if not hasattr(gu_mod, "git_identity_env"):
+        # Functional stand-in mirroring the real helper: api.main imports it
+        # for the recovered-WIP merge, which needs a complete commit identity
+        # in identity-free environments.
+        def _stub_git_identity_env():
+            env = dict(os.environ)
+            for key in (
+                "GIT_AUTHOR_NAME",
+                "GIT_AUTHOR_EMAIL",
+                "GIT_COMMITTER_NAME",
+                "GIT_COMMITTER_EMAIL",
+            ):
+                if not (env.get(key) or "").strip():
+                    env[key] = "stub@example.com" if key.endswith("EMAIL") else "Stub"
+            return env
+
+        gu_mod.git_identity_env = _stub_git_identity_env  # type: ignore[attr-defined]
     if not hasattr(gu_mod, "commit_working_tree"):
         # Functional stand-in: api.main imports commit_working_tree for dirty-tree
         # recovery, and TestPrepareIssueBranch exercises that path against real

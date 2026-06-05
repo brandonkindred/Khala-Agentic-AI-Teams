@@ -935,3 +935,127 @@ class TestRemoteFloorOnSeedSelection:
         rescued = _branch_exists(clone, "khala/rescue/issue-7-*")
         assert rescued is not None
         assert "local_only.py" in _must(clone, "ls-tree", "-r", "--name-only", rescued)
+
+
+class TestIssueBranchFetchFailureHandling:
+    """Only a CONFIRMED-absent remote issue branch may take the stale-ref
+    deletion path. `git fetch` exit codes do not distinguish "no such remote
+    ref" from a transient transport failure, and deleting the tracking ref on
+    a network blip would hide live remote progress from candidate selection —
+    prep must fail closed instead so a retry sees the real remote state."""
+
+    @staticmethod
+    def _stale_tracking_ref(clone: str) -> str:
+        """Plant refs/remotes/origin/khala/issue-7 at a local-only commit."""
+        _must(clone, "checkout", "-q", "-b", "tmp", "origin/main")
+        _commit_file(clone, "remote_work.py", "r = 1\n", "remote work")
+        tip = _must(clone, "rev-parse", "tmp")
+        _must(clone, "update-ref", "refs/remotes/origin/khala/issue-7", tip)
+        _must(clone, "checkout", "-q", "main")
+        _must(clone, "branch", "-D", "tmp")
+        return tip
+
+    def test_transient_fetch_failure_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        """Fetch fails but the probe confirms the branch is alive remotely:
+        prep must surface the fetch error, not discard the tracking ref."""
+        _, clone = repo_pair
+        tip = self._stale_tracking_ref(clone)
+
+        real_git = api._git
+
+        def fake_git(repo_path, *args, **kwargs):
+            if args[0] == "fetch" and "khala/issue-7" in args:
+                return 1, "transient network error"
+            if args[0] == "ls-remote":
+                return 0, f"{tip}\trefs/heads/khala/issue-7"
+            return real_git(repo_path, *args, **kwargs)
+
+        monkeypatch.setattr(api, "_git", fake_git)
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "transient network error" in (err or "")
+        # The tracking ref survives untouched and nothing was rescued.
+        r = _run(clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/khala/issue-7")
+        assert r.returncode == 0
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+    def test_unverifiable_absence_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        """Fetch fails and the absence probe also fails: remote state is
+        unknowable, so prep must fail rather than guess "absent"."""
+        _, clone = repo_pair
+        self._stale_tracking_ref(clone)
+
+        real_git = api._git
+
+        def fake_git(repo_path, *args, **kwargs):
+            if args[0] == "fetch" and "khala/issue-7" in args:
+                return 1, "transient network error"
+            if args[0] == "ls-remote":
+                return 128, "connection refused"
+            return real_git(repo_path, *args, **kwargs)
+
+        monkeypatch.setattr(api, "_git", fake_git)
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "connection refused" in (err or "")
+        r = _run(clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/khala/issue-7")
+        assert r.returncode == 0
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+
+class TestDivergedWipReachesContinuationLine:
+    """Recovery reports same-issue WIP as continuation state, so it must reach
+    the resumed integration line: when the branch the WIP was committed on
+    diverged from the chosen seed, prep merges it in (clean case) or leaves it
+    on its branch with an explicit operator note (conflict case) — never
+    silently stranded on a side branch the orchestrator will not read."""
+
+    def test_diverged_feature_wip_merged_into_seed(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        # Feature branch cut from development, then other work merged into
+        # development (the branches diverge)…
+        _must(clone, "checkout", "-q", "-b", "feature/t2", "development")
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "merged.py", "m = 1\n", "task 1 merged")
+        # …and the crash leaves uncommitted WIP on the feature branch.
+        _must(clone, "checkout", "-q", "feature/t2")
+        with open(os.path.join(clone, "wip.py"), "w", encoding="utf-8") as fh:
+            fh.write("w = 1\n")
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        files = _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        # Both the merged development progress AND the recovered WIP are in
+        # the continuation line.
+        assert "merged.py" in files
+        assert "wip.py" in files
+        ok_status, dirty, _ = api._working_tree_dirty(clone)
+        assert ok_status is True and dirty is False
+
+    def test_conflicting_wip_left_on_branch_with_note(self, api, repo_pair) -> None:
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone)
+        assert ok is True
+        _must(clone, "checkout", "-q", "-b", "feature/t2", "development")
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "same.py", "dev = 1\n", "dev version")
+        # WIP adds the same file with different content → add/add conflict.
+        _must(clone, "checkout", "-q", "feature/t2")
+        with open(os.path.join(clone, "same.py"), "w", encoding="utf-8") as fh:
+            fh.write("wip = 2\n")
+
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        # The continuation line carries development's version…
+        assert _must(clone, "show", "khala/issue-7:same.py") == "dev = 1"
+        # …the working tree is clean (the failed merge was aborted)…
+        ok_status, dirty, _ = api._working_tree_dirty(clone)
+        assert ok_status is True and dirty is False
+        # …the WIP stays reachable on its own branch…
+        assert "same.py" in _must(clone, "ls-tree", "-r", "--name-only", "feature/t2")
+        # …and the operator is told it needs manual integration.
+        assert any("merge" in n.lower() for n in notes)
