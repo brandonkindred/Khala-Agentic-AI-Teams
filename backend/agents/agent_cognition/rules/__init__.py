@@ -24,6 +24,7 @@ from agent_cognition.rules.predicate import (
     parse_predicate,
     validate_predicate,
 )
+from agent_cognition.rules.reflection import ReflectionReport, reflect
 from agent_cognition.rules.seed_packs import SEED_PACKS, SeedRule
 from agent_cognition.rules.store import (
     RuleStoreError,
@@ -64,6 +65,9 @@ __all__ = [
     "is_valid_predicate",
     "parse_predicate",
     "validate_predicate",
+    # reflection (rule learning)
+    "ReflectionReport",
+    "reflect",
     # seed packs
     "SEED_PACKS",
     "SeedRule",

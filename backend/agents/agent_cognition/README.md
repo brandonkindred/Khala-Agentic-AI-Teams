@@ -21,13 +21,17 @@ use-case, logic-flow, rule-lifecycle, and security diagrams.
 
 ## Status
 
-The persistence and memory foundation is built; the rules and tools layers remain design.
+The persistence/memory foundation and the rules engine are built; the tools layer, the
+orchestration facade, and the platform automation remain design.
 
 - **Built** — Postgres schema + domain models (`postgres/`, `models.py`); the episodic
   memory data-access layer (`memory/store.py`); the **calendar rollup engine**
-  (`memory/rollup.py`).
-- **Design only** — rules store / reflection / enforcement, the tools layer, the
-  `CognitiveContext` facade, the scheduler, and the invoke-proxy integration.
+  (`memory/rollup.py`); the **retrieval/digest builder** (`memory/retrieval.py`); the
+  **rules engine** — store + predicate DSL + enforcement (`rules/store.py`,
+  `rules/predicate.py`, `rules/enforcement.py`); and the **reflection engine**
+  (`rules/reflection.py`).
+- **Design only** — the tools layer, the `CognitiveContext` facade, the scheduler, and the
+  invoke-proxy integration.
 
 ## Rollup engine
 
@@ -49,3 +53,32 @@ review (evidence refs are `{"summary_id": <id>, "version": <int>}` objects).
 |---|---|---|
 | `AGENT_COGNITION_ROLLUP_INPUT_CHARS` | `12000` | Character budget passed to `compact_text` for one period's input block before the summarization LLM call. Unset/garbage/non-positive values fall back to the default. |
 | `AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS` | `400` | Upper bound on the cold-start / gap backfill walk (>1 year so a yearly rollup of the prior year is always reachable). Unset/garbage/non-positive values fall back to the default. |
+
+## Reflection (rule learning)
+
+`rules/reflection.py` turns summaries into proposed guardrails. `reflect(agent_id, now)` reads the
+agent's most recent month/week/day summaries plus its current active rules, asks an LLM to propose
+rule changes (**add / retire / amend**, advisory or enforced), and writes each as a **`pending`
+`RuleProposal`** carrying `{"summary_id", "version"}` evidence refs over the window that motivated
+it. It **never creates or activates a rule** — activation happens only through the operator approve
+path (`rules/store.py::approve_proposal`), so reflection calls only `create_proposal`.
+
+The model's suggestions are untrusted: an incoherent action, a retire/amend target that is not a
+currently-active rule, or an enforced rule whose predicate is absent or fails `is_valid_predicate`
+is **dropped and counted**, never raised — one bad suggestion can't poison the batch. Suggestions
+that duplicate an existing pending proposal (same action + target + normalized text), or an earlier
+accepted suggestion in the same run, are skipped so the HITL queue stays clean across the periodic
+scheduler runs. Reflection does not run rollups itself; the caller sequences
+`ensure_rollups_current` then `reflect`. The engine returns a `ReflectionReport`
+(`proposed` / `dropped_invalid` / `deduped` / `llm_calls`).
+
+### Configuration
+
+| Env var | Default | Purpose |
+|---|---|---|
+| `AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT` | `6` | Most-recent summaries fetched **per scale** (month, week, day) as the reflection input. Unset/garbage/non-positive values fall back to the default. |
+| `AGENT_COGNITION_REFLECTION_MAX_PROPOSALS` | `5` | Hard cap on proposals written in one `reflect` run; extra LLM suggestions beyond the cap are ignored. Unset/garbage/non-positive values fall back to the default. |
+| `AGENT_COGNITION_REFLECTION_INPUT_CHARS` | `8000` | Character budget passed to `compact_text` for the rendered summaries + rules block before the LLM call. Unset/garbage/non-positive values fall back to the default. |
+
+The reflection LLM uses the shared `cognition` model key, so the same `LLM_MODEL_cognition`
+override applies as for the rollup engine.
