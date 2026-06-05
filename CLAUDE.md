@@ -248,6 +248,8 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `LLM_BASE_URL` | LLM server URL |
 | `LLM_MODEL` | Model name |
 | `LLM_NUM_CTX_FALLBACK_TTL_S` | TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show` fails, the client degrades to a 16384-token context but only caches it for this window before re-attempting — a transient `/api/show` outage can no longer poison the process into silently truncating large prompts for its whole lifetime. A successfully-resolved (or known/env) context size is still cached permanently. Garbage values fall back to the default; negative floors to `0` (retry on next call). |
+| `LLM_ENABLE_THINKING` | Global thinking default for all LLM calls that don't specify `think` explicitly (default enabled; set `false`/`0`/`no` to disable). When enabled, models registered in `KNOWN_MODEL_THINKING_LEVELS` (e.g. `deepseek-v4-pro:cloud`: low/medium/high/max) think at their **highest** level; unregistered models get boolean `think: true`. Explicit per-call `think=False` always wins. |
+| `LLM_THINKING_LEVEL` | Overrides the thinking level chosen for models with registered levels (e.g. `medium`). Values that aren't a registered level for the model fall back to the max level with a warning; ignored for models that only support boolean think. |
 | `TEMPORAL_ADDRESS` | Enables Temporal mode when set |
 | `TEMPORAL_NAMESPACE` | Temporal namespace |
 | `TEMPORAL_TASK_QUEUE` | Temporal task queue name |
@@ -299,6 +301,8 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `AGENT_EXEC_TIMEOUT_S` | Default per-agent execution timeout (`asyncio.wait_for`) inside the sandbox; overflow returns 504 with `timeout_hit: true` (default `60`). Per-agent override via `invoke.timeout_seconds` in the manifest. |
 | `GITHUB_TOKEN` | Default token for the coding team's `POST /api/coding-team/run-from-github` flow. Per-request `github_token` in the body overrides this. Needs `Issues: read/write`, `Pull requests: read/write`, `Contents: read/write`, `Metadata: read` (or classic `repo`). |
 | `GITHUB_API_URL` | Optional override for the GitHub REST base URL used by the coding team's GitHub client (`backend/agents/coding_team/github_source/`). Defaults to `https://api.github.com`; set to a GitHub Enterprise URL when relevant. |
+| `GIT_COMMIT_USER_NAME` | Author/committer name for every git commit platform code makes (SE pipeline, coding team, agent git tools — all routed through `software_engineering_team/shared/git_utils.py`). Default `Khala`. Blank values fall back to the default; natively-exported `GIT_AUTHOR_*`/`GIT_COMMITTER_*` env vars win over this setting. |
+| `GIT_COMMIT_USER_EMAIL` | Author/committer email for platform git commits. Default `brandon.kindred@gmail.com`. Same precedence rules as `GIT_COMMIT_USER_NAME`. |
 | `SE_CI_GATE_ENABLED` | Master toggle for CI gate verification after code generation (default `true`). When enabled, the orchestrator runs lint/test/build checks on generated repos before marking jobs complete. |
 | `SE_CI_GATE_TIMEOUT_S` | Timeout in seconds for GitHub CI status polling when a remote is available (default `300`). Only applies when `GITHUB_TOKEN` + repo info are provided. |
 | `SE_CI_GATE_LOCAL_FALLBACK` | When `true` (default), runs CI checks locally via subprocess (ruff, pytest, npm lint/test) when no GitHub remote is available. Set to `false` to skip CI gate entirely without GitHub. |

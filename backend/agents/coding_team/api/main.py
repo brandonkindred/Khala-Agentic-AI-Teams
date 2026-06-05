@@ -4,12 +4,14 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 
 from __future__ import annotations
 
+import base64
 import logging
 import os
 import subprocess
 import sys
 import threading
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -42,7 +44,11 @@ from coding_team.job_store import (  # noqa: E402
 from coding_team.models import CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
-from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH  # noqa: E402
+from software_engineering_team.shared.git_utils import (  # noqa: E402
+    DEVELOPMENT_BRANCH,
+    commit_working_tree,
+    git_identity_env,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -209,6 +215,34 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
     return None
 
 
+def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Dict[str, Any]]:
+    """Return another non-terminal job using this checkout, if any.
+
+    Branch prep mutates the working tree (dirty-tree recovery commits files,
+    `checkout -B` switches branches). Doing that under a job that is actively
+    working would corrupt its run — the pre-recovery code's fail-fast dirty
+    guard prevented this by accident, and recovery must not regress it. The
+    job store can answer liveness (a deleted job is not running) even though
+    it cannot answer leftover attribution — that remains the marker's job.
+
+    Postconditions:
+        - Returns the sibling job dict when one exists with a non-terminal
+          status and the same checkout; None otherwise. Paths are compared
+          canonically (symlinks, ``.``/``..``, trailing slashes resolved), so
+          a sibling registered under a different spelling of the same
+          checkout still matches. The caller's own job (``own_job_id``) is
+          never reported.
+    """
+    target = os.path.realpath(repo_path)
+    for j in list_jobs(running_only=True):
+        if not j or j.get("job_id") == own_job_id:
+            continue
+        sibling_path = j.get("repo_path")
+        if sibling_path and os.path.realpath(sibling_path) == target:
+            return j
+    return None
+
+
 def _start_hook_thread(
     job_id: str,
     request: RunFromGitHubRequest,
@@ -335,7 +369,7 @@ def _truncate_title(title: str, issue_num: int, limit: int = 256) -> str:
 
 
 def _git_auth_env(token: str) -> Dict[str, str]:
-    """Build an env dict that injects a Bearer token via ``GIT_CONFIG_*`` vars.
+    """Build an env dict that injects Basic credentials via ``GIT_CONFIG_*`` vars.
 
     Mirrors the unified API's clone-time auth (``_git_auth_env`` in
     ``unified_api/routes/integrations.py``): the credential is passed
@@ -343,21 +377,54 @@ def _git_auth_env(token: str) -> Dict[str, str]:
     That matters because the checkout lives on the shared ``agents_data``
     volume — a persisted token would outlive the job and leak across runs.
 
+    The scheme must be ``Basic`` with the ``x-access-token`` username:
+    GitHub's git smart-HTTP endpoint rejects a ``Bearer`` header (401
+    ``invalid credentials``) even for a valid token — Bearer is only accepted
+    by the REST API — after which git tries to prompt for a username and
+    fails headless ("terminal prompts disabled").
+
     Preconditions:
         - ``token`` is a non-empty GitHub credential authorizing the operation.
     Postconditions:
         - Returns a copy of ``os.environ`` augmented with a single transient
-          ``http.extraHeader`` git-config entry (Authorization: Bearer) and
+          ``http.extraHeader`` git-config entry (Authorization: Basic) and
           ``GIT_TERMINAL_PROMPT=0`` so a missing/invalid credential fails fast
           instead of blocking on an interactive prompt until the git timeout.
     """
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
     return {
         **os.environ,
         "GIT_CONFIG_COUNT": "1",
         "GIT_CONFIG_KEY_0": "http.extraHeader",
-        "GIT_CONFIG_VALUE_0": f"Authorization: Bearer {token}",
+        "GIT_CONFIG_VALUE_0": f"Authorization: Basic {basic}",
         "GIT_TERMINAL_PROMPT": "0",
     }
+
+
+def _scrub_auth_header_values(msg: str, env: Optional[Dict[str, str]]) -> str:
+    """Redact the transient auth header from git output.
+
+    ``scrub_token_from_text`` only covers URL-embedded credentials; the
+    header value built by ``_git_auth_env`` is a second representation of
+    the token (Basic + base64) that verbose/trace git output can echo. Job
+    errors and issue comments are built from these messages, so every
+    representation must be redacted.
+
+    Postconditions:
+        - Neither the full header value, the ``Basic <b64>`` credential, nor
+          the bare base64 form appears in the returned text.
+    """
+    if not env:
+        return msg
+    header = env.get("GIT_CONFIG_VALUE_0") or ""
+    if not header.startswith("Authorization: "):
+        return msg
+    credential = header[len("Authorization: ") :]  # "Basic <b64>"
+    encoded = credential.rsplit(" ", 1)[-1]
+    for needle in (header, credential, encoded):
+        if needle:
+            msg = msg.replace(needle, "***")
+    return msg
 
 
 def _git(
@@ -369,8 +436,10 @@ def _git(
     """Run a git subcommand in ``repo_path``.
 
     Postconditions:
-        - Returns ``(returncode, scrubbed_message)``; the message has any token
-          redacted via ``scrub_token_from_text``.
+        - Returns ``(returncode, scrubbed_message)``; the message has any
+          URL-embedded token redacted via ``scrub_token_from_text`` and, when
+          an auth env was supplied, the transient Authorization header value
+          (including its base64 form) redacted as well.
         - ``env=None`` (default) inherits the parent environment, preserving the
           prior behaviour for local-only operations. Pass an auth env (see
           ``_git_auth_env``) for network operations against a private remote.
@@ -384,25 +453,221 @@ def _git(
             timeout=timeout,
             env=env,
         )
-        msg = (r.stderr or r.stdout).strip()[:500]
+        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)[:500]
         return r.returncode, scrub_token_from_text(msg)
     except subprocess.TimeoutExpired:
         return 124, f"git {' '.join(args)} timed out after {timeout}s"
     except Exception as e:  # noqa: BLE001
-        return 1, scrub_token_from_text(str(e))
+        return 1, scrub_token_from_text(_scrub_auth_header_values(str(e), env))
 
 
-def _working_tree_dirty(repo_path: str) -> Tuple[bool, Optional[str]]:
-    """Return (True, listing) if the working tree has uncommitted changes.
+RESCUE_BRANCH_PREFIX = "khala/rescue/"
+ACTIVE_ISSUE_CONFIG_KEY = "khala.active-issue"
 
-    The listing is bounded (up to 500 chars of porcelain output) so we can
-    surface the conflicting paths in the failure comment without dumping
-    arbitrary file contents.
+
+def _utc_timestamp() -> str:
+    """Wall-clock UTC stamp used in rescue branch names (patchable in tests)."""
+    return datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+
+
+def _read_active_issue(repo_path: str) -> Optional[int]:
+    """Read the repo-local active-issue marker.
+
+    The marker means: a job for that issue was mid-flight on this checkout
+    and terminated abnormally (restart, kill, delete). It is the only state
+    that survives job deletion, so leftover work is attributed through it.
+
+    Postconditions:
+        - Returns the issue number, or None when the marker is absent or
+          unparseable (treated as unattributed).
+    """
+    rc, msg = _git(repo_path, "config", "--local", "--get", ACTIVE_ISSUE_CONFIG_KEY)
+    if rc != 0:
+        return None
+    try:
+        return int(msg.strip())
+    except ValueError:
+        return None
+
+
+def _write_active_issue(repo_path: str, issue_number: int) -> None:
+    """Record that a job for issue_number is mid-flight on this checkout."""
+    _git(repo_path, "config", "--local", ACTIVE_ISSUE_CONFIG_KEY, str(issue_number))
+
+
+def _clear_active_issue(repo_path: str) -> None:
+    """Remove the marker; idempotent (unsetting a missing key is a no-op)."""
+    _git(repo_path, "config", "--local", "--unset", ACTIVE_ISSUE_CONFIG_KEY)
+
+
+def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
+    """Remove the marker only when it belongs to this job's issue.
+
+    Two different issues may legitimately run against the same checkout (the
+    duplicate guard is per-issue); an older job publishing after a newer job
+    prepped must not unset the newer job's marker, or a crash of the newer
+    job would lose its development-work attribution.
+
+    Postconditions:
+        - The marker is unset iff it equaled ``issue_number``; any other
+          value (or no marker) is left untouched.
+    """
+    if _read_active_issue(repo_path) == issue_number:
+        _clear_active_issue(repo_path)
+
+
+def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
+    """True if ref resolves to a commit and has commits not reachable from base_ref."""
+    rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
+    if rc != 0:
+        return False
+    rc, out = _git(repo_path, "rev-list", "--count", f"{base_ref}..{ref}")
+    if rc != 0:
+        return False
+    try:
+        return int(out.strip()) > 0
+    except ValueError:
+        return False
+
+
+def _reachable_from(repo_path: str, tip: str, container: str) -> bool:
+    """True if tip is an ancestor of container (resetting container keeps tip reachable)."""
+    rc, _ = _git(repo_path, "merge-base", "--is-ancestor", tip, container)
+    return rc == 0
+
+
+def _rescue_branch_name(repo_path: str, issue: Optional[int]) -> Optional[str]:
+    """Allocate an unused rescue branch name.
+
+    Postconditions:
+        - Returns `khala/rescue/issue-<issue>-<ts>` (issue known) or
+          `khala/rescue/<ts>`, suffixed `-1`..`-9` on collision; None when
+          all ten candidates exist.
+    """
+    tag = f"issue-{issue}-" if issue is not None else ""
+    base = f"{RESCUE_BRANCH_PREFIX}{tag}{_utc_timestamp()}"
+    for cand in [base] + [f"{base}-{i}" for i in range(1, 10)]:
+        rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"refs/heads/{cand}")
+        if rc != 0:
+            return cand
+    return None
+
+
+def _latest_issue_rescue_ref(repo_path: str, issue_number: int) -> Optional[str]:
+    """Newest rescue ref for the issue (timestamps sort lexicographically)."""
+    rc, out = _git(
+        repo_path,
+        "for-each-ref",
+        "--sort=-refname",
+        "--count=1",
+        "--format=%(refname:short)",
+        f"refs/heads/{RESCUE_BRANCH_PREFIX}issue-{issue_number}-*",
+    )
+    if rc != 0 or not out.strip():
+        return None
+    return out.strip().splitlines()[0]
+
+
+def _working_tree_dirty(repo_path: str) -> Tuple[bool, bool, Optional[str]]:
+    """Inspect the working tree.
+
+    Postconditions:
+        - Returns (status_ok, dirty, listing). status_ok=False means
+          `git status` itself failed (state unknowable — callers must fail
+          closed, never attempt recovery); listing then carries the error.
+        - When status_ok, listing is bounded porcelain output (or None when
+          clean) so conflicting paths can be surfaced without dumping file
+          contents.
     """
     rc, msg = _git(repo_path, "status", "--porcelain")
     if rc != 0:
-        return True, msg or "git status failed"
-    return (bool(msg.strip()), msg if msg.strip() else None)
+        return False, True, msg or "git status failed"
+    return True, bool(msg.strip()), msg if msg.strip() else None
+
+
+def _recover_dirty_tree(
+    repo_path: str, marker: Optional[int], issue_number: Optional[int], listing: str
+) -> Tuple[Optional[str], Optional[str], Optional[str]]:
+    """Commit or preserve a dirty working tree before branch prep.
+
+    Same-issue work (marker == issue_number, HEAD on a real branch) is
+    committed in place so it can seed continuation; anything else — foreign
+    issue, unknown attribution, detached HEAD — is moved onto a rescue
+    branch. Work is never deleted.
+
+    Preconditions:
+        - The working tree is dirty and `git status` succeeded (callers
+          gate on _working_tree_dirty's status_ok).
+    Postconditions:
+        - On success (error is None) the working tree is clean and the prior
+          dirty state is committed on the returned-or-noted branch; wip_tip
+          names the continuation seed candidate when the work belongs to
+          issue_number, else None; note is operator-facing.
+        - On failure (error set) nothing has been deleted.
+    """
+    same_issue = marker is not None and issue_number is not None and marker == issue_number
+    rc, head = _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
+    head_branch = head.strip() if rc == 0 else "HEAD"
+    on_branch = head_branch not in ("", "HEAD")
+
+    if same_issue and on_branch:
+        ok, msg = commit_working_tree(
+            repo_path,
+            f"wip: recover uncommitted changes from interrupted run (issue {issue_number})",
+        )
+        if not ok:
+            return None, None, msg
+        note = f"♻️ Recovered uncommitted changes from an interrupted run (committed on `{head_branch}`)."
+        return head_branch, note, None
+
+    rescue = _rescue_branch_name(repo_path, marker)
+    if rescue is None:
+        return None, None, "could not allocate a rescue branch name"
+    rc, msg = _git(repo_path, "checkout", "-b", rescue, "--")
+    if rc != 0:
+        return None, None, f"rescue branch creation failed: {msg}"
+    was = f" (was on `{head_branch}`)" if on_branch else ""
+    ok, msg = commit_working_tree(
+        repo_path,
+        f"wip: rescue uncommitted changes from interrupted run{was}\n\n{listing}".rstrip(),
+    )
+    if not ok:
+        return None, None, f"rescue commit failed: {msg}"
+    wip_tip = rescue if same_issue else None
+    note = f"♻️ Recovered uncommitted changes from an interrupted run; preserved on local branch `{rescue}`."
+    return wip_tip, note, None
+
+
+def _preserve_if_would_orphan(
+    repo_path: str, branch: str, base_ref: str, seed: str, marker: Optional[int]
+) -> Optional[str]:
+    """Create a rescue ref for `branch` (any committish, including a
+    remote-tracking ref) when adopting `seed` would strand its commits.
+
+    Invariant served: no commits visible to branch prep may become
+    unreachable — neither through prep's own `checkout -B` resets of local
+    branches, nor through the job's eventual `--force-with-lease` push
+    replacing a remote issue tip the chosen seed does not contain.
+
+    Postconditions:
+        - Returns None when nothing needed preserving or a rescue ref now
+          holds the tip; returns an error string when preservation was
+          needed but failed (callers must fail closed).
+    """
+    if branch == seed:
+        return None
+    if not _is_ahead(repo_path, branch, base_ref):
+        return None
+    if _reachable_from(repo_path, branch, seed):
+        return None
+    name = _rescue_branch_name(repo_path, marker)
+    if name is None:
+        return f"could not allocate a rescue branch to preserve `{branch}`"
+    rc, msg = _git(repo_path, "branch", name, branch)
+    if rc != 0:
+        return f"failed to preserve `{branch}` before reset: {msg}"
+    logger.warning("Preserved %s on %s before reset (ahead of %s)", branch, name, base_ref)
+    return None
 
 
 def _prepare_issue_branch(
@@ -411,19 +676,64 @@ def _prepare_issue_branch(
     default_branch: str,
     integration_branch: str,
     token: Optional[str] = None,
-) -> Tuple[bool, Optional[str]]:
-    # Refuse to overwrite the operator's in-flight work. Without this check,
-    # `git checkout -B` happily carries unrelated dirty files across the
-    # branch switch and they leak into the issue's PR.
-    dirty, listing = _working_tree_dirty(repo_path)
-    if dirty:
-        return False, f"working tree has uncommitted changes; clean it before retrying:\n{listing}"
+    issue_number: Optional[int] = None,
+) -> Tuple[bool, Optional[str], List[str]]:
+    """Prepare development + integration branches, recovering interrupted state.
+
+    Dirty trees are recovered (same-issue work committed in place, foreign
+    work preserved on khala/rescue/* branches), the integration branch is
+    seeded from the best prior-progress tip so a new job picks up where the
+    previous one left off, and no reset may orphan commits.
+
+    Preconditions:
+        - repo_path is a git checkout; ref arguments may be untrusted.
+    Postconditions (success):
+        - integration_branch is checked out with a clean working tree;
+          khala.active-issue records issue_number when provided; every commit
+          reachable from a local branch on entry is still reachable from some
+          local or remote ref; the returned notes describe recovery and
+          continuation actions for operator-facing reporting.
+    Postconditions (failure):
+        - No uncommitted work has been deleted and no commit that was
+          reachable on entry has become unreachable.
+    """
+    notes: List[str] = []
 
     # Defense-in-depth: reject ref names that could be parsed as git options.
+    # This must precede dirty-tree recovery — a request that can never
+    # proceed must not commit WIP, create rescue branches, or switch the
+    # checkout on its way to being rejected.
     if not _is_safe_ref(default_branch):
-        return False, f"unsafe default_branch ref: {default_branch!r}"
+        return False, f"unsafe default_branch ref: {default_branch!r}", notes
     if not _is_safe_ref(integration_branch):
-        return False, f"unsafe integration_branch ref: {integration_branch!r}"
+        return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
+
+    marker = _read_active_issue(repo_path)
+
+    status_ok, dirty, listing = _working_tree_dirty(repo_path)
+    if not status_ok:
+        return False, f"cannot inspect working tree: {listing}", notes
+    wip_tip: Optional[str] = None
+    if dirty:
+        wip_tip, note, recover_err = _recover_dirty_tree(
+            repo_path, marker, issue_number, listing or ""
+        )
+        if recover_err:
+            return (
+                False,
+                "working tree has uncommitted changes; clean it before retrying:\n"
+                f"{listing}\n(automatic recovery failed: {recover_err})",
+                notes,
+            )
+        if note:
+            notes.append(note)
+
+    # The marker is NOT cleared here even after recovery: it also drives
+    # same-issue continuation (development as a seed candidate), and the
+    # development-ahead commits it attributes remain on the checkout until
+    # the re-seed below succeeds. The only safe transition is the success
+    # path's _write_active_issue overwrite; every failure exit retains it
+    # so a retry can still attribute and continue the prior work.
 
     # `fetch` is the only network op here (the checkouts below are local), so it
     # needs the credential. The clone was authenticated transiently by the
@@ -431,21 +741,190 @@ def _prepare_issue_branch(
     auth_env = _git_auth_env(token) if token else None
     rc, msg = _git(repo_path, "fetch", "--", remote, default_branch, env=auth_env)
     if rc != 0:
-        return False, msg
-    rc, msg = _git(
-        repo_path,
-        "checkout",
-        "-B",
-        DEVELOPMENT_BRANCH,
-        f"{remote}/{default_branch}",
-        "--",
+        return False, msg, notes
+    # The issue branch may exist remotely from a previous job that pushed
+    # before dying; fetch it as a continuation candidate (absence is fine).
+    base_ref = f"{remote}/{default_branch}"
+    remote_issue_ref = f"{remote}/{integration_branch}"
+    rc_issue_fetch, issue_fetch_msg = _git(
+        repo_path, "fetch", "--", remote, integration_branch, env=auth_env
     )
+    if rc_issue_fetch != 0:
+        # `fetch` exit codes do not distinguish "no such remote ref" from a
+        # transient transport failure, and only confirmed absence may take
+        # the deletion path below — dropping the tracking ref on a network
+        # blip would hide live remote progress from candidate selection and
+        # let the final force-with-lease push race against it. Probe absence
+        # explicitly: `ls-remote --exit-code` exits 2 when the remote has no
+        # matching head, 0 when it does, anything else on transport failure.
+        rc_probe, probe_out = _git(
+            repo_path,
+            "ls-remote",
+            "--exit-code",
+            "--heads",
+            "--",
+            remote,
+            integration_branch,
+            env=auth_env,
+        )
+        if rc_probe == 0:
+            return (
+                False,
+                f"could not fetch remote issue branch {integration_branch!r} "
+                f"(it exists on the remote — transient failure?): {issue_fetch_msg}",
+                notes,
+            )
+        if rc_probe != 2:
+            return (
+                False,
+                f"cannot verify whether remote issue branch {integration_branch!r} still "
+                f"exists (fetch failed: {issue_fetch_msg}; probe failed: {probe_out})",
+                notes,
+            )
+        # The remote branch is absent (deleted/pruned — the probe confirmed
+        # it, and the base-branch fetch succeeded so the remote itself is
+        # reachable). A stale remote-tracking ref from an earlier fetch would
+        # otherwise pose as live remote state: candidate selection could seed
+        # from it and the final force push would republish commits the remote
+        # deliberately no longer has. Pin its tip first (never-lose-work
+        # invariant), then
+        # drop the tracking ref. The rescue is deliberately UNTAGGED: a
+        # remote deletion is an explicit signal not to continue this state,
+        # so it is preserved for manual recovery without becoming an
+        # automatic continuation candidate (unlike preserved local
+        # divergence, which the system itself was still carrying).
+        if _is_ahead(repo_path, remote_issue_ref, base_ref):
+            preserve_err = _preserve_if_would_orphan(
+                repo_path, remote_issue_ref, base_ref, base_ref, None
+            )
+            if preserve_err:
+                return False, preserve_err, notes
+        _git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
+        # Postcondition, not return-code, check: deletion legitimately fails
+        # when the ref never existed (fresh issue), but a ref that SURVIVES
+        # (lock, permissions, concurrent git op) would re-enter candidate
+        # selection and re-anchor the remote floor to a state the remote
+        # deliberately deleted — fail closed instead.
+        rc_gone, _ = _git(
+            repo_path, "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote_issue_ref}"
+        )
+        if rc_gone == 0:
+            return (
+                False,
+                f"could not drop stale remote-tracking ref {remote_issue_ref!r}; "
+                f"refusing to continue while it can pose as live remote state",
+                notes,
+            )
+    candidates: List[str] = []
+    if marker is not None and issue_number is not None and marker == issue_number:
+        # Same-issue continuation: the interrupted run's progress may live on
+        # BOTH the wip tip (wherever HEAD was at crash time) and development
+        # (merged task work). Order graph-aware — a tip containing the other
+        # goes first; diverged tips put development first (the canonical
+        # integration line; the wip branch is never reset, and a diverged
+        # integration-branch wip is pinned by the orphan-prevention pass).
+        if wip_tip and wip_tip != DEVELOPMENT_BRANCH:
+            if _reachable_from(repo_path, DEVELOPMENT_BRANCH, wip_tip):
+                candidates.extend((wip_tip, DEVELOPMENT_BRANCH))
+            else:
+                candidates.extend((DEVELOPMENT_BRANCH, wip_tip))
+        else:
+            candidates.append(DEVELOPMENT_BRANCH)
+    # Local-vs-remote issue tip: prefer local only when it already contains
+    # the remote tip. The eventual publish is `push --force-with-lease` and
+    # this function's own fetch refreshes the lease, so seeding from a tip
+    # that lacks remote-only commits would let the push silently drop them.
+    # A diverged local tip is pinned by the orphan-prevention pass below.
+    if _reachable_from(repo_path, remote_issue_ref, integration_branch):
+        candidates.extend((integration_branch, remote_issue_ref))
+    else:
+        candidates.extend((remote_issue_ref, integration_branch))
+    if issue_number is not None:
+        rescue_ref = _latest_issue_rescue_ref(repo_path, issue_number)
+        if rescue_ref:
+            candidates.append(rescue_ref)
+    # Remote floor: when the remote issue branch is live and ahead, no
+    # candidate that lacks its commits may seed — the force-with-lease push
+    # (lease refreshed by this function's own fetch) would silently drop the
+    # remote-only commits from the published PR. Locally-pinned rescue refs
+    # are no substitute for commits the remote is expected to keep.
+    remote_floor = _is_ahead(repo_path, remote_issue_ref, base_ref)
+
+    def _eligible(candidate: str) -> bool:
+        if not _is_ahead(repo_path, candidate, base_ref):
+            return False
+        if not remote_floor or candidate == remote_issue_ref:
+            return True
+        return _reachable_from(repo_path, remote_issue_ref, candidate)
+
+    seed = next((c for c in candidates if _eligible(c)), base_ref)
+
+    if seed != base_ref:
+        rc, count = _git(repo_path, "rev-list", "--count", f"{base_ref}..{seed}")
+        ahead = count.strip() if rc == 0 else "?"
+        notes.append(
+            f"▶️ Continuing issue from previous progress: `{seed}` ({ahead} commits ahead of `{default_branch}`)."
+        )
+
+    # Invariant: no commits visible to prep — on local branches about to be
+    # reset, or on the just-fetched remote issue tip that the final
+    # --force-with-lease push would replace — may become unreachable.
+    # Rescue-tag attribution is per ref: work on the issue branch (local or
+    # remote tip) belongs to the issue being prepared by construction, so its
+    # rescue ref is issue-tagged for _latest_issue_rescue_ref continuation;
+    # development work is only attributable through the marker.
+    for ref, owner_issue in (
+        (DEVELOPMENT_BRANCH, marker),
+        (integration_branch, issue_number),
+        (remote_issue_ref, issue_number),
+    ):
+        preserve_err = _preserve_if_would_orphan(repo_path, ref, base_ref, seed, owner_issue)
+        if preserve_err:
+            return False, preserve_err, notes
+
+    rc, msg = _git(repo_path, "checkout", "-B", DEVELOPMENT_BRANCH, seed, "--")
     if rc != 0:
-        return False, msg
+        return False, msg, notes
+
+    if (
+        wip_tip
+        and _is_safe_ref(wip_tip)
+        and not _reachable_from(repo_path, wip_tip, DEVELOPMENT_BRANCH)
+    ):
+        # Same-issue WIP was recovered onto a branch that diverged from the
+        # chosen seed (e.g. a feature branch cut before other work merged
+        # into development). Recovery reported that WIP as continuation
+        # state, so it must reach the resumed line — left only on a side
+        # branch the orchestrator never reads, "recovered" would be a lie.
+        # Merge it in; on conflict, abort and tell the operator rather than
+        # guessing a resolution (the WIP branch itself is never reset, so
+        # nothing is lost either way).
+        rc, msg = _git(repo_path, "merge", "--no-edit", wip_tip, env=git_identity_env())
+        if rc == 0:
+            notes.append(
+                f"🔀 Merged recovered work-in-progress from `{wip_tip}` into the continuation line."
+            )
+        else:
+            _git(repo_path, "merge", "--abort")
+            status_ok, still_dirty, _ = _working_tree_dirty(repo_path)
+            if not status_ok or still_dirty:
+                return (
+                    False,
+                    f"merge of recovered work-in-progress `{wip_tip}` failed and could not "
+                    f"be cleanly aborted: {msg}",
+                    notes,
+                )
+            notes.append(
+                f"⚠️ Recovered work-in-progress on `{wip_tip}` conflicts with the continuation "
+                f"line; left unmerged on that branch for manual integration."
+            )
+
     rc, msg = _git(repo_path, "checkout", "-B", integration_branch, "--")
     if rc != 0:
-        return False, msg
-    return True, None
+        return False, msg, notes
+    if issue_number is not None:
+        _write_active_issue(repo_path, issue_number)
+    return True, None, notes
 
 
 def _fast_forward(repo_path: str, branch: str, source_ref: str) -> Tuple[bool, Optional[str]]:
@@ -477,6 +956,32 @@ def _push_branch(
     return (rc == 0), (None if rc == 0 else msg)
 
 
+def _defer_terminal_success(job_id: str):
+    """Build an ``update_job_fn`` that holds the job non-terminal until publish.
+
+    The orchestrator marks its job ``completed`` when the code work finishes,
+    but the GitHub hook keeps mutating the shared checkout afterwards
+    (fast-forward, push, PR creation, marker clear) and the busy-checkout
+    guard keys liveness off pending/running. Mapping the orchestrator's
+    terminal success to ``(running, publishing)`` keeps the job visible to
+    the guard for that whole window; ``_run_with_github_hooks`` sets the real
+    terminal status only once it is fully done with the checkout. Failure
+    statuses pass through unchanged — every post-orchestrator failure path
+    stops touching the checkout.
+
+    Postconditions:
+        - The returned callable forwards every update to ``update_job`` for
+          ``job_id``, rewriting only ``status="completed"`` updates.
+    """
+
+    def _update(**kw: Any) -> None:
+        if kw.get("status") == "completed":
+            kw = {**kw, "status": "running", "phase": "publishing"}
+        update_job(job_id, **kw)
+
+    return _update
+
+
 def _run_with_github_hooks(
     job_id: str,
     request: RunFromGitHubRequest,
@@ -499,21 +1004,41 @@ def _run_with_github_hooks(
             return
         base = request.base_branch or default_branch
 
+        # Branch prep mutates the shared checkout; never do that under a
+        # sibling job that is actively working it. Leftovers from DEAD jobs
+        # are recovered below — live work is not a leftover.
+        sibling = _running_sibling_on_checkout(request.repo_path, job_id)
+        if sibling is not None:
+            sib_ctx = sibling.get("github_context") or {}
+            _record_failure(
+                client,
+                owner,
+                repo,
+                num,
+                job_id,
+                f"checkout busy: job `{sibling.get('job_id')}` "
+                f"(issue #{sib_ctx.get('issue_number', '?')}) is still running on this "
+                f"checkout; retry after it finishes",
+            )
+            return
+
         _safe_comment(client, owner, repo, num, f"Coding team started job `{job_id}`.")
 
-        prep_ok, prep_err = _prepare_issue_branch(
-            request.repo_path, request.remote, base, integration_branch, token
+        prep_ok, prep_err, prep_notes = _prepare_issue_branch(
+            request.repo_path, request.remote, base, integration_branch, token, issue_number=num
         )
         if not prep_ok:
             _record_failure(client, owner, repo, num, job_id, f"branch prep failed: {prep_err}")
             return
+        for note in prep_notes:
+            _safe_comment(client, owner, repo, num, note)
 
         try:
             run_coding_team_orchestrator(
                 job_id,
                 request.repo_path,
                 plan,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                update_job_fn=_defer_terminal_success(job_id),
                 get_job_fn=lambda jid: get_job(jid),
                 cache_dir=DEFAULT_CACHE_DIR,
             )
@@ -580,3 +1105,15 @@ def _run_with_github_hooks(
             _safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
         else:
             _safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
+        # Publication is the marker's end of life: the work now lives on the
+        # remote PR branch, so the checkout no longer holds unpublished work
+        # for this issue. Every earlier return (orchestrator failure, no
+        # merged tasks, fast-forward/push/PR failure) retains the marker so a
+        # retry continues from development instead of starting over. Scoped
+        # to this job's issue: a sibling job for another issue may have
+        # re-marked the checkout since this job prepped.
+        _clear_active_issue_if_matches(request.repo_path, num)
+        # Terminal status comes last: the busy-checkout guard treats a
+        # terminal job as done with the checkout, so this must be the hook's
+        # final action after every checkout-touching step above.
+        update_job(job_id, status="completed", phase="completed")
