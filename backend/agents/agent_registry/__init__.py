@@ -6,8 +6,8 @@ Loads declarative per-agent manifests from
 structured metadata. Read-only; no Postgres, no Temporal, no LLM.
 
 Used by ``backend/unified_api/routes/agents.py`` to serve ``/api/agents``.
-Later phases will consume the ``invoke`` and ``sandbox`` blocks to run
-agents in isolation via warm provisioned sandboxes.
+Later phases consume the ``invoke``, ``sandbox``, and ``cognition`` blocks to
+run agents in isolation and give them durable memory + rules.
 """
 
 from .loader import AgentRegistry, get_registry
@@ -15,6 +15,8 @@ from .models import (
     AgentDetail,
     AgentManifest,
     AgentSummary,
+    CognitionMemorySpec,
+    CognitionSpec,
     InvokeSpec,
     IOSchema,
     SandboxSpec,
@@ -27,6 +29,8 @@ __all__ = [
     "AgentManifest",
     "AgentRegistry",
     "AgentSummary",
+    "CognitionMemorySpec",
+    "CognitionSpec",
     "InvokeSpec",
     "IOSchema",
     "SandboxSpec",

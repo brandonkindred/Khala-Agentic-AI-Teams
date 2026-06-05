@@ -6,8 +6,11 @@ from pathlib import Path
 from textwrap import dedent
 
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from agent_registry.loader import AgentRegistry
+from agent_registry.models import AgentManifest
 
 
 def _write_manifest(root: Path, team: str, filename: str, body: str) -> Path:
@@ -191,6 +194,8 @@ def test_summary_flags_reflect_manifest_content(tmp_path: Path) -> None:
         sandbox:
           manifest_path: default.yaml
           access_tier: standard
+        cognition:
+          tools: [git]
         source:
           entrypoint: pkg.mod:Agent
         """,
@@ -201,6 +206,7 @@ def test_summary_flags_reflect_manifest_content(tmp_path: Path) -> None:
     assert summary.has_output_schema is True
     assert summary.has_invoke is True
     assert summary.has_sandbox is True
+    assert summary.has_cognition is True
 
 
 def test_detail_returns_manifest_and_anatomy_when_present(tmp_path: Path) -> None:
@@ -325,3 +331,124 @@ def test_orphan_team_is_kept_but_logged(tmp_path: Path, caplog: pytest.LogCaptur
     )
     reg = AgentRegistry.load(tmp_path)
     assert reg.get("unknown.agent") is not None
+
+
+def test_cognition_spec_round_trip_with_block(tmp_path: Path) -> None:
+    """A full `cognition:` block parses and every field round-trips."""
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "smart.yaml",
+        """
+        schema_version: 1
+        id: blogging.smart
+        team: blogging
+        name: Smart
+        summary: has a cognition block
+        cognition:
+          memory:
+            retention_days_events: 30
+          tools: [git, http_api]
+          rule_packs: [default_guardrails]
+          requires_idempotency_key: true
+        source:
+          entrypoint: x:y
+        """,
+    )
+    reg = AgentRegistry.load(tmp_path)
+    smart = reg.get("blogging.smart")
+    assert smart is not None
+    assert smart.cognition is not None
+    assert smart.cognition.memory.retention_days_events == 30
+    assert smart.cognition.tools == ["git", "http_api"]
+    assert smart.cognition.rule_packs == ["default_guardrails"]
+    assert smart.cognition.requires_idempotency_key is True
+
+
+def test_cognition_spec_absent_defaults_to_none(tmp_path: Path) -> None:
+    """Manifests without a `cognition:` block still load; the field is None."""
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "plain.yaml",
+        """
+        schema_version: 1
+        id: blogging.plain
+        team: blogging
+        name: Plain
+        summary: no cognition block
+        source:
+          entrypoint: x:y
+        """,
+    )
+    reg = AgentRegistry.load(tmp_path)
+    plain = reg.get("blogging.plain")
+    assert plain is not None
+    assert plain.cognition is None
+    [summary] = reg.search()
+    assert summary.has_cognition is False
+
+
+def test_cognition_spec_partial_block_uses_defaults(tmp_path: Path) -> None:
+    """A `cognition:` block that omits sub-fields fills in safe defaults."""
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "partial.yaml",
+        """
+        schema_version: 1
+        id: blogging.partial
+        team: blogging
+        name: Partial
+        summary: cognition block with only one field set
+        cognition:
+          tools: [git]
+        source:
+          entrypoint: x:y
+        """,
+    )
+    reg = AgentRegistry.load(tmp_path)
+    partial = reg.get("blogging.partial")
+    assert partial is not None
+    assert partial.cognition is not None
+    assert partial.cognition.tools == ["git"]
+    # Omitted sub-fields fall back to defaults, never missing attributes.
+    assert partial.cognition.memory.retention_days_events == 90
+    assert partial.cognition.rule_packs == []
+    assert partial.cognition.requires_idempotency_key is False
+
+
+def test_cognition_retention_must_be_positive(tmp_path: Path) -> None:
+    """`retention_days_events` < 1 violates the precondition and fails validation."""
+    raw = {
+        "schema_version": 1,
+        "id": "blogging.bad",
+        "team": "blogging",
+        "name": "Bad",
+        "summary": "non-positive retention",
+        "cognition": {"memory": {"retention_days_events": 0}},
+        "source": {"entrypoint": "x:y"},
+    }
+    with pytest.raises(ValidationError):
+        AgentManifest.model_validate(raw)
+
+    # The loader swallows the ValidationError and skips the manifest entirely.
+    _write_manifest(tmp_path, "blogging", "bad.yaml", yaml.safe_dump(raw))
+    reg = AgentRegistry.load(tmp_path)
+    assert reg.get("blogging.bad") is None
+
+
+def test_cognition_example_manifest_is_valid() -> None:
+    """The shipped standalone example manifest parses as a valid AgentManifest."""
+    example = (
+        Path(__file__).resolve().parents[2]
+        / "agent_cognition"
+        / "examples"
+        / "cognition_manifest.example.yaml"
+    )
+    manifest = AgentManifest.model_validate(yaml.safe_load(example.read_text(encoding="utf-8")))
+    assert manifest.cognition is not None
+    assert manifest.cognition.tools == ["git", "http_api"]
+    assert manifest.cognition.rule_packs == ["default_guardrails"]
+    assert manifest.cognition.memory.retention_days_events == 90
+    assert manifest.cognition.requires_idempotency_key is False
