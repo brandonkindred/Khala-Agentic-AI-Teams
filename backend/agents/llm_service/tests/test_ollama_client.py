@@ -445,15 +445,6 @@ def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.Mo
     assert "reasoning_effort" not in captured
 
 
-def test_payload_omits_reasoning_effort_when_thinking_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
-    client.complete_json("hi", think=False)
-    assert captured["think"] is False
-    assert "reasoning_effort" not in captured
-
-
 def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.chat([{"role": "user", "content": "hi"}])
@@ -461,3 +452,23 @@ def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyP
     client2, captured2 = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client2.complete("hi")
     assert captured2["reasoning_effort"] == "high"
+
+
+def test_payload_maps_disabled_thinking_to_reasoning_effort_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ollama's OpenAI-compatible endpoint controls reasoning via
+    reasoning_effort (which supports "none"); think:false alone is ignored
+    there, so the kill switch must also be expressed as reasoning_effort."""
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    client.complete_json("hi", think=False)
+    assert captured["think"] is False
+    assert captured["reasoning_effort"] == "none"
+
+
+def test_global_disable_also_sends_reasoning_effort_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
+    monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
+    client.complete_json("hi")
+    assert captured["think"] is False
+    assert captured["reasoning_effort"] == "none"

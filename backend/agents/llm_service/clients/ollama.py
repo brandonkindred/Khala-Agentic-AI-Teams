@@ -113,22 +113,28 @@ def _think_payload_fields(think: "bool | str") -> dict:
     """Wire fields for reasoning controls.
 
     The client posts to the OpenAI-compatible /v1/chat/completions, where
-    Ollama controls reasoning via ``reasoning_effort`` and documents the
-    native ``think`` field as ignored. ``think`` is kept for native proxies
-    and forward compatibility, and level strings are mirrored into
-    ``reasoning_effort`` so requested levels actually reach the model.
-    Boolean values stay on ``think`` only (``reasoning_effort`` has no
-    boolean form).
+    Ollama controls reasoning via ``reasoning_effort`` (whose values include
+    ``"none"``) and documents the native ``think`` field as ignored.
+    ``think`` is kept for native proxies and forward compatibility; level
+    strings are mirrored into ``reasoning_effort`` so requested levels reach
+    the model, and ``False`` maps to ``reasoning_effort="none"`` so the
+    kill switch (explicit ``think=False`` or ``LLM_ENABLE_THINKING=false``)
+    actually disables reasoning instead of leaving the model default.
+    ``True`` stays on ``think`` only: it means "model-default thinking" for
+    models with no registered levels, and pinning an effort level for an
+    unknown model would be a guess.
 
     Preconditions:
         - ``think`` has been resolved (bool or level string, never None).
     Postconditions:
-        - Returns a dict carrying ``think`` and, for level strings,
-          ``reasoning_effort``.
+        - Returns a dict carrying ``think`` and, for level strings or
+          ``False``, the corresponding ``reasoning_effort``.
     """
     fields: dict = {"think": think}
     if isinstance(think, str):
         fields["reasoning_effort"] = think
+    elif think is False:
+        fields["reasoning_effort"] = "none"
     return fields
 
 
