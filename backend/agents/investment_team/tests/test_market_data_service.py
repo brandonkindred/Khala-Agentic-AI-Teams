@@ -106,6 +106,26 @@ def test_compute_adv_unaffected_by_coerced_volume() -> None:
     assert compute_adv_from_bars([_bar(volume=0.0)] * 20, lookback=20) is None
 
 
+def test_compute_adv_excludes_nonfinite_volume() -> None:
+    """A non-finite volume is treated as zero (excluded), so the ADV value
+    matches the coerced derived-ADV cache key and a cached replay.
+
+    Without excluding ``+inf`` (``inf > 0`` passes the raw filter) the compute
+    path would return ``inf`` while the cache key hashed it as ``0.0`` — storing
+    ``inf`` under the zero-volume fingerprint and serving it to a later genuine
+    zero-volume window.
+    """
+    # All-inf and all-NaN windows behave like all-zero: no real volume → None.
+    assert compute_adv_from_bars([_bar(volume=float("inf"))] * 20, lookback=20) is None
+    assert compute_adv_from_bars([_bar(volume=float("nan"))] * 20, lookback=20) is None
+    # A +inf bar mixed with finite-volume bars is excluded, never poisoning the
+    # mean with inf; ADV is the mean over the finite bars only.
+    mixed = [_bar(close=100.0, volume=1_000_000.0)] * 19 + [_bar(close=100.0, volume=float("inf"))]
+    val = compute_adv_from_bars(mixed, lookback=20)
+    assert val == 100_000_000.0
+    assert val is not None and math.isfinite(val)
+
+
 # ---------------------------------------------------------------------------
 # Provider chain
 # ---------------------------------------------------------------------------

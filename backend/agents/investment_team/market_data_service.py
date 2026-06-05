@@ -150,11 +150,22 @@ def compute_adv_from_bars(
     fewer than ``lookback`` *real* bars are available (imputed bars are
     excluded via :func:`trailing_real_bars`) or every bar in the window has
     zero volume.
+
+    A non-finite volume (NaN/±inf) is treated as zero volume (excluded), the
+    same canonicalisation the cache applies when it persists/hashes bars — so
+    the ADV computed here for an un-normalised ``+inf`` bar matches both the
+    coerced derived-ADV cache key and the value a cached replay (which reads
+    the volume back as ``0.0``) would produce. Without this, ``inf > 0`` would
+    pass the filter and store ``inf`` under the zero-volume fingerprint.
     """
     window = trailing_real_bars(bars, lookback)
     if not window:
         return None
-    dollar_volume = [b.close * b.volume for b in window if b.volume > 0 and b.close > 0]
+    dollar_volume = [
+        b.close * b.volume
+        for b in window
+        if math.isfinite(b.volume) and b.volume > 0 and b.close > 0
+    ]
     if not dollar_volume:
         return None
     return sum(dollar_volume) / len(dollar_volume)
