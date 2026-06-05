@@ -226,13 +226,18 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
 
     Postconditions:
         - Returns the sibling job dict when one exists with a non-terminal
-          status and the same ``repo_path``; None otherwise. The caller's own
-          job (``own_job_id``) is never reported.
+          status and the same checkout; None otherwise. Paths are compared
+          canonically (symlinks, ``.``/``..``, trailing slashes resolved), so
+          a sibling registered under a different spelling of the same
+          checkout still matches. The caller's own job (``own_job_id``) is
+          never reported.
     """
+    target = os.path.realpath(repo_path)
     for j in list_jobs(running_only=True):
         if not j or j.get("job_id") == own_job_id:
             continue
-        if j.get("repo_path") == repo_path:
+        sibling_path = j.get("repo_path")
+        if sibling_path and os.path.realpath(sibling_path) == target:
             return j
     return None
 

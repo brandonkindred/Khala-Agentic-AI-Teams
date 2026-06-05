@@ -9,6 +9,7 @@ the GitHubClient and helper functions on the api module.
 
 from __future__ import annotations
 
+import os
 from typing import Any, Callable, Optional
 
 import httpx
@@ -1293,6 +1294,37 @@ class TestBusyCheckoutGuard:
         assert job["status"] == "failed"
         assert "busy" in (job["error"] or "").lower()
         assert prep_calls == []  # the sibling's tree was never touched
+
+    def test_sibling_under_alias_spelling_still_blocks(self, patched_app, monkeypatch) -> None:
+        """The guard compares canonical paths: a sibling registered under a
+        different spelling of the same checkout (symlink, `/.` suffix) must
+        still block — string equality would fail open exactly where the
+        guard matters."""
+        from coding_team.job_store import create_job, update_job
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        alias = os.path.join(os.path.dirname(repo_path), "repo-alias")
+        os.symlink(repo_path, alias)
+        create_job(job_id="sibling-3", repo_path=os.path.join(alias, "."), plan_input=None)
+        update_job(
+            "sibling-3",
+            status="running",
+            github_context={"owner": "o", "repo": "r", "issue_number": 99},
+        )
+        prep_calls: list = []
+        monkeypatch.setattr(
+            api, "_prepare_issue_branch", lambda *a, **kw: prep_calls.append(a) or (True, None, [])
+        )
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "busy" in (job["error"] or "").lower()
+        assert prep_calls == []
 
     def test_terminal_sibling_does_not_block(self, patched_app, monkeypatch) -> None:
         from coding_team.job_store import create_job, update_job
