@@ -631,7 +631,13 @@ class OllamaLLMClient(LLMClient):
                     "LLM returned finish_reason=tool_calls but no tool_calls in message"
                 )
             logger.info("LLM returned %d tool call(s)", len(tool_calls))
-            return json.dumps({"__tool_calls__": tool_calls})
+            envelope: dict = {"__tool_calls__": tool_calls}
+            # DeepSeek thinking mode requires the tool-call turn's
+            # reasoning_content to be passed back on subsequent requests
+            # (400 otherwise) — surface it for the echo-back paths.
+            if msg.get("reasoning_content"):
+                envelope["__reasoning_content__"] = msg["reasoning_content"]
+            return json.dumps(envelope)
         if finish_reason == "length":
             partial_content = msg.get("content", "")
             partial_content = str(partial_content) if partial_content else ""
@@ -700,6 +706,7 @@ class OllamaLLMClient(LLMClient):
                                 response.read()
                             if status == 200:
                                 content_parts: list[str] = []
+                                reasoning_parts: list[str] = []
                                 finish_reason: Optional[str] = None
                                 tool_call_buffers: dict[int, dict] = {}
                                 has_reasoning: bool = False
@@ -764,6 +771,11 @@ class OllamaLLMClient(LLMClient):
                                         )
                                         if reasoning:
                                             has_reasoning = True
+                                            # Kept whole: DeepSeek thinking mode
+                                            # requires tool-call turns to echo
+                                            # reasoning_content back on the next
+                                            # request (400 otherwise).
+                                            reasoning_parts.append(str(reasoning))
                                         for tc in delta.get("tool_calls") or []:
                                             idx = tc.get("index", 0)
                                             if idx not in tool_call_buffers:
@@ -832,6 +844,7 @@ class OllamaLLMClient(LLMClient):
                                             "message": {
                                                 "content": joined_content,
                                                 "tool_calls": tool_calls,
+                                                "reasoning_content": "".join(reasoning_parts),
                                             },
                                             "finish_reason": finish_reason or "stop",
                                         }

@@ -54,7 +54,11 @@ KNOWN_MODEL_CONTEXT: dict[str, int] = {
 # ---------------------------------------------------------------------------
 
 KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
-    "deepseek-v4-pro:cloud": ("low", "medium", "high"),
+    # DeepSeek's thinking-mode docs list reasoning_effort "high" and "max"
+    # (the true maximum), with compatibility mapping low/medium → high and
+    # xhigh → max — so all four registered names are accepted on the wire
+    # and "max" is the platform default for this model.
+    "deepseek-v4-pro:cloud": ("low", "medium", "high", "max"),
 }
 
 

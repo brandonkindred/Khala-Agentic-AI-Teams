@@ -77,3 +77,47 @@ def test_tool_loop_max_rounds() -> None:
             max_rounds=2,
             think=False,
         )
+
+
+def test_tool_loop_echoes_reasoning_content_on_assistant_turn() -> None:
+    """DeepSeek thinking mode 400s when a tool-call turn's reasoning_content
+    is not passed back; the loop must attach it to the assistant message."""
+    from llm_service.clients.dummy import DummyLLMClient
+    from llm_service.tool_loop import complete_json_with_tool_loop
+
+    class ReasoningLLM(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.seen_messages: list = []
+            self.round = 0
+
+        def chat(self, messages, **kwargs):  # type: ignore[override]
+            self.round += 1
+            self.seen_messages.append([dict(m) for m in messages])
+            if self.round == 1:
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "c1",
+                            "type": "function",
+                            "function": {"name": "noop", "arguments": {}},
+                        }
+                    ],
+                    "__reasoning_content__": "thought about it",
+                }
+            return {"done": True}
+
+    llm = ReasoningLLM()
+    result = complete_json_with_tool_loop(
+        llm,
+        system_prompt="s",
+        user_prompt="u",
+        tools=[{"type": "function", "function": {"name": "noop", "parameters": {}}}],
+        tool_handlers={"noop": lambda args: {"ok": True}},
+    )
+    assert result == {"done": True}
+    second_round = llm.seen_messages[1]
+    assistant = next(
+        m for m in second_round if m.get("role") == "assistant" and m.get("tool_calls")
+    )
+    assert assistant.get("reasoning_content") == "thought about it"

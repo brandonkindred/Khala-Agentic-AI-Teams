@@ -129,13 +129,17 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
     * ``{toolUse: ...}`` blocks emit ``tool_calls`` on an assistant message.
     * ``{toolResult: ...}`` blocks are flushed as their own ``role="tool"``
       messages (OpenAI's contract puts tool responses in a distinct message).
-    * Unknown block types (image, document, reasoningContent, etc.) are
-      skipped with a debug log — this adapter is text-and-tools only.
+    * ``{reasoningContent: ...}`` blocks are replayed as ``reasoning_content``
+      on the assistant tool-call message (DeepSeek thinking mode requires it
+      on subsequent requests).
+    * Unknown block types (image, document, etc.) are skipped with a debug
+      log — this adapter is text, reasoning, and tools only.
     """
     out: List[Dict[str, Any]] = []
     for msg in messages:
         role = msg.get("role", "user")
         text_parts: List[str] = []
+        reasoning_parts: List[str] = []
         tool_calls: List[Dict[str, Any]] = []
 
         for block in msg.get("content", []) or []:
@@ -165,6 +169,14 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
                         "content": _tool_result_content_to_text(tr.get("content", [])),
                     }
                 )
+            elif "reasoningContent" in block:
+                # DeepSeek thinking mode requires the tool-call turn's
+                # reasoning to be replayed on subsequent requests (400
+                # otherwise) — collect it instead of dropping the block.
+                rc = block.get("reasoningContent") or {}
+                text = ((rc.get("reasoningText") or {}).get("text")) or ""
+                if text:
+                    reasoning_parts.append(str(text))
             else:
                 logger.debug(
                     "strands_adapter: skipping unsupported content block %r", list(block.keys())
@@ -174,13 +186,14 @@ def _strands_messages_to_openai(messages: Messages) -> List[Dict[str, Any]]:
             # Assistant turns with tool calls must be emitted as assistant
             # regardless of the incoming ``role``. Strands only sets
             # ``toolUse`` content on assistant messages, so this is defensive.
-            out.append(
-                {
-                    "role": "assistant",
-                    "content": "\n".join(text_parts),
-                    "tool_calls": tool_calls,
-                }
-            )
+            assistant_msg: Dict[str, Any] = {
+                "role": "assistant",
+                "content": "\n".join(text_parts),
+                "tool_calls": tool_calls,
+            }
+            if reasoning_parts:
+                assistant_msg["reasoning_content"] = "\n".join(reasoning_parts)
+            out.append(assistant_msg)
         elif text_parts:
             out.append({"role": role, "content": "\n".join(text_parts)})
 
@@ -437,6 +450,17 @@ class LLMClientModel(Model):
                 tool_calls = tc
 
         if tool_calls is not None:
+            # Surface the tool-call turn's reasoning as a strands
+            # reasoningContent block so the Agent's message history carries
+            # it back through _strands_messages_to_openai on the next turn —
+            # DeepSeek thinking mode 400s when it is omitted.
+            reasoning = result.get("__reasoning_content__") if isinstance(result, dict) else None
+            if reasoning:
+                yield {"contentBlockStart": {"start": {}}}
+                yield {
+                    "contentBlockDelta": {"delta": {"reasoningContent": {"text": str(reasoning)}}}
+                }
+                yield {"contentBlockStop": {}}
             for idx, call in enumerate(tool_calls):
                 fn = (call or {}).get("function") or {}
                 tool_name = str(fn.get("name") or call.get("name") or f"tool_{idx}")

@@ -71,8 +71,9 @@ def clean_thinking_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_think_none_upgrades_registered_model_to_max_level(clean_thinking_env) -> None:
-    """Platform default: thinking on, at the model's highest registered level."""
-    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
+    """Platform default: thinking on, at the model's highest registered level
+    (deepseek-v4-pro documents reasoning_effort high/max — max is the top)."""
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "max"
 
 
 def test_resolve_think_none_stays_boolean_for_unregistered_model(clean_thinking_env) -> None:
@@ -99,7 +100,7 @@ def test_resolve_think_explicit_true_wins_over_global_disable(
     clean_thinking_env, monkeypatch
 ) -> None:
     monkeypatch.setenv("LLM_ENABLE_THINKING", "false")
-    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", True) == "high"
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", True) == "max"
 
 
 def test_resolve_think_env_level_override(clean_thinking_env, monkeypatch) -> None:
@@ -109,7 +110,7 @@ def test_resolve_think_env_level_override(clean_thinking_env, monkeypatch) -> No
 
 def test_resolve_think_env_garbage_falls_back_to_max(clean_thinking_env, monkeypatch) -> None:
     monkeypatch.setenv("LLM_THINKING_LEVEL", "banana")
-    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "max"
 
 
 def test_resolve_think_env_level_ignored_for_unregistered_model(
@@ -118,3 +119,10 @@ def test_resolve_think_env_level_ignored_for_unregistered_model(
     """A level string would be rejected by models that only support boolean think."""
     monkeypatch.setenv("LLM_THINKING_LEVEL", "high")
     assert config.resolve_think_for_model("qwen3.5:cloud", None) is True
+
+
+def test_resolve_think_env_high_selects_documented_lower_level(
+    clean_thinking_env, monkeypatch
+) -> None:
+    monkeypatch.setenv("LLM_THINKING_LEVEL", "high")
+    assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"

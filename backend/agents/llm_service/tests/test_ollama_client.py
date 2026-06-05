@@ -398,7 +398,7 @@ def _captured_payload_client(monkeypatch: pytest.MonkeyPatch, model: str) -> tup
 def test_complete_json_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.complete_json("hi")
-    assert captured["think"] == "high"
+    assert captured["think"] == "max"
 
 
 def test_complete_json_explicit_think_false_respected(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -410,13 +410,13 @@ def test_complete_json_explicit_think_false_respected(monkeypatch: pytest.Monkey
 def test_complete_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.complete("hi")
-    assert captured["think"] == "high"
+    assert captured["think"] == "max"
 
 
 def test_chat_resolves_default_think_to_max_level(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.chat([{"role": "user", "content": "hi"}])
-    assert captured["think"] == "high"
+    assert captured["think"] == "max"
 
 
 def test_complete_json_boolean_think_for_unregistered_model(
@@ -433,8 +433,8 @@ def test_payload_maps_thinking_level_to_reasoning_effort(monkeypatch: pytest.Mon
     for proxies that honor it, but levels must also reach reasoning_effort."""
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.complete_json("hi")
-    assert captured["think"] == "high"
-    assert captured["reasoning_effort"] == "high"
+    assert captured["think"] == "max"
+    assert captured["reasoning_effort"] == "max"
 
 
 def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -448,10 +448,10 @@ def test_payload_omits_reasoning_effort_for_boolean_think(monkeypatch: pytest.Mo
 def test_chat_and_complete_also_map_reasoning_effort(monkeypatch: pytest.MonkeyPatch) -> None:
     client, captured = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client.chat([{"role": "user", "content": "hi"}])
-    assert captured["reasoning_effort"] == "high"
+    assert captured["reasoning_effort"] == "max"
     client2, captured2 = _captured_payload_client(monkeypatch, "deepseek-v4-pro:cloud")
     client2.complete("hi")
-    assert captured2["reasoning_effort"] == "high"
+    assert captured2["reasoning_effort"] == "max"
 
 
 def test_payload_maps_disabled_thinking_to_reasoning_effort_none(
@@ -472,3 +472,39 @@ def test_global_disable_also_sends_reasoning_effort_none(monkeypatch: pytest.Mon
     client.complete_json("hi")
     assert captured["think"] is False
     assert captured["reasoning_effort"] == "none"
+
+
+def test_tool_call_envelope_carries_reasoning_content(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DeepSeek thinking mode requires the tool-call turn's reasoning_content
+    to be passed back on subsequent requests (400 otherwise); the parser must
+    surface it on the envelope instead of discarding it."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"reasoning_content":"step 1; "},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"reasoning_content":"step 2"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"git_status","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("run status", temperature=0)
+    assert result["__tool_calls__"][0]["function"]["name"] == "git_status"
+    assert result["__reasoning_content__"] == "step 1; step 2"
+
+
+def test_tool_call_envelope_omits_empty_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","type":"function","function":{"name":"git_status","arguments":"{}"}}]},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        result = client.complete_json("run status", temperature=0)
+    assert "__reasoning_content__" not in result

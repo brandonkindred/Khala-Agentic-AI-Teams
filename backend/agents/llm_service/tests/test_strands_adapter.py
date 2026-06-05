@@ -822,3 +822,57 @@ def test_adapter_default_think_is_none_for_client_side_resolution() -> None:
     model = LLMClientModel(client)
     _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
     assert client.chat_calls[0]["think"] is None
+
+
+# ---------------------------------------------------------------------------
+# Reasoning round-trip on tool-call turns
+# ---------------------------------------------------------------------------
+
+
+def test_stream_emits_reasoning_block_before_tool_use() -> None:
+    """The envelope's reasoning must surface as a strands reasoningContent
+    block so the Agent's history carries it back on the next turn."""
+    client = _RecordingClient(
+        {
+            "__tool_calls__": [
+                {
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "git_status", "arguments": "{}"},
+                }
+            ],
+            "__reasoning_content__": "thinking...",
+        }
+    )
+    model = LLMClientModel(client)
+    events = _drain(model.stream(messages=[{"role": "user", "content": [{"text": "go"}]}]))
+    reasoning_deltas = [
+        e["contentBlockDelta"]["delta"]["reasoningContent"]["text"]
+        for e in events
+        if "contentBlockDelta" in e and "reasoningContent" in e["contentBlockDelta"]["delta"]
+    ]
+    assert reasoning_deltas == ["thinking..."]
+    assert events[-1] == {"messageStop": {"stopReason": "tool_use"}}
+
+
+def test_messages_to_openai_maps_reasoning_block_onto_tool_call_message() -> None:
+    """DeepSeek requires the tool-call turn's reasoning_content on the wire
+    when the history is replayed; reasoningContent blocks must not be dropped."""
+    messages = [
+        {
+            "role": "assistant",
+            "content": [
+                {"reasoningContent": {"reasoningText": {"text": "thought hard"}}},
+                {
+                    "toolUse": {
+                        "toolUseId": "c1",
+                        "name": "git_status",
+                        "input": {},
+                    }
+                },
+            ],
+        }
+    ]
+    out = _strands_messages_to_openai(messages)
+    assistant = next(m for m in out if m["role"] == "assistant" and m.get("tool_calls"))
+    assert assistant["reasoning_content"] == "thought hard"
