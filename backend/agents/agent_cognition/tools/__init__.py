@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 from agent_cognition.tools.channel import (
     collect_tool_audit,
     get_cognition_context,
-    record_tool_audit,
     runtime_channel,
 )
 from agent_cognition.tools.envelope import (
@@ -88,7 +87,6 @@ __all__ = [
     # channel
     "collect_tool_audit",
     "get_cognition_context",
-    "record_tool_audit",
     "runtime_channel",
     # runner (lazy)
     "ToolAudit",

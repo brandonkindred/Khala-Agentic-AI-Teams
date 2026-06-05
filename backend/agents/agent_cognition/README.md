@@ -119,8 +119,10 @@ loop and logged to memory.
   through unchanged; a marked-but-malformed body is rejected.
 - **`tools/channel.py`** — the `ContextVar`-backed runtime channels: the cognition side
   channel (`get_cognition_context`, read by the agent runtime to render advisory rules) and
-  the trusted tool-audit sink (`record_tool_audit`, written by the broker and collected by
-  the shim).
+  the trusted tool-audit sink (collected by the shim). The audit *writer* is deliberately
+  not public — entries are only appended through the runner's broker path (a private
+  recording window), so agent code can't forge the trusted record; a write attempted outside
+  a brokered dispatch is a no-op.
 
 The invoke shim (`shared_agent_invoke`) consumes these lazily — it unwraps the envelope,
 opens the runtime channel, and returns the collected `tool_audit` on its response envelope —

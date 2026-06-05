@@ -47,7 +47,7 @@ from uuid import uuid4
 from agent_cognition.models import EventKind, MemoryEvent, Rule, ToolCall
 from agent_cognition.rules.enforcement import evaluate_tool_call
 from agent_cognition.tools.binding import BoundToolset, ExecutionSite
-from agent_cognition.tools.channel import record_tool_audit
+from agent_cognition.tools.channel import _record_brokered, _recording_window
 from llm_service.tool_loop import complete_json_with_tool_loop
 
 __all__ = [
@@ -345,9 +345,15 @@ def _emit_event(
 
 
 def _finish_call(audit: ToolAudit, call: ToolCall) -> None:
-    """Append the per-call summary and mirror it to the trusted audit sink."""
+    """Append the per-call summary and mirror it to the trusted audit sink.
+
+    The sink write is wrapped in :func:`_recording_window` — the only sanctioned
+    way to populate the trusted audit — so agent code cannot forge entries
+    through the channel (the writer is module-private to the runner↔channel pair).
+    """
     audit.tool_calls.append(call)
-    record_tool_audit(call.model_dump(mode="json"))
+    with _recording_window():
+        _record_brokered(call.model_dump(mode="json"))
 
 
 def _result_ok(result: Any) -> bool:

@@ -32,9 +32,11 @@ from .cognition_envelope import (
 from .dispatch import AgentNotRunnableError, invoke_entrypoint
 from .limits import (
     cap_output,
+    cap_tool_audit,
     default_exec_timeout_s,
     max_output_bytes,
     max_payload_bytes,
+    max_writeback_bytes,
     read_json_capped,
 )
 
@@ -137,6 +139,11 @@ def mount_invoke_shim(app: FastAPI) -> None:
 
         duration_ms = int((time.perf_counter() - start) * 1000)
 
+        # Bound the trusted audit on its own budget — independent of the per-field
+        # `output` cap — so a large audit can't blow the response size and neither
+        # field starves the other.
+        capped_audit, _ = cap_tool_audit(tool_audit, max_bytes=max_writeback_bytes())
+
         if dispatch_error is not None:
             # Infrastructure/config failure — must NOT return 200. Clients
             # that rely on status codes (including the unified API proxy's
@@ -149,7 +156,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                 trace_id=trace_id,
                 logs_tail=logs_tail[-50:],
                 error=f"AgentNotRunnable: {dispatch_error}",
-                tool_audit=tool_audit,
+                tool_audit=capped_audit,
             )
             raise HTTPException(status_code=500, detail=envelope.model_dump())
 
@@ -162,7 +169,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
             error=error,
             truncated=truncated,
             timeout_hit=timeout_hit,
-            tool_audit=tool_audit,
+            tool_audit=capped_audit,
         )
         if timeout_hit:
             raise HTTPException(status_code=504, detail=envelope.model_dump())

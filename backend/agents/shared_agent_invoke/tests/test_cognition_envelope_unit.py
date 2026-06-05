@@ -66,7 +66,9 @@ def test_open_runtime_routes_audit_when_cognition_present() -> None:
     sink: list[dict] = []
     with open_cognition_runtime({"memory_digest": "d"}, sink):
         assert ch.get_cognition_context() == {"memory_digest": "d"}
-        ch.record_tool_audit({"tool_id": "t", "ok": True})
+        # Only the broker path (a recording window) may write the audit.
+        with ch._recording_window():
+            assert ch._record_brokered({"tool_id": "t", "ok": True}) is True
     assert sink == [{"tool_id": "t", "ok": True}]
     # Channel is reset on exit.
     assert ch.get_cognition_context() is None

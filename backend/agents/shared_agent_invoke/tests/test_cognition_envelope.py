@@ -37,26 +37,91 @@ def _write_manifest(tmp_path: Path, filename: str, body: str) -> None:
 def client(tmp_path: Path):
     mod = types.ModuleType("_cog_shim_test")
 
+    class _ScriptedLLM:
+        """Calls `probe` once, then returns a final JSON object."""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def chat(self, messages, **_kwargs):
+            self.n += 1
+            if self.n == 1:
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {"name": "probe", "arguments": {}},
+                        }
+                    ]
+                }
+            return {"done": True}
+
+    def _probe_toolset():
+        from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
+
+        defn = {
+            "type": "function",
+            "function": {
+                "name": "probe",
+                "description": "probe",
+                "parameters": {"type": "object", "properties": {}, "additionalProperties": True},
+            },
+        }
+        return BoundToolset(
+            (
+                BoundTool(
+                    tool_id="probe",
+                    site=ExecutionSite.SANDBOX_LOCAL,
+                    definitions=(defn,),
+                    handlers={"probe": lambda a: {"ok": True}},
+                ),
+            )
+        )
+
+    def _run_brokered_probe():
+        from agent_cognition.tools.runner import run_tool_loop
+
+        run_tool_loop(
+            _ScriptedLLM(),
+            agent_id="blogging.cog",
+            source_run_id="r1",
+            user_prompt="",
+            system_prompt="",
+            toolset=_probe_toolset(),
+            enforced_rules=[],
+        )
+
     class CognitionAgent:
-        """Records a trusted tool-audit entry and reflects what it received."""
+        """Runs a brokered tool call (which feeds the audit) and reflects input."""
 
         def run(self, body):
             import agent_cognition.tools.channel as ch
 
-            ch.record_tool_audit({"tool_id": "probe", "args": {}, "ok": True})
+            _run_brokered_probe()
             return {"received": body, "cognition_seen": ch.get_cognition_context()}
 
     class RaisingCognitionAgent:
-        """Records an audit entry, then fails (writeback would be dropped)."""
+        """Runs a brokered tool call, then fails (writeback would be dropped)."""
+
+        def run(self, body):
+            _run_brokered_probe()
+            raise RuntimeError("boom after a tool call")
+
+    class ForgingAgent:
+        """Tries to forge an audit entry outside the broker path (must be a no-op)."""
 
         def run(self, body):
             import agent_cognition.tools.channel as ch
 
-            ch.record_tool_audit({"tool_id": "probe", "args": {}, "ok": True})
-            raise RuntimeError("boom after a tool call")
+            # No public writer exists; the private path refuses writes outside a
+            # broker recording window, so this must NOT pollute the audit.
+            ch._record_brokered({"tool_id": "forged", "ok": True})
+            return {"received": body}
 
     mod.CognitionAgent = CognitionAgent
     mod.RaisingCognitionAgent = RaisingCognitionAgent
+    mod.ForgingAgent = ForgingAgent
     sys.modules["_cog_shim_test"] = mod
 
     _write_manifest(
@@ -83,6 +148,19 @@ def client(tmp_path: Path):
         summary: cognition agent that raises
         source:
           entrypoint: _cog_shim_test:RaisingCognitionAgent
+        """,
+    )
+    _write_manifest(
+        tmp_path,
+        "cog_forge.yaml",
+        """
+        schema_version: 1
+        id: blogging.cog_forge
+        team: blogging
+        name: Cog Forge
+        summary: cognition agent that tries to forge the audit
+        source:
+          entrypoint: _cog_shim_test:ForgingAgent
         """,
     )
 
@@ -124,8 +202,10 @@ def test_marked_envelope_delivers_input_only_and_side_channel(client: TestClient
     assert body["output"]["received"] == {"q": "hi"}
     # Cognition rode the side channel.
     assert body["output"]["cognition_seen"] == {"rules": [], "memory_digest": "remember this"}
-    # The broker's trusted audit came back out-of-band.
-    assert body["tool_audit"] == [{"tool_id": "probe", "args": {}, "ok": True}]
+    # The broker's trusted audit came back out-of-band (one ToolCall dump).
+    assert len(body["tool_audit"]) == 1
+    assert body["tool_audit"][0]["tool_id"] == "probe"
+    assert body["tool_audit"][0]["ok"] is True
 
 
 def test_unmarked_body_with_input_key_passes_through(client: TestClient) -> None:
@@ -138,7 +218,8 @@ def test_unmarked_body_with_input_key_passes_through(client: TestClient) -> None
     assert body["output"]["cognition_seen"] is None
     # Audit sink is still opened (so sandbox-local tools are audited even without
     # an injected cognition block).
-    assert body["tool_audit"] == [{"tool_id": "probe", "args": {}, "ok": True}]
+    assert len(body["tool_audit"]) == 1
+    assert body["tool_audit"][0]["tool_id"] == "probe"
 
 
 def test_malformed_envelope_returns_400(client: TestClient) -> None:
@@ -160,4 +241,16 @@ def test_audit_survives_a_dropped_writeback(client: TestClient) -> None:
     assert resp.status_code == 422
     detail = resp.json()["detail"]
     assert detail["error"].startswith("RuntimeError:")
-    assert detail["tool_audit"] == [{"tool_id": "probe", "args": {}, "ok": True}]
+    assert len(detail["tool_audit"]) == 1
+    assert detail["tool_audit"][0]["tool_id"] == "probe"
+
+
+def test_agent_cannot_forge_audit_outside_the_broker(client: TestClient) -> None:
+    # An agent calling the private writer outside a broker recording window must
+    # not be able to inject a forged entry into the trusted audit.
+    resp = client.post(
+        "/_agents/blogging.cog_forge/invoke",
+        json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {}},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["tool_audit"] == []
