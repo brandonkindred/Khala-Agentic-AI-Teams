@@ -965,19 +965,6 @@ def test_normalize_ohlc_bar_coerces_nonfinite_volume(bad_volume: float, caplog) 
     )
 
 
-def test_ohlcvbar_validator_coerces_nonfinite_volume() -> None:
-    """Direct construction (e.g. cache read-back) coerces non-finite volume to 0.0."""
-    for bad in (float("nan"), float("inf"), float("-inf")):
-        bar = OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=bad)
-        assert bar.volume == 0.0
-        assert math.isfinite(bar.volume)
-    # A finite volume passes through untouched.
-    assert (
-        OHLCVBar(date="2024-01-01", open=1.0, high=1.0, low=1.0, close=1.0, volume=42.0).volume
-        == 42.0
-    )
-
-
 def test_fetch_alphavantage_crypto_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     import investment_team.market_data_service as mds
 

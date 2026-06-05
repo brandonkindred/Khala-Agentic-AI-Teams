@@ -16,7 +16,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 from .data_providers.symbol_maps import (
     resolve_alphavantage_forex,
@@ -83,10 +83,11 @@ class OHLCVBar(BaseModel):
     Snapshots written before the column existed read back with the flag
     defaulted to ``False``.
 
-    Invariant: ``volume`` is always finite. A non-finite volume (NaN/±inf,
-    which providers emit on early-listing/low-liquidity sessions) is coerced
-    to ``0.0`` on construction so it can never be persisted to the cache or
-    reach ADV / cost-model arithmetic.
+    The model is a permissive transport — it does not validate finiteness, so
+    callers handling raw provider data must normalise through a dedicated
+    helper (e.g. ``MarketDataService._normalize_ohlc_bar``) before persisting
+    or computing on it. Synthetic-bar paths rely on this permissiveness to
+    detect and repair non-finite fields themselves.
     """
 
     date: str
@@ -96,20 +97,6 @@ class OHLCVBar(BaseModel):
     close: float
     volume: float
     is_imputed: bool = False
-
-    @field_validator("volume", mode="after")
-    @classmethod
-    def _coerce_nonfinite_volume(cls, v: float) -> float:
-        """Coerce a non-finite volume (NaN/±inf) to 0.0.
-
-        Postconditions:
-            Returns a finite float. Non-finite input becomes ``0.0`` — the
-            documented zero-volume sentinel ADV/liquidity math already excludes
-            — so a malformed value can never be persisted to the Parquet cache
-            or reach cost-model arithmetic. Finite inputs pass through
-            unchanged.
-        """
-        return v if math.isfinite(v) else 0.0
 
 
 # Type alias for a fetch function used in the provider chain.
