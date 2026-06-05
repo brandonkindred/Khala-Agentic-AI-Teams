@@ -536,6 +536,22 @@ def test_llm_calls_counts_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
     assert report.llm_calls == 2 and canned.text_calls
 
 
+def test_priority_out_of_int32_range_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[
+            {"action": "add", "text": "too big", "priority": 2**31},  # > INT32 max
+            {"action": "add", "text": "too small", "priority": -(2**31) - 1},  # < INT32 min
+            {"action": "add", "text": "ok", "priority": 2**31 - 1},  # INT32 max → valid
+        ],
+    )
+    report = reflection.reflect("a", _NOW)
+    # Out-of-range priorities would overflow the INT32 column on approval → dropped
+    # here; the boundary value is accepted.
+    assert report.dropped_invalid == 2 and report.proposed == 1
+    assert created[0].proposed_rule["priority"] == 2**31 - 1
+
+
 def test_stale_pending_is_superseded_and_does_not_block_fresh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

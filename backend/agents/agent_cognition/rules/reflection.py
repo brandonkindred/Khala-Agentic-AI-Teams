@@ -61,6 +61,12 @@ _DEFAULT_SUMMARY_LIMIT = 6
 _DEFAULT_MAX_PROPOSALS = 5
 _DEFAULT_INPUT_CHARS = 8000
 
+# Bounds of the signed 32-bit `agent_cognition_rules.priority` INTEGER column. A
+# model-supplied priority outside this range parses fine but would overflow on
+# approval, so reflection drops it at the source (see _build_proposed_rule).
+_PG_INT32_MIN = -(2**31)
+_PG_INT32_MAX = 2**31 - 1
+
 # Scales fed to the reflector, coarse → fine so the model sees long-range
 # context before recent detail. Year is omitted — yearly cadence is too slow to
 # drive rule learning and the month/week/day window already spans it.
@@ -433,15 +439,23 @@ def _build_proposed_rule(item: _ProposedAction) -> dict[str, Any] | None:
     """Build the ``proposed_rule`` dict consumed by the store's approve path.
 
     Emits only the keys ``store._build_rule_from_spec`` reads and stamps
-    ``source='derived'``. Returns ``None`` when the model proposes an enforced
-    rule whose predicate is absent or fails :func:`is_valid_predicate` — such a
-    proposal could never be approved (the approve gate re-validates), so it is
-    dropped at the source rather than parked unapprovable in the queue.
+    ``source='derived'``. Returns ``None`` (the caller counts a drop) when the
+    model proposes an enforced rule whose predicate is absent or fails
+    :func:`is_valid_predicate`, or a ``priority`` outside the signed 32-bit range
+    of the ``agent_cognition_rules.priority`` INTEGER column — either could never
+    be approved (the approve gate re-validates / the DB write would overflow), so
+    it is dropped at the source rather than parked unapprovable in the queue.
     """
     try:
         mode = RuleMode(item.mode)
     except ValueError:
         logger.warning("reflection: unknown rule mode %r; dropping", item.mode)
+        return None
+    if not (_PG_INT32_MIN <= item.priority <= _PG_INT32_MAX):
+        logger.warning(
+            "reflection: priority %d is outside the INT32 rule-column range; dropping",
+            item.priority,
+        )
         return None
     spec: dict[str, Any] = {
         "text": item.text,
