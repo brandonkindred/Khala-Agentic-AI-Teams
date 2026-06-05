@@ -179,6 +179,17 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
           accepted suggestion this run — are skipped. At most ``_max_proposals()``
           rows are written.
         * Returns a :class:`ReflectionReport` counting the work done.
+
+    Concurrency: the duplicate suppression is best-effort *within a single run*
+    — the read of pending proposals and the inserts are not one atomic
+    transaction, so two reflection runs racing for the **same** ``agent_id`` can
+    each insert the same proposal. The duplicate is low-harm and self-healing (an
+    operator rejects it, and once either is decided it drops out of the pending
+    set), so the caller is expected to single-flight reflection per agent rather
+    than this function locking — the scheduler owns run cadence, mirroring how the
+    rollup engine relies on the scheduler plus idempotency. Reflection across
+    *different* agents is always independent (every store read/write is
+    ``agent_id``-scoped).
     """
     assert agent_id, "reflect: agent_id must be non-empty"
     assert now.tzinfo is not None, "reflect: now must be timezone-aware (UTC)"
