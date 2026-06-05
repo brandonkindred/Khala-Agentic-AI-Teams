@@ -415,7 +415,12 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
 
 @timed_query(store=_STORE, op="fetch_summaries")
 def fetch_summaries(
-    agent_id: str, scale: Scale, limit: int | None = None, offset: int = 0
+    agent_id: str,
+    scale: Scale,
+    limit: int | None = None,
+    offset: int = 0,
+    *,
+    exclude_stale: bool = False,
 ) -> list[PeriodSummary]:
     """Return this agent's summaries at ``scale``, newest period first.
 
@@ -426,13 +431,18 @@ def fetch_summaries(
         * Ordered by ``period_start`` descending (deterministic — the period
           key is unique per scale); only rows owned by ``agent_id`` at the
           requested ``scale``.
+        * When ``exclude_stale`` is set, ``stale`` rows are filtered in SQL —
+          *before* ``limit`` — so ``limit`` counts non-stale rows (a caller after
+          the newest *fresh* summaries isn't starved when the most recent periods
+          are stale but older ones are fresh).
     """
     assert agent_id, "fetch_summaries: agent_id must be non-empty"
     assert offset >= 0, "fetch_summaries: offset must be non-negative"
     assert limit is None or limit >= 0, "fetch_summaries: limit must be non-negative"
+    stale_clause = " AND stale = FALSE" if exclude_stale else ""
     sql = f"""SELECT {_SUMMARY_READ_COLS}
               FROM agent_cognition_summaries
-              WHERE agent_id = %s AND scale = %s
+              WHERE agent_id = %s AND scale = %s{stale_clause}
               ORDER BY period_start DESC"""
     params: list[object] = [agent_id, scale.value]
     if limit is not None:

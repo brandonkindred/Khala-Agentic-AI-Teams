@@ -431,6 +431,26 @@ def test_fetch_summaries_filters_scale_and_paginates() -> None:
     assert [r.period_start.month for r in offset_only] == [2, 1]
 
 
+def test_fetch_summaries_exclude_stale_filters_before_limit() -> None:
+    windows = {
+        m: (datetime(2026, m, 1, tzinfo=_UTC), datetime(2026, m + 1, 1, tzinfo=_UTC))
+        for m in (1, 2, 3)
+    }
+    _upsert("a", _summary("a", scale=Scale.MONTH, window=windows[1], stale=False))
+    _upsert("a", _summary("a", scale=Scale.MONTH, window=windows[2], stale=False))
+    _upsert("a", _summary("a", scale=Scale.MONTH, window=windows[3], stale=True))  # newest, stale
+
+    # Default returns every row, stale included.
+    assert [r.period_start.month for r in store.fetch_summaries("a", Scale.MONTH)] == [3, 2, 1]
+    # exclude_stale drops the stale newest row.
+    fresh = store.fetch_summaries("a", Scale.MONTH, exclude_stale=True)
+    assert [r.period_start.month for r in fresh] == [2, 1]
+    # The filter is applied BEFORE the limit: a limit of 2 returns two *fresh*
+    # rows even though the single newest period is stale (no starvation).
+    limited = store.fetch_summaries("a", Scale.MONTH, limit=2, exclude_stale=True)
+    assert [r.period_start.month for r in limited] == [2, 1]
+
+
 def test_fetch_summaries_negative_offset_raises() -> None:
     with pytest.raises(AssertionError):
         store.fetch_summaries("a", Scale.DAY, offset=-1)
