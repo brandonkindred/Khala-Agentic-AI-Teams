@@ -157,14 +157,21 @@ its caller `_run_with_github_hooks()`.
 ### 6.1 The active-issue marker
 
 - Repo-local git config key: `khala.active-issue`, value = the issue number.
+- Semantics: *this checkout holds unpublished work for issue N.*
 - **Written** by `_prepare_issue_branch` once the tree is clean and branches
-  are seeded, immediately before returning success.
-- **Cleared** by `_run_with_github_hooks` on every terminal path (success,
-  recorded failure, orchestrator exception) via `try`/`finally`.
+  are seeded, immediately before returning success (overwriting any previous
+  issue's marker — a fully successful prep has rescued/preserved that issue's
+  leftovers under its tag, so the overwrite is the one safe transition).
+- **Cleared** by `_run_with_github_hooks` only once the work is published
+  (PR recorded). Every other terminal path — prep failure, orchestrator
+  exception, no merged tasks, fast-forward/push/PR failure — retains it:
+  the unpublished work (dirty files, `development`-ahead commits) is still
+  on the checkout, and the marker is both its attribution and the
+  same-issue continuation signal for the next retry.
 - A marker found at prep time therefore means: *the previous job on this
-  checkout terminated abnormally (restart, kill, delete) while working issue
-  M*. Leftover dirty files and `development`-ahead commits are attributed to
-  issue M.
+  checkout stopped before publishing issue M's work* (restart, kill, delete,
+  or a failed publish step). Leftover dirty files and `development`-ahead
+  commits are attributed to issue M.
 - Absent marker + leftovers means attribution is unknown → treat as foreign
   (preserve, don't continue from).
 

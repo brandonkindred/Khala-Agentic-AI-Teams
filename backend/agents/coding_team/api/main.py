@@ -372,6 +372,32 @@ def _git_auth_env(token: str) -> Dict[str, str]:
     }
 
 
+def _scrub_auth_header_values(msg: str, env: Optional[Dict[str, str]]) -> str:
+    """Redact the transient auth header from git output.
+
+    ``scrub_token_from_text`` only covers URL-embedded credentials; the
+    header value built by ``_git_auth_env`` is a second representation of
+    the token (Basic + base64) that verbose/trace git output can echo. Job
+    errors and issue comments are built from these messages, so every
+    representation must be redacted.
+
+    Postconditions:
+        - Neither the full header value, the ``Basic <b64>`` credential, nor
+          the bare base64 form appears in the returned text.
+    """
+    if not env:
+        return msg
+    header = env.get("GIT_CONFIG_VALUE_0") or ""
+    if not header.startswith("Authorization: "):
+        return msg
+    credential = header[len("Authorization: ") :]  # "Basic <b64>"
+    encoded = credential.rsplit(" ", 1)[-1]
+    for needle in (header, credential, encoded):
+        if needle:
+            msg = msg.replace(needle, "***")
+    return msg
+
+
 def _git(
     repo_path: str,
     *args: str,
@@ -381,8 +407,10 @@ def _git(
     """Run a git subcommand in ``repo_path``.
 
     Postconditions:
-        - Returns ``(returncode, scrubbed_message)``; the message has any token
-          redacted via ``scrub_token_from_text``.
+        - Returns ``(returncode, scrubbed_message)``; the message has any
+          URL-embedded token redacted via ``scrub_token_from_text`` and, when
+          an auth env was supplied, the transient Authorization header value
+          (including its base64 form) redacted as well.
         - ``env=None`` (default) inherits the parent environment, preserving the
           prior behaviour for local-only operations. Pass an auth env (see
           ``_git_auth_env``) for network operations against a private remote.
@@ -396,12 +424,12 @@ def _git(
             timeout=timeout,
             env=env,
         )
-        msg = (r.stderr or r.stdout).strip()[:500]
+        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)[:500]
         return r.returncode, scrub_token_from_text(msg)
     except subprocess.TimeoutExpired:
         return 124, f"git {' '.join(args)} timed out after {timeout}s"
     except Exception as e:  # noqa: BLE001
-        return 1, scrub_token_from_text(str(e))
+        return 1, scrub_token_from_text(_scrub_auth_header_values(str(e), env))
 
 
 RESCUE_BRANCH_PREFIX = "khala/rescue/"
@@ -645,13 +673,12 @@ def _prepare_issue_branch(
         if note:
             notes.append(note)
 
-    # The marker's purpose — attributing the previous abnormal job's
-    # leftovers — is spent once the tree is clean. Clear it here so a later
-    # prep failure (fetch, ref validation, checkout) cannot leave a stale
-    # marker that misattributes unrelated future work; the fail-closed exits
-    # above keep it precisely because their dirt still needs attribution.
-    if marker is not None:
-        _clear_active_issue(repo_path)
+    # The marker is NOT cleared here even after recovery: it also drives
+    # same-issue continuation (development as a seed candidate), and the
+    # development-ahead commits it attributes remain on the checkout until
+    # the re-seed below succeeds. The only safe transition is the success
+    # path's _write_active_issue overwrite; every failure exit retains it
+    # so a retry can still attribute and continue the prior work.
 
     # Defense-in-depth: reject ref names that could be parsed as git options.
     if not _is_safe_ref(default_branch):
@@ -779,79 +806,80 @@ def _run_with_github_hooks(
             _safe_comment(client, owner, repo, num, note)
 
         try:
-            try:
-                run_coding_team_orchestrator(
-                    job_id,
-                    request.repo_path,
-                    plan,
-                    update_job_fn=lambda **kw: update_job(job_id, **kw),
-                    get_job_fn=lambda jid: get_job(jid),
-                    cache_dir=DEFAULT_CACHE_DIR,
-                )
-            except Exception as e:  # noqa: BLE001
-                logger.exception("Coding team orchestrator failed: %s", e)
-                _record_failure(client, owner, repo, num, job_id, str(e))
-                return
-
-            if not _has_merged_tasks(get_job(job_id) or {}):
-                update_job(
-                    job_id,
-                    status="failed",
-                    error="orchestrator produced no merged tasks",
-                )
-                _safe_comment(
-                    client,
-                    owner,
-                    repo,
-                    num,
-                    f"Coding team job `{job_id}` finished but produced no merged tasks.",
-                )
-                return
-
-            ff_ok, ff_err = _fast_forward(request.repo_path, integration_branch, DEVELOPMENT_BRANCH)
-            if not ff_ok:
-                _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
-                return
-
-            push_ok, push_err = _push_branch(
-                request.repo_path, request.remote, integration_branch, token
+            run_coding_team_orchestrator(
+                job_id,
+                request.repo_path,
+                plan,
+                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                get_job_fn=lambda jid: get_job(jid),
+                cache_dir=DEFAULT_CACHE_DIR,
             )
-            if not push_ok:
-                _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
-                return
+        except Exception as e:  # noqa: BLE001
+            logger.exception("Coding team orchestrator failed: %s", e)
+            _record_failure(client, owner, repo, num, job_id, str(e))
+            return
 
+        if not _has_merged_tasks(get_job(job_id) or {}):
+            update_job(
+                job_id,
+                status="failed",
+                error="orchestrator produced no merged tasks",
+            )
+            _safe_comment(
+                client,
+                owner,
+                repo,
+                num,
+                f"Coding team job `{job_id}` finished but produced no merged tasks.",
+            )
+            return
+
+        ff_ok, ff_err = _fast_forward(request.repo_path, integration_branch, DEVELOPMENT_BRANCH)
+        if not ff_ok:
+            _record_failure(client, owner, repo, num, job_id, f"fast-forward failed: {ff_err}")
+            return
+
+        push_ok, push_err = _push_branch(
+            request.repo_path, request.remote, integration_branch, token
+        )
+        if not push_ok:
+            _record_failure(client, owner, repo, num, job_id, f"git push failed: {push_err}")
+            return
+
+        try:
+            existing = client.find_existing_pr(owner, repo, integration_branch)
+        except GitHubAPIError as e:
+            _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
+            return
+
+        if existing is not None:
+            pr_url, created = existing.html_url, False
+        else:
             try:
-                existing = client.find_existing_pr(owner, repo, integration_branch)
+                pr = client.create_pull_request(
+                    owner=owner,
+                    repo=repo,
+                    title=_truncate_title(issue.title, num),
+                    head=integration_branch,
+                    base=base,
+                    body=(f"Closes #{num}\n\nGenerated by Khala coding team job `{job_id}`."),
+                    draft=True,
+                )
             except GitHubAPIError as e:
-                _record_failure(client, owner, repo, num, job_id, f"github find_existing_pr: {e}")
+                _record_failure(
+                    client, owner, repo, num, job_id, f"github create_pull_request: {e}"
+                )
                 return
+            pr_url, created = pr.html_url, True
 
-            if existing is not None:
-                pr_url, created = existing.html_url, False
-            else:
-                try:
-                    pr = client.create_pull_request(
-                        owner=owner,
-                        repo=repo,
-                        title=_truncate_title(issue.title, num),
-                        head=integration_branch,
-                        base=base,
-                        body=(f"Closes #{num}\n\nGenerated by Khala coding team job `{job_id}`."),
-                        draft=True,
-                    )
-                except GitHubAPIError as e:
-                    _record_failure(
-                        client, owner, repo, num, job_id, f"github create_pull_request: {e}"
-                    )
-                    return
-                pr_url, created = pr.html_url, True
-
-            update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
-            if created:
-                _safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
-            else:
-                _safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
-        finally:
-            # A set marker means "job mid-flight on this checkout"; clearing it
-            # on every terminal path keeps later leftover-attribution honest.
-            _clear_active_issue(request.repo_path)
+        update_job(job_id, github_pr_url=pr_url, integration_branch=integration_branch)
+        if created:
+            _safe_comment(client, owner, repo, num, f"Draft PR opened: {pr_url}")
+        else:
+            _safe_comment(client, owner, repo, num, f"Reusing existing draft PR: {pr_url}")
+        # Publication is the marker's end of life: the work now lives on the
+        # remote PR branch, so the checkout no longer holds unpublished work
+        # for this issue. Every earlier return (orchestrator failure, no
+        # merged tasks, fast-forward/push/PR failure) retains the marker so a
+        # retry continues from development instead of starting over.
+        _clear_active_issue(request.repo_path)

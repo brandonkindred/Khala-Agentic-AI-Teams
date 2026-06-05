@@ -656,24 +656,46 @@ class TestFailureMatrix:
 
 
 class TestMarkerLifecycleInPrep:
-    """A stale marker must not outlive its purpose (attributing the previous
-    abnormal job's leftovers), even when prep fails after recovery."""
+    """The marker means "this checkout holds unpublished work for issue N".
+    It is overwritten only by a fully successful prep and must survive every
+    prep failure — the leftovers it attributes (dirt and `development`-ahead
+    commits) are still on the checkout until a successful re-seed absorbs
+    them, and clearing earlier breaks same-issue continuation on retry."""
 
-    def test_prep_failure_after_recovery_clears_stale_marker(self, api, repo_pair) -> None:
-        """Marker's attribution is spent once the tree is clean; a later prep
-        failure (e.g. fetch/auth) must not leave it behind to misattribute
-        unrelated future work."""
-        import shutil
-
+    def test_prep_failure_retains_marker_so_retry_continues(self, api, repo_pair) -> None:
+        """The reviewer scenario: a same-issue run committed progress on
+        development; the retry fails mid-prep (fetch). The marker must
+        survive so a later retry still seeds continuation from development."""
         remote, clone = repo_pair
         ok, _, _ = _prep(api, clone)
         assert ok is True
-        assert api._read_active_issue(clone) == 7  # job died: marker left set
-        shutil.rmtree(remote)  # next prep's fetch will fail
-
-        ok, err, _ = _prep(api, clone, issue=9)
+        _must(clone, "checkout", "-q", "development")
+        _commit_file(clone, "progress.py", "x = 1\n", "interrupted progress")
+        # The job died; a retry then fails at fetch.
+        remote_backup = remote + ".bak"
+        os.rename(remote, remote_backup)
+        ok, _, _ = _prep(api, clone)
         assert ok is False
-        assert api._read_active_issue(clone) is None
+        assert api._read_active_issue(clone) == 7
+
+        # Restore the remote: the next retry continues from development.
+        os.rename(remote_backup, remote)
+        ok, err, notes = _prep(api, clone)
+        assert ok is True, err
+        assert "progress.py" in _must(clone, "ls-tree", "-r", "--name-only", "khala/issue-7")
+        assert any("Continuing" in n for n in notes)
+
+    def test_successful_prep_for_other_issue_overwrites_stale_marker(self, api, repo_pair) -> None:
+        """A fully successful prep absorbs the previous issue's leftovers
+        (rescued/preserved with its tag) and is the one safe transition
+        point: the marker switches to the new issue."""
+        _, clone = repo_pair
+        ok, _, _ = _prep(api, clone, issue=5)
+        assert ok is True
+        assert api._read_active_issue(clone) == 5
+        ok, _, _ = _prep(api, clone, issue=9)
+        assert ok is True
+        assert api._read_active_issue(clone) == 9
 
     def test_status_failure_retains_marker_for_attribution(
         self, api, repo_pair, monkeypatch
@@ -702,3 +724,36 @@ class TestMarkerLifecycleInPrep:
         ok, _, _ = _prep(api, clone, issue=9)
         assert ok is False
         assert api._read_active_issue(clone) == 7
+
+
+class TestGitOutputCredentialScrubbing:
+    """Transient auth material (the Basic header) must never reach job errors
+    or issue comments, even via verbose/trace git output."""
+
+    def test_git_scrubs_header_credential_from_output(self, api, monkeypatch) -> None:
+        auth_env = api._git_auth_env("tok-secret")
+        header_value = auth_env["GIT_CONFIG_VALUE_0"]  # "Authorization: Basic <b64>"
+        encoded = header_value.rsplit(" ", 1)[-1]
+
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = f"trace: http.extraHeader: {header_value} rejected ({encoded})"
+
+        monkeypatch.setattr(api.subprocess, "run", lambda *a, **kw: _Proc())
+        rc, msg = api._git("/repo", "fetch", "--", "origin", "main", env=auth_env)
+        assert rc == 1
+        assert encoded not in msg
+        assert header_value not in msg
+        assert "***" in msg
+
+    def test_git_without_auth_env_output_unchanged(self, api, monkeypatch) -> None:
+        class _Proc:
+            returncode = 1
+            stdout = ""
+            stderr = "fatal: ordinary failure"
+
+        monkeypatch.setattr(api.subprocess, "run", lambda *a, **kw: _Proc())
+        rc, msg = api._git("/repo", "status")
+        assert rc == 1
+        assert msg == "fatal: ordinary failure"

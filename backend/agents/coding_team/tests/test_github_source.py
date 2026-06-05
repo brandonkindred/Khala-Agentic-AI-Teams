@@ -1147,7 +1147,11 @@ class TestGitCredentialThreading:
 
 
 class TestActiveIssueMarkerLifecycle:
-    """The marker must be cleared on every terminal path after a successful prep."""
+    """The marker means "this checkout holds unpublished work for issue N":
+    it is cleared only once the work is published (PR recorded). Every
+    unpublished terminal path — orchestrator exception, no merged tasks,
+    fast-forward/push/PR failure — must retain it so a retry continues from
+    `development` instead of rescuing the finished work and starting over."""
 
     def _run(self, patched_app, monkeypatch, github_client, orchestrator=None):
         api = patched_app["api"]
@@ -1162,26 +1166,50 @@ class TestActiveIssueMarkerLifecycle:
         assert resp.status_code == 200
         return cleared
 
-    def test_cleared_on_success(self, patched_app, monkeypatch) -> None:
+    def test_cleared_on_publish_success(self, patched_app, monkeypatch) -> None:
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client)
         assert cleared == [patched_app["repo_path"]]
 
-    def test_cleared_when_orchestrator_raises(self, patched_app, monkeypatch) -> None:
+    def test_retained_when_orchestrator_raises(self, patched_app, monkeypatch) -> None:
         def boom(*_a, **_kw):
             raise RuntimeError("orchestrator died")
 
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=boom)
-        assert cleared == [patched_app["repo_path"]]
+        assert cleared == []
 
-    def test_cleared_when_no_merged_tasks(self, patched_app, monkeypatch) -> None:
+    def test_retained_when_no_merged_tasks(self, patched_app, monkeypatch) -> None:
         def no_merge(_job_id, _repo, _plan, **kw):
             kw["update_job_fn"](status="completed", task_graph_snapshot=[])
 
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
-        assert cleared == [patched_app["repo_path"]]
+        assert cleared == []
+
+    def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (False, "remote hung up"))
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
+
+    def test_retained_when_fast_forward_fails(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        monkeypatch.setattr(api, "_fast_forward", lambda *a, **kw: (False, "not possible"))
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
+
+    def test_retained_when_pr_creation_fails(self, patched_app, monkeypatch) -> None:
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+
+        def _raise_create(**_kw):
+            raise GitHubAPIError(422, "validation")
+
+        client.create_pull_request = _raise_create  # type: ignore[assignment]
+        cleared = self._run(patched_app, monkeypatch, client)
+        assert cleared == []
 
     def test_prep_notes_posted_as_issue_comments(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
