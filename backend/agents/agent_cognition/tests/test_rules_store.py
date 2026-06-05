@@ -408,6 +408,27 @@ def test_approve_stale_evidence_proposal_raises() -> None:
     assert store.list_rules("a") == []  # nothing activated
 
 
+def test_supersede_pending_sets_status_superseded_no_rule_touched() -> None:
+    proposal = _proposal("a", ProposalAction.ADD, proposed_rule=_add_spec(), stale_evidence=True)
+    store.create_proposal("a", proposal)
+    updated = store.supersede_proposal("a", proposal.id)
+    assert updated is not None and updated.status == ProposalStatus.SUPERSEDED
+    assert updated.decided_by is None  # system action, not a human decision
+    assert store.get_proposal("a", proposal.id).status == ProposalStatus.SUPERSEDED  # type: ignore[union-attr]
+    assert store.list_rules("a") == []  # nothing activated
+
+
+def test_supersede_is_tolerant_no_op_on_missing_or_decided() -> None:
+    # Missing proposal → None (no raise).
+    assert store.supersede_proposal("a", "nope") is None
+    # Already-decided proposal → None (tolerant: housekeeping never raises).
+    proposal = _proposal("a", ProposalAction.ADD, proposed_rule=_add_spec())
+    store.create_proposal("a", proposal)
+    store.approve_proposal("a", proposal.id, decided_by="op")
+    assert store.supersede_proposal("a", proposal.id) is None
+    assert store.get_proposal("a", proposal.id).status == ProposalStatus.APPROVED  # type: ignore[union-attr]
+
+
 # ---------------------------------------------------------------------------
 # agent_id isolation
 # ---------------------------------------------------------------------------

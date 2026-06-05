@@ -15,10 +15,12 @@ Reflection does not run rollups itself — the caller (the central scheduler)
 sequences ``ensure_rollups_current`` then :func:`reflect`. Reflection only reads
 the summaries that already exist.
 
-Robustness contract: the LLM's individual suggestions are untrusted. A proposal
-that is incoherent, targets a rule that is not currently active, or asks for an
-enforced rule without a valid predicate is **dropped and counted**, never
-raised — one bad suggestion can't poison the batch or activate anything.
+Robustness contract: the LLM's individual suggestions are untrusted. A malformed
+item, a proposal that is incoherent, one that targets a rule that is not
+currently active, or one that asks for an enforced rule without a valid predicate
+is **dropped and counted**, never raised — one bad suggestion can't poison the
+batch or activate anything. Pending proposals whose evidence has gone stale are
+superseded before deduping so a fresh proposal can replace them.
 
 Design by Contract: every function documents its Preconditions and
 Postconditions. The module is stateless — all durable state lives in the rules
@@ -33,7 +35,7 @@ from datetime import datetime
 from typing import Any
 from uuid import uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from agent_cognition.memory import store as memory_store
 from agent_cognition.models import (
@@ -115,28 +117,35 @@ class _ProposedAction(BaseModel):
 class _ReflectionResult(BaseModel):
     """Narrow LLM output schema: only the fields the model authors.
 
-    The engine builds the full :class:`RuleProposal` (id, agent_id, status,
-    evidence, timestamps) around each item so the model can never author
-    store-managed columns or forge its own evidence.
+    ``proposals`` is kept as a list of raw objects (not ``list[_ProposedAction]``)
+    so a single malformed item — e.g. ``{"priority": "high"}`` — is dropped and
+    counted on its own during materialization rather than failing validation of
+    the whole batch (the untrusted-model contract: one bad suggestion must not
+    poison the rest). Each item is validated individually via
+    :func:`_coerce_item`. The engine builds the full :class:`RuleProposal` (id,
+    agent_id, status, evidence, timestamps) around each item so the model can
+    never author store-managed columns or forge its own evidence.
     """
 
-    proposals: list[_ProposedAction] = Field(default_factory=list)
+    proposals: list[Any] = Field(default_factory=list)
 
 
 class ReflectionReport(BaseModel):
     """Telemetry returned by :func:`reflect` (not persisted).
 
     ``proposed`` counts rows actually inserted; ``dropped_invalid`` counts model
-    suggestions rejected by the validity guards; ``deduped`` counts suggestions
-    skipped as duplicates of an existing pending proposal (or of an earlier
-    suggestion in the same batch); ``llm_calls`` is ``0`` on the empty-history
-    fast path and ``1`` otherwise.
+    suggestions rejected by per-item validation or the validity guards;
+    ``deduped`` counts suggestions skipped as duplicates of an existing *fresh*
+    pending proposal (or of an earlier suggestion in the same batch);
+    ``superseded`` counts stale-evidence pending proposals retired this run;
+    ``llm_calls`` is ``0`` on the empty-history fast path and ``1`` otherwise.
     """
 
     agent_id: str
     proposed: int = 0
     dropped_invalid: int = 0
     deduped: int = 0
+    superseded: int = 0
     llm_calls: int = 0
 
 
@@ -156,12 +165,19 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
           ``proposed_rule.source='derived'`` and ``(summary_id, version)``
           evidence refs spanning the reflection window; **no rule is created or
           activated** — reflection calls only ``create_proposal``.
-        * Invalid suggestions (unknown action, incoherent action/target/text,
-          a retire/amend target that is not an active rule, or an enforced rule
+        * Pending proposals already flagged ``stale_evidence`` (their evidence
+          was superseded by a later summary recompute, so the approve gate
+          refuses them) are **superseded** before deduping — otherwise their
+          dedupe keys would block a fresh, approvable re-proposal and they would
+          linger unapprovable forever.
+        * Invalid suggestions (a non-object item, a field that fails per-item
+          validation, an unknown action, incoherent action/target/text, a
+          retire/amend target that is not an active rule, or an enforced rule
           whose predicate is absent or invalid) are dropped and counted, never
-          raised. Suggestions duplicating an existing pending proposal — or an
-          earlier accepted suggestion this run — are skipped. At most
-          ``_max_proposals()`` rows are written.
+          raised — one bad suggestion cannot poison the batch. Suggestions
+          duplicating an existing *fresh* pending proposal — or an earlier
+          accepted suggestion this run — are skipped. At most ``_max_proposals()``
+          rows are written.
         * Returns a :class:`ReflectionReport` counting the work done.
     """
     assert agent_id, "reflect: agent_id must be non-empty"
@@ -180,14 +196,28 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     result = _propose(summaries, active_rules, llm)
     report.llm_calls = 1
 
+    # Retire stale-evidence pending proposals so a fresh proposal can replace
+    # them; only *fresh* pending proposals gate the dedupe below.
+    fresh_pending: list[RuleProposal] = []
+    for proposal in pending:
+        if proposal.stale_evidence:
+            rules_store.supersede_proposal(agent_id, proposal.id, now=now)
+            report.superseded += 1
+        else:
+            fresh_pending.append(proposal)
+
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
     active_by_id = {r.id: r for r in active_rules}
-    seen = {_dedupe_key_of(p) for p in pending}
+    seen = {_dedupe_key_of(p) for p in fresh_pending}
     cap = _max_proposals()
 
-    for item in result.proposals:
+    for raw in result.proposals:
         if report.proposed >= cap:
             break
+        item = _coerce_item(raw)
+        if item is None:
+            report.dropped_invalid += 1
+            continue
         proposal = _materialize(agent_id, item, active_by_id, evidence, now)
         if proposal is None:
             report.dropped_invalid += 1
@@ -201,6 +231,24 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
         report.proposed += 1
 
     return report
+
+
+def _coerce_item(raw: Any) -> _ProposedAction | None:
+    """Validate one raw LLM proposal object into a :class:`_ProposedAction`.
+
+    Postconditions: returns the parsed action, or ``None`` when ``raw`` is not an
+    object or any field fails validation (e.g. a non-numeric ``priority``). Never
+    raises — a single malformed item is the caller's to drop and count, so it
+    cannot fail the whole batch.
+    """
+    if not isinstance(raw, dict):
+        logger.warning("reflection: proposal item is not an object; dropping")
+        return None
+    try:
+        return _ProposedAction.model_validate(raw)
+    except ValidationError as exc:
+        logger.warning("reflection: proposal item failed validation (%s); dropping", exc)
+        return None
 
 
 # ---------------------------------------------------------------------------

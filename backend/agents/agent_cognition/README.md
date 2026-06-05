@@ -63,14 +63,18 @@ rule changes (**add / retire / amend**, advisory or enforced), and writes each a
 it. It **never creates or activates a rule** — activation happens only through the operator approve
 path (`rules/store.py::approve_proposal`), so reflection calls only `create_proposal`.
 
-The model's suggestions are untrusted: an incoherent action, a retire/amend target that is not a
-currently-active rule, or an enforced rule whose predicate is absent or fails `is_valid_predicate`
-is **dropped and counted**, never raised — one bad suggestion can't poison the batch. Suggestions
-that duplicate an existing pending proposal (same action + target + normalized text), or an earlier
-accepted suggestion in the same run, are skipped so the HITL queue stays clean across the periodic
-scheduler runs. Reflection does not run rollups itself; the caller sequences
-`ensure_rollups_current` then `reflect`. The engine returns a `ReflectionReport`
-(`proposed` / `dropped_invalid` / `deduped` / `llm_calls`).
+The model's suggestions are untrusted: a malformed item (validated per-item, so one bad field can't
+fail the whole batch), an incoherent action, a retire/amend target that is not a currently-active
+rule, or an enforced rule whose predicate is absent or fails `is_valid_predicate` is **dropped and
+counted**, never raised — one bad suggestion can't poison the batch. Pending proposals already
+flagged `stale_evidence` (their evidence was superseded by a later summary recompute, so the approve
+gate refuses them) are **superseded** before deduping, so a fresh, approvable re-proposal can
+replace them instead of being blocked forever. Suggestions that duplicate an existing *fresh*
+pending proposal (same action + target + normalized text), or an earlier accepted suggestion in the
+same run, are skipped so the HITL queue stays clean across the periodic scheduler runs. Reflection
+does not run rollups itself; the caller sequences `ensure_rollups_current` then `reflect`. The
+engine returns a `ReflectionReport` (`proposed` / `dropped_invalid` / `deduped` / `superseded` /
+`llm_calls`).
 
 ### Configuration
 

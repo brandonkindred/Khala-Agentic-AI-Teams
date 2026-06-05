@@ -73,7 +73,9 @@ class CannedLLM(LLMClient):
         **kwargs: Any,
     ) -> dict[str, Any]:
         self.json_calls.append({"prompt": prompt, "system_prompt": system_prompt})
-        return {"proposals": [dict(p) for p in self._proposals]}
+        # Returned verbatim (no per-item ``dict()`` copy) so a non-object item can
+        # flow through to exercise reflection's drop-malformed-item path.
+        return {"proposals": list(self._proposals)}
 
     def complete(
         self,
@@ -150,6 +152,7 @@ def _pending(
     action: ProposalAction = ProposalAction.ADD,
     target_rule_id: str | None = None,
     text: str | None = "be kind",
+    stale_evidence: bool = False,
 ) -> RuleProposal:
     proposed = {"text": text, "mode": "advisory", "source": "derived"} if text is not None else None
     return RuleProposal(
@@ -159,6 +162,7 @@ def _pending(
         target_rule_id=target_rule_id,
         proposed_rule=proposed,
         evidence=[],
+        stale_evidence=stale_evidence,
         status=ProposalStatus.PENDING,
         created_at=_NOW,
     )
@@ -193,6 +197,11 @@ def _wire(
         reflection.rules_store, "list_proposals", lambda aid, status=None: list(pending or [])
     )
     monkeypatch.setattr(reflection.rules_store, "create_proposal", lambda aid, p: created.append(p))
+    # No-op by default so a stale-evidence pending row doesn't hit the real DB;
+    # tests that assert supersession re-patch this with a recorder.
+    monkeypatch.setattr(
+        reflection.rules_store, "supersede_proposal", lambda aid, pid, now=None: None
+    )
     return canned, created
 
 
@@ -358,6 +367,79 @@ def test_duplicate_within_batch_is_skipped(monkeypatch: pytest.MonkeyPatch) -> N
     assert report.proposed == 1 and report.deduped == 1 and len(created) == 1
 
 
+def test_stale_pending_is_superseded_and_does_not_block_fresh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _pending(action=ProposalAction.ADD, text="be kind", stale_evidence=True)
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[{"action": "add", "text": "be kind"}],  # identical text to the stale one
+        pending=[stale],
+    )
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        reflection.rules_store,
+        "supersede_proposal",
+        lambda aid, pid, now=None: superseded.append(pid),
+    )
+    report = reflection.reflect("a", _NOW)
+    # The stale proposal is retired, and its dedupe key no longer blocks the
+    # fresh identical suggestion — which is created anew with fresh evidence.
+    assert superseded == [stale.id] and report.superseded == 1
+    assert report.proposed == 1 and report.deduped == 0 and len(created) == 1
+
+
+def test_stale_pending_is_superseded_even_without_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stale = _pending(action=ProposalAction.ADD, text="obsolete", stale_evidence=True)
+    _canned, created = _wire(monkeypatch, proposals=[], pending=[stale])
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        reflection.rules_store,
+        "supersede_proposal",
+        lambda aid, pid, now=None: superseded.append(pid),
+    )
+    report = reflection.reflect("a", _NOW)
+    assert superseded == [stale.id] and report.superseded == 1
+    assert report.proposed == 0 and created == []
+
+
+def test_fresh_pending_is_not_superseded(monkeypatch: pytest.MonkeyPatch) -> None:
+    fresh = _pending(action=ProposalAction.ADD, text="keep me", stale_evidence=False)
+    _canned, _created = _wire(monkeypatch, proposals=[], pending=[fresh])
+    superseded: list[str] = []
+    monkeypatch.setattr(
+        reflection.rules_store,
+        "supersede_proposal",
+        lambda aid, pid, now=None: superseded.append(pid),
+    )
+    report = reflection.reflect("a", _NOW)
+    assert superseded == [] and report.superseded == 0
+
+
+def test_one_malformed_field_does_not_poison_the_batch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-numeric priority drops just that item, not the whole response."""
+    _canned, created = _wire(
+        monkeypatch,
+        proposals=[
+            {"action": "add", "text": "good one"},
+            {"action": "add", "text": "bad", "priority": "high"},  # int field given a word
+        ],
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1 and report.dropped_invalid == 1
+    assert len(created) == 1 and created[0].proposed_rule["text"] == "good one"
+
+
+def test_non_object_item_is_dropped(monkeypatch: pytest.MonkeyPatch) -> None:
+    _canned, created = _wire(
+        monkeypatch, proposals=[{"action": "add", "text": "ok"}, "garbage", 42]
+    )
+    report = reflection.reflect("a", _NOW)
+    assert report.proposed == 1 and report.dropped_invalid == 2 and len(created) == 1
+
+
 def test_max_proposals_cap_stops_writing(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", "1")
     _canned, created = _wire(
@@ -513,3 +595,17 @@ def test_reflected_proposal_activates_only_after_approval(monkeypatch: pytest.Mo
     assert rule is not None and rule.status == RuleStatus.ACTIVE and rule.text == "approved later"
     assert rule.source == RuleSource.DERIVED
     assert [r.id for r in store.list_rules("a", status=RuleStatus.ACTIVE)] == [rule.id]
+
+
+@pg
+def test_reflect_supersedes_stale_pending_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_summary("a", "sum-1")
+    stale = _pending(action=ProposalAction.ADD, text="stale one", stale_evidence=True)
+    store.create_proposal("a", stale)
+    monkeypatch.setattr(reflection, "get_client", lambda key: CannedLLM([]))
+
+    report = reflection.reflect("a", _NOW)
+
+    assert report.superseded == 1
+    assert store.get_proposal("a", stale.id).status == ProposalStatus.SUPERSEDED  # type: ignore[union-attr]
+    assert store.list_proposals("a", status=ProposalStatus.PENDING) == []

@@ -404,6 +404,42 @@ def reject_proposal(
         )
 
 
+@timed_query(store=_STORE, op="supersede_proposal")
+def supersede_proposal(
+    agent_id: str,
+    proposal_id: str,
+    *,
+    now: datetime | None = None,
+) -> RuleProposal | None:
+    """System-supersede a pending proposal (terminal status ``superseded``).
+
+    Unlike :func:`reject_proposal` (an explicit human decision), this is the
+    *system* auto-withdraw path for a proposal whose evidence went stale on a
+    summary recompute: reflection retires it so a fresh proposal can replace it.
+    ``decided_by`` is left null — no operator decided it.
+
+    Preconditions: ``agent_id`` is non-empty.
+    Postconditions:
+        * Returns ``None`` iff the proposal does not exist for ``agent_id`` **or
+          is not ``pending``** — already-decided/superseded rows are a tolerant
+          no-op (this is unattended housekeeping, so it never raises on a
+          non-pending row the way reject/approve do).
+        * On success sets ``status='superseded'`` with ``decided_at`` (system);
+          **no rule rows are touched**. Returns the updated proposal.
+    """
+    assert agent_id, "supersede_proposal: agent_id must be non-empty"
+    _require_aware(now)
+    decided_at = now or _now()
+    with _conn() as conn:
+        proposal = _fetch_proposal_for_update(conn, agent_id, proposal_id)
+        if proposal is None or proposal.status != ProposalStatus.PENDING:
+            return None
+        _decide_proposal(conn, agent_id, proposal_id, ProposalStatus.SUPERSEDED, None, decided_at)
+        return proposal.model_copy(
+            update={"status": ProposalStatus.SUPERSEDED, "decided_at": decided_at}
+        )
+
+
 def _apply_approval(
     conn: Any,
     agent_id: str,

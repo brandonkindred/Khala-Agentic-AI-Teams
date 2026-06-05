@@ -38,6 +38,7 @@ from agent_cognition.rules.store import (
     list_proposals,
     list_rules,
     reject_proposal,
+    supersede_proposal,
 )
 
 __all__ = [
@@ -53,6 +54,7 @@ __all__ = [
     "list_proposals",
     "list_rules",
     "reject_proposal",
+    "supersede_proposal",
     # enforcement
     "build_rule_prompt_block",
     "evaluate_postcondition",
