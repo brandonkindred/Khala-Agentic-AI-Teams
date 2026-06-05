@@ -1059,3 +1059,62 @@ class TestDivergedWipReachesContinuationLine:
         assert "same.py" in _must(clone, "ls-tree", "-r", "--name-only", "feature/t2")
         # …and the operator is told it needs manual integration.
         assert any("merge" in n.lower() for n in notes)
+
+
+class TestRefValidationBeforeRecovery:
+    """A request that can never proceed (unsafe ref names) must be rejected
+    before any recovery side effect: the pre-recovery dirty-tree guard failed
+    without mutating the checkout, and recovery must not regress that for
+    invalid input — no WIP commit, no rescue branch, no branch switch."""
+
+    @pytest.mark.parametrize(
+        "default_branch,integration_branch",
+        [("main", "--upload-pack=evil"), ("-evil", "khala/issue-7")],
+    )
+    def test_unsafe_ref_rejected_before_dirty_tree_recovery(
+        self, api, repo_pair, default_branch, integration_branch
+    ) -> None:
+        _, clone = repo_pair
+        api._write_active_issue(clone, 7)
+        with open(os.path.join(clone, "wip.txt"), "w", encoding="utf-8") as fh:
+            fh.write("uncommitted\n")
+        head_before = _must(clone, "rev-parse", "HEAD")
+
+        ok, err, _ = api._prepare_issue_branch(
+            clone, "origin", default_branch, integration_branch, None, issue_number=7
+        )
+        assert ok is False
+        assert "unsafe" in (err or "")
+        # No mutation happened: tree still dirty, HEAD unmoved, no rescue.
+        _, dirty, _ = api._working_tree_dirty(clone)
+        assert dirty is True
+        assert _must(clone, "rev-parse", "HEAD") == head_before
+        assert _must(clone, "rev-parse", "--abbrev-ref", "HEAD") == "main"
+        assert _branch_exists(clone, "khala/rescue/*") is None
+
+
+class TestStaleRefDeletionFailure:
+    """The confirmed-deleted-remote path must verify the stale tracking ref is
+    actually gone: a locked/undeletable ref that survives would re-enter
+    candidate selection and re-anchor the remote floor to a state the remote
+    deliberately deleted."""
+
+    def test_failed_stale_ref_deletion_fails_closed(self, api, repo_pair, monkeypatch) -> None:
+        _, clone = repo_pair
+        TestIssueBranchFetchFailureHandling._stale_tracking_ref(clone)
+
+        real_git = api._git
+
+        def fake_git(repo_path, *args, **kwargs):
+            if args[0] == "update-ref" and "-d" in args:
+                return 1, "ref locked"
+            return real_git(repo_path, *args, **kwargs)
+
+        monkeypatch.setattr(api, "_git", fake_git)
+
+        ok, err, _ = _prep(api, clone)
+        assert ok is False
+        assert "stale remote-tracking ref" in (err or "")
+        # The surviving ref was reported, not silently used as a candidate.
+        r = _run(clone, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/khala/issue-7")
+        assert r.returncode == 0

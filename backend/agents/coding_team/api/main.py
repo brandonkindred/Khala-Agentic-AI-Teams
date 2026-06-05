@@ -698,6 +698,16 @@ def _prepare_issue_branch(
           reachable on entry has become unreachable.
     """
     notes: List[str] = []
+
+    # Defense-in-depth: reject ref names that could be parsed as git options.
+    # This must precede dirty-tree recovery — a request that can never
+    # proceed must not commit WIP, create rescue branches, or switch the
+    # checkout on its way to being rejected.
+    if not _is_safe_ref(default_branch):
+        return False, f"unsafe default_branch ref: {default_branch!r}", notes
+    if not _is_safe_ref(integration_branch):
+        return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
+
     marker = _read_active_issue(repo_path)
 
     status_ok, dirty, listing = _working_tree_dirty(repo_path)
@@ -724,12 +734,6 @@ def _prepare_issue_branch(
     # the re-seed below succeeds. The only safe transition is the success
     # path's _write_active_issue overwrite; every failure exit retains it
     # so a retry can still attribute and continue the prior work.
-
-    # Defense-in-depth: reject ref names that could be parsed as git options.
-    if not _is_safe_ref(default_branch):
-        return False, f"unsafe default_branch ref: {default_branch!r}", notes
-    if not _is_safe_ref(integration_branch):
-        return False, f"unsafe integration_branch ref: {integration_branch!r}", notes
 
     # `fetch` is the only network op here (the checkouts below are local), so it
     # needs the credential. The clone was authenticated transiently by the
@@ -796,6 +800,21 @@ def _prepare_issue_branch(
             if preserve_err:
                 return False, preserve_err, notes
         _git(repo_path, "update-ref", "-d", f"refs/remotes/{remote_issue_ref}")
+        # Postcondition, not return-code, check: deletion legitimately fails
+        # when the ref never existed (fresh issue), but a ref that SURVIVES
+        # (lock, permissions, concurrent git op) would re-enter candidate
+        # selection and re-anchor the remote floor to a state the remote
+        # deliberately deleted — fail closed instead.
+        rc_gone, _ = _git(
+            repo_path, "rev-parse", "--verify", "--quiet", f"refs/remotes/{remote_issue_ref}"
+        )
+        if rc_gone == 0:
+            return (
+                False,
+                f"could not drop stale remote-tracking ref {remote_issue_ref!r}; "
+                f"refusing to continue while it can pose as live remote state",
+                notes,
+            )
     candidates: List[str] = []
     if marker is not None and issue_number is not None and marker == issue_number:
         # Same-issue continuation: the interrupted run's progress may live on
@@ -937,6 +956,32 @@ def _push_branch(
     return (rc == 0), (None if rc == 0 else msg)
 
 
+def _defer_terminal_success(job_id: str):
+    """Build an ``update_job_fn`` that holds the job non-terminal until publish.
+
+    The orchestrator marks its job ``completed`` when the code work finishes,
+    but the GitHub hook keeps mutating the shared checkout afterwards
+    (fast-forward, push, PR creation, marker clear) and the busy-checkout
+    guard keys liveness off pending/running. Mapping the orchestrator's
+    terminal success to ``(running, publishing)`` keeps the job visible to
+    the guard for that whole window; ``_run_with_github_hooks`` sets the real
+    terminal status only once it is fully done with the checkout. Failure
+    statuses pass through unchanged — every post-orchestrator failure path
+    stops touching the checkout.
+
+    Postconditions:
+        - The returned callable forwards every update to ``update_job`` for
+          ``job_id``, rewriting only ``status="completed"`` updates.
+    """
+
+    def _update(**kw: Any) -> None:
+        if kw.get("status") == "completed":
+            kw = {**kw, "status": "running", "phase": "publishing"}
+        update_job(job_id, **kw)
+
+    return _update
+
+
 def _run_with_github_hooks(
     job_id: str,
     request: RunFromGitHubRequest,
@@ -993,7 +1038,7 @@ def _run_with_github_hooks(
                 job_id,
                 request.repo_path,
                 plan,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                update_job_fn=_defer_terminal_success(job_id),
                 get_job_fn=lambda jid: get_job(jid),
                 cache_dir=DEFAULT_CACHE_DIR,
             )
@@ -1068,3 +1113,7 @@ def _run_with_github_hooks(
         # to this job's issue: a sibling job for another issue may have
         # re-marked the checkout since this job prepped.
         _clear_active_issue_if_matches(request.repo_path, num)
+        # Terminal status comes last: the busy-checkout guard treats a
+        # terminal job as done with the checkout, so this must be the hook's
+        # final action after every checkout-touching step above.
+        update_job(job_id, status="completed", phase="completed")

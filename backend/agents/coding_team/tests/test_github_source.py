@@ -1357,3 +1357,40 @@ class TestBusyCheckoutGuard:
         assert resp.status_code == 200
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
+
+
+class TestPublishWindowLiveness:
+    """A job must not report a terminal status while the hook is still
+    mutating the checkout (fast-forward, push, PR creation, marker clear):
+    the busy-checkout guard keys liveness off pending/running, so a terminal
+    status during the publish window would let a sibling job reset the shared
+    checkout mid-publish."""
+
+    def test_job_stays_running_during_publish_window(self, patched_app, monkeypatch) -> None:
+        from coding_team.job_store import list_jobs as store_list_jobs
+
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+        seen: dict = {}
+
+        def spy_push(repo, remote, branch, token=None):
+            jobs = store_list_jobs()
+            assert len(jobs) == 1
+            seen["status_at_push"] = jobs[0]["status"]
+            seen["phase_at_push"] = jobs[0].get("phase")
+            return True, None
+
+        monkeypatch.setattr(api, "_push_branch", spy_push)
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda *a: None)
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        patched_app["set_github"](client)
+        resp = patched_app["client"].post("/run-from-github", json=_body(3, repo_path=repo_path))
+        assert resp.status_code == 200
+        # The orchestrator declared success before the push, but the job must
+        # still be non-terminal (and visible to the busy-checkout guard)…
+        assert seen["status_at_push"] == "running"
+        assert seen["phase_at_push"] == "publishing"
+        # …and only goes terminal once the hook is fully done.
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job.get("phase") == "completed"
