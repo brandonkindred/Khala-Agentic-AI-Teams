@@ -207,6 +207,12 @@ class TechLeadAgent:
         for i in range(attempts):
             try:
                 data = _agent_call_json(self._review_agent, user)
+                # A response that parses as JSON but carries no verdict (missing/null "approved")
+                # is not a substantive rejection — it's an unusable review. Treat it like any other
+                # failed attempt so it retries and ultimately surfaces error=True (fail once),
+                # rather than silently becoming approved=False and burning the revision loop.
+                if data.get("approved") is None:
+                    raise ValueError(f"review response missing 'approved' verdict: {data!r}")
             except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
                 last_err = e
                 logger.warning(

@@ -33,6 +33,7 @@ import type {
   ProductAnalysisStatusResponse,
   TeamProgressEntry,
 } from '../../models';
+import { COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
 import {
   type DashboardRow,
   type JobSource,
@@ -642,7 +643,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       case 'completed': return 'status-completed';
       // Partial success: finished, but with failed tasks — flag it distinctly rather than
       // showing the same green as a clean completion.
-      case 'completed_with_failures': return 'status-completed-with-failures';
+      case COMPLETED_WITH_FAILURES: return 'status-completed-with-failures';
       case 'failed': return 'status-failed';
       case 'cancelled': return 'status-cancelled';
       case 'interrupted': return 'status-interrupted';
@@ -820,7 +821,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   canRestartJob(job: DashboardRow): boolean {
-    return ['completed', 'completed_with_failures', 'failed', 'cancelled', 'interrupted', 'agent_crash'].includes(job.unified.status);
+    return ['completed', COMPLETED_WITH_FAILURES, 'failed', 'cancelled', 'interrupted', 'agent_crash'].includes(job.unified.status);
   }
 
   canDeleteJob(job: DashboardRow): boolean {
@@ -998,7 +999,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       case 'cancelled':
       case 'needs_human_review':
       case 'completed_with_errors':
-      case 'completed_with_failures':
+      case COMPLETED_WITH_FAILURES:
         // Terminal "the run finished" bucket — `needs_human_review` is the
         // Blogging team's terminal success state (see `TERMINAL_STATUSES` in
         // `blogging-dashboard.component.ts`); `completed_with_errors` is the

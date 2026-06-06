@@ -26,3 +26,4 @@ export * from './team-assistant.model';
 export * from './persona-testing.model';
 export * from './road-trip-planning.model';
 export * from './product-delivery.model';
+export * from './job-status.model';

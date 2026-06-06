@@ -257,6 +257,42 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
     assert "2 attempts" in out["reason"]
 
 
+def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
+    """A parseable verdict with no 'approved' field must surface error=True (fail once), not be
+    silently coerced to approved=False and re-sent through the revision loop."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    # Valid JSON, but no verdict — e.g. a weak/over-context model that omits 'approved'.
+    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"reason": "hmm"})
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    out = tl.run_code_review("t", "d", [], "evidence")
+
+    assert out["error"] is True
+    assert out["approved"] is False
+
+
+def test_review_explicit_false_is_substantive_rejection(monkeypatch):
+    """An explicit approved=False is a real rejection (error=False), not an infra failure."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod, "_agent_call_json",
+        lambda agent, prompt: {"approved": False, "reason": "needs tests"},
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    out = tl.run_code_review("t", "d", [], "evidence")
+
+    assert out["error"] is False
+    assert out["approved"] is False
+    assert out["reason"] == "needs tests"
+
+
 def test_review_retry_attempts_env_parsing(monkeypatch):
     """_review_retry_attempts: valid → retries+1; negative/garbage/empty → documented default."""
     from coding_team.tech_lead_agent import agent as tl_mod
