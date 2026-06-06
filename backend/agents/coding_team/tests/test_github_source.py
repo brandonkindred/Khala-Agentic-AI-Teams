@@ -1205,6 +1205,25 @@ class TestActiveIssueMarkerLifecycle:
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
         assert cleared == []
 
+    def test_retained_when_guardrail_failed_with_partial_merge(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """A returned ``failed:*`` status must stop publishing even when a task
+        merged — a partial branch must never be pushed or reported as success."""
+
+        def partial_then_fail(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="failed: budget_exhausted",
+                task_graph_snapshot=[
+                    {"id": "t1", "status": "merged", "feature_branch": "feature/t1"}
+                ],
+            )
+            return "failed: budget_exhausted"
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=partial_then_fail)
+        assert cleared == []  # not published despite the merged task
+
     def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
         monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (False, "remote hung up"))
