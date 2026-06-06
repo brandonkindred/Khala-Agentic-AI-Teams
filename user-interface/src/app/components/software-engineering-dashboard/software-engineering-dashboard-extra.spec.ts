@@ -37,6 +37,7 @@ describe('SoftwareEngineeringDashboardComponent (extra coverage)', () => {
     expect(component.isTerminal('failed')).toBe(true);
     expect(component.isTerminal('cancelled')).toBe(true);
     expect(component.isTerminal('stopped')).toBe(true);
+    expect(component.isTerminal('completed_with_failures')).toBe(true);
     expect(component.isTerminal('running')).toBe(false);
   });
 

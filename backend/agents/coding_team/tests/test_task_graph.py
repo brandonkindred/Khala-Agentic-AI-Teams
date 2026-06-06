@@ -76,6 +76,35 @@ def test_mark_branch_merged() -> None:
     assert tg.get_task_for_agent("agent-a") is None
 
 
+def test_update_task_to_failed_frees_agent() -> None:
+    """update_task(status=FAILED) releases the agent immediately (symmetric with merge).
+
+    Without eager release the mapping lingers until the next get_task_for_agent prunes it, so a
+    snapshot persisted right after the failure would still report the agent as occupied.
+    """
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.assign_task_to_agent("t1", "agent-a")
+    assert "agent-a" in tg.snapshot()["agent_task_map"]
+    tg.update_task("t1", status=TaskStatus.FAILED)
+    # Mapping gone in the persisted snapshot — not merely lazily pruned on later access.
+    assert "agent-a" not in tg.snapshot()["agent_task_map"]
+    assert tg.get_task_for_agent("agent-a") is None
+
+
+def test_update_task_to_failed_keeps_other_agents_mappings() -> None:
+    """Failing one task must not disturb a different agent's active mapping."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.add_task("t2", title="T2")
+    tg.assign_task_to_agent("t1", "agent-a")
+    tg.assign_task_to_agent("t2", "agent-b")
+    tg.update_task("t1", status=TaskStatus.FAILED)
+    assert tg.get_task_for_agent("agent-a") is None
+    assert tg.get_task_for_agent("agent-b") is not None
+    assert tg.get_task_for_agent("agent-b").id == "t2"
+
+
 def test_mark_branch_merged_unknown_task_returns_false() -> None:
     """mark_branch_merged returns False for unknown task."""
     tg = TaskGraphService(job_id="j1")

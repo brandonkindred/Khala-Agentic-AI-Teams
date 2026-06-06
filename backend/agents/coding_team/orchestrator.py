@@ -31,7 +31,7 @@ from coding_team.tech_lead_agent import TechLeadAgent
 logger = logging.getLogger(__name__)
 
 CANCEL_KEY = "cancel_requested"
-MAX_TASK_REVISIONS = 3  # max times a task can be returned for revision before accepting
+MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
 
 
 def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
@@ -157,10 +157,13 @@ def run_coding_team_orchestrator(
     )
 
     merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
+    failed_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.FAILED)
+    # A job with failed tasks must not be presented as a clean success — surface a distinct
+    # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     _update(
-        status="completed",
+        status="completed_with_failures" if failed_count else "completed",
         phase="completed",
-        status_text=f"Completed: {merged_count} tasks merged",
+        status_text=f"Completed: {merged_count} merged, {failed_count} failed",
     )
 
 
@@ -229,10 +232,51 @@ class CodingTeamSwarm:
             # Run quality gates as tools
             if not self._run_quality_gates(swe, task, result, update_fn):
                 return  # task returned to TODO for revision
-            self.graph.update_task(task.id, feature_branch=result.get("feature_branch"))
+            self.graph.update_task(
+                task.id,
+                feature_branch=result.get("feature_branch"),
+                changes_summary=result.get("changes_summary"),
+            )
             self.graph.set_task_in_review(task.id)
         elif result.get("status") == "failed":
             logger.warning("Worker %s task %s failed: %s", swe.agent_id, task.id, result.get("error"))
+            self._handle_implement_failure(task, result)
+
+    def _handle_implement_failure(self, task: Task, result: Dict[str, Any]) -> None:
+        """Bound a failing implementation so it cannot spin the loop to max_rounds.
+
+        A `run_implement` that returns status="failed" (e.g. the LLM call raised) was previously
+        only logged, leaving the task IN_PROGRESS and assigned — so the same failing call repeated
+        every round until the round cap. Count each failure against the shared revision cap and,
+        on exhaustion, fail the task (and its dependents) terminally with the error recorded.
+        """
+        entry = {
+            "source": "engineer",
+            "reason": f"Implementation failed: {result.get('error') or 'unknown error'}",
+            "requested_changes": [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        revision_count = task.revision_count + 1
+        if revision_count >= MAX_TASK_REVISIONS:
+            logger.warning(
+                "Task %s implementation failed and exhausted revisions (%d); marking FAILED",
+                task.id, MAX_TASK_REVISIONS,
+            )
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                revision_count=revision_count,
+                revision_feedback=feedback,
+            )
+            self._cascade_fail_dependents(task.id)
+            return
+        # Keep it with the same engineer for another bounded attempt; record the failure.
+        self.graph.update_task(
+            task.id,
+            status=TaskStatus.IN_PROGRESS,
+            revision_count=revision_count,
+            revision_feedback=feedback,
+        )
 
     def _run_quality_gates(
         self, swe: SeniorSWEAgent, task: Task, result: Dict[str, Any], update_fn: Callable
@@ -290,39 +334,135 @@ class CodingTeamSwarm:
                 "Task %s exceeded max revisions (%d); accepting as-is", task.id, MAX_TASK_REVISIONS
             )
             return True  # accept despite issues
+        # Append to the accumulated history rather than overwriting it: a task may have prior
+        # Tech Lead feedback that must survive a later quality-gate failure, or the next engineer
+        # prompt would lose those requirements and the reviewer could reintroduce them.
         self.graph.update_task(
             task.id,
             status=TaskStatus.TO_DO,
             assigned_agent_id=None,
             revision_count=revision_count,
-            revision_feedback=feedback,
+            revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
         return False
 
     def _review_and_merge(self, update_fn: Callable) -> None:
-        """Coordinator reviews completed tasks and merges approved ones."""
+        """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
+        from software_engineering_team.shared.git_utils import (
+            DEVELOPMENT_BRANCH,
+            branch_diff,
+            merge_branch,
+        )
+
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
         for task in in_review:
             update_fn(status_text=f"Tech Lead reviewing: {task.title}")
+            branch = task.feature_branch or f"feature/{task.id}"
+            summary = task.changes_summary or "(no summary recorded)"
+            diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+            evidence = summary + (f"\n\n--- DIFF ---\n{diff}" if diff else "")
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,
                 acceptance_criteria=task.acceptance_criteria,
-                changes_summary="See implementation summary.",
+                changes_summary=evidence,
             )
-            if review.get("approved"):
+            if review.get("error"):
+                # The review itself could not run (e.g. evidence exceeded the model context
+                # window). Do NOT route this through the revision loop — re-sending the same
+                # failing prompt every round would burn the whole revision budget at max cost.
+                # Fail the task once with the diagnostic instead.
+                self._fail_task(task, review, "Tech Lead review could not be completed")
+            elif review.get("approved"):
                 try:
-                    from software_engineering_team.shared.git_utils import (
-                        DEVELOPMENT_BRANCH,
-                        merge_branch,
-                    )
-                    branch = task.feature_branch or f"feature/{task.id}"
                     ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
                     if ok:
                         self.graph.mark_branch_merged(task.id)
                 except Exception as e:
                     logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
                     self.graph.mark_branch_merged(task.id)
+            else:
+                self._request_revision(task, review)
+
+    def _request_revision(self, task: Task, review: Dict[str, Any]) -> None:
+        """Send a Tech-Lead-rejected task back to the SAME engineer for revision.
+
+        Unlike the quality-gate path (_return_for_revision, which demotes to TO_DO and clears the
+        assignment), a Tech Lead rejection keeps the task with its current engineer: status goes
+        back to IN_PROGRESS so the same SWE re-runs run_implement next round with the reviewer's
+        reasons threaded into the prompt. On exhausting MAX_TASK_REVISIONS the task is marked
+        FAILED (terminal) rather than merging code the Tech Lead rejected.
+
+        Preconditions:
+            - task is currently IN_REVIEW and assigned to an engineer.
+        Postconditions:
+            - task.status is IN_PROGRESS (revision pending) or FAILED (exhausted); never left
+              IN_REVIEW with no state change, so the swarm loop cannot deadlock on it.
+        """
+        entry = {
+            "source": "tech_lead",
+            "reason": review.get("reason", ""),
+            "requested_changes": review.get("requested_changes") or [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        revision_count = task.revision_count + 1
+        if revision_count >= MAX_TASK_REVISIONS:
+            logger.warning(
+                "Task %s exceeded max revisions (%d) on Tech Lead review; marking FAILED. Reason: %s",
+                task.id, MAX_TASK_REVISIONS, entry["reason"],
+            )
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                revision_count=revision_count,
+                revision_feedback=feedback,
+            )
+            self._cascade_fail_dependents(task.id)
+            return
+        logger.info(
+            "Task %s rejected by Tech Lead (revision %d); returning to engineer %s",
+            task.id, revision_count, task.assigned_agent_id,
+        )
+        # Keep the assignment (do not clear assigned_agent_id / the agent->task mapping) so the
+        # same engineer picks it up next round and revises the current work.
+        self.graph.update_task(
+            task.id,
+            status=TaskStatus.IN_PROGRESS,
+            revision_count=revision_count,
+            revision_feedback=feedback,
+        )
+
+    def _fail_task(self, task: Task, review: Dict[str, Any], context: str) -> None:
+        """Terminally fail a task (and its dependents) without spinning the revision loop.
+
+        Used when a Tech Lead review cannot be performed (e.g. the review evidence exceeded the
+        model context window). Re-routing such a task through the revision loop would re-send the
+        same failing prompt every round up to MAX_TASK_REVISIONS at max cost; instead we record
+        the diagnostic, mark the task FAILED, and cascade the failure to dependents.
+
+        Postconditions:
+            - task.status is FAILED; tasks transitively depending on it are FAILED too.
+        """
+        entry = {
+            "source": "tech_lead",
+            "reason": review.get("reason", context),
+            "requested_changes": [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        logger.warning("%s for task %s; marking FAILED. Reason: %s", context, task.id, entry["reason"])
+        self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
+        self._cascade_fail_dependents(task.id)
+
+    def _cascade_fail_dependents(self, task_id: str) -> None:
+        """Propagate a task's FAILED state to every task that can no longer be satisfied.
+
+        A task depending on a FAILED task can never satisfy `_dependencies_satisfied` (which
+        requires MERGED deps), so without this it would sit TO_DO forever and keep the swarm loop
+        from completing. Delegates to `TaskGraphService.mark_dependents_failed`.
+        """
+        blocked = self.graph.mark_dependents_failed(task_id)
+        if blocked:
+            logger.warning("Task %s failure cascaded FAILED to dependents: %s", task_id, blocked)
 
     def _is_complete(self) -> bool:
         tasks = self.graph.get_tasks()

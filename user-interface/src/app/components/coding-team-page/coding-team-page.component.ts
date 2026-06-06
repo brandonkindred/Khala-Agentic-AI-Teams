@@ -15,6 +15,7 @@ import { HealthIndicatorComponent } from '../health-indicator/health-indicator.c
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
+import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
 @Component({
   selector: 'app-coding-team-page',
@@ -169,7 +170,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
             }),
           ),
         ),
-        takeWhile((status) => !['completed', 'failed', 'cancelled'].includes(status.status), true),
+        takeWhile((status) => !isCodingTeamTerminalStatus(status.status), true),
       )
       .subscribe({
         next: (status: CodingTeamJobStatus) => {
@@ -184,6 +185,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.pollSub.unsubscribe();
       this.pollSub = null;
     }
+  }
+
+  /** True once the active job has reached a terminal state (finished — pollable no further). */
+  isJobTerminal(): boolean {
+    return isCodingTeamTerminalStatus(this.jobStatus?.status);
   }
 
   dismissJob(): void {

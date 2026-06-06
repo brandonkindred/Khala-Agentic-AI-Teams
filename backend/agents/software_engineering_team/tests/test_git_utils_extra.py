@@ -9,9 +9,12 @@ import pytest
 
 from software_engineering_team.shared.git_utils import (
     _clear_disposable_files_if_blocking,
+    branch_diff,
+    create_feature_branch,
     ensure_development_branch,
     ensure_files_committed_on_main,
     initialize_new_repo,
+    write_files_and_commit,
 )
 
 
@@ -154,3 +157,29 @@ def test_initialize_new_repo_with_existing_gitignore(tmp_path: Path):
     # gitignore content preserved if init succeeded
     if ok:
         assert (tmp_path / ".gitignore").read_text() == "custom\n"
+
+
+def test_branch_diff_returns_full_untruncated_diff(tmp_path: Path):
+    """branch_diff returns the complete base...branch diff for the feature branch's changes."""
+    ok, _ = initialize_new_repo(tmp_path)
+    assert ok
+    ok, _ = create_feature_branch(tmp_path, "development", "x")
+    assert ok
+    big = "new line\n" * 5000
+    write_files_and_commit(tmp_path, {"b.txt": big}, "add b")
+
+    diff = branch_diff(tmp_path, "development", "feature/x")
+    assert "b.txt" in diff
+    assert diff.count("+new line") > 1000  # full diff, not truncated
+
+
+def test_branch_diff_no_repo_returns_empty(tmp_path: Path):
+    """branch_diff returns '' when the path is not a git repository."""
+    assert branch_diff(tmp_path / "nope", "development", "feature/x") == ""
+
+
+def test_branch_diff_failed_command_returns_empty(tmp_path: Path):
+    """branch_diff returns '' (not raise) when git diff fails, e.g. an unknown branch."""
+    ok, _ = initialize_new_repo(tmp_path)
+    assert ok
+    assert branch_diff(tmp_path, "development", "feature/does-not-exist") == ""

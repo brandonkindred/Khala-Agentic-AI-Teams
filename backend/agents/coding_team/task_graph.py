@@ -59,6 +59,23 @@ class TaskGraphService:
         self._maybe_persist()
         return task
 
+    def _free_agent(self, task: Task) -> None:
+        """Release the agent currently mapped to *task*, if it still points back at this task.
+
+        A task in a terminal state (MERGED or FAILED) holds no agent — the worker is free to pick
+        up the next assignment. This is the single place that enforces that invariant; every
+        terminal transition (`update_task(status=FAILED)`, `mark_branch_merged`,
+        `mark_dependents_failed`) routes through here so a new terminal path cannot forget it.
+
+        Preconditions:
+            - `task` is a task tracked by this graph.
+        Postconditions:
+            - `self._agent_to_task` contains no entry pointing at `task.id`.
+        """
+        aid = task.assigned_agent_id
+        if aid and self._agent_to_task.get(aid) == task.id:
+            del self._agent_to_task[aid]
+
     def update_task(
         self,
         task_id: str,
@@ -74,6 +91,12 @@ class TaskGraphService:
             return None
         if status is not None:
             task.status = status
+            # A task transitioning to FAILED frees its agent immediately — symmetric with
+            # `mark_branch_merged`/`mark_dependents_failed`. Without this the mapping lingers
+            # until the next `get_task_for_agent` lazily prunes it, so a terminal snapshot
+            # persisted right after the failure would still report the agent as occupied.
+            if status == TaskStatus.FAILED:
+                self._free_agent(task)
         if assigned_agent_id is not None:
             task.assigned_agent_id = assigned_agent_id
         if feature_branch is not None:
@@ -139,7 +162,7 @@ class TaskGraphService:
         if not task_id:
             return None
         task = self._tasks.get(task_id)
-        if not task or task.status == TaskStatus.MERGED:
+        if not task or task.status in (TaskStatus.MERGED, TaskStatus.FAILED):
             self._agent_to_task.pop(agent_id, None)
             return None
         return task
@@ -151,8 +174,7 @@ class TaskGraphService:
             return False
         task.status = TaskStatus.MERGED
         task.merged_at = datetime.now(timezone.utc)
-        if task.assigned_agent_id and self._agent_to_task.get(task.assigned_agent_id) == task_id:
-            del self._agent_to_task[task.assigned_agent_id]
+        self._free_agent(task)
         self._maybe_persist()
         return True
 
@@ -164,6 +186,43 @@ class TaskGraphService:
         task.status = TaskStatus.IN_REVIEW
         self._maybe_persist()
         return True
+
+    def mark_dependents_failed(self, task_id: str) -> List[str]:
+        """Cascade-FAIL every task that (transitively) depends on a FAILED task.
+
+        A FAILED dependency can never become MERGED, so any task that depends on it can never
+        satisfy `_dependencies_satisfied` and would otherwise keep the swarm loop from ever
+        completing (it stays TO_DO, `_is_complete()` stays false, the loop spins to max_rounds).
+        This marks all such tasks FAILED to a fixpoint, frees any agent mapped to them, and
+        records why.
+
+        Preconditions:
+            - `task_id` refers to a task already in FAILED status.
+        Postconditions:
+            - No non-FAILED task has a FAILED task among its dependencies.
+        Returns the ids newly marked FAILED (excludes `task_id` itself).
+        """
+        newly_failed: List[str] = []
+        changed = True
+        while changed:
+            changed = False
+            for t in self._tasks.values():
+                if t.status == TaskStatus.FAILED or not t.dependencies:
+                    continue
+                if any(
+                    (dep := self._tasks.get(d)) is not None and dep.status == TaskStatus.FAILED
+                    for d in t.dependencies
+                ):
+                    t.status = TaskStatus.FAILED
+                    t.revision_feedback = list(t.revision_feedback or []) + [
+                        {"source": "system", "reason": "Blocked: a required dependency failed"}
+                    ]
+                    self._free_agent(t)
+                    newly_failed.append(t.id)
+                    changed = True
+        if newly_failed:
+            self._maybe_persist()
+        return newly_failed
 
     def get_next_eligible_subtask(self, task_id: str) -> Optional[Any]:
         """Return the next subtask that does not depend on an incomplete subtask, or None."""
@@ -197,6 +256,9 @@ class TaskGraphService:
                     "acceptance_criteria": t.acceptance_criteria,
                     "out_of_scope": t.out_of_scope,
                     "priority": t.priority,
+                    "changes_summary": t.changes_summary,
+                    "revision_count": t.revision_count,
+                    "revision_feedback": t.revision_feedback,
                     "subtasks": [
                         {
                             "id": s.id,
@@ -247,6 +309,9 @@ class TaskGraphService:
                 out_of_scope=tdata.get("out_of_scope", ""),
                 priority=tdata.get("priority", "medium"),
                 subtasks=subtasks,
+                changes_summary=tdata.get("changes_summary"),
+                revision_count=tdata.get("revision_count", 0),
+                revision_feedback=tdata.get("revision_feedback", []),
             )
             self._tasks[task.id] = task
         self._agent_to_task = dict(snapshot.get("agent_task_map", {}))

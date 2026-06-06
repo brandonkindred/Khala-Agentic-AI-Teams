@@ -10,9 +10,11 @@ import { SoftwareEngineeringApiService } from '../../services/software-engineeri
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import type { RunningJobSummary } from '../../models';
+import { CODING_TEAM_TERMINAL_STATUSES } from '../../models/job-status.model';
 
 const POLL_JOBS_MS = 30_000;
-const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'stopped'];
+// SE jobs share the coding-team terminal set, plus 'stopped' (an SE-only terminal state).
+const TERMINAL_STATUSES = [...CODING_TEAM_TERMINAL_STATUSES, 'stopped'];
 
 @Component({
   selector: 'app-software-engineering-dashboard',

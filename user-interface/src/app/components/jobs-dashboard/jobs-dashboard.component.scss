@@ -330,6 +330,7 @@
       &.status-pending    { border-left: 3px solid var(--kh-border-muted); }
       &.status-waiting    { border-left: 3px solid var(--kh-warning); }
       &.status-completed  { border-left: 3px solid var(--kh-success); }
+      &.status-completed-with-failures { border-left: 3px solid var(--kh-warning); }
       &.status-failed     { border-left: 3px solid var(--kh-error); }
       &.status-cancelled    { border-left: 3px solid var(--kh-border-muted); }
       &.status-interrupted  { border-left: 3px solid var(--kh-warning); }
@@ -464,6 +465,11 @@ tbody .col-actions {
   &.status-completed {
     background: var(--kh-success-subtle);
     color: var(--kh-success);
+  }
+
+  &.status-completed-with-failures {
+    background: var(--kh-warning-subtle, rgba(251, 191, 36, 0.12));
+    color: var(--kh-warning, #d97706);
   }
 
   &.status-failed {

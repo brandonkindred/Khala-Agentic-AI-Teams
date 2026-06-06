@@ -254,6 +254,25 @@ def branch_has_commits_ahead_of(repo_path: str | Path, branch: str, base: str) -
     return code == 0 and bool((out or "").strip())
 
 
+def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
+    """
+    Return the full ``git diff base...branch`` (changes on branch since it diverged from base).
+
+    Preconditions:
+        - base and branch are branch names; the caller wants the feature branch's own changes.
+    Postconditions:
+        - Returns the complete, untruncated diff text, or "" when the path is not a git repo
+          or the diff command fails (so callers can treat "no evidence" uniformly).
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return ""
+    code, out = _run_git(path, ["git", "diff", f"{base}...{branch}"])
+    if code != 0:
+        return ""
+    return out or ""
+
+
 def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) -> Tuple[bool, str]:
     """
     Checkout target_branch and merge source_branch into it.

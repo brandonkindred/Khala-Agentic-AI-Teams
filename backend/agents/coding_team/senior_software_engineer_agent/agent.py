@@ -30,6 +30,29 @@ def _parse_json_response(raw: str) -> Dict[str, Any]:
     return json.loads(raw)
 
 
+def _render_revision_feedback(feedback: list) -> str:
+    """Render prior-round revision feedback into a human-readable bullet list for the prompt.
+
+    Preconditions:
+        - feedback is the task's revision_feedback list (entries are dicts; Tech Lead entries
+          carry "reason"/"requested_changes", quality-gate entries carry "type"/"error"/etc.).
+    Postconditions:
+        - Returns a non-empty bullet string when feedback has content, else "".
+    """
+    lines: list[str] = []
+    for entry in feedback or []:
+        if not isinstance(entry, dict):
+            lines.append(f"- {entry}")
+            continue
+        source = entry.get("source") or entry.get("type") or "review"
+        reason = entry.get("reason") or entry.get("error") or entry.get("message") or ""
+        if reason:
+            lines.append(f"- [{source}] {reason}")
+        for change in entry.get("requested_changes") or []:
+            lines.append(f"  - {change}")
+    return "\n".join(lines)
+
+
 def _make_python_agent_tool(
     name: str, handler: Any, description: str, parameters: dict
 ) -> PythonAgentTool:
@@ -142,10 +165,13 @@ class SeniorSWEAgent:
             stack_name=stack_name,
             tools_services=tools_services,
             task_title=task.title,
-            task_description=task.description[:6000],
+            task_description=task.description,
             acceptance_criteria=json.dumps(task.acceptance_criteria),
             repo_context=repo_context[:4000] or "No existing code context provided.",
         )
+        feedback_text = _render_revision_feedback(task.revision_feedback)
+        if feedback_text:
+            user = prompts.REVISION_FEEDBACK_BLOCK.format(feedback=feedback_text) + "\n" + user
         system = prompts.IMPLEMENT_TASK_SYSTEM
         if use_git_tools:
             system += (

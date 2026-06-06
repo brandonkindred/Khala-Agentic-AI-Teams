@@ -175,6 +175,14 @@ describe('JobsDashboardComponent', () => {
     expect(component.getStatusClass(job)).toContain('status-running');
   });
 
+  it('getStatusClass gives completed_with_failures a distinct warning class (not plain success)', () => {
+    const job = { unified: { status: 'completed_with_failures' }, seDetail: null } as any;
+    expect(component.getStatusClass(job)).toBe('status-completed-with-failures');
+    // Must not collapse to the clean-success class.
+    const clean = { unified: { status: 'completed' }, seDetail: null } as any;
+    expect(component.getStatusClass(clean)).toBe('status-completed');
+  });
+
   it('renders a single merged Job column (no separate Team/Type headers)', () => {
     component.jobs = [
       {
@@ -873,6 +881,7 @@ describe('JobsDashboardComponent', () => {
       expect(component.canRestartJob(makeJob('cancelled'))).toBe(true);
       expect(component.canRestartJob(makeJob('interrupted'))).toBe(true);
       expect(component.canRestartJob(makeJob('agent_crash'))).toBe(true);
+      expect(component.canRestartJob(makeJob('completed_with_failures'))).toBe(true);
       expect(component.canRestartJob(makeJob('failed', 'road_trip_planning'))).toBe(true);
       expect(component.canRestartJob(makeJob('completed', 'personal_assistant'))).toBe(true);
     });
@@ -947,12 +956,20 @@ describe('JobsDashboardComponent', () => {
         buildRow({ jobId: 'x', status: 'cancelled' }),
         buildRow({ jobId: 'r', status: 'needs_human_review', source: 'blogging' }),
         buildRow({ jobId: 'e', status: 'completed_with_errors', source: 'investment' }),
+        buildRow({ jobId: 'g', status: 'completed_with_failures', source: 'software_engineering' }),
       ];
       const counts = component.statusCounts;
-      expect(counts.completed).toBe(4);
+      expect(counts.completed).toBe(5);
       expect(counts.active).toBe(0);
       expect(counts.failed).toBe(0);
-      expect(counts.all).toBe(4);
+      expect(counts.all).toBe(5);
+    });
+
+    it('completed_with_failures (Coding Team partial success) buckets as completed, not active', () => {
+      component.jobs = [buildRow({ jobId: 'g', status: 'completed_with_failures' })];
+      const counts = component.statusCounts;
+      expect(counts.completed).toBe(1);
+      expect(counts.active).toBe(0);
     });
 
     it('statusCounts.all always equals total job count', () => {
