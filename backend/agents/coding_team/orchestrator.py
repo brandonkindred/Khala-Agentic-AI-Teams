@@ -9,6 +9,7 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -31,6 +32,46 @@ logger = logging.getLogger(__name__)
 
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
+
+# Upper bound on Tech Lead review evidence (summary + diff). A correct-but-large diff must not
+# deterministically overflow the reviewer's context and fail an otherwise-good task (cascading to
+# its dependents). Generous enough to pass realistic diffs uncut; pathological diffs are truncated
+# with a marker so the reviewer sees partial — not absent — evidence. Override via
+# CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS.
+_DEFAULT_REVIEW_EVIDENCE_MAX_CHARS = 50000
+
+
+def _review_evidence_max_chars() -> int:
+    """Evidence cap for Tech Lead review; env override, garbage/non-positive → default."""
+    raw = os.getenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "")
+    try:
+        val = int(raw)
+        return val if val > 0 else _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+    except (TypeError, ValueError):
+        return _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+
+
+def _build_review_evidence(summary: str, diff: str, max_chars: int) -> str:
+    """Assemble review evidence (summary + diff) bounded to *max_chars*.
+
+    Keeps the full summary (the most important signal) and appends as much of the diff as fits,
+    marking any truncation so the reviewer knows the evidence is partial rather than absent. A huge
+    diff is thereby truncated instead of overflowing the model context and failing the task.
+
+    Preconditions: max_chars > 0.
+    Postconditions: len(result) <= max_chars (modulo a short truncation marker).
+    """
+    assert max_chars > 0, "max_chars must be positive"
+    if not diff:
+        return summary[:max_chars]
+    header = "\n\n--- DIFF ---\n"
+    marker = "\n... [diff truncated for review context] ..."
+    budget = max_chars - len(summary) - len(header)
+    if budget <= 0:
+        return summary[:max_chars]
+    if len(diff) <= budget:
+        return summary + header + diff
+    return summary + header + diff[: max(0, budget - len(marker))] + marker
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
 # software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
@@ -308,28 +349,42 @@ class CodingTeamSwarm:
                 changes_summary=result.get("changes_summary"),
             )
             self.graph.set_task_in_review(task.id)
-        elif result.get("status") == "failed":
-            logger.warning("Worker %s task %s failed: %s", swe.agent_id, task.id, result.get("error"))
-            self._handle_implement_failure(task, result)
+        else:
+            # Any non-review outcome — status="failed" (the LLM call raised) or status="in_progress"
+            # (the model set ready_for_review=false / asked for another pass) or any unexpected
+            # status — must be bounded. Otherwise the task stays IN_PROGRESS and assigned, its
+            # revision_count never advances, and the same full implement call repeats every round to
+            # the round cap, after which the task is neither MERGED nor FAILED and the job is reported
+            # a clean success despite incomplete work.
+            logger.warning(
+                "Worker %s task %s did not reach review (status=%s): %s",
+                swe.agent_id, task.id, result.get("status"), result.get("error"),
+            )
+            self._handle_incomplete_implementation(task, result)
 
-    def _handle_implement_failure(self, task: Task, result: Dict[str, Any]) -> None:
-        """Bound a failing implementation so it cannot spin the loop to max_rounds.
+    def _handle_incomplete_implementation(self, task: Task, result: Dict[str, Any]) -> None:
+        """Bound an implementation that did not reach review so it cannot spin the loop to max_rounds.
 
-        A `run_implement` that returns status="failed" (e.g. the LLM call raised) was previously
-        only logged, leaving the task IN_PROGRESS and assigned — so the same failing call repeated
-        every round until the round cap. Count each failure against the shared revision cap and,
-        on exhaustion, fail the task (and its dependents) terminally with the error recorded.
+        Covers both status="failed" (e.g. the LLM call raised) and status="in_progress" (the model
+        set ready_for_review=false). Previously only "failed" was handled and "in_progress" was
+        dropped entirely, leaving the task IN_PROGRESS and assigned — so the same call repeated every
+        round until the round cap. Count each occurrence against the shared revision cap and, on
+        exhaustion, fail the task (and its dependents) terminally with the reason recorded.
         """
+        if result.get("status") == "in_progress":
+            reason = "Engineer did not mark the work ready for review"
+        else:
+            reason = f"Implementation failed: {result.get('error') or 'unknown error'}"
         entry = {
             "source": "engineer",
-            "reason": f"Implementation failed: {result.get('error') or 'unknown error'}",
+            "reason": reason,
             "requested_changes": [],
         }
         feedback = list(task.revision_feedback or []) + [entry]
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
-                "Task %s implementation failed and exhausted revisions (%d); marking FAILED",
+                "Task %s did not reach review and exhausted revisions (%d); marking FAILED",
                 task.id, MAX_TASK_REVISIONS,
             )
             self.graph.update_task(
@@ -340,7 +395,7 @@ class CodingTeamSwarm:
             )
             self._cascade_fail_dependents(task.id)
             return
-        # Keep it with the same engineer for another bounded attempt; record the failure.
+        # Keep it with the same engineer for another bounded attempt; record the reason.
         self.graph.update_task(
             task.id,
             status=TaskStatus.IN_PROGRESS,
@@ -432,7 +487,7 @@ class CodingTeamSwarm:
             branch = task.feature_branch or f"feature/{task.id}"
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-            evidence = summary + (f"\n\n--- DIFF ---\n{diff}" if diff else "")
+            evidence = _build_review_evidence(summary, diff, _review_evidence_max_chars())
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,

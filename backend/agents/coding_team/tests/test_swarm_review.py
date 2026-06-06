@@ -217,7 +217,7 @@ def test_review_retries_transient_error_then_succeeds(monkeypatch):
     from coding_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     calls = {"n": 0}
 
     def flaky(agent, prompt):
@@ -242,7 +242,7 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
 
     def boom(agent, prompt):
         raise RuntimeError("context overflow")
@@ -264,7 +264,7 @@ def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     # Valid JSON, but no verdict — e.g. a weak/over-context model that omits 'approved'.
     monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"reason": "hmm"})
     tl = tl_mod.TechLeadAgent(model=object())
@@ -925,3 +925,101 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
 
     assert updates[-1]["status"] == "completed"
     assert "1 merged, 0 failed" in updates[-1]["status_text"]
+
+
+# ----------------------------------------------------- in_progress (not-ready) is bounded
+
+
+def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
+    """A worker that never marks ready_for_review (status='in_progress') is bounded by the revision
+    cap and ends FAILED — not spinning to max_rounds and then reported as a clean success."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 3)
+    _patch_git(monkeypatch)
+
+    class NeverReadyWorker(StubWorker):
+        def run_implement(self, task, path, repo_context=""):
+            self.implement_calls.append(task)
+            return {
+                "status": "in_progress",  # model set ready_for_review=false
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": "",
+                "error": None,
+            }
+
+    worker = NeverReadyWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=50)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.FAILED  # bounded, not stuck IN_PROGRESS forever
+    assert task.revision_feedback[-1]["source"] == "engineer"
+    assert "ready for review" in task.revision_feedback[-1]["reason"].lower()
+    assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
+    assert swarm._is_complete()  # loop terminates
+
+
+# ----------------------------------------------------- bounded review evidence
+
+
+def test_build_review_evidence_passes_small_uncut():
+    ev = orch_mod._build_review_evidence("SUMMARY", "DIFFDATA", max_chars=1000)
+    assert "SUMMARY" in ev and "DIFFDATA" in ev and "--- DIFF ---" in ev
+
+
+def test_build_review_evidence_truncates_large_diff():
+    big = "D" * 100000
+    ev = orch_mod._build_review_evidence("SUM", big, max_chars=5000)
+    assert len(ev) <= 5000  # bounded, does not overflow the reviewer context
+    assert ev.startswith("SUM")
+    assert "diff truncated" in ev
+
+
+def test_build_review_evidence_no_diff():
+    assert orch_mod._build_review_evidence("ONLY SUMMARY", "", max_chars=1000) == "ONLY SUMMARY"
+
+
+def test_review_evidence_max_chars_env(monkeypatch):
+    default = orch_mod._DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "1234")
+    assert orch_mod._review_evidence_max_chars() == 1234
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "0")
+    assert orch_mod._review_evidence_max_chars() == default
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "junk")
+    assert orch_mod._review_evidence_max_chars() == default
+    monkeypatch.delenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", raising=False)
+    assert orch_mod._review_evidence_max_chars() == default
+
+
+# ----------------------------------------------------- implement description cap
+
+
+def test_implement_caps_large_task_description(tmp_path, monkeypatch):
+    """A pathologically large task description is capped in the implement prompt so it cannot
+    deterministically overflow the model context (and then be retried up to the cap)."""
+    from coding_team.senior_software_engineer_agent import agent as swe_mod
+
+    captured: Dict[str, str] = {}
+
+    class FakeAgent:
+        def __init__(self, **kw):
+            pass
+
+        def __call__(self, prompt):
+            captured["prompt"] = prompt
+            return (
+                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
+                '"ready_for_review":true,"feature_branch":"feature/t1"}'
+            )
+
+    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
+    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
+    cap = swe_mod._IMPLEMENT_DESCRIPTION_MAX_CHARS
+    huge = "X" * (cap + 20000)
+    task = Task(id="t1", title="T1", description=huge)
+
+    swe.run_implement(task, tmp_path, repo_context="ctx")
+
+    assert huge not in captured["prompt"]  # full description not embedded
+    assert "X" * cap in captured["prompt"]  # capped slice is present
