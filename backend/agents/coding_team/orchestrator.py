@@ -42,18 +42,37 @@ _CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
 )
 _CONTEXT_EXTRA_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "venv", ".venv"})
 
+# Fallback stack when planning/snapshot provide none (one Senior SWE on a generic stack).
+_DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [{"name": "default", "tools_services": []}]
+
+# Full file-selection sets for repo-context scanning, built once from the shared repo_utils
+# constants + the extras above and cached (the import lives below to keep the SE dependency
+# function-level; the sets are static so there is no need to rebuild them on every call).
+_CONTEXT_EXTENSIONS: Optional[frozenset[str]] = None
+_CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
+
+
+def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
+    """Return (extensions, exclude_dirs) for repo-context scanning, computed once and cached.
+
+    Reuses the shared full-stack code extensions / exclude dirs (so adding a code file type in one
+    place keeps every repo scanner consistent), unioned with this summariser's doc/config extras.
+    """
+    global _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
+    if _CONTEXT_EXTENSIONS is None or _CONTEXT_EXCLUDE_DIRS is None:
+        from software_engineering_team.shared.repo_utils import (
+            FULL_STACK_EXTENSIONS,
+            REPO_EXCLUDE_DIRS,
+        )
+
+        _CONTEXT_EXTENSIONS = frozenset(FULL_STACK_EXTENSIONS) | _CONTEXT_EXTRA_EXTENSIONS
+        _CONTEXT_EXCLUDE_DIRS = REPO_EXCLUDE_DIRS | _CONTEXT_EXTRA_EXCLUDE_DIRS
+    return _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
+
 
 def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
     """Read a short summary of repo structure/code for Senior SWE context."""
-    from software_engineering_team.shared.repo_utils import (
-        FULL_STACK_EXTENSIONS,
-        REPO_EXCLUDE_DIRS,
-    )
-
-    # Reuse the shared full-stack code extensions / exclude dirs, plus this summariser's doc/config
-    # extras — so adding a code file type in one place keeps every repo scanner consistent.
-    extensions = frozenset(FULL_STACK_EXTENSIONS) | _CONTEXT_EXTRA_EXTENSIONS
-    exclude_dirs = REPO_EXCLUDE_DIRS | _CONTEXT_EXTRA_EXCLUDE_DIRS
+    extensions, exclude_dirs = _context_file_filters()
 
     parts: List[str] = []
     total = 0
@@ -147,11 +166,11 @@ def run_coding_team_orchestrator(
         # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
         # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
         graph.reset_in_flight()
-        stacks_raw = existing.get("stack_specs") or [{"name": "default", "tools_services": []}]
+        stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
     else:
         out = tech_lead.run_plan_to_task_graph(plan_input)
         tasks_raw = out.get("tasks") or []
-        stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
+        stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
         for t in tasks_raw:
             graph.add_task(
                 task_id=t["id"],
@@ -195,8 +214,8 @@ def run_coding_team_orchestrator(
         update_fn=_update,
     )
 
-    merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
-    failed_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.FAILED)
+    merged_count = graph.count_with_status(TaskStatus.MERGED)
+    failed_count = graph.count_with_status(TaskStatus.FAILED)
     # A job with failed tasks must not be presented as a clean success — surface a distinct
     # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     _update(
@@ -235,7 +254,7 @@ class CodingTeamSwarm:
         self._context_merged_count = self._merged_count()
 
     def _merged_count(self) -> int:
-        return sum(1 for t in self.graph.get_tasks() if t.status == TaskStatus.MERGED)
+        return self.graph.count_with_status(TaskStatus.MERGED)
 
     def _find_ready_tasks(self) -> List[Task]:
         return [
@@ -394,9 +413,8 @@ class CodingTeamSwarm:
             revision_count=revision_count,
             revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
-        # `update_task` ignores assigned_agent_id=None by design, so clear the assignment explicitly:
-        # the task must be genuinely unassigned (and the agent freed) before the next round, or it
-        # stays mapped to its agent and can be double-assigned.
+        # Release the task before the next round (status went to TO_DO above): it must be genuinely
+        # unassigned and its agent freed, or it stays mapped to its agent and can be double-assigned.
         self.graph.unassign_task(task.id)
         return False
 
@@ -541,11 +559,13 @@ class CodingTeamSwarm:
                 _update(status="cancelled", status_text="Cancelled by user")
                 return
 
-            # Refresh the repo context when merged work has landed since the last read, so the
-            # implement prompt reflects files written in prior rounds (specs, plans, code) without
-            # paying for a full repo walk on every idle round (e.g. while tasks sit in review or
-            # blocked). A one-time snapshot taken at construction would make a worker blind to
-            # earlier work and recreate it.
+            # Refresh the repo context when merged work has landed since the last read. The merged
+            # count is the right signal here: a task's files become part of the shared/integrated
+            # tree only once it merges (work in progress lives on per-worker feature branches), and
+            # a dependent task is not assignable until its dependencies are MERGED — so it always
+            # sees its prerequisites' code. This avoids a full repo walk on every idle round (e.g.
+            # while tasks sit in review or blocked); a one-time snapshot at construction would make a
+            # worker blind to earlier merged work and recreate it.
             merged_now = self._merged_count()
             if merged_now != self._context_merged_count:
                 self.repo_context = _read_repo_context(self.path)

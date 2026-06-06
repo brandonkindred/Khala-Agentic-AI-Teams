@@ -236,3 +236,18 @@ def test_update_task_omitting_assignment_leaves_it_untouched() -> None:
     assert tg.get_task("t1").assigned_agent_id == "a1"  # preserved
     assert tg.get_task_for_agent("a1").id == "t1"
     assert tg.get_task("t1").feature_branch == "feature/t1"
+
+
+def test_count_with_status() -> None:
+    """count_with_status tallies tasks in a given status (single source of truth for tallies)."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.add_task("t2")
+    tg.add_task("t3")
+    tg.mark_branch_merged("t1")
+    tg.update_task("t2", status=TaskStatus.FAILED)
+
+    assert tg.count_with_status(TaskStatus.MERGED) == 1
+    assert tg.count_with_status(TaskStatus.FAILED) == 1
+    assert tg.count_with_status(TaskStatus.TO_DO) == 1
+    assert tg.count_with_status(TaskStatus.IN_REVIEW) == 0

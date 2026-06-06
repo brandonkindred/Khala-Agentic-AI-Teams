@@ -169,6 +169,10 @@ class TaskGraphService:
         """Return task by id."""
         return self._tasks.get(task_id)
 
+    def count_with_status(self, status: TaskStatus) -> int:
+        """Number of tasks currently in *status*. Single source of truth for status tallies."""
+        return sum(1 for t in self._tasks.values() if t.status == status)
+
     def _dependencies_satisfied(self, task_id: str) -> bool:
         """True if all dependency tasks are merged."""
         task = self._tasks.get(task_id)
