@@ -16,7 +16,6 @@ from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
     update_job,
-    update_job_task_graph,
 )
 from coding_team.models import (
     CodingTeamPlanInput,
@@ -33,32 +32,36 @@ logger = logging.getLogger(__name__)
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
 
+# Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
+# software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
+# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs) and skips a
+# few extra interpreter/venv caches. Built from the shared constants in `_read_repo_context` to
+# avoid re-listing the canonical sets here.
+_CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
+    {".js", ".html", ".json", ".md", ".txt", ".rst"}
+)
+_CONTEXT_EXTRA_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "venv", ".venv"})
+
 
 def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
     """Read a short summary of repo structure/code for Senior SWE context."""
+    from software_engineering_team.shared.repo_utils import (
+        FULL_STACK_EXTENSIONS,
+        REPO_EXCLUDE_DIRS,
+    )
+
+    # Reuse the shared full-stack code extensions / exclude dirs, plus this summariser's doc/config
+    # extras — so adding a code file type in one place keeps every repo scanner consistent.
+    extensions = frozenset(FULL_STACK_EXTENSIONS) | _CONTEXT_EXTRA_EXTENSIONS
+    exclude_dirs = REPO_EXCLUDE_DIRS | _CONTEXT_EXTRA_EXCLUDE_DIRS
+
     parts: List[str] = []
     total = 0
     try:
         for f in sorted(repo_path.rglob("*"))[:80]:
-            if not f.is_file() or f.suffix not in {
-                ".py",
-                ".ts",
-                ".js",
-                ".java",
-                ".html",
-                ".json",
-                ".yaml",
-                ".yml",
-                # Markdown/plain-text docs (specs, plans, READMEs) must be visible too, or a worker
-                # tasked with documentation reports the repo "empty" and recreates docs every round.
-                ".md",
-                ".txt",
-                ".rst",
-            }:
+            if not f.is_file() or f.suffix not in extensions:
                 continue
-            if any(
-                skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")
-            ):
+            if any(skip in f.parts for skip in exclude_dirs):
                 continue
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")[:500]
@@ -105,9 +108,19 @@ def run_coding_team_orchestrator(
 
     # Create Task Graph with persist
     def _persist_graph() -> None:
+        # Persist the snapshot through the SAME store used for the resume read and cancel checks
+        # (the injected update_job_fn). On the software-engineering path that is the SE job record;
+        # the hardcoded coding_team store targets a record that is never created on that path, so
+        # the central job service's UPDATE-WHERE matches no row and the write — hence resume — is
+        # silently lost. The standalone coding_team path's default callback writes the same keys to
+        # the coding_team record exactly as before.
         snap = graph.snapshot()
-        update_job_task_graph(job_id, snap, cache_dir=cache_dir)
-        _update(phase=phase, status_text=status_text)
+        _update(
+            task_graph_snapshot=snap["tasks"],
+            agent_task_map=snap["agent_task_map"],
+            phase=phase,
+            status_text=status_text,
+        )
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
     phase = "task_graph"
@@ -217,6 +230,12 @@ class CodingTeamSwarm:
         self.agent_ids = agent_ids
         self.llm_getter = llm_getter
         self.repo_context = _read_repo_context(path)
+        # Repo context only changes when merged work lands new files on the working tree, so cache
+        # the merged-task count the context reflects and re-read only when it advances (see run()).
+        self._context_merged_count = self._merged_count()
+
+    def _merged_count(self) -> int:
+        return sum(1 for t in self.graph.get_tasks() if t.status == TaskStatus.MERGED)
 
     def _find_ready_tasks(self) -> List[Task]:
         return [
@@ -522,10 +541,15 @@ class CodingTeamSwarm:
                 _update(status="cancelled", status_text="Cancelled by user")
                 return
 
-            # Refresh the repo context each round so the implement prompt reflects files written in
-            # prior rounds (specs, plans, code). A one-time snapshot taken at construction makes a
-            # worker blind to earlier work and recreate it.
-            self.repo_context = _read_repo_context(self.path)
+            # Refresh the repo context when merged work has landed since the last read, so the
+            # implement prompt reflects files written in prior rounds (specs, plans, code) without
+            # paying for a full repo walk on every idle round (e.g. while tasks sit in review or
+            # blocked). A one-time snapshot taken at construction would make a worker blind to
+            # earlier work and recreate it.
+            merged_now = self._merged_count()
+            if merged_now != self._context_merged_count:
+                self.repo_context = _read_repo_context(self.path)
+                self._context_merged_count = merged_now
 
             # Coordinator: assign ready tasks to free workers
             ready = self._find_ready_tasks()

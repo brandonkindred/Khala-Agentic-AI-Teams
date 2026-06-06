@@ -563,7 +563,6 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     updates: List[Dict[str, Any]] = []
     plan = CodingTeamPlanInput(repo_path=str(tmp_path))
@@ -767,7 +766,6 @@ def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     snapshot = {
         "task_graph_snapshot": [
@@ -832,7 +830,6 @@ def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     updates: List[Dict[str, Any]] = []
     plan = CodingTeamPlanInput(repo_path=str(tmp_path))
@@ -913,7 +910,6 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     updates: List[Dict[str, Any]] = []
     plan = CodingTeamPlanInput(repo_path=str(tmp_path))

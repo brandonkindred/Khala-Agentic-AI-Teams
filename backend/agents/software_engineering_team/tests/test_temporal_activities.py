@@ -274,3 +274,64 @@ def test_execute_coding_team_activity_exception_path(monkeypatch, tmp_path, patc
         )
     job = js.get_job("ec-j")
     assert job["status"] == js.JOB_STATUS_FAILED
+
+
+def test_background_heartbeater_beats_until_stopped(monkeypatch) -> None:
+    """The background heartbeater emits heartbeats repeatedly until the stop event is set."""
+    import threading
+
+    from software_engineering_team.temporal import activities
+
+    beats = {"n": 0}
+    stop = threading.Event()
+
+    def hb(*a, **k):
+        beats["n"] += 1
+        if beats["n"] >= 3:
+            stop.set()
+
+    monkeypatch.setattr(activities.activity, "heartbeat", hb)
+    t = activities._start_background_heartbeater(0.005, stop)
+    t.join(timeout=2)
+
+    assert not t.is_alive()
+    assert beats["n"] >= 3
+
+
+def test_background_heartbeater_swallows_errors(monkeypatch) -> None:
+    """A raising heartbeat (e.g. outside an activity context) does not kill the beater loop."""
+    import threading
+
+    from software_engineering_team.temporal import activities
+
+    calls = {"n": 0}
+    stop = threading.Event()
+
+    def hb(*a, **k):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            stop.set()
+        raise RuntimeError("no activity context")
+
+    monkeypatch.setattr(activities.activity, "heartbeat", hb)
+    t = activities._start_background_heartbeater(0.005, stop)
+    t.join(timeout=2)
+
+    assert not t.is_alive()  # errors swallowed; loop continued and exited cleanly on stop
+    assert calls["n"] >= 2
+
+
+def test_coding_heartbeat_interval_env(monkeypatch) -> None:
+    """Interval: valid positive float honored; zero/negative/garbage/unset fall back to 30s."""
+    from software_engineering_team.temporal import activities
+
+    monkeypatch.setenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", "12.5")
+    assert activities._coding_heartbeat_interval_s() == 12.5
+    monkeypatch.setenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", "0")
+    assert activities._coding_heartbeat_interval_s() == 30.0
+    monkeypatch.setenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", "-5")
+    assert activities._coding_heartbeat_interval_s() == 30.0
+    monkeypatch.setenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", "garbage")
+    assert activities._coding_heartbeat_interval_s() == 30.0
+    monkeypatch.delenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", raising=False)
+    assert activities._coding_heartbeat_interval_s() == 30.0

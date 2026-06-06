@@ -7,7 +7,10 @@ they run in the worker process and update the job store. No threads are started.
 
 from __future__ import annotations
 
+import contextvars
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -478,6 +481,50 @@ def plan_project_activity(
         raise
 
 
+def _coding_heartbeat_interval_s() -> float:
+    """Interval (seconds) between background heartbeats for the coding-team activity.
+
+    Must stay comfortably below the activity's `heartbeat_timeout` (10 min). Override via
+    `CODING_TEAM_HEARTBEAT_INTERVAL_S`; blank/garbage/non-positive falls back to 30s.
+    """
+    raw = os.getenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", "")
+    try:
+        val = float(raw)
+        return val if val > 0 else 30.0
+    except (TypeError, ValueError):
+        return 30.0
+
+
+def _start_background_heartbeater(interval_s: float, stop: threading.Event) -> threading.Thread:
+    """Start a daemon thread that emits an `activity.heartbeat()` every `interval_s` until `stop`.
+
+    The per-update heartbeat (`_heartbeat_update_callback`) only fires when the orchestrator calls
+    back; a single long blocking step (e.g. a multi-minute code-generation LLM call) would emit no
+    heartbeat and could trip `heartbeat_timeout`. This independent beater keeps the activity alive
+    across such gaps. It runs in a separate thread, so it copies the current context (which carries
+    the Temporal activity handle) and heartbeats within it. Heartbeat errors are swallowed: outside
+    an activity context (unit tests / local dev) the beat is simply a no-op and the loop continues
+    until stopped.
+
+    Preconditions:
+        - Called from within a running activity thread (so the copied context carries the handle).
+    Postconditions:
+        - Returns a started daemon thread that exits within one interval of `stop` being set.
+    """
+    ctx = contextvars.copy_context()
+
+    def _loop() -> None:
+        while not stop.wait(interval_s):
+            try:
+                ctx.run(activity.heartbeat)
+            except Exception:
+                pass
+
+    thread = threading.Thread(target=_loop, name="coding-team-heartbeat", daemon=True)
+    thread.start()
+    return thread
+
+
 def _heartbeat_update_callback(job_id: str) -> Callable[..., None]:
     """Build the coding-team update callback that emits a Temporal heartbeat before each job update.
 
@@ -546,14 +593,22 @@ def execute_coding_team_activity(
         from llm_service import get_client
         from software_engineering_team.shared.job_store import JOB_STATUS_COMPLETED, get_job
 
-        run_coding_team_orchestrator(
-            job_id,
-            str(path),
-            plan_input,
-            update_job_fn=_heartbeat_update_callback(job_id),
-            get_job_fn=lambda jid: get_job(jid),
-            get_llm=get_client,
-        )
+        # Keep the activity alive across long blocking steps (e.g. multi-minute code-gen LLM calls)
+        # that emit no update callback, in addition to the per-update heartbeat below.
+        stop_heartbeat = threading.Event()
+        heartbeat_thread = _start_background_heartbeater(_coding_heartbeat_interval_s(), stop_heartbeat)
+        try:
+            run_coding_team_orchestrator(
+                job_id,
+                str(path),
+                plan_input,
+                update_job_fn=_heartbeat_update_callback(job_id),
+                get_job_fn=lambda jid: get_job(jid),
+                get_llm=get_client,
+            )
+        finally:
+            stop_heartbeat.set()
+            heartbeat_thread.join(timeout=5)
         update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
 
         return ExecutionResult(merged_count=0).model_dump()

@@ -210,3 +210,29 @@ def test_persist_callback_exception_is_swallowed() -> None:
     tg = TaskGraphService(job_id="j1", persist_callback=boom)
     tg.add_task("t1", title="T1")  # must not raise despite the failing callback
     assert tg.get_task("t1") is not None
+
+
+def test_update_task_clears_assignment_and_frees_agent() -> None:
+    """update_task(assigned_agent_id=None) clears the back-reference AND frees the agent mapping."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.assign_task_to_agent("t1", "a1")
+    assert tg.get_task_for_agent("a1").id == "t1"
+
+    tg.update_task("t1", status=TaskStatus.TO_DO, assigned_agent_id=None)
+
+    assert tg.get_task("t1").assigned_agent_id is None
+    assert tg.get_task_for_agent("a1") is None  # agent freed, not silently left busy (no-op bug)
+
+
+def test_update_task_omitting_assignment_leaves_it_untouched() -> None:
+    """Omitting assigned_agent_id must not clobber an existing assignment (sentinel default)."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.assign_task_to_agent("t1", "a1")
+
+    tg.update_task("t1", feature_branch="feature/t1")  # assigned_agent_id not supplied
+
+    assert tg.get_task("t1").assigned_agent_id == "a1"  # preserved
+    assert tg.get_task_for_agent("a1").id == "t1"
+    assert tg.get_task("t1").feature_branch == "feature/t1"
