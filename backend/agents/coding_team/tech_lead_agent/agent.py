@@ -167,9 +167,9 @@ class TechLeadAgent:
         """Review feature branch: approved (bool), reason (str), requested_changes (list)."""
         user = prompts.CODE_REVIEW_USER.format(
             task_title=task_title,
-            task_description=task_description[:2000],
+            task_description=task_description,
             acceptance_criteria=json.dumps(acceptance_criteria),
-            changes_summary=changes_summary[:8000],
+            changes_summary=changes_summary,
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:

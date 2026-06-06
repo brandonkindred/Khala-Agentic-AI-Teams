@@ -139,7 +139,7 @@ class TaskGraphService:
         if not task_id:
             return None
         task = self._tasks.get(task_id)
-        if not task or task.status == TaskStatus.MERGED:
+        if not task or task.status in (TaskStatus.MERGED, TaskStatus.FAILED):
             self._agent_to_task.pop(agent_id, None)
             return None
         return task
@@ -197,6 +197,9 @@ class TaskGraphService:
                     "acceptance_criteria": t.acceptance_criteria,
                     "out_of_scope": t.out_of_scope,
                     "priority": t.priority,
+                    "changes_summary": t.changes_summary,
+                    "revision_count": t.revision_count,
+                    "revision_feedback": t.revision_feedback,
                     "subtasks": [
                         {
                             "id": s.id,
@@ -247,6 +250,9 @@ class TaskGraphService:
                 out_of_scope=tdata.get("out_of_scope", ""),
                 priority=tdata.get("priority", "medium"),
                 subtasks=subtasks,
+                changes_summary=tdata.get("changes_summary"),
+                revision_count=tdata.get("revision_count", 0),
+                revision_feedback=tdata.get("revision_feedback", []),
             )
             self._tasks[task.id] = task
         self._agent_to_task = dict(snapshot.get("agent_task_map", {}))

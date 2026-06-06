@@ -18,6 +18,7 @@ class TaskStatus(str, Enum):
     IN_PROGRESS = "in_progress"
     IN_REVIEW = "in_review"
     MERGED = "merged"
+    FAILED = "failed"
 
 
 class StackSpec(BaseModel):
@@ -83,13 +84,17 @@ class Task(BaseModel):
         default_factory=list,
         description="Well-defined subtasks with optional dependencies between them",
     )
+    changes_summary: Optional[str] = Field(
+        default=None,
+        description="Senior SWE's summary of the implemented changes, for Tech Lead review",
+    )
     revision_count: int = Field(
         default=0,
-        description="Number of times returned for revision after quality gate rejection",
+        description="Number of times returned for revision (quality gate or Tech Lead rejection)",
     )
     revision_feedback: List[Dict[str, Any]] = Field(
         default_factory=list,
-        description="Quality gate feedback from prior revision rounds",
+        description="Feedback from prior revision rounds (quality gate or Tech Lead review)",
     )
 
 

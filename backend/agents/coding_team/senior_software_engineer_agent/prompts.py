@@ -21,3 +21,10 @@ Acceptance criteria: {acceptance_criteria}
 Repo context (existing code structure): {repo_context}
 
 Implement this task. Respond with JSON only (summary, files_to_create_or_edit, commands_run, ready_for_review)."""
+
+REVISION_FEEDBACK_BLOCK = """
+REVISIONS REQUESTED — your previous submission for THIS task was rejected by the Tech Lead.
+Do not start a new task: revise the existing work on this task to address every point below,
+then resubmit. Reasons the work was not accepted as-is:
+{feedback}
+"""
