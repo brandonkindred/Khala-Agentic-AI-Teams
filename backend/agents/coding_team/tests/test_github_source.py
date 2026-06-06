@@ -586,7 +586,9 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     monkeypatch.setattr(api_main, "_fast_forward", lambda *a, **kw: (True, None))
     monkeypatch.setattr(api_main, "_push_branch", lambda *a, **kw: (True, None))
 
-    # Orchestrator no-op: mark a merged task on the job.
+    # Orchestrator no-op: mark a merged task on the job. Returns "completed"
+    # to match the real orchestrator's terminal-status contract (None means
+    # cancelled, which the hook must not publish).
     def _fake_orchestrator(job_id: str, _repo_path, _plan, **kw):
         update_fn = kw["update_job_fn"]
         update_fn(
@@ -601,6 +603,7 @@ def patched_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
                 }
             ],
         )
+        return "completed"
 
     monkeypatch.setattr(api_main, "run_coding_team_orchestrator", _fake_orchestrator)
 
@@ -766,6 +769,7 @@ class TestEndpointFailures:
                 phase="completed",
                 task_graph_snapshot=[{"id": "t1", "status": "to_do", "feature_branch": None}],
             )
+            return "completed"
 
         monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_merge)
         resp = patched_app["client"].post(
@@ -1200,6 +1204,7 @@ class TestActiveIssueMarkerLifecycle:
     def test_retained_when_no_merged_tasks(self, patched_app, monkeypatch) -> None:
         def no_merge(_job_id, _repo, _plan, **kw):
             kw["update_job_fn"](status="completed", task_graph_snapshot=[])
+            return "completed"
 
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
@@ -1223,6 +1228,27 @@ class TestActiveIssueMarkerLifecycle:
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=partial_then_fail)
         assert cleared == []  # not published despite the merged task
+
+    def test_retained_when_cancelled_with_partial_merge(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """A cancellation (orchestrator returns None) must stop publishing even
+        when a task merged — the user stopped the job, so nothing is published."""
+
+        def cancelled(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="cancelled",
+                task_graph_snapshot=[
+                    {"id": "t1", "status": "merged", "feature_branch": "feature/t1"}
+                ],
+            )
+            return None
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=cancelled)
+        assert cleared == []  # not published despite the merged task
+        # And no PR was opened for the cancelled run.
+        assert client.created_pulls == []
 
     def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]

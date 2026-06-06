@@ -1047,10 +1047,15 @@ def _run_with_github_hooks(
             _record_failure(client, owner, repo, num, job_id, str(e))
             return
 
-        # A guardrail failure (budget / round ceiling / no merges) must stop
-        # the hook before it publishes — even if some tasks merged, a partial
-        # branch must never be fast-forwarded, pushed, or reported as success.
-        if ct_status is not None and ct_status.startswith("failed"):
+        # A guardrail failure (budget / round ceiling / no merges) or a
+        # cancellation must stop the hook before it publishes — even if some
+        # tasks merged, a partial branch must never be fast-forwarded, pushed,
+        # or reported as success.
+        if ct_status is None:
+            # Cancelled: the cancelled status was already recorded via the
+            # callback. Leave the work unpublished so a retry can resume.
+            return
+        if ct_status.startswith("failed"):
             _record_failure(client, owner, repo, num, job_id, f"coding team {ct_status}")
             return
 
