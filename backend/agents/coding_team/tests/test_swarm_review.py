@@ -520,5 +520,48 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     )
 
     final = updates[-1]
-    assert final["status"] == "completed"
+    assert final["status"] == "completed_with_failures"  # a failed task is not a clean success
     assert "1 merged, 1 failed" in final["status_text"]
+
+
+def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
+
+    updates: List[Dict[str, Any]] = []
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates[-1]["status"] == "completed"
+    assert "1 merged, 0 failed" in updates[-1]["status_text"]

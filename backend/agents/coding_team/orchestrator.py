@@ -158,8 +158,10 @@ def run_coding_team_orchestrator(
 
     merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
     failed_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.FAILED)
+    # A job with failed tasks must not be presented as a clean success — surface a distinct
+    # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     _update(
-        status="completed",
+        status="completed_with_failures" if failed_count else "completed",
         phase="completed",
         status_text=f"Completed: {merged_count} merged, {failed_count} failed",
     )

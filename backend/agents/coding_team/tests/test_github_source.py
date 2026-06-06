@@ -668,6 +668,49 @@ class TestEndpointHappyPath:
         assert resp.status_code == 200
         assert resp.json()["issue_number"] == 7
 
+    def test_partial_failure_publishes_pr_and_flags_failed_tasks(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """Some tasks merged, one FAILED: still publish the PR, but flag the gap and report
+        a partial terminal status rather than a clean completion."""
+        api = patched_app["api"]
+
+        def _partial_orchestrator(job_id, _repo_path, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed_with_failures",
+                phase="completed",
+                task_graph_snapshot=[
+                    {
+                        "id": "t1",
+                        "status": "merged",
+                        "feature_branch": "feature/t1",
+                        "merged_at": "2026-05-10T00:00:00Z",
+                    },
+                    {"id": "t2", "title": "Broken task", "status": "failed"},
+                ],
+            )
+
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
+        gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        )
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+
+        # PR is still created for the merged work, with the failed task flagged in the body.
+        assert len(gh.created_pulls) == 1
+        assert "Broken task" in gh.created_pulls[0]["body"]
+        assert "t2" in gh.created_pulls[0]["body"]
+        # A warning comment about the incomplete tasks was posted.
+        assert any("did not complete" in body for _n, body in gh.comments)
+        # The job is reported as a partial success, not a clean completion.
+        job = patched_app["jobs"].get_job(data["job_id"])
+        assert job["status"] == "completed_with_failures"
+
 
 class TestEndpointFailures:
     def test_no_token_returns_400(self, patched_app, monkeypatch) -> None:
