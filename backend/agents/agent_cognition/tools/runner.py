@@ -151,6 +151,7 @@ def execute_plan(
     source_run_id: str,
     enforced_rules: list[Rule],
     deadline: float | None = None,
+    audit: ToolAudit | None = None,
 ) -> tuple[dict[str, Any], ToolAudit]:
     """Run a :class:`ToolLoopPlan` and return ``(final_output, audit)``.
 
@@ -160,6 +161,9 @@ def execute_plan(
     Args:
         deadline: optional ``time.monotonic()`` instant past which no further tool
             handler is dispatched (the invoke timeout — see :func:`run_tool_loop`).
+        audit: optional caller-owned accumulator. The shim passes one it already
+            holds so it can read the *partial* audit even if the invoke times out
+            while the loop runs on in a worker thread.
 
     Preconditions: ``agent_id`` / ``source_run_id`` are non-empty; ``enforced_rules``
     are the platform's active rules (the gate is authoritative, not agent-supplied).
@@ -178,6 +182,7 @@ def execute_plan(
         temperature=plan.temperature,
         think=plan.think,
         deadline=deadline,
+        audit=audit,
     )
 
 
@@ -196,6 +201,7 @@ def run_tool_loop(
     think: bool = False,
     clock: Callable[[], datetime] = None,  # type: ignore[assignment]
     deadline: float | None = None,
+    audit: ToolAudit | None = None,
 ) -> tuple[dict[str, Any], ToolAudit]:
     """Run the brokered tool loop and return ``(final_output, audit)``.
 
@@ -206,6 +212,10 @@ def run_tool_loop(
             refuses to dispatch any further handler (a cooperative invoke-timeout
             bound — a worker thread can't be force-killed, so this stops *new* side
             effects once the deadline passes).
+        audit: optional caller-owned :class:`ToolAudit` to accumulate into. The
+            broker appends each call to it as it runs, so a caller holding the same
+            reference can read the partial record even mid-flight (e.g. the shim
+            snapshotting it after a timeout). A fresh one is created when omitted.
 
     Postconditions: returns ``(final_output, audit)`` on success. If the loop
     raises after one or more handlers ran, raises :class:`ToolLoopError` carrying
@@ -216,7 +226,7 @@ def run_tool_loop(
     assert source_run_id, "run_tool_loop: source_run_id must be non-empty"
     assert source_seq_start >= 0, "run_tool_loop: source_seq_start must be non-negative"
     tick = clock or _utcnow
-    audit = ToolAudit()
+    audit = audit if audit is not None else ToolAudit()
     counter = _SeqCounter(source_seq_start)
     # Broker per *function*, but bound to its owning *declared* tool id so the
     # enforced gate matches `forbid_tool: <tool_id>` (e.g. `git`) rather than the

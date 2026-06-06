@@ -53,6 +53,16 @@ def test_audit_first_entry_too_big_still_bounds() -> None:
     assert capped == [{"__truncated__": True, "dropped": 1, "original_count": 1}]
 
 
+def test_tiny_budget_below_marker_returns_empty() -> None:
+    # A budget smaller than the truncation marker itself must yield [] — never an
+    # over-cap [*kept, marker] result.
+    entries = [{"tool_id": "t", "ok": True} for _ in range(5)]
+    capped, truncated = cap_tool_audit(entries, max_bytes=10)
+    assert truncated is True
+    assert capped == []
+    assert len(json.dumps(capped)) <= 10
+
+
 def test_empty_audit_is_unchanged() -> None:
     capped, truncated = cap_tool_audit([], max_bytes=100)
     assert capped == []

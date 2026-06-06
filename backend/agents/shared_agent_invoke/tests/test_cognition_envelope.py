@@ -137,10 +137,47 @@ def client(tmp_path: Path):
                 toolset=_probe_toolset(),
             )
 
+    class _SlowLLM:
+        """Completes a `probe` call (recorded), then blocks past the timeout."""
+
+        def __init__(self) -> None:
+            self.n = 0
+
+        def chat(self, messages, **_kwargs):
+            self.n += 1
+            if self.n == 1:
+                return {
+                    "__tool_calls__": [
+                        {
+                            "id": "c",
+                            "type": "function",
+                            "function": {"name": "probe", "arguments": {}},
+                        }
+                    ]
+                }
+            import time as _t
+
+            _t.sleep(5)  # the loop hangs here; the shim's wait_for fires first
+            return {"done": True}
+
+    class SlowPlanAgent:
+        """A plan whose first tool call completes, then the loop blocks past timeout."""
+
+        def run(self, body):
+            from agent_cognition.tools.runner import ToolLoopPlan
+
+            return ToolLoopPlan(
+                llm=_SlowLLM(),
+                system_prompt="sys",
+                user_prompt="go",
+                toolset=_probe_toolset(),
+            )
+
     mod.ReflectAgent = ReflectAgent
     mod.PlanAgent = PlanAgent
     mod.RaisingAgent = RaisingAgent
     mod.FailingPlanAgent = FailingPlanAgent
+    mod.SlowPlanAgent = SlowPlanAgent
     sys.modules["_cog_shim_test"] = mod
 
     for fname, agent_id, entry in (
@@ -148,6 +185,7 @@ def client(tmp_path: Path):
         ("plan.yaml", "blogging.plan", "PlanAgent"),
         ("raises.yaml", "blogging.raises", "RaisingAgent"),
         ("plan_fail.yaml", "blogging.plan_fail", "FailingPlanAgent"),
+        ("plan_slow.yaml", "blogging.plan_slow", "SlowPlanAgent"),
     ):
         _write_manifest(
             tmp_path,
@@ -247,6 +285,22 @@ def test_failing_tool_loop_returns_422_with_partial_audit(client: TestClient) ->
     assert "loop failed" in detail["error"]
     assert detail["tool_audit"] and detail["tool_audit"][0]["tool_id"] == "probe"
     assert detail["memory_events"]
+
+
+def test_timeout_preserves_partial_audit(
+    client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The loop's first tool call completes, then it blocks; the invoke times out
+    # (504) but the trusted audit of the completed call must still come back.
+    monkeypatch.setenv("AGENT_EXEC_TIMEOUT_S", "0.3")
+    resp = client.post(
+        "/_agents/blogging.plan_slow/invoke",
+        json={ENVELOPE_MARKER: 1, "input": {}, "cognition": {"rules": []}},
+    )
+    assert resp.status_code == 504
+    detail = resp.json()["detail"]
+    assert detail["timeout_hit"] is True
+    assert detail["tool_audit"] and detail["tool_audit"][0]["tool_id"] == "probe"
 
 
 def test_malformed_envelope_returns_400(client: TestClient) -> None:

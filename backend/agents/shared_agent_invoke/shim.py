@@ -27,7 +27,9 @@ from pydantic import BaseModel, Field
 
 from .cognition_envelope import (
     CognitionEnvelopeError,
+    dump_audit,
     maybe_drive_tool_loop,
+    new_tool_audit,
     open_cognition_runtime,
     unwrap_cognition_request,
 )
@@ -109,6 +111,10 @@ def mount_invoke_shim(app: FastAPI) -> None:
         dispatch_error: AgentNotRunnableError | None = None
         timeout_hit = False
         timeout_s = _resolve_exec_timeout(manifest)
+        # A caller-owned audit accumulator: the broker appends to it as the loop
+        # runs, so even if the invoke times out (the worker thread can outlive the
+        # cancelled await) we can still snapshot the calls that completed.
+        audit_obj = new_tool_audit()
         try:
             with ExitStack() as stack:
                 stack.enter_context(redirect_stdout(stdout_buf))
@@ -122,6 +128,7 @@ def mount_invoke_shim(app: FastAPI) -> None:
                         trace_id,
                         cognition_block,
                         time.monotonic() + timeout_s,
+                        audit_obj,
                     ),
                     timeout=timeout_s,
                 )
@@ -144,6 +151,9 @@ def mount_invoke_shim(app: FastAPI) -> None:
             logger.warning("agent %s exceeded execution timeout (%.1fs)", agent_id, timeout_s)
             error = f"AgentExecutionTimeout: exceeded {timeout_s:.1f}s"
             timeout_hit = True
+            # The worker thread may still be finishing — snapshot the audit of the
+            # tool calls that completed before the deadline so they aren't lost.
+            tool_audit, memory_events = dump_audit(audit_obj)
         except Exception as exc:
             # User-space exception raised by the agent itself — surface it
             # with logs via a 422 so the caller can still render the envelope.
@@ -213,6 +223,7 @@ async def _invoke_and_drive(
     source_run_id: str,
     cognition: dict[str, Any] | None,
     deadline: float | None,
+    audit: Any,
 ) -> dict[str, Any]:
     """Invoke the entrypoint, then drive the tool loop if it returned a plan.
 
@@ -223,6 +234,7 @@ async def _invoke_and_drive(
     produced in the shim's frame — never reachable to agent code. ``deadline``
     (a ``time.monotonic()`` instant) bounds handler side effects: the worker thread
     can outlive a cancelled await, so the broker stops dispatching past it.
+    ``audit`` is the caller-owned accumulator the shim can snapshot on timeout.
     """
     result = await invoke_entrypoint(entrypoint, body)
     return await asyncio.to_thread(
@@ -232,6 +244,7 @@ async def _invoke_and_drive(
         source_run_id=source_run_id,
         cognition=cognition,
         deadline=deadline,
+        audit=audit,
     )
 
 

@@ -293,3 +293,35 @@ def test_maybe_drive_runs_a_tool_loop_plan_and_sources_rules_from_cognition() ->
     assert side == []  # the forbidden tool never ran
     calls = driven["tool_calls"]
     assert calls and calls[0]["ok"] is False and calls[0]["function"] == "echo"
+
+
+def test_dump_audit_handles_none() -> None:
+    from shared_agent_invoke.cognition_envelope import dump_audit
+
+    assert dump_audit(None) == ([], [])
+
+
+def test_new_tool_audit_is_none_without_cognition(_no_cognition) -> None:
+    from shared_agent_invoke.cognition_envelope import new_tool_audit
+
+    assert new_tool_audit() is None
+
+
+def test_shared_audit_is_populated_for_timeout_snapshot() -> None:
+    # The shim passes a caller-owned audit so it can snapshot the partial record
+    # even if the invoke times out mid-loop. Driving fills that very object.
+    from shared_agent_invoke.cognition_envelope import (
+        dump_audit,
+        maybe_drive_tool_loop,
+        new_tool_audit,
+    )
+
+    side: list = []
+    plan = _probe_plan(side)
+    audit = new_tool_audit()
+    assert audit is not None
+    maybe_drive_tool_loop(plan, agent_id="a", source_run_id="r", cognition=None, audit=audit)
+    # The shim's reference is populated and snapshot-able (what the 504 path reads).
+    tool_calls, events = dump_audit(audit)
+    assert tool_calls and tool_calls[0]["tool_id"] == "echo"
+    assert events

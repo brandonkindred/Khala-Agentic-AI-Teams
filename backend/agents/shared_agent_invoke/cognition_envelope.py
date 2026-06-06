@@ -32,12 +32,42 @@ __all__ = [
     "CognitionEnvelopeError",
     "unwrap_cognition_request",
     "open_cognition_runtime",
+    "new_tool_audit",
+    "dump_audit",
     "maybe_drive_tool_loop",
 ]
 
 
 class CognitionEnvelopeError(ValueError):
     """A request carried the cognition marker but was not a valid envelope."""
+
+
+def new_tool_audit() -> Any:
+    """Return a fresh ``ToolAudit`` accumulator, or ``None`` if cognition is absent.
+
+    The shim creates one and holds the reference *before* driving the loop, so it
+    can read the partial audit even if the invoke times out while the loop runs on
+    in a worker thread (the broker keeps appending to this same object).
+    """
+    try:
+        from agent_cognition.tools.runner import ToolAudit
+    except Exception:
+        return None
+    return ToolAudit()
+
+
+def dump_audit(audit: Any) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Snapshot a (possibly still-mutating) ``ToolAudit`` into JSON dumps.
+
+    Returns ``(tool_calls, events)``. ``list(...)`` takes a GIL-atomic snapshot
+    first so a concurrent append from a timed-out worker thread can't corrupt the
+    iteration; entries completed by snapshot time are preserved.
+    """
+    if audit is None:
+        return [], []
+    tool_calls = [tc.model_dump(mode="json") for tc in list(audit.tool_calls)]
+    events = [ev.model_dump(mode="json") for ev in list(audit.events)]
+    return tool_calls, events
 
 
 def unwrap_cognition_request(body: Any) -> tuple[Any, dict[str, Any] | None]:
@@ -83,6 +113,7 @@ def maybe_drive_tool_loop(
     source_run_id: str,
     cognition: dict[str, Any] | None,
     deadline: float | None = None,
+    audit: Any = None,
 ) -> dict[str, Any]:
     """Drive the brokered loop when the entrypoint returned a ``ToolLoopPlan``.
 
@@ -116,21 +147,18 @@ def maybe_drive_tool_loop(
         except Exception:
             continue  # a malformed rule never blocks the run; the gate just skips it
     try:
-        final, audit = execute_plan(
+        final, run_audit = execute_plan(
             result,
             agent_id=agent_id,
             source_run_id=source_run_id,
             enforced_rules=enforced_rules,
             deadline=deadline,
+            audit=audit,
         )
         error = None
     except ToolLoopError as exc:
         # The loop failed after partial execution — surface the error but keep the
         # trusted audit of the side effects that already happened.
-        final, audit, error = None, exc.audit, str(exc)
-    return {
-        "output": final,
-        "tool_calls": [tc.model_dump(mode="json") for tc in audit.tool_calls],
-        "events": [ev.model_dump(mode="json") for ev in audit.events],
-        "error": error,
-    }
+        final, run_audit, error = None, exc.audit, str(exc)
+    tool_calls, events = dump_audit(run_audit)
+    return {"output": final, "tool_calls": tool_calls, "events": events, "error": error}

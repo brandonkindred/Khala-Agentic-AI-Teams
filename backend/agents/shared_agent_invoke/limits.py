@@ -112,20 +112,28 @@ def cap_tool_audit(entries: list, *, max_bytes: int) -> tuple[list, bool]:
     hand-accounting separators), and uses ``json.dumps`` defaults — whose ``", "``
     item separators are *wider* than the compact separators Starlette emits — so
     the measured size is a conservative upper bound on the real response and the
-    capped result is guaranteed to serialise within ``max_bytes``.
+    capped result is guaranteed to serialise within ``max_bytes`` (returning an
+    empty list when even a lone truncation marker would not fit a tiny budget).
     """
+    n = len(entries)
     if _safe_len(entries, max_bytes) <= max_bytes:
         return entries, False
+    # Longest leading prefix that fits with a trailing truncation marker.
     kept: list = []
-    n = len(entries)
-    for i, entry in enumerate(entries):
-        marker = {"__truncated__": True, "dropped": n - i, "original_count": n}
+    for entry in entries:
+        marker = {"__truncated__": True, "dropped": n - len(kept), "original_count": n}
         if _safe_len([*kept, entry, marker], max_bytes) > max_bytes:
-            return [*kept, marker], True
+            break
         kept.append(entry)
-    # Unreachable: the whole list exceeded the cap, but adding a marker only grows
-    # the payload, so the final entry's candidate must have overflowed and returned.
-    return entries, False  # pragma: no cover - the loop always returns when over cap
+    # Shrink further until even the marker fits — a budget smaller than the marker
+    # itself yields an empty list, never an over-cap result.
+    while True:
+        marker = {"__truncated__": True, "dropped": n - len(kept), "original_count": n}
+        if _safe_len([*kept, marker], max_bytes) <= max_bytes:
+            return [*kept, marker], True
+        if not kept:
+            return [], True
+        kept.pop()
 
 
 def _safe_len(obj: Any, over: int) -> int:
