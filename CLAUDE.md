@@ -309,6 +309,7 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 | `SE_CI_GATE_ENABLED` | Master toggle for CI gate verification after code generation (default `true`). When enabled, the orchestrator runs lint/test/build checks on generated repos before marking jobs complete. |
 | `SE_CI_GATE_TIMEOUT_S` | Timeout in seconds for GitHub CI status polling when a remote is available (default `300`). Only applies when `GITHUB_TOKEN` + repo info are provided. |
 | `SE_CI_GATE_LOCAL_FALLBACK` | When `true` (default), runs CI checks locally via subprocess (ruff, pytest, npm lint/test) when no GitHub remote is available. Set to `false` to skip CI gate entirely without GitHub. |
+| `CODING_TEAM_REVIEW_RETRIES` | Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered exponential backoff) on a transient failure (rate limit / timeout / provider outage) before the review is flagged as an infrastructure error (default `2` → 3 attempts; blank/garbage falls back to the default; floored at 1 attempt). On exhaustion the orchestrator fails the task once with a clear diagnostic rather than re-sending the same failing prompt through the revision loop. |
 
 **Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`; `POST /research-and-review` runs research + the same planning step. See `backend/agents/blogging/README.md` and repo `CHANGELOG.md`.
 

@@ -209,6 +209,96 @@ def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
     assert swarm._is_complete()
 
 
+# ----------------------------------------------------- review retry / failure handling
+
+
+def test_review_retries_transient_error_then_succeeds(monkeypatch):
+    """A transient reviewer error (rate limit/timeout) is retried, not turned into a rejection."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rate limited")
+        return {"approved": True, "reason": "ok", "requested_changes": []}
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    out = tl.run_code_review("t", "d", [], "evidence")
+
+    assert out["approved"] is True
+    assert out["error"] is False
+    assert calls["n"] == 2  # retried once after the transient failure
+
+
+def test_review_returns_error_after_exhausting_retries(monkeypatch):
+    """After all attempts fail, the verdict is flagged error=True (not a substantive rejection)."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+
+    def boom(agent, prompt):
+        raise RuntimeError("context overflow")
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    out = tl.run_code_review("t", "d", [], "x")
+
+    assert out["error"] is True
+    assert out["approved"] is False
+    assert "2 attempts" in out["reason"]
+
+
+def test_quality_gate_failure_appends_to_accumulated_feedback(tmp_path, monkeypatch):
+    """A quality-gate revision must not clobber prior (e.g. Tech Lead) feedback."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 5)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", revision_feedback=[{"source": "tech_lead", "reason": "add tests"}])
+
+    swarm._return_for_revision(graph.get_task("t1"), [{"type": "build", "error": "boom"}])
+
+    fb = graph.get_task("t1").revision_feedback
+    assert fb[0]["source"] == "tech_lead"  # prior feedback preserved
+    assert fb[-1]["type"] == "build"  # gate feedback appended
+
+
+def test_persistent_implement_failure_fails_task(tmp_path, monkeypatch):
+    """A run_implement that keeps failing is bounded by the revision cap, not spun to max_rounds."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 2)
+    _patch_git(monkeypatch)
+
+    class FailingWorker(StubWorker):
+        def run_implement(self, task, path, repo_context=""):
+            self.implement_calls.append(task)
+            return {
+                "status": "failed",
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": "",
+                "error": "llm exploded",
+            }
+
+    worker = FailingWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=50)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.FAILED
+    assert task.revision_feedback[-1]["source"] == "engineer"
+    assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
+
+
 def test_revision_feedback_threaded_into_implement_prompt(tmp_path, monkeypatch):
     """Reviewer reasons on the task reach the SWE's implement prompt so it revises, not restarts."""
     from coding_team.senior_software_engineer_agent import agent as swe_mod

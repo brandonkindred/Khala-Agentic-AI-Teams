@@ -238,6 +238,43 @@ class CodingTeamSwarm:
             self.graph.set_task_in_review(task.id)
         elif result.get("status") == "failed":
             logger.warning("Worker %s task %s failed: %s", swe.agent_id, task.id, result.get("error"))
+            self._handle_implement_failure(task, result)
+
+    def _handle_implement_failure(self, task: Task, result: Dict[str, Any]) -> None:
+        """Bound a failing implementation so it cannot spin the loop to max_rounds.
+
+        A `run_implement` that returns status="failed" (e.g. the LLM call raised) was previously
+        only logged, leaving the task IN_PROGRESS and assigned — so the same failing call repeated
+        every round until the round cap. Count each failure against the shared revision cap and,
+        on exhaustion, fail the task (and its dependents) terminally with the error recorded.
+        """
+        entry = {
+            "source": "engineer",
+            "reason": f"Implementation failed: {result.get('error') or 'unknown error'}",
+            "requested_changes": [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        revision_count = task.revision_count + 1
+        if revision_count >= MAX_TASK_REVISIONS:
+            logger.warning(
+                "Task %s implementation failed and exhausted revisions (%d); marking FAILED",
+                task.id, MAX_TASK_REVISIONS,
+            )
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                revision_count=revision_count,
+                revision_feedback=feedback,
+            )
+            self._cascade_fail_dependents(task.id)
+            return
+        # Keep it with the same engineer for another bounded attempt; record the failure.
+        self.graph.update_task(
+            task.id,
+            status=TaskStatus.IN_PROGRESS,
+            revision_count=revision_count,
+            revision_feedback=feedback,
+        )
 
     def _run_quality_gates(
         self, swe: SeniorSWEAgent, task: Task, result: Dict[str, Any], update_fn: Callable
@@ -295,12 +332,15 @@ class CodingTeamSwarm:
                 "Task %s exceeded max revisions (%d); accepting as-is", task.id, MAX_TASK_REVISIONS
             )
             return True  # accept despite issues
+        # Append to the accumulated history rather than overwriting it: a task may have prior
+        # Tech Lead feedback that must survive a later quality-gate failure, or the next engineer
+        # prompt would lose those requirements and the reviewer could reintroduce them.
         self.graph.update_task(
             task.id,
             status=TaskStatus.TO_DO,
             assigned_agent_id=None,
             revision_count=revision_count,
-            revision_feedback=feedback,
+            revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
         return False
 
