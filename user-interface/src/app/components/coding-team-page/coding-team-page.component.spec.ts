@@ -157,6 +157,18 @@ describe('CodingTeamPageComponent', () => {
     expect(component.jobStatus).toBeNull();
   });
 
+  it('treats completed_with_failures as terminal (so polling stops and the job is dismissable)', async () => {
+    await setup();
+    component.jobStatus = null;
+    expect(component.isJobTerminal()).toBe(false);
+    component.jobStatus = { job_id: 'j1', status: 'running' };
+    expect(component.isJobTerminal()).toBe(false);
+    for (const status of ['completed', 'completed_with_failures', 'failed', 'cancelled']) {
+      component.jobStatus = { job_id: 'j1', status };
+      expect(component.isJobTerminal()).toBe(true);
+    }
+  });
+
   it('confirmAndRun is a no-op without a selected issue', async () => {
     await setup();
     component.selectedIssue = null;

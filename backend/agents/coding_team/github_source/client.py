@@ -368,6 +368,25 @@ class GitHubClient:
         )
         return _pr_from_payload(r.json())
 
+    def update_pull_request(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        body: str,
+    ) -> PullRequest:
+        """Patch an existing PR's body. Used to keep a reused PR's description in sync with the
+        latest run (e.g. surfacing tasks that failed on a retry)."""
+        r = self._check(
+            self._request(
+                "PATCH",
+                f"/repos/{owner}/{repo}/pulls/{number}",
+                json={"body": body},
+            )
+        )
+        return _pr_from_payload(r.json())
+
     # ----- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:

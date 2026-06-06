@@ -12,7 +12,7 @@ import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-
 import type { RunningJobSummary } from '../../models';
 
 const POLL_JOBS_MS = 30_000;
-const TERMINAL_STATUSES = ['completed', 'failed', 'cancelled', 'stopped'];
+const TERMINAL_STATUSES = ['completed', 'completed_with_failures', 'failed', 'cancelled', 'stopped'];
 
 @Component({
   selector: 'app-software-engineering-dashboard',

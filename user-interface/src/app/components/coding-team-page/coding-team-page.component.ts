@@ -16,6 +16,14 @@ import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistan
 import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 
+/**
+ * Terminal job statuses: once a job reports one of these it will never change again, so polling
+ * stops and the job can be dismissed. `completed_with_failures` is the partial-success terminal
+ * state the orchestrator emits when some tasks merged but others failed — it MUST be listed here,
+ * otherwise such jobs poll forever and cannot be dismissed.
+ */
+const TERMINAL_JOB_STATUSES = ['completed', 'completed_with_failures', 'failed', 'cancelled'];
+
 @Component({
   selector: 'app-coding-team-page',
   standalone: true,
@@ -169,7 +177,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
             }),
           ),
         ),
-        takeWhile((status) => !['completed', 'failed', 'cancelled'].includes(status.status), true),
+        takeWhile((status) => !TERMINAL_JOB_STATUSES.includes(status.status), true),
       )
       .subscribe({
         next: (status: CodingTeamJobStatus) => {
@@ -184,6 +192,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.pollSub.unsubscribe();
       this.pollSub = null;
     }
+  }
+
+  /** True once the active job has reached a terminal state (finished — pollable no further). */
+  isJobTerminal(): boolean {
+    return !!this.jobStatus && TERMINAL_JOB_STATUSES.includes(this.jobStatus.status);
   }
 
   dismissJob(): void {

@@ -1106,6 +1106,18 @@ def _run_with_github_hooks(
 
         if existing is not None:
             pr_url, created = existing.html_url, False
+            # The reused PR's body was written on an earlier run that may have presented the work
+            # as complete. If this run left tasks unfinished, rewrite the body so the PR itself
+            # surfaces the gap — the warning comment below lands on the issue, not the PR.
+            if failed:
+                try:
+                    updated = client.update_pull_request(
+                        owner=owner, repo=repo, number=existing.number, body=pr_body
+                    )
+                    pr_url = updated.html_url
+                except GitHubAPIError as e:
+                    # Non-fatal: the warning is still posted as a comment below.
+                    logger.warning("Failed to update reused PR #%s body: %s", existing.number, e)
         else:
             try:
                 pr = client.create_pull_request(

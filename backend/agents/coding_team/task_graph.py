@@ -74,6 +74,16 @@ class TaskGraphService:
             return None
         if status is not None:
             task.status = status
+            # A task transitioning to FAILED frees its agent immediately — symmetric with
+            # `mark_branch_merged`/`mark_dependents_failed`. Without this the mapping lingers
+            # until the next `get_task_for_agent` lazily prunes it, so a terminal snapshot
+            # persisted right after the failure would still report the agent as occupied.
+            if (
+                status == TaskStatus.FAILED
+                and task.assigned_agent_id
+                and self._agent_to_task.get(task.assigned_agent_id) == task_id
+            ):
+                del self._agent_to_task[task.assigned_agent_id]
         if assigned_agent_id is not None:
             task.assigned_agent_id = assigned_agent_id
         if feature_branch is not None:

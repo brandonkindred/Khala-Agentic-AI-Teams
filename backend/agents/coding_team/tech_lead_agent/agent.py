@@ -35,7 +35,12 @@ def _review_retry_attempts() -> int:
         retries = int(raw) if raw is not None and raw.strip() != "" else 2
     except (TypeError, ValueError):
         retries = 2
-    return max(1, retries + 1)
+    # A negative value is meaningless as a retry count; rather than silently collapsing it to a
+    # single attempt (which would strip all transient-failure protection for a disabling-style
+    # value like -1), treat it as garbage and restore the documented default.
+    if retries < 0:
+        retries = 2
+    return retries + 1
 
 
 def _review_backoff_seconds(attempt: int, base: float = 1.5, cap: float = 20.0) -> float:

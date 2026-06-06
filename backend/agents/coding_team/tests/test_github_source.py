@@ -9,6 +9,7 @@ the GitHubClient and helper functions on the api module.
 
 from __future__ import annotations
 
+import json
 import os
 from typing import Any, Callable, Optional
 
@@ -169,6 +170,33 @@ class TestClientGetIssue:
         assert client.get_issue("o", "r", 5).body == ""
 
 
+class TestClientUpdatePullRequest:
+    def test_patches_pr_body(self) -> None:
+        seen: dict[str, Any] = {}
+
+        def handler(req: httpx.Request) -> httpx.Response:
+            seen["method"] = req.method
+            seen["url"] = str(req.url)
+            seen["body"] = json.loads(req.content.decode())
+            return httpx.Response(
+                200,
+                json={
+                    "number": 7,
+                    "html_url": "https://example/pr/7",
+                    "head": {"ref": "feature"},
+                    "base": {"ref": "main"},
+                },
+            )
+
+        client = _client_with(handler)
+        pr = client.update_pull_request(owner="o", repo="r", number=7, body="new body")
+        assert seen["method"] == "PATCH"
+        assert seen["url"].endswith("/repos/o/r/pulls/7")
+        assert seen["body"] == {"body": "new body"}
+        assert pr.number == 7
+        assert pr.html_url == "https://example/pr/7"
+
+
 class TestClientRetries:
     def test_retries_on_502_then_raises(self) -> None:
         calls = {"n": 0}
@@ -282,6 +310,7 @@ class _FakeClient:
         self._repo = repo or Repo(default_branch="main")
         self._existing_pr = existing_pr
         self.created_pulls: list[dict[str, Any]] = []
+        self.updated_pulls: list[dict[str, Any]] = []
         self.comments: list[tuple[int, str]] = []
         self.fail_comments = False
         self.fail_get_repo = False
@@ -328,6 +357,16 @@ class _FakeClient:
             html_url="https://example/pr/42",
             head=kwargs["head"],
             base=kwargs["base"],
+        )
+
+    def update_pull_request(self, *, owner: str, repo: str, number: int, body: str) -> PullRequest:
+        self.updated_pulls.append({"number": number, "body": body})
+        existing = self._existing_pr
+        return PullRequest(
+            number=number,
+            html_url=existing.html_url if existing else "https://example/pr/updated",
+            head=existing.head if existing else "head",
+            base=existing.base if existing else "base",
         )
 
 
@@ -936,6 +975,54 @@ class TestEndpointReuse:
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["github_pr_url"] == "https://example/pr/99"
         assert any("Reusing existing draft PR" in c[1] for c in gh.comments)
+        # A clean run does not touch the reused PR's body.
+        assert gh.updated_pulls == []
+
+    def test_reused_pr_body_updated_on_partial_failure(self, patched_app, monkeypatch) -> None:
+        """When a retry reuses an existing PR but some tasks failed, the PR body is rewritten so
+        the PR itself surfaces the gap (the warning comment lands on the issue, not the PR)."""
+        api = patched_app["api"]
+
+        def _partial_orchestrator(job_id, _repo_path, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed_with_failures",
+                phase="completed",
+                task_graph_snapshot=[
+                    {
+                        "id": "t1",
+                        "status": "merged",
+                        "feature_branch": "feature/t1",
+                        "merged_at": "2026-05-10T00:00:00Z",
+                    },
+                    {"id": "t2", "title": "Broken task", "status": "failed"},
+                ],
+            )
+
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
+        gh = _FakeClient(
+            issues=[_issue(11, title="Add feature")],
+            sub_map={11: []},
+            existing_pr=PullRequest(
+                number=99,
+                html_url="https://example/pr/99",
+                head="khala/issue-11",
+                base="main",
+            ),
+        )
+        patched_app["set_github"](gh)
+
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        )
+        assert resp.status_code == 200, resp.text
+
+        # No new PR; the reused PR's body was patched to flag the failed task.
+        assert gh.created_pulls == []
+        assert len(gh.updated_pulls) == 1
+        assert gh.updated_pulls[0]["number"] == 99
+        assert "Broken task" in gh.updated_pulls[0]["body"]
+        assert "t2" in gh.updated_pulls[0]["body"]
 
 
 class TestEndpointDuplicateGuard:

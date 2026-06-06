@@ -257,6 +257,28 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
     assert "2 attempts" in out["reason"]
 
 
+def test_review_retry_attempts_env_parsing(monkeypatch):
+    """_review_retry_attempts: valid → retries+1; negative/garbage/empty → documented default."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "3")
+    assert tl_mod._review_retry_attempts() == 4  # 3 retries + 1
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "0")
+    assert tl_mod._review_retry_attempts() == 1  # 0 retries → single attempt
+    # A negative value must restore the default (3 attempts), not collapse to a single attempt
+    # that strips all transient-failure protection.
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "-1")
+    assert tl_mod._review_retry_attempts() == 3
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "-99")
+    assert tl_mod._review_retry_attempts() == 3
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "garbage")
+    assert tl_mod._review_retry_attempts() == 3
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "   ")
+    assert tl_mod._review_retry_attempts() == 3
+    monkeypatch.delenv("CODING_TEAM_REVIEW_RETRIES", raising=False)
+    assert tl_mod._review_retry_attempts() == 3
+
+
 def test_quality_gate_failure_appends_to_accumulated_feedback(tmp_path, monkeypatch):
     """A quality-gate revision must not clobber prior (e.g. Tech Lead) feedback."""
     monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 5)

@@ -270,6 +270,10 @@
     background: #e6f4ea;
     color: #1e8e3e;
   }
+  &--completed_with_failures {
+    background: #fef7e0;
+    color: #e37400;
+  }
   &--failed {
     background: #fce8e6;
     color: #c5221f;
