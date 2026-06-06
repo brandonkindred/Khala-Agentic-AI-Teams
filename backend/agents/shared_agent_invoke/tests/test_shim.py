@@ -297,3 +297,18 @@ def test_per_manifest_timeout_overrides_env_default(
     assert detail["timeout_hit"] is True
     # Timeout message reflects the manifest's 0.2s override, not the env 60s.
     assert "0.2s" in detail["error"]
+
+
+def test_bounded_logs_caps_line_count_and_length() -> None:
+    from shared_agent_invoke.shim import (
+        _MAX_LOG_LINE_CHARS,
+        _MAX_LOG_LINES,
+        _bounded_logs,
+    )
+
+    lines = [f"line{i}" for i in range(120)] + ["x" * (_MAX_LOG_LINE_CHARS + 500)]
+    out = _bounded_logs(lines)
+    assert len(out) == _MAX_LOG_LINES  # only the last 50 lines
+    # Each line is truncated (with an ellipsis) to the per-line cap.
+    assert all(len(line) <= _MAX_LOG_LINE_CHARS + 1 for line in out)
+    assert out[-1].endswith("…")
