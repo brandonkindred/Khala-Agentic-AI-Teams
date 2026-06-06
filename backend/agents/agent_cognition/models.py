@@ -192,9 +192,16 @@ class RuleProposal(BaseModel):
 # Invoke-path envelope payloads (not persisted rows; carried on the wire).
 # ---------------------------------------------------------------------------
 class ToolCall(BaseModel):
-    """A single tool invocation recorded in a writeback / shim audit."""
+    """A single tool invocation recorded in a writeback / shim audit.
+
+    ``tool_id`` is the *declared* tool (e.g. ``git``) the enforced rules and
+    manifest reference; ``function`` is the specific advertised operation that
+    actually ran (e.g. ``git_status``), preserved so the out-of-band audit can
+    distinguish operations of a multi-function tool, not just the umbrella id.
+    """
 
     tool_id: str
+    function: str | None = None
     args: dict[str, Any] = Field(default_factory=dict)
     ok: bool = True
     result: Any = None

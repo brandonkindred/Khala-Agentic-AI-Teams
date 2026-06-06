@@ -21,17 +21,18 @@ use-case, logic-flow, rule-lifecycle, and security diagrams.
 
 ## Status
 
-The persistence/memory foundation and the rules engine are built; the tools layer, the
-orchestration facade, and the platform automation remain design.
+The persistence/memory foundation, the rules engine, and the tools layer are built; the
+orchestration facade and the platform automation remain design.
 
 - **Built** — Postgres schema + domain models (`postgres/`, `models.py`); the episodic
   memory data-access layer (`memory/store.py`); the **calendar rollup engine**
   (`memory/rollup.py`); the **retrieval/digest builder** (`memory/retrieval.py`); the
   **rules engine** — store + predicate DSL + enforcement (`rules/store.py`,
-  `rules/predicate.py`, `rules/enforcement.py`); and the **reflection engine**
-  (`rules/reflection.py`).
-- **Design only** — the tools layer, the `CognitiveContext` facade, the scheduler, and the
-  invoke-proxy integration.
+  `rules/predicate.py`, `rules/enforcement.py`); the **reflection engine**
+  (`rules/reflection.py`); and the **tools layer** — binding + brokered runner + invoke
+  envelope (`tools/binding.py`, `tools/runner.py`, `tools/envelope.py`, `tools/channel.py`).
+- **Design only** — the `CognitiveContext` facade, the scheduler, and the invoke-proxy
+  integration.
 
 ## Rollup engine
 
@@ -86,3 +87,47 @@ engine returns a `ReflectionReport` (`proposed` / `dropped_invalid` / `deduped` 
 
 The reflection LLM uses the shared `cognition` model key, so the same `LLM_MODEL_cognition`
 override applies as for the rollup engine.
+
+## Tools layer
+
+`tools/` gives each agent a per-agent toolset that is executed through the shared LLM tool
+loop and logged to memory.
+
+- **`tools/binding.py`** — `bind_tools(tool_ids, …)` resolves the ids an agent declares
+  (`cognition.tools`) against `agent_git_tools`, the `LlmToolsService` catalog, and the
+  `IntegrationRegistry`, returning OpenAI-style **definitions + handlers** tagged with an
+  **execution site**: `in_process` (the agent runs in the Unified API), `sandbox_local`
+  (bundled in the sandbox image — e.g. `git` — the v1 default), or `platform_bound` (needs
+  platform secrets/egress, so the proxy drives the loop). An unknown id, a duplicate
+  function name, or `git` without a `GitToolContext` raises `ToolBindingError`.
+- **`tools/runner.py`** — `run_tool_loop(…)` wraps `complete_json_with_tool_loop` with a
+  **broker** around every handler. Before dispatch it evaluates the active enforced
+  `forbid_tool` predicates (`rules/enforcement.evaluate_tool_call`) and **refuses a
+  forbidden call before the handler runs** (no side effect). Every call writes a `tool_call`
+  + `outcome`/`error` `MemoryEvent` and a `ToolCall` audit entry **onto the returned
+  `ToolAudit`** (which records both the declared `tool_id` and the specific `function`);
+  args/results are secret-stripped and handler exceptions are reduced to their type before
+  anything crosses the boundary. A cognition tool-using agent returns a **`ToolLoopPlan`**
+  (LLM + prompts + pre-bound toolset) and the **shim drives the loop** via `execute_plan(…)`,
+  so the trusted audit is produced in the shim's frame and is never reachable to agent code.
+  `drive_platform_bound_loop(runtime, …)` is the proxy-driven entry for `platform_bound`
+  tools — handlers (holding secrets) run platform-side and only their results cross back to
+  the sandbox; live use for *generated* agents is gated on the multi-turn runtime scaffold.
+- **`tools/envelope.py`** — the namespaced `__khala_cognition_envelope__` marker plus
+  `wrap_request` / `try_unwrap_request`. The proxy wraps the request as
+  `{marker, input, cognition}` (and rejects a caller body that already carries the marker);
+  the sandbox shim unwraps **only** on a well-formed marker, invokes the entrypoint with
+  `input` exactly as declared, and exposes `cognition` via a side channel. An unmarked body —
+  even one with its own top-level `input` key — is passed through unchanged; a
+  marked-but-malformed body is rejected.
+- **`tools/channel.py`** — the `ContextVar`-backed **cognition side channel**
+  (`get_cognition_context`, read by the agent runtime to render advisory rules). There is no
+  audit channel: the trusted audit is **not** carried through any ambient/importable state
+  (a leading underscore is not an access boundary in a shared process). Instead the shim
+  drives the loop and reads the audit off the runner's return value, so agent code has
+  nothing to forge into; integrity-critical tools additionally use `platform_bound`.
+
+The invoke shim (`shared_agent_invoke`) consumes these lazily — it unwraps the envelope,
+opens the cognition side channel, drives a returned `ToolLoopPlan`, and returns the trusted
+`tool_audit` on its response envelope — without a hard dependency on this package (an image
+without cognition simply runs the agent unwrapped).
