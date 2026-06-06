@@ -146,3 +146,67 @@ def test_create_task_graph() -> None:
     assert tg.job_id == "job-1"
     tg.add_task("t1", title="T1")
     assert tg.get_task("t1") is not None
+
+
+def test_snapshot_restore_round_trips_subtasks() -> None:
+    """A task's subtasks survive a snapshot → restore round-trip (serialization + reconstruction)."""
+    from coding_team.models import Subtask
+
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task(
+        "t1",
+        title="T1",
+        subtasks=[
+            Subtask(id="s1", title="S1", description="first", status=TaskStatus.MERGED),
+            Subtask(id="s2", title="S2", dependencies=["s1"]),
+        ],
+    )
+
+    tg2 = TaskGraphService(job_id="j1")
+    tg2.restore(tg.snapshot())
+
+    sub = tg2.get_task("t1").subtasks
+    assert [s.id for s in sub] == ["s1", "s2"]
+    assert sub[0].status == TaskStatus.MERGED
+    assert sub[1].dependencies == ["s1"]
+
+
+def test_get_next_eligible_subtask() -> None:
+    """Returns the first subtask whose subtask-deps are all MERGED; None when blocked/none/empty."""
+    from coding_team.models import Subtask
+
+    tg = TaskGraphService(job_id="j1")
+    assert tg.get_next_eligible_subtask("missing") is None  # unknown task
+    tg.add_task("t0", title="no subs")
+    assert tg.get_next_eligible_subtask("t0") is None  # task without subtasks
+    tg.add_task(
+        "t1",
+        title="T1",
+        subtasks=[
+            Subtask(id="s1", title="S1", status=TaskStatus.MERGED),
+            Subtask(id="s2", title="S2", dependencies=["s1"]),
+            Subtask(id="s3", title="S3", dependencies=["s2"]),  # blocked: s2 not merged
+        ],
+    )
+    nxt = tg.get_next_eligible_subtask("t1")
+    assert nxt.id == "s2"  # s1 merged → s2 eligible, s3 still blocked
+
+
+def test_missing_task_operations_are_safe_noops() -> None:
+    """Mutating operations on an unknown task id return falsy/None instead of raising."""
+    tg = TaskGraphService(job_id="j1")
+    assert tg.update_task("nope", status=TaskStatus.MERGED) is None
+    assert tg.mark_branch_merged("nope") is False
+    assert tg.set_task_in_review("nope") is False
+    assert tg.assign_task_to_agent("nope", "a1") is False
+
+
+def test_persist_callback_exception_is_swallowed() -> None:
+    """A failing persist callback must not break a graph mutation (_maybe_persist guards it)."""
+
+    def boom() -> None:
+        raise RuntimeError("persist down")
+
+    tg = TaskGraphService(job_id="j1", persist_callback=boom)
+    tg.add_task("t1", title="T1")  # must not raise despite the failing callback
+    assert tg.get_task("t1") is not None

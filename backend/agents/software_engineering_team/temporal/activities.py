@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
@@ -478,6 +478,33 @@ def plan_project_activity(
         raise
 
 
+def _heartbeat_update_callback(job_id: str) -> Callable[..., None]:
+    """Build the coding-team update callback that emits a Temporal heartbeat before each job update.
+
+    The coding orchestrator calls its update callback many times per task (implement, build, lint,
+    review, per-round persist), so routing every call through a heartbeat keeps a healthy long
+    coding run well inside the activity's `heartbeat_timeout` — preventing a spurious timeout +
+    retry, which would re-plan and re-do work. The heartbeat is best-effort: outside a Temporal
+    activity context (e.g. in unit tests) `activity.heartbeat()` raises and is swallowed, so the
+    callback still performs the underlying `update_job`.
+
+    Preconditions:
+        - `job_id` identifies an existing job.
+    Postconditions:
+        - The returned callable forwards all kwargs to `update_job(job_id, **kwargs)` after a
+          best-effort heartbeat, regardless of whether the heartbeat succeeds.
+    """
+
+    def _update(**kw: Any) -> None:
+        try:
+            activity.heartbeat()
+        except Exception:
+            pass
+        update_job(job_id, **kw)
+
+    return _update
+
+
 @activity.defn(name="execute_coding_team")
 def execute_coding_team_activity(
     job_id: str,
@@ -523,7 +550,7 @@ def execute_coding_team_activity(
             job_id,
             str(path),
             plan_input,
-            update_job_fn=lambda **kw: update_job(job_id, **kw),
+            update_job_fn=_heartbeat_update_callback(job_id),
             get_job_fn=lambda jid: get_job(jid),
             get_llm=get_client,
         )

@@ -109,6 +109,47 @@ class TaskGraphService:
         self._maybe_persist()
         return task
 
+    def unassign_task(self, task_id: str) -> None:
+        """Clear a task's agent assignment and release the agent that held it.
+
+        `update_task` deliberately ignores `assigned_agent_id=None` (its `is not None` guard lets
+        callers update other fields without clobbering the assignment), so clearing an assignment
+        needs its own entry point. Used when a quality-gate rejection demotes a task to TO_DO: the
+        task must become genuinely unassigned so a free agent can re-pick it and the old agent is
+        freed — otherwise the task is TO_DO yet still mapped to its agent, and the next round can
+        both re-serve it to that agent and assign it to a second free agent (two workers, one task).
+
+        Preconditions:
+            - `task_id` refers to a task tracked by this graph (no-op if it does not).
+        Postconditions:
+            - `task.assigned_agent_id is None` and no agent in `_agent_to_task` maps to `task_id`.
+        """
+        task = self._tasks.get(task_id)
+        if not task:
+            return
+        self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
+        task.assigned_agent_id = None
+        self._maybe_persist()
+
+    def reset_in_flight(self) -> None:
+        """Demote every non-terminal in-flight task to TO_DO and drop all agent assignments.
+
+        Used on resume from a persisted snapshot (e.g. a Temporal retry of the same job): a task
+        left IN_PROGRESS or IN_REVIEW when the previous attempt died may hold only partial work, and
+        its agent mapping refers to workers that no longer exist in this run. Demoting these to
+        unassigned TO_DO lets the fresh swarm re-plan and re-pick them deterministically. MERGED and
+        FAILED tasks (terminal) are left untouched.
+
+        Postconditions:
+            - No task is IN_PROGRESS or IN_REVIEW; `_agent_to_task` is empty.
+        """
+        for task in self._tasks.values():
+            if task.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW):
+                task.status = TaskStatus.TO_DO
+                task.assigned_agent_id = None
+        self._agent_to_task.clear()
+        self._maybe_persist()
+
     def get_tasks(self) -> List[Task]:
         """Return all tasks (copy)."""
         return list(self._tasks.values())

@@ -49,6 +49,11 @@ def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
                 ".json",
                 ".yaml",
                 ".yml",
+                # Markdown/plain-text docs (specs, plans, READMEs) must be visible too, or a worker
+                # tasked with documentation reports the repo "empty" and recreates docs every round.
+                ".md",
+                ".txt",
+                ".rst",
             }:
                 continue
             if any(
@@ -108,20 +113,41 @@ def run_coding_team_orchestrator(
     phase = "task_graph"
     status_text = "Building task graph from plan"
 
-    # Tech Lead: plan → tasks + stacks
+    # The Tech Lead object is needed for the swarm coordinator (assignments/reviews) regardless of
+    # whether we plan fresh or resume, so build it unconditionally.
     llm = llm_getter("tech_lead")
     tech_lead = TechLeadAgent(llm)
-    out = tech_lead.run_plan_to_task_graph(plan_input)
-    tasks_raw = out.get("tasks") or []
-    stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
 
-    for t in tasks_raw:
-        graph.add_task(
-            task_id=t["id"],
-            title=t.get("title", t["id"]),
-            description=t.get("description", ""),
-            dependencies=t.get("dependencies", []),
+    # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
+    # re-running the planning LLM and re-doing finished work. `_persist_graph` writes the task
+    # snapshot every round; the stacks are persisted alongside it on the fresh path below.
+    existing = _get_job(job_id) or {}
+    snapshot_tasks = existing.get("task_graph_snapshot") or []
+    if snapshot_tasks:
+        logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
+        graph.restore(
+            {
+                "tasks": snapshot_tasks,
+                "agent_task_map": existing.get("agent_task_map") or {},
+            }
         )
+        # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
+        # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
+        graph.reset_in_flight()
+        stacks_raw = existing.get("stack_specs") or [{"name": "default", "tools_services": []}]
+    else:
+        out = tech_lead.run_plan_to_task_graph(plan_input)
+        tasks_raw = out.get("tasks") or []
+        stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
+        for t in tasks_raw:
+            graph.add_task(
+                task_id=t["id"],
+                title=t.get("title", t["id"]),
+                description=t.get("description", ""),
+                dependencies=t.get("dependencies", []),
+            )
+        # Persist the stacks so a later retry can rebuild the workers without re-planning.
+        _update(stack_specs=stacks_raw)
     _persist_graph()
 
     # Build Senior SWE agents (one per stack)
@@ -223,6 +249,12 @@ class CodingTeamSwarm:
         """Worker implements its assigned task, then runs quality gate tools."""
         task = self.graph.get_task_for_agent(swe.agent_id)
         if not task:
+            return
+        # Only (re)implement a task that is actively assigned for work. An IN_REVIEW task is awaiting
+        # Tech Lead review — re-running the engineer on it would regenerate code already under review
+        # and churn the loop. With un-assignment fixed this is belt-and-suspenders, but it makes the
+        # worker's contract explicit and robust against any upstream assignment slip.
+        if task.status != TaskStatus.IN_PROGRESS:
             return
 
         update_fn(status_text=f"Implementing: {task.title}")
@@ -340,10 +372,13 @@ class CodingTeamSwarm:
         self.graph.update_task(
             task.id,
             status=TaskStatus.TO_DO,
-            assigned_agent_id=None,
             revision_count=revision_count,
             revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
+        # `update_task` ignores assigned_agent_id=None by design, so clear the assignment explicitly:
+        # the task must be genuinely unassigned (and the agent freed) before the next round, or it
+        # stays mapped to its agent and can be double-assigned.
+        self.graph.unassign_task(task.id)
         return False
 
     def _review_and_merge(self, update_fn: Callable) -> None:
@@ -486,6 +521,11 @@ class CodingTeamSwarm:
             if check_cancel and check_cancel():
                 _update(status="cancelled", status_text="Cancelled by user")
                 return
+
+            # Refresh the repo context each round so the implement prompt reflects files written in
+            # prior rounds (specs, plans, code). A one-time snapshot taken at construction makes a
+            # worker blind to earlier work and recreate it.
+            self.repo_context = _read_repo_context(self.path)
 
             # Coordinator: assign ready tasks to free workers
             ready = self._find_ready_tasks()

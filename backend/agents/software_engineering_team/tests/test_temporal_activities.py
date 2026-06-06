@@ -218,6 +218,47 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
+def test_heartbeat_update_callback_emits_heartbeat(monkeypatch) -> None:
+    """The coding-team update callback emits a Temporal heartbeat, then forwards the update."""
+    from software_engineering_team.temporal import activities
+
+    beats = {"n": 0}
+    monkeypatch.setattr(
+        activities.activity, "heartbeat", lambda *a, **k: beats.__setitem__("n", beats["n"] + 1)
+    )
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
+    )
+
+    cb = activities._heartbeat_update_callback("job-x")
+    cb(status_text="implementing")
+
+    assert beats["n"] == 1
+    assert captured["jid"] == "job-x"
+    assert captured["status_text"] == "implementing"
+
+
+def test_heartbeat_update_callback_swallows_heartbeat_error(monkeypatch) -> None:
+    """Outside an activity context heartbeat() raises; the callback swallows it and still updates."""
+    from software_engineering_team.temporal import activities
+
+    def boom(*a, **k):
+        raise RuntimeError("not in an activity context")
+
+    monkeypatch.setattr(activities.activity, "heartbeat", boom)
+    captured: Dict[str, Any] = {}
+    monkeypatch.setattr(
+        activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
+    )
+
+    cb = activities._heartbeat_update_callback("job-y")
+    cb(phase="coding")  # must not raise despite the heartbeat failure
+
+    assert captured["jid"] == "job-y"
+    assert captured["phase"] == "coding"
+
+
 def test_execute_coding_team_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
     """Bogus adapter_result_dict triggers an exception inside the activity;
     the outer except marks the job FAILED and re-raises."""
