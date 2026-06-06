@@ -175,9 +175,12 @@ describe('JobsDashboardComponent', () => {
     expect(component.getStatusClass(job)).toContain('status-running');
   });
 
-  it('getStatusClass maps completed_with_failures to the completed style', () => {
+  it('getStatusClass gives completed_with_failures a distinct warning class (not plain success)', () => {
     const job = { unified: { status: 'completed_with_failures' }, seDetail: null } as any;
-    expect(component.getStatusClass(job)).toContain('status-completed');
+    expect(component.getStatusClass(job)).toBe('status-completed-with-failures');
+    // Must not collapse to the clean-success class.
+    const clean = { unified: { status: 'completed' }, seDetail: null } as any;
+    expect(component.getStatusClass(clean)).toBe('status-completed');
   });
 
   it('renders a single merged Job column (no separate Team/Type headers)', () => {

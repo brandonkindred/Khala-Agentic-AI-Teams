@@ -692,6 +692,8 @@ class TestEndpointHappyPath:
         assert gh.created_pulls[0]["draft"] is True
         assert gh.created_pulls[0]["head"] == "khala/issue-11"
         assert gh.created_pulls[0]["base"] == "main"
+        # A clean run auto-closes the issue on merge.
+        assert "Closes #11" in gh.created_pulls[0]["body"]
         # Job persisted with PR url
         job = patched_app["jobs"].get_job(data["job_id"])
         assert job["github_pr_url"] == "https://example/pr/42"
@@ -744,6 +746,9 @@ class TestEndpointHappyPath:
         assert len(gh.created_pulls) == 1
         assert "Broken task" in gh.created_pulls[0]["body"]
         assert "t2" in gh.created_pulls[0]["body"]
+        # A partial result must NOT auto-close the issue — use a non-closing reference.
+        assert "Refs #11" in gh.created_pulls[0]["body"]
+        assert "Closes #" not in gh.created_pulls[0]["body"]
         # A warning comment about the incomplete tasks was posted.
         assert any("did not complete" in body for _n, body in gh.comments)
         # The job is reported as a partial success, not a clean completion.
@@ -975,8 +980,9 @@ class TestEndpointReuse:
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["github_pr_url"] == "https://example/pr/99"
         assert any("Reusing existing draft PR" in c[1] for c in gh.comments)
-        # A clean run does not touch the reused PR's body.
-        assert gh.updated_pulls == []
+        # The reused PR's body is refreshed to reflect this (clean) run.
+        assert len(gh.updated_pulls) == 1
+        assert "Closes #1" in gh.updated_pulls[0]["body"]
 
     def test_reused_pr_body_updated_on_partial_failure(self, patched_app, monkeypatch) -> None:
         """When a retry reuses an existing PR but some tasks failed, the PR body is rewritten so
@@ -1023,6 +1029,34 @@ class TestEndpointReuse:
         assert gh.updated_pulls[0]["number"] == 99
         assert "Broken task" in gh.updated_pulls[0]["body"]
         assert "t2" in gh.updated_pulls[0]["body"]
+        assert "Refs #11" in gh.updated_pulls[0]["body"]
+
+    def test_reused_pr_body_refreshed_on_clean_retry(self, patched_app) -> None:
+        """A later retry that completes every task must refresh the reused PR body so a stale
+        partial-failure warning from an earlier run is cleared (and the issue auto-closes again)."""
+        gh = _FakeClient(
+            issues=[_issue(1)],
+            sub_map={1: []},
+            existing_pr=PullRequest(
+                number=99,
+                html_url="https://example/pr/99",
+                head="khala/issue-1",
+                base="main",
+            ),
+        )
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        # The default orchestrator produces a clean (all-merged) result.
+        assert gh.created_pulls == []
+        assert len(gh.updated_pulls) == 1
+        assert gh.updated_pulls[0]["number"] == 99
+        # Body reflects the clean run: closing reference, no failure warning.
+        assert "Closes #1" in gh.updated_pulls[0]["body"]
+        assert "did not complete" not in gh.updated_pulls[0]["body"]
 
 
 class TestEndpointDuplicateGuard:

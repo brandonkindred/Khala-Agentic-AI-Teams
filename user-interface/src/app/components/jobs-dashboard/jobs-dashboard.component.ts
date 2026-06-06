@@ -639,8 +639,10 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     if (job.seDetail?.waitingForAnswers) return 'status-waiting';
     switch (job.unified.status) {
       case 'running': return 'status-running';
-      case 'completed':
-      case 'completed_with_failures': return 'status-completed';
+      case 'completed': return 'status-completed';
+      // Partial success: finished, but with failed tasks — flag it distinctly rather than
+      // showing the same green as a clean completion.
+      case 'completed_with_failures': return 'status-completed-with-failures';
       case 'failed': return 'status-failed';
       case 'cancelled': return 'status-cancelled';
       case 'interrupted': return 'status-interrupted';
