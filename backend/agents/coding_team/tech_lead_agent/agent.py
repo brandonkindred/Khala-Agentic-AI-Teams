@@ -176,9 +176,20 @@ class TechLeadAgent:
             data = _agent_call_json(self._review_agent, user)
         except Exception as e:
             logger.warning("Tech Lead code_review LLM failed: %s", e)
-            return {"approved": False, "reason": "Review failed", "requested_changes": []}
+            # Distinguish an infrastructure failure (e.g. the review evidence exceeded the model
+            # context window so the call raised) from a substantive rejection. The caller must
+            # NOT route this through the revision loop — re-sending the same failing prompt every
+            # round would burn the whole revision budget at max cost. error=True flags the
+            # difference so the orchestrator can fail the task once with a clear diagnostic.
+            return {
+                "approved": False,
+                "error": True,
+                "reason": f"Review could not be completed: {e}",
+                "requested_changes": [],
+            }
         return {
             "approved": bool(data.get("approved")),
+            "error": False,
             "reason": str(data.get("reason") or ""),
             "requested_changes": list(data.get("requested_changes") or []),
         }

@@ -325,7 +325,13 @@ class CodingTeamSwarm:
                 acceptance_criteria=task.acceptance_criteria,
                 changes_summary=evidence,
             )
-            if review.get("approved"):
+            if review.get("error"):
+                # The review itself could not run (e.g. evidence exceeded the model context
+                # window). Do NOT route this through the revision loop — re-sending the same
+                # failing prompt every round would burn the whole revision budget at max cost.
+                # Fail the task once with the diagnostic instead.
+                self._fail_task(task, review, "Tech Lead review could not be completed")
+            elif review.get("approved"):
                 try:
                     ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
                     if ok:
@@ -369,6 +375,7 @@ class CodingTeamSwarm:
                 revision_count=revision_count,
                 revision_feedback=feedback,
             )
+            self._cascade_fail_dependents(task.id)
             return
         logger.info(
             "Task %s rejected by Tech Lead (revision %d); returning to engineer %s",
@@ -382,6 +389,38 @@ class CodingTeamSwarm:
             revision_count=revision_count,
             revision_feedback=feedback,
         )
+
+    def _fail_task(self, task: Task, review: Dict[str, Any], context: str) -> None:
+        """Terminally fail a task (and its dependents) without spinning the revision loop.
+
+        Used when a Tech Lead review cannot be performed (e.g. the review evidence exceeded the
+        model context window). Re-routing such a task through the revision loop would re-send the
+        same failing prompt every round up to MAX_TASK_REVISIONS at max cost; instead we record
+        the diagnostic, mark the task FAILED, and cascade the failure to dependents.
+
+        Postconditions:
+            - task.status is FAILED; tasks transitively depending on it are FAILED too.
+        """
+        entry = {
+            "source": "tech_lead",
+            "reason": review.get("reason", context),
+            "requested_changes": [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        logger.warning("%s for task %s; marking FAILED. Reason: %s", context, task.id, entry["reason"])
+        self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
+        self._cascade_fail_dependents(task.id)
+
+    def _cascade_fail_dependents(self, task_id: str) -> None:
+        """Propagate a task's FAILED state to every task that can no longer be satisfied.
+
+        A task depending on a FAILED task can never satisfy `_dependencies_satisfied` (which
+        requires MERGED deps), so without this it would sit TO_DO forever and keep the swarm loop
+        from completing. Delegates to `TaskGraphService.mark_dependents_failed`.
+        """
+        blocked = self.graph.mark_dependents_failed(task_id)
+        if blocked:
+            logger.warning("Task %s failure cascaded FAILED to dependents: %s", task_id, blocked)
 
     def _is_complete(self) -> bool:
         tasks = self.graph.get_tasks()

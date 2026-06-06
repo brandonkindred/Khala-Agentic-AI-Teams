@@ -165,6 +165,47 @@ class TaskGraphService:
         self._maybe_persist()
         return True
 
+    def mark_dependents_failed(self, task_id: str) -> List[str]:
+        """Cascade-FAIL every task that (transitively) depends on a FAILED task.
+
+        A FAILED dependency can never become MERGED, so any task that depends on it can never
+        satisfy `_dependencies_satisfied` and would otherwise keep the swarm loop from ever
+        completing (it stays TO_DO, `_is_complete()` stays false, the loop spins to max_rounds).
+        This marks all such tasks FAILED to a fixpoint, frees any agent mapped to them, and
+        records why.
+
+        Preconditions:
+            - `task_id` refers to a task already in FAILED status.
+        Postconditions:
+            - No non-FAILED task has a FAILED task among its dependencies.
+        Returns the ids newly marked FAILED (excludes `task_id` itself).
+        """
+        newly_failed: List[str] = []
+        changed = True
+        while changed:
+            changed = False
+            for t in self._tasks.values():
+                if t.status == TaskStatus.FAILED or not t.dependencies:
+                    continue
+                if any(
+                    (dep := self._tasks.get(d)) is not None and dep.status == TaskStatus.FAILED
+                    for d in t.dependencies
+                ):
+                    t.status = TaskStatus.FAILED
+                    t.revision_feedback = list(t.revision_feedback or []) + [
+                        {"source": "system", "reason": "Blocked: a required dependency failed"}
+                    ]
+                    if (
+                        t.assigned_agent_id
+                        and self._agent_to_task.get(t.assigned_agent_id) == t.id
+                    ):
+                        del self._agent_to_task[t.assigned_agent_id]
+                    newly_failed.append(t.id)
+                    changed = True
+        if newly_failed:
+            self._maybe_persist()
+        return newly_failed
+
     def get_next_eligible_subtask(self, task_id: str) -> Optional[Any]:
         """Return the next subtask that does not depend on an incomplete subtask, or None."""
         task = self._tasks.get(task_id)

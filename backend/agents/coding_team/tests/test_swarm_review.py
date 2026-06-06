@@ -144,6 +144,71 @@ def test_max_task_revisions_is_20():
     assert orch_mod.MAX_TASK_REVISIONS == 20
 
 
+def test_failed_task_cascades_to_dependents(tmp_path, monkeypatch):
+    """When a task is FAILED, tasks depending on it are cascade-FAILED (never satisfiable)."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 1)
+    _patch_git(monkeypatch)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+    graph.add_task("t3", title="T3", dependencies=["t2"])  # transitive dependent
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED
+    assert graph.get_task("t2").status == TaskStatus.FAILED  # direct dependent
+    assert graph.get_task("t3").status == TaskStatus.FAILED  # transitive dependent
+    assert graph.get_task("t2").revision_feedback[-1]["source"] == "system"
+
+
+def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatch):
+    """A review that errors (e.g. evidence > context) fails the task once — it is not re-reviewed
+    every round through the revision loop."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    _patch_git(monkeypatch)
+
+    class ErrTechLead(StubTechLead):
+        def run_code_review(self, task_title, task_description, acceptance_criteria, changes_summary):
+            self.review_calls.append(changes_summary)
+            return {
+                "approved": False,
+                "error": True,
+                "reason": "evidence exceeded context",
+                "requested_changes": [],
+            }
+
+    tech_lead = ErrTechLead(approved=False)
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=20)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.FAILED
+    assert len(tech_lead.review_calls) == 1  # reviewed once, not spun through the revision loop
+    assert task.revision_feedback[-1]["reason"] == "evidence exceeded context"
+
+
+def test_swarm_completes_when_dependency_fails(tmp_path, monkeypatch):
+    """The loop terminates (does not spin to max_rounds) when a dependency fails review."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 2)
+    _patch_git(monkeypatch)
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [worker])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+
+    swarm.run(max_rounds=50)
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED
+    assert graph.get_task("t2").status == TaskStatus.FAILED
+    assert graph.get_task("t2") not in worker.implement_calls  # dependent never implemented
+    assert swarm._is_complete()
+
+
 def test_revision_feedback_threaded_into_implement_prompt(tmp_path, monkeypatch):
     """Reviewer reasons on the task reach the SWE's implement prompt so it revises, not restarts."""
     from coding_team.senior_software_engineer_agent import agent as swe_mod
