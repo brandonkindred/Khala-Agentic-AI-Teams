@@ -9,6 +9,7 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -16,7 +17,6 @@ from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
     update_job,
-    update_job_task_graph,
 )
 from coding_team.models import (
     CodingTeamPlanInput,
@@ -33,27 +33,95 @@ logger = logging.getLogger(__name__)
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
 
+# Upper bound on Tech Lead review evidence (summary + diff). A correct-but-large diff must not
+# deterministically overflow the reviewer's context and fail an otherwise-good task (cascading to
+# its dependents). Generous enough to pass realistic diffs uncut; pathological diffs are truncated
+# with a marker so the reviewer sees partial — not absent — evidence. Override via
+# CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS.
+_DEFAULT_REVIEW_EVIDENCE_MAX_CHARS = 50000
+
+
+def _review_evidence_max_chars() -> int:
+    """Evidence cap for Tech Lead review; env override, garbage/non-positive → default."""
+    raw = os.getenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "")
+    try:
+        val = int(raw)
+        return val if val > 0 else _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+    except (TypeError, ValueError):
+        return _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+
+
+def _build_review_evidence(summary: str, diff: str, max_chars: int) -> str:
+    """Assemble review evidence (summary + diff) bounded to *max_chars*.
+
+    Keeps the full summary (the most important signal) and appends as much of the diff as fits,
+    marking any truncation so the reviewer knows the evidence is partial rather than absent. A huge
+    diff is thereby truncated instead of overflowing the model context and failing the task.
+
+    Preconditions: max_chars > 0.
+    Postconditions: len(result) <= max_chars (modulo a short truncation marker).
+    """
+    assert max_chars > 0, "max_chars must be positive"
+    if not diff:
+        return summary[:max_chars]
+    header = "\n\n--- DIFF ---\n"
+    marker = "\n... [diff truncated for review context] ..."
+    budget = max_chars - len(summary) - len(header)
+    if budget <= 0:
+        return summary[:max_chars]
+    if len(diff) <= budget:
+        return summary + header + diff
+    return summary + header + diff[: max(0, budget - len(marker))] + marker
+
+# Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
+# software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
+# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs) and skips a
+# few extra interpreter/venv caches. Built from the shared constants in `_read_repo_context` to
+# avoid re-listing the canonical sets here.
+_CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
+    {".js", ".html", ".json", ".md", ".txt", ".rst"}
+)
+_CONTEXT_EXTRA_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "venv", ".venv"})
+
+# Fallback stack when planning/snapshot provide none (one Senior SWE on a generic stack).
+_DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [{"name": "default", "tools_services": []}]
+
+# Full file-selection sets for repo-context scanning, built once from the shared repo_utils
+# constants + the extras above and cached (the import lives below to keep the SE dependency
+# function-level; the sets are static so there is no need to rebuild them on every call).
+_CONTEXT_EXTENSIONS: Optional[frozenset[str]] = None
+_CONTEXT_EXCLUDE_DIRS: Optional[frozenset[str]] = None
+
+
+def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
+    """Return (extensions, exclude_dirs) for repo-context scanning, computed once and cached.
+
+    Reuses the shared full-stack code extensions / exclude dirs (so adding a code file type in one
+    place keeps every repo scanner consistent), unioned with this summariser's doc/config extras.
+    """
+    global _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
+    if _CONTEXT_EXTENSIONS is None or _CONTEXT_EXCLUDE_DIRS is None:
+        from software_engineering_team.shared.repo_utils import (
+            FULL_STACK_EXTENSIONS,
+            REPO_EXCLUDE_DIRS,
+        )
+
+        _CONTEXT_EXTENSIONS = frozenset(FULL_STACK_EXTENSIONS) | _CONTEXT_EXTRA_EXTENSIONS
+        _CONTEXT_EXCLUDE_DIRS = REPO_EXCLUDE_DIRS | _CONTEXT_EXTRA_EXCLUDE_DIRS
+    return _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
+
 
 def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
     """Read a short summary of repo structure/code for Senior SWE context."""
+    extensions, exclude_dirs = _context_file_filters()
+
     parts: List[str] = []
     total = 0
     try:
         for f in sorted(repo_path.rglob("*"))[:80]:
-            if not f.is_file() or f.suffix not in {
-                ".py",
-                ".ts",
-                ".js",
-                ".java",
-                ".html",
-                ".json",
-                ".yaml",
-                ".yml",
-            }:
+            if not f.is_file() or f.suffix not in extensions:
                 continue
-            if any(
-                skip in f.parts for skip in ("node_modules", ".git", "__pycache__", "venv", ".venv")
-            ):
+            if any(skip in f.parts for skip in exclude_dirs):
                 continue
             try:
                 content = f.read_text(encoding="utf-8", errors="replace")[:500]
@@ -100,28 +168,59 @@ def run_coding_team_orchestrator(
 
     # Create Task Graph with persist
     def _persist_graph() -> None:
+        # Persist the snapshot through the SAME store used for the resume read and cancel checks
+        # (the injected update_job_fn). On the software-engineering path that is the SE job record;
+        # the hardcoded coding_team store targets a record that is never created on that path, so
+        # the central job service's UPDATE-WHERE matches no row and the write — hence resume — is
+        # silently lost. The standalone coding_team path's default callback writes the same keys to
+        # the coding_team record exactly as before.
         snap = graph.snapshot()
-        update_job_task_graph(job_id, snap, cache_dir=cache_dir)
-        _update(phase=phase, status_text=status_text)
+        _update(
+            task_graph_snapshot=snap["tasks"],
+            agent_task_map=snap["agent_task_map"],
+            phase=phase,
+            status_text=status_text,
+        )
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
     phase = "task_graph"
     status_text = "Building task graph from plan"
 
-    # Tech Lead: plan → tasks + stacks
+    # The Tech Lead object is needed for the swarm coordinator (assignments/reviews) regardless of
+    # whether we plan fresh or resume, so build it unconditionally.
     llm = llm_getter("tech_lead")
     tech_lead = TechLeadAgent(llm)
-    out = tech_lead.run_plan_to_task_graph(plan_input)
-    tasks_raw = out.get("tasks") or []
-    stacks_raw = out.get("stacks") or [{"name": "default", "tools_services": []}]
 
-    for t in tasks_raw:
-        graph.add_task(
-            task_id=t["id"],
-            title=t.get("title", t["id"]),
-            description=t.get("description", ""),
-            dependencies=t.get("dependencies", []),
+    # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
+    # re-running the planning LLM and re-doing finished work. `_persist_graph` writes the task
+    # snapshot every round; the stacks are persisted alongside it on the fresh path below.
+    existing = _get_job(job_id) or {}
+    snapshot_tasks = existing.get("task_graph_snapshot") or []
+    if snapshot_tasks:
+        logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
+        graph.restore(
+            {
+                "tasks": snapshot_tasks,
+                "agent_task_map": existing.get("agent_task_map") or {},
+            }
         )
+        # In-flight tasks from the dead attempt may be half-done and their agent mapping is stale,
+        # so demote them to unassigned TO_DO; MERGED/FAILED are preserved (no re-work).
+        graph.reset_in_flight()
+        stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
+    else:
+        out = tech_lead.run_plan_to_task_graph(plan_input)
+        tasks_raw = out.get("tasks") or []
+        stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
+        for t in tasks_raw:
+            graph.add_task(
+                task_id=t["id"],
+                title=t.get("title", t["id"]),
+                description=t.get("description", ""),
+                dependencies=t.get("dependencies", []),
+            )
+        # Persist the stacks so a later retry can rebuild the workers without re-planning.
+        _update(stack_specs=stacks_raw)
     _persist_graph()
 
     # Build Senior SWE agents (one per stack)
@@ -156,8 +255,8 @@ def run_coding_team_orchestrator(
         update_fn=_update,
     )
 
-    merged_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.MERGED)
-    failed_count = sum(1 for t in graph.get_tasks() if t.status == TaskStatus.FAILED)
+    merged_count = graph.count_with_status(TaskStatus.MERGED)
+    failed_count = graph.count_with_status(TaskStatus.FAILED)
     # A job with failed tasks must not be presented as a clean success — surface a distinct
     # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     _update(
@@ -191,6 +290,12 @@ class CodingTeamSwarm:
         self.agent_ids = agent_ids
         self.llm_getter = llm_getter
         self.repo_context = _read_repo_context(path)
+        # Repo context only changes when merged work lands new files on the working tree, so cache
+        # the merged-task count the context reflects and re-read only when it advances (see run()).
+        self._context_merged_count = self._merged_count()
+
+    def _merged_count(self) -> int:
+        return self.graph.count_with_status(TaskStatus.MERGED)
 
     def _find_ready_tasks(self) -> List[Task]:
         return [
@@ -224,6 +329,12 @@ class CodingTeamSwarm:
         task = self.graph.get_task_for_agent(swe.agent_id)
         if not task:
             return
+        # Only (re)implement a task that is actively assigned for work. An IN_REVIEW task is awaiting
+        # Tech Lead review — re-running the engineer on it would regenerate code already under review
+        # and churn the loop. With un-assignment fixed this is belt-and-suspenders, but it makes the
+        # worker's contract explicit and robust against any upstream assignment slip.
+        if task.status != TaskStatus.IN_PROGRESS:
+            return
 
         update_fn(status_text=f"Implementing: {task.title}")
         result = swe.run_implement(task, self.path, repo_context=self.repo_context)
@@ -238,28 +349,42 @@ class CodingTeamSwarm:
                 changes_summary=result.get("changes_summary"),
             )
             self.graph.set_task_in_review(task.id)
-        elif result.get("status") == "failed":
-            logger.warning("Worker %s task %s failed: %s", swe.agent_id, task.id, result.get("error"))
-            self._handle_implement_failure(task, result)
+        else:
+            # Any non-review outcome — status="failed" (the LLM call raised) or status="in_progress"
+            # (the model set ready_for_review=false / asked for another pass) or any unexpected
+            # status — must be bounded. Otherwise the task stays IN_PROGRESS and assigned, its
+            # revision_count never advances, and the same full implement call repeats every round to
+            # the round cap, after which the task is neither MERGED nor FAILED and the job is reported
+            # a clean success despite incomplete work.
+            logger.warning(
+                "Worker %s task %s did not reach review (status=%s): %s",
+                swe.agent_id, task.id, result.get("status"), result.get("error"),
+            )
+            self._handle_incomplete_implementation(task, result)
 
-    def _handle_implement_failure(self, task: Task, result: Dict[str, Any]) -> None:
-        """Bound a failing implementation so it cannot spin the loop to max_rounds.
+    def _handle_incomplete_implementation(self, task: Task, result: Dict[str, Any]) -> None:
+        """Bound an implementation that did not reach review so it cannot spin the loop to max_rounds.
 
-        A `run_implement` that returns status="failed" (e.g. the LLM call raised) was previously
-        only logged, leaving the task IN_PROGRESS and assigned — so the same failing call repeated
-        every round until the round cap. Count each failure against the shared revision cap and,
-        on exhaustion, fail the task (and its dependents) terminally with the error recorded.
+        Covers both status="failed" (e.g. the LLM call raised) and status="in_progress" (the model
+        set ready_for_review=false). Previously only "failed" was handled and "in_progress" was
+        dropped entirely, leaving the task IN_PROGRESS and assigned — so the same call repeated every
+        round until the round cap. Count each occurrence against the shared revision cap and, on
+        exhaustion, fail the task (and its dependents) terminally with the reason recorded.
         """
+        if result.get("status") == "in_progress":
+            reason = "Engineer did not mark the work ready for review"
+        else:
+            reason = f"Implementation failed: {result.get('error') or 'unknown error'}"
         entry = {
             "source": "engineer",
-            "reason": f"Implementation failed: {result.get('error') or 'unknown error'}",
+            "reason": reason,
             "requested_changes": [],
         }
         feedback = list(task.revision_feedback or []) + [entry]
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
-                "Task %s implementation failed and exhausted revisions (%d); marking FAILED",
+                "Task %s did not reach review and exhausted revisions (%d); marking FAILED",
                 task.id, MAX_TASK_REVISIONS,
             )
             self.graph.update_task(
@@ -270,7 +395,7 @@ class CodingTeamSwarm:
             )
             self._cascade_fail_dependents(task.id)
             return
-        # Keep it with the same engineer for another bounded attempt; record the failure.
+        # Keep it with the same engineer for another bounded attempt; record the reason.
         self.graph.update_task(
             task.id,
             status=TaskStatus.IN_PROGRESS,
@@ -340,10 +465,12 @@ class CodingTeamSwarm:
         self.graph.update_task(
             task.id,
             status=TaskStatus.TO_DO,
-            assigned_agent_id=None,
             revision_count=revision_count,
             revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
+        # Release the task before the next round (status went to TO_DO above): it must be genuinely
+        # unassigned and its agent freed, or it stays mapped to its agent and can be double-assigned.
+        self.graph.unassign_task(task.id)
         return False
 
     def _review_and_merge(self, update_fn: Callable) -> None:
@@ -360,7 +487,7 @@ class CodingTeamSwarm:
             branch = task.feature_branch or f"feature/{task.id}"
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-            evidence = summary + (f"\n\n--- DIFF ---\n{diff}" if diff else "")
+            evidence = _build_review_evidence(summary, diff, _review_evidence_max_chars())
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,
@@ -486,6 +613,18 @@ class CodingTeamSwarm:
             if check_cancel and check_cancel():
                 _update(status="cancelled", status_text="Cancelled by user")
                 return
+
+            # Refresh the repo context when merged work has landed since the last read. The merged
+            # count is the right signal here: a task's files become part of the shared/integrated
+            # tree only once it merges (work in progress lives on per-worker feature branches), and
+            # a dependent task is not assignable until its dependencies are MERGED — so it always
+            # sees its prerequisites' code. This avoids a full repo walk on every idle round (e.g.
+            # while tasks sit in review or blocked); a one-time snapshot at construction would make a
+            # worker blind to earlier merged work and recreate it.
+            merged_now = self._merged_count()
+            if merged_now != self._context_merged_count:
+                self.repo_context = _read_repo_context(self.path)
+                self._context_merged_count = merged_now
 
             # Coordinator: assign ready tasks to free workers
             ready = self._find_ready_tasks()

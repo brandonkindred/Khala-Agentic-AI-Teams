@@ -217,7 +217,7 @@ def test_review_retries_transient_error_then_succeeds(monkeypatch):
     from coding_team.tech_lead_agent import agent as tl_mod
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     calls = {"n": 0}
 
     def flaky(agent, prompt):
@@ -242,7 +242,7 @@ def test_review_returns_error_after_exhausting_retries(monkeypatch):
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
 
     def boom(agent, prompt):
         raise RuntimeError("context overflow")
@@ -264,7 +264,7 @@ def test_review_missing_approved_is_infra_error_not_rejection(monkeypatch):
 
     monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
-    monkeypatch.setattr(tl_mod.time, "sleep", lambda *_a: None)
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
     # Valid JSON, but no verdict — e.g. a weak/over-context model that omits 'approved'.
     monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"reason": "hmm"})
     tl = tl_mod.TechLeadAgent(model=object())
@@ -563,7 +563,6 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
     # No job service in unit tests — skip the persistence write.
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     updates: List[Dict[str, Any]] = []
     plan = CodingTeamPlanInput(repo_path=str(tmp_path))
@@ -580,6 +579,310 @@ def test_status_text_reports_merged_and_failed_counts(tmp_path, monkeypatch):
     final = updates[-1]
     assert final["status"] == "completed_with_failures"  # a failed task is not a clean success
     assert "1 merged, 1 failed" in final["status_text"]
+
+
+# ----------------------------------------------------- real quality-gate path
+
+QG = "software_engineering_team.quality_gate_tools"
+
+
+def _make_real_swarm(tmp_path):
+    """A swarm WITHOUT the _run_quality_gates bypass, with one task already assigned to a1."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    return swarm, graph
+
+
+def _patch_gates(monkeypatch, *, build_ok=True, review_ok=True, build_raises=False):
+    import types
+
+    def build(*a, **k):
+        if build_raises:
+            raise RuntimeError("tool crashed")
+        return types.SimpleNamespace(success=build_ok, error="" if build_ok else "boom build")
+
+    monkeypatch.setattr(f"{QG}.run_build_verification", build)
+    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
+    monkeypatch.setattr(
+        f"{QG}.run_code_review",
+        lambda **k: types.SimpleNamespace(
+            approved=review_ok, issues=[] if review_ok else [{"type": "review", "error": "x"}]
+        ),
+    )
+
+
+def test_quality_gates_pass_sets_in_review(tmp_path, monkeypatch):
+    _patch_gates(monkeypatch, build_ok=True, review_ok=True)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
+def test_quality_gate_build_failure_returns_for_revision(tmp_path, monkeypatch):
+    _patch_gates(monkeypatch, build_ok=False)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO  # returned for revision
+    assert task.assigned_agent_id is None  # and unassigned
+
+
+def test_quality_gate_review_rejection_returns_for_revision(tmp_path, monkeypatch):
+    _patch_gates(monkeypatch, build_ok=True, review_ok=False)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
+def test_quality_gate_tool_exception_proceeds_to_review(tmp_path, monkeypatch):
+    """An unexpected quality-gate tool error is logged and the task still proceeds (best-effort)."""
+    _patch_gates(monkeypatch, build_raises=True)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW  # proceeded despite the tool error
+
+
+# ----------------------------------------------------- un-assignment / double-assignment guard
+
+
+def test_return_for_revision_unassigns_task(tmp_path, monkeypatch):
+    """A quality-gate rejection must genuinely unassign the task (TO_DO + agent freed), not leave it
+    mapped to its agent — otherwise it can be both re-served to that agent and assigned to a second
+    free agent next round (two workers on one task)."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 5)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")  # IN_PROGRESS, mapped to a1
+
+    ready = swarm._return_for_revision(graph.get_task("t1"), [{"type": "build", "error": "boom"}])
+
+    assert ready is False
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.TO_DO
+    assert task.assigned_agent_id is None  # genuinely unassigned (was a silent no-op before)
+    assert graph.get_task_for_agent("a1") is None  # agent freed
+    assert graph._agent_to_task.get("a1") is None  # mapping cleared
+    # It can now be cleanly reassigned (no "already has active task" rejection).
+    assert graph.assign_task_to_agent("t1", "a1") is True
+
+
+# ----------------------------------------------------- IN_REVIEW is not re-implemented
+
+
+def test_in_review_task_is_not_reimplemented(tmp_path):
+    """A worker whose mapped task is IN_REVIEW (awaiting Tech Lead review) must not re-run implement
+    — that would regenerate code under review and churn the loop."""
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")  # IN_REVIEW, still mapped to a1
+
+    swarm._implement_and_verify(worker, lambda **kw: None)
+
+    assert worker.implement_calls == []  # not re-implemented while under review
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+
+# ----------------------------------------------------- repo context visibility / refresh
+
+
+def test_read_repo_context_includes_markdown(tmp_path):
+    """Markdown docs must be visible in repo context so a docs task does not see an 'empty' repo."""
+    (tmp_path / "spec.md").write_text("# Spec\nThe plan lives here.")
+    ctx = orch_mod._read_repo_context(tmp_path)
+    assert "spec.md" in ctx
+    assert "The plan lives here." in ctx
+
+
+def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
+    """The swarm re-reads repo context each round so files written in earlier rounds become visible
+    to later implementations (instead of being recreated)."""
+    _patch_git(monkeypatch)
+    seen: List[str] = []
+
+    class ContextWorker(StubWorker):
+        def run_implement(self, task, path, repo_context=""):
+            seen.append(repo_context)
+            (Path(path) / "notes.md").write_text("notes round content")
+            return super().run_implement(task, path, repo_context=repo_context)
+
+    worker = ContextWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+
+    swarm.run(max_rounds=20)
+
+    # notes.md (written while implementing t1) is picked up by a later round's context refresh.
+    assert any("notes.md" in ctx for ctx in seen)
+
+
+# ----------------------------------------------------- resume from snapshot (no re-planning)
+
+
+def test_resume_from_snapshot_skips_planning(tmp_path, monkeypatch):
+    """A retry with a persisted task snapshot restores the graph and does NOT re-run planning;
+    MERGED tasks are preserved and in-flight tasks are reset to unassigned TO_DO."""
+
+    class ExplodingTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            raise AssertionError("planning must not run on resume")
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    captured: Dict[str, Any] = {}
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            captured["graph"] = self.graph
+
+        def run(self, **kw):
+            pass  # leave the restored state as-is so we can assert on it
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", ExplodingTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    snapshot = {
+        "task_graph_snapshot": [
+            {"id": "t1", "title": "T1", "status": "merged", "dependencies": []},
+            {
+                "id": "t2",
+                "title": "T2",
+                "status": "in_progress",
+                "dependencies": [],
+                "assigned_agent_id": "backend",
+            },
+        ],
+        "agent_task_map": {"backend": "t2"},
+        "stack_specs": [{"name": "backend", "tools_services": []}],
+    }
+    updates: List[Dict[str, Any]] = []
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: snapshot,
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    graph = captured["graph"]
+    assert graph.get_task("t1").status == TaskStatus.MERGED  # finished work preserved
+    assert graph.get_task("t2").status == TaskStatus.TO_DO  # in-flight reset
+    assert graph.get_task("t2").assigned_agent_id is None  # and unassigned
+    # No stack_specs persisted on the resume path (stacks came from the snapshot, not planning).
+    assert not any("stack_specs" in u for u in updates)
+    assert updates[-1]["status"] == "completed"  # 1 merged, 0 failed
+
+
+def test_fresh_run_persists_stack_specs(tmp_path, monkeypatch):
+    """The fresh (non-resume) path persists the stacks so a later retry can resume without
+    re-planning."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": ["pytest"]}],
+            }
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    plan = CodingTeamPlanInput(repo_path=str(tmp_path))
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        plan,
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},  # no snapshot → fresh path
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    stack_updates = [u for u in updates if "stack_specs" in u]
+    assert stack_updates, "fresh run must persist stack_specs for resume"
+    assert stack_updates[0]["stack_specs"] == [{"name": "backend", "tools_services": ["pytest"]}]
+
+
+# ----------------------------------------------------- task graph helpers (direct)
+
+
+def test_unassign_task_frees_agent_and_clears_assignment():
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.assign_task_to_agent("t1", "a1")
+
+    tg.unassign_task("t1")
+
+    assert tg.get_task("t1").assigned_agent_id is None
+    assert tg.get_task_for_agent("a1") is None
+    tg.unassign_task("missing")  # unknown id is a no-op, must not raise
+
+
+def test_reset_in_flight_demotes_only_nonterminal():
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t_inprog")
+    tg.assign_task_to_agent("t_inprog", "a1")
+    tg.add_task("t_review")
+    tg.assign_task_to_agent("t_review", "a2")
+    tg.set_task_in_review("t_review")
+    tg.add_task("t_merged")
+    tg.mark_branch_merged("t_merged")
+    tg.add_task("t_failed")
+    tg.update_task("t_failed", status=TaskStatus.FAILED)
+
+    tg.reset_in_flight()
+
+    assert tg.get_task("t_inprog").status == TaskStatus.TO_DO
+    assert tg.get_task("t_inprog").assigned_agent_id is None
+    assert tg.get_task("t_review").status == TaskStatus.TO_DO
+    assert tg.get_task("t_merged").status == TaskStatus.MERGED  # terminal untouched
+    assert tg.get_task("t_failed").status == TaskStatus.FAILED  # terminal untouched
+    assert tg._agent_to_task == {}
 
 
 def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
@@ -607,7 +910,6 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
     monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
     monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
     monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
-    monkeypatch.setattr(orch_mod, "update_job_task_graph", lambda *a, **k: None)
 
     updates: List[Dict[str, Any]] = []
     plan = CodingTeamPlanInput(repo_path=str(tmp_path))
@@ -623,3 +925,101 @@ def test_status_is_completed_when_no_failures(tmp_path, monkeypatch):
 
     assert updates[-1]["status"] == "completed"
     assert "1 merged, 0 failed" in updates[-1]["status_text"]
+
+
+# ----------------------------------------------------- in_progress (not-ready) is bounded
+
+
+def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
+    """A worker that never marks ready_for_review (status='in_progress') is bounded by the revision
+    cap and ends FAILED — not spinning to max_rounds and then reported as a clean success."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 3)
+    _patch_git(monkeypatch)
+
+    class NeverReadyWorker(StubWorker):
+        def run_implement(self, task, path, repo_context=""):
+            self.implement_calls.append(task)
+            return {
+                "status": "in_progress",  # model set ready_for_review=false
+                "feature_branch": f"feature/{task.id}",
+                "changes_summary": "",
+                "error": None,
+            }
+
+    worker = NeverReadyWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=50)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.FAILED  # bounded, not stuck IN_PROGRESS forever
+    assert task.revision_feedback[-1]["source"] == "engineer"
+    assert "ready for review" in task.revision_feedback[-1]["reason"].lower()
+    assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
+    assert swarm._is_complete()  # loop terminates
+
+
+# ----------------------------------------------------- bounded review evidence
+
+
+def test_build_review_evidence_passes_small_uncut():
+    ev = orch_mod._build_review_evidence("SUMMARY", "DIFFDATA", max_chars=1000)
+    assert "SUMMARY" in ev and "DIFFDATA" in ev and "--- DIFF ---" in ev
+
+
+def test_build_review_evidence_truncates_large_diff():
+    big = "D" * 100000
+    ev = orch_mod._build_review_evidence("SUM", big, max_chars=5000)
+    assert len(ev) <= 5000  # bounded, does not overflow the reviewer context
+    assert ev.startswith("SUM")
+    assert "diff truncated" in ev
+
+
+def test_build_review_evidence_no_diff():
+    assert orch_mod._build_review_evidence("ONLY SUMMARY", "", max_chars=1000) == "ONLY SUMMARY"
+
+
+def test_review_evidence_max_chars_env(monkeypatch):
+    default = orch_mod._DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "1234")
+    assert orch_mod._review_evidence_max_chars() == 1234
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "0")
+    assert orch_mod._review_evidence_max_chars() == default
+    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "junk")
+    assert orch_mod._review_evidence_max_chars() == default
+    monkeypatch.delenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", raising=False)
+    assert orch_mod._review_evidence_max_chars() == default
+
+
+# ----------------------------------------------------- implement description cap
+
+
+def test_implement_caps_large_task_description(tmp_path, monkeypatch):
+    """A pathologically large task description is capped in the implement prompt so it cannot
+    deterministically overflow the model context (and then be retried up to the cap)."""
+    from coding_team.senior_software_engineer_agent import agent as swe_mod
+
+    captured: Dict[str, str] = {}
+
+    class FakeAgent:
+        def __init__(self, **kw):
+            pass
+
+        def __call__(self, prompt):
+            captured["prompt"] = prompt
+            return (
+                '{"summary":"ok","files_to_create_or_edit":[],"commands_run":[],'
+                '"ready_for_review":true,"feature_branch":"feature/t1"}'
+            )
+
+    monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
+    swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
+    cap = swe_mod._IMPLEMENT_DESCRIPTION_MAX_CHARS
+    huge = "X" * (cap + 20000)
+    task = Task(id="t1", title="T1", description=huge)
+
+    swe.run_implement(task, tmp_path, repo_context="ctx")
+
+    assert huge not in captured["prompt"]  # full description not embedded
+    assert "X" * cap in captured["prompt"]  # capped slice is present

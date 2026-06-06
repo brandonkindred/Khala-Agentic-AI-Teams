@@ -8,15 +8,14 @@ from __future__ import annotations
 import json
 import logging
 import os
-import random
 import re
-import time
 from typing import Any, Dict, List
 
 from strands import Agent
 
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
+from llm_service import call_llm_with_retries
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +40,6 @@ def _review_retry_attempts() -> int:
     if retries < 0:
         retries = 2
     return retries + 1
-
-
-def _review_backoff_seconds(attempt: int, base: float = 1.5, cap: float = 20.0) -> float:
-    """Jittered exponential backoff between review retries: min(base**attempt + U(0,0.5), cap)."""
-    return min(base**attempt + random.uniform(0.0, 0.5), cap)
 
 
 def _plan_text(plan: CodingTeamPlanInput) -> str:
@@ -203,36 +197,35 @@ class TechLeadAgent:
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         attempts = _review_retry_attempts()
-        last_err: Exception | None = None
-        for i in range(attempts):
-            try:
-                data = _agent_call_json(self._review_agent, user)
-                # A response that parses as JSON but carries no verdict (missing/null "approved")
-                # is not a substantive rejection — it's an unusable review. Treat it like any other
-                # failed attempt so it retries and ultimately surfaces error=True (fail once),
-                # rather than silently becoming approved=False and burning the revision loop.
-                if data.get("approved") is None:
-                    raise ValueError(f"review response missing 'approved' verdict: {data!r}")
-            except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
-                last_err = e
-                logger.warning(
-                    "Tech Lead code_review attempt %d/%d failed: %s", i + 1, attempts, e
-                )
-                if i + 1 < attempts:
-                    time.sleep(_review_backoff_seconds(i))
-                continue
+
+        def _attempt_review() -> Dict[str, Any]:
+            data = _agent_call_json(self._review_agent, user)
+            # A response that parses as JSON but carries no verdict (missing/null "approved") is not
+            # a substantive rejection — it's an unusable review. Raise so the shared retry envelope
+            # retries it and it ultimately surfaces error=True (fail once), rather than silently
+            # becoming approved=False and burning the revision loop.
+            if data.get("approved") is None:
+                raise ValueError(f"review response missing 'approved' verdict: {data!r}")
+            return data
+
+        # Reuse the platform's jittered-exponential-backoff retry envelope rather than a bespoke
+        # loop, so review retry/backoff tuning stays consistent with every other LLM caller.
+        try:
+            data = call_llm_with_retries(_attempt_review, max_attempts=attempts)
+        except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
+            # Flag an infrastructure failure (error=True) distinctly from a substantive rejection so
+            # the orchestrator fails the task once with a clear diagnostic rather than re-sending the
+            # same failing prompt through the revision loop every round.
+            logger.warning("Tech Lead code_review failed after %d attempts: %s", attempts, e)
             return {
-                "approved": bool(data.get("approved")),
-                "error": False,
-                "reason": str(data.get("reason") or ""),
-                "requested_changes": list(data.get("requested_changes") or []),
+                "approved": False,
+                "error": True,
+                "reason": f"Review could not be completed after {attempts} attempts: {e}",
+                "requested_changes": [],
             }
-        # Every attempt failed. Flag an infrastructure failure (error=True) distinctly from a
-        # substantive rejection so the orchestrator fails the task once with a clear diagnostic
-        # rather than re-sending the same failing prompt through the revision loop every round.
         return {
-            "approved": False,
-            "error": True,
-            "reason": f"Review could not be completed after {attempts} attempts: {last_err}",
-            "requested_changes": [],
+            "approved": bool(data.get("approved")),
+            "error": False,
+            "reason": str(data.get("reason") or ""),
+            "requested_changes": list(data.get("requested_changes") or []),
         }

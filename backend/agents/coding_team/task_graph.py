@@ -13,6 +13,11 @@ from coding_team.models import Task, TaskStatus
 
 logger = logging.getLogger(__name__)
 
+# Sentinel distinguishing "argument not supplied" from an explicit None in update_task, so a caller
+# can clear an assignment with assigned_agent_id=None without it being indistinguishable from the
+# default. None previously meant "leave untouched", which silently dropped clear requests.
+_UNSET: Any = object()
+
 
 class TaskGraphService:
     """
@@ -80,12 +85,18 @@ class TaskGraphService:
         self,
         task_id: str,
         status: Optional[TaskStatus] = None,
-        assigned_agent_id: Optional[str] = None,
+        assigned_agent_id: Any = _UNSET,
         feature_branch: Optional[str] = None,
         merged_at: Optional[datetime] = None,
         **kwargs: Any,
     ) -> Optional[Task]:
-        """Update task fields. Returns the task if found."""
+        """Update task fields. Returns the task if found.
+
+        Passing `assigned_agent_id=None` explicitly clears the assignment AND releases the agent
+        (equivalent to `unassign_task`); omitting it leaves the assignment untouched. Clearing must
+        free the agent->task mapping too — nulling only the back-reference would leave the agent
+        marked busy, which is the silent-no-op bug this sentinel design removes.
+        """
         task = self._tasks.get(task_id)
         if not task:
             return None
@@ -97,8 +108,12 @@ class TaskGraphService:
             # persisted right after the failure would still report the agent as occupied.
             if status == TaskStatus.FAILED:
                 self._free_agent(task)
-        if assigned_agent_id is not None:
-            task.assigned_agent_id = assigned_agent_id
+        if assigned_agent_id is not _UNSET:
+            if assigned_agent_id is None:
+                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
+                task.assigned_agent_id = None
+            else:
+                task.assigned_agent_id = assigned_agent_id
         if feature_branch is not None:
             task.feature_branch = feature_branch
         if merged_at is not None:
@@ -109,6 +124,43 @@ class TaskGraphService:
         self._maybe_persist()
         return task
 
+    def unassign_task(self, task_id: str) -> None:
+        """Clear a task's agent assignment and release the agent that held it.
+
+        Thin wrapper over `update_task(task_id, assigned_agent_id=None)` for callers whose intent is
+        purely to release a task (e.g. a quality-gate rejection demoting it to TO_DO): the task must
+        become genuinely unassigned so a free agent can re-pick it and the old agent is freed —
+        otherwise the task is TO_DO yet still mapped to its agent, and the next round can both
+        re-serve it to that agent and assign it to a second free agent (two workers, one task).
+
+        Preconditions:
+            - `task_id` refers to a task tracked by this graph (no-op if it does not).
+        Postconditions:
+            - `task.assigned_agent_id is None` and no agent in `_agent_to_task` maps to `task_id`.
+        """
+        self.update_task(task_id, assigned_agent_id=None)
+
+    def reset_in_flight(self) -> None:
+        """Demote every non-terminal in-flight task to TO_DO and release its agent.
+
+        Used on resume from a persisted snapshot (e.g. a Temporal retry of the same job): a task
+        left IN_PROGRESS or IN_REVIEW when the previous attempt died may hold only partial work, and
+        its agent mapping refers to workers that no longer exist in this run. Demoting these to
+        unassigned TO_DO lets the fresh swarm re-plan and re-pick them deterministically. MERGED and
+        FAILED tasks (terminal) are left untouched. Agent release routes through `_free_agent` (the
+        single place that maintains the agent->task mapping invariant) rather than clearing the map
+        directly, so the two stay consistent if that mapping ever gains structure.
+
+        Postconditions:
+            - No task is IN_PROGRESS or IN_REVIEW; no in-flight task retains an agent mapping.
+        """
+        for task in self._tasks.values():
+            if task.status in (TaskStatus.IN_PROGRESS, TaskStatus.IN_REVIEW):
+                task.status = TaskStatus.TO_DO
+                self._free_agent(task)  # uses task.assigned_agent_id — must run before we null it
+                task.assigned_agent_id = None
+        self._maybe_persist()
+
     def get_tasks(self) -> List[Task]:
         """Return all tasks (copy)."""
         return list(self._tasks.values())
@@ -116,6 +168,10 @@ class TaskGraphService:
     def get_task(self, task_id: str) -> Optional[Task]:
         """Return task by id."""
         return self._tasks.get(task_id)
+
+    def count_with_status(self, status: TaskStatus) -> int:
+        """Number of tasks currently in *status*. Single source of truth for status tallies."""
+        return sum(1 for t in self._tasks.values() if t.status == status)
 
     def _dependencies_satisfied(self, task_id: str) -> bool:
         """True if all dependency tasks are merged."""

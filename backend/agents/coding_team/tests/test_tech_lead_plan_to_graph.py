@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
-
 from coding_team.models import CodingTeamPlanInput
+from coding_team.tech_lead_agent import agent as tl_mod
 from coding_team.tech_lead_agent.agent import TechLeadAgent
 
 
-def test_tech_lead_plan_to_task_graph_output_structure() -> None:
+def test_tech_lead_plan_to_task_graph_output_structure(monkeypatch) -> None:
     """Given CodingTeamPlanInput, Tech Lead output contains tasks (with deps) and stacks list."""
     plan = CodingTeamPlanInput(
         requirements_title="Test Project",
@@ -18,28 +17,33 @@ def test_tech_lead_plan_to_task_graph_output_structure() -> None:
         repo_path="/tmp/repo",
         architecture_overview="Backend FastAPI, frontend Angular.",
     )
-    mock_llm = MagicMock()
-    mock_llm.complete_json.return_value = {
-        "tasks": [
-            {
-                "id": "t1",
-                "title": "Backend API",
-                "description": "Implement endpoints",
-                "dependencies": [],
-            },
-            {
-                "id": "t2",
-                "title": "Frontend UI",
-                "description": "Implement UI",
-                "dependencies": ["t1"],
-            },
-        ],
-        "stacks": [
-            {"name": "backend", "tools_services": ["Python", "FastAPI"]},
-            {"name": "frontend", "tools_services": ["Angular", "TypeScript"]},
-        ],
-    }
-    agent = TechLeadAgent(llm=mock_llm)
+    # The Tech Lead drives a strands Agent via _agent_call_json; stub both so no real LLM runs.
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "tasks": [
+                {
+                    "id": "t1",
+                    "title": "Backend API",
+                    "description": "Implement endpoints",
+                    "dependencies": [],
+                },
+                {
+                    "id": "t2",
+                    "title": "Frontend UI",
+                    "description": "Implement UI",
+                    "dependencies": ["t1"],
+                },
+            ],
+            "stacks": [
+                {"name": "backend", "tools_services": ["Python", "FastAPI"]},
+                {"name": "frontend", "tools_services": ["Angular", "TypeScript"]},
+            ],
+        },
+    )
+    agent = TechLeadAgent(model=object())
     out = agent.run_plan_to_task_graph(plan)
     assert "tasks" in out
     assert "stacks" in out
@@ -56,16 +60,20 @@ def test_tech_lead_plan_to_task_graph_output_structure() -> None:
     assert stacks[1]["name"] == "frontend"
 
 
-def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults() -> None:
-    """When LLM fails, return empty tasks and default stack."""
+def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) -> None:
+    """When the LLM call fails, return empty tasks and a single default stack."""
     plan = CodingTeamPlanInput(
         requirements_title="X",
         requirements_description="",
         repo_path="/tmp",
     )
-    mock_llm = MagicMock()
-    mock_llm.complete_json.side_effect = RuntimeError("LLM error")
-    agent = TechLeadAgent(llm=mock_llm)
+
+    def boom(agent, prompt):
+        raise RuntimeError("LLM error")
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
+    agent = TechLeadAgent(model=object())
     out = agent.run_plan_to_task_graph(plan)
     assert out["tasks"] == []
     assert len(out["stacks"]) == 1

@@ -146,3 +146,108 @@ def test_create_task_graph() -> None:
     assert tg.job_id == "job-1"
     tg.add_task("t1", title="T1")
     assert tg.get_task("t1") is not None
+
+
+def test_snapshot_restore_round_trips_subtasks() -> None:
+    """A task's subtasks survive a snapshot → restore round-trip (serialization + reconstruction)."""
+    from coding_team.models import Subtask
+
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task(
+        "t1",
+        title="T1",
+        subtasks=[
+            Subtask(id="s1", title="S1", description="first", status=TaskStatus.MERGED),
+            Subtask(id="s2", title="S2", dependencies=["s1"]),
+        ],
+    )
+
+    tg2 = TaskGraphService(job_id="j1")
+    tg2.restore(tg.snapshot())
+
+    sub = tg2.get_task("t1").subtasks
+    assert [s.id for s in sub] == ["s1", "s2"]
+    assert sub[0].status == TaskStatus.MERGED
+    assert sub[1].dependencies == ["s1"]
+
+
+def test_get_next_eligible_subtask() -> None:
+    """Returns the first subtask whose subtask-deps are all MERGED; None when blocked/none/empty."""
+    from coding_team.models import Subtask
+
+    tg = TaskGraphService(job_id="j1")
+    assert tg.get_next_eligible_subtask("missing") is None  # unknown task
+    tg.add_task("t0", title="no subs")
+    assert tg.get_next_eligible_subtask("t0") is None  # task without subtasks
+    tg.add_task(
+        "t1",
+        title="T1",
+        subtasks=[
+            Subtask(id="s1", title="S1", status=TaskStatus.MERGED),
+            Subtask(id="s2", title="S2", dependencies=["s1"]),
+            Subtask(id="s3", title="S3", dependencies=["s2"]),  # blocked: s2 not merged
+        ],
+    )
+    nxt = tg.get_next_eligible_subtask("t1")
+    assert nxt.id == "s2"  # s1 merged → s2 eligible, s3 still blocked
+
+
+def test_missing_task_operations_are_safe_noops() -> None:
+    """Mutating operations on an unknown task id return falsy/None instead of raising."""
+    tg = TaskGraphService(job_id="j1")
+    assert tg.update_task("nope", status=TaskStatus.MERGED) is None
+    assert tg.mark_branch_merged("nope") is False
+    assert tg.set_task_in_review("nope") is False
+    assert tg.assign_task_to_agent("nope", "a1") is False
+
+
+def test_persist_callback_exception_is_swallowed() -> None:
+    """A failing persist callback must not break a graph mutation (_maybe_persist guards it)."""
+
+    def boom() -> None:
+        raise RuntimeError("persist down")
+
+    tg = TaskGraphService(job_id="j1", persist_callback=boom)
+    tg.add_task("t1", title="T1")  # must not raise despite the failing callback
+    assert tg.get_task("t1") is not None
+
+
+def test_update_task_clears_assignment_and_frees_agent() -> None:
+    """update_task(assigned_agent_id=None) clears the back-reference AND frees the agent mapping."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.assign_task_to_agent("t1", "a1")
+    assert tg.get_task_for_agent("a1").id == "t1"
+
+    tg.update_task("t1", status=TaskStatus.TO_DO, assigned_agent_id=None)
+
+    assert tg.get_task("t1").assigned_agent_id is None
+    assert tg.get_task_for_agent("a1") is None  # agent freed, not silently left busy (no-op bug)
+
+
+def test_update_task_omitting_assignment_leaves_it_untouched() -> None:
+    """Omitting assigned_agent_id must not clobber an existing assignment (sentinel default)."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.assign_task_to_agent("t1", "a1")
+
+    tg.update_task("t1", feature_branch="feature/t1")  # assigned_agent_id not supplied
+
+    assert tg.get_task("t1").assigned_agent_id == "a1"  # preserved
+    assert tg.get_task_for_agent("a1").id == "t1"
+    assert tg.get_task("t1").feature_branch == "feature/t1"
+
+
+def test_count_with_status() -> None:
+    """count_with_status tallies tasks in a given status (single source of truth for tallies)."""
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1")
+    tg.add_task("t2")
+    tg.add_task("t3")
+    tg.mark_branch_merged("t1")
+    tg.update_task("t2", status=TaskStatus.FAILED)
+
+    assert tg.count_with_status(TaskStatus.MERGED) == 1
+    assert tg.count_with_status(TaskStatus.FAILED) == 1
+    assert tg.count_with_status(TaskStatus.TO_DO) == 1
+    assert tg.count_with_status(TaskStatus.IN_REVIEW) == 0
