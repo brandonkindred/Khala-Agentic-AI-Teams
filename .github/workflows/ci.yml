@@ -123,6 +123,11 @@ jobs:
               - 'backend/agents/coding_team/**'
               - 'backend/agents/planning_v3_team/**'
               - 'backend/agents/agent_repair_team/**'
+              # SE/coding_team's Senior SWE imports the shared repo-inspection tools.
+              - 'backend/agents/agent_repo_tools/**'
+            # Read-only repo-inspection tools shared by repo-backed agents.
+            agent_repo_tools:
+              - 'backend/agents/agent_repo_tools/**'
             blogging:
               - 'backend/agents/blogging/**'
               - 'backend/agents/api/**'
@@ -210,6 +215,7 @@ jobs:
               - '!backend/agents/coding_team/**'
               - '!backend/agents/planning_v3_team/**'
               - '!backend/agents/agent_repair_team/**'
+              - '!backend/agents/agent_repo_tools/**'
               - '!backend/agents/api/**'
               - '!backend/agents/blogging/**'
               - '!backend/blogging_service/**'
@@ -256,6 +262,7 @@ jobs:
           F_SOCIAL_MARKETING: ${{ steps.filter.outputs.social_marketing }}
           F_AGENT_PROVISIONING: ${{ steps.filter.outputs.agent_provisioning }}
           F_SALES: ${{ steps.filter.outputs.sales }}
+          F_AGENT_REPO_TOOLS: ${{ steps.filter.outputs.agent_repo_tools }}
           F_DOCKER_BLOGGING_SERVICE: ${{ steps.filter.outputs.docker_blogging_service }}
           F_DOCKER_TEAM_SERVICE: ${{ steps.filter.outputs.docker_team_service }}
         run: |
@@ -313,10 +320,14 @@ jobs:
                   "tests": "sales_team/tests/",
                   "source": "sales_team",
               },
+              "agent_repo_tools": {
+                  "tests": "agent_repo_tools/tests/",
+                  "source": "agent_repo_tools",
+              },
           }
 
           misc_entry = {
-              "name": "Misc Teams (market_research + soc2 + social_marketing + sales)",
+              "name": "Misc Teams (market_research + soc2 + social_marketing + sales + agent_repo_tools)",
               "tests": "BATCHED",
               "source": "BATCHED",
               "batched_teams": [v for v in misc_teams.values()],
