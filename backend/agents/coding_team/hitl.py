@@ -240,6 +240,29 @@ def answers_to_resolved(
     return resolved
 
 
+def decision_qa(entry: Dict[str, Any]) -> "tuple[str, str]":
+    """Extract the (question, answer) display strings from a resolved/submitted decision record.
+
+    Tolerates the several decision shapes the gate produces — resolved records (``question_text`` +
+    ``answer``) and raw submitted answers (``selected_option_id`` / ``other_text``) — so every
+    renderer derives the same question→answer text from one fallback chain instead of re-spelling it.
+
+    Postconditions:
+        - Returns ``(question, answer)`` as strings (either may be empty when the record lacks it).
+    """
+    question = str(
+        entry.get("question_text") or entry.get("question") or entry.get("question_id") or ""
+    )
+    answer = str(
+        entry.get("answer")
+        or entry.get("selected_answer")
+        or entry.get("other_text")
+        or entry.get("selected_option_id")
+        or ""
+    )
+    return question, answer
+
+
 def is_terminal(job_data: Dict[str, Any]) -> bool:
     """True when a job will not resume on its own (terminal status or cancellation requested)."""
     if not job_data:

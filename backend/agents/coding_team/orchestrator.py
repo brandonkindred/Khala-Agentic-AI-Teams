@@ -130,9 +130,9 @@ def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
     for r in resolved or []:
         if not isinstance(r, dict):
             continue
-        q = r.get("question_text") or r.get("question_id") or ""
-        a = r.get("answer") or r.get("selected_option_id") or r.get("other_text") or ""
-        lines.append(f"{q} → {a}" if q else str(a))
+        q, a = hitl.decision_qa(r)
+        if q or a:
+            lines.append(f"{q} → {a}" if q else a)
     body = "\n".join(f"- {ln}" for ln in lines if ln)
     return (
         (

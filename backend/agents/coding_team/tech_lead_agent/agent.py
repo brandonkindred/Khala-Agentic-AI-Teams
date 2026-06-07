@@ -13,6 +13,7 @@ from typing import Any, Dict, List
 
 from strands import Agent
 
+from coding_team.hitl import decision_qa
 from coding_team.hitl import normalize_open_questions as _normalize_open_questions
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
@@ -56,14 +57,7 @@ def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
     for entry in resolved or []:
         if not isinstance(entry, dict):
             continue
-        q = entry.get("question_text") or entry.get("question") or entry.get("question_id") or ""
-        a = (
-            entry.get("answer")
-            or entry.get("selected_answer")
-            or entry.get("other_text")
-            or entry.get("selected_option_id")
-            or ""
-        )
+        q, a = decision_qa(entry)
         if q or a:
             lines.append(f"- {q} → {a}")
     return "\n".join(lines)
