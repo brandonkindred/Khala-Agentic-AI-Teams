@@ -9,6 +9,7 @@ safety page-cap is enforced.
 """
 
 import logging
+import re
 import sys
 from pathlib import Path
 from unittest.mock import patch
@@ -51,12 +52,34 @@ class _FakeIssuesResp:
         return self._json
 
 
-class _FakeIssuesClient:
-    """Async-context-manager client returning queued responses, recording calls."""
+class _FakeDepResp:
+    """Stand-in for an httpx.Response from GET /issues/{n}/dependencies/blocked_by."""
 
-    def __init__(self, responses):
+    def __init__(self, status_code=200, json_data=None, raise_exc=None):
+        self.status_code = status_code
+        self._json = json_data if json_data is not None else []
+        self._raise_exc = raise_exc
+
+    def json(self):
+        return self._json
+
+
+_BLOCKED_BY_RE = re.compile(r"/issues/(\d+)/dependencies/blocked_by$")
+
+
+class _FakeIssuesClient:
+    """Async-context-manager client returning queued responses, recording calls.
+
+    Issues-list pages are served FIFO from ``responses``; ``blocked_by`` dependency
+    requests are routed by issue number to ``dependency_responses`` (default: an empty
+    200), so dependency enrichment never consumes an issues-list response.
+    """
+
+    def __init__(self, responses, dependency_responses=None):
         self._responses = list(responses)
-        self.calls = []  # list of (url, params)
+        self._dependency_responses = dict(dependency_responses or {})
+        self.calls = []  # list of (url, params) for issues-list requests
+        self.dep_calls = []  # list of issue numbers whose dependencies were fetched
 
     async def __aenter__(self):
         return self
@@ -65,8 +88,26 @@ class _FakeIssuesClient:
         return False
 
     async def get(self, url, headers=None, params=None):
+        match = _BLOCKED_BY_RE.search(url)
+        if match:
+            number = int(match.group(1))
+            self.dep_calls.append(number)
+            resp = self._dependency_responses.get(number, _FakeDepResp(200, []))
+            if resp._raise_exc is not None:
+                raise resp._raise_exc
+            return resp
         self.calls.append((url, params))
         return self._responses.pop(0)
+
+
+def _dep(number, *, state="open", title=None):
+    """A dependency object as GitHub returns it on the blocked_by endpoint."""
+    return {
+        "number": number,
+        "state": state,
+        "title": title if title is not None else f"Dependency {number}",
+        "html_url": f"https://github.com/acme/widget/issues/{number}",
+    }
 
 
 def _issue(number, *, title=None, body="body text", labels=None, html_url=None):
@@ -269,3 +310,121 @@ def test_issues_stops_at_page_cap_and_warns(mock_cfg, mock_cred, monkeypatch, ca
     # the still-present "next" link into page 3.
     assert len(fake.calls) == 2
     assert any("page cap" in rec.message for rec in caplog.records)
+
+
+# ---------------------------------------------------------------------------
+# Dependency enrichment: blocked_by relationships drive the picker indicator
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_issue_with_open_dependency_is_blocked(mock_cfg, mock_cred):
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={1: _FakeDepResp(200, [_dep(3, state="open"), _dep(5, state="closed")])},
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is True
+    assert item["open_dependencies"] == [3]
+    assert {d["number"]: d["state"] for d in item["dependencies"]} == {3: "open", 5: "closed"}
+    assert fake.dep_calls == [1]
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_issue_with_all_closed_dependencies_not_blocked(mock_cfg, mock_cred):
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={1: _FakeDepResp(200, [_dep(3, state="closed"), _dep(5, state="closed")])},
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is False
+    assert item["open_dependencies"] == []
+    assert [d["number"] for d in item["dependencies"]] == [3, 5]
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_issue_with_no_dependencies(mock_cfg, mock_cred):
+    # No queued dependency response → the fake returns an empty 200.
+    fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is False
+    assert item["dependencies"] == []
+    assert item["open_dependencies"] == []
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_dependency_endpoint_404_treated_as_no_deps(mock_cfg, mock_cred):
+    # 404 = issue dependencies feature not enabled for the repo.
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={1: _FakeDepResp(404)},
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is False
+    assert item["dependencies"] == []
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_one_dependency_fetch_failure_does_not_fail_list(mock_cfg, mock_cred):
+    # Issue #1's dependency lookup raises; issue #2's succeeds. The whole list must
+    # still return 200 with #1 degraded to empty deps and #2 enriched.
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1), _issue(2)])],
+        dependency_responses={
+            1: _FakeDepResp(raise_exc=RuntimeError("boom")),
+            2: _FakeDepResp(200, [_dep(9, state="open")]),
+        },
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    by_number = {item["number"]: item for item in resp.json()}
+    assert by_number[1]["blocked"] is False
+    assert by_number[1]["dependencies"] == []
+    assert by_number[2]["blocked"] is True
+    assert by_number[2]["open_dependencies"] == [9]
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_dependency_concurrency_knob_respected(mock_cfg, mock_cred, monkeypatch):
+    # A small concurrency bound must not drop any dependency fetch.
+    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "2")
+    issues = [_issue(n) for n in (1, 2, 3, 4, 5)]
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, issues)],
+        dependency_responses={n: _FakeDepResp(200, [_dep(100 + n, state="open")]) for n in (1, 2, 3, 4, 5)},
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    assert sorted(fake.dep_calls) == [1, 2, 3, 4, 5]
+    assert all(item["blocked"] for item in resp.json())
+
+
+def test_github_dependency_concurrency_falls_back_on_garbage(monkeypatch):
+    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "not-a-number")
+    assert integrations._github_dependency_concurrency() == 8
+    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "0")
+    assert integrations._github_dependency_concurrency() == 8
+    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "4")
+    assert integrations._github_dependency_concurrency() == 4
+    monkeypatch.delenv("GITHUB_DEPENDENCY_CONCURRENCY", raising=False)
+    assert integrations._github_dependency_concurrency() == 8

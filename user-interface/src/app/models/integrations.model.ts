@@ -107,6 +107,13 @@ export interface GitHubConfigUpdate {
   repo_path: string;
 }
 
+/** A single issue this issue is blocked by (a GitHub "blocked by" dependency). */
+export interface GitHubDependencyRef {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+}
+
 /** Single GitHub issue item from GET /api/integrations/github/issues. */
 export interface GitHubIssueItem {
   number: number;
@@ -114,6 +121,12 @@ export interface GitHubIssueItem {
   body_preview: string;
   labels: string[];
   html_url: string;
+  /** All issues this issue is blocked by ("depends on"). */
+  dependencies: GitHubDependencyRef[];
+  /** Numbers of dependencies still open (drives the blocked indicator). */
+  open_dependencies: number[];
+  /** True while any dependency is still open. */
+  blocked: boolean;
 }
 
 /** Request body for POST /api/integrations/github/run-issue. */
