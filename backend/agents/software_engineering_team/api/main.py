@@ -80,9 +80,7 @@ def _start_stale_job_monitor_once() -> None:
         if _stale_monitor_started:
             return
 
-        def _monitor() -> (
-            None
-        ):  # pragma: no cover  # integration-only: infinite-loop background thread with time.sleep
+        def _monitor() -> None:  # pragma: no cover  # integration-only: infinite-loop background thread with time.sleep
             while True:
                 try:
                     mark_stale_jobs_failed(
@@ -136,9 +134,7 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
 
 
 @asynccontextmanager
-async def _lifespan(
-    app: FastAPI,
-):  # pragma: no cover  # integration-only: ASGI startup/shutdown hooks (Temporal + job store)
+async def _lifespan(app: FastAPI):  # pragma: no cover  # integration-only: ASGI startup/shutdown hooks (Temporal + job store)
     """Start Temporal worker on startup if TEMPORAL_ADDRESS is set; mark jobs failed on shutdown."""
     try:
         from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
@@ -568,9 +564,7 @@ def _run_orchestrator_background(
             planning_only=planning_only,
             sprint_id=sprint_id,
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Orchestrator failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
     finally:  # pragma: no cover  # integration-only: paired with integration-only try block
@@ -583,9 +577,7 @@ def _run_retry_background(job_id: str) -> None:
         from orchestrator import run_failed_tasks
 
         run_failed_tasks(job_id)
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Retry orchestrator failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
@@ -662,9 +654,7 @@ def run_team(request: RunTeamRequest) -> RunTeamResponse:
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start run-team execution")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=f"Failed to start workflow: {e}") from e
@@ -721,9 +711,7 @@ async def run_team_upload(
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start run-team/upload execution")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=f"Failed to start workflow: {e}") from e
@@ -933,9 +921,7 @@ def retry_failed_tasks(job_id: str) -> RetryResponse:
             thread = threading.Thread(target=_run_retry_background, args=(job_id,))
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start retry-failed workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1138,9 +1124,7 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
                 daemon=True,
             )
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start resume workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1240,9 +1224,7 @@ def restart_run_team_job(job_id: str) -> RunTeamResponse:
                 daemon=True,
             )
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start restart workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1292,9 +1274,7 @@ def resume_after_llm_check(job_id: str) -> RetryResponse:
             thread = threading.Thread(target=_run_retry_background, args=(job_id,))
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start resume-after-llm-check workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1489,9 +1469,7 @@ def architect_design(request: ArchitectDesignRequest) -> ArchitectDesignResponse
             reliability_model=getattr(architecture, "reliability_model", "") or "",
             summary=arch_output.summary or "",
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Architect design failed")
         raise HTTPException(status_code=500, detail=str(e)) from e
 
@@ -1681,9 +1659,7 @@ def _run_frontend_code_v2_background(
             error=result.failure_reason if not result.success else None,
             current_phase=result.current_phase.value if result.current_phase else "deliver",
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Frontend-code-v2 workflow failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
@@ -1732,9 +1708,7 @@ def run_frontend_code_v2(request: FrontendCodeV2RunRequest) -> FrontendCodeV2Run
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start frontend-code-v2 workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -1939,9 +1913,7 @@ def _run_backend_code_v2_background(
             error=result.failure_reason if not result.success else None,
             current_phase=result.current_phase.value if result.current_phase else "deliver",
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Backend-code-v2 workflow failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
@@ -1990,9 +1962,7 @@ def run_backend_code_v2(request: BackendCodeV2RunRequest) -> BackendCodeV2RunRes
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start backend-code-v2 workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -2126,16 +2096,12 @@ def auto_answer_run_team_question(
             risks=result.risks,
             applied=False,
         )
-    except (
-        ImportError
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except ImportError as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         raise HTTPException(
             status_code=500,
             detail=f"Auto-answer module not available: {e}",
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Auto-answer failed")
         raise HTTPException(
             status_code=500,
@@ -2291,9 +2257,7 @@ def _run_product_analysis_background(
             iterations=result.iterations,
             validated_spec_path=result.validated_spec_path,
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Product analysis workflow failed")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
@@ -2354,9 +2318,7 @@ def run_product_analysis(request: ProductAnalysisRunRequest) -> ProductAnalysisR
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start product-analysis workflow")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -2438,9 +2400,7 @@ def start_product_analysis_from_spec(request: StartFromSpecRequest) -> ProductAn
             )
             thread.daemon = True
             thread.start()
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Failed to start product-analysis workflow from spec")
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
         raise HTTPException(status_code=503, detail=str(e)) from e
@@ -2628,16 +2588,12 @@ def auto_answer_product_analysis_question(
             risks=result.risks,
             applied=False,
         )
-    except (
-        ImportError
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except ImportError as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         raise HTTPException(
             status_code=500,
             detail=f"Auto-answer module not available: {e}",
         )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Auto-answer failed")
         raise HTTPException(
             status_code=500,

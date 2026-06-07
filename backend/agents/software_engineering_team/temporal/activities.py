@@ -231,6 +231,7 @@ def run_backend_code_v2_activity(
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
+
 def _run_product_analysis_impl(
     job_id: str,
     repo_path: str,
@@ -318,12 +319,7 @@ def parse_spec_activity(
         from software_engineering_team.shared.job_store import JOB_STATUS_RUNNING
 
         path = Path(repo_path).resolve()
-        update_job(
-            job_id,
-            status=JOB_STATUS_RUNNING,
-            phase="product_analysis",
-            status_text="Starting pipeline",
-        )
+        update_job(job_id, status=JOB_STATUS_RUNNING, phase="product_analysis", status_text="Starting pipeline")
 
         from spec_parser import (
             gather_context_files,
@@ -343,9 +339,7 @@ def parse_spec_activity(
 
         context_files = gather_context_files(path)
         requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
-        update_job(
-            job_id, requirements_title=requirements.title, status_text="Specification parsed"
-        )
+        update_job(job_id, requirements_title=requirements.title, status_text="Specification parsed")
 
         _check_cancellation(job_id)
         plan_dir = ensure_plan_dir(path)
@@ -438,12 +432,8 @@ def plan_project_activity(
             if prd_content:
                 req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
             reqs = ProductRequirements(
-                title="Project",
-                description=req_desc or "See planning artifacts.",
-                acceptance_criteria=["Deliver according to spec."],
-                constraints=[],
-                priority="medium",
-                metadata={},
+                title="Project", description=req_desc or "See planning artifacts.",
+                acceptance_criteria=["Deliver according to spec."], constraints=[], priority="medium", metadata={},
             )
             features_doc = prd_content or ""
             arch_input = ArchitectureInput(
@@ -454,11 +444,7 @@ def plan_project_activity(
             )
             try:
                 arch_output = agents["architecture"].run(arch_input)
-                return (
-                    (arch_output.architecture.overview or "")
-                    if arch_output and arch_output.architecture
-                    else None
-                )
+                return (arch_output.architecture.overview or "") if arch_output and arch_output.architecture else None
             except Exception:
                 return None
 
@@ -476,21 +462,15 @@ def plan_project_activity(
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return PlanResult().model_dump()
 
-        adapter_result = adapt_planning_v3_result(
-            p3_result, spec_title=requirements.title, repo_path=str(path)
-        )
-        adapter_result.shared_planning_doc_path = str(
-            path / "plan" / "planning_team" / "planning_document.md"
-        )
+        adapter_result = adapt_planning_v3_result(p3_result, spec_title=requirements.title, repo_path=str(path))
+        adapter_result.shared_planning_doc_path = str(path / "plan" / "planning_team" / "planning_document.md")
         spec_content_for_planning = adapter_result.final_spec_content or spec_data.spec_content
         update_job(job_id, requirements_title=adapter_result.requirements.title)
 
         _check_cancellation(job_id)
 
         return PlanResult(
-            adapter_result_dict=adapter_result.model_dump()
-            if hasattr(adapter_result, "model_dump")
-            else {},
+            adapter_result_dict=adapter_result.model_dump() if hasattr(adapter_result, "model_dump") else {},
             spec_content_for_planning=spec_content_for_planning,
             requirements_title=adapter_result.requirements.title,
         ).model_dump()
@@ -616,9 +596,7 @@ def execute_coding_team_activity(
         # Keep the activity alive across long blocking steps (e.g. multi-minute code-gen LLM calls)
         # that emit no update callback, in addition to the per-update heartbeat below.
         stop_heartbeat = threading.Event()
-        heartbeat_thread = _start_background_heartbeater(
-            _coding_heartbeat_interval_s(), stop_heartbeat
-        )
+        heartbeat_thread = _start_background_heartbeater(_coding_heartbeat_interval_s(), stop_heartbeat)
         try:
             run_coding_team_orchestrator(
                 job_id,
@@ -633,7 +611,7 @@ def execute_coding_team_activity(
             heartbeat_thread.join(timeout=5)
         # The coding orchestrator owns the terminal status — it may have failed (e.g. a decision
         # pause timed out), paused for the user (waiting_for_user), or completed with failures.
-        # Only finalize as COMPLETED when it completed cleanly (or is still running, the legacy
+        # Only finalize COMPLETED when it completed cleanly (or is still running, the legacy
         # contract); never clobber a failure/pause with a clean success.
         coding_status = (get_job(job_id) or {}).get("status")
         if coding_status in (None, "running", "pending", JOB_STATUS_COMPLETED):

@@ -384,7 +384,9 @@ def run_coding_team_orchestrator(
         # the job does not linger in an ambiguous running state.
         out = _plan_with_hitl(tech_lead, plan_input, _pause_cycle)
         if out is None:
-            if (_get_job(job_id) or {}).get("status") not in ("failed", "cancelled"):
+            # Only set 'failed' when the job is not already terminal — a pause that ended because the
+            # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
+            if not hitl.is_terminal(_get_job(job_id) or {}):
                 _update(
                     status="failed",
                     phase="completed",
@@ -659,6 +661,24 @@ class CodingTeamSwarm:
                 "requested_changes": [],
             }
         ]
+        # Bound re-asking with a per-task escalation cap counted independently of the revision cap
+        # (so a late-stage task still gets its first answer implemented). A model that keeps
+        # re-raising decisions after they are answered is failed after MAX_TASK_REVISIONS
+        # escalations rather than pausing a human indefinitely.
+        prior_escalations = sum(
+            1
+            for e in (task.revision_feedback or [])
+            if isinstance(e, dict) and e.get("source") == "user_decision"
+        )
+        if prior_escalations + 1 >= MAX_TASK_REVISIONS:
+            logger.warning(
+                "Task %s exceeded %d decision escalations; marking FAILED",
+                task.id,
+                MAX_TASK_REVISIONS,
+            )
+            self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
+            self._cascade_fail_dependents(task.id)
+            return
         self.graph.update_task(
             task.id,
             status=TaskStatus.IN_PROGRESS,

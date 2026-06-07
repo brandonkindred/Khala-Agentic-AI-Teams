@@ -322,14 +322,20 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
                     status_code=400,
                     detail=f"Question {a.question_id}: 'other' selected but no text provided.",
                 )
-        elif a.selected_option_id is not None and a.selected_option_id not in options_by_qid.get(
-            a.question_id, set()
-        ):
-            # Reject an option id that is not one this question offered (and isn't 'other'); a bogus
-            # id would otherwise be threaded through as the literal user 'decision'.
+        elif a.selected_option_id:
+            # A non-'other' option id must be one this question actually offered; a bogus id would
+            # otherwise be threaded through as the literal user 'decision'.
+            if a.selected_option_id not in options_by_qid.get(a.question_id, set()):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {a.question_id}: unknown option '{a.selected_option_id}'.",
+                )
+        elif not a.other_text:
+            # Neither an option nor free text: a blank submission is not a decision. Reject it so it
+            # cannot be recorded as an (empty) answer that spuriously 'covers' the open question.
             raise HTTPException(
                 status_code=400,
-                detail=f"Question {a.question_id}: unknown option '{a.selected_option_id}'.",
+                detail=f"Question {a.question_id}: no option selected and no text provided.",
             )
     return [
         {
@@ -413,7 +419,13 @@ def resume_job(job_id: str) -> RunResponse:
         finally:
             _clear_run_thread(job_id)
 
-    threading.Thread(target=run, daemon=True).start()
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        # The thread never started, so run()'s finally will never release the claim — release it
+        # here so the job stays resumable instead of being wedged in _starting_run_jobs.
+        _clear_run_thread(job_id)
+        raise
     return RunResponse(job_id=job_id, status="running", message="Job resumed.")
 
 

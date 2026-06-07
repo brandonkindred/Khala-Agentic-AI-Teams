@@ -108,6 +108,15 @@ def test_answers_400_other_without_text(monkeypatch):
     assert "no text" in r.json()["detail"]
 
 
+def test_answers_400_blank_answer(monkeypatch):
+    # An answer with neither a selected option nor free text is not a decision and must be rejected,
+    # not recorded as an empty answer that spuriously 'covers' the open question.
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    r = client.post("/run/j1/answers", json={"answers": [{"question_id": "q1"}]})
+    assert r.status_code == 400
+    assert "no option selected" in r.json()["detail"].lower()
+
+
 def test_answers_400_unknown_option_id(monkeypatch):
     # A non-'other' option id the question never offered must be rejected, not threaded through as
     # the literal user decision.

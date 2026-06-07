@@ -711,12 +711,12 @@ def test_run_implement_llm_exception_returns_failed(tmp_path, monkeypatch):
 def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeypatch):
     """A late-stage escalation must still implement the user's answer — an escalation is not a
     failed revision and must not discard the decision when the task is already at the revision cap."""
-    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 1)
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 5)
     worker = _DecisionWorker()
     swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
     graph.add_task("t1", title="T1")
     graph.assign_task_to_agent("t1", "a1")
-    graph.update_task("t1", revision_count=1)  # already at the cap
+    graph.update_task("t1", revision_count=4)  # near the revision cap (from quality-gate revisions)
     swarm.pause_for_questions = lambda q, s: ([{"question_text": "Q?", "answer": "use TLS"}], True)
 
     swarm._escalate_decision(
@@ -726,6 +726,27 @@ def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeyp
     task = graph.get_task("t1")
     assert task.status == TaskStatus.IN_PROGRESS  # answer will be implemented, not discarded
     assert task.assigned_agent_id == "a1"  # same engineer
-    assert task.revision_count == 1  # escalation did not consume the revision budget
+    assert task.revision_count == 4  # escalation did not consume the revision budget
     assert task.revision_feedback[-1]["source"] == "user_decision"
     assert "use TLS" in task.revision_feedback[-1]["reason"]
+
+
+def test_escalate_decision_bounded_by_escalation_cap(tmp_path, monkeypatch):
+    """A model that keeps re-raising decisions after they are answered is bounded: after
+    MAX_TASK_REVISIONS escalations the task fails rather than pausing a human indefinitely."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 3)
+    _patch_git(monkeypatch)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [_DecisionWorker()])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    # Pre-load prior escalations so the next one trips the cap.
+    graph.update_task(
+        "t1", revision_feedback=[{"source": "user_decision", "reason": "x"} for _ in range(2)]
+    )
+    swarm.pause_for_questions = lambda q, s: ([{"question_text": "Q?", "answer": "a"}], True)
+
+    swarm._escalate_decision(
+        graph.get_task("t1"), {"open_questions": [{"question_text": "Q?"}]}, lambda **k: None
+    )
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED  # 2 prior + 1 == cap(3)
