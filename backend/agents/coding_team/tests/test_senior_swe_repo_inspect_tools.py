@@ -1,46 +1,18 @@
-"""Tests that the read-only repo-inspection tools register with Strands and reach the SWE agent.
+"""Tests that ``run_implement`` wires the repo-inspection tools into the Senior SWE agent.
 
-The Strands registry silently drops unrecognized tool specs, so a misbuilt tool would
-leave the agent running without it. These tests pin that the inspection definitions become
-registrable ``AgentTool``s carrying their schema verbatim, and that ``run_implement`` wires
-them alongside the git tools into the model's toolset.
+The Strands-registration / schema contract for the inspection definitions lives in
+``agent_repo_tools/tests/test_strands_registration.py`` (so it runs in that module's CI
+job). Here we pin the coding-team-side integration: the tools reach the model's toolset and
+the system prompt tells the agent to use them.
 """
 
 from __future__ import annotations
 
 from typing import Any, Dict
 
-from strands.tools.registry import ToolRegistry
-from strands.types.tools import AgentTool
-
-from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import agent as swe_mod
-from coding_team.senior_software_engineer_agent.agent import SeniorSWEAgent, _build_strands_tools
-
-_NAMES = ["list_files", "read_file"]
-
-
-def test_repo_inspect_tools_register_with_strands_registry(tmp_path) -> None:
-    handlers = build_repo_inspect_handlers(tmp_path)
-    tools = _build_strands_tools(handlers, REPO_INSPECT_TOOL_DEFINITIONS)
-    assert len(tools) == len(REPO_INSPECT_TOOL_DEFINITIONS)
-    assert all(isinstance(t, AgentTool) for t in tools)
-    registered = ToolRegistry().process_tools(tools)
-    assert sorted(registered) == sorted(_NAMES)
-
-
-def test_repo_inspect_tool_spec_carries_definition_schema_verbatim(tmp_path) -> None:
-    handlers = build_repo_inspect_handlers(tmp_path)
-    by_name = {
-        t.tool_name: t for t in _build_strands_tools(handlers, REPO_INSPECT_TOOL_DEFINITIONS)
-    }
-    for definition in REPO_INSPECT_TOOL_DEFINITIONS:
-        fn = definition["function"]
-        spec = by_name[fn["name"]].tool_spec
-        assert spec["name"] == fn["name"]
-        assert spec["description"] == fn["description"]
-        assert spec["inputSchema"] == {"json": fn["parameters"]}
+from coding_team.senior_software_engineer_agent.agent import SeniorSWEAgent
 
 
 def test_run_implement_wires_inspection_tools_into_agent(tmp_path, monkeypatch) -> None:
