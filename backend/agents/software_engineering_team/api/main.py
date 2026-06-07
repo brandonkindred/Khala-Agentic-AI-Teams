@@ -1020,6 +1020,9 @@ RESUMABLE_STATUSES = (
     JOB_STATUS_RUNNING,
     JOB_STATUS_AGENT_CRASH,
     JOB_STATUS_FAILED,
+    # A job paused for a coding-team decision whose orchestrator thread died (e.g. server restart)
+    # must be resumable after the user answers — otherwise it is stuck at waiting_for_user forever.
+    "waiting_for_user",
 )
 RESTARTABLE_STATUSES = (
     JOB_STATUS_COMPLETED,

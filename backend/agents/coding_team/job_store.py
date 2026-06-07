@@ -39,6 +39,11 @@ def create_job(
         "error": None,
         "plan_input": plan_input or {},
         "events": [],
+        # Human-in-the-loop gate state (mirrors the SE job-record contract so the same answer
+        # protocol resumes a pause on either path).
+        "pending_questions": [],
+        "waiting_for_answers": False,
+        "submitted_answers": [],
     }
     _client(cache_dir).create_job(job_id, status="pending", **data)
 
@@ -83,3 +88,70 @@ def list_jobs(
     """List coding_team jobs. If running_only, only pending or running."""
     statuses = ["pending", "running"] if running_only else None
     return _client(cache_dir).list_jobs(statuses=statuses)
+
+
+# ---------------------------------------------------------------------------
+# Human-in-the-loop pause / answer operations
+#
+# These mirror software_engineering_team/shared/job_store.py so the coding team's pause uses the
+# same job-record fields (waiting_for_answers / pending_questions / submitted_answers) as the SE
+# gate. Writes are atomic via the job service so a concurrent answer submission and a status update
+# cannot clobber each other.
+# ---------------------------------------------------------------------------
+
+
+def add_pending_questions(
+    job_id: str,
+    questions: List[Dict[str, Any]],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Append pending questions and set waiting_for_answers=True to pause the job.
+
+    Preconditions:
+        - ``questions`` is a list of structured question dicts (id, question_text, options, ...).
+    Postconditions:
+        - The job's ``waiting_for_answers`` is True and ``questions`` are appended to
+          ``pending_questions``.
+    """
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"waiting_for_answers": True},
+        append_to={"pending_questions": questions},
+    )
+
+
+def is_waiting_for_answers(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> bool:
+    """True iff the job is currently paused waiting for user answers."""
+    data = _client(cache_dir).get_job(job_id)
+    return bool(data.get("waiting_for_answers", False)) if data else False
+
+
+def submit_answers(
+    job_id: str,
+    answers: List[Dict[str, Any]],
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> None:
+    """Store submitted answers, clear pending questions, and clear the waiting flag to resume.
+
+    Postconditions:
+        - ``waiting_for_answers`` is False, ``pending_questions`` is empty, and ``answers`` are
+          appended to ``submitted_answers``. The orchestrator's wait loop resumes on the cleared
+          flag and reads ``submitted_answers``.
+    """
+    _client(cache_dir).atomic_update(
+        job_id,
+        merge_fields={"pending_questions": [], "waiting_for_answers": False},
+        append_to={"submitted_answers": answers},
+    )
+
+
+def get_submitted_answers(
+    job_id: str,
+    cache_dir: str | Path = DEFAULT_CACHE_DIR,
+) -> List[Dict[str, Any]]:
+    """Return the answers submitted for this job (empty when none/unknown)."""
+    data = _client(cache_dir).get_job(job_id)
+    return list(data.get("submitted_answers") or []) if data else []

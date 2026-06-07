@@ -21,6 +21,13 @@ REPO_EXCLUDE_DIRS: frozenset[str] = frozenset(
     }
 )
 
+# Extra interpreter/venv caches excluded by repo-inspection views on top of
+# REPO_EXCLUDE_DIRS, plus the combined set those views use. Single-sourced here so
+# the active repo-inspection tools (agent_repo_tools) and the passive context
+# scanner (coding_team._read_repo_context) cannot drift.
+REPO_INSPECT_EXTRA_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "venv", ".venv"})
+REPO_INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_EXCLUDE_DIRS | REPO_INSPECT_EXTRA_EXCLUDE_DIRS
+
 # Default extensions per agent domain
 BACKEND_EXTENSIONS: List[str] = [".py", ".java"]
 FRONTEND_EXTENSIONS: List[str] = [".ts", ".tsx", ".html", ".scss"]

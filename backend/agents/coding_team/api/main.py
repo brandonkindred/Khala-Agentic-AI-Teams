@@ -41,6 +41,7 @@ from coding_team.job_store import (  # noqa: E402
     list_jobs,
     update_job,
 )
+from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
 from coding_team.models import CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
@@ -61,6 +62,51 @@ app = FastAPI(
 )
 instrument_fastapi_app(app, team_key="coding_team")
 
+# Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
+# loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the
+# thread died, e.g. on a server restart). Mirrors the SE team's _active_orchestrator_threads.
+_active_run_threads: Dict[str, threading.Thread] = {}
+# Jobs whose orchestrator thread has been claimed but not yet started/registered. The claim closes
+# the check-then-spawn race in resume_job: a not-yet-started Thread reports is_alive()==False, so
+# without this marker two concurrent /resume calls could both spawn an orchestrator for one job.
+_starting_run_jobs: set[str] = set()
+_run_thread_lock = threading.Lock()
+
+
+def _register_run_thread(job_id: str) -> None:
+    with _run_thread_lock:
+        _active_run_threads[job_id] = threading.current_thread()
+        _starting_run_jobs.discard(job_id)
+
+
+def _clear_run_thread(job_id: str) -> None:
+    with _run_thread_lock:
+        _active_run_threads.pop(job_id, None)
+        _starting_run_jobs.discard(job_id)
+
+
+def _is_run_thread_alive(job_id: str) -> bool:
+    """True if an orchestrator thread for this job is still running (so a blocked wait will resume)."""
+    t = _active_run_threads.get(job_id)
+    return t is not None and t.is_alive()
+
+
+def _claim_run_thread(job_id: str) -> bool:
+    """Atomically claim the right to start an orchestrator thread for *job_id*.
+
+    Postconditions:
+        - Returns True (and marks the job 'starting') iff no thread is running or already being
+          started for it; False otherwise. The claim is released by _register_run_thread (once the
+          new thread registers) or _clear_run_thread.
+    """
+    with _run_thread_lock:
+        if (
+            _active_run_threads.get(job_id) is not None and _active_run_threads[job_id].is_alive()
+        ) or (job_id in _starting_run_jobs):
+            return False
+        _starting_run_jobs.add(job_id)
+        return True
+
 
 class RunRequest(BaseModel):
     """Request body for POST /run."""
@@ -78,6 +124,49 @@ class RunResponse(BaseModel):
     message: str = "Job started. Poll GET /status/{job_id} for progress."
 
 
+class QuestionOption(BaseModel):
+    """A selectable option for a pending question."""
+
+    id: str = Field(..., description="Unique identifier for this option.")
+    label: str = Field(..., description="Display text for this option.")
+    is_default: bool = Field(
+        default=False, description="Whether this option is the suggested default."
+    )
+
+
+class PendingQuestion(BaseModel):
+    """A product/design decision the coding team escalated to the user before it could proceed."""
+
+    id: str = Field(..., description="Unique identifier for this question.")
+    question_text: str = Field(..., description="The question to display to the user.")
+    context: Optional[str] = Field(None, description="Why this decision matters.")
+    options: List[QuestionOption] = Field(
+        default_factory=list,
+        description="Selectable answer options. The UI always offers an 'other' free-text option.",
+    )
+    required: bool = Field(default=True, description="Whether this question must be answered.")
+    source: str = Field(
+        default="coding_team",
+        description="Origin of the question: plan_input, tech_lead, engineer:<agent>, etc.",
+    )
+
+
+class AnswerSubmission(BaseModel):
+    """A user's answer to a pending question."""
+
+    question_id: str = Field(..., description="ID of the question being answered.")
+    selected_option_id: Optional[str] = Field(
+        None, description="ID of the selected option, or 'other' if custom text is provided."
+    )
+    other_text: Optional[str] = Field(None, description="Custom text when 'other' is selected.")
+
+
+class SubmitAnswersRequest(BaseModel):
+    """Request body for submitting answers to a coding-team job's pending questions."""
+
+    answers: List[AnswerSubmission] = Field(..., description="List of answers to submit.")
+
+
 class StatusResponse(BaseModel):
     job_id: str
     status: str
@@ -89,6 +178,14 @@ class StatusResponse(BaseModel):
     error: Optional[str] = None
     github_context: Optional[Dict[str, Any]] = None
     github_pr_url: Optional[str] = None
+    pending_questions: List[PendingQuestion] = Field(
+        default_factory=list,
+        description="Decisions awaiting a user answer before the job can proceed.",
+    )
+    waiting_for_answers: bool = Field(
+        default=False,
+        description="True when the job is paused waiting for the user to answer pending questions.",
+    )
 
 
 class JobListItem(BaseModel):
@@ -144,6 +241,7 @@ def post_run(request: RunRequest) -> RunResponse:
         )
 
         def run() -> None:
+            _register_run_thread(job_id)
             try:
                 run_coding_team_orchestrator(
                     job_id,
@@ -156,6 +254,8 @@ def post_run(request: RunRequest) -> RunResponse:
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
                 update_job(job_id, status="failed", error=str(e))
+            finally:
+                _clear_run_thread(job_id)
 
         t = threading.Thread(target=run, daemon=True)
         t.start()
@@ -179,7 +279,157 @@ def get_status(job_id: str) -> StatusResponse:
         error=data.get("error"),
         github_context=data.get("github_context"),
         github_pr_url=data.get("github_pr_url"),
+        pending_questions=[PendingQuestion(**q) for q in data.get("pending_questions", [])],
+        waiting_for_answers=bool(data.get("waiting_for_answers", False)),
     )
+
+
+def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> List[Dict[str, Any]]:
+    """Validate submitted answers against the job's pending questions; return them as plain dicts.
+
+    Preconditions:
+        - ``data`` is the job record; it must be ``waiting_for_answers`` with non-empty
+          ``pending_questions``.
+    Postconditions:
+        - Raises HTTP 400 if the job is not waiting, has no pending questions, any required question
+          is unanswered, an answer references an unknown question, or an 'other' selection carries
+          no text. Otherwise returns the answers as dicts ready for ``store_submit_answers``.
+    """
+    if not data.get("waiting_for_answers"):
+        raise HTTPException(status_code=400, detail="Job is not waiting for answers.")
+    pending = data.get("pending_questions", [])
+    if not pending:
+        raise HTTPException(status_code=400, detail="No pending questions to answer.")
+    pending_ids = {q["id"] for q in pending}
+    required_ids = {q["id"] for q in pending if q.get("required", True)}
+    answered_ids = {a.question_id for a in request.answers}
+    missing = required_ids - answered_ids
+    if missing:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Missing answers for required questions: {', '.join(sorted(missing))}",
+        )
+    unknown = answered_ids - pending_ids
+    if unknown:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown question IDs: {', '.join(sorted(unknown))}"
+        )
+    options_by_qid = {q["id"]: {o.get("id") for o in (q.get("options") or [])} for q in pending}
+    for a in request.answers:
+        # Whitespace-only free text is not a decision: strip before the emptiness checks so a blank
+        # or all-whitespace answer can never be recorded as a (vacuous) decision that 'covers' the
+        # open question.
+        other_text = (a.other_text or "").strip()
+        if a.selected_option_id == "other":
+            if not other_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {a.question_id}: 'other' selected but no text provided.",
+                )
+        elif a.selected_option_id:
+            # A non-'other' option id must be one this question actually offered; a bogus id would
+            # otherwise be threaded through as the literal user 'decision'.
+            if a.selected_option_id not in options_by_qid.get(a.question_id, set()):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {a.question_id}: unknown option '{a.selected_option_id}'.",
+                )
+        elif not other_text:
+            # Neither an option nor (non-blank) free text: not a decision. Reject it.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Question {a.question_id}: no option selected and no text provided.",
+            )
+    return [
+        {
+            "question_id": a.question_id,
+            "selected_option_id": a.selected_option_id,
+            "other_text": a.other_text,
+        }
+        for a in request.answers
+    ]
+
+
+@app.post("/run/{job_id}/answers", response_model=StatusResponse)
+def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> StatusResponse:
+    """Submit answers to a paused coding-team job's pending questions and resume it.
+
+    The orchestrator's blocked wait loop clears on the stored answers (thread alive). If the thread
+    died (e.g. a server restart), the answers are stored and the caller should POST /run/{job_id}/resume.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    answers = _validate_answers(data, request)
+    store_submit_answers(job_id, answers)
+    if not _is_run_thread_alive(job_id):
+        logger.info(
+            "Orchestrator thread for job %s is not running; answers stored. "
+            "Call POST /run/%s/resume to restart it.",
+            job_id,
+            job_id,
+        )
+        update_job(
+            job_id,
+            status_text="Answers received. Resume the job to continue processing.",
+        )
+    return get_status(job_id)
+
+
+@app.post("/run/{job_id}/resume", response_model=RunResponse)
+def resume_job(job_id: str) -> RunResponse:
+    """Restart a paused coding-team job's orchestrator after answers were stored but its thread died.
+
+    No-op-safe: if a thread is still running, it will resume on its own and this just reports status.
+    Only the standalone (plan_input) path is resumable here; the GitHub-issue publish flow is not
+    re-driven (its hook thread is gone), so a restarted GitHub job continues the code work but you
+    must re-trigger publication.
+    """
+    data = get_job(job_id)
+    if not data:
+        raise HTTPException(status_code=404, detail="Job not found")
+    if _is_run_thread_alive(job_id):
+        return RunResponse(
+            job_id=job_id, status=data.get("status", "running"), message="Job already running."
+        )
+    plan_raw = data.get("plan_input") or {}
+    repo_path = data.get("repo_path") or plan_raw.get("repo_path")
+    if not repo_path:
+        raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
+    plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+
+    # Atomically claim the right to start the thread so two concurrent /resume calls (or one racing
+    # an as-yet-unregistered original thread) cannot both spawn an orchestrator for this job.
+    if not _claim_run_thread(job_id):
+        return RunResponse(
+            job_id=job_id, status=data.get("status", "running"), message="Job already running."
+        )
+
+    def run() -> None:
+        _register_run_thread(job_id)
+        try:
+            run_coding_team_orchestrator(
+                job_id,
+                repo_path,
+                plan,
+                update_job_fn=lambda **kw: update_job(job_id, **kw),
+                get_job_fn=lambda jid: get_job(jid),
+                cache_dir=DEFAULT_CACHE_DIR,
+            )
+        except Exception as e:
+            logger.exception("Coding team orchestrator resume failed: %s", e)
+            update_job(job_id, status="failed", error=str(e))
+        finally:
+            _clear_run_thread(job_id)
+
+    try:
+        threading.Thread(target=run, daemon=True).start()
+    except Exception:
+        # The thread never started, so run()'s finally will never release the claim — release it
+        # here so the job stays resumable instead of being wedged in _starting_run_jobs.
+        _clear_run_thread(job_id)
+        raise
+    return RunResponse(job_id=job_id, status="running", message="Job resumed.")
 
 
 @app.get("/jobs", response_model=List[JobListItem])
@@ -345,6 +595,29 @@ def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body
         logger.warning("Failed to comment on issue #%s: %s", number, e)
 
 
+def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> str:
+    """Render escalated open questions as a single GitHub issue comment.
+
+    Postconditions:
+        - Returns markdown listing each question (with context and selectable option ids when
+          present) and how to answer it, so a human can unblock the paused job.
+    """
+    lines = [
+        f"⏸️ Coding team job `{job_id}` is **paused for a decision** and will not proceed until "
+        f"these are answered. Submit answers to `POST /run/{job_id}/answers`:",
+        "",
+    ]
+    for i, q in enumerate(questions or [], 1):
+        lines.append(f"{i}. **{q.get('question_text', '')}**  _(id: `{q.get('id', '')}`)_")
+        if q.get("context"):
+            lines.append(f"   - _Why:_ {q['context']}")
+        opts = q.get("options") or []
+        if opts:
+            opt_str = ", ".join(f"`{o.get('id')}` ({o.get('label')})" for o in opts)
+            lines.append(f"   - Options: {opt_str} (or `other` with free text)")
+    return "\n".join(lines)
+
+
 def _record_failure(
     client: GitHubClient, owner: str, repo: str, num: int, job_id: str, error: str
 ) -> None:
@@ -365,13 +638,16 @@ def _has_merged_tasks(job: Dict[str, Any]) -> bool:
 def _failed_tasks(job: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Tasks that reached the terminal FAILED state (rejected past the revision cap, blocked by a
     failed dependency, or an unrecoverable implementation/review error)."""
-    return [t for t in (job.get("task_graph_snapshot") or []) if (t or {}).get("status") == "failed"]
+    return [
+        t for t in (job.get("task_graph_snapshot") or []) if (t or {}).get("status") == "failed"
+    ]
 
 
 def _format_failed_tasks(failed: List[Dict[str, Any]]) -> str:
     """Render a markdown bullet list of failed tasks for a PR body / issue comment."""
     return "\n".join(
-        f"- `{(t.get('id') or '?')}`: {((t.get('title') or '').strip() or 'untitled')}" for t in failed
+        f"- `{(t.get('id') or '?')}`: {((t.get('title') or '').strip() or 'untitled')}"
+        for t in failed
     )
 
 
@@ -466,7 +742,7 @@ def _git(
             timeout=timeout,
             env=env,
         )
-        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)[:500]
+        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)
         return r.returncode, scrub_token_from_text(msg)
     except subprocess.TimeoutExpired:
         return 124, f"git {' '.join(args)} timed out after {timeout}s"
@@ -1046,6 +1322,13 @@ def _run_with_github_hooks(
         for note in prep_notes:
             _safe_comment(client, owner, repo, num, note)
 
+        # When the coding team pauses for a user decision, surface the questions on the issue so a
+        # human can answer them (via POST /run/{job_id}/answers); the hook thread stays blocked in
+        # the orchestrator's wait until they do.
+        def _on_pause(questions: List[Dict[str, Any]]) -> None:
+            _safe_comment(client, owner, repo, num, _format_questions_comment(questions, job_id))
+
+        _register_run_thread(job_id)
         try:
             run_coding_team_orchestrator(
                 job_id,
@@ -1054,13 +1337,28 @@ def _run_with_github_hooks(
                 update_job_fn=_defer_terminal_success(job_id),
                 get_job_fn=lambda jid: get_job(jid),
                 cache_dir=DEFAULT_CACHE_DIR,
+                on_pause=_on_pause,
             )
         except Exception as e:  # noqa: BLE001
             logger.exception("Coding team orchestrator failed: %s", e)
             _record_failure(client, owner, repo, num, job_id, str(e))
             return
 
-        if not _has_merged_tasks(get_job(job_id) or {}):
+        job_after = get_job(job_id) or {}
+        # The orchestrator may have already set a terminal/paused status — e.g. a decision pause
+        # timed out (status=failed) or is still waiting for the user. Surface that diagnostic rather
+        # than overwriting it with the generic "no merged tasks" message, which would hide the real
+        # cause (an unanswered question) from the operator.
+        if job_after.get("status") in ("failed", "cancelled", "waiting_for_user"):
+            reason = (
+                job_after.get("error") or job_after.get("status_text") or job_after.get("status")
+            )
+            _safe_comment(
+                client, owner, repo, num, f"Coding team job `{job_id}` did not complete: {reason}"
+            )
+            return
+
+        if not _has_merged_tasks(job_after):
             update_job(
                 job_id,
                 status="failed",
