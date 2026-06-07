@@ -68,7 +68,7 @@ class GitHubAPIError(RuntimeError):
     def __init__(self, status: int, body: str = "") -> None:
         self.status = status
         self.body = body
-        super().__init__(f"GitHub API {status}: {body[:200]}")
+        super().__init__(f"GitHub API {status}: {body}")
 
 
 class NotAnIssueError(GitHubAPIError):
