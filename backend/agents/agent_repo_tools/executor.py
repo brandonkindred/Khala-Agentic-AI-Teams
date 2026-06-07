@@ -129,12 +129,12 @@ def _read_file(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
 
     # The full file is returned, deliberately uncapped: the agent must be able to read any file in
     # the workspace in full to do its job. Containment to the workspace is enforced above.
-    content = target.read_bytes().decode("utf-8", errors="replace")
+    raw = target.read_bytes()
     return {
         "success": True,
         "path": str(target.relative_to(repo)),
-        "bytes": target.stat().st_size,
-        "content": content,
+        "bytes": len(raw),
+        "content": raw.decode("utf-8", errors="replace"),
     }
 
 

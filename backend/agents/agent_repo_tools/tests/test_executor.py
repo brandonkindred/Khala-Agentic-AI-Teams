@@ -159,7 +159,33 @@ def test_read_file_reads_large_file_in_full_uncapped(repo: Path) -> None:
     out = execute_repo_tool("read_file", {"path": "big.txt"}, _ctx(repo))
     assert out["success"] is True
     assert out["content"] == big
-    assert out["bytes"] == len(big)
+    assert out["bytes"] == len(big.encode("utf-8"))
+
+
+def test_read_file_bytes_is_a_byte_count_for_multibyte_content(repo: Path) -> None:
+    # `bytes` is the file's byte length, not its character length.
+    text = "café"  # 4 chars, 5 UTF-8 bytes
+    (repo / "uni.txt").write_text(text, encoding="utf-8")
+    out = execute_repo_tool("read_file", {"path": "uni.txt"}, _ctx(repo))
+    assert out["success"] is True
+    assert out["content"] == text
+    assert out["bytes"] == len(text.encode("utf-8")) == 5
+
+
+def test_read_file_decodes_invalid_utf8_with_replacement(repo: Path) -> None:
+    # Binary / invalid-UTF-8 content does not crash; bytes are decoded with the replacement char.
+    (repo / "bin").write_bytes(b"\xff\xfe")
+    out = execute_repo_tool("read_file", {"path": "bin"}, _ctx(repo))
+    assert out["success"] is True
+    assert out["bytes"] == 2
+    assert "�" in out["content"]
+
+
+def test_read_file_ignores_unknown_args(repo: Path) -> None:
+    # A stale caller passing a removed arg (e.g. max_bytes) is ignored, not capped or crashed.
+    out = execute_repo_tool("read_file", {"path": "src/app.py", "max_bytes": 1}, _ctx(repo))
+    assert out["success"] is True
+    assert out["content"] == "print('hi')\n"
 
 
 # --------------------------------------------------------------------------- path safety
