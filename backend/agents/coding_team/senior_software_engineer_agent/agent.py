@@ -16,6 +16,7 @@ from strands.tools.tools import PythonAgentTool
 from strands.types.tools import ToolResult, ToolSpec, ToolUse
 
 from agent_git_tools import GIT_TOOL_DEFINITIONS, GitToolContext, build_git_tool_handlers
+from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import prompts
 
@@ -181,10 +182,14 @@ class SeniorSWEAgent:
         system = prompts.IMPLEMENT_TASK_SYSTEM
         if use_git_tools:
             system += (
-                "\n\nYou may call the provided Git tools to inspect the repository, create a feature branch, "
-                "write files, and commit. The repository path is fixed by the runtime; do not pass repo_path. "
-                "When finished, respond with a single JSON object matching the schema above (summary, "
-                "files_to_create_or_edit, commands_run, ready_for_review) and do not call tools in that message."
+                "\n\nYou may call the provided tools to inspect the repository and make changes. "
+                "Use list_files and read_file to explore the checkout — confirm whether a file already "
+                "exists before creating it, and open related code in full rather than guessing from the "
+                "summary; if read_file reports a file is too large, read a more specific path. Use the Git "
+                "tools to create a feature branch, write files, and commit. The repository path is fixed by "
+                "the runtime; do not pass repo_path. When finished, respond with a single JSON object matching "
+                "the schema above (summary, files_to_create_or_edit, commands_run, ready_for_review) and do not "
+                "call tools in that message."
             )
         try:
             if use_git_tools:
@@ -194,6 +199,8 @@ class SeniorSWEAgent:
                 )
                 handlers = build_git_tool_handlers(ctx)
                 strands_tools = _build_strands_tools(handlers, GIT_TOOL_DEFINITIONS)
+                repo_handlers = build_repo_inspect_handlers(path)
+                strands_tools += _build_strands_tools(repo_handlers, REPO_INSPECT_TOOL_DEFINITIONS)
                 agent = Agent(
                     model=self._model,
                     system_prompt=system,
