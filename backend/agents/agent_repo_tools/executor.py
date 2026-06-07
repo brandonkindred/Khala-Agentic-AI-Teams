@@ -38,6 +38,15 @@ def _strip_model_repo_path(args: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in args.items() if k != "repo_path"}
 
 
+def _has_unsafe_parts(p: Path) -> bool:
+    """True if a model-supplied relative path or glob is absolute or contains a ``..`` segment.
+
+    Single source for the "must not point outside the workspace" predicate shared by path
+    resolution and glob validation, so the two checks cannot drift.
+    """
+    return p.is_absolute() or ".." in p.parts
+
+
 def _resolve_within_repo(repo: Path, rel: str) -> Path:
     """Resolve a model-supplied relative path and confirm it stays inside the workspace.
 
@@ -53,10 +62,9 @@ def _resolve_within_repo(repo: Path, rel: str) -> Path:
     if not rel_str:
         raise _RepoPathError("empty path not allowed")
     p = Path(rel_str)
-    if p.is_absolute():
-        raise _RepoPathError(f"absolute path not allowed: {rel_str}")
-    if ".." in p.parts:
-        raise _RepoPathError(f"path escapes repo: {rel_str}")
+    if _has_unsafe_parts(p):
+        reason = "absolute path not allowed" if p.is_absolute() else "path escapes repo"
+        raise _RepoPathError(f"{reason}: {rel_str}")
     candidate = (repo / p).resolve()
     if not candidate.is_relative_to(repo):
         raise _RepoPathError(f"path escapes repo: {rel_str}")
@@ -79,11 +87,15 @@ def _list_files(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
     glob = args.get("glob")
     if glob:
         glob_str = str(glob)
-        glob_path = Path(glob_str)
         # Validate the glob like a path: the model must not glob outside the workspace.
-        if glob_path.is_absolute() or ".." in glob_path.parts:
+        if _has_unsafe_parts(Path(glob_str)):
             raise _RepoPathError(f"glob escapes repo (absolute or '..'): {glob_str}")
-        raw = sorted(base.glob(glob_str, **_GLOB_KWARGS))
+        # A malformed pattern (e.g. ".") makes Path.glob raise; report it as a bad input
+        # rather than letting it fall through to the opaque catch-all error.
+        try:
+            raw = sorted(base.glob(glob_str, **_GLOB_KWARGS))
+        except (ValueError, IndexError, NotImplementedError) as e:
+            raise _RepoPathError(f"invalid glob: {glob_str}") from e
     else:
         raw = sorted(base.iterdir())
 

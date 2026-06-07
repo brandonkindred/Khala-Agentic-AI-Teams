@@ -75,10 +75,10 @@ def _build_review_evidence(summary: str, diff: str, max_chars: int) -> str:
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
 # software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
-# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs). The extra
-# interpreter/venv caches it skips are shared with the active inspection tools via
-# repo_utils.REPO_INSPECT_EXTRA_EXCLUDE_DIRS (imported in `_context_file_filters`) so the two views
-# of the repo cannot drift.
+# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs). The
+# directories it skips come from repo_utils.REPO_INSPECT_EXCLUDE_DIRS (imported in
+# `_context_file_filters`), shared with the active inspection tools so the two views of the repo
+# cannot drift.
 _CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
     {".js", ".html", ".json", ".md", ".txt", ".rst"}
 )
