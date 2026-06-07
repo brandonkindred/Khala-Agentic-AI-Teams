@@ -279,12 +279,12 @@ def _plan_with_hitl(
     """Plan the task graph, pausing for the user whenever the Tech Lead raises an open question.
 
     Postconditions:
-        - Returns the task-graph dict once the Tech Lead emits no open questions (or the round cap
-          is reached — best-effort), with every answered decision folded into
-          ``plan_input.resolved_questions``.
-        - Returns ``None`` when a pause ended without answers (terminal/timeout); the caller stops.
+        - Returns the task-graph dict once the Tech Lead emits no open questions, with every
+          answered decision folded into ``plan_input.resolved_questions``.
+        - Returns ``None`` when a pause ended without answers (terminal/timeout) OR when the Tech
+          Lead keeps raising open questions past ``max_rounds`` — in the latter case it fails closed
+          rather than building tasks around an undecided question. The caller stops either way.
     """
-    out: Dict[str, Any] = {}
     for _ in range(max_rounds):
         out = tech_lead.run_plan_to_task_graph(plan_input)
         questions = out.get("open_questions") or []
@@ -295,11 +295,12 @@ def _plan_with_hitl(
             return None
         plan_input.resolved_questions = list(plan_input.resolved_questions or []) + resolved
         plan_input.open_questions = []
-    logger.warning(
-        "Tech Lead still raising open questions after %d round(s); proceeding best-effort",
-        max_rounds,
+    # Reaching here means the Tech Lead raised open questions on every one of max_rounds rounds.
+    # Fail closed — do NOT proceed to build tasks around questions that may still be undecided.
+    logger.error(
+        "Tech Lead still raising open questions after %d round(s); failing closed", max_rounds
     )
-    return out
+    return None
 
 
 def run_coding_team_orchestrator(
@@ -402,9 +403,18 @@ def run_coding_team_orchestrator(
         stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
     else:
         # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not
-        # make. None means a pause ended without answers (terminal/timeout) — stop.
+        # make. None means either a pause ended without answers (the pause cycle already set the
+        # failure status) or the Tech Lead never stopped asking — fail closed in the latter case so
+        # the job does not linger in an ambiguous running state.
         out = _plan_with_hitl(tech_lead, plan_input, _pause_cycle)
         if out is None:
+            if (_get_job(job_id) or {}).get("status") not in ("failed", "cancelled"):
+                _update(
+                    status="failed",
+                    phase="completed",
+                    status_text="Design did not converge: open questions were never resolved",
+                    error="Tech Lead exceeded the open-question round cap",
+                )
             return
         tasks_raw = out.get("tasks") or []
         stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
@@ -625,15 +635,17 @@ class CodingTeamSwarm:
         """Pause the job for a user decision a worker raised, then thread the answer back to the task.
 
         The engineer never decides the question itself. The task stays with the same engineer
-        (IN_PROGRESS) so it re-implements next round with the user's decision in its feedback. Each
-        escalation counts against the shared revision cap so a model that ignores the answer and
-        re-asks cannot spin forever. A pause that ends without answers (terminal/timeout) aborts the
-        swarm.
+        (IN_PROGRESS) so it re-implements next round with the user's decision in its feedback. An
+        escalation is NOT counted against the revision cap — a late-stage question (a task already
+        near the cap) must still get its answer implemented, not discarded. Pathological re-asking
+        is bounded by the human (each escalation needs a user answer) and the swarm's round cap. A
+        pause that ends without answers (terminal/timeout) aborts the swarm.
 
         Postconditions:
-            - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry;
-              on cap exhaustion it is FAILED (and dependents cascade); on an unanswered pause
-              ``self.aborted`` is set.
+            - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry
+              and the same engineer, so the answer is implemented next round (revision count
+              unchanged). On an unanswered pause ``self.aborted`` is set. With no answer channel the
+              task is FAILED (fail closed).
         """
         questions = result.get("open_questions") or []
         if self.pause_for_questions is None:
@@ -664,7 +676,6 @@ class CodingTeamSwarm:
         if not ok:
             self.aborted = True
             return
-        revision_count = task.revision_count + 1
         feedback = list(task.revision_feedback or []) + [
             {
                 "source": "user_decision",
@@ -672,24 +683,9 @@ class CodingTeamSwarm:
                 "requested_changes": [],
             }
         ]
-        if revision_count >= MAX_TASK_REVISIONS:
-            logger.warning(
-                "Task %s still escalating decisions after %d rounds; marking FAILED",
-                task.id,
-                MAX_TASK_REVISIONS,
-            )
-            self.graph.update_task(
-                task.id,
-                status=TaskStatus.FAILED,
-                revision_count=revision_count,
-                revision_feedback=feedback,
-            )
-            self._cascade_fail_dependents(task.id)
-            return
         self.graph.update_task(
             task.id,
             status=TaskStatus.IN_PROGRESS,
-            revision_count=revision_count,
             revision_feedback=feedback,
         )
 

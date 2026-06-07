@@ -164,16 +164,19 @@ def unanswered_questions(
 ) -> List[Any]:
     """Return the open questions NOT covered by a resolved answer (fail-closed).
 
-    Coverage is by normalized question text when resolved answers carry it. When resolved answers
-    exist but none carry text (a legacy answer shape that cannot be matched), an open question is
-    treated as covered only if there are at least as many resolved answers as open questions (count
-    coverage). With no resolved answers, every open question is unanswered.
+    Coverage is strictly by normalized question text: an open question is covered only when a
+    resolved answer carries a matching ``question_text``. We deliberately do **not** treat N
+    text-less answers as covering N open questions by raw count — those answers may belong to a
+    different pause batch, and guessing coverage by count would let a genuinely-undecided product
+    question reach implementation. The conservative failure mode is therefore to re-ask (pause),
+    never to proceed on an unmatched question.
 
     Preconditions:
         - ``open_questions`` entries are strings or dicts with a question text.
     Postconditions:
-        - Returns a sublist of ``open_questions`` (in order); empty iff every open question is
-          covered. Never returns a question that has a matching answer.
+        - Returns a sublist of ``open_questions`` (in order); empty iff every open question has a
+          resolved answer matching it by text. Never returns a question that has a text-matched
+          answer, and never returns ``[]`` while an unmatched open question remains.
     """
     if not open_questions:
         return []
@@ -183,15 +186,7 @@ def unanswered_questions(
         for r in resolved
         if isinstance(r, dict) and r.get("question_text")
     }
-    unmatched = [q for q in open_questions if question_key(_question_text(q)) not in answered_keys]
-    if not unmatched:
-        return []
-    # Some open questions did not match by text. If the resolved answers carry no text at all
-    # (legacy shape) but there are at least as many of them as open questions, treat them as
-    # covered; otherwise fail closed and report the unmatched questions.
-    if not answered_keys and resolved and len(resolved) >= len(open_questions):
-        return []
-    return unmatched
+    return [q for q in open_questions if question_key(_question_text(q)) not in answered_keys]
 
 
 def answers_to_resolved(

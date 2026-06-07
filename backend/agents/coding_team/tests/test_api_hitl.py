@@ -108,6 +108,44 @@ def test_answers_400_other_without_text(monkeypatch):
     assert "no text" in r.json()["detail"]
 
 
+def test_answers_400_unknown_option_id(monkeypatch):
+    # A non-'other' option id the question never offered must be rejected, not threaded through as
+    # the literal user decision.
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "bogus"}]}
+    )
+    assert r.status_code == 400
+    assert "unknown option" in r.json()["detail"].lower()
+
+
+def test_answers_accepts_other_with_text(monkeypatch):
+    stored = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(
+        api, "store_submit_answers", lambda jid, answers: stored.update({"a": answers})
+    )
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: True)
+    r = client.post(
+        "/run/j1/answers",
+        json={
+            "answers": [
+                {"question_id": "q1", "selected_option_id": "other", "other_text": "use mTLS"}
+            ]
+        },
+    )
+    assert r.status_code == 200
+    assert stored["a"][0]["other_text"] == "use mTLS"
+
+
+def test_claim_run_thread_is_exclusive():
+    api._active_run_threads.pop("claim-job", None)
+    api._starting_run_jobs.discard("claim-job")
+    assert api._claim_run_thread("claim-job") is True  # first claim wins
+    assert api._claim_run_thread("claim-job") is False  # second rejected while 'starting'
+    api._starting_run_jobs.discard("claim-job")  # cleanup
+
+
 def test_answers_success_stores_and_returns_status(monkeypatch):
     stored = {}
     monkeypatch.setattr(api, "get_job", lambda jid: _job())

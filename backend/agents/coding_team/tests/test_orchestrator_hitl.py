@@ -217,7 +217,7 @@ def test_plan_with_hitl_aborts_on_unanswered_pause():
     )
 
 
-def test_plan_with_hitl_exhausts_rounds_best_effort():
+def test_plan_with_hitl_exhausts_rounds_fails_closed():
     class TL:
         def run_plan_to_task_graph(self, p):
             return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Q?"}]}
@@ -228,7 +228,9 @@ def test_plan_with_hitl_exhausts_rounds_best_effort():
         lambda q, s: ([{"question_text": "Q?", "answer": "A"}], True),
         max_rounds=2,
     )
-    assert out is not None  # best-effort: proceeds with the last plan rather than spinning
+    # A Tech Lead that never stops asking fails closed (None) rather than building tasks around an
+    # undecided question.
+    assert out is None
 
 
 # --------------------------------------------------------------------------- Tech Lead agent channel
@@ -415,6 +417,40 @@ def test_entry_gate_pauses_then_resumes_and_threads_answers(tmp_path, monkeypatc
     assert seen["resolved"]  # answers threaded into planning
     assert seen["open"] == []  # open questions cleared before planning
     assert updates[-1]["status"] == "completed"
+
+
+def test_orchestrator_fails_when_tech_lead_never_stops_asking(tmp_path, monkeypatch):
+    job: Dict[str, Any] = {"submitted_answers": []}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+    monkeypatch.setattr(orch_mod, "MAX_TECH_LEAD_QUESTION_ROUNDS", 2)
+
+    class TL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan):
+            # Always raises a question, even after each is answered → never converges.
+            return {"tasks": [], "stacks": [], "open_questions": [{"question_text": "Q?"}]}
+
+    class Swarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+            self.aborted = False
+
+        def run(self, **kw):
+            raise AssertionError("swarm must not run when planning never converges")
+
+    _stub_agents(monkeypatch, TL, Swarm)
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: job.update(kw),
+        get_job_fn=lambda jid: job,
+        cache_dir=tmp_path,
+        get_llm=lambda k: None,
+    )
+    assert job.get("status") == "failed"  # fail closed, not a clean completion
 
 
 def test_entry_gate_no_answer_makes_zero_llm_calls(tmp_path, monkeypatch):
@@ -672,16 +708,24 @@ def test_run_implement_llm_exception_returns_failed(tmp_path, monkeypatch):
     assert "llm down" in out["error"]
 
 
-def test_escalate_decision_exhausts_revision_cap(tmp_path, monkeypatch):
+def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeypatch):
+    """A late-stage escalation must still implement the user's answer — an escalation is not a
+    failed revision and must not discard the decision when the task is already at the revision cap."""
     monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 1)
     worker = _DecisionWorker()
     swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=True), [worker])
     graph.add_task("t1", title="T1")
     graph.assign_task_to_agent("t1", "a1")
-    swarm.pause_for_questions = lambda q, s: ([{"question_text": "Q?", "answer": "x"}], True)
+    graph.update_task("t1", revision_count=1)  # already at the cap
+    swarm.pause_for_questions = lambda q, s: ([{"question_text": "Q?", "answer": "use TLS"}], True)
 
     swarm._escalate_decision(
         graph.get_task("t1"), {"open_questions": [{"question_text": "Q?"}]}, lambda **k: None
     )
 
-    assert graph.get_task("t1").status == TaskStatus.FAILED  # revision_count 0+1 >= cap(1)
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.IN_PROGRESS  # answer will be implemented, not discarded
+    assert task.assigned_agent_id == "a1"  # same engineer
+    assert task.revision_count == 1  # escalation did not consume the revision budget
+    assert task.revision_feedback[-1]["source"] == "user_decision"
+    assert "use TLS" in task.revision_feedback[-1]["reason"]

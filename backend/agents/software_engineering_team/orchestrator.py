@@ -2929,6 +2929,14 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
+            # The coding orchestrator owns the terminal status: it may have failed (e.g. a decision
+            # pause timed out), paused for the user, or completed with failures. Do NOT clobber any
+            # of those with a clean COMPLETED — only finalize when it actually completed cleanly (or
+            # left the job still running, the legacy contract). Otherwise preserve what it set.
+            coding_status = (get_job(job_id) or {}).get("status")
+            if coding_status not in (None, "running", "pending", JOB_STATUS_COMPLETED):
+                # failed / cancelled / waiting_for_user / completed_with_failures — leave as-is.
+                return
             update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
             return
 

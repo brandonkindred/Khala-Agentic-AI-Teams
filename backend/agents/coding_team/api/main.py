@@ -66,20 +66,46 @@ instrument_fastapi_app(app, team_key="coding_team")
 # loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the
 # thread died, e.g. on a server restart). Mirrors the SE team's _active_orchestrator_threads.
 _active_run_threads: Dict[str, threading.Thread] = {}
+# Jobs whose orchestrator thread has been claimed but not yet started/registered. The claim closes
+# the check-then-spawn race in resume_job: a not-yet-started Thread reports is_alive()==False, so
+# without this marker two concurrent /resume calls could both spawn an orchestrator for one job.
+_starting_run_jobs: set[str] = set()
+_run_thread_lock = threading.Lock()
 
 
 def _register_run_thread(job_id: str) -> None:
-    _active_run_threads[job_id] = threading.current_thread()
+    with _run_thread_lock:
+        _active_run_threads[job_id] = threading.current_thread()
+        _starting_run_jobs.discard(job_id)
 
 
 def _clear_run_thread(job_id: str) -> None:
-    _active_run_threads.pop(job_id, None)
+    with _run_thread_lock:
+        _active_run_threads.pop(job_id, None)
+        _starting_run_jobs.discard(job_id)
 
 
 def _is_run_thread_alive(job_id: str) -> bool:
     """True if an orchestrator thread for this job is still running (so a blocked wait will resume)."""
     t = _active_run_threads.get(job_id)
     return t is not None and t.is_alive()
+
+
+def _claim_run_thread(job_id: str) -> bool:
+    """Atomically claim the right to start an orchestrator thread for *job_id*.
+
+    Postconditions:
+        - Returns True (and marks the job 'starting') iff no thread is running or already being
+          started for it; False otherwise. The claim is released by _register_run_thread (once the
+          new thread registers) or _clear_run_thread.
+    """
+    with _run_thread_lock:
+        if (
+            _active_run_threads.get(job_id) is not None and _active_run_threads[job_id].is_alive()
+        ) or (job_id in _starting_run_jobs):
+            return False
+        _starting_run_jobs.add(job_id)
+        return True
 
 
 class RunRequest(BaseModel):
@@ -288,11 +314,22 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
         raise HTTPException(
             status_code=400, detail=f"Unknown question IDs: {', '.join(sorted(unknown))}"
         )
+    options_by_qid = {q["id"]: {o.get("id") for o in (q.get("options") or [])} for q in pending}
     for a in request.answers:
-        if a.selected_option_id == "other" and not a.other_text:
+        if a.selected_option_id == "other":
+            if not a.other_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {a.question_id}: 'other' selected but no text provided.",
+                )
+        elif a.selected_option_id is not None and a.selected_option_id not in options_by_qid.get(
+            a.question_id, set()
+        ):
+            # Reject an option id that is not one this question offered (and isn't 'other'); a bogus
+            # id would otherwise be threaded through as the literal user 'decision'.
             raise HTTPException(
                 status_code=400,
-                detail=f"Question {a.question_id}: 'other' selected but no text provided.",
+                detail=f"Question {a.question_id}: unknown option '{a.selected_option_id}'.",
             )
     return [
         {
@@ -351,6 +388,13 @@ def resume_job(job_id: str) -> RunResponse:
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
     plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
+
+    # Atomically claim the right to start the thread so two concurrent /resume calls (or one racing
+    # an as-yet-unregistered original thread) cannot both spawn an orchestrator for this job.
+    if not _claim_run_thread(job_id):
+        return RunResponse(
+            job_id=job_id, status=data.get("status", "running"), message="Job already running."
+        )
 
     def run() -> None:
         _register_run_thread(job_id)
@@ -1285,7 +1329,21 @@ def _run_with_github_hooks(
             _record_failure(client, owner, repo, num, job_id, str(e))
             return
 
-        if not _has_merged_tasks(get_job(job_id) or {}):
+        job_after = get_job(job_id) or {}
+        # The orchestrator may have already set a terminal/paused status — e.g. a decision pause
+        # timed out (status=failed) or is still waiting for the user. Surface that diagnostic rather
+        # than overwriting it with the generic "no merged tasks" message, which would hide the real
+        # cause (an unanswered question) from the operator.
+        if job_after.get("status") in ("failed", "cancelled", "waiting_for_user"):
+            reason = (
+                job_after.get("error") or job_after.get("status_text") or job_after.get("status")
+            )
+            _safe_comment(
+                client, owner, repo, num, f"Coding team job `{job_id}` did not complete: {reason}"
+            )
+            return
+
+        if not _has_merged_tasks(job_after):
             update_job(
                 job_id,
                 status="failed",

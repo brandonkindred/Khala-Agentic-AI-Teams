@@ -93,13 +93,15 @@ def test_unanswered_partial_text_match_fails_closed():
     assert hitl.unanswered_questions(open_qs, resolved) == ["Policy?"]
 
 
-def test_unanswered_count_coverage_when_answers_have_no_text():
+def test_unanswered_textless_answers_fail_closed():
+    # Text-less answers (no question_text) cannot be matched to a question, so they NEVER cover one
+    # by raw count — proceeding would risk applying answers to the wrong questions. Fail closed.
     open_qs = ["a", "b"]
     resolved = [{"selected_option_id": "yes"}, {"selected_option_id": "no"}]  # no question_text
-    assert hitl.unanswered_questions(open_qs, resolved) == []
+    assert hitl.unanswered_questions(open_qs, resolved) == ["a", "b"]
 
 
-def test_unanswered_count_coverage_insufficient_fails_closed():
+def test_unanswered_textless_answers_insufficient_also_fail_closed():
     open_qs = ["a", "b", "c"]
     resolved = [{"selected_option_id": "yes"}]
     assert hitl.unanswered_questions(open_qs, resolved) == ["a", "b", "c"]
