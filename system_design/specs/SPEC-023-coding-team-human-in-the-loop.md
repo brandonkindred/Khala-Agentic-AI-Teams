@@ -2,11 +2,13 @@
 
 | Field        | Value                                                                 |
 |--------------|-----------------------------------------------------------------------|
-| **Status**   | Proposed                                                              |
+| **Status**   | Approved (implemented)                                                |
 | **Author**   | Platform Engineering                                                  |
 | **Created**  | 2026-06-07                                                            |
 | **Priority** | P0 (correctness/safety)                                              |
 | **Scope**    | Planning V3 → SE orchestrator → Coding Team handoff; SE + Coding Team APIs; agent prompts |
+
+> **Implementation note.** Shipped per the plan with one refinement learned during build: because the SE path invokes Planning V3 with `use_product_analysis=False`, Planning V3 emits no clarification questions there today, so the *active* escalation channel is the coding-team agents (Tech Lead + Senior SWE) raising `open_questions`, plus the `run-from-github` path. The Planning V3 / handoff changes (fail-closed answer resolution via `auto_answer_questions`, `HandoffPackage` question fields) ship as correctness + defense-in-depth for when product analysis is enabled. The blocking wait is thread-mode (the default); Temporal-mode pause semantics remain the deferred item in §7.
 
 ---
 

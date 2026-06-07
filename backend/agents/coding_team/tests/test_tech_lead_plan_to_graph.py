@@ -60,6 +60,42 @@ def test_tech_lead_plan_to_task_graph_output_structure(monkeypatch) -> None:
     assert stacks[1]["name"] == "frontend"
 
 
+def test_tech_lead_run_groom_task(monkeypatch) -> None:
+    """run_groom_task returns the enriched grooming fields parsed from the LLM JSON."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "acceptance_criteria": ["done when tests pass"],
+            "out_of_scope": "no UI",
+            "description_enriched": "more detail",
+            "priority": "high",
+            "subtasks": [{"id": "s1", "title": "sub", "description": "", "dependencies": []}],
+            "task_dependencies": ["d1"],
+        },
+    )
+    out = TechLeadAgent(model=object()).run_groom_task("t1", "T", "desc", ["d1"], "plan ctx")
+    assert out["acceptance_criteria"] == ["done when tests pass"]
+    assert out["priority"] == "high"
+    assert out["subtasks"][0]["id"] == "s1"
+    assert out["task_dependencies"] == ["d1"]
+
+
+def test_tech_lead_run_groom_task_llm_failure_returns_defaults(monkeypatch) -> None:
+    """When grooming's LLM call fails, return safe defaults that preserve the input dependencies."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+
+    def boom(agent, prompt):
+        raise RuntimeError("LLM error")
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
+    out = TechLeadAgent(model=object()).run_groom_task("t1", "T", "desc", ["d1"], "ctx")
+    assert out["priority"] == "medium"
+    assert out["acceptance_criteria"] == []
+    assert out["task_dependencies"] == ["d1"]
+
+
 def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) -> None:
     """When the LLM call fails, return empty tasks and a single default stack."""
     plan = CodingTeamPlanInput(

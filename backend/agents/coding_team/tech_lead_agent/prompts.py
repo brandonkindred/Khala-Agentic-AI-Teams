@@ -2,25 +2,30 @@
 
 PLAN_TO_TASK_GRAPH_SYSTEM = """You are a Tech Lead for a software delivery team. You receive a plan from the Planning team (product/spec/architecture). Your job is to turn that plan into a Task Graph: a list of tasks with dependencies and a list of tech stacks. You do NOT create the product plan; you only break it down into implementable tasks and define which stacks (e.g. frontend, backend, devops) are needed.
 
+CRITICAL — never make product, design, policy, or safety decisions yourself. If turning the plan into tasks requires a decision the plan does not answer (e.g. a default policy, a scope boundary, a behavior that affects users, anything with legal/safety weight), DO NOT assume, default, or invent an answer. Instead, list it in "open_questions" and stop. Emitting an open question is always correct; guessing a product decision is always wrong. Only break the plan down once the decisions you need are present (any answers already provided are shown under "User decisions").
+
 Output must be valid JSON matching the schema below. No other text."""
 
 PLAN_TO_TASK_GRAPH_USER = """Based on the following plan from the Planning team, produce:
 1. A list of tasks. Each task must have: id (unique kebab-case), title, description, dependencies (list of task ids that must be merged before this task can start).
 2. A list of stacks. Each stack has: name (e.g. "frontend", "backend"), tools_services (list of tools/frameworks, e.g. ["Angular", "Tailwind CSS"] or ["Java", "Spring Boot", "Postgres"]).
+3. A list of open_questions: product/design/policy decisions the plan does NOT answer that you must NOT decide yourself. Leave empty only when no such decision is needed.
 
 Rules:
 - Tasks should be implementable units (one deliverable per task). Respect any hierarchy (initiatives/epics/stories) in the plan by encoding dependencies.
 - Dependencies: a task can only start after all its dependency tasks are completed (merged).
 - Stacks: define one stack per major technical area (e.g. one for frontend, one for backend, optionally devops). Each stack will get one Senior Software Engineer agent.
+- Open questions: if any required product/design decision is missing, put it in "open_questions" and you may return an empty "tasks" list — the job pauses for a human to answer, then you will be re-asked with the answers.
 
 Plan:
 ---
 {plan_text}
 ---
 
-Respond with a single JSON object with keys "tasks" and "stacks".
+Respond with a single JSON object with keys "tasks", "stacks", and "open_questions".
 "tasks": list of {{ "id": str, "title": str, "description": str, "dependencies": list[str] }}
-"stacks": list of {{ "name": str, "tools_services": list[str] }}"""
+"stacks": list of {{ "name": str, "tools_services": list[str] }}
+"open_questions": list of {{ "question_text": str, "context": str (optional), "options": list[{{ "id": str, "label": str }}] (optional) }}"""
 
 
 GROOM_TASK_SYSTEM = """You are a Tech Lead grooming a single task for implementation. For the given task and plan context, you will:

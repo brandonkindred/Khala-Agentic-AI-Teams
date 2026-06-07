@@ -17,6 +17,7 @@ from strands.types.tools import ToolResult, ToolSpec, ToolUse
 
 from agent_git_tools import GIT_TOOL_DEFINITIONS, GitToolContext, build_git_tool_handlers
 from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
+from coding_team.hitl import normalize_open_questions
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import prompts
 
@@ -159,11 +160,18 @@ class SeniorSWEAgent:
     ) -> Dict[str, Any]:
         """
         Implement the task. Returns dict with:
-        - status: "in_review" | "failed"
+        - status: "in_review" | "in_progress" | "failed" | "needs_decision"
         - feature_branch: suggested branch name (orchestrator may override)
         - changes_summary: for Tech Lead review
         - files_to_create_or_edit: optional list of {path, content} for orchestrator to apply
+        - open_questions: product/design decisions the engineer must NOT make (only on
+          status="needs_decision"); the orchestrator pauses the job for the user
         - error: optional error message if failed
+
+        Postconditions:
+            - When the model emits non-empty open_questions, status is "needs_decision" and the
+              questions are returned verbatim — the engineer never decides them itself, regardless
+              of ready_for_review.
         """
         path = Path(repo_path).resolve()
         stack_name = self.stack_spec.name or self.agent_id
@@ -236,11 +244,28 @@ class SeniorSWEAgent:
         branch = data.get("feature_branch")
         if not isinstance(branch, str) or not branch.strip():
             branch = f"feature/{task.id}"
+        open_questions = normalize_open_questions(data.get("open_questions"))
+        if open_questions:
+            # The engineer hit a product/design decision it must not make. Escalate, never decide —
+            # this wins regardless of ready_for_review so a model that both asks and marks ready
+            # cannot slip a guessed decision through.
+            return {
+                "status": "needs_decision",
+                "feature_branch": branch.strip(),
+                "changes_summary": summary,
+                "files_to_create_or_edit": [
+                    f for f in files if isinstance(f, dict) and f.get("path")
+                ],
+                "commands_run": [str(c) for c in commands],
+                "open_questions": open_questions,
+                "error": None,
+            }
         return {
             "status": "in_review" if ready else "in_progress",
             "feature_branch": branch.strip(),
             "changes_summary": summary,
             "files_to_create_or_edit": [f for f in files if isinstance(f, dict) and f.get("path")],
             "commands_run": [str(c) for c in commands],
+            "open_questions": [],
             "error": None,
         }
