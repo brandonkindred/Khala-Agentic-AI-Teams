@@ -114,3 +114,50 @@ def test_tech_lead_plan_to_task_graph_llm_failure_returns_defaults(monkeypatch) 
     assert out["tasks"] == []
     assert len(out["stacks"]) == 1
     assert out["stacks"][0]["name"] == "default"
+
+
+def test_plan_text_passes_all_fields_uncut() -> None:
+    """Every plan field reaches the Task-Graph prompt in full — inputs are never truncated."""
+    big_desc = "D" * 50000
+    big_overview_value = "O" * 50000
+    big_spec = "S" * 50000
+    big_arch = "A" * 50000
+    plan = CodingTeamPlanInput(
+        requirements_title="Big Project",
+        requirements_description=big_desc,
+        project_overview={"doc": big_overview_value},
+        final_spec_content=big_spec,
+        repo_path="/tmp/repo",
+        architecture_overview=big_arch,
+    )
+    text = tl_mod._plan_text(plan)
+    assert big_desc in text
+    assert big_overview_value in text
+    assert big_spec in text
+    assert big_arch in text
+
+
+def test_run_groom_task_passes_full_inputs_to_llm(monkeypatch) -> None:
+    """A large task description and plan context reach the groom prompt in full, never truncated."""
+    captured: dict[str, str] = {}
+
+    def _capture(agent, prompt):
+        captured["prompt"] = prompt
+        return {}
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod, "_agent_call_json", _capture)
+    agent = TechLeadAgent(model=object())
+    big_desc = "D" * 50000
+    big_context = "C" * 50000
+
+    agent.run_groom_task(
+        task_id="t1",
+        task_title="T1",
+        task_description=big_desc,
+        task_dependencies=[],
+        plan_context=big_context,
+    )
+
+    assert big_desc in captured["prompt"]
+    assert big_context in captured["prompt"]

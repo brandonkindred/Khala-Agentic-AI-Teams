@@ -72,33 +72,35 @@ def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
 def _plan_text(plan: CodingTeamPlanInput) -> str:
     """Build plan text for the LLM from plan input.
 
-    Includes the user's resolved decisions and recorded assumptions so the Tech Lead breaks the
+    Every field is passed through in full: the plan, spec, and architecture are the primary inputs
+    the Tech Lead reasons over, and clipping them would hide requirements from the Task Graph. The
+    user's resolved decisions and recorded assumptions are included too, so the Tech Lead breaks the
     plan down according to choices the user actually made, not ones an agent invented. Unanswered
     open questions are NOT rendered here: by the time this runs the orchestrator's decision gate has
-    guaranteed there are none (the job pauses otherwise).
+    guaranteed there are none (the job pauses otherwise). Inputs are never truncated.
+
+    Postconditions:
+        - Each non-empty plan field (including resolved decisions and assumptions) appears verbatim
+          (uncut) in the returned text.
     """
     parts = [
         f"Title: {plan.requirements_title}",
-        f"Description: {plan.requirements_description[:8000]}"
-        if plan.requirements_description
-        else "",
+        f"Description: {plan.requirements_description}" if plan.requirements_description else "",
     ]
     if plan.project_overview:
-        parts.append("Project overview: " + json.dumps(plan.project_overview, indent=2)[:4000])
+        parts.append("Project overview: " + json.dumps(plan.project_overview, indent=2))
     if plan.final_spec_content:
-        parts.append("Spec: " + (plan.final_spec_content[:6000] or ""))
+        parts.append("Spec: " + plan.final_spec_content)
     if plan.architecture_overview:
-        parts.append("Architecture: " + plan.architecture_overview[:3000])
+        parts.append("Architecture: " + plan.architecture_overview)
     resolved_text = _render_resolved_questions(plan.resolved_questions or [])
     if resolved_text:
         parts.append(
             "User decisions (these were answered by the user — implement them exactly, "
-            "do not revisit):\n" + resolved_text[:4000]
+            "do not revisit):\n" + resolved_text
         )
     if plan.assumptions:
-        parts.append(
-            "Assumptions on record:\n" + "\n".join(f"- {a}" for a in plan.assumptions)[:2000]
-        )
+        parts.append("Assumptions on record:\n" + "\n".join(f"- {a}" for a in plan.assumptions))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -186,9 +188,9 @@ class TechLeadAgent:
         user = prompts.GROOM_TASK_USER.format(
             task_id=task_id,
             task_title=task_title,
-            task_description=task_description[:3000],
+            task_description=task_description,
             task_dependencies=json.dumps(task_dependencies),
-            plan_context=plan_context[:6000],
+            plan_context=plan_context,
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:

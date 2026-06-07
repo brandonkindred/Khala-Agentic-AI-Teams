@@ -727,7 +727,7 @@ def _git(
             timeout=timeout,
             env=env,
         )
-        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)[:500]
+        msg = _scrub_auth_header_values((r.stderr or r.stdout).strip(), env)
         return r.returncode, scrub_token_from_text(msg)
     except subprocess.TimeoutExpired:
         return 124, f"git {' '.join(args)} timed out after {timeout}s"

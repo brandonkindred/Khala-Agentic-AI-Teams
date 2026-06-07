@@ -9,7 +9,6 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -36,7 +35,7 @@ MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before 
 
 # Cap on the Tech-Lead clarify→answer→re-plan loop. Each round is one pause for the user plus one
 # re-plan; bounding it stops a model that keeps asking from looping forever. On exhaustion the
-# orchestrator proceeds with the last plan (best-effort) rather than spinning.
+# orchestrator fails closed rather than building tasks around an undecided question.
 MAX_TECH_LEAD_QUESTION_ROUNDS = 5
 
 # Type alias for the bound pause cycle: given questions + a source label, surface them to the user,
@@ -44,45 +43,20 @@ MAX_TECH_LEAD_QUESTION_ROUNDS = 5
 # timed out while waiting (the cycle has already set the failure status) and the caller must stop.
 PauseCycle = Callable[[List[Any], str], "tuple[List[Dict[str, Any]], bool]"]
 
-# Upper bound on Tech Lead review evidence (summary + diff). A correct-but-large diff must not
-# deterministically overflow the reviewer's context and fail an otherwise-good task (cascading to
-# its dependents). Generous enough to pass realistic diffs uncut; pathological diffs are truncated
-# with a marker so the reviewer sees partial — not absent — evidence. Override via
-# CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS.
-_DEFAULT_REVIEW_EVIDENCE_MAX_CHARS = 50000
 
+def _build_review_evidence(summary: str, diff: str) -> str:
+    """Assemble review evidence (summary + full diff) for the Tech Lead review.
 
-def _review_evidence_max_chars() -> int:
-    """Evidence cap for Tech Lead review; env override, garbage/non-positive → default."""
-    raw = os.getenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "")
-    try:
-        val = int(raw)
-        return val if val > 0 else _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
-    except (TypeError, ValueError):
-        return _DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
+    The reviewer must see the complete change to judge it; the diff is never truncated. If the
+    evidence genuinely exceeds the model context, the review call fails and the caller fails that
+    single task cleanly (see ``_review_and_merge``) rather than silently reviewing partial evidence.
 
-
-def _build_review_evidence(summary: str, diff: str, max_chars: int) -> str:
-    """Assemble review evidence (summary + diff) bounded to *max_chars*.
-
-    Keeps the full summary (the most important signal) and appends as much of the diff as fits,
-    marking any truncation so the reviewer knows the evidence is partial rather than absent. A huge
-    diff is thereby truncated instead of overflowing the model context and failing the task.
-
-    Preconditions: max_chars > 0.
-    Postconditions: len(result) <= max_chars (modulo a short truncation marker).
+    Postconditions:
+        - The full summary and the full diff (when present) both appear verbatim in the result.
     """
-    assert max_chars > 0, "max_chars must be positive"
     if not diff:
-        return summary[:max_chars]
-    header = "\n\n--- DIFF ---\n"
-    marker = "\n... [diff truncated for review context] ..."
-    budget = max_chars - len(summary) - len(header)
-    if budget <= 0:
-        return summary[:max_chars]
-    if len(diff) <= budget:
-        return summary + header + diff
-    return summary + header + diff[: max(0, budget - len(marker))] + marker
+        return summary
+    return f"{summary}\n\n--- DIFF ---\n{diff}"
 
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
@@ -175,9 +149,11 @@ def _hydrate_resolved_from_record(
 ) -> None:
     """Fold answers already persisted on the job record into ``plan_input.resolved_questions``.
 
-    Used on a fresh process resuming a job (e.g. a Temporal retry) so questions answered in a prior
-    attempt are not asked again. Persisted answers lack the original question text; they are folded
-    in by id so the deterministic coverage check (count fallback) can clear them.
+    Used on a fresh process resuming a job (e.g. a Temporal retry) so answers from a prior attempt
+    are carried forward. Persisted answers carry their ``question_id`` but not the original question
+    text, so they only clear an open question when the persisted record also carries a matching
+    ``question_text``; the coverage check (``hitl.unanswered_questions``) is strictly text-based and
+    fails closed, so a resume whose answers lack question text re-asks rather than guessing.
 
     Postconditions:
         - ``plan_input.resolved_questions`` contains an entry for every persisted answer not already
@@ -707,7 +683,7 @@ class CodingTeamSwarm:
             build = run_build_verification(self.path, agent_type, task.id)
             if not build.success:
                 logger.warning(
-                    "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error[:200]
+                    "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error
                 )
                 return self._return_for_revision(task, [{"type": "build", "error": build.error}])
 
@@ -777,7 +753,7 @@ class CodingTeamSwarm:
             branch = task.feature_branch or f"feature/{task.id}"
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-            evidence = _build_review_evidence(summary, diff, _review_evidence_max_chars())
+            evidence = _build_review_evidence(summary, diff)
             review = self.tech_lead.run_code_review(
                 task_title=task.title,
                 task_description=task.description,
