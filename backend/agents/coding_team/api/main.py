@@ -316,8 +316,12 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
         )
     options_by_qid = {q["id"]: {o.get("id") for o in (q.get("options") or [])} for q in pending}
     for a in request.answers:
+        # Whitespace-only free text is not a decision: strip before the emptiness checks so a blank
+        # or all-whitespace answer can never be recorded as a (vacuous) decision that 'covers' the
+        # open question.
+        other_text = (a.other_text or "").strip()
         if a.selected_option_id == "other":
-            if not a.other_text:
+            if not other_text:
                 raise HTTPException(
                     status_code=400,
                     detail=f"Question {a.question_id}: 'other' selected but no text provided.",
@@ -330,9 +334,8 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
                     status_code=400,
                     detail=f"Question {a.question_id}: unknown option '{a.selected_option_id}'.",
                 )
-        elif not a.other_text:
-            # Neither an option nor free text: a blank submission is not a decision. Reject it so it
-            # cannot be recorded as an (empty) answer that spuriously 'covers' the open question.
+        elif not other_text:
+            # Neither an option nor (non-blank) free text: not a decision. Reject it.
             raise HTTPException(
                 status_code=400,
                 detail=f"Question {a.question_id}: no option selected and no text provided.",

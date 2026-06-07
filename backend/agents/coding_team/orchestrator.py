@@ -661,10 +661,12 @@ class CodingTeamSwarm:
                 "requested_changes": [],
             }
         ]
-        # Bound re-asking with a per-task escalation cap counted independently of the revision cap
-        # (so a late-stage task still gets its first answer implemented). A model that keeps
-        # re-raising decisions after they are answered is failed after MAX_TASK_REVISIONS
-        # escalations rather than pausing a human indefinitely.
+        # Bound the total number of decision escalations per task, counted independently of the
+        # revision cap (so a task at the revision cap still gets its decision implemented). This is a
+        # cumulative per-task ceiling, not a same-question repeat detector: after MAX_TASK_REVISIONS
+        # escalations the task is failed rather than pausing a human indefinitely. A task that
+        # genuinely needs that many distinct decisions is over-scoped and should be split — at the
+        # default (20) this needs 19 prior escalations, so it does not bite well-scoped tasks.
         prior_escalations = sum(
             1
             for e in (task.revision_feedback or [])
