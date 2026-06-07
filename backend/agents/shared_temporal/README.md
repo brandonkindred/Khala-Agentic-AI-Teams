@@ -69,6 +69,18 @@ handler that calls `submit_input` (Temporal mode); both operate on the same
 job record fields (`waiting_for`, `inputs`) so the HTTP resume route works
 for either mode.
 
+## Background heartbeats
+
+The "daemon thread beats a callable on an interval" keep-alive that Temporal
+activities use (e.g. `execute_coding_team_activity`'s `activity.heartbeat()`
+beater) is driven by the shared `BackgroundHeartbeat` helper in the
+**`shared_concurrency`** package (it is Temporal-agnostic and also used by
+non-Temporal callers). See `backend/agents/shared_concurrency/README.md`.
+
+The coding-team activity's beater interval is set by
+`CODING_TEAM_HEARTBEAT_INTERVAL_S` (seconds; blank/garbage/non-positive falls
+back to `30`).
+
 ## Environment
 
 - `TEMPORAL_ADDRESS` — required; Temporal is mandatory for all teams.

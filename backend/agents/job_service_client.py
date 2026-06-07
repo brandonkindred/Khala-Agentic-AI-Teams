@@ -21,6 +21,8 @@ from typing import Any, Dict, List, Optional
 
 import httpx
 
+from shared_concurrency import BackgroundHeartbeat
+
 logger = logging.getLogger(__name__)
 
 # Re-export status constants so teams can import from here
@@ -283,22 +285,24 @@ def start_stale_job_monitor(
     stale_after_seconds: float,
     reason: str,
 ) -> threading.Event:
-    """Start a background thread that periodically marks stale jobs as failed."""
+    """Start a background thread that periodically marks stale jobs as failed.
+
+    Beats immediately on start (``beat_first``) so stale jobs left by a previous
+    crash are swept on startup, then every ``interval_seconds``. Returns the stop
+    ``Event`` the caller sets during shutdown.
+    """
     stop_event = threading.Event()
-
-    def _run() -> None:
-        while not stop_event.is_set():
-            try:
-                client.mark_stale_active_jobs_failed(
-                    stale_after_seconds=stale_after_seconds,
-                    reason=reason,
-                )
-            except Exception as exc:
-                logger.warning("stale job monitor error (%s): %s", client.team, exc)
-            stop_event.wait(interval_seconds)
-
-    thread = threading.Thread(target=_run, name=f"{client.team}-stale-job-monitor", daemon=True)
-    thread.start()
+    BackgroundHeartbeat(
+        lambda: client.mark_stale_active_jobs_failed(
+            stale_after_seconds=stale_after_seconds,
+            reason=reason,
+        ),
+        interval_seconds,
+        name=f"{client.team}-stale-job-monitor",
+        beat_first=True,
+        stop_event=stop_event,
+        on_error=lambda exc: logger.warning("stale job monitor error (%s): %s", client.team, exc),
+    ).start()
     return stop_event
 
 

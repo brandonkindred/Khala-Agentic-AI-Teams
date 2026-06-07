@@ -7,15 +7,14 @@ they run in the worker process and update the job store. No threads are started.
 
 from __future__ import annotations
 
-import contextvars
 import logging
 import os
-import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
+from shared_concurrency import BackgroundHeartbeat
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     update_job,
@@ -231,7 +230,6 @@ def run_backend_code_v2_activity(
         update_job(job_id, error=str(e), status=JOB_STATUS_FAILED)
 
 
-
 def _run_product_analysis_impl(
     job_id: str,
     repo_path: str,
@@ -319,7 +317,12 @@ def parse_spec_activity(
         from software_engineering_team.shared.job_store import JOB_STATUS_RUNNING
 
         path = Path(repo_path).resolve()
-        update_job(job_id, status=JOB_STATUS_RUNNING, phase="product_analysis", status_text="Starting pipeline")
+        update_job(
+            job_id,
+            status=JOB_STATUS_RUNNING,
+            phase="product_analysis",
+            status_text="Starting pipeline",
+        )
 
         from spec_parser import (
             gather_context_files,
@@ -339,7 +342,9 @@ def parse_spec_activity(
 
         context_files = gather_context_files(path)
         requirements = parse_spec_with_llm(spec_content, get_client("spec_intake"))
-        update_job(job_id, requirements_title=requirements.title, status_text="Specification parsed")
+        update_job(
+            job_id, requirements_title=requirements.title, status_text="Specification parsed"
+        )
 
         _check_cancellation(job_id)
         plan_dir = ensure_plan_dir(path)
@@ -432,8 +437,12 @@ def plan_project_activity(
             if prd_content:
                 req_desc = (req_desc + "\n\n" + prd_content.strip()).strip()
             reqs = ProductRequirements(
-                title="Project", description=req_desc or "See planning artifacts.",
-                acceptance_criteria=["Deliver according to spec."], constraints=[], priority="medium", metadata={},
+                title="Project",
+                description=req_desc or "See planning artifacts.",
+                acceptance_criteria=["Deliver according to spec."],
+                constraints=[],
+                priority="medium",
+                metadata={},
             )
             features_doc = prd_content or ""
             arch_input = ArchitectureInput(
@@ -444,7 +453,11 @@ def plan_project_activity(
             )
             try:
                 arch_output = agents["architecture"].run(arch_input)
-                return (arch_output.architecture.overview or "") if arch_output and arch_output.architecture else None
+                return (
+                    (arch_output.architecture.overview or "")
+                    if arch_output and arch_output.architecture
+                    else None
+                )
             except Exception:
                 return None
 
@@ -462,15 +475,21 @@ def plan_project_activity(
             update_job(job_id, status=JOB_STATUS_FAILED, error=err, phase="completed")
             return PlanResult().model_dump()
 
-        adapter_result = adapt_planning_v3_result(p3_result, spec_title=requirements.title, repo_path=str(path))
-        adapter_result.shared_planning_doc_path = str(path / "plan" / "planning_team" / "planning_document.md")
+        adapter_result = adapt_planning_v3_result(
+            p3_result, spec_title=requirements.title, repo_path=str(path)
+        )
+        adapter_result.shared_planning_doc_path = str(
+            path / "plan" / "planning_team" / "planning_document.md"
+        )
         spec_content_for_planning = adapter_result.final_spec_content or spec_data.spec_content
         update_job(job_id, requirements_title=adapter_result.requirements.title)
 
         _check_cancellation(job_id)
 
         return PlanResult(
-            adapter_result_dict=adapter_result.model_dump() if hasattr(adapter_result, "model_dump") else {},
+            adapter_result_dict=adapter_result.model_dump()
+            if hasattr(adapter_result, "model_dump")
+            else {},
             spec_content_for_planning=spec_content_for_planning,
             requirements_title=adapter_result.requirements.title,
         ).model_dump()
@@ -495,58 +514,19 @@ def _coding_heartbeat_interval_s() -> float:
         return 30.0
 
 
-def _start_background_heartbeater(interval_s: float, stop: threading.Event) -> threading.Thread:
-    """Start a daemon thread that emits an `activity.heartbeat()` every `interval_s` until `stop`.
+def _coding_update_callback(job_id: str) -> Callable[..., None]:
+    """Forward orchestrator progress writes to `update_job(job_id, **kw)`.
 
-    The per-update heartbeat (`_heartbeat_update_callback`) only fires when the orchestrator calls
-    back; a single long blocking step (e.g. a multi-minute code-generation LLM call) would emit no
-    heartbeat and could trip `heartbeat_timeout`. This independent beater keeps the activity alive
-    across such gaps. It runs in a separate thread, so it copies the current context (which carries
-    the Temporal activity handle) and heartbeats within it. Heartbeat errors are swallowed: outside
-    an activity context (unit tests / local dev) the beat is simply a no-op and the loop continues
-    until stopped.
-
-    Preconditions:
-        - Called from within a running activity thread (so the copied context carries the handle).
-    Postconditions:
-        - Returns a started daemon thread that exits within one interval of `stop` being set.
-    """
-    ctx = contextvars.copy_context()
-
-    def _loop() -> None:
-        while not stop.wait(interval_s):
-            try:
-                ctx.run(activity.heartbeat)
-            except Exception:
-                pass
-
-    thread = threading.Thread(target=_loop, name="coding-team-heartbeat", daemon=True)
-    thread.start()
-    return thread
-
-
-def _heartbeat_update_callback(job_id: str) -> Callable[..., None]:
-    """Build the coding-team update callback that emits a Temporal heartbeat before each job update.
-
-    The coding orchestrator calls its update callback many times per task (implement, build, lint,
-    review, per-round persist), so routing every call through a heartbeat keeps a healthy long
-    coding run well inside the activity's `heartbeat_timeout` — preventing a spurious timeout +
-    retry, which would re-plan and re-do work. The heartbeat is best-effort: outside a Temporal
-    activity context (e.g. in unit tests) `activity.heartbeat()` raises and is swallowed, so the
-    callback still performs the underlying `update_job`.
+    Liveness is owned by the background `BackgroundHeartbeat` in
+    `execute_coding_team_activity`, not here — this callback does not heartbeat.
 
     Preconditions:
         - `job_id` identifies an existing job.
     Postconditions:
-        - The returned callable forwards all kwargs to `update_job(job_id, **kwargs)` after a
-          best-effort heartbeat, regardless of whether the heartbeat succeeds.
+        - The returned callable forwards all kwargs to `update_job(job_id, **kwargs)`.
     """
 
     def _update(**kw: Any) -> None:
-        try:
-            activity.heartbeat()
-        except Exception:
-            pass
         update_job(job_id, **kw)
 
     return _update
@@ -593,22 +573,26 @@ def execute_coding_team_activity(
         from llm_service import get_client
         from software_engineering_team.shared.job_store import get_job
 
-        # Keep the activity alive across long blocking steps (e.g. multi-minute code-gen LLM calls)
-        # that emit no update callback, in addition to the per-update heartbeat below.
-        stop_heartbeat = threading.Event()
-        heartbeat_thread = _start_background_heartbeater(_coding_heartbeat_interval_s(), stop_heartbeat)
-        try:
+        # Single liveness mechanism: a background beater emits `activity.heartbeat()` on a fixed
+        # interval for the whole run, keeping the activity alive across long blocking steps (e.g.
+        # multi-minute code-gen LLM calls) that emit no update callback. `copy_context=True` carries
+        # the Temporal activity handle into the beater thread; beat errors (outside an activity
+        # context, e.g. unit tests) are swallowed so the loop survives.
+        with BackgroundHeartbeat(
+            activity.heartbeat,
+            _coding_heartbeat_interval_s(),
+            name="coding-team-heartbeat",
+            copy_context=True,
+            join_timeout=5.0,
+        ):
             run_coding_team_orchestrator(
                 job_id,
                 str(path),
                 plan_input,
-                update_job_fn=_heartbeat_update_callback(job_id),
+                update_job_fn=_coding_update_callback(job_id),
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
-        finally:
-            stop_heartbeat.set()
-            heartbeat_thread.join(timeout=5)
         # run_coding_team_orchestrator owns its terminal status on every exit path (the heartbeat
         # callback forwards its status writes to update_job), so do not re-write COMPLETED here — it
         # would clobber a failure / partial-success the orchestrator already set.

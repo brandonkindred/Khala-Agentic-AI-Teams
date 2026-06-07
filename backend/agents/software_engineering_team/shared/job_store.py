@@ -14,8 +14,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -28,6 +26,7 @@ from job_service_client import (
     JOB_STATUS_RUNNING,
     JobServiceClient,
 )
+from shared_concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -209,28 +208,25 @@ def start_job_heartbeat_thread(
 ) -> None:
     """Start a daemon thread that periodically updates the job's heartbeat (last_heartbeat_at)
     while the job is pending or running. The thread exits when the job is missing or in a
-    terminal status (completed, failed, cancelled, etc.)."""
+    terminal status (completed, failed, cancelled, etc.).
+
+    Self-terminating, fire-and-forget: there is no external stop handle. The shared
+    ``BackgroundHeartbeat`` driver checks ``should_continue`` (job still active) each tick and
+    exits the thread when it returns False; a transient ``get_job``/heartbeat error is logged and
+    the loop continues to the next tick."""
     active_statuses = (JOB_STATUS_PENDING, JOB_STATUS_RUNNING)
 
-    def _heartbeat_loop() -> None:
-        while True:
-            time.sleep(interval_seconds)
-            try:
-                data = get_job(job_id, cache_dir=cache_dir)
-                if not data:
-                    return
-                if data.get("status") not in active_statuses:
-                    return
-                _client(cache_dir).heartbeat(job_id)
-            except Exception as exc:
-                logger.warning("Job heartbeat thread for %s: %s", job_id, exc)
+    def _job_active() -> bool:
+        data = get_job(job_id, cache_dir=cache_dir)
+        return bool(data) and data.get("status") in active_statuses
 
-    thread = threading.Thread(
-        target=_heartbeat_loop,
+    BackgroundHeartbeat(
+        lambda: _client(cache_dir).heartbeat(job_id),
+        interval_seconds,
         name=f"job-heartbeat-{job_id[:8]}",
-        daemon=True,
-    )
-    thread.start()
+        should_continue=_job_active,
+        on_error=lambda exc: logger.warning("Job heartbeat thread for %s: %s", job_id, exc),
+    ).start()
 
 
 def update_task_state(

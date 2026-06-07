@@ -24,7 +24,12 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
     called: Dict[str, Any] = {}
 
     def fake_run_orchestrator(
-        job_id, repo_path, *, spec_content_override=None, resolved_questions_override=None, planning_only=False
+        job_id,
+        repo_path,
+        *,
+        spec_content_override=None,
+        resolved_questions_override=None,
+        planning_only=False,
     ):
         called.update(
             job_id=job_id,
@@ -36,12 +41,16 @@ def test_run_orchestrator_activity_success(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "software_engineering_team.orchestrator.run_orchestrator", fake_run_orchestrator
     )
-    activities.run_orchestrator_activity("job1", str(tmp_path), spec_content_override="x", planning_only=True)
+    activities.run_orchestrator_activity(
+        "job1", str(tmp_path), spec_content_override="x", planning_only=True
+    )
     assert called["job_id"] == "job1"
     assert called["planning_only"] is True
 
 
-def test_run_orchestrator_activity_failure_captured(monkeypatch, tmp_path, patched_job_store) -> None:
+def test_run_orchestrator_activity_failure_captured(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
     from software_engineering_team.shared import job_store as js
     from software_engineering_team.temporal import activities
 
@@ -218,48 +227,34 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
-def test_heartbeat_update_callback_emits_heartbeat(monkeypatch) -> None:
-    """The coding-team update callback emits a Temporal heartbeat, then forwards the update."""
+def test_coding_update_callback_forwards_without_heartbeat(monkeypatch) -> None:
+    """The callback forwards kwargs to update_job and must NOT heartbeat.
+
+    Liveness is owned solely by the background beater (single-liveness owner), so the
+    update callback only persists progress.
+    """
     from software_engineering_team.temporal import activities
 
+    captured: Dict[str, Any] = {}
     beats = {"n": 0}
+    monkeypatch.setattr(
+        activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
+    )
     monkeypatch.setattr(
         activities.activity, "heartbeat", lambda *a, **k: beats.__setitem__("n", beats["n"] + 1)
     )
-    captured: Dict[str, Any] = {}
-    monkeypatch.setattr(
-        activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
-    )
 
-    cb = activities._heartbeat_update_callback("job-x")
+    cb = activities._coding_update_callback("job-x")
     cb(status_text="implementing")
 
-    assert beats["n"] == 1
     assert captured["jid"] == "job-x"
     assert captured["status_text"] == "implementing"
+    assert beats["n"] == 0, "update callback must not emit a heartbeat (single-liveness owner)"
 
 
-def test_heartbeat_update_callback_swallows_heartbeat_error(monkeypatch) -> None:
-    """Outside an activity context heartbeat() raises; the callback swallows it and still updates."""
-    from software_engineering_team.temporal import activities
-
-    def boom(*a, **k):
-        raise RuntimeError("not in an activity context")
-
-    monkeypatch.setattr(activities.activity, "heartbeat", boom)
-    captured: Dict[str, Any] = {}
-    monkeypatch.setattr(
-        activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
-    )
-
-    cb = activities._heartbeat_update_callback("job-y")
-    cb(phase="coding")  # must not raise despite the heartbeat failure
-
-    assert captured["jid"] == "job-y"
-    assert captured["phase"] == "coding"
-
-
-def test_execute_coding_team_activity_exception_path(monkeypatch, tmp_path, patched_job_store) -> None:
+def test_execute_coding_team_activity_exception_path(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
     """Bogus adapter_result_dict triggers an exception inside the activity;
     the outer except marks the job FAILED and re-raises."""
     from software_engineering_team.shared import job_store as js
@@ -274,51 +269,6 @@ def test_execute_coding_team_activity_exception_path(monkeypatch, tmp_path, patc
         )
     job = js.get_job("ec-j")
     assert job["status"] == js.JOB_STATUS_FAILED
-
-
-def test_background_heartbeater_beats_until_stopped(monkeypatch) -> None:
-    """The background heartbeater emits heartbeats repeatedly until the stop event is set."""
-    import threading
-
-    from software_engineering_team.temporal import activities
-
-    beats = {"n": 0}
-    stop = threading.Event()
-
-    def hb(*a, **k):
-        beats["n"] += 1
-        if beats["n"] >= 3:
-            stop.set()
-
-    monkeypatch.setattr(activities.activity, "heartbeat", hb)
-    t = activities._start_background_heartbeater(0.005, stop)
-    t.join(timeout=2)
-
-    assert not t.is_alive()
-    assert beats["n"] >= 3
-
-
-def test_background_heartbeater_swallows_errors(monkeypatch) -> None:
-    """A raising heartbeat (e.g. outside an activity context) does not kill the beater loop."""
-    import threading
-
-    from software_engineering_team.temporal import activities
-
-    calls = {"n": 0}
-    stop = threading.Event()
-
-    def hb(*a, **k):
-        calls["n"] += 1
-        if calls["n"] >= 2:
-            stop.set()
-        raise RuntimeError("no activity context")
-
-    monkeypatch.setattr(activities.activity, "heartbeat", hb)
-    t = activities._start_background_heartbeater(0.005, stop)
-    t.join(timeout=2)
-
-    assert not t.is_alive()  # errors swallowed; loop continued and exited cleanly on stop
-    assert calls["n"] >= 2
 
 
 def test_coding_heartbeat_interval_env(monkeypatch) -> None:

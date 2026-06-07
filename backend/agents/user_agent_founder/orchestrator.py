@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import logging
 import os
-import threading
 import time
 from typing import Any, Callable
 
@@ -19,6 +18,7 @@ import httpx
 
 from job_service_client import JobServiceClient
 from llm_service import LLMJsonParseError, LLMSchemaValidationError
+from shared_concurrency import BackgroundHeartbeat
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.store import FounderRunStore
 from user_agent_founder.targets import StartFailed, TargetTeamAdapter, get_adapter
@@ -62,23 +62,13 @@ def _generate_spec_with_heartbeat(agent: FounderAgent, run_id: str) -> str:
     job-service stale-job monitor reaps the run as dead even though Phases 2
     and 3 still succeed.
     """
-    stop = threading.Event()
-
-    def _beat() -> None:
-        while not stop.wait(SPEC_HEARTBEAT_INTERVAL):
-            _heartbeat(run_id)
-
-    hb_thread = threading.Thread(
-        target=_beat,
+    with BackgroundHeartbeat(
+        lambda: _heartbeat(run_id),
+        SPEC_HEARTBEAT_INTERVAL,
         name=f"founder-spec-hb-{run_id[:12]}",
-        daemon=True,
-    )
-    hb_thread.start()
-    try:
+        join_timeout=1.0,
+    ):
         return agent.generate_spec()
-    finally:
-        stop.set()
-        hb_thread.join(timeout=1)
 
 
 def _answer_pending_questions(
