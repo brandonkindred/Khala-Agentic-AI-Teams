@@ -109,19 +109,26 @@ def _start_reaper_if_needed() -> None:
     The driver's loop evicts idle subscriptions and enforces the global cap every
     ``_REAPER_INTERVAL_SECONDS`` by calling ``_reap_once``; a failing pass is logged
     (with traceback) and the loop continues.
+
+    The check-and-start runs under ``_lock`` so a burst of concurrent subscribes
+    cannot double-start (and orphan) a beater: each instance owns its own stop
+    event, so an orphaned beater would be unstoppable by ``shutdown``. ``start()`` is
+    a thread spawn (no join), and the new beater's first ``_reap_once`` is a full
+    interval away, so holding ``_lock`` here cannot deadlock against ``_reap_once``.
     """
     global _reaper
-    if _reaper is not None and _reaper.is_alive():
-        return
-    _reaper = BackgroundHeartbeat(
-        _reap_once,
-        _REAPER_INTERVAL_SECONDS,
-        name="blogging-event-bus-reaper",
-        join_timeout=2.0,
-        on_error=lambda exc: logger.error(
-            "blogging event-bus reaper iteration failed", exc_info=exc
-        ),
-    ).start()
+    with _lock:
+        if _reaper is not None and _reaper.is_alive():
+            return
+        _reaper = BackgroundHeartbeat(
+            _reap_once,
+            _REAPER_INTERVAL_SECONDS,
+            name="blogging-event-bus-reaper",
+            join_timeout=2.0,
+            on_error=lambda exc: logger.error(
+                "blogging event-bus reaper iteration failed", exc_info=exc
+            ),
+        ).start()
 
 
 def _reap_once() -> None:
@@ -241,9 +248,14 @@ def shutdown() -> None:
     """Stop the reaper thread. Call during process shutdown (tests / lifespan).
 
     Idempotent and re-startable: after shutdown a later ``_start_reaper_if_needed``
-    spins up a fresh beater.
+    spins up a fresh beater. The global is swapped under ``_lock`` (atomic vs a
+    concurrent subscribe), but ``stop()`` — which joins the beater, and the beater's
+    ``_reap_once`` takes ``_lock`` — is called *outside* the lock to avoid a
+    join-deadlock.
     """
     global _reaper
-    if _reaper is not None:
-        _reaper.stop()
+    with _lock:
+        reaper = _reaper
         _reaper = None
+    if reaper is not None:
+        reaper.stop()

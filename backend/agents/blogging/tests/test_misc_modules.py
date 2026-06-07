@@ -446,6 +446,41 @@ def test_event_bus_shutdown_safe(monkeypatch) -> None:
     bus.shutdown()
 
 
+def test_event_bus_concurrent_start_no_double_reaper() -> None:
+    """Concurrent _start_reaper_if_needed must not orphan a second beater.
+
+    The lazy-init is guarded by _lock; a burst of concurrent starts must leave
+    exactly one reaper thread, and shutdown() must stop it (no leaked, unstoppable
+    beater whose private stop event shutdown can't reach).
+    """
+    import threading
+
+    from shared import job_event_bus as bus
+
+    bus.shutdown()  # clean slate
+
+    def _reapers_alive() -> int:
+        return len([t for t in threading.enumerate() if t.name == "blogging-event-bus-reaper"])
+
+    barrier = threading.Barrier(16)
+
+    def _racer() -> None:
+        barrier.wait()  # maximise the chance all threads race the check-and-start
+        bus._start_reaper_if_needed()
+
+    threads = [threading.Thread(target=_racer) for _ in range(16)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    try:
+        assert _reapers_alive() == 1, "concurrent starts must yield exactly one reaper thread"
+    finally:
+        bus.shutdown()
+    assert _reapers_alive() == 0, "shutdown() must stop the (only) reaper thread"
+
+
 # ---------------------------------------------------------------------------
 # blog_research_agent.allowed_claims
 # ---------------------------------------------------------------------------
