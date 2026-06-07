@@ -43,9 +43,7 @@ REPO_INSPECT_TOOL_DEFINITIONS: List[dict[str, Any]] = [
             "name": "read_file",
             "description": (
                 "Return the full contents of a single file in the repository. Read-only. "
-                "The path must be relative to the repo root (no absolute paths, no ..). "
-                "Output is byte-bounded: a file larger than the limit returns an error "
-                "(it is never partially returned) — read a more specific file instead."
+                "The path must be relative to the repo root (no absolute paths, no ..)."
             ),
             "parameters": {
                 "type": "object",
@@ -53,13 +51,6 @@ REPO_INSPECT_TOOL_DEFINITIONS: List[dict[str, Any]] = [
                     "path": {
                         "type": "string",
                         "description": "Relative path of the file to read.",
-                    },
-                    "max_bytes": {
-                        "type": "integer",
-                        "description": (
-                            "Optional lower byte limit for this read; clamped to the configured "
-                            "ceiling. A file larger than the effective limit returns an error."
-                        ),
                     },
                 },
                 "required": ["path"],

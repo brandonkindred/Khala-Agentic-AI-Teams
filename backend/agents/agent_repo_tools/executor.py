@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from software_engineering_team.shared.repo_utils import REPO_INSPECT_EXCLUDE_DIRS, int_env
+from software_engineering_team.shared.repo_utils import REPO_INSPECT_EXCLUDE_DIRS
 
 from .context import RepoToolContext
 from .definitions import REPO_INSPECT_TOOL_DEFINITIONS
@@ -24,9 +24,6 @@ _INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_INSPECT_EXCLUDE_DIRS
 # containment filter in ``_list_files`` still drops any escaping result, and a cycle surfaces as a
 # bounded OSError rather than unbounded work.)
 _GLOB_KWARGS: dict[str, Any] = {"recurse_symlinks": False} if sys.version_info >= (3, 13) else {}
-
-_READ_FILE_MAX_BYTES_ENV = "CODING_TEAM_READ_FILE_MAX_BYTES"
-_READ_FILE_MAX_BYTES_DEFAULT = 65536
 
 
 class _RepoPathError(ValueError):
@@ -130,30 +127,13 @@ def _read_file(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
     if not target.is_file():
         return {"success": False, "error": "not_a_file", "message": str(raw_path)}
 
-    ceiling = int_env(_READ_FILE_MAX_BYTES_ENV, _READ_FILE_MAX_BYTES_DEFAULT, min_val=1)
-    requested = args.get("max_bytes")
-    effective = ceiling
-    if isinstance(requested, int) and not isinstance(requested, bool) and requested > 0:
-        effective = min(requested, ceiling)
-
-    size = target.stat().st_size
-    if size > effective:
-        return {
-            "success": False,
-            "error": "file_too_large",
-            "size": size,
-            "limit": effective,
-            "message": (
-                f"file is {size} bytes, over the {effective}-byte limit; read a more specific "
-                f"path or raise {_READ_FILE_MAX_BYTES_ENV}"
-            ),
-        }
-
+    # The full file is returned, deliberately uncapped: the agent must be able to read any file in
+    # the workspace in full to do its job. Containment to the workspace is enforced above.
     content = target.read_bytes().decode("utf-8", errors="replace")
     return {
         "success": True,
         "path": str(target.relative_to(repo)),
-        "bytes": size,
+        "bytes": target.stat().st_size,
         "content": content,
     }
 

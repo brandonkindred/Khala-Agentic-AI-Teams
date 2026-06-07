@@ -1,8 +1,8 @@
 """Tests for the read-only repo-inspection tool executor.
 
 Cover the contract from the tool spec: listing (with skip set + glob), reading a
-file in full, path-traversal rejection (absolute / ``..`` / symlink escape), the
-byte-cap error (never a silent truncation), and the env-tunable ceiling.
+file in full (uncapped), path-traversal rejection (absolute / ``..`` / symlink
+escape), and malformed-glob handling.
 """
 
 from __future__ import annotations
@@ -19,8 +19,6 @@ from agent_repo_tools import (
 )
 from agent_repo_tools import executor as executor_mod
 from agent_repo_tools.executor import _RepoPathError, _resolve_within_repo
-
-_ENV = "CODING_TEAM_READ_FILE_MAX_BYTES"
 
 
 @pytest.fixture
@@ -154,73 +152,14 @@ def test_read_file_on_directory_is_rejected(repo: Path) -> None:
     assert out["error"] == "not_a_file"
 
 
-def test_read_file_oversize_errors_without_content(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(_ENV, "10")
-    (repo / "big.txt").write_text("x" * 50, encoding="utf-8")
+def test_read_file_reads_large_file_in_full_uncapped(repo: Path) -> None:
+    # No byte cap: a large file is returned in full so the agent can read any file it needs.
+    big = "x" * 500_000
+    (repo / "big.txt").write_text(big, encoding="utf-8")
     out = execute_repo_tool("read_file", {"path": "big.txt"}, _ctx(repo))
-    assert out["success"] is False
-    assert out["error"] == "file_too_large"
-    assert out["size"] == 50
-    assert out["limit"] == 10
-    assert "content" not in out
-
-
-def test_read_file_under_ceiling_succeeds(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(_ENV, "100")
-    (repo / "small.txt").write_text("abc", encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "small.txt"}, _ctx(repo))
     assert out["success"] is True
-    assert out["content"] == "abc"
-
-
-def test_read_file_per_call_max_bytes_lowers_limit(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(_ENV, "100")
-    (repo / "mid.txt").write_text("x" * 50, encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "mid.txt", "max_bytes": 10}, _ctx(repo))
-    assert out["error"] == "file_too_large"
-    assert out["limit"] == 10
-
-
-def test_read_file_max_bytes_clamped_to_ceiling(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(_ENV, "10")
-    (repo / "mid.txt").write_text("x" * 50, encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "mid.txt", "max_bytes": 1000}, _ctx(repo))
-    assert out["error"] == "file_too_large"
-    assert out["limit"] == 10  # ceiling wins over the larger per-call request
-
-
-def test_read_file_boolean_max_bytes_is_ignored(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # bool is an int subclass; it must not be treated as a byte budget.
-    monkeypatch.setenv(_ENV, "100")
-    (repo / "small.txt").write_text("abc", encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "small.txt", "max_bytes": True}, _ctx(repo))
-    assert out["success"] is True
-    assert out["content"] == "abc"
-
-
-def test_read_file_garbage_max_bytes_is_ignored(
-    repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv(_ENV, "100")
-    (repo / "small.txt").write_text("abc", encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "small.txt", "max_bytes": "lots"}, _ctx(repo))
-    assert out["success"] is True
-
-
-def test_read_file_ceiling_floored_to_one(repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(_ENV, "0")  # int_env floors to min_val=1
-    (repo / "small.txt").write_text("abc", encoding="utf-8")
-    out = execute_repo_tool("read_file", {"path": "small.txt"}, _ctx(repo))
-    assert out["error"] == "file_too_large"
-    assert out["limit"] == 1
+    assert out["content"] == big
+    assert out["bytes"] == len(big)
 
 
 # --------------------------------------------------------------------------- path safety
