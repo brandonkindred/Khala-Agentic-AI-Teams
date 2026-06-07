@@ -227,13 +227,21 @@ def test_plan_project_activity_exception_path(monkeypatch, tmp_path, patched_job
     assert job["status"] == js.JOB_STATUS_FAILED
 
 
-def test_coding_update_callback_forwards_update(monkeypatch) -> None:
-    """The coding-team update callback forwards kwargs to update_job for the right job."""
+def test_coding_update_callback_forwards_without_heartbeat(monkeypatch) -> None:
+    """The callback forwards kwargs to update_job and must NOT heartbeat.
+
+    Liveness is owned solely by the background beater (single-liveness owner), so the
+    update callback only persists progress.
+    """
     from software_engineering_team.temporal import activities
 
     captured: Dict[str, Any] = {}
+    beats = {"n": 0}
     monkeypatch.setattr(
         activities, "update_job", lambda jid, **kw: captured.update({"jid": jid, **kw})
+    )
+    monkeypatch.setattr(
+        activities.activity, "heartbeat", lambda *a, **k: beats.__setitem__("n", beats["n"] + 1)
     )
 
     cb = activities._coding_update_callback("job-x")
@@ -241,21 +249,6 @@ def test_coding_update_callback_forwards_update(monkeypatch) -> None:
 
     assert captured["jid"] == "job-x"
     assert captured["status_text"] == "implementing"
-
-
-def test_coding_update_callback_does_not_heartbeat(monkeypatch) -> None:
-    """Liveness is owned solely by the background beater: the update callback must NOT heartbeat."""
-    from software_engineering_team.temporal import activities
-
-    beats = {"n": 0}
-    monkeypatch.setattr(
-        activities.activity, "heartbeat", lambda *a, **k: beats.__setitem__("n", beats["n"] + 1)
-    )
-    monkeypatch.setattr(activities, "update_job", lambda jid, **kw: None)
-
-    cb = activities._coding_update_callback("job-y")
-    cb(phase="coding")
-
     assert beats["n"] == 0, "update callback must not emit a heartbeat (single-liveness owner)"
 
 

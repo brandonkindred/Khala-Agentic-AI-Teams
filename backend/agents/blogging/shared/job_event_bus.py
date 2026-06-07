@@ -104,17 +104,11 @@ _reaper: Optional[BackgroundHeartbeat] = None
 
 
 def _start_reaper_if_needed() -> None:
-    """Start the reaper daemon thread on first subscription (lazy init, idempotent).
+    """Lazily start the reaper (calls ``_reap_once`` every ``_REAPER_INTERVAL_SECONDS``).
 
-    The driver's loop evicts idle subscriptions and enforces the global cap every
-    ``_REAPER_INTERVAL_SECONDS`` by calling ``_reap_once``; a failing pass is logged
-    (with traceback) and the loop continues.
-
-    The check-and-start runs under ``_lock`` so a burst of concurrent subscribes
-    cannot double-start (and orphan) a beater: each instance owns its own stop
-    event, so an orphaned beater would be unstoppable by ``shutdown``. ``start()`` is
-    a thread spawn (no join), and the new beater's first ``_reap_once`` is a full
-    interval away, so holding ``_lock`` here cannot deadlock against ``_reap_once``.
+    The check-and-start runs under ``_lock`` so concurrent subscribes can't double-start
+    and orphan a beater (idempotent). Spawning the thread under the lock is safe — it
+    does no join, and the new beater's first ``_reap_once`` is a full interval away.
     """
     global _reaper
     with _lock:
@@ -245,13 +239,10 @@ def cleanup_job(job_id: str) -> None:
 
 
 def shutdown() -> None:
-    """Stop the reaper thread. Call during process shutdown (tests / lifespan).
+    """Stop the reaper thread (tests / lifespan); idempotent and re-startable.
 
-    Idempotent and re-startable: after shutdown a later ``_start_reaper_if_needed``
-    spins up a fresh beater. The global is swapped under ``_lock`` (atomic vs a
-    concurrent subscribe), but ``stop()`` — which joins the beater, and the beater's
-    ``_reap_once`` takes ``_lock`` — is called *outside* the lock to avoid a
-    join-deadlock.
+    The global is swapped under ``_lock``, but ``stop()`` (which joins the beater,
+    and ``_reap_once`` takes ``_lock``) runs *outside* the lock to avoid a deadlock.
     """
     global _reaper
     with _lock:

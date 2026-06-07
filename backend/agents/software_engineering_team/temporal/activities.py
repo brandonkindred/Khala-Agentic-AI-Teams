@@ -515,14 +515,10 @@ def _coding_heartbeat_interval_s() -> float:
 
 
 def _coding_update_callback(job_id: str) -> Callable[..., None]:
-    """Build the coding-team update callback that forwards job updates to the store.
+    """Forward orchestrator progress writes to `update_job(job_id, **kw)`.
 
-    Liveness is owned solely by the background `BackgroundHeartbeat` started in
-    `execute_coding_team_activity` (which beats `activity.heartbeat()` on a fixed interval for the
-    whole activity, independent of orchestrator callback cadence). This callback therefore does
-    *not* beat — a previous per-update heartbeat here was redundant with the background beater and
-    made the "who owns liveness" question ambiguous. The single, unambiguous answer is: the
-    background beater. This callback only persists the orchestrator's progress writes.
+    Liveness is owned by the background `BackgroundHeartbeat` in
+    `execute_coding_team_activity`, not here — this callback does not heartbeat.
 
     Preconditions:
         - `job_id` identifies an existing job.

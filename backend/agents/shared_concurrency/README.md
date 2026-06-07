@@ -8,10 +8,10 @@ Importing this package pulls in only the Python standard library.
 One driver for the "daemon thread runs a callable on an interval until stopped"
 pattern that several teams had independently hand-rolled (a Temporal
 `activity.heartbeat()` keep-alive, the founder spec-generation job heartbeat, the
-SE job-store heartbeat thread, the blogging pipeline heartbeat, the blogging
-event-bus reaper, and the job-service stale-job monitor). The driver is generic —
-it knows nothing about Temporal or the job service; it just calls a `beat`
-callable every `interval_s` until stopped.
+SE job-store heartbeat thread, the SE and job-service stale-job monitors, the
+blogging pipeline heartbeat, and the blogging event-bus reaper). The driver is
+generic — it knows nothing about Temporal or the job service; it just calls a
+`beat` callable every `interval_s` until stopped.
 
 ```python
 from shared_concurrency import BackgroundHeartbeat

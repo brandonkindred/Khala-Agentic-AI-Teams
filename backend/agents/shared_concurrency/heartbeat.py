@@ -1,29 +1,11 @@
 """Shared background-heartbeat / interval-loop driver.
 
-Several teams independently grew the same scaffolding: a ``threading.Event`` stop
-flag, a daemon thread looping on ``event.wait(interval)``, a best-effort beat, and
-a ``finally`` that sets the flag and joins. Each copy drifted slightly.
-:class:`BackgroundHeartbeat` is the single driver they share.
-
-The driver is deliberately generic — it knows nothing about Temporal, the job
-service, or any team; it only repeatedly calls a caller-supplied ``beat`` on an
-interval until stopped. It lives in ``shared_concurrency`` (not ``shared_temporal``)
-precisely because non-Temporal callers (the job-service stale monitor, the
-blogging event-bus reaper) use it too, and importing it pulls in only the stdlib.
-
-The axes on which the original copies differed are all parameters here:
-
-- **stop semantics** — externally controlled (``stop()`` / context-manager exit, or
-  an injected ``stop_event`` the caller sets) *or* self-terminating via a
-  ``should_continue`` predicate checked each tick.
-- **beat timing** — wait-then-beat (default) *or* ``beat_first`` (beat once before
-  the first wait, e.g. a stale-job sweep that should run immediately on startup).
-- **error policy** — silent swallow (default) *or* a caller ``on_error`` hook
-  (e.g. ``logger.warning``).
-- **context capture** — optionally snapshot ``contextvars.copy_context()`` and run
-  the beat *and* ``should_continue`` inside it (so a Temporal activity handle is
-  visible in the thread).
-- **join timeout** — caller-tunable bound on ``stop()``'s join.
+:class:`BackgroundHeartbeat` consolidates the daemon-thread + ``event.wait(interval)``
+loop + best-effort-beat + stop/join scaffolding that several teams had each
+hand-rolled. It is Temporal-agnostic and lives in ``shared_concurrency`` (stdlib
+only) so non-Temporal callers can use it without importing ``shared_temporal``. See
+the class docstring for the parameters and ``shared_concurrency/README.md`` for the
+rationale and usage examples.
 """
 
 from __future__ import annotations
@@ -106,9 +88,9 @@ class BackgroundHeartbeat:
         # Snapshot the *current* context now (constructor runs on the caller's
         # thread) so the beat sees e.g. the Temporal activity handle.
         self._ctx = contextvars.copy_context() if copy_context else None
-        # An injected stop event lets a caller keep a raw handle (and is never
-        # cleared on start, so a pre-set event stops the loop immediately).
-        self._owns_stop = stop_event is None
+        # An injected stop event lets a caller keep a raw handle; otherwise the
+        # driver owns a fresh (already-clear) event. The event is never re-cleared,
+        # so a pre-set injected event stops the loop immediately.
         self._stop = stop_event if stop_event is not None else threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -137,12 +119,9 @@ class BackgroundHeartbeat:
                 return
 
     def start(self) -> "BackgroundHeartbeat":
-        """Start the daemon thread (idempotent). Returns self for chaining."""
+        """Start the daemon thread (idempotent — a no-op while already running)."""
         if self._thread is not None and self._thread.is_alive():
             return self
-        # Only reset an event we own; an injected event is the caller's to control.
-        if self._owns_stop:
-            self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name=self._name, daemon=True)
         self._thread.start()
         return self
