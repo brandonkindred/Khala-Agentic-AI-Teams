@@ -156,6 +156,21 @@ class HandoffPackage(BaseModel):
         None,
         description="Optional blueprint or runnable from AI Systems Team.",
     )
+    open_questions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Unanswered product/design questions surfaced during planning. These must be escalated "
+            "to the user downstream, never auto-decided. Each entry mirrors OpenQuestion "
+            "(id, question_text, options, ...)."
+        ),
+    )
+    resolved_questions: List[Dict[str, Any]] = Field(
+        default_factory=list,
+        description=(
+            "Questions answered by the user during planning, carried across the handoff so the "
+            "decisions reach the implementing team. Each entry mirrors AnsweredQuestion."
+        ),
+    )
     summary: Optional[str] = Field(None)
 
 

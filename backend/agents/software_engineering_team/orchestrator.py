@@ -24,7 +24,7 @@ import time
 import traceback
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 
@@ -168,7 +168,9 @@ def _wait_for_user_answers(
     Returns True if answers were received, False if timed out or job failed.
     """
     start = time.time()
-    while time.time() - start < timeout_seconds:  # pragma: no cover  # integration-only: polling loop with real time.sleep
+    while (
+        time.time() - start < timeout_seconds
+    ):  # pragma: no cover  # integration-only: polling loop with real time.sleep
         if not is_waiting_for_answers(job_id):
             return True
         job_data = get_job(job_id)
@@ -178,6 +180,73 @@ def _wait_for_user_answers(
     logger.warning("Timed out waiting for user answers on job %s", job_id)
     update_job(job_id, status=JOB_STATUS_FAILED, error="Timed out waiting for user answers")
     return False
+
+
+def _run_se_decision_gate(
+    job_id: str, question_texts: List[str], source: str = "planning"
+) -> "tuple[List[Dict[str, Any]], bool]":
+    """Pause the job for the user to answer open questions, then return their resolved answers.
+
+    Reuses the existing pending-questions / wait-for-answers machinery so an open question raised by
+    planning never reaches implementation un-answered. Deterministic and fail-closed.
+
+    Postconditions:
+        - ``([], True)`` when there is nothing to ask.
+        - ``(resolved, True)`` once the user answers (each entry carries the question text + answer,
+          ready to thread into the coding team as ``resolved_questions``).
+        - ``([], False)`` when the wait ended without answers (timeout/failure); ``_wait_for_user_answers``
+          has already set the failure status on timeout, so the caller just stops.
+    """
+    from coding_team.hitl import answers_to_resolved
+
+    structured = _convert_to_structured_questions(question_texts, source=source)
+    if not structured:
+        return [], True
+    add_pending_questions(job_id, structured)
+    if slack_notify_open_questions:
+        slack_notify_open_questions(job_id, structured, source="run-team")
+    logger.info(
+        "Job %s waiting for %d clarification answer(s) from the user", job_id, len(structured)
+    )
+    if not _wait_for_user_answers(job_id):
+        return [], False
+    submitted = (get_job(job_id) or {}).get("submitted_answers") or []
+    return answers_to_resolved(submitted, structured), True
+
+
+def _build_planning_v3_answer_callback(job_id: str) -> Callable[[list], list]:
+    """Build an escalating answer callback for Planning V3 PRA — surface questions, never auto-decide.
+
+    When Planning V3's product-analysis phase asks clarification questions, this pauses the SE job
+    and routes them to the user (instead of Planning V3 auto-selecting a default). It preserves each
+    PRA question's id/options so the submitted answers map straight back to PRA.
+
+    Postconditions:
+        - Returns a callable ``(questions) -> [{question_id, selected_option_id, other_text}]`` that
+          only ever returns user-supplied answers (empty list if the wait ended without answers).
+    """
+
+    def _cb(questions: list) -> list:
+        texts = [
+            (q.get("question_text") or q.get("text") or "") if isinstance(q, dict) else str(q)
+            for q in questions
+        ]
+        structured = _convert_to_structured_questions(texts, source="planning")
+        for sq, oq in zip(structured, questions):
+            if isinstance(oq, dict) and oq.get("id"):
+                sq["id"] = str(oq["id"])
+                if oq.get("options"):
+                    sq["options"] = oq["options"]
+        add_pending_questions(job_id, structured)
+        if slack_notify_open_questions:
+            slack_notify_open_questions(job_id, structured, source="run-team")
+        if not _wait_for_user_answers(job_id):
+            return []
+        answered_ids = {sq["id"] for sq in structured}
+        submitted = (get_job(job_id) or {}).get("submitted_answers") or []
+        return [a for a in submitted if a.get("question_id") in answered_ids]
+
+    return _cb
 
 
 def _get_task_stats() -> Dict[str, Any]:
@@ -567,7 +636,9 @@ def _run_dbc_comments_review(
                 "[%s] DbC: code complies with Design by Contract -- great job coding!",
                 task_id,
             )
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         # Non-blocking: DbC failure should never stop the pipeline
         logger.warning("[%s] DbC: review failed (non-blocking): %s", task_id, e)
 
@@ -595,8 +666,12 @@ def _run_tech_lead_review(
     completed_tasks = [t for tid, t in all_tasks.items() if tid in completed]
     remaining_ids = set(execution_queue)
     remaining_tasks = [t for tid, t in all_tasks.items() if tid in remaining_ids]
-    max_code_chars = compute_existing_code_chars(tech_lead.llm)  # pragma: no cover  # integration-only: tech-lead review uses live LLM
-    codebase_summary = _truncate_for_context(_read_repo_code(repo_path), max_code_chars)  # pragma: no cover  # integration-only
+    max_code_chars = compute_existing_code_chars(
+        tech_lead.llm
+    )  # pragma: no cover  # integration-only: tech-lead review uses live LLM
+    codebase_summary = _truncate_for_context(
+        _read_repo_code(repo_path), max_code_chars
+    )  # pragma: no cover  # integration-only
 
     new_tasks = tech_lead.review_progress(  # pragma: no cover  # integration-only: LLM call
         task_update=task_update,
@@ -622,7 +697,9 @@ def _run_tech_lead_review(
         )
 
     # Tech Lead triggers the Documentation Agent to update project docs
-    if doc_agent:  # pragma: no cover  # integration-only: documentation agent runs LLM + writes docs to repo
+    if (
+        doc_agent
+    ):  # pragma: no cover  # integration-only: documentation agent runs LLM + writes docs to repo
         tech_lead.trigger_documentation_update(
             doc_agent=doc_agent,
             repo_path=repo_path,
@@ -650,9 +727,13 @@ def _run_code_review(
 
     from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
 
-    llm = agents["code_review"].llm  # pragma: no cover  # integration-only: code review uses live LLM
+    llm = agents[
+        "code_review"
+    ].llm  # pragma: no cover  # integration-only: code review uses live LLM
     max_chars = compute_code_review_total_chars(llm)  # pragma: no cover  # integration-only
-    code_capped = _truncate_for_context(code_to_review, max_chars)  # pragma: no cover  # integration-only
+    code_capped = _truncate_for_context(
+        code_to_review, max_chars
+    )  # pragma: no cover  # integration-only
     review_input = CodeReviewInput(  # pragma: no cover  # integration-only
         code=code_capped,
         spec_content=spec_content,
@@ -731,7 +812,9 @@ def _run_build_verification(
         run_python_syntax_check,
     )
 
-    if agent_type == "frontend":  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
+    if (
+        agent_type == "frontend"
+    ):  # pragma: no cover  # integration-only: invokes ng build and downstream LLM fix loop
         # repo_path may be frontend repo root (package.json here) or work path (frontend/ subdir)
         frontend_dir = (
             repo_path if (repo_path / "package.json").exists() else (repo_path / "frontend")
@@ -797,7 +880,9 @@ def _run_build_verification(
         if tests_dir.exists() and any(tests_dir.rglob("test_*.py")):
             # Install deps before pytest so agent-added packages (e.g. sqlalchemy) are available
             req_txt = backend_dir / "requirements.txt"
-            if req_txt.exists():  # pragma: no cover  # integration-only: shells out to `pip install`
+            if (
+                req_txt.exists()
+            ):  # pragma: no cover  # integration-only: shells out to `pip install`
                 try:
                     pip_result = run_command(
                         [sys.executable, "-m", "pip", "install", "-r", "requirements.txt"],
@@ -847,7 +932,9 @@ def _run_build_verification(
         logger.info("Build verification passed for backend task %s", task_id)
         return True, ""
 
-    elif agent_type == "devops":  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
+    elif (
+        agent_type == "devops"
+    ):  # pragma: no cover  # integration-only: docker build + yaml parsing on real workflow files
         # Validate YAML files and run docker build if Dockerfile exists
         import yaml
 
@@ -925,7 +1012,9 @@ def _try_build_fix_one_at_a_time(
         run_python_syntax_check,
     )
 
-    if agent_type == "frontend":  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
+    if (
+        agent_type == "frontend"
+    ):  # pragma: no cover  # integration-only: invokes ng build + LLM repair loop
         project_dir = repo_path if (repo_path / "package.json").exists() else repo_path / "frontend"
         if not (project_dir / "package.json").exists():
             return False, "No frontend project found"
@@ -964,7 +1053,9 @@ def _try_build_fix_one_at_a_time(
             )
         language = "typescript"
         prompt_module = "frontend_code_v2_team.prompts"
-    elif agent_type == "backend":  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
+    elif (
+        agent_type == "backend"
+    ):  # pragma: no cover  # integration-only: runs python syntax check + pytest + LLM repair loop
         project_dir = repo_path if any(repo_path.rglob("*.py")) else repo_path / "backend"
         if not project_dir.exists() or not any(project_dir.rglob("*.py")):
             return False, "No Python project found"
@@ -1098,7 +1189,9 @@ def _try_build_fix_one_at_a_time(
         language_conventions = JAVA_CONVENTIONS if language == "java" else PYTHON_CONVENTIONS
 
     max_fix_attempts = 15
-    for attempt in range(max_fix_attempts):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
+    for attempt in range(
+        max_fix_attempts
+    ):  # pragma: no cover  # integration-only: LLM fix loop reruns build/test after each repair
         if not issues:
             break
         issue = issues.pop(0)
@@ -1306,7 +1399,9 @@ def _backend_code_v2_worker(
             failed[tid] = "backend team not registered"
         return
 
-    while backend_code_v2_queue:  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
+    while (
+        backend_code_v2_queue
+    ):  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
         # Check for cancellation before starting each task
         if is_cancel_requested(job_id):
             logger.info("Backend worker: cancellation detected, stopping")
@@ -2763,6 +2858,10 @@ def run_orchestrator(
             llm=get_client("project_planning"),
             job_updater=_planning_v3_job_updater,
             run_architecture_fn=_run_architecture_for_planning_v3,
+            # Never let Planning V3 silently auto-decide a clarification question on this path:
+            # escalate to the user, and fail closed if escalation is somehow unavailable.
+            answer_callback=_build_planning_v3_answer_callback(job_id),
+            auto_answer_questions=False,
         )
         if not p3_result.get("success"):
             err = (
@@ -2796,6 +2895,20 @@ def run_orchestrator(
         # Check for cancellation after Planning V3
         _check_cancellation(job_id)
 
+        # Human-in-the-loop decision gate (default path). If planning surfaced open questions that
+        # the user has not already answered, pause the job and block until they do — an open
+        # question must never reach implementation un-answered. The answers thread into the coding
+        # team via resolved_questions_override; the open questions are then cleared so the
+        # coding-team gate does not re-pause on them.
+        if adapter_result.open_questions and not resolved_questions_override:
+            resolved, ok = _run_se_decision_gate(
+                job_id, list(adapter_result.open_questions), source="planning"
+            )
+            if not ok:
+                return
+            resolved_questions_override = resolved
+            adapter_result.open_questions = []
+
         # Main path: coding_team (replaces Tech Lead + Architecture Expert + backend_code_v2/frontend_code_v2 workers).
         # Legacy path (tech_lead_agent, backend_code_v2_team, frontend_code_v2_team) retained below for alternate flows.
         use_coding_team = True
@@ -2816,7 +2929,9 @@ def run_orchestrator(
                 get_job_fn=lambda jid: get_job(jid),
                 get_llm=get_client,
             )
-            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+            # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
+            # completed_with_failures / failed / cancelled), so there is nothing to finalize here —
+            # writing COMPLETED would clobber a failure or a partial-success it already set.
             return
 
         # Legacy path (deprecated for main path): tech_lead_agent, backend_code_v2_team,
@@ -2971,7 +3086,9 @@ def run_orchestrator(
                     path,
                     assignment,
                     summary=getattr(tech_lead_output, "summary", "") or "",
-                    requirement_task_mapping=getattr(tech_lead_output, "requirement_task_mapping", None)
+                    requirement_task_mapping=getattr(
+                        tech_lead_output, "requirement_task_mapping", None
+                    )
                     or [],
                     validation_report=getattr(tech_lead_output, "validation_report", None),
                     plan_dir=plan_dir,
@@ -3075,7 +3192,9 @@ def run_orchestrator(
                 tid
                 for tid in full_order
                 if all_tasks.get(tid)
-                and (all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops")
+                and (
+                    all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
+                )
             ]
             backend_queue: List[
                 str
@@ -3091,7 +3210,8 @@ def run_orchestrator(
             frontend_code_v2_queue: List[str] = [
                 tid
                 for tid in full_order
-                if all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
+                if all_tasks.get(tid)
+                and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
             ]
             total_tasks = (
                 len(prefix_queue)
@@ -3211,7 +3331,9 @@ def run_orchestrator(
                 frontend_code_v2_thread.join()
 
             llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
-            llm_connectivity_failed = any(v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values())
+            llm_connectivity_failed = any(
+                v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values()
+            )
             remaining_in_queues = (
                 len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
             )
@@ -3313,7 +3435,11 @@ def run_orchestrator(
                                 "Integration agent found %s issues (%s critical/high)",
                                 len(int_result.issues),
                                 len(
-                                    [i for i in int_result.issues if i.severity in ("critical", "high")]
+                                    [
+                                        i
+                                        for i in int_result.issues
+                                        if i.severity in ("critical", "high")
+                                    ]
                                 ),
                             )
                             for i, issue in enumerate(int_result.issues[:10], 1):
@@ -3410,7 +3536,8 @@ def run_orchestrator(
                     for tid in completed_code_task_ids
                 )
                 has_frontend = any(
-                    all_tasks.get(tid) and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
+                    all_tasks.get(tid)
+                    and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
                     for tid in completed_code_task_ids
                 )
                 if has_backend:
@@ -3526,7 +3653,9 @@ def run_orchestrator(
                 logger.info("")
                 logger.info("=" * BANNER_WIDTH)
                 logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE  ★★★")
-                logger.info("  Job %s finished. All tasks executed. Artifacts in work path.", job_id)
+                logger.info(
+                    "  Job %s finished. All tasks executed. Artifacts in work path.", job_id
+                )
                 logger.info("=" * BANNER_WIDTH)
                 _log_task_breakdown(
                     completed=completed,
@@ -3544,7 +3673,9 @@ def run_orchestrator(
                     status_text="All tasks completed successfully",
                 )
 
-    except CancellationError:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        CancellationError
+    ):  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.info("Orchestrator stopped due to job cancellation: %s", job_id)
         update_job(
             job_id,
@@ -3552,7 +3683,9 @@ def run_orchestrator(
             status_text="Job cancelled by user",
             phase="completed",
         )
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e), phase="completed")
 
@@ -3874,9 +4007,13 @@ def run_failed_tasks(job_id: str) -> None:
                 status_text="Retry completed",
             )
 
-    except CancellationError:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        CancellationError
+    ):  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.info("Retry orchestrator stopped due to job cancellation: %s", job_id)
         update_job(job_id, status=JOB_STATUS_CANCELLED, status_text="Job cancelled by user")
-    except Exception as e:  # pragma: no cover  # integration-only: paired with integration-only try block
+    except (
+        Exception
+    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
         logger.exception("Retry orchestrator failed")
         update_job(job_id, status=JOB_STATUS_FAILED, error=str(e))

@@ -24,6 +24,44 @@ PHASE_ORDER = [
 ]
 
 
+def _resolve_pra_answers(
+    questions: list,
+    answer_callback: Optional[Callable[[list], list]],
+    auto_answer_questions: bool,
+) -> list:
+    """Resolve PRA clarification questions to answers.
+
+    Preconditions:
+        - ``questions`` is the PRA pending-question list (dicts with id/options).
+    Postconditions:
+        - If ``answer_callback`` is supplied, returns its result (user-supplied answers).
+        - Else if ``auto_answer_questions`` is True, auto-selects each question's is_default/first
+          option and logs a WARNING (never silent).
+        - Else (gated, no callback) RAISES — decisions must be made by the user, never auto-decided.
+    """
+    if answer_callback:
+        return answer_callback(questions)
+    if not questions:
+        return []
+    if not auto_answer_questions:
+        raise RuntimeError(
+            "Planning V3 received clarification questions but no answer_callback was supplied "
+            "and auto-answering is disabled; decisions must be made by the user."
+        )
+    logger.warning(
+        "Planning V3 auto-answering %d clarification question(s) with defaults "
+        "(no answer_callback supplied)",
+        len(questions),
+    )
+    answers = []
+    for q in questions:
+        opts = q.get("options", [])
+        if opts:
+            opt_id = next((o.get("id") for o in opts if o.get("is_default")), opts[0].get("id"))
+            answers.append({"question_id": q.get("id", ""), "selected_option_id": opt_id})
+    return answers
+
+
 def run_workflow(
     repo_path: str,
     client_name: Optional[str] = None,
@@ -37,13 +75,25 @@ def run_workflow(
     job_updater: Optional[Callable[..., None]] = None,
     answer_callback: Optional[Callable[[list], list]] = None,
     run_architecture_fn: Optional[Callable[..., Optional[str]]] = None,
+    auto_answer_questions: bool = True,
 ) -> Dict[str, Any]:
     """
     Run the full Planning V3 workflow.
 
     job_updater(current_phase, progress, status_text, ...) is called to report progress.
     answer_callback(pending_questions) is used when PRA is waiting for answers; return list of
-    {question_id, selected_option_id?, other_text?}. If None, defaults are used (first option).
+    {question_id, selected_option_id?, other_text?}.
+
+    answer_callback / auto_answer_questions contract:
+        - If ``answer_callback`` is supplied it is always used (and must return user-supplied
+          answers — it must never fabricate a default).
+        - Else if ``auto_answer_questions`` is True (default, standalone behavior), the workflow
+          auto-selects each question's default/first option and logs a WARNING (so the auto-answer
+          is never silent).
+        - Else (``auto_answer_questions`` False and no callback — a gated caller such as the SE /
+          coding-team path), the workflow FAILS CLOSED: clarification questions raise rather than
+          being auto-decided, because decisions must be made by the user.
+
     Returns a result dict with success, handoff_package, summary, failure_reason, current_phase.
     """
     from planning_v3_team.adapters import (
@@ -121,17 +171,7 @@ def run_workflow(
         _update(Phase.DOCUMENT_PRODUCTION.value, 45, "Document production")
 
         def _pra_answer_cb(questions: list) -> list:
-            if answer_callback:
-                return answer_callback(questions)
-            answers = []
-            for q in questions:
-                opts = q.get("options", [])
-                if opts:
-                    opt_id = next(
-                        (o.get("id") for o in opts if o.get("is_default")), opts[0].get("id")
-                    )
-                    answers.append({"question_id": q.get("id", ""), "selected_option_id": opt_id})
-            return answers
+            return _resolve_pra_answers(questions, answer_callback, auto_answer_questions)
 
         ctx_update, artifacts = run_document_production(
             context,
@@ -149,6 +189,16 @@ def run_workflow(
         result["handoff_package"] = context.get("handoff_package")
         if result["handoff_package"] and hasattr(result["handoff_package"], "model_dump"):
             result["handoff_package"] = result["handoff_package"].model_dump()
+        # Carry any planning-surfaced questions across the handoff so the downstream team can
+        # escalate unanswered ones to the user instead of auto-deciding them. Typically empty today
+        # (PRA resolves answers inline), but the field makes the decisions survive the boundary.
+        if isinstance(result["handoff_package"], dict):
+            result["handoff_package"].setdefault(
+                "open_questions", list(context.get("open_questions") or [])
+            )
+            result["handoff_package"].setdefault(
+                "resolved_questions", list(context.get("resolved_questions") or [])
+            )
 
         _update(Phase.SUB_AGENT_PROVISIONING.value, 90, "Sub-agent provisioning (optional)")
         ctx_update, _ = run_sub_agent_provisioning(

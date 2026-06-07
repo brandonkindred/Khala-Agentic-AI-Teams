@@ -29,6 +29,7 @@ class PlanningV2AdapterResult:
     final_spec_content: Optional[str] = field(default=None)
     architecture_overview: Optional[str] = field(default=None)
     shared_planning_doc_path: Optional[str] = field(default=None)
+    resolved_questions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 __all__ = ["adapt_planning_v3_result", "PlanningV2AdapterResult"]
@@ -164,7 +165,18 @@ def adapt_planning_v3_result(
         "goals": goals.strip(),
     }
 
+    # Open/resolved questions are carried across the planning handoff so the SE gate can escalate
+    # unanswered product questions to the user instead of letting them be auto-decided downstream.
     open_questions: List[str] = []
+    for q in handoff.get("open_questions") or []:
+        if isinstance(q, dict):
+            text = q.get("question_text") or q.get("text") or q.get("question") or ""
+        else:
+            text = str(q)
+        if text:
+            open_questions.append(text)
+    resolved_questions: List[Dict[str, Any]] = list(handoff.get("resolved_questions") or [])
+
     assumptions: List[str] = []
     if client_context and client_context.get("assumptions"):
         assumptions = list(client_context["assumptions"])
@@ -181,4 +193,5 @@ def adapt_planning_v3_result(
         hierarchy=hierarchy,
         final_spec_content=final_spec_content,
         architecture_overview=architecture_overview,
+        resolved_questions=resolved_questions,
     )

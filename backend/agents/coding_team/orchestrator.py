@@ -12,6 +12,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from coding_team import hitl
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -31,6 +32,16 @@ logger = logging.getLogger(__name__)
 
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
+
+# Cap on the Tech-Lead clarify→answer→re-plan loop. Each round is one pause for the user plus one
+# re-plan; bounding it stops a model that keeps asking from looping forever. On exhaustion the
+# orchestrator fails closed rather than building tasks around an undecided question.
+MAX_TECH_LEAD_QUESTION_ROUNDS = 5
+
+# Type alias for the bound pause cycle: given questions + a source label, surface them to the user,
+# block until answered, and return (resolved_answers, ok). ok=False means the job went terminal or
+# timed out while waiting (the cycle has already set the failure status) and the caller must stop.
+PauseCycle = Callable[[List[Any], str], "tuple[List[Dict[str, Any]], bool]"]
 
 
 def _build_review_evidence(summary: str, diff: str) -> str:
@@ -113,6 +124,161 @@ def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
     return "\n".join(parts) if parts else "No files found"
 
 
+def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
+    """Render resolved decisions as a 'question → answer' block for an engineer's revision feedback."""
+    lines = []
+    for r in resolved or []:
+        if not isinstance(r, dict):
+            continue
+        q, a = hitl.decision_qa(r)
+        if q or a:
+            lines.append(f"{q} → {a}" if q else a)
+    body = "\n".join(f"- {ln}" for ln in lines if ln)
+    return (
+        (
+            "The user answered the open question(s) you raised. Implement these decisions exactly; "
+            "do not ask again:\n" + body
+        )
+        if body
+        else "The user answered the open question(s) you raised."
+    )
+
+
+def _hydrate_resolved_from_record(
+    plan_input: CodingTeamPlanInput, job_data: Dict[str, Any]
+) -> None:
+    """Fold answers already persisted on the job record into ``plan_input.resolved_questions``.
+
+    Used on a fresh process resuming a job (e.g. a Temporal retry) so answers from a prior attempt
+    are carried forward. Persisted answers carry their ``question_id`` but not the original question
+    text, so they only clear an open question when the persisted record also carries a matching
+    ``question_text``; the coverage check (``hitl.unanswered_questions``) is strictly text-based and
+    fails closed, so a resume whose answers lack question text re-asks rather than guessing.
+
+    Postconditions:
+        - ``plan_input.resolved_questions`` contains an entry for every persisted answer not already
+          present (matched by ``question_id``); pre-existing resolved entries are untouched.
+    """
+    submitted = (job_data or {}).get("submitted_answers") or []
+    if not submitted:
+        return
+    existing = list(plan_input.resolved_questions or [])
+    existing_ids = {r.get("question_id") for r in existing if isinstance(r, dict)}
+    for a in submitted:
+        if not isinstance(a, dict) or a.get("question_id") in existing_ids:
+            continue
+        existing.append(
+            {
+                "question_id": a.get("question_id"),
+                "question_text": a.get("question_text", ""),
+                "answer": a.get("other_text") or a.get("selected_option_id") or "",
+                "selected_option_id": a.get("selected_option_id", ""),
+                "other_text": a.get("other_text", ""),
+            }
+        )
+    plan_input.resolved_questions = existing
+
+
+def _run_pause_cycle(
+    job_id: str,
+    questions: List[Any],
+    source: str,
+    *,
+    get_job_fn: Callable[[str], Optional[Dict[str, Any]]],
+    update_fn: Callable[..., None],
+    on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+) -> "tuple[List[Dict[str, Any]], bool]":
+    """Surface open questions, pause the job, block until answered, and return resolved answers.
+
+    This is the single deterministic gate the whole coding team funnels decisions through. It sets
+    the job ``waiting_for_user`` (flag ``waiting_for_answers``), records the structured questions,
+    optionally invokes ``on_pause`` (e.g. to post a GitHub issue comment), then blocks until the
+    answer endpoint clears the flag.
+
+    Postconditions:
+        - Returns ``([], True)`` immediately when there is nothing to ask.
+        - On answers: returns ``(resolved, True)`` and the job is back to ``running``.
+        - On timeout: sets the job ``failed`` and returns ``([], False)``.
+        - On the job going terminal while waiting (e.g. cancelled): leaves the status as-is and
+          returns ``([], False)``.
+        - Never fabricates or defaults an answer.
+    """
+    structured = hitl.convert_to_structured_questions(questions, source=source)
+    if not structured:
+        return [], True
+    update_fn(
+        status=hitl.WAITING_STATUS,
+        phase="paused",
+        status_text=f"Waiting for {len(structured)} decision(s) from the user",
+        waiting_for_answers=True,
+        pending_questions=structured,
+    )
+    if on_pause is not None:
+        try:
+            on_pause(structured)
+        except Exception as e:  # noqa: BLE001 — surfacing the pause must never abort the job
+            logger.warning("on_pause callback failed for job %s: %s", job_id, e)
+    got = hitl.wait_for_answers(job_id, get_job_fn)
+    if not got:
+        data = get_job_fn(job_id) or {}
+        if hitl.is_terminal(data):
+            logger.info(
+                "Job %s ended while waiting for answers (status=%s)", job_id, data.get("status")
+            )
+        else:
+            update_fn(
+                status="failed",
+                phase="completed",
+                status_text="Timed out waiting for user answers",
+                error="Timed out waiting for user answers",
+                waiting_for_answers=False,
+            )
+        return [], False
+    submitted = (get_job_fn(job_id) or {}).get("submitted_answers") or []
+    resolved = hitl.answers_to_resolved(submitted, structured)
+    update_fn(
+        status="running",
+        phase="coding",
+        status_text="Resuming after user answers",
+        waiting_for_answers=False,
+        pending_questions=[],
+    )
+    return resolved, True
+
+
+def _plan_with_hitl(
+    tech_lead: TechLeadAgent,
+    plan_input: CodingTeamPlanInput,
+    pause_cycle: PauseCycle,
+    max_rounds: int = MAX_TECH_LEAD_QUESTION_ROUNDS,
+) -> Optional[Dict[str, Any]]:
+    """Plan the task graph, pausing for the user whenever the Tech Lead raises an open question.
+
+    Postconditions:
+        - Returns the task-graph dict once the Tech Lead emits no open questions, with every
+          answered decision folded into ``plan_input.resolved_questions``.
+        - Returns ``None`` when a pause ended without answers (terminal/timeout) OR when the Tech
+          Lead keeps raising open questions past ``max_rounds`` — in the latter case it fails closed
+          rather than building tasks around an undecided question. The caller stops either way.
+    """
+    for _ in range(max_rounds):
+        out = tech_lead.run_plan_to_task_graph(plan_input)
+        questions = out.get("open_questions") or []
+        if not questions:
+            return out
+        resolved, ok = pause_cycle(questions, "tech_lead")
+        if not ok:
+            return None
+        plan_input.resolved_questions = list(plan_input.resolved_questions or []) + resolved
+        plan_input.open_questions = []
+    # Reaching here means the Tech Lead raised open questions on every one of max_rounds rounds.
+    # Fail closed — do NOT proceed to build tasks around questions that may still be undecided.
+    logger.error(
+        "Tech Lead still raising open questions after %d round(s); failing closed", max_rounds
+    )
+    return None
+
+
 def run_coding_team_orchestrator(
     job_id: str,
     repo_path: str | Path,
@@ -122,6 +288,7 @@ def run_coding_team_orchestrator(
     get_job_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     get_llm: Optional[Callable[[str], Any]] = None,
+    on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
 ) -> None:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
@@ -132,9 +299,9 @@ def run_coding_team_orchestrator(
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
     llm_getter = get_llm or (
-        lambda key: __import__("llm_service.strands_provider", fromlist=["get_strands_model"]).get_strands_model(
-            key or "coding_team"
-        )
+        lambda key: __import__(
+            "llm_service.strands_provider", fromlist=["get_strands_model"]
+        ).get_strands_model(key or "coding_team")
     )
 
     def _check_cancel() -> bool:
@@ -166,11 +333,38 @@ def run_coding_team_orchestrator(
     llm = llm_getter("tech_lead")
     tech_lead = TechLeadAgent(llm)
 
+    def _pause_cycle(questions: List[Any], source: str) -> "tuple[List[Dict[str, Any]], bool]":
+        return _run_pause_cycle(
+            job_id,
+            questions,
+            source,
+            get_job_fn=_get_job,
+            update_fn=_update,
+            on_pause=on_pause,
+        )
+
     # Resume from a persisted snapshot (e.g. a Temporal retry of the same job_id) instead of
     # re-running the planning LLM and re-doing finished work. `_persist_graph` writes the task
     # snapshot every round; the stacks are persisted alongside it on the fresh path below.
     existing = _get_job(job_id) or {}
     snapshot_tasks = existing.get("task_graph_snapshot") or []
+
+    # Human-in-the-loop decision gate (entry). Fold any answers persisted from a prior attempt,
+    # then if open questions handed in still have no answer, pause for the user before doing any
+    # work. Deterministic and fail-closed — the swarm is never entered while an unanswered open
+    # question exists. On a pause that ends without answers (terminal/timeout) the cycle has
+    # already set the failure status, so we just stop.
+    _hydrate_resolved_from_record(plan_input, existing)
+    entry_unanswered = hitl.unanswered_questions(
+        plan_input.open_questions, plan_input.resolved_questions
+    )
+    if entry_unanswered:
+        resolved, ok = _pause_cycle(entry_unanswered, "plan_input")
+        if not ok:
+            return
+        plan_input.resolved_questions = list(plan_input.resolved_questions or []) + resolved
+        plan_input.open_questions = []
+
     if snapshot_tasks:
         logger.info("Resuming job %s from snapshot (%d tasks)", job_id, len(snapshot_tasks))
         graph.restore(
@@ -184,7 +378,22 @@ def run_coding_team_orchestrator(
         graph.reset_in_flight()
         stacks_raw = existing.get("stack_specs") or _DEFAULT_STACK_SPECS
     else:
-        out = tech_lead.run_plan_to_task_graph(plan_input)
+        # Plan the task graph, pausing for the user if the Tech Lead raises a decision it must not
+        # make. None means either a pause ended without answers (the pause cycle already set the
+        # failure status) or the Tech Lead never stopped asking — fail closed in the latter case so
+        # the job does not linger in an ambiguous running state.
+        out = _plan_with_hitl(tech_lead, plan_input, _pause_cycle)
+        if out is None:
+            # Only set 'failed' when the job is not already terminal — a pause that ended because the
+            # job went terminal (failed/cancelled/completed) must keep that status, not be relabeled.
+            if not hitl.is_terminal(_get_job(job_id) or {}):
+                _update(
+                    status="failed",
+                    phase="completed",
+                    status_text="Design did not converge: open questions were never resolved",
+                    error="Tech Lead exceeded the open-question round cap",
+                )
+            return
         tasks_raw = out.get("tasks") or []
         stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
         for t in tasks_raw:
@@ -228,7 +437,13 @@ def run_coding_team_orchestrator(
         check_cancel=_check_cancel,
         persist_fn=_persist_graph,
         update_fn=_update,
+        pause_for_questions=_pause_cycle,
     )
+
+    # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
+    # the pause cycle has already set the failure status, so do not overwrite it with "completed".
+    if getattr(swarm, "aborted", False):
+        return
 
     merged_count = graph.count_with_status(TaskStatus.MERGED)
     failed_count = graph.count_with_status(TaskStatus.FAILED)
@@ -264,6 +479,11 @@ class CodingTeamSwarm:
         self.path = path
         self.agent_ids = agent_ids
         self.llm_getter = llm_getter
+        # Bound pause cycle (set in run()) used to escalate a worker-raised decision to the user.
+        self.pause_for_questions: Optional[PauseCycle] = None
+        # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
+        # the orchestrator not to overwrite the failure status with "completed".
+        self.aborted = False
         self.repo_context = _read_repo_context(path)
         # Repo context only changes when merged work lands new files on the working tree, so cache
         # the merged-task count the context reflects and re-read only when it advances (see run()).
@@ -274,7 +494,8 @@ class CodingTeamSwarm:
 
     def _find_ready_tasks(self) -> List[Task]:
         return [
-            t for t in self.graph.get_tasks()
+            t
+            for t in self.graph.get_tasks()
             if t.status == TaskStatus.TO_DO and self.graph._dependencies_satisfied(t.id)
         ]
 
@@ -314,6 +535,12 @@ class CodingTeamSwarm:
         update_fn(status_text=f"Implementing: {task.title}")
         result = swe.run_implement(task, self.path, repo_context=self.repo_context)
 
+        if result.get("status") == "needs_decision":
+            # The engineer hit a product/design decision it must not make. Escalate to the user
+            # (never decide it here); thread the answer back so the next round implements it.
+            self._escalate_decision(task, result, update_fn)
+            return
+
         if result.get("status") == "in_review":
             # Run quality gates as tools
             if not self._run_quality_gates(swe, task, result, update_fn):
@@ -333,7 +560,10 @@ class CodingTeamSwarm:
             # a clean success despite incomplete work.
             logger.warning(
                 "Worker %s task %s did not reach review (status=%s): %s",
-                swe.agent_id, task.id, result.get("status"), result.get("error"),
+                swe.agent_id,
+                task.id,
+                result.get("status"),
+                result.get("error"),
             )
             self._handle_incomplete_implementation(task, result)
 
@@ -360,7 +590,8 @@ class CodingTeamSwarm:
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
                 "Task %s did not reach review and exhausted revisions (%d); marking FAILED",
-                task.id, MAX_TASK_REVISIONS,
+                task.id,
+                MAX_TASK_REVISIONS,
             )
             self.graph.update_task(
                 task.id,
@@ -375,6 +606,84 @@ class CodingTeamSwarm:
             task.id,
             status=TaskStatus.IN_PROGRESS,
             revision_count=revision_count,
+            revision_feedback=feedback,
+        )
+
+    def _escalate_decision(self, task: Task, result: Dict[str, Any], update_fn: Callable) -> None:
+        """Pause the job for a user decision a worker raised, then thread the answer back to the task.
+
+        The engineer never decides the question itself. The task stays with the same engineer
+        (IN_PROGRESS) so it re-implements next round with the user's decision in its feedback. An
+        escalation is NOT counted against the revision cap — a late-stage question (a task already
+        near the cap) must still get its answer implemented, not discarded. Pathological re-asking
+        is bounded by the human (each escalation needs a user answer) and the swarm's round cap. A
+        pause that ends without answers (terminal/timeout) aborts the swarm.
+
+        Postconditions:
+            - On a successful pause the task is IN_PROGRESS with a ``user_decision`` feedback entry
+              and the same engineer, so the answer is implemented next round (revision count
+              unchanged). On an unanswered pause ``self.aborted`` is set. With no answer channel the
+              task is FAILED (fail closed).
+        """
+        questions = result.get("open_questions") or []
+        if self.pause_for_questions is None:
+            # No answer channel wired (should not happen on real paths). Fail closed rather than
+            # let the engineer's unanswered decision slip through as silently-decided work.
+            logger.error(
+                "Worker raised a decision but no pause channel is available; failing task %s",
+                task.id,
+            )
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.FAILED,
+                revision_feedback=list(task.revision_feedback or [])
+                + [
+                    {
+                        "source": "system",
+                        "reason": "engineer needs a product decision but no answer channel is available",
+                        "requested_changes": [],
+                    }
+                ],
+            )
+            self._cascade_fail_dependents(task.id)
+            return
+        update_fn(status_text=f"Awaiting user decision: {task.title}")
+        resolved, ok = self.pause_for_questions(
+            questions, f"engineer:{task.assigned_agent_id or task.id}"
+        )
+        if not ok:
+            self.aborted = True
+            return
+        feedback = list(task.revision_feedback or []) + [
+            {
+                "source": "user_decision",
+                "reason": _format_decisions(resolved),
+                "requested_changes": [],
+            }
+        ]
+        # Bound the total number of decision escalations per task, counted independently of the
+        # revision cap (so a task at the revision cap still gets its decision implemented). This is a
+        # cumulative per-task ceiling, not a same-question repeat detector: after MAX_TASK_REVISIONS
+        # escalations the task is failed rather than pausing a human indefinitely. A task that
+        # genuinely needs that many distinct decisions is over-scoped and should be split — at the
+        # default (20) this needs 19 prior escalations, so it does not bite well-scoped tasks.
+        prior_escalations = sum(
+            1
+            for e in (task.revision_feedback or [])
+            if isinstance(e, dict) and e.get("source") == "user_decision"
+        )
+        if prior_escalations + 1 >= MAX_TASK_REVISIONS:
+            logger.warning(
+                "Task %s exceeded %d decision escalations; marking FAILED",
+                task.id,
+                MAX_TASK_REVISIONS,
+            )
+            self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
+            self._cascade_fail_dependents(task.id)
+            return
+        self.graph.update_task(
+            task.id,
+            status=TaskStatus.IN_PROGRESS,
             revision_feedback=feedback,
         )
 
@@ -395,7 +704,9 @@ class CodingTeamSwarm:
             update_fn(status_text=f"Build verification: {task.title}")
             build = run_build_verification(self.path, agent_type, task.id)
             if not build.success:
-                logger.warning("[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error)
+                logger.warning(
+                    "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error
+                )
                 return self._return_for_revision(task, [{"type": "build", "error": build.error}])
 
             # Linting
@@ -415,7 +726,9 @@ class CodingTeamSwarm:
             if not review.approved:
                 logger.info(
                     "[%s] Code review rejected task %s (%d issues); returning for revision",
-                    swe.agent_id, task.id, len(review.issues),
+                    swe.agent_id,
+                    task.id,
+                    len(review.issues),
                 )
                 return self._return_for_revision(task, review.issues)
 
@@ -511,7 +824,9 @@ class CodingTeamSwarm:
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
                 "Task %s exceeded max revisions (%d) on Tech Lead review; marking FAILED. Reason: %s",
-                task.id, MAX_TASK_REVISIONS, entry["reason"],
+                task.id,
+                MAX_TASK_REVISIONS,
+                entry["reason"],
             )
             self.graph.update_task(
                 task.id,
@@ -523,7 +838,9 @@ class CodingTeamSwarm:
             return
         logger.info(
             "Task %s rejected by Tech Lead (revision %d); returning to engineer %s",
-            task.id, revision_count, task.assigned_agent_id,
+            task.id,
+            revision_count,
+            task.assigned_agent_id,
         )
         # Keep the assignment (do not clear assigned_agent_id / the agent->task mapping) so the
         # same engineer picks it up next round and revises the current work.
@@ -551,7 +868,9 @@ class CodingTeamSwarm:
             "requested_changes": [],
         }
         feedback = list(task.revision_feedback or []) + [entry]
-        logger.warning("%s for task %s; marking FAILED. Reason: %s", context, task.id, entry["reason"])
+        logger.warning(
+            "%s for task %s; marking FAILED. Reason: %s", context, task.id, entry["reason"]
+        )
         self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
         self._cascade_fail_dependents(task.id)
 
@@ -579,10 +898,17 @@ class CodingTeamSwarm:
         check_cancel: Optional[Callable[[], bool]] = None,
         persist_fn: Optional[Callable] = None,
         update_fn: Optional[Callable] = None,
+        pause_for_questions: Optional[PauseCycle] = None,
     ) -> None:
-        """Main swarm loop: assign → implement + quality gates → review → merge."""
+        """Main swarm loop: assign → implement + quality gates → review → merge.
+
+        ``pause_for_questions`` is the bound HITL gate used to escalate a worker-raised decision to
+        the user; when omitted, a worker that raises a decision fails its task closed (no silent
+        decide). The loop stops early if a pause ends without answers (``self.aborted``).
+        """
         _update = update_fn or (lambda **kw: None)
         _persist = persist_fn or (lambda: None)
+        self.pause_for_questions = pause_for_questions
 
         for round_num in range(max_rounds):
             if check_cancel and check_cancel():
@@ -610,7 +936,13 @@ class CodingTeamSwarm:
             # Workers: implement + quality gates
             for swe in self.workers:
                 self._implement_and_verify(swe, _update)
+                if self.aborted:
+                    break
             _persist()
+            # A worker escalation that ended without answers aborts the loop; the orchestrator sees
+            # self.aborted and does not report the job as completed.
+            if self.aborted:
+                return
 
             # Coordinator: review and merge
             self._review_and_merge(_update)

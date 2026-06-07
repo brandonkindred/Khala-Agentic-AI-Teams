@@ -591,7 +591,7 @@ def execute_coding_team_activity(
 
         from coding_team.orchestrator import run_coding_team_orchestrator
         from llm_service import get_client
-        from software_engineering_team.shared.job_store import JOB_STATUS_COMPLETED, get_job
+        from software_engineering_team.shared.job_store import get_job
 
         # Keep the activity alive across long blocking steps (e.g. multi-minute code-gen LLM calls)
         # that emit no update callback, in addition to the per-update heartbeat below.
@@ -609,7 +609,9 @@ def execute_coding_team_activity(
         finally:
             stop_heartbeat.set()
             heartbeat_thread.join(timeout=5)
-        update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+        # run_coding_team_orchestrator owns its terminal status on every exit path (the heartbeat
+        # callback forwards its status writes to update_job), so do not re-write COMPLETED here — it
+        # would clobber a failure / partial-success the orchestrator already set.
 
         return ExecutionResult(merged_count=0).model_dump()
 

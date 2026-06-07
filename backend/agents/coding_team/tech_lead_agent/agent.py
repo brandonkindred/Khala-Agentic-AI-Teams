@@ -13,6 +13,8 @@ from typing import Any, Dict, List
 
 from strands import Agent
 
+from coding_team.hitl import decision_qa
+from coding_team.hitl import normalize_open_questions as _normalize_open_questions
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
@@ -42,15 +44,38 @@ def _review_retry_attempts() -> int:
     return retries + 1
 
 
+def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
+    """Render user-supplied decisions as 'question → answer' lines for the planning prompt.
+
+    Preconditions:
+        - ``resolved`` entries are dicts; an answer carries ``question_text`` and a human-readable
+          ``answer`` (or ``selected_answer`` / ``selected_option_id`` / ``other_text``).
+    Postconditions:
+        - Returns a non-empty bullet string when any decision has content, else "".
+    """
+    lines: List[str] = []
+    for entry in resolved or []:
+        if not isinstance(entry, dict):
+            continue
+        q, a = decision_qa(entry)
+        if q or a:
+            lines.append(f"- {q} → {a}")
+    return "\n".join(lines)
+
+
 def _plan_text(plan: CodingTeamPlanInput) -> str:
     """Build plan text for the LLM from plan input.
 
-    Every field is passed through in full: the plan, spec, and architecture are the primary
-    inputs the Tech Lead reasons over, and clipping them would hide requirements from the
-    Task Graph. Inputs are never truncated.
+    Every field is passed through in full: the plan, spec, and architecture are the primary inputs
+    the Tech Lead reasons over, and clipping them would hide requirements from the Task Graph. The
+    user's resolved decisions and recorded assumptions are included too, so the Tech Lead breaks the
+    plan down according to choices the user actually made, not ones an agent invented. Unanswered
+    open questions are NOT rendered here: by the time this runs the orchestrator's decision gate has
+    guaranteed there are none (the job pauses otherwise). Inputs are never truncated.
 
     Postconditions:
-        - Each non-empty plan field appears verbatim (uncut) in the returned text.
+        - Each non-empty plan field (including resolved decisions and assumptions) appears verbatim
+          (uncut) in the returned text.
     """
     parts = [
         f"Title: {plan.requirements_title}",
@@ -62,6 +87,14 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
         parts.append("Spec: " + plan.final_spec_content)
     if plan.architecture_overview:
         parts.append("Architecture: " + plan.architecture_overview)
+    resolved_text = _render_resolved_questions(plan.resolved_questions or [])
+    if resolved_text:
+        parts.append(
+            "User decisions (these were answered by the user — implement them exactly, "
+            "do not revisit):\n" + resolved_text
+        )
+    if plan.assumptions:
+        parts.append("Assumptions on record:\n" + "\n".join(f"- {a}" for a in plan.assumptions))
     return "\n\n".join(p for p in parts if p)
 
 
@@ -86,8 +119,15 @@ class TechLeadAgent:
 
     def run_plan_to_task_graph(self, plan: CodingTeamPlanInput) -> Dict[str, Any]:
         """
-        Given plan from Planning team, return { "tasks": [...], "stacks": [...] }.
-        Orchestrator will add tasks to Task Graph and create Senior SWEs from stacks.
+        Given plan from Planning team, return { "tasks": [...], "stacks": [...], "open_questions": [...] }.
+        Orchestrator will add tasks to Task Graph and create Senior SWEs from stacks. A non-empty
+        ``open_questions`` means the Tech Lead needs a product/design decision it must not make
+        itself; the orchestrator pauses the job for the user rather than building tasks.
+
+        Postconditions:
+            - Returns a dict with "tasks" (possibly empty), a non-empty "stacks" (defaulted), and
+              "open_questions" (possibly empty). Never decides an open question on the caller's
+              behalf.
         """
         plan_text = _plan_text(plan)
         user = prompts.PLAN_TO_TASK_GRAPH_USER.format(plan_text=plan_text)
@@ -96,7 +136,11 @@ class TechLeadAgent:
             data = _agent_call_json(self._plan_agent, user)
         except Exception as e:
             logger.warning("Tech Lead plan_to_task_graph LLM failed: %s", e)
-            return {"tasks": [], "stacks": [{"name": "default", "tools_services": []}]}
+            return {
+                "tasks": [],
+                "stacks": [{"name": "default", "tools_services": []}],
+                "open_questions": [],
+            }
         tasks_raw = data.get("tasks") or []
         stacks_raw = data.get("stacks") or []
         tasks = []
@@ -120,7 +164,11 @@ class TechLeadAgent:
                 stacks.append({"name": name, "tools_services": [str(x) for x in tools]})
         if not stacks:
             stacks = [{"name": "default", "tools_services": []}]
-        return {"tasks": tasks, "stacks": stacks}
+        return {
+            "tasks": tasks,
+            "stacks": stacks,
+            "open_questions": _normalize_open_questions(data.get("open_questions")),
+        }
 
     def run_groom_task(
         self,
