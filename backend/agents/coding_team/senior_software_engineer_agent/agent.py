@@ -22,12 +22,6 @@ from coding_team.senior_software_engineer_agent import prompts
 
 logger = logging.getLogger(__name__)
 
-# Upper bound on the task description embedded in the implement prompt. A pathologically large
-# description (e.g. a long issue body / accumulated spec) would otherwise deterministically overflow
-# the model context, and _handle_incomplete_implementation would then re-run the same overflowing
-# call up to MAX_TASK_REVISIONS times. Generous so realistic descriptions are passed in full.
-_IMPLEMENT_DESCRIPTION_MAX_CHARS = 16000
-
 
 def _parse_json_response(raw: str) -> Dict[str, Any]:
     """Parse a JSON response from an agent, stripping markdown fences if present."""
@@ -172,9 +166,9 @@ class SeniorSWEAgent:
             stack_name=stack_name,
             tools_services=tools_services,
             task_title=task.title,
-            task_description=task.description[:_IMPLEMENT_DESCRIPTION_MAX_CHARS],
+            task_description=task.description,
             acceptance_criteria=json.dumps(task.acceptance_criteria),
-            repo_context=repo_context[:4000] or "No existing code context provided.",
+            repo_context=repo_context or "No existing code context provided.",
         )
         feedback_text = _render_revision_feedback(task.revision_feedback)
         if feedback_text:

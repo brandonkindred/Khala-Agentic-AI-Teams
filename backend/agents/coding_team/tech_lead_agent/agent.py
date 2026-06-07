@@ -43,19 +43,25 @@ def _review_retry_attempts() -> int:
 
 
 def _plan_text(plan: CodingTeamPlanInput) -> str:
-    """Build plan text for the LLM from plan input."""
+    """Build plan text for the LLM from plan input.
+
+    Every field is passed through in full: the plan, spec, and architecture are the primary
+    inputs the Tech Lead reasons over, and clipping them would hide requirements from the
+    Task Graph. Inputs are never truncated.
+
+    Postconditions:
+        - Each non-empty plan field appears verbatim (uncut) in the returned text.
+    """
     parts = [
         f"Title: {plan.requirements_title}",
-        f"Description: {plan.requirements_description[:8000]}"
-        if plan.requirements_description
-        else "",
+        f"Description: {plan.requirements_description}" if plan.requirements_description else "",
     ]
     if plan.project_overview:
-        parts.append("Project overview: " + json.dumps(plan.project_overview, indent=2)[:4000])
+        parts.append("Project overview: " + json.dumps(plan.project_overview, indent=2))
     if plan.final_spec_content:
-        parts.append("Spec: " + (plan.final_spec_content[:6000] or ""))
+        parts.append("Spec: " + plan.final_spec_content)
     if plan.architecture_overview:
-        parts.append("Architecture: " + plan.architecture_overview[:3000])
+        parts.append("Architecture: " + plan.architecture_overview)
     return "\n\n".join(p for p in parts if p)
 
 
@@ -128,9 +134,9 @@ class TechLeadAgent:
         user = prompts.GROOM_TASK_USER.format(
             task_id=task_id,
             task_title=task_title,
-            task_description=task_description[:3000],
+            task_description=task_description,
             task_dependencies=json.dumps(task_dependencies),
-            plan_context=plan_context[:6000],
+            plan_context=plan_context,
         )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         try:

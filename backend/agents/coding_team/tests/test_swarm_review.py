@@ -448,8 +448,12 @@ def test_approved_merge_failure_marks_merged_anyway(tmp_path, monkeypatch):
 
 
 def test_full_evidence_reaches_reviewer(tmp_path, monkeypatch):
-    """The reviewer gets the real summary + the full diff — no placeholder, no truncation."""
-    big_diff = "D" * 20000
+    """The reviewer gets the real summary + the full diff — no placeholder, no truncation.
+
+    The diff is deliberately larger than any cap the team ever used, proving the evidence is
+    passed through whole.
+    """
+    big_diff = "D" * 120000
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: big_diff)
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (True, "ok"))
     tech_lead = StubTechLead(approved=False)
@@ -960,44 +964,32 @@ def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
     assert swarm._is_complete()  # loop terminates
 
 
-# ----------------------------------------------------- bounded review evidence
+# ----------------------------------------------------- full review evidence (never truncated)
 
 
-def test_build_review_evidence_passes_small_uncut():
-    ev = orch_mod._build_review_evidence("SUMMARY", "DIFFDATA", max_chars=1000)
+def test_build_review_evidence_includes_summary_and_diff():
+    ev = orch_mod._build_review_evidence("SUMMARY", "DIFFDATA")
     assert "SUMMARY" in ev and "DIFFDATA" in ev and "--- DIFF ---" in ev
 
 
-def test_build_review_evidence_truncates_large_diff():
-    big = "D" * 100000
-    ev = orch_mod._build_review_evidence("SUM", big, max_chars=5000)
-    assert len(ev) <= 5000  # bounded, does not overflow the reviewer context
+def test_build_review_evidence_passes_large_diff_uncut():
+    big = "D" * 200000
+    ev = orch_mod._build_review_evidence("SUM", big)
     assert ev.startswith("SUM")
-    assert "diff truncated" in ev
+    assert big in ev  # full diff passed through, never truncated
+    assert "diff truncated" not in ev
 
 
 def test_build_review_evidence_no_diff():
-    assert orch_mod._build_review_evidence("ONLY SUMMARY", "", max_chars=1000) == "ONLY SUMMARY"
+    assert orch_mod._build_review_evidence("ONLY SUMMARY", "") == "ONLY SUMMARY"
 
 
-def test_review_evidence_max_chars_env(monkeypatch):
-    default = orch_mod._DEFAULT_REVIEW_EVIDENCE_MAX_CHARS
-    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "1234")
-    assert orch_mod._review_evidence_max_chars() == 1234
-    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "0")
-    assert orch_mod._review_evidence_max_chars() == default
-    monkeypatch.setenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", "junk")
-    assert orch_mod._review_evidence_max_chars() == default
-    monkeypatch.delenv("CODING_TEAM_REVIEW_EVIDENCE_MAX_CHARS", raising=False)
-    assert orch_mod._review_evidence_max_chars() == default
+# ----------------------------------------------------- implement passes inputs in full
 
 
-# ----------------------------------------------------- implement description cap
-
-
-def test_implement_caps_large_task_description(tmp_path, monkeypatch):
-    """A pathologically large task description is capped in the implement prompt so it cannot
-    deterministically overflow the model context (and then be retried up to the cap)."""
+def test_implement_passes_full_task_description_and_repo_context(tmp_path, monkeypatch):
+    """A large task description and repo context reach the implement prompt in full — the
+    engineer's inputs are never truncated."""
     from coding_team.senior_software_engineer_agent import agent as swe_mod
 
     captured: Dict[str, str] = {}
@@ -1015,11 +1007,11 @@ def test_implement_caps_large_task_description(tmp_path, monkeypatch):
 
     monkeypatch.setattr(swe_mod, "Agent", FakeAgent)
     swe = SeniorSWEAgent(agent_id="a1", stack_spec=StackSpec(name="backend"), llm=object())
-    cap = swe_mod._IMPLEMENT_DESCRIPTION_MAX_CHARS
-    huge = "X" * (cap + 20000)
+    huge = "X" * 60000
+    big_ctx = "C" * 30000
     task = Task(id="t1", title="T1", description=huge)
 
-    swe.run_implement(task, tmp_path, repo_context="ctx")
+    swe.run_implement(task, tmp_path, repo_context=big_ctx)
 
-    assert huge not in captured["prompt"]  # full description not embedded
-    assert "X" * cap in captured["prompt"]  # capped slice is present
+    assert huge in captured["prompt"]  # full description embedded, uncut
+    assert big_ctx in captured["prompt"]  # full repo context embedded, uncut
