@@ -3,21 +3,27 @@
 from __future__ import annotations
 
 import logging
+import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List
 
-from software_engineering_team.shared.repo_utils import REPO_EXCLUDE_DIRS, int_env
+from software_engineering_team.shared.repo_utils import REPO_INSPECT_EXCLUDE_DIRS, int_env
 
 from .context import RepoToolContext
 from .definitions import REPO_INSPECT_TOOL_DEFINITIONS
 
 logger = logging.getLogger(__name__)
 
-# Directories never surfaced by inspection. Matches the passive repo-context scanner's union
-# (shared full-stack excludes + interpreter/venv caches) so both views of the repo agree.
-_INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_EXCLUDE_DIRS | frozenset(
-    {"__pycache__", "venv", ".venv"}
-)
+# Directories never surfaced by inspection. Single-sourced with the passive repo-context scanner
+# (coding_team._read_repo_context) so both views of the repo agree.
+_INSPECT_EXCLUDE_DIRS: frozenset[str] = REPO_INSPECT_EXCLUDE_DIRS
+
+# ``Path.glob`` follows symlinked directories when expanding ``**`` on Python < 3.13, so a symlink
+# cycle in the workspace could make recursion run away. 3.13+ defaults to not recursing symlinks
+# and exposes ``recurse_symlinks``; pass it where supported. (On older runtimes the per-entry
+# containment filter in ``_list_files`` still drops any escaping result, and a cycle surfaces as a
+# bounded OSError rather than unbounded work.)
+_GLOB_KWARGS: dict[str, Any] = {"recurse_symlinks": False} if sys.version_info >= (3, 13) else {}
 
 _READ_FILE_MAX_BYTES_ENV = "CODING_TEAM_READ_FILE_MAX_BYTES"
 _READ_FILE_MAX_BYTES_DEFAULT = 65536
@@ -63,18 +69,23 @@ def _is_excluded(rel_parts: tuple[str, ...]) -> bool:
 
 
 def _list_files(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
-    base = _resolve_within_repo(repo, str(args.get("path") or "."))
+    requested = str(args.get("path") or ".")
+    base = _resolve_within_repo(repo, requested)
     if not base.exists():
-        return {"success": False, "error": "not_found", "message": str(args.get("path") or ".")}
+        return {"success": False, "error": "not_found", "message": requested}
     if not base.is_dir():
-        return {
-            "success": False,
-            "error": "not_a_directory",
-            "message": str(args.get("path") or "."),
-        }
+        return {"success": False, "error": "not_a_directory", "message": requested}
 
     glob = args.get("glob")
-    raw = sorted(base.glob(str(glob))) if glob else sorted(base.iterdir())
+    if glob:
+        glob_str = str(glob)
+        glob_path = Path(glob_str)
+        # Validate the glob like a path: the model must not glob outside the workspace.
+        if glob_path.is_absolute() or ".." in glob_path.parts:
+            raise _RepoPathError(f"glob escapes repo (absolute or '..'): {glob_str}")
+        raw = sorted(base.glob(glob_str, **_GLOB_KWARGS))
+    else:
+        raw = sorted(base.iterdir())
 
     entries: List[dict[str, str]] = []
     for entry in raw:
@@ -88,7 +99,7 @@ def _list_files(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
 
     return {
         "success": True,
-        "path": str(base.relative_to(repo)) or ".",
+        "path": str(base.relative_to(repo)),
         "entries": entries,
         "count": len(entries),
     }
@@ -96,6 +107,9 @@ def _list_files(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
 
 def _read_file(repo: Path, args: dict[str, Any]) -> dict[str, Any]:
     raw_path = args.get("path")
+    # `path` is required for read_file (unlike list_files, which defaults to the root), so an
+    # absent/blank value gets the distinct `missing_path` code rather than the `invalid_path`
+    # that _resolve_within_repo would raise for the same empty string.
     if raw_path is None or not str(raw_path).strip():
         return {"success": False, "error": "missing_path", "message": "path is required"}
     target = _resolve_within_repo(repo, str(raw_path))

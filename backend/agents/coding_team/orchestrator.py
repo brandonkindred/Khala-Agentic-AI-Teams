@@ -75,13 +75,13 @@ def _build_review_evidence(summary: str, diff: str, max_chars: int) -> str:
 
 # Repo-context file selection. The shared full-stack code extensions / exclude dirs live in
 # software_engineering_team.shared.repo_utils; this summariser additionally surfaces the doc and
-# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs) and skips a
-# few extra interpreter/venv caches. Built from the shared constants in `_read_repo_context` to
-# avoid re-listing the canonical sets here.
+# config formats below (so a docs/spec task is not blind to specs, plans, and READMEs). The extra
+# interpreter/venv caches it skips are shared with the active inspection tools via
+# repo_utils.REPO_INSPECT_EXTRA_EXCLUDE_DIRS (imported in `_context_file_filters`) so the two views
+# of the repo cannot drift.
 _CONTEXT_EXTRA_EXTENSIONS: frozenset[str] = frozenset(
     {".js", ".html", ".json", ".md", ".txt", ".rst"}
 )
-_CONTEXT_EXTRA_EXCLUDE_DIRS: frozenset[str] = frozenset({"__pycache__", "venv", ".venv"})
 
 # Fallback stack when planning/snapshot provide none (one Senior SWE on a generic stack).
 _DEFAULT_STACK_SPECS: List[Dict[str, Any]] = [{"name": "default", "tools_services": []}]
@@ -103,11 +103,11 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
     if _CONTEXT_EXTENSIONS is None or _CONTEXT_EXCLUDE_DIRS is None:
         from software_engineering_team.shared.repo_utils import (
             FULL_STACK_EXTENSIONS,
-            REPO_EXCLUDE_DIRS,
+            REPO_INSPECT_EXCLUDE_DIRS,
         )
 
         _CONTEXT_EXTENSIONS = frozenset(FULL_STACK_EXTENSIONS) | _CONTEXT_EXTRA_EXTENSIONS
-        _CONTEXT_EXCLUDE_DIRS = REPO_EXCLUDE_DIRS | _CONTEXT_EXTRA_EXCLUDE_DIRS
+        _CONTEXT_EXCLUDE_DIRS = REPO_INSPECT_EXCLUDE_DIRS
     return _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
 
 

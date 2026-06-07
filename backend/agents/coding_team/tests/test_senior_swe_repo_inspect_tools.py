@@ -10,9 +10,12 @@ from __future__ import annotations
 
 from typing import Any, Dict
 
+from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS
 from coding_team.models import StackSpec, Task
 from coding_team.senior_software_engineer_agent import agent as swe_mod
 from coding_team.senior_software_engineer_agent.agent import SeniorSWEAgent
+
+_INSPECT_TOOL_NAMES = {d["function"]["name"] for d in REPO_INSPECT_TOOL_DEFINITIONS}
 
 
 def test_run_implement_wires_inspection_tools_into_agent(tmp_path, monkeypatch) -> None:
@@ -34,7 +37,7 @@ def test_run_implement_wires_inspection_tools_into_agent(tmp_path, monkeypatch) 
     swe.run_implement(Task(id="t1", title="T1", description="do it"), tmp_path, use_git_tools=True)
 
     tool_names = {t.tool_name for t in captured["tools"]}
-    assert {"list_files", "read_file"}.issubset(tool_names)
+    assert _INSPECT_TOOL_NAMES.issubset(tool_names)
 
 
 def test_run_implement_prompt_mentions_inspection_tools(tmp_path, monkeypatch) -> None:

@@ -92,15 +92,27 @@ def test_list_files_on_a_file_is_rejected(repo: Path) -> None:
     assert out["error"] == "not_a_directory"
 
 
-def test_list_files_skips_symlink_escaping_workspace(repo: Path, tmp_path: Path) -> None:
-    outside = tmp_path.parent / "outside_dir"
-    outside.mkdir(exist_ok=True)
+def test_list_files_skips_symlink_escaping_workspace(repo: Path, tmp_path_factory) -> None:
+    # The escape target lives in its own pytest-managed dir, a sibling of (not under) the workspace.
+    outside = tmp_path_factory.mktemp("outside_dir")
     (outside / "secret.txt").write_text("nope", encoding="utf-8")
     (repo / "escape").symlink_to(outside, target_is_directory=True)
 
     out = execute_repo_tool("list_files", {"path": "."}, _ctx(repo))
     assert out["success"] is True
     assert "escape" not in {e["path"] for e in out["entries"]}
+
+
+def test_list_files_rejects_absolute_glob(repo: Path) -> None:
+    out = execute_repo_tool("list_files", {"glob": "/etc/*"}, _ctx(repo))
+    assert out["success"] is False
+    assert out["error"] == "invalid_path"
+
+
+def test_list_files_rejects_parent_traversal_glob(repo: Path) -> None:
+    out = execute_repo_tool("list_files", {"glob": "../*"}, _ctx(repo))
+    assert out["success"] is False
+    assert out["error"] == "invalid_path"
 
 
 # --------------------------------------------------------------------------- read_file
@@ -217,8 +229,8 @@ def test_read_file_rejects_parent_traversal(repo: Path) -> None:
     assert out["error"] == "invalid_path"
 
 
-def test_read_file_rejects_symlink_escape(repo: Path, tmp_path: Path) -> None:
-    outside = tmp_path.parent / "outside_secret.txt"
+def test_read_file_rejects_symlink_escape(repo: Path, tmp_path_factory) -> None:
+    outside = tmp_path_factory.mktemp("outside_secret") / "secret.txt"
     outside.write_text("top secret", encoding="utf-8")
     (repo / "link.txt").symlink_to(outside)
     out = execute_repo_tool("read_file", {"path": "link.txt"}, _ctx(repo))

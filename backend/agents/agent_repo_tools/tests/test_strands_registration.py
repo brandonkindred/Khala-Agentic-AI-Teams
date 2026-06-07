@@ -15,7 +15,7 @@ from strands.types.tools import AgentTool
 from agent_repo_tools import REPO_INSPECT_TOOL_DEFINITIONS, build_repo_inspect_handlers
 from coding_team.senior_software_engineer_agent.agent import _build_strands_tools
 
-_NAMES = ["list_files", "read_file"]
+_NAMES = sorted(d["function"]["name"] for d in REPO_INSPECT_TOOL_DEFINITIONS)
 
 
 def test_repo_inspect_tools_register_with_strands_registry(tmp_path) -> None:
