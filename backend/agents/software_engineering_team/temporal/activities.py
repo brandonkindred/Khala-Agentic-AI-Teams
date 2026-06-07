@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from temporalio import activity
 
-from shared_temporal import BackgroundHeartbeat
+from shared_concurrency import BackgroundHeartbeat
 from software_engineering_team.shared.job_store import (
     JOB_STATUS_FAILED,
     update_job,

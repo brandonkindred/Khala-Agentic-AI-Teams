@@ -18,7 +18,7 @@ import httpx
 
 from job_service_client import JobServiceClient
 from llm_service import LLMJsonParseError, LLMSchemaValidationError
-from shared_temporal import BackgroundHeartbeat
+from shared_concurrency import BackgroundHeartbeat
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.store import FounderRunStore
 from user_agent_founder.targets import StartFailed, TargetTeamAdapter, get_adapter

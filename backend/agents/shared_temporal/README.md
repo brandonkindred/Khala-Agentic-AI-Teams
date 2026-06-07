@@ -69,54 +69,23 @@ handler that calls `submit_input` (Temporal mode); both operate on the same
 job record fields (`waiting_for`, `inputs`) so the HTTP resume route works
 for either mode.
 
-## Background heartbeats (`BackgroundHeartbeat`)
+## Background heartbeats
 
-`heartbeat.py` provides one shared driver for the "daemon thread beats a
-callable on an interval" pattern that several teams had hand-rolled (a Temporal
-`activity.heartbeat()` keep-alive, the founder spec-generation job heartbeat, and
-the SE job-store heartbeat thread). The driver is generic — it knows nothing
-about Temporal or the job service; it just calls a `beat` callable every
-`interval_s` until stopped. Importing it does **not** pull in the Temporal SDK
-(every `temporalio` import in this package is function-deferred).
+The "daemon thread beats a callable on an interval" keep-alive that Temporal
+activities use (e.g. `execute_coding_team_activity`'s `activity.heartbeat()`
+beater) is driven by the shared `BackgroundHeartbeat` helper in the
+**`shared_concurrency`** package (it is Temporal-agnostic and also used by
+non-Temporal callers). See `backend/agents/shared_concurrency/README.md`.
 
-```python
-from shared_temporal import BackgroundHeartbeat
-
-# Externally controlled (context manager owns start + stop):
-with BackgroundHeartbeat(activity.heartbeat, 30.0, copy_context=True):
-    do_long_blocking_work()
-
-# Fire-and-forget, self-terminating via a predicate:
-BackgroundHeartbeat(
-    lambda: client.heartbeat(job_id),
-    120.0,
-    should_continue=lambda: job_is_active(job_id),
-    on_error=lambda exc: logger.warning("hb %s: %s", job_id, exc),
-).start()
-```
-
-Parameters cover the four axes the original copies differed on:
-
-- `should_continue` — optional predicate checked each tick; returning `False`
-  exits the thread on its own (no external stop needed).
-- `copy_context` — snapshot `contextvars.copy_context()` and run the beat inside
-  it (so a Temporal activity handle is visible in the beater thread).
-- `on_error` — invoked on any beat/predicate exception; default swallows. A
-  raising beat or predicate never kills the loop.
-- `join_timeout` — bound on `stop()`'s join.
-
-**Single liveness owner (coding-team activity).** `execute_coding_team_activity`
-relies on the background beater as the *sole* liveness mechanism for the whole
-run; the orchestrator's update callback only persists progress and does **not**
-also heartbeat. This keeps "who keeps the activity alive" unambiguous.
+The coding-team activity's beater interval is set by
+`CODING_TEAM_HEARTBEAT_INTERVAL_S` (seconds; blank/garbage/non-positive falls
+back to `30`).
 
 ## Environment
 
 - `TEMPORAL_ADDRESS` — required; Temporal is mandatory for all teams.
 - `TEMPORAL_NAMESPACE` — default `default`.
 - `TEMPORAL_TASK_QUEUE` — default `khala`.
-- `CODING_TEAM_HEARTBEAT_INTERVAL_S` — interval (seconds) for the coding-team
-  activity's background beater; blank/garbage/non-positive falls back to `30`.
 
 ## See also
 

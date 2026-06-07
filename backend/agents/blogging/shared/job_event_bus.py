@@ -39,6 +39,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from shared_concurrency import BackgroundHeartbeat
+
 logger = logging.getLogger(__name__)
 
 
@@ -98,34 +100,28 @@ _subscribers: Dict[str, list[Subscription]] = {}
 # exceeded. Kept in insertion order (Python dict guarantee from 3.7+).
 _job_created_at: Dict[str, float] = {}
 
-_reaper_thread: Optional[threading.Thread] = None
-_reaper_stop = threading.Event()
+_reaper: Optional[BackgroundHeartbeat] = None
 
 
 def _start_reaper_if_needed() -> None:
-    """Start the reaper daemon thread on first subscription (lazy init)."""
-    global _reaper_thread
-    if _reaper_thread is not None and _reaper_thread.is_alive():
+    """Start the reaper daemon thread on first subscription (lazy init, idempotent).
+
+    The driver's loop evicts idle subscriptions and enforces the global cap every
+    ``_REAPER_INTERVAL_SECONDS`` by calling ``_reap_once``; a failing pass is logged
+    (with traceback) and the loop continues.
+    """
+    global _reaper
+    if _reaper is not None and _reaper.is_alive():
         return
-    # Holding _lock isn't strictly needed here (daemon init is idempotent-ish
-    # and Python assignment is atomic), but we pay for one acquire to avoid a
-    # double-start race during a burst of concurrent subscribes.
-    thread = threading.Thread(
-        target=_reaper_loop,
+    _reaper = BackgroundHeartbeat(
+        _reap_once,
+        _REAPER_INTERVAL_SECONDS,
         name="blogging-event-bus-reaper",
-        daemon=True,
-    )
-    _reaper_thread = thread
-    thread.start()
-
-
-def _reaper_loop() -> None:
-    """Background loop: evict idle subscriptions and enforce the global cap."""
-    while not _reaper_stop.wait(_REAPER_INTERVAL_SECONDS):
-        try:
-            _reap_once()
-        except Exception:
-            logger.exception("blogging event-bus reaper iteration failed")
+        join_timeout=2.0,
+        on_error=lambda exc: logger.error(
+            "blogging event-bus reaper iteration failed", exc_info=exc
+        ),
+    ).start()
 
 
 def _reap_once() -> None:
@@ -242,11 +238,12 @@ def cleanup_job(job_id: str) -> None:
 
 
 def shutdown() -> None:
-    """Stop the reaper thread. Call during process shutdown (tests / lifespan)."""
-    global _reaper_thread
-    _reaper_stop.set()
-    thread = _reaper_thread
-    if thread is not None and thread.is_alive():
-        thread.join(timeout=2.0)
-    _reaper_thread = None
-    _reaper_stop.clear()
+    """Stop the reaper thread. Call during process shutdown (tests / lifespan).
+
+    Idempotent and re-startable: after shutdown a later ``_start_reaper_if_needed``
+    spins up a fresh beater.
+    """
+    global _reaper
+    if _reaper is not None:
+        _reaper.stop()
+        _reaper = None

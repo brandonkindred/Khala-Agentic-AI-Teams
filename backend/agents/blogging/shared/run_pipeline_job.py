@@ -5,13 +5,13 @@ Accepts a request dict (serializable) so Temporal can pass it to activities.
 
 from __future__ import annotations
 
-import contextvars
 import logging
-import threading
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from temporalio.exceptions import CancelledError
+
+from shared_concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
 
@@ -184,41 +184,37 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         start_blog_job(job_id)
     job_updater(work_dir=str(work_dir))
 
-    stop_heartbeat = threading.Event()
-
-    def _pipeline_heartbeat() -> (
+    def _pipeline_beat() -> (
         None
-    ):  # pragma: no cover - background thread driven by a 30s timer; exercising the loop body in unit tests requires faking threading + temporalio, which provides no signal beyond what targeted heartbeat tests already cover.
-        """Keep last_heartbeat_at fresh and send Temporal heartbeats during long phases."""
-        while not stop_heartbeat.wait(30.0):
-            if update_blog_job is not None:
-                try:
-                    update_blog_job(job_id)
-                except Exception:
-                    pass
-            # Send Temporal activity heartbeat if running inside a Temporal activity.
-            # RuntimeError means we're not in an activity context (e.g. local dev).
+    ):  # pragma: no cover - background thread driven by a 30s timer; exercising the beat body in unit tests requires faking threading + temporalio, which provides no signal beyond what targeted heartbeat tests already cover.
+        """One heartbeat tick: keep last_heartbeat_at fresh and beat Temporal."""
+        if update_blog_job is not None:
             try:
-                from temporalio import activity as _act
-
-                _act.heartbeat()
-            except RuntimeError:
+                update_blog_job(job_id)
+            except Exception:
                 pass
+        # Send Temporal activity heartbeat if running inside a Temporal activity.
+        # RuntimeError means we're not in an activity context (e.g. local dev).
+        try:
+            from temporalio import activity as _act
 
-    hb_thread: Optional[threading.Thread] = None
+            _act.heartbeat()
+        except RuntimeError:
+            pass
+
+    hb: Optional[BackgroundHeartbeat] = None
     if update_blog_job is not None:
-        # Copy the current context so the heartbeat thread inherits the Temporal
-        # activity ContextVar.  Without this, activity.heartbeat() silently fails
-        # (ContextVar is not auto-inherited by threading.Thread), and Temporal
-        # cancels the activity after heartbeat_timeout expires.
-        ctx = contextvars.copy_context()
-        hb_thread = threading.Thread(
-            target=ctx.run,
-            args=(_pipeline_heartbeat,),
+        # copy_context=True carries the Temporal activity ContextVar into the beater
+        # thread; without it activity.heartbeat() silently no-ops (the ContextVar is
+        # not auto-inherited by a new thread) and Temporal cancels the activity after
+        # heartbeat_timeout expires.
+        hb = BackgroundHeartbeat(
+            _pipeline_beat,
+            30.0,
             name=f"blog-pipeline-hb-{job_id[:12]}",
-            daemon=True,
-        )
-        hb_thread.start()
+            copy_context=True,
+            join_timeout=2.0,
+        ).start()
 
     def _mark_cancelled() -> bool:
         """Mark job as cancelled and return True, for use in except handlers."""
@@ -301,9 +297,8 @@ def run_blog_full_pipeline_job(job_id: str, request_dict: Dict[str, Any]) -> Non
         _fail_job(job_id, str(e))
         _publish_terminal(job_id, "error", error=str(e))
     finally:
-        stop_heartbeat.set()
-        if hb_thread is not None:
-            hb_thread.join(timeout=2.0)
+        if hb is not None:
+            hb.stop()
 
 
 def _publish_terminal(job_id: str, event_type: str, **kwargs: Any) -> None:

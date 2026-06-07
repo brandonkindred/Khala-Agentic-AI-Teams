@@ -26,7 +26,7 @@ from job_service_client import (
     JOB_STATUS_RUNNING,
     JobServiceClient,
 )
-from shared_temporal import BackgroundHeartbeat
+from shared_concurrency import BackgroundHeartbeat
 
 logger = logging.getLogger(__name__)
 
