@@ -46,7 +46,7 @@ def test_schema_declares_all_tables() -> None:
 def test_graph_watermark_table_and_keyset_indexes_present() -> None:
     # The knowledge-graph sync worker tracks per-agent ingestion progress in
     # agent_cognition_graph_watermarks with symmetric keyset cursors over events
-    # (recorded_at, id) and summaries (created_at, id); the table and both
+    # (recorded_at, id) and summaries (updated_at, id); the table and both
     # supporting keyset indexes must be declared here.
     joined = "".join(SCHEMA.statements)
     watermark_ddl = next(
@@ -58,7 +58,7 @@ def test_graph_watermark_table_and_keyset_indexes_present() -> None:
     for col in (
         "last_event_recorded_at",
         "last_event_id",
-        "last_summary_created_at",
+        "last_summary_updated_at",
         "last_summary_id",
         "ingested_count",
     ):
@@ -68,8 +68,8 @@ def test_graph_watermark_table_and_keyset_indexes_present() -> None:
         and "agent_cognition_events(agent_id, recorded_at, id)" in joined
     )
     assert (
-        "idx_agent_cognition_summaries_agent_created" in joined
-        and "agent_cognition_summaries(agent_id, created_at, id)" in joined
+        "idx_agent_cognition_summaries_agent_updated" in joined
+        and "agent_cognition_summaries(agent_id, updated_at, id)" in joined
     )
 
 

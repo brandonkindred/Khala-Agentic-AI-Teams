@@ -17,8 +17,10 @@ unset), so the unit-test suite and a graph-less deployment never start it.
 
 At-least-once delivery: the watermark advances only *after* a batch's episodes are
 added. A crash mid-pass re-ingests from the last committed watermark; episodes use
-stable ``name``s (``event:<id>`` / ``summary:<id>``) so Graphiti treats a re-add as
-an update, not a duplicate.
+stable ``name``s (``event:<id>`` / ``summary:<id>:<version>``) so Graphiti treats a
+re-add as an update, not a duplicate. The summary name carries the ``version`` so a
+recomputed summary (keysetting on ``updated_at``) becomes a fresh per-version
+episode rather than overwriting the prior one — capturing how the rollup evolved.
 """
 
 from __future__ import annotations
@@ -196,34 +198,39 @@ async def _ingest_events(graphiti: Any, agent_id: str, wm: Any, batch: int) -> i
 
 
 async def _ingest_summaries(graphiti: Any, agent_id: str, wm: Any, batch: int) -> int:
-    """Add up to ``batch`` new rollup summaries, then advance the summary cursor."""
-    summaries = await asyncio.to_thread(
-        memory_store.fetch_summaries_created_after,
+    """Add up to ``batch`` updated rollup summaries, then advance the summary cursor.
+
+    Keysets on ``(updated_at, id)`` so a recomputed summary — whose ``version``
+    advanced — is re-fetched and re-ingested under a fresh per-version episode name
+    (``summary:<id>:<version>``); a stable summary is ingested exactly once.
+    """
+    rows = await asyncio.to_thread(
+        memory_store.fetch_summaries_updated_after,
         agent_id,
-        after_created_at=wm.last_summary_created_at if wm else None,
+        after_updated_at=wm.last_summary_updated_at if wm else None,
         after_id=wm.last_summary_id if wm else None,
         limit=batch,
     )
 
-    def episode_of(summary):
+    def episode_of(rec):
+        summary, _updated_at = rec
         return {
-            "name": f"summary:{summary.id}",
+            "name": f"summary:{summary.id}:{summary.version}",
             "episode_body": _render_summary(summary),
             "source_description": f"{summary.scale.value} rollup summary",
             "reference_time": summary.period_start,
         }
 
     def advance(last, count):
+        summary, updated_at = last
         watermark_store.upsert_watermark(
             agent_id,
-            last_summary_created_at=last.created_at,
-            last_summary_id=last.id,
+            last_summary_updated_at=updated_at,
+            last_summary_id=summary.id,
             ingested_delta=count,
         )
 
-    return await _ingest_batch(
-        graphiti, agent_id, summaries, episode_of=episode_of, advance=advance
-    )
+    return await _ingest_batch(graphiti, agent_id, rows, episode_of=episode_of, advance=advance)
 
 
 def _render_summary(summary: Any) -> str:

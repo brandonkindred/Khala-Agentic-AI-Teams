@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 import pytest
 
 from agent_cognition.graph import sync_worker
-from agent_cognition.memory.store import RecordedEvent
+from agent_cognition.memory.store import RecordedEvent, RecordedSummary
 from agent_cognition.models import EventKind, MemoryEvent, PeriodSummary, Scale
 
 
@@ -54,7 +54,7 @@ def _event(eid: str, content: str, occurred: datetime) -> MemoryEvent:
     )
 
 
-def _summary(sid: str, scale: Scale, created: datetime) -> PeriodSummary:
+def _summary(sid: str, scale: Scale, created: datetime, version: int = 1) -> PeriodSummary:
     return PeriodSummary(
         id=sid,
         agent_id="agent-1",
@@ -63,6 +63,7 @@ def _summary(sid: str, scale: Scale, created: datetime) -> PeriodSummary:
         period_end=created,
         summary=f"summary {sid}",
         highlights=["h1", "h2"],
+        version=version,
         created_at=created,
     )
 
@@ -177,7 +178,7 @@ def test_ingest_events_uses_existing_watermark_cursor(monkeypatch):
     wm = types.SimpleNamespace(
         last_event_recorded_at=t,
         last_event_id="e8",
-        last_summary_created_at=None,
+        last_summary_updated_at=None,
         last_summary_id=None,
     )
     asyncio.run(sync_worker._ingest_events(_FakeGraphiti(), "agent-1", wm, 25))
@@ -190,9 +191,14 @@ def test_ingest_events_uses_existing_watermark_cursor(monkeypatch):
 def test_ingest_summaries_adds_episodes_and_advances_watermark(monkeypatch):
     c0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
     c1 = datetime(2026, 6, 2, tzinfo=timezone.utc)
-    summaries = [_summary("s1", Scale.DAY, c0), _summary("s2", Scale.WEEK, c1)]
+    u0 = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    u1 = datetime(2026, 6, 2, 12, 0, tzinfo=timezone.utc)
+    rows = [
+        RecordedSummary(_summary("s1", Scale.DAY, c0), u0),
+        RecordedSummary(_summary("s2", Scale.WEEK, c1), u1),
+    ]
     monkeypatch.setattr(
-        sync_worker.memory_store, "fetch_summaries_created_after", lambda *a, **k: summaries
+        sync_worker.memory_store, "fetch_summaries_updated_after", lambda *a, **k: rows
     )
     captured = {}
     monkeypatch.setattr(
@@ -204,16 +210,59 @@ def test_ingest_summaries_adds_episodes_and_advances_watermark(monkeypatch):
     count = asyncio.run(sync_worker._ingest_summaries(graphiti, "agent-1", None, 50))
 
     assert count == 2
-    assert [e["name"] for e in graphiti.episodes] == ["summary:s1", "summary:s2"]
+    # Episode name carries the version so a recomputed summary becomes a new episode.
+    assert [e["name"] for e in graphiti.episodes] == ["summary:s1:1", "summary:s2:1"]
+    assert all(e["group_id"] == "agent-1" for e in graphiti.episodes)
     assert graphiti.episodes[0]["source_description"] == "day rollup summary"
-    assert captured["last_summary_created_at"] == c1
+    # Watermark advances on the last row's (updated_at, id), not created_at.
+    assert captured["last_summary_updated_at"] == u1
     assert captured["last_summary_id"] == "s2"
     assert captured["ingested_delta"] == 2
 
 
+def test_ingest_summaries_versioned_name_on_advance(monkeypatch):
+    # A recomputed summary (version 3) is re-ingested under a fresh per-version name.
+    c0 = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    u2 = datetime(2026, 6, 3, tzinfo=timezone.utc)
+    rows = [RecordedSummary(_summary("s1", Scale.DAY, c0, version=3), u2)]
+    monkeypatch.setattr(
+        sync_worker.memory_store, "fetch_summaries_updated_after", lambda *a, **k: rows
+    )
+    captured = {}
+    monkeypatch.setattr(
+        sync_worker.watermark_store, "upsert_watermark", lambda agent_id, **kw: captured.update(kw)
+    )
+    graphiti = _FakeGraphiti()
+    count = asyncio.run(sync_worker._ingest_summaries(graphiti, "agent-1", None, 50))
+    assert count == 1
+    assert graphiti.episodes[0]["name"] == "summary:s1:3"
+    assert captured["last_summary_updated_at"] == u2
+
+
+def test_ingest_summaries_uses_existing_watermark_cursor(monkeypatch):
+    u = datetime(2026, 6, 2, tzinfo=timezone.utc)
+    seen = {}
+
+    def _fetch(agent_id, *, after_updated_at, after_id, limit):
+        seen.update(after_updated_at=after_updated_at, after_id=after_id, limit=limit)
+        return [RecordedSummary(_summary("s9", Scale.DAY, u), u)]
+
+    monkeypatch.setattr(sync_worker.memory_store, "fetch_summaries_updated_after", _fetch)
+    monkeypatch.setattr(sync_worker.watermark_store, "upsert_watermark", lambda *a, **k: None)
+
+    wm = types.SimpleNamespace(
+        last_event_recorded_at=None,
+        last_event_id=None,
+        last_summary_updated_at=u,
+        last_summary_id="s8",
+    )
+    asyncio.run(sync_worker._ingest_summaries(_FakeGraphiti(), "agent-1", wm, 25))
+    assert seen == {"after_updated_at": u, "after_id": "s8", "limit": 25}
+
+
 def test_ingest_summaries_noop_when_empty(monkeypatch):
     monkeypatch.setattr(
-        sync_worker.memory_store, "fetch_summaries_created_after", lambda *a, **k: []
+        sync_worker.memory_store, "fetch_summaries_updated_after", lambda *a, **k: []
     )
     upserts = []
     monkeypatch.setattr(
