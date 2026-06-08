@@ -92,9 +92,12 @@ The engine calls:
 
 `ctx.submit_order(symbol=..., side=OrderSide.LONG|SHORT, qty=<positive>, order_type=OrderType.MARKET|LIMIT|STOP, limit_price=..., stop_price=..., tif=TimeInForce.DAY|GTC, reason="...")` — submit an opposite-side order with `qty==position.qty` to close.
 
-## Output format
+## Output format — JSON only
 
-Return ONLY a JSON object with:
+Respond with a SINGLE valid JSON object and nothing else: no markdown
+fences, no prose before or after, every brace balanced. The task message
+includes the exact JSON Schema your response must conform to; honor it.
+The shape is:
 ```json
 {
   "strategy_code": "the complete fixed Python code",

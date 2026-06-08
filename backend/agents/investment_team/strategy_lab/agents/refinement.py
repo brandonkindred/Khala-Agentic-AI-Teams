@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -13,12 +12,33 @@ from strands import Agent
 from ...models import BacktestResult, StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._parse_helpers import (
+    build_json_correction_prompt,
+    extract_json_object,
+    parse_retry_budget,
+)
 from ._response_schemas import REFINEMENT_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt. This is the SAME schema passed to the model's
+# ``format`` field via ``get_strands_model(response_schema=REFINEMENT_SCHEMA)``,
+# so the prompt-level contract and the decoder-level constraint can never
+# drift. Provider-agnostic: it constrains the model even when structured
+# output is disabled or the provider is Bedrock (which ignores ``format``).
+_REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
+
+# Spliced into the shared JSON-correction re-prompt so a malformed-output retry
+# still names the exact two keys the refinement response must carry. Leading
+# space so it reads as a sentence continuation in the shared preamble.
+_CORRECTION_KEYS_HINT = (
+    " Emit exactly the two keys `strategy_code` (the complete fixed Python "
+    "code) and `changes_made` (a 1-2 sentence summary)."
+)
 
 # Refinement output is code-only (#543). ``strategy_code`` is consumed
 # separately; ``changes_made`` is logged. Any other top-level key in the
@@ -60,7 +80,17 @@ Risk limits: {risk_limits}
    DSL objects; do NOT emit them back in your response.
 3. Ensure your fix doesn't re-introduce any previously fixed issues.
 
-Return ONLY a JSON object with no markdown — exactly these two keys:
+## Response format — JSON only
+Respond with a SINGLE valid JSON object and nothing else: no markdown
+fences, no prose before or after, every brace balanced. Your response
+MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
+
+Concretely, emit exactly these keys (omit `risk_limits` unless you are
+tightening a risk limit):
 {{
   "strategy_code": "the complete fixed Python code",
   "changes_made": "1-2 sentence summary of what you changed and why"
@@ -130,18 +160,10 @@ class RefinementAgent:
             metrics_section=metrics_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_REFINEMENT_SCHEMA_JSON,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-
-        raw = invoke_agent(
-            agent, user_prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
-        )
-        parsed = _extract_json(raw)
+        parsed = self._invoke_and_parse(system_prompt, user_prompt, failure_phase)
 
         updated_code = parsed.pop("strategy_code", code)
 
@@ -164,29 +186,64 @@ class RefinementAgent:
         }
         return narrowed, updated_code
 
+    def _invoke_and_parse(
+        self, system_prompt: str, user_prompt: str, failure_phase: str
+    ) -> Dict[str, Any]:
+        """Call the LLM and recover its JSON object, retrying on unparseable output.
 
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from LLM output."""
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
+        Preconditions: ``system_prompt`` / ``user_prompt`` are non-empty
+        strings; ``failure_phase`` is a non-empty diagnostic label.
+        Postconditions: returns the parsed JSON dict for the LLM's response.
+        Raises ``ValueError`` when the retry budget is exhausted and no
+        balanced JSON object could be recovered, or
+        :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
+        its transport retries / budget.
 
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in LLM response")
+        Why retry here: the LLM occasionally returns an empty, thinking-only,
+        or prose-only response with no JSON object. That is not a transport
+        fault — ``invoke_agent`` sees a "successful" string and returns it — so
+        the envelope cannot recover it. A code-only refinement asks the model
+        to emit the *complete* fixed program as a JSON string, which is exactly
+        the kind of long generation prone to this slip. Without a retry, a
+        single such response wastes the whole refinement round (the orchestrator
+        falls back to the unchanged code). Re-prompting with the parse error as
+        feedback recovers the common transient case; the budget bounds the rare
+        persistent one. Mirrors :meth:`DesignAgent._invoke_and_parse`.
 
-    depth = 0
-    end = start
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
+        Each attempt builds a fresh ``Agent`` deliberately: ``strands.Agent``
+        accumulates conversation history, so reusing one instance would feed
+        the model its own unparseable output back as context. The correction
+        re-prompt must be read as "reissue the whole object correctly", not
+        "continue from what you emitted".
+        """
+        retries = parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES")
+        prompt = user_prompt
+        for attempt in range(retries + 1):
+            agent = Agent(
+                model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
+                system_prompt=system_prompt,
+                tools=[],
+            )
+            raw = invoke_agent(
+                agent, prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
+            )
+            try:
+                return extract_json_object(raw)
+            except ValueError as exc:
+                logger.warning(
+                    "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
+                    "for failure_phase=%s: %s",
+                    attempt + 1,
+                    retries + 1,
+                    failure_phase,
+                    exc,
+                )
+                if attempt >= retries:
+                    raise
+                prompt = build_json_correction_prompt(
+                    user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT
+                )
 
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON from LLM response: {e}") from e
+        # Unreachable: the loop returns on success or re-raises on the final
+        # attempt. Kept so type-checkers see a definite return.
+        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
