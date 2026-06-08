@@ -27,19 +27,8 @@ def _rule(text: str) -> Rule:
 
 
 # ---------------------------------------------------------------------------
-# Token budget + query extraction
+# Query extraction
 # ---------------------------------------------------------------------------
-def test_digest_budget_env(monkeypatch):
-    monkeypatch.delenv("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", raising=False)
-    assert invoke_context.invoke_digest_token_budget() == 1024
-    monkeypatch.setenv("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", "256")
-    assert invoke_context.invoke_digest_token_budget() == 256
-    monkeypatch.setenv("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", "0")
-    assert invoke_context.invoke_digest_token_budget() == 1024
-    monkeypatch.setenv("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", "x")
-    assert invoke_context.invoke_digest_token_budget() == 1024
-
-
 def test_extract_query_text_variants():
     assert invoke_context.extract_query_text("hello") == "hello"
     assert invoke_context.extract_query_text({"a": "foo", "b": "bar", "n": 3}) == "foo bar"
@@ -55,7 +44,7 @@ def _patch(monkeypatch, *, rules, digest, graph):
     monkeypatch.setattr(invoke_context.rules_store, "list_rules", lambda *a, **k: rules)
     monkeypatch.setattr(invoke_context, "build_memory_digest", lambda *a, **k: digest)
 
-    async def _graph(agent_id, query, budget):
+    async def _graph(agent_id, query):
         return graph
 
     monkeypatch.setattr(invoke_context, "build_graph_context", _graph)

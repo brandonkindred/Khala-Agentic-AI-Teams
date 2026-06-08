@@ -54,7 +54,7 @@ def test_grounding_block_relabeled_when_enabled(monkeypatch):
 
     monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: True)
 
-    async def _fake_graph(agent_id, query, budget):
+    async def _fake_graph(agent_id, query):
         return "## Knowledge graph\n- Alice knows Bob"
 
     monkeypatch.setattr(retrieval_mod, "build_graph_context", _fake_graph)
@@ -81,7 +81,7 @@ def test_grounding_empty_when_graph_returns_nothing(monkeypatch):
 
     monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: True)
 
-    async def _empty(agent_id, query, budget):
+    async def _empty(agent_id, query):
         return ""
 
     monkeypatch.setattr(retrieval_mod, "build_graph_context", _empty)

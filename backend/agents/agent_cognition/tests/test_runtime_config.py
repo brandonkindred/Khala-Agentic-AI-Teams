@@ -5,14 +5,9 @@ from __future__ import annotations
 import pytest
 
 from agent_cognition.runtime_config import (
-    CHARS_PER_TOKEN,
     read_int_with_floor,
     read_positive_int,
 )
-
-
-def test_chars_per_token_constant():
-    assert CHARS_PER_TOKEN == 4
 
 
 def test_read_positive_int_unset(monkeypatch):

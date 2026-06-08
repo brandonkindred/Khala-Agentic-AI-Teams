@@ -2,9 +2,8 @@
 
 Two layers, matching the rest of the package:
 
-* **Pure** tests of digest assembly, budget enforcement, ordering, rendering
-  helpers, and env parsing run with no Postgres (the store fetchers and the
-  compaction hook are monkeypatched).
+* **Pure** tests of digest assembly, ordering, rendering helpers, and env parsing
+  run with no Postgres (the store fetchers are monkeypatched).
 * A **live-Postgres** end-to-end test is skipped automatically when
   ``POSTGRES_HOST`` is unset, using the same schema-provision + truncate autouse
   fixture as ``test_store.py``.
@@ -109,13 +108,8 @@ def _no_late(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def _no_llm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make any attempt to construct/compact via the LLM fail loudly."""
-    monkeypatch.setattr(
-        retrieval, "get_client", lambda *a, **k: pytest.fail("LLM should not be used")
-    )
-    monkeypatch.setattr(
-        retrieval, "compact_text", lambda *a, **k: pytest.fail("compaction should not run")
-    )
+    """No-op: the digest builder makes no LLM call, so there is nothing to stub."""
+    return
 
 
 # ===========================================================================
@@ -123,30 +117,15 @@ def _no_llm(monkeypatch: pytest.MonkeyPatch) -> None:
 # ===========================================================================
 def test_empty_agent_id_raises() -> None:
     with pytest.raises(AssertionError):
-        retrieval.build_memory_digest("", 100)
-
-
-def test_negative_budget_raises() -> None:
-    with pytest.raises(AssertionError):
-        retrieval.build_memory_digest("a", -1)
+        retrieval.build_memory_digest("")
 
 
 # ===========================================================================
-# Empty / zero paths
+# Empty path
 # ===========================================================================
-def test_zero_budget_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    _no_llm(monkeypatch)
-    # Store is never consulted for a zero budget.
-    monkeypatch.setattr(
-        store, "fetch_summaries", lambda *a, **k: pytest.fail("no store read for 0 budget")
-    )
-    assert retrieval.build_memory_digest("a", 0) == ""
-
-
 def test_empty_history_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     _wire_store(monkeypatch, summaries={}, events=[])
-    _no_llm(monkeypatch)
-    assert retrieval.build_memory_digest("a", 100) == ""
+    assert retrieval.build_memory_digest("a") == ""
 
 
 # ===========================================================================
@@ -165,7 +144,7 @@ def test_mid_period_includes_closed_week_month_and_live_events(
     _wire_store(monkeypatch, summaries=summaries, events=events)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "month recap" in digest
     assert "week recap" in digest
@@ -184,7 +163,7 @@ def test_section_and_scale_ordering(monkeypatch: pytest.MonkeyPatch) -> None:
     _wire_store(monkeypatch, summaries=summaries, events=events)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     # broadest → narrowest, then recent activity last.
     assert digest.index("[month]") < digest.index("[week]") < digest.index("[day]")
@@ -204,7 +183,7 @@ def test_recent_events_request_uses_salience_and_preserves_order(
     captured = _wire_store(monkeypatch, summaries={}, events=events)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert captured["by_salience"] is True
     assert digest.index("high") < digest.index("mid") < digest.index("low")
@@ -217,7 +196,7 @@ def test_summaries_only_renders_without_recent_section(
     _wire_store(monkeypatch, summaries=summaries, events=[])
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "## Long-term memory" in digest
     assert "## Recent activity" not in digest
@@ -229,7 +208,7 @@ def test_events_only_renders_without_long_term_section(
     _wire_store(monkeypatch, summaries={}, events=[_event(content="solo")])
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "## Recent activity" in digest
     assert "## Long-term memory" not in digest
@@ -249,7 +228,7 @@ def test_live_events_bounded_to_finest_summary_period_end(
     )
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert captured["since"] == day.period_end
     assert captured["by_salience"] is True
@@ -273,7 +252,7 @@ def test_live_events_bounded_to_week_when_no_day_summary(
     captured = _wire_store(monkeypatch, summaries=summaries, events=[])
     _no_llm(monkeypatch)
 
-    retrieval.build_memory_digest("a", 1000)
+    retrieval.build_memory_digest("a")
 
     assert captured["since"] == _WEEK[1]  # week.period_end, the latest covered point
 
@@ -291,7 +270,7 @@ def test_live_events_merge_capped_to_top_n(monkeypatch: pytest.MonkeyPatch) -> N
     _wire_store(monkeypatch, summaries={Scale.DAY: day}, events=window_events)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "hi" in digest and "mid" in digest  # top-2 by salience
     assert "lo" not in digest  # capped out
@@ -304,7 +283,7 @@ def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch)
     captured = _wire_store(monkeypatch, summaries={}, events=[_event(content="all-history")])
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert captured["since"] is None
     assert captured["by_salience"] is True
@@ -334,7 +313,7 @@ def test_stale_latest_summary_falls_back_to_non_stale(
     _no_late(monkeypatch)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "current yesterday" in digest
     assert "STALE today" not in digest
@@ -354,7 +333,7 @@ def test_all_recent_summaries_stale_contributes_nothing(
     _no_late(monkeypatch)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "## Long-term memory" not in digest
     assert "live" in digest  # cold-start event path still runs (no non-stale day)
@@ -385,7 +364,7 @@ def test_stale_latest_day_late_event_surfaces_via_window(
     )
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert captured["since"] == prev_day.period_end
     assert "late event" in digest
@@ -413,7 +392,7 @@ def test_latest_non_stale_summary_pages_past_long_stale_run(
     _no_late(monkeypatch)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "current" in digest
     assert "stale" not in digest
@@ -439,7 +418,7 @@ def test_latest_non_stale_summary_stops_at_short_page(
     _no_late(monkeypatch)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "## Long-term memory" not in digest
     assert "live" in digest
@@ -472,7 +451,7 @@ def test_late_event_in_older_stale_day_surfaces(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(store, "fetch_recent_unfolded_events", _fetch_unfolded)
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     assert "late in old day" in digest  # surfaced despite preceding the live window
     assert "today recap" in digest  # the non-stale newest day is still shown
@@ -496,7 +475,7 @@ def test_stale_late_events_merge_dedupe_and_rerank(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(store, "fetch_recent_unfolded_events", lambda *a, **k: list(late))
     _no_llm(monkeypatch)
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
 
     # ``shared`` (same id in both sources) appears once; ordered salience DESC.
     assert digest.count("shared") == 1
@@ -517,44 +496,8 @@ def test_under_budget_returned_verbatim_without_compaction(
     _wire_store(monkeypatch, summaries={}, events=[_event(content="x")])
     _no_llm(monkeypatch)  # asserts compaction / client are never touched
 
-    digest = retrieval.build_memory_digest("a", 1000)
+    digest = retrieval.build_memory_digest("a")
     assert "x" in digest
-
-
-def test_over_budget_invokes_compaction(monkeypatch: pytest.MonkeyPatch) -> None:
-    big = _summary(scale=Scale.DAY, summary="z" * 500)
-    _wire_store(monkeypatch, summaries={Scale.DAY: big}, events=[])
-
-    calls: list[tuple[Any, ...]] = []
-    sentinel_client = object()
-    monkeypatch.setattr(retrieval, "get_client", lambda key: sentinel_client)
-
-    def _fake_compact(text: str, max_chars: int, llm: Any, label: str) -> str:
-        calls.append((text, max_chars, llm, label))
-        return "compacted"
-
-    monkeypatch.setattr(retrieval, "compact_text", _fake_compact)
-
-    # token_budget 10 → char_budget 40, well under the 500-char digest.
-    digest = retrieval.build_memory_digest("a", 10)
-
-    assert digest == "compacted"
-    assert len(calls) == 1
-    _text, max_chars, llm, label = calls[0]
-    assert max_chars == 10 * retrieval._CHARS_PER_TOKEN
-    assert llm is sentinel_client
-    assert label == "memory digest"
-
-
-def test_compaction_overshoot_is_hard_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
-    big = _summary(scale=Scale.DAY, summary="z" * 500)
-    _wire_store(monkeypatch, summaries={Scale.DAY: big}, events=[])
-    monkeypatch.setattr(retrieval, "get_client", lambda key: object())
-    # compact_text is best-effort and may overshoot — the safety net must clamp.
-    monkeypatch.setattr(retrieval, "compact_text", lambda *a, **k: "y" * 999)
-
-    digest = retrieval.build_memory_digest("a", 10)
-    assert len(digest) == 10 * retrieval._CHARS_PER_TOKEN
 
 
 # ===========================================================================
@@ -595,13 +538,6 @@ def test_event_top_n_env(monkeypatch: pytest.MonkeyPatch) -> None:
 # ===========================================================================
 # Live-Postgres end-to-end (skipped without POSTGRES_HOST)
 # ===========================================================================
-class _LoudLLM:
-    """Stand-in that fails if used — the e2e budget is large enough to skip compaction."""
-
-    def __getattr__(self, _name: str):  # pragma: no cover - defensive
-        raise AssertionError("LLM should not be used in the e2e digest test")
-
-
 @pytest.mark.skipif(
     not __import__("shared_postgres").is_postgres_enabled(),
     reason="POSTGRES_HOST not set; skipping live-Postgres retrieval test",
@@ -613,7 +549,6 @@ def test_build_digest_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
 
     register_team_schemas(SCHEMA)
     truncate_team_tables(SCHEMA)
-    monkeypatch.setattr(retrieval, "get_client", lambda *a, **k: _LoudLLM())
 
     agent_id = f"agent-{uuid4()}"
     # The closed week summary covers [Jun 1, Jun 8); the live event occurs after it
@@ -633,7 +568,7 @@ def test_build_digest_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
         computed_at=datetime(2099, 1, 1, tzinfo=_UTC),
     )
 
-    digest = retrieval.build_memory_digest(agent_id, 2000)
+    digest = retrieval.build_memory_digest(agent_id)
 
     assert "weekly recap" in digest
     assert "shipped the thing" in digest
@@ -641,4 +576,4 @@ def test_build_digest_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "## Recent activity" in digest
 
     # An agent with no memory yields an empty digest.
-    assert retrieval.build_memory_digest(f"empty-{uuid4()}", 2000) == ""
+    assert retrieval.build_memory_digest(f"empty-{uuid4()}") == ""

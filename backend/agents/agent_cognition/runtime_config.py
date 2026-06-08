@@ -1,14 +1,9 @@
 """Small shared runtime-config helpers for the Agent Cognition Core.
 
-Centralizes two things that were being copy-pasted across the cognition modules:
-
-* ``CHARS_PER_TOKEN`` — the repo's conservative token→char heuristic, used by every
-  budget-capped text block (memory digest, knowledge-graph context).
-* ``read_positive_int`` / ``read_int_with_floor`` — the two env-int parsing
-  semantics the modules need (positive-or-default, and unset/garbage-or-floored).
-
-Keeping these in one place means a change to the heuristic or the parsing policy
-lands once instead of in eight modules. Pure stdlib — safe to import anywhere.
+Centralizes the two env-int parsing semantics the cognition modules need
+(positive-or-default, and unset/garbage-or-floored) so a change to the parsing
+policy lands once instead of in several modules. Pure stdlib — safe to import
+anywhere.
 """
 
 from __future__ import annotations
@@ -17,10 +12,6 @@ import logging
 import os
 
 logger = logging.getLogger(__name__)
-
-# Conservative ~4-chars-per-token heuristic (matches the llm_service clients). A
-# caller converts a token budget to a char budget by multiplying.
-CHARS_PER_TOKEN = 4
 
 
 def read_positive_int(name: str, default: int) -> int:

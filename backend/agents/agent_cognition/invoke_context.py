@@ -24,16 +24,8 @@ from agent_cognition.graph.retrieval import build_graph_context
 from agent_cognition.memory.retrieval import build_memory_digest
 from agent_cognition.models import CognitionContext, RuleStatus
 from agent_cognition.rules import store as rules_store
-from agent_cognition.runtime_config import read_positive_int
 
 logger = logging.getLogger(__name__)
-
-_DEFAULT_DIGEST_TOKENS = 1024
-
-
-def invoke_digest_token_budget() -> int:
-    """Token budget for each memory block (env ``AGENT_COGNITION_INVOKE_DIGEST_TOKENS``)."""
-    return read_positive_int("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", _DEFAULT_DIGEST_TOKENS)
 
 
 def extract_query_text(body: Any) -> str:
@@ -52,9 +44,7 @@ def extract_query_text(body: Any) -> str:
     return ""
 
 
-async def build_cognition_context(
-    agent_id: str, *, query: str, token_budget: int | None = None
-) -> CognitionContext:
+async def build_cognition_context(agent_id: str, *, query: str) -> CognitionContext:
     """Assemble the ``CognitionContext`` injected on an agent invoke.
 
     Preconditions:
@@ -67,14 +57,13 @@ async def build_cognition_context(
           graph failure (the graph block degrades to empty).
     """
     assert agent_id, "build_cognition_context: agent_id must be non-empty"
-    budget = token_budget if token_budget is not None else invoke_digest_token_budget()
 
     # The three reads are independent — fetch them concurrently so a
     # cognition-enabled invoke pays the latency of the slowest, not their sum.
     rules, digest, graph = await asyncio.gather(
         asyncio.to_thread(rules_store.list_rules, agent_id, status=RuleStatus.ACTIVE),
-        asyncio.to_thread(build_memory_digest, agent_id, budget),
-        build_graph_context(agent_id, query, budget),
+        asyncio.to_thread(build_memory_digest, agent_id),
+        build_graph_context(agent_id, query),
     )
 
     memory_digest = "\n\n".join(block for block in (digest, graph) if block)

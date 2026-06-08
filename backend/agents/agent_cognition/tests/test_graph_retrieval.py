@@ -39,48 +39,36 @@ def test_top_k_env(monkeypatch):
     assert retrieval._search_top_k() == 10
 
 
-def test_empty_when_budget_zero(monkeypatch):
-    _enable(monkeypatch, _FakeGraphiti(facts=["x"]))
-    assert asyncio.run(retrieval.build_graph_context("a", "q", 0)) == ""
-
-
 def test_empty_when_disabled(monkeypatch):
     monkeypatch.delenv("NEO4J_BOLT_URL", raising=False)
-    assert asyncio.run(retrieval.build_graph_context("a", "q", 100)) == ""
+    assert asyncio.run(retrieval.build_graph_context("a", "q")) == ""
 
 
 def test_empty_when_query_blank(monkeypatch):
     _enable(monkeypatch, _FakeGraphiti(facts=["x"]))
-    assert asyncio.run(retrieval.build_graph_context("a", "   ", 100)) == ""
+    assert asyncio.run(retrieval.build_graph_context("a", "   ")) == ""
 
 
 def test_empty_when_no_results(monkeypatch):
     _enable(monkeypatch, _FakeGraphiti(facts=[]))
-    assert asyncio.run(retrieval.build_graph_context("a", "q", 100)) == ""
+    assert asyncio.run(retrieval.build_graph_context("a", "q")) == ""
 
 
 def test_empty_on_search_error(monkeypatch):
     _enable(monkeypatch, _FakeGraphiti(error=RuntimeError("boom")))
-    assert asyncio.run(retrieval.build_graph_context("a", "q", 100)) == ""
+    assert asyncio.run(retrieval.build_graph_context("a", "q")) == ""
 
 
 def test_renders_facts_scoped_to_agent(monkeypatch):
     graphiti = _FakeGraphiti(facts=["Alice knows Bob", "Bob owns Acme"])
     _enable(monkeypatch, graphiti)
-    out = asyncio.run(retrieval.build_graph_context("agent-7", "who is bob", 1000))
+    out = asyncio.run(retrieval.build_graph_context("agent-7", "who is bob"))
     assert out.startswith("## Knowledge graph")
     assert "- Alice knows Bob" in out
     assert "- Bob owns Acme" in out
     assert graphiti.calls[0]["group_ids"] == ["agent-7"]
 
 
-def test_hard_truncates_to_budget(monkeypatch):
-    long_fact = "x" * 500
-    _enable(monkeypatch, _FakeGraphiti(facts=[long_fact]))
-    out = asyncio.run(retrieval.build_graph_context("a", "q", 10))  # 10*4 = 40 chars
-    assert len(out) <= 40
-
-
 def test_precondition_rejects_empty_agent(monkeypatch):
     with pytest.raises(AssertionError):
-        asyncio.run(retrieval.build_graph_context("", "q", 100))
+        asyncio.run(retrieval.build_graph_context("", "q"))

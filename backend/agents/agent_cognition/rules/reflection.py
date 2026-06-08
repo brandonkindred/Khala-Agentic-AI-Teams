@@ -391,10 +391,6 @@ def _propose(
     )
 
 
-# Token budget for the knowledge-graph grounding block fed to reflection.
-_GRAPH_GROUNDING_TOKENS = 512
-
-
 def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str:
     """Best-effort knowledge-graph grounding for reflection, or ``""``.
 
@@ -422,7 +418,7 @@ def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str
         # Query the graph with the agent's recent memory text so the search
         # surfaces facts related to what reflection is reasoning over.
         query = _render_summaries_text(summaries)
-        block = run_sync(build_graph_context(agent_id, query, _GRAPH_GROUNDING_TOKENS), default="")
+        block = run_sync(build_graph_context(agent_id, query), default="")
         if not block:
             return ""
         return block.replace("## Knowledge graph", "## Related knowledge (from graph)", 1)

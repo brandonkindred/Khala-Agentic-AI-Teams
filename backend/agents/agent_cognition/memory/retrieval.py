@@ -1,29 +1,24 @@
 """Retrieval / digest builder for the Agent Cognition Core.
 
-Assembles the compact ``memory_digest`` block the invoke boundary folds into an
-agent's prompt — the "what this agent remembers" side channel. This is the read
+Assembles the ``memory_digest`` block the invoke boundary folds into an agent's
+prompt — the "what this agent remembers" side channel. This is the read
 counterpart to :mod:`agent_cognition.memory.rollup`: the rollup engine *writes*
-calendar-scoped summaries, this module *reads* them back into one bounded block.
+calendar-scoped summaries, this module *reads* them back into one block.
 
-Two design constraints shape the digest, both from the cognition spec:
-
-* **Closed-period rollups only.** A rollup summary exists only once its calendar
-  period has *closed*, so mid-week/mid-month there is no current-period summary.
-  The digest therefore stitches the most recent **closed, non-stale** month /
-  week / day summaries (stable long-range context) together with the
-  **in-progress** period rendered directly from the top-N most salient raw events
-  that no such summary covers yet (events at/after the latest non-stale closed
-  day). A summary the memory subsystem has flagged ``stale`` (a late writeback
-  landed in it and the rollup hasn't reconciled it yet) is skipped in favour of
-  the latest summary still considered current — so the digest never shows
-  invalidated context. The late events that triggered the staleness are surfaced
-  in the live section instead (directly, for a late event in an *older* stale day
-  whose unfolded tail the in-progress window wouldn't reach), so fresh memory is
-  never dropped while the rollup catches up. It never goes empty merely because
-  the current period hasn't closed.
-* **Caller-bounded size.** The whole block is trimmed to a caller-supplied
-  ``token_budget`` (converted to characters, then compacted and hard-capped), so
-  the injector can size it against the model context window.
+**Closed-period rollups only.** A rollup summary exists only once its calendar
+period has *closed*, so mid-week/mid-month there is no current-period summary.
+The digest therefore stitches the most recent **closed, non-stale** month / week
+/ day summaries (stable long-range context) together with the **in-progress**
+period rendered directly from the top-N most salient raw events that no such
+summary covers yet (events at/after the latest non-stale closed day). A summary
+the memory subsystem has flagged ``stale`` (a late writeback landed in it and the
+rollup hasn't reconciled it yet) is skipped in favour of the latest summary still
+considered current — so the digest never shows invalidated context. The late
+events that triggered the staleness are surfaced in the live section instead
+(directly, for a late event in an *older* stale day whose unfolded tail the
+in-progress window wouldn't reach), so fresh memory is never dropped while the
+rollup catches up. It never goes empty merely because the current period hasn't
+closed.
 
 Design by Contract: :func:`build_memory_digest` documents its Preconditions and
 Postconditions. The module is stateless — all durable state lives in
@@ -37,15 +32,9 @@ from datetime import datetime, timezone
 
 from agent_cognition.memory import store
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
-from agent_cognition.runtime_config import CHARS_PER_TOKEN, read_positive_int
-from llm_service import compact_text, get_client
+from agent_cognition.runtime_config import read_positive_int
 
 logger = logging.getLogger(__name__)
-
-# Token→char conversion (the repo's conservative ~4-chars-per-token heuristic),
-# sourced from the shared constant so the knowledge-graph context and this digest
-# never diverge. Kept under the module-private name for existing call sites.
-_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 
 # Default number of recent raw events used to represent the in-progress period.
 # Read at call time so operators/tests can override via the env var below.
@@ -63,34 +52,25 @@ _SUMMARY_PAGE_SIZE = 32
 _SUMMARY_SCALES: tuple[Scale, ...] = (Scale.MONTH, Scale.WEEK, Scale.DAY)
 
 
-def build_memory_digest(agent_id: str, token_budget: int) -> str:
-    """Build the compact memory digest injected on invoke.
+def build_memory_digest(agent_id: str) -> str:
+    """Build the memory digest injected on invoke.
 
     Stitches the most recent **closed** month/week/day rollup summaries together
     with the **in-progress** period — rendered from the top-N most salient recent
-    raw events — and trims the result to ``token_budget``.
+    raw events.
 
     Preconditions:
         * ``agent_id`` is non-empty.
-        * ``token_budget >= 0``.
     Postconditions:
-        * ``len(result) <= token_budget * _CHARS_PER_TOKEN`` (hard-capped, so an
-          over-budget or best-effort LLM compaction can never breach the budget).
         * Sections are ordered broadest→narrowest: month, week, day summaries,
           then the recent in-progress events in ``(salience DESC, occurred_at
           DESC)`` order.
         * Only **non-stale** summaries are surfaced; a ``stale`` latest summary is
           skipped in favour of the latest non-stale one at that scale (or none).
         * Returns ``""`` when the agent has no non-stale summaries and no recent
-          events, or when ``token_budget == 0``.
+          events.
     """
     assert agent_id, "agent_id must be non-empty"
-    assert token_budget >= 0, "token_budget must be non-negative"
-
-    if token_budget == 0:
-        return ""
-
-    char_budget = token_budget * _CHARS_PER_TOKEN
 
     # Most recent *non-stale* closed summary per scale (stable long-range context).
     # A scale with no current summary yet simply contributes nothing.
@@ -107,18 +87,7 @@ def build_memory_digest(agent_id: str, token_budget: int) -> str:
     if not summaries and not events:
         return ""
 
-    digest = _render_digest(summaries, events)
-
-    if len(digest) > char_budget:
-        digest = compact_text(digest, char_budget, get_client("cognition"), "memory digest")
-        # compact_text is best-effort — an LLM may overshoot the target, or fall
-        # back to the original text on failure — so hard-truncate to guarantee
-        # the budget postcondition regardless of the model's behaviour.
-        if len(digest) > char_budget:
-            digest = digest[:char_budget]
-
-    assert len(digest) <= char_budget
-    return digest
+    return _render_digest(summaries, events)
 
 
 def _latest_non_stale_summary(agent_id: str, scale: Scale) -> PeriodSummary | None:
