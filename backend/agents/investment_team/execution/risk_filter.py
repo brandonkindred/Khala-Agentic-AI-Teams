@@ -67,27 +67,22 @@ class RiskLimits(BaseModel):
     def from_legacy_dict(cls, raw: Dict[str, Any]) -> "RiskLimits":
         """Upgrade a raw ``StrategySpec.risk_limits`` dict into the new schema.
 
-        Unknown keys are silently ignored so old specs don't break.
-
-        Migration: the retired ``max_loss_per_trade_pct`` field was a duplicate of
-        ``max_position_pct`` (the deployed position size is the most a single trade
-        can lose). A legacy dict carrying it is folded into ``max_position_pct`` by
-        taking the tighter (min) of the two so any narrower legacy intent survives
-        the consolidation; the obsolete key is then dropped.
+        Unknown keys are silently ignored so old specs don't break. The retired
+        ``max_loss_per_trade_pct`` is one such key: it is dropped, and the authored
+        ``max_position_pct`` (the deployed-capital cap, which is itself the most a
+        single trade can lose) stands. The two are NOT folded together — under the
+        old model ``max_loss_per_trade_pct`` was a different quantity (a
+        stop-governed realised-loss tolerance, ``fraction × stop``), so importing
+        it as a deployed-capital cap would wrongly shrink the position (and a
+        legacy ``0``/negative/None value would either silently zero or fail to
+        validate the cap).
 
         Preconditions: ``raw`` is a mapping of risk-limit field names to values.
-        Postconditions: returns a validated ``RiskLimits``; a legacy
-        ``max_loss_per_trade_pct`` (when numeric) only ever tightens
-        ``max_position_pct``, never loosens it.
+        Postconditions: returns a validated ``RiskLimits``; unknown/retired keys
+        are ignored, never folded into another field.
         """
         known_fields = set(cls.model_fields)
         filtered = {k: v for k, v in raw.items() if k in known_fields}
-        legacy_loss = raw.get("max_loss_per_trade_pct")
-        if isinstance(legacy_loss, (int, float)) and not isinstance(legacy_loss, bool):
-            current_cap = filtered.get(
-                "max_position_pct", cls.model_fields["max_position_pct"].default
-            )
-            filtered["max_position_pct"] = min(float(current_cap), float(legacy_loss))
         return cls(**filtered)
 
 

@@ -925,6 +925,25 @@ def test_rule8_max_position_pct_above_25_is_critical() -> None:
     assert any("max_position_pct=30" in c for c in _critical(results))
 
 
+def test_rule8_zero_max_position_pct_is_critical() -> None:
+    """max_position_pct=0 (schema-valid via ge=0) caps deployed size to 0% so the
+    strategy can never open a position. It must be flagged regardless of sizing
+    kind — including volatility_target, where Check A is skipped (no static
+    deployed fraction)."""
+    spec = _spec(
+        sizing=VolatilityTargetSizing(target_annual_vol=0.15),
+        risk_limits={"max_position_pct": 0, "max_drawdown_pct": 10},
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    crit = [
+        r.details
+        for r in results
+        if r.severity == "critical" and r.rule_id == "risk_limits:zero_position_cap"
+    ]
+    assert crit, _critical(results)
+    assert "max_position_pct=0" in crit[0]
+
+
 # ---------------------------------------------------------------------------
 # Acceptance contract: end-to-end vague + well-formed cases
 # ---------------------------------------------------------------------------

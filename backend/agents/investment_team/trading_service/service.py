@@ -1186,12 +1186,15 @@ class TradingService:
         # (``basis="entry_price"``, ``pct=1.0``) so the short exits at 2x entry —
         # bounding its modeled worst-case loss at the full deployed amount, like a
         # long. The readiness gate relies on this contract to pass uncovered
-        # shorts. ``entry_rules is None`` is the custom-code path (sides unknown
-        # at construction): inject the backstop unconditionally there since the
-        # generated code may short. The rule is a no-op for longs (entry_price/1.0
-        # → long floor = 0, never fires), and ``self._exit_rules`` is a fresh copy
-        # so this never mutates the caller's list.
-        shorts_possible = entry_rules is None or any(
+        # shorts. Falsy ``entry_rules`` (``None`` or ``[]``) means the engine has
+        # no entry rules to enumerate — the custom-code path (``None``) and the
+        # ad-hoc / strategy-code-driven path (``[]``, e.g. the sandbox compat
+        # shim) both let the subprocess open shorts, so inject the backstop
+        # unconditionally there rather than assume long-only. The rule is a no-op
+        # for longs (entry_price/1.0 → long floor = 0, never fires), and
+        # ``self._exit_rules`` is a fresh copy so this never mutates the caller's
+        # list.
+        shorts_possible = not entry_rules or any(
             getattr(rule, "side", "long") == "short" for rule in entry_rules
         )
         if shorts_possible and first_side_stop_factor(self._exit_rules, "short") is None:

@@ -917,6 +917,22 @@ class SpecReadinessGate(GateResultsMixin):
                     )
                 )
 
+        if ctx.spec.risk_limits.max_position_pct == 0:
+            # ``max_position_pct`` is the deployed-capital cap (and, since the
+            # consolidation, the per-trade loss cap). A 0 cap sizes every entry to
+            # zero at runtime (``_cap_qty_to_position`` → ``equity*0/100/close``),
+            # so the strategy can never open a position. The schema permits 0
+            # (``ge=0``), and Check A is skipped for dynamic sizing
+            # (``volatility_target`` / unconfigured ``fixed_notional``), so catch
+            # the degenerate cap here regardless of sizing kind.
+            out.append(
+                self._critical(
+                    "max_position_pct=0 caps deployed position size to 0% of the "
+                    "account, so the strategy can never open a position. Set a "
+                    "positive max_position_pct.",
+                    rule_id="risk_limits:zero_position_cap",
+                )
+            )
         if ctx.spec.risk_limits.max_position_pct > MAX_POSITION_PCT_CEILING:
             out.append(
                 self._critical(
