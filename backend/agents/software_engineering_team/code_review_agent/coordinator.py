@@ -15,7 +15,13 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .chunk_reviewer import ChunkReviewAgent
-from .models import ChunkReviewInput, CodeReviewInput, CodeReviewIssue, CodeReviewOutput
+from .models import (
+    ChunkReviewInput,
+    CodeReviewInput,
+    CodeReviewIssue,
+    CodeReviewOutput,
+    coerce_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,6 +133,8 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
                         severity=i.get("severity", "high"),
                         category=i.get("category", "general"),
                         file_path=i.get("file_path", paths_label),
+                        line=coerce_line(i.get("line")),
+                        start_line=coerce_line(i.get("start_line")),
                         description=i.get("description", ""),
                         suggestion=i.get("suggestion", ""),
                     )

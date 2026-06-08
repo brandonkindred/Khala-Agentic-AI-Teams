@@ -28,8 +28,12 @@ from coding_team.github_source import (  # noqa: E402
     GitHubClient,
     Issue,
     NotAnIssueError,
+    build_review_body,
+    choose_event,
     is_ready,
     issue_to_plan_input,
+    map_issues_to_comments,
+    parse_valid_lines,
     pick_ready_issue,
     scrub_token_from_text,
 )
@@ -178,6 +182,10 @@ class StatusResponse(BaseModel):
     error: Optional[str] = None
     github_context: Optional[Dict[str, Any]] = None
     github_pr_url: Optional[str] = None
+    review_summary: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Set by the PR-review flow: total_issues, inline_comments, body_findings, event.",
+    )
     pending_questions: List[PendingQuestion] = Field(
         default_factory=list,
         description="Decisions awaiting a user answer before the job can proceed.",
@@ -223,6 +231,33 @@ class RunFromGitHubResponse(BaseModel):
     issue_url: str
     status: str = "pending"
     message: str = "Job started. Poll GET /status/{job_id} for progress."
+
+
+class ReviewPrRequest(BaseModel):
+    """Request body for POST /review-pr."""
+
+    owner: str = Field(..., description="GitHub repository owner (user or org)")
+    repo: str = Field(..., description="GitHub repository name")
+    repo_path: str = Field(
+        default="",
+        description="Local checkout path, accepted for parity with /run-from-github. "
+        "The PR review reads the diff via the GitHub API and never touches the checkout.",
+    )
+    pr_number: int = Field(..., description="Pull request number to review")
+    github_token: Optional[str] = Field(
+        default=None, description="Overrides GITHUB_TOKEN env var for this request."
+    )
+    base_branch: Optional[str] = Field(
+        default=None, description="Informational; the PR already records its base."
+    )
+
+
+class ReviewPrResponse(BaseModel):
+    job_id: str
+    pr_number: int
+    pr_url: str
+    status: str = "pending"
+    message: str = "Review started. Poll GET /status/{job_id} for progress."
 
 
 @app.get("/health")
@@ -279,6 +314,7 @@ def get_status(job_id: str) -> StatusResponse:
         error=data.get("error"),
         github_context=data.get("github_context"),
         github_pr_url=data.get("github_pr_url"),
+        review_summary=data.get("review_summary"),
         pending_questions=[PendingQuestion(**q) for q in data.get("pending_questions", [])],
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
     )
@@ -577,6 +613,278 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
     _start_hook_thread(job_id, request, plan, issue, token)
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
+
+
+# ---------------------------------------------------------------------------
+# Pull-request review flow (code reviewer agents review an open PR)
+# ---------------------------------------------------------------------------
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive int env var, falling back to ``default`` on absent/garbage/non-positive."""
+    try:
+        val = int(os.environ.get(name, "") or default)
+    except ValueError:
+        return default
+    return val if val > 0 else default
+
+
+# Cap how many changed files we fetch full content for, bounding the per-file
+# content API calls on a very large PR. Files past the cap still contribute their
+# diff lines to the commentable-line map (so an inline anchor on them is honored),
+# they are just not sent to the reviewer for inspection.
+PR_REVIEW_MAX_FILES = _env_int("PR_REVIEW_MAX_FILES", 50)
+
+
+def _infer_review_language(files: List[Any]) -> str:
+    """Pick the dominant language label for the reviewer from the changed filenames.
+
+    Postconditions:
+        - Returns "typescript" when TS/JS-family files outnumber Python files,
+          else "python" (the agent's two supported language buckets).
+    """
+    ts = sum(1 for f in files if f.filename.endswith((".ts", ".tsx", ".js", ".jsx")))
+    py = sum(1 for f in files if f.filename.endswith(".py"))
+    return "typescript" if ts > py else "python"
+
+
+def _annotate_file_content(content: str) -> str:
+    """Prefix each line with its 1-based number so the reviewer can cite real lines."""
+    return "\n".join(f"{i}: {line}" for i, line in enumerate(content.splitlines(), start=1))
+
+
+def _build_review_code(
+    client: GitHubClient, owner: str, repo: str, files: List[Any], head_sha: str
+) -> str:
+    """Assemble the line-annotated ``code`` input for the reviewer from changed files.
+
+    Only files with a non-empty diff that still exist on the head commit are
+    included (removed files are skipped). Each is fetched at ``head_sha`` and wrapped
+    in a ``### path ###`` block so the reviewer's coordinator can chunk large PRs and
+    every cited line maps 1:1 to a new-file line.
+
+    Postconditions:
+        - Returns concatenated ``### filename ###`` blocks of line-numbered content,
+          bounded to ``PR_REVIEW_MAX_FILES`` reviewable files. A file whose content
+          cannot be fetched is skipped (best-effort) rather than failing the review.
+    """
+    blocks: List[str] = []
+    reviewed = 0
+    for f in files:
+        if reviewed >= PR_REVIEW_MAX_FILES:
+            break
+        if not f.patch or f.status == "removed":
+            continue
+        try:
+            content = client.get_file_content(owner, repo, f.filename, head_sha)
+        except GitHubAPIError as e:
+            logger.warning("PR review: could not fetch %s@%s: %s", f.filename, head_sha[:8], e)
+            continue
+        if not content:
+            continue
+        blocks.append(f"### {f.filename} ###\n{_annotate_file_content(content)}")
+        reviewed += 1
+    return "\n\n".join(blocks)
+
+
+def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
+    """Spawn the PR-review hook in a background thread.
+
+    Indirection so tests can monkey-patch this to invoke the hook synchronously
+    (mirrors ``_start_hook_thread``).
+    """
+    t = threading.Thread(
+        target=_run_pr_review,
+        args=(job_id, request, token),
+        daemon=True,
+    )
+    t.start()
+
+
+@app.post("/review-pr", response_model=ReviewPrResponse)
+def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
+    """Start a code-reviewer-agent review of an open GitHub pull request.
+
+    Reads the PR diff via the GitHub API (no checkout), runs the SE code-review
+    agent over the changed files, and posts one PR review with inline comments.
+
+    Preconditions:
+        - A GitHub token is configured (request body or ``GITHUB_TOKEN``).
+        - ``pr_number`` names an existing pull request in ``owner/repo``.
+    Postconditions:
+        - Creates a job, starts the review hook in the background, and returns the
+          job id plus the PR URL. Poll ``GET /status/{job_id}`` for progress.
+    """
+    token = request.github_token or os.environ.get("GITHUB_TOKEN")
+    if not token:
+        raise HTTPException(status_code=400, detail="GITHUB_TOKEN not configured")
+
+    with GitHubClient(token=token) as client:
+        try:
+            pr = client.get_pull_request(request.owner, request.repo, request.pr_number)
+        except GitHubAPIError as e:
+            raise HTTPException(status_code=502, detail=f"github api error: {e}") from e
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id=job_id, repo_path=request.repo_path)
+    update_job(
+        job_id,
+        github_context={
+            "owner": request.owner,
+            "repo": request.repo,
+            "pr_number": request.pr_number,
+            "pr_url": pr.html_url,
+        },
+    )
+    _start_pr_review_thread(job_id, request, token)
+    return ReviewPrResponse(job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url)
+
+
+def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
+    """Background hook: review the PR and post one review with inline comments.
+
+    Postconditions:
+        - On success the job is ``completed`` with ``github_pr_url`` set and exactly
+          one PR review submitted (REQUEST_CHANGES on critical/high findings from a
+          PR the bot did not author, else COMMENT). Findings tied to a diff line
+          become inline comments; the rest are folded into the review body, so no
+          finding is dropped. Any failure marks the job ``failed`` and posts a
+          (token-scrubbed) PR comment — never raises.
+    """
+    owner, repo, pr_number = request.owner, request.repo, request.pr_number
+    update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
+    try:
+        with GitHubClient(token=token) as client:
+            pr = client.get_pull_request(owner, repo, pr_number)
+            files = client.get_pull_request_files(owner, repo, pr_number)
+            if not files:
+                _safe_comment(
+                    client, owner, repo, pr_number, "Code review: no changed files to review."
+                )
+                update_job(
+                    job_id,
+                    status="completed",
+                    phase="completed",
+                    status_text="No changed files to review",
+                    github_pr_url=pr.html_url,
+                )
+                return
+
+            valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
+            code = _build_review_code(client, owner, repo, files, pr.head_sha)
+            if not code:
+                _safe_comment(
+                    client, owner, repo, pr_number, "Code review: no reviewable file content."
+                )
+                update_job(
+                    job_id,
+                    status="completed",
+                    phase="completed",
+                    status_text="No reviewable file content",
+                    github_pr_url=pr.html_url,
+                )
+                return
+
+            try:
+                reviewer_login = client.get_authenticated_login()
+            except GitHubAPIError:
+                reviewer_login = ""
+
+            # Import the reviewer lazily: it pulls in strands/llm_service, and
+            # keeping it out of module import lets tests stub it cheaply.
+            from software_engineering_team.code_review_agent import CodeReviewAgent, CodeReviewInput
+
+            review_input = CodeReviewInput(
+                code=code,
+                task_description=f"Review pull request #{pr_number}: {pr.title}",
+                task_requirements=pr.body or "",
+                language=_infer_review_language(files),
+            )
+            try:
+                output = CodeReviewAgent().run(review_input)
+            except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
+                logger.exception("PR review agent failed: %s", e)
+                _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
+                return
+
+            comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
+            body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)
+            event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
+
+            _submit_review(client, owner, repo, pr_number, pr.head_sha, body, event, comments)
+
+            update_job(
+                job_id,
+                status="completed",
+                phase="completed",
+                status_text=(
+                    f"Review posted: {len(output.issues)} finding(s), "
+                    f"{len(comments)} inline, event={event}"
+                ),
+                github_pr_url=pr.html_url,
+                review_summary={
+                    "total_issues": len(output.issues),
+                    "inline_comments": len(comments),
+                    "body_findings": len(leftovers),
+                    "event": event,
+                },
+            )
+    except GitHubAPIError as e:
+        # Best-effort failure comment; build a fresh client since the context closed.
+        try:
+            with GitHubClient(token=token) as client:
+                _record_failure(client, owner, repo, pr_number, job_id, f"github api error: {e}")
+        except GitHubAPIError:
+            update_job(job_id, status="failed", error=scrub_token_from_text(str(e)))
+
+
+def _submit_review(
+    client: GitHubClient,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    head_sha: str,
+    body: str,
+    event: str,
+    comments: List[Dict[str, Any]],
+) -> None:
+    """Submit the PR review, degrading gracefully on GitHub rejections.
+
+    GitHub rejects the whole review (422) if it requests changes on the bot's own
+    PR, or if any single inline comment lands off the diff. So: try the chosen
+    event with inline comments; on failure retry as COMMENT keeping the comments
+    (handles the self-PR case without losing inline feedback); on a further failure
+    retry as COMMENT with no inline comments (handles a stray bad line — all
+    findings already live in the body).
+
+    Postconditions:
+        - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
+          if every attempt fails.
+    """
+    attempts = [(event, comments), ("COMMENT", comments), ("COMMENT", [])]
+    last_exc: Optional[GitHubAPIError] = None
+    seen: set[tuple[str, int]] = set()
+    for ev, cs in attempts:
+        key = (ev, len(cs))
+        if key in seen:
+            continue  # skip a redundant attempt (e.g. event already COMMENT)
+        seen.add(key)
+        try:
+            client.create_pull_request_review(
+                owner=owner,
+                repo=repo,
+                number=pr_number,
+                commit_id=head_sha,
+                body=body,
+                event=ev,
+                comments=cs,
+            )
+            return
+        except GitHubAPIError as e:
+            logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(cs), e)
+            last_exc = e
+    assert last_exc is not None
+    raise last_exc
 
 
 # ---------------------------------------------------------------------------

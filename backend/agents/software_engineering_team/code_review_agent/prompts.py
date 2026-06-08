@@ -82,6 +82,7 @@ Return a single JSON object with:
   - "severity": "critical" | "high" | "medium" | "low" | "info"
   - "category": "naming" | "structure" | "logic" | "spec-compliance" | "standards" | "integration" | "testing"
   - "file_path": string (which file has the issue)
+  - "line": integer (1-based line number in the NEW version of file_path where the issue is). When the code is presented with line-number prefixes (e.g. `123: <code>`), set "line" to that exact prefixed number. REQUIRED when the issue is tied to a specific line; OMIT it for file-wide or structural issues.
   - "description": string (clear description of the issue)
   - "suggestion": string (concrete fix recommendation)
 - "summary": string (overall review summary - what's good, what needs work)
