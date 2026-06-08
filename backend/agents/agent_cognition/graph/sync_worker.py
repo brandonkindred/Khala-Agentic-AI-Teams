@@ -68,11 +68,12 @@ def graph_sync_batch() -> int:
 def _agent_graph_scope(agent_id: str) -> tuple[bool, bool]:
     """Return ``(ingest_events, ingest_summaries)`` for an agent.
 
-    Per-agent scope from the manifest's ``cognition.knowledge_graph`` block is
-    wired in a later phase; until then every agent ingests both events and
-    summaries (the default-on contract).
+    Reads the agent's ``cognition.knowledge_graph`` manifest block (default-on for
+    a manifest-less agent); an agent with the graph disabled ingests neither.
     """
-    return (True, True)
+    from agent_cognition.manifest_scope import graph_scope  # noqa: PLC0415
+
+    return graph_scope(agent_id)
 
 
 async def run_graph_sync(*, interval_s: int | None = None, batch: int | None = None) -> None:

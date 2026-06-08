@@ -37,7 +37,6 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_INTERVAL_S = 3600
 _MIN_INTERVAL_S = 60
-_DEFAULT_RETENTION_DAYS = 90
 
 
 def scheduler_interval_seconds() -> int:
@@ -54,13 +53,10 @@ def scheduler_interval_seconds() -> int:
 
 
 def _agent_retention_days(agent_id: str) -> int:
-    """Raw-event retention (days) for an agent.
+    """Raw-event retention (days) for an agent, from its manifest or the default."""
+    from agent_cognition.manifest_scope import retention_days  # noqa: PLC0415
 
-    Read from the manifest's ``cognition.memory.retention_days_events`` in a later
-    phase; until then every agent uses the platform default (matching
-    ``CognitionMemorySpec``'s default).
-    """
-    return _DEFAULT_RETENTION_DAYS
+    return retention_days(agent_id)
 
 
 async def run_cognition_scheduler(*, interval_s: int | None = None) -> None:

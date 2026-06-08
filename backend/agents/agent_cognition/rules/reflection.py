@@ -266,7 +266,8 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     # call, and structured-output validation can retry) so the report reflects
     # true usage for schedulers/budgets/observability rather than a hard-coded 1.
     llm = _CallCountingClient(get_client("cognition"))
-    result = _propose(summaries, active_rules, llm)
+    graph_block = _graph_grounding_block(agent_id, summaries)
+    result = _propose(summaries, active_rules, llm, graph_block=graph_block)
     report.llm_calls = llm.calls
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
@@ -357,16 +358,25 @@ def _recent_summaries(agent_id: str) -> list[PeriodSummary]:
 
 
 def _propose(
-    summaries: list[PeriodSummary], active_rules: list[Rule], llm: Any
+    summaries: list[PeriodSummary],
+    active_rules: list[Rule],
+    llm: Any,
+    *,
+    graph_block: str = "",
 ) -> _ReflectionResult:
     """Render the inputs, bound them to budget, and ask the LLM to propose.
 
     Preconditions: ``summaries`` is non-empty.
     Postconditions: returns a validated :class:`_ReflectionResult` (whose
     proposal list may be empty); the input is compacted to the configured char
-    budget before the call so a long memory window can't overflow the model.
+    budget before the call so a long memory window can't overflow the model. When
+    ``graph_block`` is non-empty it is prepended as additional grounding context —
+    additive only, it never changes what the engine writes (still only ``pending``
+    proposals via ``create_proposal``).
     """
     text = f"{_render_summaries_text(summaries)}\n\n{_render_rules_text(active_rules)}"
+    if graph_block:
+        text = f"{graph_block}\n\n{text}"
     bounded = compact_text(
         text, _input_char_budget(), llm, content_description="agent memory and rules"
     )
@@ -379,6 +389,46 @@ def _propose(
         temperature=0.0,
         correction_attempts=1,
     )
+
+
+# Token budget for the knowledge-graph grounding block fed to reflection.
+_GRAPH_GROUNDING_TOKENS = 512
+
+
+def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str:
+    """Best-effort knowledge-graph grounding for reflection, or ``""``.
+
+    Returns a ``## Related knowledge (from graph)`` block of recency-ranked facts
+    related to the agent's recent memory, or ``""`` when the graph layer is
+    disabled, the agent opted out of grounding, or anything fails. The graph is a
+    read-only input here — it never proposes or activates a rule.
+
+    Postconditions:
+        * ``""`` unless ``is_neo4j_enabled()`` **and** the agent's manifest enables
+          ``knowledge_graph.ground_rule_proposals``; never raises.
+    """
+    try:
+        from shared_neo4j import is_neo4j_enabled  # noqa: PLC0415
+
+        if not is_neo4j_enabled():
+            return ""
+        from agent_cognition.manifest_scope import ground_rule_proposals  # noqa: PLC0415
+
+        if not ground_rule_proposals(agent_id):
+            return ""
+        from agent_cognition.graph.bridge import run_sync  # noqa: PLC0415
+        from agent_cognition.graph.retrieval import build_graph_context  # noqa: PLC0415
+
+        # Query the graph with the agent's recent memory text so the search
+        # surfaces facts related to what reflection is reasoning over.
+        query = _render_summaries_text(summaries)
+        block = run_sync(build_graph_context(agent_id, query, _GRAPH_GROUNDING_TOKENS), default="")
+        if not block:
+            return ""
+        return block.replace("## Knowledge graph", "## Related knowledge (from graph)", 1)
+    except Exception:
+        logger.warning("reflection: graph grounding failed; proceeding ungrounded", exc_info=True)
+        return ""
 
 
 # ---------------------------------------------------------------------------
