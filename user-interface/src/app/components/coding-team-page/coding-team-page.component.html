@@ -109,6 +109,17 @@
                 </div>
               </div>
             }
+            @if (jobStatus.thinking) {
+              <mat-expansion-panel class="thinking-panel" [expanded]="true">
+                <mat-expansion-panel-header>
+                  <mat-panel-title>
+                    <mat-icon>psychology</mat-icon>
+                    Agent thinking
+                  </mat-panel-title>
+                </mat-expansion-panel-header>
+                <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
+              </mat-expansion-panel>
+            }
             @if (jobStatus.github_pr_url) {
               <div class="github-job-panel__field github-job-panel__field--pr">
                 <mat-icon>merge_type</mat-icon>
