@@ -67,7 +67,9 @@ def test_unbalanced_open_brace_inside_string_value() -> None:
 
 
 def test_balanced_braces_inside_string_value() -> None:
-    """Dict/f-string braces inside a string value round-trip cleanly."""
+    """Sanity (not a regression guard — this also passed the old scanner since
+    the braces balance): dict/f-string braces inside a string value round-trip
+    cleanly, so the string-aware scanner doesn't break the common balanced case."""
     obj = {"code": 'd = {1: 2}\nf"{x:>{w}}"', "note": "ok"}
     raw = json.dumps(obj)
     assert extract_json_object(raw) == obj
@@ -81,8 +83,25 @@ def test_escaped_quote_then_brace_inside_string_value() -> None:
     assert extract_json_object(raw) == obj
 
 
+def test_trailing_backslash_before_closing_quote() -> None:
+    """A string value ending in a backslash must consume it as an escaped
+    backslash so the real closing quote isn't read as escaped — the classic
+    escape-state off-by-one. The next value's unbalanced braces would derail
+    the scan if the string didn't close exactly here."""
+    obj = {"a": "ends with backslash\\", "b": "}{}{"}
+    raw = json.dumps(obj)  # -> {"a": "ends with backslash\\", "b": "}{}{"}
+    assert extract_json_object(raw) == obj
+
+
 def test_string_with_braces_then_trailing_prose() -> None:
     """Surrounding prose + a brace-laden string value: outermost object wins."""
     obj = {"strategy_code": "x = {}  # } trailing brace", "changes_made": "y"}
     raw = "Here is the fix: " + json.dumps(obj) + " -- done"
     assert extract_json_object(raw) == obj
+
+
+def test_unterminated_string_in_input_raises() -> None:
+    """An unterminated string leaves the scan unbalanced to EOF; the string-aware
+    path must still surface a ValueError, never a silently-truncated partial."""
+    with pytest.raises(ValueError):
+        extract_json_object('{"k": "unterminated }')
