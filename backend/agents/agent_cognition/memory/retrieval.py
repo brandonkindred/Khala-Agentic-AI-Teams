@@ -33,12 +33,11 @@ Postconditions. The module is stateless — all durable state lives in
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime, timezone
 
 from agent_cognition.memory import store
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
-from agent_cognition.runtime_config import CHARS_PER_TOKEN
+from agent_cognition.runtime_config import CHARS_PER_TOKEN, read_positive_int
 from llm_service import compact_text, get_client
 
 logger = logging.getLogger(__name__)
@@ -265,20 +264,4 @@ def _utcnow() -> datetime:
 
 def _event_top_n() -> int:
     """In-progress event count (env ``AGENT_COGNITION_DIGEST_EVENT_TOP_N``)."""
-    return _read_positive_int("AGENT_COGNITION_DIGEST_EVENT_TOP_N", _DEFAULT_EVENT_TOP_N)
-
-
-def _read_positive_int(name: str, default: int) -> int:
-    """Parse a positive int env var, falling back to ``default``.
-
-    Postconditions: returns the parsed value when ``>= 1``; unset/garbage/
-    non-positive values fall back to ``default``.
-    """
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 1 else default
+    return read_positive_int("AGENT_COGNITION_DIGEST_EVENT_TOP_N", _DEFAULT_EVENT_TOP_N)

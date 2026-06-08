@@ -38,20 +38,33 @@ def _retention_default() -> int:
     return CognitionMemorySpec().retention_days_events
 
 
-def _knowledge_graph_spec(agent_id: str) -> Any:
-    """Return the agent's ``CognitionKnowledgeGraphSpec``, or the default.
+def _manifest_cognition(agent_id: str) -> Any:
+    """Return the agent's ``cognition`` manifest block, or ``None``.
 
-    Falls back to the model default when there is no manifest, no cognition block,
-    or any lookup failure — so callers always get a spec to read. Never raises.
+    The single registry-read used by every resolver below: returns ``None`` when
+    there is no manifest, no cognition block, or any lookup failure, so callers
+    apply their own defaults. Never raises.
     """
     try:
         from agent_registry import get_registry  # noqa: PLC0415
 
         manifest = get_registry().get(agent_id)
-        if manifest is not None and manifest.cognition is not None:
-            return manifest.cognition.knowledge_graph
+        if manifest is not None:
+            return manifest.cognition
     except Exception:
         logger.debug("manifest_scope: registry lookup failed for %s; using defaults", agent_id)
+    return None
+
+
+def _knowledge_graph_spec(agent_id: str) -> Any:
+    """Return the agent's ``CognitionKnowledgeGraphSpec``, or the default.
+
+    Falls back to the model default when there is no manifest, no cognition block,
+    or any lookup failure — so callers always get a spec to read.
+    """
+    cognition = _manifest_cognition(agent_id)
+    if cognition is not None:
+        return cognition.knowledge_graph
     return _kg_default()
 
 
@@ -82,12 +95,7 @@ def ground_rule_proposals(agent_id: str) -> bool:
 
 def retention_days(agent_id: str) -> int:
     """Raw-event retention (days) for an agent, from the manifest or the default."""
-    try:
-        from agent_registry import get_registry  # noqa: PLC0415
-
-        manifest = get_registry().get(agent_id)
-        if manifest is not None and manifest.cognition is not None:
-            return manifest.cognition.memory.retention_days_events
-    except Exception:
-        logger.debug("manifest_scope: retention lookup failed for %s; using default", agent_id)
+    cognition = _manifest_cognition(agent_id)
+    if cognition is not None:
+        return cognition.memory.retention_days_events
     return _retention_default()

@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 
 from agent_cognition.runtime_config import CHARS_PER_TOKEN, read_positive_int
-from shared_neo4j import get_graphiti, is_neo4j_enabled
+from shared_neo4j import get_graphiti, is_neo4j_enabled, timed_graph_op
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,7 @@ def _search_top_k() -> int:
     return read_positive_int("AGENT_COGNITION_GRAPH_SEARCH_TOP_K", _DEFAULT_TOP_K)
 
 
+@timed_graph_op("build_graph_context")
 async def build_graph_context(agent_id: str, query: str, token_budget: int) -> str:
     """Build the bounded knowledge-graph context block for an agent + query.
 

@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -52,6 +51,7 @@ from agent_cognition.models import (
 )
 from agent_cognition.rules import store as rules_store
 from agent_cognition.rules.predicate import is_valid_predicate
+from agent_cognition.runtime_config import read_positive_int
 from llm_service import compact_text, complete_validated, get_client
 
 logger = logging.getLogger(__name__)
@@ -729,16 +729,5 @@ def _input_char_budget() -> int:
 
 
 def _read_positive_int(name: str, default: int) -> int:
-    """Parse a positive int env var, falling back to ``default``.
-
-    Postconditions: returns the parsed value when ``>= 1``; unset/garbage/
-    non-positive values fall back to ``default``.
-    """
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 1 else default
+    """Positive-int env parse (delegates to the shared helper; name kept for callers)."""
+    return read_positive_int(name, default)

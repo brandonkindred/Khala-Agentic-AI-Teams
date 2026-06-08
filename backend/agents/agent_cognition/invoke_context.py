@@ -69,9 +69,13 @@ async def build_cognition_context(
     assert agent_id, "build_cognition_context: agent_id must be non-empty"
     budget = token_budget if token_budget is not None else invoke_digest_token_budget()
 
-    rules = await asyncio.to_thread(rules_store.list_rules, agent_id, status=RuleStatus.ACTIVE)
-    digest = await asyncio.to_thread(build_memory_digest, agent_id, budget)
-    graph = await build_graph_context(agent_id, query, budget)
+    # The three reads are independent — fetch them concurrently so a
+    # cognition-enabled invoke pays the latency of the slowest, not their sum.
+    rules, digest, graph = await asyncio.gather(
+        asyncio.to_thread(rules_store.list_rules, agent_id, status=RuleStatus.ACTIVE),
+        asyncio.to_thread(build_memory_digest, agent_id, budget),
+        build_graph_context(agent_id, query, budget),
+    )
 
     memory_digest = "\n\n".join(block for block in (digest, graph) if block)
     return CognitionContext(rules=rules, memory_digest=memory_digest)
