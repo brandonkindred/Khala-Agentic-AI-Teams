@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 
 from . import config as _config
 from .api import generate_structured, generate_text
+from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import _clear_client_cache_for_testing, get_client
@@ -72,6 +73,8 @@ __all__ = [
     "extract_json_from_response",
     "generate_structured",
     "generate_text",
+    "parse_rate_limit_retry_config",
+    "rate_limit_retry_delay",
     "get_client",
     "get_strands_model",
     "get_llm_config_summary",

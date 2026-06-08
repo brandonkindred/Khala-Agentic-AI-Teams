@@ -66,9 +66,13 @@ for the design rationale and migration notes.
 | `LLM_TIMEOUT` | Request timeout in seconds (default 900 / 15 min; all calls use streaming) |
 | `LLM_CONTEXT_SIZE` | Override context size |
 | `LLM_MAX_TOKENS` | Max output tokens |
-| `LLM_MAX_RETRIES` | Retries for transient errors |
-| `LLM_BACKOFF_BASE` | Backoff base (seconds) |
-| `LLM_BACKOFF_MAX` | Max backoff (seconds) |
+| `LLM_MAX_RETRIES` | Retries for **transient** (5xx / network) errors only — not 429 (default 10) |
+| `LLM_BACKOFF_BASE` | Transient backoff base in seconds (default 2) |
+| `LLM_BACKOFF_MAX` | Transient max backoff in seconds (default 120) |
+| `LLM_RATE_LIMIT_MAX_RETRIES` | Retries for HTTP **429** rate limits before raising `LLMRateLimitError` (default 5 → 6 total attempts) |
+| `LLM_RATE_LIMIT_BACKOFF_INITIAL` | First 429 retry wait in seconds — a 429 means the budget is exhausted, so the first retry is minutes out (default 300) |
+| `LLM_RATE_LIMIT_BACKOFF_MAX` | Per-wait cap for the 429 schedule in seconds (default 3600) |
+| `LLM_RATE_LIMIT_HONOR_RETRY_AFTER` | Honor an integer-seconds `Retry-After` header on a 429 (`max(computed, Retry-After)`, capped); default on, set `false` to disable |
 | `LLM_MAX_CONCURRENCY` | Max concurrent Ollama calls |
 | `LLM_ENABLE_THINKING` | Enable thinking mode (some Ollama Cloud models reject `think: true`; disable if you see 500s) |
 | `OLLAMA_API_KEY` | **Required for Ollama Cloud.** API key from https://ollama.com/settings/keys. All LLM requests use this when set. |
@@ -146,7 +150,7 @@ See `tests/test_strands_adapter.py` for message-conversion, tool-loop, and `stru
 ## Exceptions
 
 - `LLMError` – base
-- `LLMRateLimitError` – 429 after retries
+- `LLMRateLimitError` – 429 after the slow rate-limit backoff (300s initial, 3600s cap, 5 retries by default; separate from the transient schedule)
 - `LLMTemporaryError` – 5xx / network after retries
 - `LLMPermanentError` – 4xx (except 429)
 - `LLMJsonParseError` – response not valid JSON

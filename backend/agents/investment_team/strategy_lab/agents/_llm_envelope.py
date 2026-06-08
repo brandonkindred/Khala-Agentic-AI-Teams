@@ -49,6 +49,7 @@ from typing import Any, Callable, Optional
 
 import httpx
 
+from llm_service.backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from llm_service.config import resolve_timeout
 from llm_service.interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
@@ -122,7 +123,15 @@ def _env_int(name: str, default: int) -> int:
 class _EnvelopeConfig:
     """Resolved per-call envelope tunables. Pure value object."""
 
-    __slots__ = ("max_attempts", "timeout_s", "total_budget_s", "backoff_base", "backoff_max")
+    __slots__ = (
+        "max_attempts",
+        "timeout_s",
+        "total_budget_s",
+        "backoff_base",
+        "backoff_max",
+        "rl_initial",
+        "rl_cap",
+    )
 
     def __init__(
         self,
@@ -132,12 +141,21 @@ class _EnvelopeConfig:
         total_budget_s: float,
         backoff_base: float,
         backoff_max: float,
+        rl_initial: float,
+        rl_cap: float,
     ) -> None:
         self.max_attempts = max_attempts
         self.timeout_s = timeout_s
         self.total_budget_s = total_budget_s
         self.backoff_base = backoff_base
         self.backoff_max = backoff_max
+        # Rate-limit (429) backoff schedule — the slow, distinct schedule applied
+        # when a failure is a rate limit. The number of rate-limit retries is
+        # governed by ``max_attempts`` and the total-budget deadline (the real
+        # terminator), not a separate counter; only the per-attempt *delay* comes
+        # from this schedule.
+        self.rl_initial = rl_initial
+        self.rl_cap = rl_cap
 
 
 def _resolve_config(
@@ -184,12 +202,24 @@ def _resolve_config(
         total_budget_s = _env_float("STRATEGY_LAB_LLM_TOTAL_BUDGET", attempts * timeout_s * 1.5)
     total_budget_s = max(0.001, float(total_budget_s))
 
+    # Rate-limit (429) backoff schedule. STRATEGY_LAB_LLM_RATE_LIMIT_* override the
+    # global LLM_RATE_LIMIT_* policy (whose parsed values are the defaults here).
+    _, global_rl_initial, global_rl_cap = parse_rate_limit_retry_config()
+    rl_initial = max(
+        1.0, _env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", global_rl_initial)
+    )
+    # Floor the cap at the initial so rate_limit_retry_delay's precondition
+    # (cap >= initial) always holds even under a misconfigured override.
+    rl_cap = max(rl_initial, _env_float("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", global_rl_cap))
+
     return _EnvelopeConfig(
         max_attempts=attempts,
         timeout_s=timeout_s,
         total_budget_s=total_budget_s,
         backoff_base=backoff_base,
         backoff_max=backoff_max,
+        rl_initial=rl_initial,
+        rl_cap=rl_cap,
     )
 
 
@@ -280,6 +310,27 @@ def classify_strands_exception(exc: BaseException) -> bool:
     return True
 
 
+def _is_rate_limit_kind(exc: BaseException) -> bool:
+    """Whether ``exc`` is a 429 rate limit that should use the SLOW backoff schedule.
+
+    A weekly-usage cap is deliberately NOT a rate-limit kind: it is fatal (see
+    :func:`classify_strands_exception`), so it must never enter the rate-limit
+    retry branch.
+
+    Preconditions: ``exc`` is any raised exception.
+    Postconditions: returns a bool — pure, no I/O, never raises.
+    """
+    if OLLAMA_WEEKLY_LIMIT_MESSAGE in str(exc):
+        return False
+    if isinstance(exc, LLMRateLimitError):
+        return True
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    name = type(exc).__name__.lower()
+    msg = str(exc).lower()
+    return any(m in name or m in msg for m in ("throttl", "ratelimit", "rate limit"))
+
+
 def _backoff_delay(attempt: int, base: float, max_: float) -> float:
     """Jittered exponential backoff seconds for a 0-based ``attempt`` index.
 
@@ -360,6 +411,11 @@ def invoke_agent(
         exception classifies as fatal.
       * Emits one structured ``logger.exception`` per failed attempt and one
         summary ``logger.error`` on terminal failure.
+      * A retriable 429 rate limit backs off on the SLOW rate-limit schedule
+        (first retry ~300s, ``STRATEGY_LAB_LLM_RATE_LIMIT_*`` /
+        ``LLM_RATE_LIMIT_*``); transient faults keep the fast backoff. A
+        weekly-usage cap stays fatal (never retried). Each rate-limit delay is
+        clamped to the remaining total budget.
     """
     log = logger or _module_logger
     classify = retriable_classifier or classify_strands_exception
@@ -401,12 +457,20 @@ def invoke_agent(
                     outcome="fatal",
                     cause=exc,
                 ) from exc
-            # Retriable: back off before the next attempt, clamped to budget.
+            # Retriable: back off before the next attempt, clamped to budget. A
+            # 429 rate limit uses the SLOW schedule (first retry ~300s); transient
+            # faults keep the fast schedule. The budget deadline is the terminator,
+            # so a clamped rate-limit delay that overruns the budget ends the loop
+            # with outcome="budget_exhausted" on the next iteration.
             if attempt < cfg.max_attempts - 1:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     break
-                delay = min(_backoff_delay(attempt, cfg.backoff_base, cfg.backoff_max), remaining)
+                if _is_rate_limit_kind(exc):
+                    computed = rate_limit_retry_delay(attempt, cfg.rl_initial, cfg.rl_cap)
+                else:
+                    computed = _backoff_delay(attempt, cfg.backoff_base, cfg.backoff_max)
+                delay = min(computed, remaining)
                 if delay > 0:
                     time.sleep(delay)
 
@@ -432,4 +496,4 @@ def invoke_agent(
     )
 
 
-__all__ = ["invoke_agent", "classify_strands_exception"]
+__all__ = ["invoke_agent", "classify_strands_exception", "_is_rate_limit_kind"]
