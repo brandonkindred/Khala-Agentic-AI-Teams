@@ -33,6 +33,7 @@ from __future__ import annotations
 import logging
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
+from typing import NamedTuple
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
@@ -310,6 +311,121 @@ def has_events_recorded_after(
             (agent_id, period_start, period_end, after),
         )
         return bool(cur.fetchone()[0])
+
+
+class RecordedEvent(NamedTuple):
+    """An event paired with its store-managed ``recorded_at`` arrival time.
+
+    ``MemoryEvent`` deliberately omits ``recorded_at`` (write bookkeeping), but the
+    knowledge-graph sync worker keysets on ``(recorded_at, id)``, so this carries
+    the arrival time alongside the event for the worker to advance its watermark.
+    """
+
+    event: MemoryEvent
+    recorded_at: datetime
+
+
+@timed_query(store=_STORE, op="fetch_events_recorded_after")
+def fetch_events_recorded_after(
+    agent_id: str,
+    *,
+    after_recorded_at: datetime | None,
+    after_id: str | None,
+    limit: int,
+) -> list[RecordedEvent]:
+    """Return this agent's events after a ``(recorded_at, id)`` keyset cursor.
+
+    The forward, append-ordered scan the knowledge-graph sync worker uses to drain
+    new episodic events into the graph. Ordering on ``recorded_at`` (arrival time,
+    not ``occurred_at``) means a late event — appended with a fresh ``recorded_at``
+    after an earlier sync pass — sorts *after* the watermark and is picked up on a
+    subsequent pass rather than skipped. The ``(recorded_at, id)`` row comparison
+    plus the matching index makes this a true keyset scan (no OFFSET walk).
+
+    Args:
+        after_recorded_at / after_id: the exclusive cursor — only events with
+            ``(recorded_at, id) > (after_recorded_at, after_id)`` are returned.
+            Pass both ``None`` (the cold-start watermark) for no lower bound; they
+            are advanced together by the worker, so a half-set cursor is a caller
+            bug.
+        limit: maximum rows to return (the worker's batch size).
+
+    Preconditions:
+        * ``agent_id`` is non-empty and ``limit >= 1``.
+        * ``after_recorded_at`` and ``after_id`` are both set or both ``None``.
+    Postconditions:
+        * At most ``limit`` rows owned by ``agent_id``, ordered ``(recorded_at
+          ASC, id ASC)``, each strictly after the cursor; ``recorded_at`` rides
+          back on each :class:`RecordedEvent`. No rows are modified.
+    """
+    assert agent_id, "fetch_events_recorded_after: agent_id must be non-empty"
+    assert limit >= 1, "fetch_events_recorded_after: limit must be >= 1"
+    assert (after_recorded_at is None) == (after_id is None), (
+        "fetch_events_recorded_after: after_recorded_at and after_id must both be set or both None"
+    )
+    sql = f"SELECT {_EVENT_COLS}, recorded_at FROM agent_cognition_events WHERE agent_id = %s"
+    params: list[object] = [agent_id]
+    if after_recorded_at is not None:
+        # Row-comparison keyset: strictly after the (recorded_at, id) cursor.
+        sql += " AND (recorded_at, id) > (%s, %s)"
+        params.extend([after_recorded_at, after_id])
+    sql += " ORDER BY recorded_at ASC, id ASC LIMIT %s"
+    params.append(limit)
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return [
+            RecordedEvent(MemoryEvent.model_validate(row), row["recorded_at"])
+            for row in cur.fetchall()
+        ]
+
+
+@timed_query(store=_STORE, op="fetch_summaries_created_after")
+def fetch_summaries_created_after(
+    agent_id: str,
+    *,
+    after_created_at: datetime | None,
+    after_id: str | None,
+    limit: int,
+) -> list[PeriodSummary]:
+    """Return this agent's rollup summaries after a ``(created_at, id)`` cursor.
+
+    The forward, creation-ordered scan the knowledge-graph sync worker uses to
+    drain rollup summaries into the graph, symmetric with
+    :func:`fetch_events_recorded_after`. Every summary across all scales is
+    returned exactly once in keyset order (no ``stale`` filter — a momentarily
+    stale period is still ingested; recency/staleness is resolved at retrieval
+    time and by the fresher event episodes). ``created_at`` is stable across
+    recompute (``upsert_summary``'s ``ON CONFLICT DO UPDATE`` never touches it),
+    so the cursor never skips or re-emits a period.
+
+    Args:
+        after_created_at / after_id: the exclusive ``(created_at, id)`` cursor;
+            pass both ``None`` for no lower bound (cold start). Advanced together.
+        limit: maximum rows to return (the worker's batch size).
+
+    Preconditions:
+        * ``agent_id`` is non-empty and ``limit >= 1``.
+        * ``after_created_at`` and ``after_id`` are both set or both ``None``.
+    Postconditions:
+        * At most ``limit`` summaries owned by ``agent_id``, ordered
+          ``(created_at ASC, id ASC)``, each strictly after the cursor. No rows
+          are modified.
+    """
+    assert agent_id, "fetch_summaries_created_after: agent_id must be non-empty"
+    assert limit >= 1, "fetch_summaries_created_after: limit must be >= 1"
+    assert (after_created_at is None) == (after_id is None), (
+        "fetch_summaries_created_after: after_created_at and after_id must both be set or both None"
+    )
+    sql = f"SELECT {_SUMMARY_READ_COLS} FROM agent_cognition_summaries WHERE agent_id = %s"
+    params: list[object] = [agent_id]
+    if after_created_at is not None:
+        sql += " AND (created_at, id) > (%s, %s)"
+        params.extend([after_created_at, after_id])
+    sql += " ORDER BY created_at ASC, id ASC LIMIT %s"
+    params.append(limit)
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(sql, params)
+        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
 
 
 @timed_query(store=_STORE, op="upsert_summary")

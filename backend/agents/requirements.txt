@@ -15,6 +15,9 @@ cryptography>=46.0,<47.0
 # Unified API: encrypted_integration_credentials / Google browser login when POSTGRES_HOST is set
 psycopg[binary]>=3.3,<4.0
 psycopg_pool>=3.3,<4.0
+# Knowledge-graph layer over Agent Cognition (shared_neo4j + agent_cognition.graph)
+neo4j>=5.26,<6.0
+graphiti-core>=0.29,<0.30
 temporalio>=1.25,<2.0
 APScheduler>=3.11,<4.0
 pytz>=2026.1
