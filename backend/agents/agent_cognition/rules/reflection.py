@@ -715,19 +715,14 @@ def _render_rules_text(rules: list[Rule]) -> str:
 # ---------------------------------------------------------------------------
 def _summary_limit() -> int:
     """Summaries per scale fed to the reflector (env ``AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT", _DEFAULT_SUMMARY_LIMIT)
+    return read_positive_int("AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT", _DEFAULT_SUMMARY_LIMIT)
 
 
 def _max_proposals() -> int:
     """Cap on proposals written per run (env ``AGENT_COGNITION_REFLECTION_MAX_PROPOSALS``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", _DEFAULT_MAX_PROPOSALS)
+    return read_positive_int("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", _DEFAULT_MAX_PROPOSALS)
 
 
 def _input_char_budget() -> int:
     """Char budget for ``compact_text`` (env ``AGENT_COGNITION_REFLECTION_INPUT_CHARS``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_INPUT_CHARS", _DEFAULT_INPUT_CHARS)
-
-
-def _read_positive_int(name: str, default: int) -> int:
-    """Positive-int env parse (delegates to the shared helper; name kept for callers)."""
-    return read_positive_int(name, default)
+    return read_positive_int("AGENT_COGNITION_REFLECTION_INPUT_CHARS", _DEFAULT_INPUT_CHARS)
