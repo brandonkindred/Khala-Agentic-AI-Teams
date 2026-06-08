@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -49,6 +50,11 @@ from coding_team.job_store import (  # noqa: E402
 from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
 from coding_team.models import CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
+from coding_team.review_history_store import (  # noqa: E402
+    list_reviews,
+    record_review_start,
+    update_review,
+)
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
@@ -61,9 +67,32 @@ logger = logging.getLogger(__name__)
 
 init_otel(service_name="coding-team", team_key="coding_team")
 
+
+@asynccontextmanager
+async def _coding_team_lifespan(
+    app: FastAPI,
+):  # pragma: no cover - exercised only with a live Postgres pool
+    # Register the code-review-history schema (no-op when POSTGRES_HOST is unset).
+    try:
+        from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(CODE_REVIEW_SCHEMA)
+    except Exception:
+        logger.exception("coding_team postgres schema registration failed")
+    yield
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("coding_team shared_postgres close_pool failed", exc_info=True)
+
+
 app = FastAPI(
     title="Coding Team API",
     description="Tech Lead and Senior SWEs with Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
+    lifespan=_coding_team_lifespan,
 )
 instrument_fastapi_app(app, team_key="coding_team")
 
@@ -263,6 +292,23 @@ class ReviewPrResponse(BaseModel):
     pr_url: str
     status: str = "pending"
     message: str = "Review started. Poll GET /status/{job_id} for progress."
+
+
+class ReviewRunItem(BaseModel):
+    """One persisted code-review run for a pull request (GET /reviews)."""
+
+    job_id: str
+    owner: str
+    repo: str
+    pr_number: int
+    pr_url: Optional[str] = None
+    status: str
+    status_text: Optional[str] = None
+    review_summary: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+    author: str
+    created_at: datetime
+    completed_at: Optional[datetime] = None
 
 
 @app.get("/health")
@@ -697,6 +743,16 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
     return ReviewCode("\n\n".join(blocks), reviewed, skipped)
 
 
+def _review_author() -> str:
+    """Resolve the author handle for a review row (best-effort, never raises)."""
+    try:
+        from agent_console.author import resolve_author
+
+        return resolve_author()
+    except Exception:  # noqa: BLE001 - author tagging must never block a review
+        return "anonymous"
+
+
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """Spawn the PR-review hook in a background thread.
 
@@ -746,8 +802,32 @@ def post_review_pr(request: ReviewPrRequest) -> ReviewPrResponse:
             "pr_url": pr.html_url,
         },
     )
+    # Persist a row so the Code Review page can show this review's history (best-effort).
+    record_review_start(
+        job_id, request.owner, request.repo, request.pr_number, pr.html_url, _review_author()
+    )
     _start_pr_review_thread(job_id, request, token)
     return ReviewPrResponse(job_id=job_id, pr_number=request.pr_number, pr_url=pr.html_url)
+
+
+@app.get("/reviews", response_model=List[ReviewRunItem])
+def get_reviews(
+    owner: str,
+    repo: str,
+    pr_number: Optional[int] = None,
+    limit: int = 500,
+) -> List[ReviewRunItem]:
+    """List persisted code-review runs for a repository (optionally one PR).
+
+    Preconditions:
+        - ``owner``/``repo`` name a repository; ``pr_number`` filters to one PR.
+    Postconditions:
+        - Returns up to ``limit`` runs ordered newest-first. Returns an empty
+          list when Postgres is unavailable (the history feature degrades to
+          "no history" rather than erroring).
+    """
+    rows = list_reviews(owner, repo, pr_number, limit=limit)
+    return [ReviewRunItem.model_validate(row) for row in rows]
 
 
 def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
@@ -763,6 +843,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
+    update_review(job_id, status="running", status_text="Reviewing pull request")
     try:
         with GitHubClient(token=token) as client:
             pr = client.get_pull_request(owner, repo, pr_number)
@@ -778,6 +859,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                     status_text="No changed files to review",
                     github_pr_url=pr.html_url,
                 )
+                update_review(
+                    job_id,
+                    status="completed",
+                    status_text="No changed files to review",
+                    completed=True,
+                )
                 return
 
             valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
@@ -792,6 +879,12 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                     phase="completed",
                     status_text="No reviewable file content",
                     github_pr_url=pr.html_url,
+                )
+                update_review(
+                    job_id,
+                    status="completed",
+                    status_text="No reviewable file content",
+                    completed=True,
                 )
                 return
 
@@ -830,24 +923,33 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             _submit_review(client, owner, repo, pr_number, pr.head_sha, body, event, comments)
 
+            review_summary = {
+                "total_issues": len(output.issues),
+                "inline_comments": len(comments),
+                "body_findings": len(leftovers),
+                "event": event,
+                "files_reviewed": files_reviewed,
+                "files_skipped": files_skipped,
+            }
+            status_text = (
+                f"Review posted: {len(output.issues)} finding(s), "
+                f"{len(comments)} inline, event={event}"
+                + (f"; {files_skipped} file(s) skipped (cap)" if files_skipped else "")
+            )
             update_job(
                 job_id,
                 status="completed",
                 phase="completed",
-                status_text=(
-                    f"Review posted: {len(output.issues)} finding(s), "
-                    f"{len(comments)} inline, event={event}"
-                    + (f"; {files_skipped} file(s) skipped (cap)" if files_skipped else "")
-                ),
+                status_text=status_text,
                 github_pr_url=pr.html_url,
-                review_summary={
-                    "total_issues": len(output.issues),
-                    "inline_comments": len(comments),
-                    "body_findings": len(leftovers),
-                    "event": event,
-                    "files_reviewed": files_reviewed,
-                    "files_skipped": files_skipped,
-                },
+                review_summary=review_summary,
+            )
+            update_review(
+                job_id,
+                status="completed",
+                status_text=status_text,
+                review_summary=review_summary,
+                completed=True,
             )
     except Exception as e:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread
@@ -858,7 +960,9 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             with GitHubClient(token=token) as client:
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
         except Exception:  # noqa: BLE001 - the status update below is the last resort
-            update_job(job_id, status="failed", error=scrub_token_from_text(str(e)))
+            safe_err = scrub_token_from_text(str(e))
+            update_job(job_id, status="failed", error=safe_err)
+            update_review(job_id, status="failed", error=safe_err, completed=True)
 
 
 def _submit_review(
@@ -959,6 +1063,9 @@ def _record_failure(
     """
     safe = scrub_token_from_text(error)
     update_job(job_id, status="failed", error=safe)
+    # No-op for non-review jobs (no matching code_review_runs row); persists the
+    # failure for review jobs so the Code Review page shows the failed outcome.
+    update_review(job_id, status="failed", error=safe, completed=True)
     _safe_comment(client, owner, repo, num, f"Coding team job `{job_id}` failed: {safe}")
 
 

@@ -1,3 +1,5 @@
+import type { CodeReviewSummary } from './coding-team.model';
+
 /** Integration list item (GET /api/integrations). */
 export interface IntegrationListItem {
   id: string;
@@ -171,4 +173,23 @@ export interface RunPrReviewResponse {
   pr_url: string;
   status: string;
   message: string;
+}
+
+/**
+ * One persisted code-review run for a pull request
+ * (GET /api/integrations/github/reviews). Backed by the coding team's
+ * `code_review_runs` table so review history survives reloads/restarts.
+ */
+export interface CodeReviewRunItem {
+  job_id: string;
+  pr_number: number;
+  pr_url?: string;
+  status: string;
+  status_text?: string;
+  review_summary?: CodeReviewSummary;
+  error?: string;
+  /** ISO-8601 timestamp when the review was started. */
+  created_at: string;
+  /** ISO-8601 timestamp when the review reached a terminal state, if any. */
+  completed_at?: string;
 }

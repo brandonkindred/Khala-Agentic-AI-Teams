@@ -997,6 +997,20 @@ class RunPrReviewResponse(BaseModel):
     message: str = "Review started. Poll GET /api/coding-team/status/{job_id} for progress."
 
 
+class CodeReviewRunItem(BaseModel):
+    """One persisted code-review run for a PR (GET /github/reviews)."""
+
+    job_id: str
+    pr_number: int
+    pr_url: str | None = None
+    status: str
+    status_text: str | None = None
+    review_summary: dict[str, Any] | None = None
+    error: str | None = None
+    created_at: str
+    completed_at: str | None = None
+
+
 def _build_github_config_response(cfg: dict[str, Any]) -> GitHubConfigResponse:
     return GitHubConfigResponse(
         enabled=cfg["enabled"],
@@ -1645,6 +1659,69 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
             message=data.get("message", ""),
         )
     except (ValueError, KeyError, TypeError) as e:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Coding team service returned an unexpected response: {e}",
+        ) from e
+
+
+@router.get("/github/reviews", response_model=list[CodeReviewRunItem])
+async def list_github_reviews(
+    pr_number: int | None = Query(default=None),
+) -> list[CodeReviewRunItem]:
+    """List persisted code-review runs for the configured repository.
+
+    Powers the Code Review page's per-PR review history: row status badges and
+    the expanded reviews table. Owner/repo are injected from the GitHub config
+    (the frontend never sends them), then the request is forwarded to the
+    coding-team service which owns the ``code_review_runs`` table.
+
+    Preconditions:
+        - GitHub integration is enabled with a configured owner/repo.
+        - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+    Postconditions:
+        - Returns the review runs (optionally filtered to ``pr_number``),
+          newest-first. Every failure path raises ``HTTPException``; no ``httpx``
+          error escapes unhandled.
+    """
+    _cfg, _token, owner, repo = _resolve_github_target()
+
+    coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
+    if not coding_team_url:
+        raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
+
+    params: dict[str, Any] = {"owner": owner, "repo": repo}
+    if pr_number is not None:
+        params["pr_number"] = pr_number
+
+    target = f"{coding_team_url.rstrip('/')}/reviews"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, connect=10.0)) as client:
+            resp = await client.get(target, params=params)
+    except httpx.TimeoutException as e:
+        logger.warning("github reviews: coding team service timed out: %s", e)
+        raise HTTPException(
+            status_code=504,
+            detail="Coding team service timed out while listing reviews.",
+        ) from e
+    except httpx.HTTPError as e:
+        logger.warning("github reviews: cannot reach coding team service at %s: %s", coding_team_url, e)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not reach coding team service: {e}",
+        ) from e
+
+    if resp.status_code != 200:
+        try:
+            detail = resp.json().get("detail", resp.text[:300])
+        except Exception:
+            detail = resp.text[:300]
+        raise HTTPException(status_code=resp.status_code, detail=detail)
+
+    try:
+        data = resp.json()
+        return [CodeReviewRunItem.model_validate(item) for item in data]
+    except (ValueError, TypeError) as e:
         raise HTTPException(
             status_code=502,
             detail=f"Coding team service returned an unexpected response: {e}",

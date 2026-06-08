@@ -3,6 +3,7 @@ import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import { environment } from '../../environments/environment';
 import type {
+  CodeReviewRunItem,
   GitHubConfigResponse,
   GitHubConfigUpdate,
   GitHubIssueItem,
@@ -141,5 +142,17 @@ export class IntegrationsApiService {
   /** POST /api/integrations/github/review-pr */
   runGitHubReviewPr(body: RunPrReviewRequest): Observable<RunPrReviewResponse> {
     return this.http.post<RunPrReviewResponse>(`${this.baseUrl}/github/review-pr`, body);
+  }
+
+  /**
+   * GET /api/integrations/github/reviews — persisted code-review history for the
+   * configured repository (optionally filtered to one PR), newest-first.
+   */
+  getGitHubReviewHistory(prNumber?: number): Observable<CodeReviewRunItem[]> {
+    const params: Record<string, string> = {};
+    if (prNumber !== undefined) {
+      params['pr_number'] = String(prNumber);
+    }
+    return this.http.get<CodeReviewRunItem[]>(`${this.baseUrl}/github/reviews`, { params });
   }
 }

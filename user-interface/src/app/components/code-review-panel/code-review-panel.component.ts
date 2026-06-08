@@ -11,14 +11,36 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
-import type { GitHubPullRequestItem, RunPrReviewResponse } from '../../models/integrations.model';
-import type { CodingTeamJobStatus } from '../../models/coding-team.model';
+import type {
+  CodeReviewRunItem,
+  GitHubPullRequestItem,
+  RunPrReviewResponse,
+} from '../../models/integrations.model';
+import type { CodeReviewSummary, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
 /**
+ * One code-review run on a pull request. Held in memory and kept live by a
+ * per-job poller; the authoritative copy is persisted backend-side (the
+ * `code_review_runs` table) and re-hydrated on load so history survives reloads.
+ */
+export interface PrReviewRecord {
+  jobId: string;
+  prNumber: number;
+  /** Milliseconds since epoch when the review started (for the table timestamp). */
+  startedAt: number;
+  status: string;
+  statusText?: string;
+  reviewSummary?: CodeReviewSummary;
+  prUrl?: string;
+  error?: string;
+}
+
+/**
  * Code Review panel: lists open pull requests from the configured GitHub repo and
- * lets the user start an AI code review on one. The review runs the Software
- * Engineering code-reviewer agents, which post a GitHub review with inline comments.
+ * lets the user start AI code reviews on them. Each PR row expands inline to show
+ * the PR detail, a Start Review action, and a table of every review run on that PR
+ * (status + outcome). A live status badge on each row reflects the latest review.
  */
 @Component({
   selector: 'app-code-review-panel',
@@ -59,21 +81,25 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   pageSize = 10;
   pageIndex = 0;
 
-  // Selection & confirmation
-  selectedPull: GitHubPullRequestItem | null = null;
-  startingReview = false;
+  // Accordion: the number of the currently-expanded PR row, or null.
+  expandedPrNumber: number | null = null;
 
-  // Active review job tracking
-  activeJob: RunPrReviewResponse | null = null;
-  jobStatus: CodingTeamJobStatus | null = null;
-  private pollSub: Subscription | null = null;
+  // All review runs per PR number, newest-first. Hydrated from the backend on
+  // load and updated live by the per-job pollers below.
+  reviews = new Map<number, PrReviewRecord[]>();
+
+  // PR numbers whose Start Review request is in flight (disables the button).
+  starting = new Set<number>();
+
+  // Live status pollers keyed by job id, so ngOnDestroy can tear them all down.
+  private pollers = new Map<string, Subscription>();
 
   ngOnInit(): void {
     this.checkGitHubConfig();
   }
 
   ngOnDestroy(): void {
-    this.stopPolling();
+    this.stopAllPollers();
   }
 
   checkGitHubConfig(): void {
@@ -98,19 +124,66 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   loadPulls(): void {
     this.loadingPulls = true;
     this.pullError = null;
-    this.selectedPull = null;
+    this.expandedPrNumber = null;
     this.integrationsApi.getGitHubPullRequests().subscribe({
       next: (pulls) => {
         this.pulls = pulls;
         this.pageIndex = 0;
         this.pullsLoaded = true;
         this.loadingPulls = false;
+        this.hydrateReviews();
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
         this.loadingPulls = false;
       },
     });
+  }
+
+  /**
+   * Re-load persisted review history from the backend and rebuild the per-PR map,
+   * resuming a live poller for any review still in a non-terminal state. The
+   * backend is the source of truth, so this reconciles in-memory records with it.
+   * Best-effort: a failure leaves the page usable without history.
+   */
+  private hydrateReviews(): void {
+    this.integrationsApi.getGitHubReviewHistory().subscribe({
+      next: (items) => {
+        this.stopAllPollers();
+        const map = new Map<number, PrReviewRecord[]>();
+        for (const item of items) {
+          const record = this.toRecord(item);
+          const list = map.get(record.prNumber) ?? [];
+          list.push(record); // backend returns newest-first; preserve that order
+          map.set(record.prNumber, list);
+        }
+        this.reviews = map;
+        for (const list of map.values()) {
+          for (const record of list) {
+            if (!isCodingTeamTerminalStatus(record.status)) {
+              this.startPolling(record);
+            }
+          }
+        }
+      },
+      error: () => {
+        // History is a best-effort enhancement; the PR list still works without it.
+      },
+    });
+  }
+
+  private toRecord(item: CodeReviewRunItem): PrReviewRecord {
+    const parsed = Date.parse(item.created_at);
+    return {
+      jobId: item.job_id,
+      prNumber: item.pr_number,
+      startedAt: Number.isNaN(parsed) ? Date.now() : parsed,
+      status: item.status,
+      statusText: item.status_text,
+      reviewSummary: item.review_summary,
+      prUrl: item.pr_url,
+      error: item.error,
+    };
   }
 
   /** The slice of PRs visible on the current page. */
@@ -124,61 +197,111 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     this.pageSize = event.pageSize;
   }
 
-  selectPull(pull: GitHubPullRequestItem): void {
-    this.selectedPull = pull;
+  /** Toggle the accordion expansion for a PR (only one open at a time). */
+  togglePull(pull: GitHubPullRequestItem): void {
+    this.expandedPrNumber = this.expandedPrNumber === pull.number ? null : pull.number;
   }
 
-  cancelSelection(): void {
-    this.selectedPull = null;
-  }
-
-  confirmAndReview(): void {
-    if (!this.selectedPull) return;
-    this.startingReview = true;
+  /** Start a code review on a PR, recording it and polling it live. */
+  startReview(pull: GitHubPullRequestItem): void {
+    if (this.starting.has(pull.number)) return;
+    this.starting.add(pull.number);
     this.pullError = null;
-    this.integrationsApi.runGitHubReviewPr({ pr_number: this.selectedPull.number }).subscribe({
+    this.integrationsApi.runGitHubReviewPr({ pr_number: pull.number }).subscribe({
       next: (resp: RunPrReviewResponse) => {
-        this.activeJob = resp;
-        this.selectedPull = null;
-        this.startingReview = false;
-        this.startPolling(resp.job_id);
+        this.starting.delete(pull.number);
+        const record: PrReviewRecord = {
+          jobId: resp.job_id,
+          prNumber: pull.number,
+          startedAt: Date.now(),
+          status: resp.status,
+          prUrl: resp.pr_url,
+        };
+        const list = this.reviews.get(pull.number) ?? [];
+        list.unshift(record); // newest-first
+        this.reviews.set(pull.number, list);
+        this.startPolling(record);
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.starting.delete(pull.number);
         this.pullError = err?.error?.detail || err?.message || 'Failed to start review.';
-        this.startingReview = false;
       },
     });
   }
 
-  private startPolling(jobId: string): void {
-    this.stopPolling();
-    this.pollSub = pollJobStatus(
+  private startPolling(record: PrReviewRecord): void {
+    if (this.pollers.has(record.jobId)) return;
+    const sub = pollJobStatus(
       this.api,
-      jobId,
-      (status) => {
-        this.jobStatus = status;
+      record.jobId,
+      (status: CodingTeamJobStatus) => {
+        // Mutate the record in place so the row badge + table re-render live.
+        record.status = status.status;
+        record.statusText = status.status_text;
+        record.reviewSummary = status.review_summary ?? record.reviewSummary;
+        record.prUrl = status.github_pr_url ?? record.prUrl;
+        record.error = status.error;
+        if (isCodingTeamTerminalStatus(status.status)) {
+          this.pollers.delete(record.jobId);
+        }
       },
       () => {
-        this.pullError = 'Lost connection to the coding team — status polling failed.';
+        record.error = 'Lost connection to the coding team — status polling failed.';
+        this.pollers.delete(record.jobId);
       },
     );
+    this.pollers.set(record.jobId, sub);
   }
 
-  private stopPolling(): void {
-    if (this.pollSub) {
-      this.pollSub.unsubscribe();
-      this.pollSub = null;
+  private stopAllPollers(): void {
+    for (const sub of this.pollers.values()) {
+      sub.unsubscribe();
     }
+    this.pollers.clear();
   }
 
-  /** True once the active review job has reached a terminal state. */
-  isJobTerminal(): boolean {
-    return isCodingTeamTerminalStatus(this.jobStatus?.status);
+  /** All review runs for a PR, newest-first. */
+  reviewsFor(prNumber: number): PrReviewRecord[] {
+    return this.reviews.get(prNumber) ?? [];
   }
 
-  dismissJob(): void {
-    this.stopPolling();
-    this.activeJob = null;
-    this.jobStatus = null;
+  /** The most recent review run for a PR, or null. */
+  latestReview(prNumber: number): PrReviewRecord | null {
+    return this.reviewsFor(prNumber)[0] ?? null;
+  }
+
+  hasReviews(prNumber: number): boolean {
+    return this.reviewsFor(prNumber).length > 0;
+  }
+
+  /** True when a PR's latest review is still running (drives the row spinner). */
+  isLatestRunning(prNumber: number): boolean {
+    const latest = this.latestReview(prNumber);
+    return !!latest && !latest.error && !isCodingTeamTerminalStatus(latest.status);
+  }
+
+  /** True once a single review run has reached a terminal state. */
+  isRecordTerminal(record: PrReviewRecord): boolean {
+    return isCodingTeamTerminalStatus(record.status);
+  }
+
+  /** Row status badge text derived from the latest review, or null when none. */
+  badgeLabel(prNumber: number): string | null {
+    const latest = this.latestReview(prNumber);
+    if (!latest) return null;
+    if (latest.error) return 'error';
+    if (isCodingTeamTerminalStatus(latest.status)) {
+      return latest.reviewSummary?.event ?? latest.status;
+    }
+    return latest.status;
+  }
+
+  /** Row status badge CSS class derived from the latest review. */
+  badgeClass(prNumber: number): string {
+    const latest = this.latestReview(prNumber);
+    if (!latest) return '';
+    if (latest.error || latest.status === 'failed') return 'cr-job-status--failed';
+    if (isCodingTeamTerminalStatus(latest.status)) return 'cr-job-status--completed';
+    return '';
   }
 }

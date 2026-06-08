@@ -7,8 +7,12 @@ import { provideRouter } from '@angular/router';
 import { vi } from 'vitest';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
-import { CodeReviewPanelComponent } from './code-review-panel.component';
-import type { GitHubConfigResponse, GitHubPullRequestItem } from '../../models/integrations.model';
+import { CodeReviewPanelComponent, PrReviewRecord } from './code-review-panel.component';
+import type {
+  CodeReviewRunItem,
+  GitHubConfigResponse,
+  GitHubPullRequestItem,
+} from '../../models/integrations.model';
 
 function makePulls(count: number): GitHubPullRequestItem[] {
   return Array.from({ length: count }, (_, i) => ({
@@ -23,6 +27,16 @@ function makePulls(count: number): GitHubPullRequestItem[] {
     labels: i % 2 === 0 ? ['needs-review'] : [],
     updated_at: '2026-01-01T00:00:00Z',
   }));
+}
+
+function record(over: Partial<PrReviewRecord> = {}): PrReviewRecord {
+  return {
+    jobId: 'j1',
+    prNumber: 1,
+    startedAt: Date.parse('2026-01-01T00:00:00Z'),
+    status: 'running',
+    ...over,
+  };
 }
 
 const CONFIGURED: GitHubConfigResponse = {
@@ -52,6 +66,7 @@ describe('CodeReviewPanelComponent', () => {
     getGitHubConfig: ReturnType<typeof vi.fn>;
     getGitHubPullRequests: ReturnType<typeof vi.fn>;
     runGitHubReviewPr: ReturnType<typeof vi.fn>;
+    getGitHubReviewHistory: ReturnType<typeof vi.fn>;
   };
 
   async function setup(): Promise<void> {
@@ -72,6 +87,7 @@ describe('CodeReviewPanelComponent', () => {
   }
 
   beforeEach(() => {
+    vi.useFakeTimers();
     apiSpy = {
       health: vi.fn().mockReturnValue(of({ status: 'ok' })),
       getJobStatus: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'running' })),
@@ -82,13 +98,24 @@ describe('CodeReviewPanelComponent', () => {
       runGitHubReviewPr: vi.fn().mockReturnValue(
         of({ job_id: 'j1', pr_number: 1, pr_url: 'https://example.com/pull/1', status: 'pending', message: '' }),
       ),
+      getGitHubReviewHistory: vi.fn().mockReturnValue(of([])),
     };
   });
 
-  it('should create and load pull requests when configured', async () => {
+  afterEach(() => {
+    fixture?.destroy();
+    vi.useRealTimers();
+  });
+
+  // -------------------------------------------------------------------------
+  // Config + list loading
+  // -------------------------------------------------------------------------
+
+  it('should create and load pull requests + review history when configured', async () => {
     await setup();
     expect(component.githubConfigured).toBe(true);
     expect(integrationsSpy.getGitHubPullRequests).toHaveBeenCalled();
+    expect(integrationsSpy.getGitHubReviewHistory).toHaveBeenCalled();
     expect(component.pulls.length).toBe(3);
     expect(component.pullsLoaded).toBe(true);
   });
@@ -125,27 +152,102 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.pagedPulls[0].number).toBe(11);
   });
 
-  it('selects and cancels a pull request', async () => {
+  // -------------------------------------------------------------------------
+  // Accordion expand/collapse
+  // -------------------------------------------------------------------------
+
+  it('expands and collapses a pull request (accordion, one open at a time)', async () => {
     await setup();
-    const pull = component.pulls[0];
-    component.selectPull(pull);
-    expect(component.selectedPull).toBe(pull);
-    component.cancelSelection();
-    expect(component.selectedPull).toBeNull();
+    const [a, b] = component.pulls;
+    component.togglePull(a);
+    expect(component.expandedPrNumber).toBe(a.number);
+    // Expanding b replaces a (only one open).
+    component.togglePull(b);
+    expect(component.expandedPrNumber).toBe(b.number);
+    // Re-clicking the open row collapses it.
+    component.togglePull(b);
+    expect(component.expandedPrNumber).toBeNull();
   });
 
-  it('starts a review on confirm and clears the selection', async () => {
+  // -------------------------------------------------------------------------
+  // Hydration from the backend
+  // -------------------------------------------------------------------------
+
+  it('hydrates the reviews map from history and resumes pollers for non-terminal runs', async () => {
+    const items: CodeReviewRunItem[] = [
+      {
+        job_id: 'done-1',
+        pr_number: 1,
+        pr_url: 'https://example.com/pull/1',
+        status: 'completed',
+        review_summary: { total_issues: 1, inline_comments: 1, body_findings: 0, event: 'COMMENT' },
+        created_at: '2026-02-01T00:00:00Z',
+      },
+      {
+        job_id: 'live-1',
+        pr_number: 1,
+        status: 'running',
+        created_at: 'not-a-real-date', // exercises the invalid-timestamp fallback
+      },
+      {
+        job_id: 'done-2',
+        pr_number: 2,
+        status: 'completed',
+        created_at: '2026-02-02T00:00:00Z',
+      },
+    ];
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(of(items));
     await setup();
-    component.selectPull(component.pulls[0]);
-    component.confirmAndReview();
+
+    expect(component.reviewsFor(1).map((r) => r.jobId)).toEqual(['done-1', 'live-1']);
+    expect(component.reviewsFor(2).map((r) => r.jobId)).toEqual(['done-2']);
+    // The running run keeps polling; the two completed runs do not.
+    expect(component['pollers'].has('live-1')).toBe(true);
+    expect(component['pollers'].has('done-1')).toBe(false);
+    // The invalid created_at fell back to a real timestamp.
+    expect(Number.isNaN(component.reviewsFor(1)[1].startedAt)).toBe(false);
+  });
+
+  it('survives a review-history load failure', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(throwError(() => new Error('nope')));
+    await setup();
+    expect(component.pullsLoaded).toBe(true);
+    expect(component.reviews.size).toBe(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Starting reviews + polling
+  // -------------------------------------------------------------------------
+
+  it('starts a review, records it, and polls it live', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        status_text: 'done',
+        github_pr_url: 'https://example.com/pull/1',
+        review_summary: { total_issues: 2, inline_comments: 1, body_findings: 1, event: 'REQUEST_CHANGES' },
+      }),
+    );
+    component.startReview(component.pulls[0]);
     expect(integrationsSpy.runGitHubReviewPr).toHaveBeenCalledWith({ pr_number: 1 });
-    expect(component.activeJob?.job_id).toBe('j1');
-    expect(component.selectedPull).toBeNull();
+    expect(component.reviewsFor(1).length).toBe(1);
+    expect(component.reviewsFor(1)[0].jobId).toBe('j1');
+
+    vi.advanceTimersByTime(5000);
+    const rec = component.reviewsFor(1)[0];
+    expect(rec.status).toBe('completed');
+    expect(rec.reviewSummary?.event).toBe('REQUEST_CHANGES');
+    expect(rec.prUrl).toBe('https://example.com/pull/1');
+    // Terminal status removes the poller.
+    expect(component['pollers'].has('j1')).toBe(false);
   });
 
-  it('does nothing on confirm with no selection', async () => {
+  it('ignores a second startReview while one is already starting', async () => {
     await setup();
-    component.confirmAndReview();
+    component.starting.add(1);
+    component.startReview(component.pulls[0]);
     expect(integrationsSpy.runGitHubReviewPr).not.toHaveBeenCalled();
   });
 
@@ -154,28 +256,142 @@ describe('CodeReviewPanelComponent', () => {
       throwError(() => ({ error: { detail: 'no such PR' } })),
     );
     await setup();
-    component.selectPull(component.pulls[0]);
-    component.confirmAndReview();
+    component.startReview(component.pulls[0]);
     expect(component.pullError).toBe('no such PR');
-    expect(component.startingReview).toBe(false);
+    expect(component.starting.has(1)).toBe(false);
   });
 
-  it('reports terminal status and dismisses the job', async () => {
+  it('accumulates multiple reviews on the same PR, newest-first', async () => {
     await setup();
-    expect(component.isJobTerminal()).toBe(false);
-    component.jobStatus = { job_id: 'j1', status: 'running' };
-    expect(component.isJobTerminal()).toBe(false);
-    component.jobStatus = {
-      job_id: 'j1',
-      status: 'completed',
-      github_pr_url: 'https://example.com/pull/1',
-      review_summary: { total_issues: 2, inline_comments: 1, body_findings: 1, event: 'REQUEST_CHANGES' },
-    };
-    expect(component.isJobTerminal()).toBe(true);
-    expect(component.jobStatus.review_summary?.event).toBe('REQUEST_CHANGES');
-    component.activeJob = { job_id: 'j1', pr_number: 1, pr_url: 'u', status: 'pending', message: '' };
-    component.dismissJob();
-    expect(component.activeJob).toBeNull();
-    expect(component.jobStatus).toBeNull();
+    integrationsSpy.runGitHubReviewPr
+      .mockReturnValueOnce(of({ job_id: 'j1', pr_number: 1, pr_url: 'u1', status: 'pending', message: '' }))
+      .mockReturnValueOnce(of({ job_id: 'j2', pr_number: 1, pr_url: 'u2', status: 'pending', message: '' }));
+    component.startReview(component.pulls[0]);
+    component.startReview(component.pulls[0]);
+    expect(component.reviewsFor(1).map((r) => r.jobId)).toEqual(['j2', 'j1']);
+    expect(component.hasReviews(1)).toBe(true);
+  });
+
+  it('polls concurrent reviews on different PRs without cross-talk', async () => {
+    await setup();
+    integrationsSpy.runGitHubReviewPr
+      .mockReturnValueOnce(of({ job_id: 'ja', pr_number: 1, pr_url: 'u1', status: 'pending', message: '' }))
+      .mockReturnValueOnce(of({ job_id: 'jb', pr_number: 2, pr_url: 'u2', status: 'pending', message: '' }));
+    apiSpy.getJobStatus.mockImplementation((id: string) =>
+      of({
+        job_id: id,
+        status: 'completed',
+        review_summary: {
+          total_issues: 0,
+          inline_comments: 0,
+          body_findings: 0,
+          event: id === 'ja' ? 'APPROVE' : 'COMMENT',
+        },
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    component.startReview(component.pulls[1]);
+    vi.advanceTimersByTime(5000);
+
+    expect(apiSpy.getJobStatus).toHaveBeenCalledWith('ja');
+    expect(apiSpy.getJobStatus).toHaveBeenCalledWith('jb');
+    expect(component.reviewsFor(1)[0].reviewSummary?.event).toBe('APPROVE');
+    expect(component.reviewsFor(2)[0].reviewSummary?.event).toBe('COMMENT');
+  });
+
+  it('marks the record errored when polling loses the connection', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('down')));
+    component.startReview(component.pulls[0]);
+    // Three consecutive failed polls trip the connection-lost handler.
+    vi.advanceTimersByTime(15001);
+    expect(component.reviewsFor(1)[0].error).toContain('Lost connection');
+    expect(component['pollers'].has('j1')).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // Derived helpers (row badge + status)
+  // -------------------------------------------------------------------------
+
+  it('derives the row badge from the latest review run', async () => {
+    await setup();
+    expect(component.badgeLabel(1)).toBeNull();
+    expect(component.badgeClass(1)).toBe('');
+
+    component.reviews.set(1, [record({ status: 'running' })]);
+    expect(component.badgeLabel(1)).toBe('running');
+    expect(component.badgeClass(1)).toBe('');
+    expect(component.isLatestRunning(1)).toBe(true);
+
+    component.reviews.set(1, [
+      record({ status: 'completed', reviewSummary: { total_issues: 0, inline_comments: 0, body_findings: 0, event: 'COMMENT' } }),
+    ]);
+    expect(component.badgeLabel(1)).toBe('COMMENT');
+    expect(component.badgeClass(1)).toBe('cr-job-status--completed');
+    expect(component.isLatestRunning(1)).toBe(false);
+
+    component.reviews.set(1, [record({ status: 'completed' })]); // terminal, no summary
+    expect(component.badgeLabel(1)).toBe('completed');
+
+    component.reviews.set(1, [record({ status: 'failed' })]);
+    expect(component.badgeLabel(1)).toBe('failed');
+    expect(component.badgeClass(1)).toBe('cr-job-status--failed');
+
+    component.reviews.set(1, [record({ status: 'running', error: 'Lost connection' })]);
+    expect(component.badgeLabel(1)).toBe('error');
+    expect(component.badgeClass(1)).toBe('cr-job-status--failed');
+    expect(component.isLatestRunning(1)).toBe(false);
+  });
+
+  it('reports per-record terminality', async () => {
+    await setup();
+    expect(component.isRecordTerminal(record({ status: 'running' }))).toBe(false);
+    expect(component.isRecordTerminal(record({ status: 'completed' }))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Teardown
+  // -------------------------------------------------------------------------
+
+  it('tears down all pollers on destroy', async () => {
+    await setup();
+    integrationsSpy.runGitHubReviewPr
+      .mockReturnValueOnce(of({ job_id: 'jx', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }))
+      .mockReturnValueOnce(of({ job_id: 'jy', pr_number: 2, pr_url: 'u', status: 'pending', message: '' }));
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'jx', status: 'running' })); // stays non-terminal
+    component.startReview(component.pulls[0]);
+    component.startReview(component.pulls[1]);
+    expect(component['pollers'].size).toBe(2);
+
+    const callsBefore = apiSpy.getJobStatus.mock.calls.length;
+    component.ngOnDestroy();
+    expect(component['pollers'].size).toBe(0);
+    vi.advanceTimersByTime(15000);
+    expect(apiSpy.getJobStatus.mock.calls.length).toBe(callsBefore);
+  });
+
+  it('renders an expanded PR detail with a reviews table', async () => {
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(
+      of([
+        {
+          job_id: 'r1',
+          pr_number: 1,
+          pr_url: 'https://example.com/pull/1',
+          status: 'completed',
+          review_summary: { total_issues: 3, inline_comments: 2, body_findings: 1, event: 'REQUEST_CHANGES' },
+          created_at: '2026-02-01T00:00:00Z',
+        },
+      ] as CodeReviewRunItem[]),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.cr-pull-detail')).toBeTruthy();
+    expect(el.querySelectorAll('.cr-reviews-table tbody tr').length).toBe(1);
+    // Collapsing removes the detail panel.
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    expect(el.querySelector('.cr-pull-detail')).toBeNull();
   });
 });
