@@ -245,15 +245,19 @@ class RiskFilter:
             # is their sole enforcement point). Dispatcher-presized orders skip
             # this check: the dispatcher clamped them to the cap at the sizing
             # price, and re-checking at the fill price would falsely reject them
-            # on a gap-up. Strict comparison with a float-noise epsilon.
+            # on a gap-up. Strict comparison with a float-noise epsilon. The
+            # reason string carries enough precision (and the raw notional /
+            # equity) to show the real breach — a coarser ``%`` rounding can make
+            # a genuine sub-0.05-point overshoot look identical to the cap.
             if enforce_position_cap:
                 position_pct = notional / current_equity * 100
                 if position_pct > self.limits.max_position_pct * (1.0 + _POSITION_CAP_REL_EPS):
                     return EntryDecision(
                         allowed=False,
                         reason=(
-                            f"position {position_pct:.1f}% of equity > "
-                            f"max_position_pct {self.limits.max_position_pct}%"
+                            f"position {position_pct:.4f}% of equity > "
+                            f"max_position_pct {self.limits.max_position_pct}% "
+                            f"(notional={notional:.2f}, equity={current_equity:.2f})"
                         ),
                     )
 
@@ -262,8 +266,9 @@ class RiskFilter:
                 return EntryDecision(
                     allowed=False,
                     reason=(
-                        f"symbol concentration {concentration:.1f}% > "
-                        f"limit {self.limits.max_symbol_concentration_pct}%"
+                        f"symbol concentration {concentration:.4f}% > "
+                        f"limit {self.limits.max_symbol_concentration_pct}% "
+                        f"(notional={notional:.2f}, equity={current_equity:.2f})"
                     ),
                 )
 

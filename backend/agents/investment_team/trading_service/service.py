@@ -553,12 +553,21 @@ class _EngineEntryDispatcher:
         # the asset class on every entry.
         self._fractional: bool = is_fractional_asset_class(self.asset_class)
         # Whether the dispatcher applies the runtime position clamp for this
-        # sizing kind. ``fixed_fraction`` is exempt (it deploys exactly its
-        # readiness-verified fraction); ``fixed_notional`` / ``volatility_target``
-        # are clamped. This also gates ``risk_presized``: only a genuinely
-        # clamped order may tell ``RiskFilter.can_enter`` to skip the cap.
+        # sizing kind. EVERY engine sizing kind is clamped to ``max_position_pct``
+        # at the sizing price so the cap is a true pre-entry sizing bound: we
+        # decide how much capital may be deployed BEFORE placing the order, then
+        # let the order fill like a real broker fill — a price gap between the
+        # sizing bar and the fill bar may leave the realised position marginally
+        # above the cap, and that is acceptable holding behaviour governed by the
+        # ``max_drawdown_pct`` backstop, not a reason to drop the entry. This also
+        # gates ``risk_presized``: a clamped order tells ``RiskFilter.can_enter``
+        # to skip the fill-time cap re-check (which would otherwise falsely reject
+        # the gap). ``fixed_fraction`` deploys ``fraction`` of current equity, so
+        # for a readiness-clean spec (``fraction <= max_position_pct``) the clamp
+        # is a no-op; for a readiness-bypassing spec it now clamps here rather than
+        # relying on a fill-time rejection.
         self._cap_position: bool = isinstance(
-            self.sizing, (FixedNotionalSizing, VolatilityTargetSizing)
+            self.sizing, (FixedFractionSizing, FixedNotionalSizing, VolatilityTargetSizing)
         )
 
     def maybe_emit(
@@ -617,12 +626,14 @@ class _EngineEntryDispatcher:
             order_type=OrderType.MARKET,
             tif=TimeInForce.DAY,
             reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
-            # Mark presized ONLY when the dispatcher actually applied the
-            # position clamp (fixed_notional / volatility_target). fixed_fraction
-            # is NOT clamped at runtime (it trusts the readiness gate), so it must
-            # stay un-presized — otherwise a fixed_fraction spec that bypassed
-            # readiness and over-deploys would skip RiskFilter's position-cap
-            # check. can_enter is the cap backstop for those.
+            # Every dispatcher-emitted order is clamped to ``max_position_pct`` at
+            # the sizing price (see ``_cap_position``), so it is presized: this
+            # tells ``RiskFilter.can_enter`` to skip the fill-time cap re-check,
+            # which would otherwise falsely reject an order whose fill price gapped
+            # above the sizing price. The cap is a pre-entry sizing bound, not a
+            # fill-time gate. ``can_enter`` remains the sole cap enforcement point
+            # only for custom-code orders, which bypass the dispatcher and leave
+            # ``risk_presized`` False.
             risk_presized=self._cap_position,
         )
         try:
@@ -660,18 +671,20 @@ class _EngineEntryDispatcher:
         if close <= 0:
             return 0
         sizing = self.sizing
-        # ``self._cap_position`` (precomputed) gates the runtime position clamp.
-        # ``fixed_fraction`` is exempt: it deploys exactly ``fraction`` of CURRENT
-        # equity every bar, so a readiness-verified ``fraction <= max_position_pct``
-        # holds at any equity level (``RiskFilter.can_enter`` is the order-gate
-        # backstop if it ever over-deploys). ``fixed_notional`` and
-        # ``volatility_target`` are NOT exempt — their fraction OF EQUITY drifts as
-        # equity moves (a fixed dollar notional becomes a larger share of a shrunken
-        # account; vol-target is data-dependent), so the readiness check against
-        # initial capital can be breached on later entries. Both go through the
-        # position clamp at runtime. ``max_position_pct`` is the only deployed cap
-        # (it is also the per-trade loss cap — the deployed size is the most a
-        # trade can lose).
+        # ``self._cap_position`` (precomputed) gates the runtime position clamp,
+        # which runs for EVERY engine sizing kind so ``max_position_pct`` is a true
+        # pre-entry sizing bound enforced once, at the sizing price, before the
+        # order is placed. For ``fixed_fraction`` a readiness-clean spec
+        # (``fraction <= max_position_pct``) makes the clamp a no-op since it
+        # deploys exactly ``fraction`` of CURRENT equity; it still clamps a
+        # readiness-bypassing spec here rather than leaving it to a fill-time
+        # rejection. ``fixed_notional`` and ``volatility_target`` need the clamp
+        # more actively — their fraction OF EQUITY drifts as equity moves (a fixed
+        # dollar notional becomes a larger share of a shrunken account; vol-target
+        # is data-dependent), so a check against initial capital can be breached on
+        # later entries. ``max_position_pct`` is the only deployed cap — it is also
+        # the per-trade loss cap (the deployed size is the most a trade can lose),
+        # so there is no separate loss clamp.
         if isinstance(sizing, FixedFractionSizing):
             raw_qty = equity * float(sizing.fraction) / close
         elif isinstance(sizing, FixedNotionalSizing):
@@ -712,14 +725,13 @@ class _EngineEntryDispatcher:
         ``qty >= 1`` floors down to ``int(qty)`` (always within the caps). A
         sub-1 ``qty`` cannot be submitted as a fraction on a whole-share venue;
         flooring up to one share is only safe when one share is itself within
-        every active risk cap, so the caps are re-probed at exactly one share and
-        the entry is skipped (``0.0``) when any cap would clip it below one. The
-        position cap is probed UNCONDITIONALLY — ``fixed_fraction`` skips the
-        main-path position clamp (it deploys its readiness-verified fraction),
-        but flooring a sub-1 fixed-fraction order up to one share can still
-        exceed ``max_position_pct`` (high price / low equity), which would emit
-        an order only to be rejected by ``RiskFilter.can_enter``. With no caps
-        the probe is a no-op and the legacy 1-share floor stands.
+        every active risk cap, so the position cap is re-probed at exactly one
+        share and the entry is skipped (``0.0``) when it would clip below one.
+        The probe runs even though ``_compute_qty`` already clamped ``qty``,
+        because flooring a sub-1 order up to a whole share can re-cross
+        ``max_position_pct`` (high price / low equity) and emit an order
+        ``RiskFilter.can_enter`` would reject. With no caps the probe is a no-op
+        and the legacy 1-share floor stands.
 
         ``side`` is accepted for call-site symmetry but does not affect the
         result — the position cap is side-independent.

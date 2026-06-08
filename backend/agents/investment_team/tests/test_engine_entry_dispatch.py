@@ -110,12 +110,41 @@ def test_entry_clamped_sizing_marked_risk_presized():
     assert len(pending) == 1 and pending[0].risk_presized is True
 
 
-def test_entry_fixed_fraction_not_marked_risk_presized():
-    """fixed_fraction is NOT clamped at runtime (it trusts the readiness gate),
-    so it must stay un-presized — otherwise a readiness-bypassing over-cap
-    fixed_fraction order would skip RiskFilter's position-cap backstop."""
+def test_entry_fixed_fraction_marked_risk_presized():
+    """fixed_fraction is now clamped to the cap at sizing like every engine
+    sizing kind, so it is flagged risk_presized — RiskFilter skips the fill-time
+    cap re-check that would otherwise falsely reject an order whose fill price
+    gapped above the sizing price. A readiness-clean fraction <= max_position_pct
+    makes the clamp itself a no-op, but the presized flag still avoids the gap
+    rejection."""
     pending = _emit_one(FixedFractionSizing(fraction=0.02))
-    assert len(pending) == 1 and pending[0].risk_presized is False
+    assert len(pending) == 1 and pending[0].risk_presized is True
+
+
+def test_fixed_fraction_over_cap_clamped_at_sizing():
+    """A readiness-bypassing fixed_fraction spec (fraction > max_position_pct) is
+    clamped to the cap at sizing time — the safety that previously relied on a
+    fill-time rejection now lives in the dispatcher, and the order is presized so
+    the fill gate won't re-reject it. 10% of $100k equity is 100 shares @ $100,
+    clamped down to the 5% cap = 50 shares ($5k notional)."""
+    rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+    dispatcher = _EngineEntryDispatcher(
+        entry_rules=rules,
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits=RiskLimits(max_position_pct=5.0),
+    )
+    pending: list = []
+    dispatcher.maybe_emit(
+        cur_bar=_make_bar(close=100.0),
+        portfolio=_make_portfolio(capital=100_000.0),
+        pending_for_prev=pending,
+        views={"AAA": _build_view([80.0, 90.0, 100.0])},
+        result=TradingServiceResult(),
+    )
+    assert len(pending) == 1
+    req = pending[0]
+    assert req.qty == 50.0
+    assert req.risk_presized is True
 
 
 def test_maybe_emit_records_risk_capped_skip_when_position_cap_zeroes_entry():
@@ -286,12 +315,12 @@ def test_cap_qty_to_position_noop_without_limits():
     assert disp._cap_qty_to_position(300.0, equity=100000.0, close=100.0) == 300.0
 
 
-def test_compute_qty_fixed_fraction_not_clamped_at_dispatcher():
-    """fixed_fraction is exempt from the dispatcher position clamp (it deploys its
-    readiness-verified fraction) and there is no separate per-trade loss clamp —
-    the deployed size IS the per-trade loss budget, and the stop does not change
-    it. A 50% fraction at $100k/$100 deploys 500 shares regardless of the stop;
-    RiskFilter.can_enter is the order-gate backstop if it ever over-deploys."""
+def test_compute_qty_fixed_fraction_stop_does_not_shrink_size():
+    """The stop is decoupled from sizing: there is no separate per-trade loss
+    clamp, so a stop_loss never shrinks the deployed size — the deployed fraction
+    IS the per-trade loss budget. A 50% fraction at the 50% cap deploys 500 shares
+    ($100k/$100) whether or not a 5% stop is present (the position clamp is a no-op
+    at the cap)."""
     disp = _EngineEntryDispatcher(
         entry_rules=[],
         sizing=FixedFractionSizing(fraction=0.50),

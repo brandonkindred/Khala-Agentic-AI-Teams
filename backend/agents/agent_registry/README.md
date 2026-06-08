@@ -70,6 +70,11 @@ cognition:                       # consumed by the Agent Cognition Core (later p
   tools: [git, http_api]         # tool ids resolved against the cognition tool registries
   rule_packs: [default_guardrails]  # seed rule packs installed on first provision
   requires_idempotency_key: false   # true => side-effecting; reject invokes lacking a caller key
+  knowledge_graph:                  # Neo4j + Graphiti knowledge base (attached by default)
+    enabled: true                   # set false to opt this agent out of the graph entirely
+    ingest_events: true             # ingest raw episodic events into the graph
+    ingest_summaries: true          # ingest rollup summaries into the graph
+    ground_rule_proposals: true     # feed graph context into rule reflection (HITL preserved)
 source:
   entrypoint: blogging.blog_planning_agent.agent:BlogPlanningAgent
   anatomy_ref: backend/agents/blogging/blog_planning_agent/ANATOMY.md
