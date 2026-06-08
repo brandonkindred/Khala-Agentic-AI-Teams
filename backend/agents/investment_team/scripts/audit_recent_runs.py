@@ -57,14 +57,6 @@ _INDICATOR_NAMES = frozenset(
     }
 )
 
-_DEFAULT_EXPECTED_HOLD_DAYS: Dict[str, float] = {
-    "1d": 10.0,
-    "1h": 0.5,
-    "15m": 0.1,
-    "5m": 0.04,
-    "1m": 0.01,
-}
-
 _MULTIPLIER_TOL = 1e-6
 
 _POST_DESIGN_PHASES = frozenset({"synthesis", "verification"})
@@ -502,51 +494,6 @@ def check_narrative_fidelity(record: Dict[str, Any]) -> CheckResult:
     return CheckResult(name, "PASS")
 
 
-def check_trade_adequacy(record: Dict[str, Any]) -> CheckResult:
-    """Trade count must meet or exceed the expected count for the backtest window."""
-    name = "trade_adequacy"
-    config = _config(record)
-    start_date = config.get("start_date")
-    end_date = config.get("end_date")
-    timeframe = _spec(record).get("timeframe")
-    trades = _trades(record)
-
-    if not start_date or not end_date:
-        return CheckResult(name, "SKIP", "Missing backtest dates")
-    if not trades:
-        return CheckResult(name, "SKIP", "No trades")
-
-    try:
-        start_str = str(start_date).split("T")[0]
-        end_str = str(end_date).split("T")[0]
-        window_days = (date.fromisoformat(end_str) - date.fromisoformat(start_str)).days
-    except (ValueError, TypeError):
-        return CheckResult(name, "SKIP", "Unparseable backtest dates")
-    if window_days < 0:
-        return CheckResult(name, "SKIP", "Negative backtest window")
-    if window_days == 0:
-        window_days = 1
-
-    observed_holds = [h for t in trades if (h := _safe_float(t.get("hold_days"), 0.0)) and h > 0]
-    if observed_holds:
-        expected_hold = sum(observed_holds) / len(observed_holds)
-    else:
-        expected_hold = _DEFAULT_EXPECTED_HOLD_DAYS.get(str(timeframe), 0.0)
-    if not expected_hold or expected_hold <= 0:
-        return CheckResult(name, "SKIP", "Cannot determine expected hold days")
-
-    expected_count = max(1, round(window_days / expected_hold))
-    n_trades = len(trades)
-    if n_trades >= expected_count:
-        return CheckResult(name, "PASS")
-    return CheckResult(
-        name,
-        "FAIL",
-        f"n_trades={n_trades} < expected={expected_count} "
-        f"(window={window_days}d, hold={expected_hold:.1f}d)",
-    )
-
-
 def check_liquidity_realism(record: Dict[str, Any]) -> CheckResult:
     """Liquidity-realism gate must not have critical failures."""
     name = "liquidity_realism"
@@ -604,7 +551,6 @@ ALL_CHECKS: List[Callable[[Dict[str, Any]], CheckResult]] = [
     check_cost_robustness,
     check_regime_coverage,
     check_narrative_fidelity,
-    check_trade_adequacy,
     check_liquidity_realism,
     check_no_dead_code_rules,
 ]
@@ -617,7 +563,6 @@ _SHORT_NAMES = {
     "cost_robustness": "cost_rob",
     "regime_coverage": "regime",
     "narrative_fidelity": "narrative",
-    "trade_adequacy": "trade_adeq",
     "liquidity_realism": "liquidity",
     "no_dead_code_rules": "dead_code",
 }

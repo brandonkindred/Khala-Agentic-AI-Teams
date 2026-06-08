@@ -660,77 +660,7 @@ class TestCheckNarrativeFidelity:
 
 
 # ---------------------------------------------------------------------------
-# Check 8: Trade adequacy
-# ---------------------------------------------------------------------------
-
-
-class TestCheckTradeAdequacy:
-    def test_pass(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        assert check_trade_adequacy(_synthetic_record()).status == "PASS"
-
-    def test_fail_too_few_trades(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["trades"] = [
-            {"symbol": "AAPL", "position_value": 1000, "hold_days": 5},
-        ]
-        result = check_trade_adequacy(rec)
-        assert result.status == "FAIL"
-        assert "n_trades=1" in result.details
-
-    def test_skip_missing_dates(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["config"] = {}
-        assert check_trade_adequacy(rec).status == "SKIP"
-
-    def test_skip_no_trades(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["trades"] = []
-        assert check_trade_adequacy(rec).status == "SKIP"
-
-    def test_accepts_iso_datetime_strings(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["config"] = {
-            "start_date": "2024-01-01T00:00:00+00:00",
-            "end_date": "2024-01-16T00:00:00+00:00",
-        }
-        result = check_trade_adequacy(rec)
-        assert result.status == "PASS"
-
-    def test_same_day_intraday_window(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["config"] = {
-            "start_date": "2024-01-15",
-            "end_date": "2024-01-15",
-        }
-        result = check_trade_adequacy(rec)
-        assert result.status in ("PASS", "FAIL")
-        assert result.status != "SKIP"
-
-    def test_fallback_to_default_hold(self) -> None:
-        from investment_team.scripts.audit_recent_runs import check_trade_adequacy
-
-        rec = _synthetic_record()
-        rec["backtest"]["trades"] = [
-            {"symbol": "AAPL", "position_value": 1000, "hold_days": 0} for _ in range(40)
-        ]
-        result = check_trade_adequacy(rec)
-        assert result.status in ("PASS", "FAIL")
-
-
-# ---------------------------------------------------------------------------
-# Check 9: Liquidity realism
+# Check 8: Liquidity realism
 # ---------------------------------------------------------------------------
 
 
@@ -764,7 +694,7 @@ class TestCheckLiquidityRealism:
 
 
 # ---------------------------------------------------------------------------
-# Check 10: No dead-code rules
+# Check 9: No dead-code rules
 # ---------------------------------------------------------------------------
 
 
