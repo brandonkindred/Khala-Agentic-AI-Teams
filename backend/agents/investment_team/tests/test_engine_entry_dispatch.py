@@ -110,12 +110,41 @@ def test_entry_clamped_sizing_marked_risk_presized():
     assert len(pending) == 1 and pending[0].risk_presized is True
 
 
-def test_entry_fixed_fraction_not_marked_risk_presized():
-    """fixed_fraction is NOT clamped at runtime (it trusts the readiness gate),
-    so it must stay un-presized — otherwise a readiness-bypassing over-cap
-    fixed_fraction order would skip RiskFilter's position-cap backstop."""
+def test_entry_fixed_fraction_marked_risk_presized():
+    """fixed_fraction is now clamped to the cap at sizing like every engine
+    sizing kind, so it is flagged risk_presized — RiskFilter skips the fill-time
+    cap re-check that would otherwise falsely reject an order whose fill price
+    gapped above the sizing price. A readiness-clean fraction <= max_position_pct
+    makes the clamp itself a no-op, but the presized flag still avoids the gap
+    rejection."""
     pending = _emit_one(FixedFractionSizing(fraction=0.02))
-    assert len(pending) == 1 and pending[0].risk_presized is False
+    assert len(pending) == 1 and pending[0].risk_presized is True
+
+
+def test_fixed_fraction_over_cap_clamped_at_sizing():
+    """A readiness-bypassing fixed_fraction spec (fraction > max_position_pct) is
+    clamped to the cap at sizing time — the safety that previously relied on a
+    fill-time rejection now lives in the dispatcher, and the order is presized so
+    the fill gate won't re-reject it. 10% of $100k equity is 100 shares @ $100,
+    clamped down to the 5% cap = 50 shares ($5k notional)."""
+    rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+    dispatcher = _EngineEntryDispatcher(
+        entry_rules=rules,
+        sizing=FixedFractionSizing(fraction=0.10),
+        risk_limits=RiskLimits(max_position_pct=5.0),
+    )
+    pending: list = []
+    dispatcher.maybe_emit(
+        cur_bar=_make_bar(close=100.0),
+        portfolio=_make_portfolio(capital=100_000.0),
+        pending_for_prev=pending,
+        views={"AAA": _build_view([80.0, 90.0, 100.0])},
+        result=TradingServiceResult(),
+    )
+    assert len(pending) == 1
+    req = pending[0]
+    assert req.qty == 50.0
+    assert req.risk_presized is True
 
 
 def test_maybe_emit_records_risk_capped_skip_for_uncovered_short():
@@ -496,12 +525,13 @@ def test_compute_qty_fractional_asset_preserves_capped_sub1_order():
     unit is a valid fractional trade, not a no-op. With 50% of $100k deployed on
     a $60k asset (0.833 units raw) and a 5% stop under a 1% loss tolerance, the
     loss cap clamps to 0.333 units — a crypto run submits 0.333, while the
-    whole-share path would skip it (return 0)."""
+    whole-share path would skip it (return 0). max_position_pct is set roomy (50%)
+    so the loss cap is the binding constraint here, not the position cap."""
     common = dict(
         entry_rules=[],
         sizing=FixedFractionSizing(fraction=0.50),
         exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
     )
     bar = _make_bar(close=60000.0)
     port = _make_portfolio(capital=100000.0)
