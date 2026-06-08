@@ -1034,10 +1034,9 @@ async def _iter_github_pages(
     request_params = params
     pages = 0
     while next_url and pages < max_pages:
-        if sem is not None:
-            async with sem:
-                resp = await client.get(next_url, headers=headers, params=request_params)
-        else:
+        # Hold the semaphore (when one is supplied) only for the request itself; a
+        # nullcontext keeps the unbounded issue-list path on the same single code path.
+        async with sem or contextlib.nullcontext():
             resp = await client.get(next_url, headers=headers, params=request_params)
         yield resp
         pages += 1
