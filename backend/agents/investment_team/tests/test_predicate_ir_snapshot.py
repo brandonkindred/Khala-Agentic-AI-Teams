@@ -42,7 +42,6 @@ from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     _eval_tree,
     _find_or_groups,
     _leg_gate_symbols,
-    _strip_symbol_gates,
     _tree_and_unknown,
     _tree_effective_symbols,
     _tree_or_unknown,
@@ -165,19 +164,35 @@ def _load_snapshots(live: dict[str, str]) -> dict[str, str]:
     return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
 
-_LIVE = _live_renders()
-_SNAPSHOTS = _load_snapshots(_LIVE)
+@pytest.fixture(scope="session")
+def live_renders() -> dict[str, str]:
+    """Extract + render every case once per test session (lazy, at run time)."""
+    return _live_renders()
+
+
+@pytest.fixture(scope="session")
+def snapshots(live_renders: dict[str, str]) -> dict[str, str]:
+    """The committed golden, loaded (or regenerated on opt-in) lazily.
+
+    Deferring this to a fixture keeps the extraction work and the
+    missing-golden ``FileNotFoundError`` out of import/collection time, so a
+    broken extractor or absent golden surfaces as a test failure rather than a
+    collection error.
+    """
+    return _load_snapshots(live_renders)
 
 
 @pytest.mark.parametrize("case_id", sorted(CASES))
-def test_predicate_ir_snapshot(case_id: str) -> None:
+def test_predicate_ir_snapshot(
+    case_id: str, live_renders: dict[str, str], snapshots: dict[str, str]
+) -> None:
     """The extracted IR render must match the committed golden for each case."""
-    expected = _SNAPSHOTS.get(case_id)
+    expected = snapshots.get(case_id)
     assert expected is not None, (
         f"no stored snapshot for {case_id}; regenerate with "
         "UPDATE_PREDICATE_IR_SNAPSHOTS=1 and commit golden/snapshots/predicate_ir.json"
     )
-    live = _LIVE[case_id]
+    live = live_renders[case_id]
     if live != expected:
         diff = "\n".join(
             difflib.unified_diff(
@@ -194,9 +209,9 @@ def test_predicate_ir_snapshot(case_id: str) -> None:
         )
 
 
-def test_every_case_is_snapshotted() -> None:
+def test_every_case_is_snapshotted(snapshots: dict[str, str]) -> None:
     """Guard against a stale golden missing newly-added cases (or vice versa)."""
-    assert set(_SNAPSHOTS) == set(CASES)
+    assert set(snapshots) == set(CASES)
 
 
 # ---------------------------------------------------------------------------
@@ -265,23 +280,6 @@ def test_render_predicate_group_denied_none_vs_set() -> None:
 def test_render_indent_precondition() -> None:
     with pytest.raises(AssertionError):
         render_bar_predicate(Static(True), indent=-1)
-
-
-def test_strip_symbol_gates_peels_and_intersects() -> None:
-    inner = AndOp(legs=(Leg("x", _mask("x", True)),))
-    # No gate → returns node unchanged, None symbols.
-    node, syms = _strip_symbol_gates(inner)
-    assert node is inner and syms is None
-
-    # Single gate → inner + its symbols.
-    single = SymbolGate(frozenset({"AAPL"}), inner)
-    node, syms = _strip_symbol_gates(single)
-    assert node is inner and syms == frozenset({"AAPL"})
-
-    # Nested gates → intersection of all enclosing gate symbols.
-    nested = SymbolGate(frozenset({"AAPL", "MSFT"}), SymbolGate(frozenset({"AAPL"}), inner))
-    node, syms = _strip_symbol_gates(nested)
-    assert node is inner and syms == frozenset({"AAPL"})
 
 
 def test_eval_tree_empty_and_or_and_static() -> None:

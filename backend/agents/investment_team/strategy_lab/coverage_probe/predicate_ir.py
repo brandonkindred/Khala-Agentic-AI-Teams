@@ -17,6 +17,13 @@ evaluation) and the standard library — no ``ast`` and no coverage-report model
 — so the extractor and aggregator can be exercised and fuzzed independently
 through this layer.
 
+The public surface other modules build on is the IR node types
+(:class:`MaskLeaf`, :class:`Static`, :class:`SymbolGate`, :class:`AndOp`,
+:class:`OrOp`, :class:`Leg`, the :data:`BarPredicate` union and
+:class:`PredicateGroup`) plus the canonical renderers. The underscore-prefixed
+tree helpers are shared implementation used by the sibling extractor and
+aggregator within this ``coverage_probe`` package, not a stable external API.
+
 Pure: no I/O, no LLM, no subprocess.
 """
 
@@ -38,7 +45,12 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class MaskLeaf:
-    """A terminal: a single evaluable comparison or truthiness mask."""
+    """A terminal: a single evaluable comparison or truthiness mask.
+
+    Instances are hashable (a frozen dataclass) as long as ``evaluator`` is
+    hashable — ordinary functions, lambdas, and bound methods all are — so a
+    tree containing a :class:`MaskLeaf` can be used in sets or as a dict key.
+    """
 
     label: str
     evaluator: Callable[[pd.DataFrame], pd.Series]
@@ -148,19 +160,6 @@ class PredicateGroup:
 # ---------------------------------------------------------------------------
 # Tree utilities
 # ---------------------------------------------------------------------------
-
-
-def _strip_symbol_gates(node: BarPredicate) -> Tuple[BarPredicate, Optional[frozenset]]:
-    """Peel any outer :class:`SymbolGate` nodes off *node* and return the inner
-    predicate plus the intersected gate symbols. ``None`` symbols means
-    no gate at this level. Used to inspect the structural shape of a
-    sub-tree without fragile dispatch on ``SymbolGate``.
-    """
-    syms: Optional[frozenset] = None
-    while isinstance(node, SymbolGate):
-        syms = node.syms if syms is None else (syms & node.syms)
-        node = node.inner
-    return node, syms
 
 
 def _tree_and_unknown(node: BarPredicate) -> bool:
