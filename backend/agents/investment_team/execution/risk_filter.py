@@ -81,8 +81,9 @@ class RiskLimits(BaseModel):
         validate the cap). A legacy spec that set ONLY the retired key (no explicit
         ``max_position_pct``) therefore migrates to the default ``max_position_pct``
         (6%); the stop, if any, remains as a decoupled within-position safeguard.
-        A one-time WARN is logged when the retired key is present so operators
-        loading old specs can confirm the migrated cap is intended.
+        A WARN is logged whenever the retired key is present (once per migration
+        call, not process-deduplicated) so operators loading old specs can confirm
+        the migrated cap is intended.
 
         Preconditions: ``raw`` is a mapping of risk-limit field names to values.
         Postconditions: returns a validated ``RiskLimits``; unknown/retired keys
