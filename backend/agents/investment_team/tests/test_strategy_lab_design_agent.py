@@ -24,7 +24,11 @@ from investment_team.strategy_lab.agents._llm_budget import (
     use_budget,
 )
 from investment_team.strategy_lab.agents._parse_helpers import StrategySpecParseError
-from investment_team.strategy_lab.agents.design import DesignAgent
+from investment_team.strategy_lab.agents.design import (
+    DesignAgent,
+    _build_correction_prompt,
+    _build_json_correction_prompt,
+)
 from investment_team.strategy_lab.agents.design_review import CritiqueIssue, SpecCritique
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -1209,3 +1213,24 @@ def test_budget_not_charged_when_absent(monkeypatch: pytest.MonkeyPatch) -> None
 
     assert len(capture.calls) == 2
     assert parsed["asset_class"] == "stocks"
+
+
+def test_json_correction_prompt_carries_full_error() -> None:
+    """The malformed-JSON re-prompt embeds the full exception text — the
+    error string is no longer cut off at 400 chars."""
+    long_error = "boom " * 200  # ~1000 chars, well past the old 400 cap
+    prompt = _build_json_correction_prompt("ORIGINAL", ValueError(long_error))
+    assert long_error in prompt
+    assert "…" not in prompt
+
+
+def test_correction_prompt_carries_full_payload_and_cause() -> None:
+    """The DSL-validation re-prompt embeds the full payload and pydantic
+    error — neither is truncated (old caps were 400 / 1200 chars)."""
+    long_payload = "P" * 5000
+    long_cause = "C" * 5000
+    exc = StrategySpecParseError("sizing", long_payload, ValueError(long_cause))
+    prompt = _build_correction_prompt("ORIGINAL", exc)
+    assert long_payload in prompt
+    assert long_cause in prompt
+    assert "…" not in prompt

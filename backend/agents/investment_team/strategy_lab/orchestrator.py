@@ -1838,7 +1838,7 @@ class StrategyLabOrchestrator:
                     )
                 )
                 failure_details = (
-                    f"Error type: {exec_result.error_type}\nstderr:\n{exec_result.stderr[:2000]}"
+                    f"Error type: {exec_result.error_type}\nstderr:\n{exec_result.stderr}"
                 )
                 spec, code, exhausted = self._refine_or_exhaust(
                     spec=spec,
