@@ -37,6 +37,7 @@ from ...symbols import (
 )
 from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
+    INDICATOR_OUTPUT_RANGES,
     EntryRule,
     IndicatorName,
     IndicatorRef,
@@ -360,19 +361,6 @@ class SpecReadinessCtx:
     config: Optional[BacktestConfig]
 
 
-# Indicators whose output is bounded to a fixed numeric range. Rule 10 uses
-# these to decide — without any market data — whether a predicate comparing one
-# of them against a constant can ever (or can always) be true. Bounds confirmed
-# against ``executor/indicators.py``: RSI, ADX and Stochastic %K/%D are all
-# 0–100. Price-scaled / unbounded indicators (sma, ema, macd, atr, vwap,
-# bollinger bands) have no closed-form out-of-range constant, so they are
-# intentionally absent — predicates over them are left undecided here.
-_BOUNDED_INDICATOR_RANGES: dict[str, tuple[float, float]] = {
-    "rsi": (0.0, 100.0),
-    "adx": (0.0, 100.0),
-    "stochastic": (0.0, 100.0),
-}
-
 # Comparison ops whose truth is monotone in the indicator value, so the
 # satisfying set is a contiguous half-line ∩ [lo, hi] and endpoint evaluation
 # decides always-true / always-false. ``==`` and the ``cross_*`` ops are
@@ -430,12 +418,12 @@ def _bounded_indicator_verdict(pred: Predicate) -> Optional[tuple[str, str]]:
     ``None`` when the shape does not match or the predicate is reachable.
     """
     lhs, rhs, op = pred.lhs, pred.rhs, pred.op
-    if not (isinstance(lhs, IndicatorRef) and lhs.name in _BOUNDED_INDICATOR_RANGES):
+    if not (isinstance(lhs, IndicatorRef) and lhs.name in INDICATOR_OUTPUT_RANGES):
         return None
-    if isinstance(rhs, bool) or not isinstance(rhs, (int, float)):
+    if not isinstance(rhs, (int, float)):
         return None
     const = float(rhs)
-    lo, hi = _BOUNDED_INDICATOR_RANGES[lhs.name]
+    lo, hi = INDICATOR_OUTPUT_RANGES[lhs.name]
     label = f"{lhs.name} ∈ [{lo:.0f}, {hi:.0f}] compared against {const:g}"
 
     if op in ("cross_above", "cross_below"):
@@ -1321,11 +1309,11 @@ class SpecReadinessGate(GateResultsMixin):
     @staticmethod
     def _iter_indicator_refs(spec: StrategySpec) -> Iterator[IndicatorRef]:
         assert isinstance(spec, StrategySpec)
-        for rule in spec.entry_rules:
-            yield from SpecReadinessGate._predicate_indicator_refs(rule.when)
-        for rule in spec.exit_rules:
-            if isinstance(rule, SignalExitRule):
-                yield from SpecReadinessGate._predicate_indicator_refs(rule.when)
+        # Reuses ``_iter_predicates`` so the entry/signal-exit rule traversal
+        # lives in exactly one place; this helper only projects each predicate
+        # down to its indicator references.
+        for pred, _kind, _label in SpecReadinessGate._iter_predicates(spec):
+            yield from SpecReadinessGate._predicate_indicator_refs(pred)
 
     @staticmethod
     def _predicate_indicator_refs(pred: Predicate) -> Iterator[IndicatorRef]:

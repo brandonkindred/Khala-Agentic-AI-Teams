@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from investment_team.strategy_lab.spec_dsl import (
     DEFAULT_SIZING_PAYLOAD,
+    INDICATOR_OUTPUT_RANGES,
     EntryRule,
     EntryRuleAdapter,
     ExitRuleAdapter,
@@ -23,6 +24,24 @@ from investment_team.strategy_lab.spec_dsl import (
     format_rules_for_prompt,
     format_sizing_rule,
 )
+
+
+# ---------------------------------------------------------------------------
+# INDICATOR_OUTPUT_RANGES — derived bounded-indicator table.
+# ---------------------------------------------------------------------------
+
+
+def test_indicator_output_ranges_covers_bounded_indicators() -> None:
+    # The deterministic spec-readiness reachability check relies on exactly the
+    # 0–100 oscillators being declared bounded. Price-scaled indicators must be
+    # absent so the check abstains on them.
+    assert INDICATOR_OUTPUT_RANGES == {
+        "rsi": (0.0, 100.0),
+        "adx": (0.0, 100.0),
+        "stochastic": (0.0, 100.0),
+    }
+    for unbounded in ("sma", "ema", "macd", "atr", "vwap", "bollinger"):
+        assert unbounded not in INDICATOR_OUTPUT_RANGES
 
 # ---------------------------------------------------------------------------
 # Round-trip serialisation per indicator name.
