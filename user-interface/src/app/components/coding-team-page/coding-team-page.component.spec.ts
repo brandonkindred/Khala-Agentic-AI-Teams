@@ -17,7 +17,24 @@ function makeIssues(count: number): GitHubIssueItem[] {
     body_preview: `body ${i + 1}`,
     labels: i % 2 === 0 ? ['bug'] : [],
     html_url: `https://example.com/${i + 1}`,
+    dependencies: [],
+    open_dependencies: [],
+    blocked: false,
   }));
+}
+
+function issueWith(overrides: Partial<GitHubIssueItem>): GitHubIssueItem {
+  return {
+    number: 1,
+    title: 'Issue 1',
+    body_preview: 'body 1',
+    labels: [],
+    html_url: 'https://example.com/1',
+    dependencies: [],
+    open_dependencies: [],
+    blocked: false,
+    ...overrides,
+  };
 }
 
 const CONFIGURED: GitHubConfigResponse = {
@@ -180,5 +197,118 @@ describe('CodingTeamPageComponent', () => {
     await setup();
     component.onWorkflowLaunched({ job_id: 'wf-1', conversation_id: 'c1' });
     expect(component.latestJobId).toBe('wf-1');
+  });
+
+  // -------------------------------------------------------------------------
+  // Issue dependency indicator
+  // -------------------------------------------------------------------------
+
+  describe('dependency helpers', () => {
+    it('builds blocked and met tooltip / open-ref text', async () => {
+      await setup();
+      expect(component.hasDependencies(issueWith({ dependencies: [] }))).toBe(false);
+      const blocked = issueWith({
+        blocked: true,
+        open_dependencies: [3, 5],
+        dependencies: [
+          { number: 3, title: 'A', state: 'open' },
+          { number: 5, title: 'B', state: 'open' },
+        ],
+      });
+      expect(component.hasDependencies(blocked)).toBe(true);
+      expect(component.openDepRefs(blocked)).toBe('#3, #5');
+      expect(component.dependencyTooltip(blocked)).toBe('Blocked by #3, #5 — must be closed first');
+
+      const met = issueWith({
+        blocked: false,
+        open_dependencies: [],
+        dependencies: [
+          { number: 3, title: 'A', state: 'closed' },
+          { number: 5, title: 'B', state: 'closed' },
+        ],
+      });
+      expect(component.dependencyTooltip(met)).toBe('Depends on #3, #5 (all complete)');
+      // Only open deps are listed in the ref string.
+      expect(component.openDepRefs(met)).toBe('');
+    });
+  });
+
+  describe('dependency indicator rendering', () => {
+    it('renders a blocked indicator with the open-dependency count', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(
+        of([
+          issueWith({
+            number: 7,
+            blocked: true,
+            open_dependencies: [3, 5],
+            dependencies: [
+              { number: 3, title: 'A', state: 'open' },
+              { number: 5, title: 'B', state: 'open' },
+            ],
+          }),
+        ]),
+      );
+      await setup();
+      const el: HTMLElement = fixture.nativeElement;
+      const deps = el.querySelector('.github-issue-row__deps');
+      expect(deps).not.toBeNull();
+      expect(deps?.classList.contains('github-issue-row__deps--blocked')).toBe(true);
+      expect(deps?.querySelector('mat-icon')?.textContent?.trim()).toBe('block');
+      expect(el.querySelector('.github-issue-row__deps-count')?.textContent?.trim()).toBe('2');
+      // a11y: the indicator is a single labelled graphic; the icon ligature/count are
+      // not announced separately.
+      expect(deps?.getAttribute('role')).toBe('img');
+      expect(deps?.getAttribute('aria-label')).toBe('Blocked by #3, #5 — must be closed first');
+      expect(deps?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
+    });
+
+    it('renders a muted "dependencies met" indicator with no count', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(
+        of([
+          issueWith({
+            number: 8,
+            blocked: false,
+            open_dependencies: [],
+            dependencies: [{ number: 3, title: 'A', state: 'closed' }],
+          }),
+        ]),
+      );
+      await setup();
+      const el: HTMLElement = fixture.nativeElement;
+      const deps = el.querySelector('.github-issue-row__deps');
+      expect(deps).not.toBeNull();
+      expect(deps?.classList.contains('github-issue-row__deps--met')).toBe(true);
+      expect(deps?.querySelector('mat-icon')?.textContent?.trim()).toBe('account_tree');
+      expect(el.querySelector('.github-issue-row__deps-count')).toBeNull();
+    });
+
+    it('renders no indicator when an issue has no dependencies', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([issueWith({ number: 9 })]));
+      await setup();
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-issue-row__deps')).toBeNull();
+    });
+
+    it('warns on the confirmation panel for a blocked issue but keeps Confirm enabled', async () => {
+      const blocked = issueWith({
+        number: 7,
+        blocked: true,
+        open_dependencies: [3],
+        dependencies: [{ number: 3, title: 'A', state: 'open' }],
+      });
+      integrationsSpy.getGitHubIssues.mockReturnValue(of([blocked]));
+      await setup();
+
+      component.selectIssue(blocked);
+      fixture.detectChanges();
+
+      const el: HTMLElement = fixture.nativeElement;
+      const warning = el.querySelector('.github-confirm-panel__warning');
+      expect(warning).not.toBeNull();
+      expect(warning?.textContent).toContain('#3');
+
+      const confirmBtn = el.querySelector('.github-confirm-panel__actions button') as HTMLButtonElement;
+      expect(confirmBtn.disabled).toBe(false);
+    });
   });
 });

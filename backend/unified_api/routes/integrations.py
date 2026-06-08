@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -889,6 +891,30 @@ _GITHUB_ISSUES_PER_PAGE = 100
 # Safety bound against a pathological repo or a redirect loop in the Link header.
 # 100 issues/page * 50 pages = 5000 open issues, far beyond any realistic repo.
 _GITHUB_MAX_ISSUE_PAGES = 50
+# Per-issue blocked_by dependencies also paginate; bound the follow so a pathological
+# issue can't fan into an unbounded number of requests. 100/page * 10 pages = 1000
+# dependencies on a single issue, far beyond any realistic case.
+_GITHUB_DEPENDENCY_PER_PAGE = 100
+_GITHUB_MAX_DEPENDENCY_PAGES = 10
+
+
+def _parse_dependency_concurrency(raw: str | None) -> int:
+    """Parse the ``GITHUB_DEPENDENCY_CONCURRENCY`` knob.
+
+    Postconditions:
+        - Returns a positive int; the default is 8. Empty, non-integer, or
+          non-positive input falls back to 8.
+    """
+    try:
+        value = int((raw or "").strip())
+    except ValueError:
+        return 8
+    return value if value > 0 else 8
+
+
+# Bounded fan-out for the per-issue blocked_by dependency enrichment in the issue
+# list, resolved once at import like the other _GITHUB_* settings above.
+_GITHUB_DEPENDENCY_CONCURRENCY = _parse_dependency_concurrency(os.environ.get("GITHUB_DEPENDENCY_CONCURRENCY"))
 
 
 class GitHubConfigResponse(BaseModel):
@@ -908,12 +934,25 @@ class GitHubConfigUpdate(BaseModel):
     repo_path: str = Field(default="", description="Operator override for local checkout path")
 
 
+class GitHubDependencyRef(BaseModel):
+    """A single issue this issue is blocked by (a GitHub ``blocked_by`` dependency)."""
+
+    number: int
+    title: str
+    state: str  # "open" | "closed"
+
+
 class GitHubIssueItem(BaseModel):
     number: int
     title: str
     body_preview: str
     labels: list[str]
     html_url: str
+    # Issue dependencies (GitHub "blocked by" relationships). An issue "depends on"
+    # the issues in ``dependencies`` and is ``blocked`` while any of them are open.
+    dependencies: list[GitHubDependencyRef] = []
+    open_dependencies: list[int] = []
+    blocked: bool = False
 
 
 class RunGitHubIssueRequest(BaseModel):
@@ -966,12 +1005,146 @@ async def delete_github() -> GitHubConfigResponse:
     return _build_github_config_response(get_github_config())
 
 
+async def _iter_github_pages(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None,
+    max_pages: int,
+    sem: asyncio.Semaphore | None = None,
+) -> AsyncIterator[httpx.Response]:
+    """Yield successive GitHub responses, following the ``Link`` header.
+
+    Shared pagination primitive for the issue list and the per-issue dependency fetch.
+    Query params ride only on the first request; GitHub's "next" Link URL already
+    carries them forward, so they are dropped on subsequent pages.
+
+    Preconditions:
+        - ``client`` is an open ``AsyncClient`` and ``headers`` carry a valid PAT.
+        - ``max_pages`` >= 1 bounds the number of pages followed.
+    Postconditions:
+        - Yields at most ``max_pages`` responses. Each request is made while holding
+          ``sem`` (when provided), so the semaphore is released between pages rather
+          than held for a whole issue's pagination. The caller inspects each response's
+          status/body and may stop early (e.g. on a non-200).
+    """
+    next_url: str | None = url
+    request_params = params
+    pages = 0
+    while next_url and pages < max_pages:
+        # Hold the semaphore (when one is supplied) only for the request itself; a
+        # nullcontext keeps the unbounded issue-list path on the same single code path.
+        async with sem or contextlib.nullcontext():
+            resp = await client.get(next_url, headers=headers, params=request_params)
+        yield resp
+        pages += 1
+        next_url = resp.links.get("next", {}).get("url")
+        request_params = None  # subsequent pages use the Link URL verbatim
+
+
+async def _fetch_blocked_by(
+    client: httpx.AsyncClient,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    headers: dict[str, str],
+    sem: asyncio.Semaphore,
+) -> list[dict[str, Any]]:
+    """Fetch every ``blocked_by`` dependency for a single issue.
+
+    Preconditions:
+        - ``client`` is an open ``AsyncClient`` and ``headers`` carry a valid PAT.
+        - ``sem`` bounds the number of concurrent dependency fetches.
+    Postconditions:
+        - Returns the dependency issue objects across all result pages (the endpoint
+          paginates via the ``Link`` header like the issue list), bounded by
+          ``_GITHUB_MAX_DEPENDENCY_PAGES`` pages of ``_GITHUB_DEPENDENCY_PER_PAGE``.
+        - Best-effort: returns whatever was gathered before any non-200 status
+          (404/410/422 = feature disabled or no dependencies, 5xx, throttle) or transport
+          error — a single issue's lookup must never fail the whole list. ``blocked`` is
+          derived only from the dependencies actually observed; we deliberately do not
+          fail safe toward "blocked" on an incomplete fetch, because the picker's
+          ``blocked`` flag is paired with the open-dependency list (a forced block with no
+          known open dependency would render an empty, confusing warning), and a total
+          dependency-API outage would otherwise flag every issue. The only residual gap is
+          the rare case of an open blocker on an unfetched later page of a many-page list.
+    """
+    # The blocked_by endpoint returns standard issue objects, so the default
+    # ``application/vnd.github+json`` Accept header (already in ``headers``) is correct.
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
+    params: dict[str, Any] | None = {"per_page": _GITHUB_DEPENDENCY_PER_PAGE}
+    out: list[dict[str, Any]] = []
+    try:
+        pages = _iter_github_pages(client, url, headers, params, _GITHUB_MAX_DEPENDENCY_PAGES, sem=sem)
+        async with contextlib.aclosing(pages) as page_iter:
+            async for resp in page_iter:
+                if resp.status_code != 200:
+                    logger.debug(
+                        "blocked_by fetch for %s/%s#%d returned %d; treating as no further dependencies",
+                        owner,
+                        repo,
+                        issue_number,
+                        resp.status_code,
+                    )
+                    return out
+                payload = resp.json()
+                if not isinstance(payload, list):
+                    return out
+                out.extend(payload)
+        return out
+    except Exception as e:  # noqa: BLE001 - best-effort enrichment; see Postconditions
+        logger.warning(
+            "blocked_by fetch for %s/%s#%d failed: %s; treating as no dependencies",
+            owner,
+            repo,
+            issue_number,
+            e,
+        )
+        return out
+
+
+def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> GitHubIssueItem:
+    """Build a ``GitHubIssueItem`` from a raw issue payload and its blocked_by deps.
+
+    Preconditions:
+        - ``raw`` is a GitHub issue payload (carries at least ``number``).
+        - ``raw_deps`` is the issue's blocked_by dependency objects (possibly empty).
+    Postconditions:
+        - Returns a fully-populated item; ``blocked`` is true iff any dependency is open.
+          A dependency with a missing ``state`` is treated as open so a malformed object
+          fails safe toward "blocked" rather than silently marking the issue runnable.
+    """
+    refs: list[GitHubDependencyRef] = []
+    for dep in raw_deps:
+        if not isinstance(dep, dict) or "number" not in dep:
+            continue
+        refs.append(
+            GitHubDependencyRef(
+                number=dep["number"],
+                title=dep.get("title") or "",
+                state=dep.get("state") or "open",
+            )
+        )
+    open_dependencies = [ref.number for ref in refs if ref.state == "open"]
+    return GitHubIssueItem(
+        number=raw["number"],
+        title=raw.get("title") or "",
+        body_preview=(raw.get("body") or "")[:200],
+        labels=[lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")],
+        html_url=raw.get("html_url") or "",
+        dependencies=refs,
+        open_dependencies=open_dependencies,
+        blocked=bool(open_dependencies),
+    )
+
+
 @router.get("/github/issues", response_model=list[GitHubIssueItem])
 async def list_github_issues(label: str | None = Query(default=None)) -> list[GitHubIssueItem]:
     """List every open issue from the configured GitHub repository.
 
     Follows GitHub's ``Link``-header pagination so the panel shows the complete set
-    of open issues rather than only the first page.
+    of open issues rather than only the first page. Each returned issue is enriched
+    with its ``blocked_by`` issue dependencies so the picker can flag blocked issues.
 
     Preconditions:
         - The GitHub integration is enabled and a PAT, owner and repo are configured;
@@ -981,6 +1154,12 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
           in GitHub's response order, bounded by ``_GITHUB_MAX_ISSUE_PAGES`` pages of
           ``_GITHUB_ISSUES_PER_PAGE`` items. Hitting that bound logs a warning and
           returns the issues gathered so far rather than failing.
+        - Each item carries ``dependencies`` (its ``blocked_by`` issues), the derived
+          ``open_dependencies`` (numbers still open) and ``blocked`` flag. Dependency
+          fetches fan out concurrently bounded by ``GITHUB_DEPENDENCY_CONCURRENCY``
+          (default 8); a failed or absent lookup yields empty dependencies for that
+          issue and never fails the list. This adds roughly one extra request wave per
+          ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
     cfg = get_github_config()
     if not cfg["enabled"]:
@@ -1005,44 +1184,37 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
         "User-Agent": "khala-integrations",
     }
 
-    items: list[GitHubIssueItem] = []
-    next_url: str | None = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    # Query params ride only on the first request; GitHub's "next" Link URL already
-    # carries state/per_page/labels forward, so we must not re-append them.
-    request_params: dict[str, Any] | None = params
-    pages = 0
+    raw_issues: list[dict[str, Any]] = []
+    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    # Tracks whether the last fetched page still advertised a "next" link, i.e. the page
+    # cap (rather than the end of the list) stopped pagination.
+    has_more = False
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        while next_url and pages < _GITHUB_MAX_ISSUE_PAGES:
-            resp = await client.get(next_url, headers=headers, params=request_params)
+        page_iter = _iter_github_pages(client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES)
+        async with contextlib.aclosing(page_iter) as pages:
+            async for resp in pages:
+                if resp.status_code == 401:
+                    raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+                if resp.status_code == 404:
+                    raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+                raw_issues.extend(raw for raw in resp.json() if "pull_request" not in raw)
+                has_more = bool(resp.links.get("next", {}).get("url"))
 
-            if resp.status_code == 401:
-                raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
-            if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
-            if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+        # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
+        # semaphore so a large page is not an N+1 storm of serial round-trips.
+        sem = asyncio.Semaphore(_GITHUB_DEPENDENCY_CONCURRENCY)
+        dep_results = await asyncio.gather(
+            *(_fetch_blocked_by(client, owner, repo, raw["number"], headers, sem) for raw in raw_issues)
+        )
 
-            for raw in resp.json():
-                if "pull_request" in raw:
-                    continue
-                body = (raw.get("body") or "")[:200]
-                labels = [lbl["name"] for lbl in (raw.get("labels") or []) if isinstance(lbl, dict) and lbl.get("name")]
-                items.append(
-                    GitHubIssueItem(
-                        number=raw["number"],
-                        title=raw.get("title") or "",
-                        body_preview=body,
-                        labels=labels,
-                        html_url=raw.get("html_url") or "",
-                    )
-                )
+    # Build each item once, with its dependencies resolved, so the model is complete
+    # at construction rather than mutated afterwards.
+    items = [_build_issue_item(raw, raw_deps) for raw, raw_deps in zip(raw_issues, dep_results, strict=True)]
 
-            pages += 1
-            next_url = resp.links.get("next", {}).get("url")
-            request_params = None  # subsequent pages use the Link URL verbatim
-
-    if next_url:
+    if has_more:
         logger.warning(
             "list_github_issues hit the %d-page cap for %s/%s; returning the first %d open issues only",
             _GITHUB_MAX_ISSUE_PAGES,

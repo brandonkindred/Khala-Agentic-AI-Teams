@@ -5,6 +5,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
 import { EMPTY, Subscription, interval } from 'rxjs';
@@ -27,6 +28,7 @@ import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
     MatButtonModule,
     MatProgressSpinnerModule,
     MatChipsModule,
+    MatTooltipModule,
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
@@ -131,6 +133,31 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   cancelSelection(): void {
     this.selectedIssue = null;
+  }
+
+  /** True when the issue is blocked by, or depends on, one or more other issues. */
+  hasDependencies(issue: GitHubIssueItem): boolean {
+    return issue.dependencies.length > 0;
+  }
+
+  /** All dependencies rendered as "#3, #5". */
+  allDepRefs(issue: GitHubIssueItem): string {
+    return issue.dependencies.map((d) => `#${d.number}`).join(', ');
+  }
+
+  /** The still-open dependencies rendered as "#3, #5" for warnings and tooltips. */
+  openDepRefs(issue: GitHubIssueItem): string {
+    return issue.dependencies
+      .filter((d) => d.state === 'open')
+      .map((d) => `#${d.number}`)
+      .join(', ');
+  }
+
+  /** Hover/aria text describing the issue's dependencies and whether they block it. */
+  dependencyTooltip(issue: GitHubIssueItem): string {
+    return issue.blocked
+      ? `Blocked by ${this.openDepRefs(issue)} — must be closed first`
+      : `Depends on ${this.allDepRefs(issue)} (all complete)`;
   }
 
   confirmAndRun(): void {
