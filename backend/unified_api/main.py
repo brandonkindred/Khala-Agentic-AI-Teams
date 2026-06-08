@@ -528,6 +528,7 @@ from unified_api.routes.agent_console_saved_inputs import (
 )
 from unified_api.routes.agents import router as agents_router
 from unified_api.routes.analytics import router as analytics_router
+from unified_api.routes.cognition import router as cognition_router
 from unified_api.routes.integrations import router as integrations_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
@@ -541,6 +542,7 @@ app.include_router(agents_router)
 app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
+app.include_router(cognition_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
 # answering, not just disappear from /teams. Gate the *import* too —

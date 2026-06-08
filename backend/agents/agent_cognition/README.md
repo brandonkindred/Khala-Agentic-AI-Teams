@@ -21,18 +21,31 @@ use-case, logic-flow, rule-lifecycle, and security diagrams.
 
 ## Status
 
-The persistence/memory foundation, the rules engine, and the tools layer are built; the
-orchestration facade and the platform automation remain design.
+The persistence/memory foundation, the rules engine, the tools layer, the live scheduler,
+the invoke-proxy integration, the knowledge-graph layer, and the operator approval API are
+all built.
 
 - **Built** — Postgres schema + domain models (`postgres/`, `models.py`); the episodic
   memory data-access layer (`memory/store.py`); the **calendar rollup engine**
   (`memory/rollup.py`); the **retrieval/digest builder** (`memory/retrieval.py`); the
   **rules engine** — store + predicate DSL + enforcement (`rules/store.py`,
   `rules/predicate.py`, `rules/enforcement.py`); the **reflection engine**
-  (`rules/reflection.py`); and the **tools layer** — binding + brokered runner + invoke
-  envelope (`tools/binding.py`, `tools/runner.py`, `tools/envelope.py`, `tools/channel.py`).
-- **Design only** — the `CognitiveContext` facade, the scheduler, and the invoke-proxy
-  integration.
+  (`rules/reflection.py`); the **tools layer** (`tools/`); the **invoke-context facade**
+  (`invoke_context.py`) + invoke-proxy injection (`unified_api/routes/agents.py`); the
+  **scheduler** (`scheduler.py`, the live rollup→reflect→prune driver); the
+  **knowledge-graph layer** (`graph/`, see below) over `shared_neo4j`; and the **operator
+  approval API** (`unified_api/routes/cognition.py`).
+
+## Knowledge-graph layer (`graph/`)
+
+A Neo4j + Graphiti layer that extracts *meaning* from the rote rollups: it ingests the
+agent's events and summaries as temporal episodes (partitioned per agent by
+`group_id = agent_id`) and surfaces recency-ranked *related* knowledge. The `sync_worker`
+drains memory into the graph since a per-agent watermark; `retrieval.build_graph_context`
+reads it back into the invoke side channel; and `reflection` optionally grounds its rule
+proposals with graph context — always additive, the human approval gate is never bypassed.
+Per-agent attachment is declared in the manifest `cognition.knowledge_graph` block
+(on by default). Gated on `NEO4J_BOLT_URL`; see `shared_neo4j/README.md`.
 
 ## Rollup engine
 
