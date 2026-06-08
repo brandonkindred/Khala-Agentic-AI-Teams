@@ -369,6 +369,29 @@ def test_runtime_uncaught_exception_is_logged_and_recorded(
     assert warning_records[0].exc_info is not None, "expected exc_info on the warning record"
 
 
+def test_runtime_failure_evidence_not_truncated(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long runtime-failure message reaches the blocker evidence whole —
+    the error string is no longer cut off at 160 chars before it lands in
+    the refinement / zero-trade-repair prompt."""
+    monkeypatch.setattr(agg_mod, "run_indicator_probe", unknown_indicator)
+    long_detail = "boom-" * 100  # 500 chars, well past the old 160 cap
+
+    def _raising_run(*args: Any, **kwargs: Any) -> StrategyRunResult:
+        raise RuntimeError(long_detail)
+
+    report = run_coverage_stage(
+        spec=make_spec(runtime_capable_code()),
+        market_data={"AAPL": make_flat_df(120)},
+        config=make_config(),
+        exec_result=make_exec_result(make_diag(category="NO_ORDERS_EMITTED", closed=0)),
+        run_strategy_code_fn=_raising_run,
+    )
+
+    failed = [b for b in report.likely_blockers if b.reason == "runtime_probe_failed"]
+    assert failed
+    assert long_detail in failed[0].evidence
+
+
 # ─────────────────────────────────────────────────────────────────────
 # Numeric-aware rule_id sort, empty-rule_id filter (C5, R1)
 # ─────────────────────────────────────────────────────────────────────

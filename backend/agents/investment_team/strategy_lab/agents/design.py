@@ -609,7 +609,7 @@ def _build_json_correction_prompt(user_prompt: str, exc: ValueError) -> str:
     JSON that fails DSL validation.
     """
     return _JSON_CORRECTION_PREAMBLE.format(
-        error=_truncate(str(exc), limit=400),
+        error=str(exc),
         original_prompt=user_prompt,
     )
 
@@ -623,17 +623,13 @@ def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") ->
     failed for this specific reason; reissue the corrected JSON."
     """
     cause = exc.__cause__ or exc
+    payload = exc.payload if isinstance(exc.payload, str) else repr(exc.payload)
     return _CORRECTION_PREAMBLE.format(
         field=exc.field,
-        payload=_truncate(exc.payload),
-        pydantic_error=_truncate(str(cause), limit=1200),
+        payload=payload,
+        pydantic_error=str(cause),
         original_prompt=user_prompt,
     )
-
-
-def _truncate(value: Any, limit: int = 400) -> str:
-    text = value if isinstance(value, str) else repr(value)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _format_issues(critique: "SpecCritique") -> str:
