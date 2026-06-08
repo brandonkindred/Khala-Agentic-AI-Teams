@@ -160,20 +160,24 @@ def _make_reasoning_llm_getter(record_reasoning: Callable[[str], None]) -> Calla
         invokes ``record_reasoning`` for each reasoning delta; the same ``key`` yields
         the same model (and underlying client) for the life of this getter — so both
         the ``/api/show`` context lookup and the wrapper allocation happen once per
-        role. Called from the single swarm thread, so the memo needs no lock.
+        role. Today it is only called from the swarm thread, but the memo is
+        lock-guarded so the one-build-per-key invariant holds even if a future caller
+        invokes it concurrently.
     """
     models: Dict[str, Any] = {}
+    lock = threading.Lock()
 
     def _getter(key: str) -> Any:
         resolved_key = key or "coding_team"
-        model = models.get(resolved_key)
-        if model is None:
-            factory = __import__("llm_service.factory", fromlist=["get_client"])
-            sp = __import__("llm_service.strands_provider", fromlist=["get_strands_model"])
-            client = factory.get_client(resolved_key, on_reasoning=record_reasoning)
-            model = sp.get_strands_model(resolved_key, client=client)
-            models[resolved_key] = model
-        return model
+        with lock:
+            model = models.get(resolved_key)
+            if model is None:
+                factory = __import__("llm_service.factory", fromlist=["get_client"])
+                sp = __import__("llm_service.strands_provider", fromlist=["get_strands_model"])
+                client = factory.get_client(resolved_key, on_reasoning=record_reasoning)
+                model = sp.get_strands_model(resolved_key, client=client)
+                models[resolved_key] = model
+            return model
 
     return _getter
 
