@@ -352,3 +352,51 @@ def test_bars_to_df_columns_match_ohlcv():
     runs = generate_rule_probe_runs(_spec_with(entry_rules=[entry_rule]))
     df = _bars_to_df(runs[0].market_data)
     assert set(df.columns) == {"open", "high", "low", "close", "volume"}
+
+
+# ---------------------------------------------------------------------------
+# Exit-probe entry-prefix truncation (stop-loss must not pre-empt the
+# targeted exit rule on a sustained-directional entry recipe).
+# ---------------------------------------------------------------------------
+
+
+def test_exit_probe_truncates_sustained_entry_prefix():
+    """A sustained-decline long entry (RSI < 30) used to stitch the *entire*
+    ~80-bar declining recipe prefix in front of the exit tail. The strategy's
+    own stop-loss then fired inside that prefix (price kept falling after the
+    position opened), so the stop-loss probe saw exits "before the trigger
+    bar" and the take-profit probe never kept a position alive long enough to
+    reach its target.
+
+    The synthesiser now trims the prefix to the bar the compiled strategy
+    actually opens on, so the exit tail directly follows the open bar and the
+    bars between the open and the trigger are flat at the entry close (no
+    adverse drift to trip the stop early).
+    """
+    entry = EntryRule(
+        side="long",
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+    )
+    stop = StopLossRule(pct=0.05)
+    tp = TakeProfitRule(pct=0.10)
+    [_entry_probe, stop_probe, tp_probe] = generate_rule_probe_runs(
+        _spec_with(entry_rules=[entry], exit_rules=[stop, tp])
+    )
+
+    for probe in (stop_probe, tp_probe):
+        assert probe.synthesizable
+        md = probe.market_data
+        # Full RSI recipe prefix is ~80 bars; truncation keeps only the
+        # warm-up lead-in (~20 bars) plus the short exit tail, so the stitched
+        # series is far shorter than the untrimmed ~89-bar version.
+        assert len(md) < 40, f"{probe.rule_id}: prefix not truncated ({len(md)} bars)"
+        # The open bar is the last prefix bar; the three quiet tail bars that
+        # follow it (immediately before the trigger) sit flat at the entry
+        # close rather than continuing the recipe's decline.
+        trigger = probe.trigger_bar_index
+        open_close = md[trigger - 4].close
+        for quiet in md[trigger - 3 : trigger]:
+            assert abs(quiet.close - open_close) <= 0.05 * open_close, (
+                f"{probe.rule_id}: post-open bar drifts from entry close "
+                f"({quiet.close} vs {open_close})"
+            )
