@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.context_sizing import (
@@ -15,7 +15,13 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .chunk_reviewer import ChunkReviewAgent
-from .models import ChunkReviewInput, CodeReviewInput, CodeReviewIssue, CodeReviewOutput
+from .models import (
+    ChunkReviewInput,
+    CodeReviewInput,
+    CodeReviewIssue,
+    CodeReviewOutput,
+    coerce_line,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -127,16 +133,26 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
                         severity=i.get("severity", "high"),
                         category=i.get("category", "general"),
                         file_path=i.get("file_path", paths_label),
+                        line=coerce_line(i.get("line")),
+                        start_line=coerce_line(i.get("start_line")),
                         description=i.get("description", ""),
                         suggestion=i.get("suggestion", ""),
                     )
                 )
 
-    # Dedupe issues by (file_path, description)
-    seen: set[Tuple[str, str]] = set()
+    # Dedupe issues by (file_path, line, description) — line is part of an issue's
+    # identity now that it anchors inline PR comments, so the same description on two
+    # different lines is two distinct findings, not a duplicate. An unanchored copy
+    # (line=None) of a finding that also appears anchored (same file_path+description)
+    # is dropped in favour of the anchored one, so the issue isn't reported twice
+    # (once in the body, once inline).
+    anchored_pairs = {(i.file_path, i.description) for i in all_issues if i.line is not None}
+    seen: set[Tuple[str, Optional[int], str]] = set()
     deduped: List[CodeReviewIssue] = []
     for issue in all_issues:
-        key = (issue.file_path, issue.description)
+        if issue.line is None and (issue.file_path, issue.description) in anchored_pairs:
+            continue
+        key = (issue.file_path, issue.line, issue.description)
         if key not in seen:
             seen.add(key)
             deduped.append(issue)

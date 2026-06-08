@@ -97,12 +97,27 @@ def _context_file_filters() -> tuple[frozenset[str], frozenset[str]]:
     return _CONTEXT_EXTENSIONS, _CONTEXT_EXCLUDE_DIRS
 
 
-def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
-    """Read a short summary of repo structure/code for Senior SWE context."""
+def _read_repo_context(repo_path: Path) -> str:
+    """Read the repo structure/code briefing for Senior SWE context.
+
+    Every file the briefing includes is rendered with its FULL contents — the
+    engineer reasons over this to implement a task, and clipping a file would
+    hide code from it (mirroring the team's "inputs are never truncated"
+    contract for the plan text, task description, and review diff). The 80-file
+    ceiling on ``sorted(repo_path.rglob("*"))`` is a deliberate cap on how many
+    files the briefing covers, not truncation of any file's content.
+
+    Preconditions:
+        - ``repo_path`` is an existing directory.
+    Postconditions:
+        - Each context-eligible file (matching ``_context_file_filters`` and
+          within the 80-file scan ceiling) appears with its complete contents,
+          never a prefix; no eligible file is dropped to fit a size budget.
+        - Returns ``"No files found"`` when no eligible file is present.
+    """
     extensions, exclude_dirs = _context_file_filters()
 
     parts: List[str] = []
-    total = 0
     try:
         for f in sorted(repo_path.rglob("*"))[:80]:
             if not f.is_file() or f.suffix not in extensions:
@@ -110,15 +125,11 @@ def _read_repo_context(repo_path: Path, max_chars: int = 4000) -> str:
             if any(skip in f.parts for skip in exclude_dirs):
                 continue
             try:
-                content = f.read_text(encoding="utf-8", errors="replace")[:500]
+                content = f.read_text(encoding="utf-8", errors="replace")
             except Exception:
                 continue
             rel = str(f.relative_to(repo_path))
-            chunk = f"--- {rel} ---\n{content}\n"
-            if total + len(chunk) > max_chars:
-                break
-            parts.append(chunk)
-            total += len(chunk)
+            parts.append(f"--- {rel} ---\n{content}\n")
     except Exception:
         pass
     return "\n".join(parts) if parts else "No files found"

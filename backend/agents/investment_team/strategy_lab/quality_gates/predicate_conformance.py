@@ -520,7 +520,7 @@ def _enriched_trace_lines(
       Returns ``[]`` when there are no offending bars.
     """
     from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
-    from .rule_probes.synthesizer import _bars_to_df
+    from .conformance_bars import _bars_to_df
 
     fp = set(false_positives)
     fn = set(false_negatives)
@@ -612,7 +612,7 @@ def _compute_other_rule_verdicts(
         return None
 
     from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
-    from .rule_probes.synthesizer import _bars_to_df
+    from .conformance_bars import _bars_to_df
 
     df = _bars_to_df(fixture.bars)
     cache: dict = {}

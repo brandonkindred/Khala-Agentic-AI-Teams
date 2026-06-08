@@ -107,6 +107,13 @@ export interface GitHubConfigUpdate {
   repo_path: string;
 }
 
+/** A single issue this issue is blocked by (a GitHub "blocked by" dependency). */
+export interface GitHubDependencyRef {
+  number: number;
+  title: string;
+  state: 'open' | 'closed';
+}
+
 /** Single GitHub issue item from GET /api/integrations/github/issues. */
 export interface GitHubIssueItem {
   number: number;
@@ -114,6 +121,12 @@ export interface GitHubIssueItem {
   body_preview: string;
   labels: string[];
   html_url: string;
+  /** All issues this issue is blocked by ("depends on"). */
+  dependencies: GitHubDependencyRef[];
+  /** Numbers of dependencies still open (drives the blocked indicator). */
+  open_dependencies: number[];
+  /** True while any dependency is still open. */
+  blocked: boolean;
 }
 
 /** Request body for POST /api/integrations/github/run-issue. */
@@ -127,6 +140,35 @@ export interface RunGitHubIssueResponse {
   job_id: string;
   issue_number: number;
   issue_url: string;
+  status: string;
+  message: string;
+}
+
+/** Single open pull request from GET /api/integrations/github/pulls. */
+export interface GitHubPullRequestItem {
+  number: number;
+  title: string;
+  body_preview: string;
+  author: string;
+  html_url: string;
+  head: string;
+  base: string;
+  draft: boolean;
+  labels: string[];
+  updated_at: string;
+}
+
+/** Request body for POST /api/integrations/github/review-pr. */
+export interface RunPrReviewRequest {
+  pr_number: number;
+  base_branch?: string;
+}
+
+/** Response from POST /api/integrations/github/review-pr. */
+export interface RunPrReviewResponse {
+  job_id: string;
+  pr_number: number;
+  pr_url: string;
   status: string;
   message: string;
 }

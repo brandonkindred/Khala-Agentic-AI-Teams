@@ -444,7 +444,7 @@ def _skip(reason: str, evidence: str) -> tuple[list[LikelyBlocker], str]:
 
 def _fail(error_type: str) -> tuple[list[LikelyBlocker], str]:
     return (
-        [LikelyBlocker(reason="runtime_probe_failed", evidence=error_type[:160])],
+        [LikelyBlocker(reason="runtime_probe_failed", evidence=error_type)],
         _RUNTIME_FAILED,
     )
 

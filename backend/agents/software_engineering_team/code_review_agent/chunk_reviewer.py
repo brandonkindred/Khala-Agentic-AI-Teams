@@ -16,7 +16,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_spec_excerpt_chars,
 )
 
-from .models import ChunkReviewInput, ChunkReviewOutput
+from .models import ChunkReviewInput, ChunkReviewOutput, coerce_line
 from .prompts import CODE_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -125,6 +125,8 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
                     "severity": issue_data.get("severity", "high"),
                     "category": issue_data.get("category", "general"),
                     "file_path": fp,
+                    "line": coerce_line(issue_data.get("line")),
+                    "start_line": coerce_line(issue_data.get("start_line")),
                     "description": issue_data.get("description", ""),
                     "suggestion": issue_data.get("suggestion", ""),
                 }

@@ -209,15 +209,6 @@ def stub_design_loop(
     # code_synthesis_agent. Stub that too so the test does not depend
     # on the real LLM path.
     monkeypatch.setattr(orch.code_synthesis_agent, "run", code_synthesis_returning(code))
-    # The rule-probes gate runs after CodeConformanceGate in the synthesis
-    # loop. It executes the compiled strategy against synthetic bars and
-    # asserts each rule fires. Pre-existing integration tests that script
-    # a fake strategy code (rather than a compiler-produced one) don't
-    # carry the order-side semantics or exit-reason strings the probe
-    # gate expects, so stub it here to keep the gate's behaviour out of
-    # the synthesis-loop pipeline tests. Tests that explicitly exercise
-    # the probe gate construct their own ``RuleProbesGate`` instance.
-    monkeypatch.setattr(orch.rule_probes_gate, "check", lambda *a, **kw: [])
 
 
 def empty_market_data(

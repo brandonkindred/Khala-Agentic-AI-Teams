@@ -144,6 +144,19 @@
         @if (selectedIssue.body_preview) {
           <p class="github-confirm-panel__preview">{{ selectedIssue.body_preview }}</p>
         }
+        @if (selectedIssue.blocked) {
+          <div class="github-confirm-panel__warning" role="alert">
+            <mat-icon>block</mat-icon>
+            <div>
+              <strong>Blocked by open dependencies</strong>
+              <p>
+                This issue depends on {{ openDepRefs(selectedIssue) }}, which are still open.
+                The coding team will attempt the run, but GitHub may reject it until those
+                issues are closed.
+              </p>
+            </div>
+          </div>
+        }
         <p class="github-confirm-panel__hint">
           The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
         </p>
@@ -191,6 +204,21 @@
                   <span class="github-label-chip">{{ label }}</span>
                 }
               </span>
+              @if (hasDependencies(issue)) {
+                <span
+                  class="github-issue-row__deps"
+                  role="img"
+                  [class.github-issue-row__deps--blocked]="issue.blocked"
+                  [class.github-issue-row__deps--met]="!issue.blocked"
+                  [matTooltip]="dependencyTooltip(issue)"
+                  [attr.aria-label]="dependencyTooltip(issue)"
+                >
+                  <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                  @if (issue.blocked) {
+                    <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
+                  }
+                </span>
+              }
               <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
             </button>
           }

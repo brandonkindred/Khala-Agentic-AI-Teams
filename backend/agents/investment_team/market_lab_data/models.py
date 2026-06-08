@@ -46,8 +46,13 @@ class MarketLabContext(BaseModel):
         description="Optional social/sentiment line; often empty on free tier without dedicated API",
     )
 
-    def as_prompt_text(self, *, max_chars: int = 6000) -> str:
-        """Render a stable block for LLM consumption."""
+    def as_prompt_text(self) -> str:
+        """Render a stable block for LLM consumption.
+
+        Postconditions: returns the full rendered snapshot block; the content
+        is never length-truncated so no decision-relevant line is dropped
+        before reaching the prompt.
+        """
         lines: List[str] = [
             f"Data as-of: {self.fetched_at}",
             f"Sources: {', '.join(self.sources_used) if self.sources_used else 'none'}",
@@ -63,7 +68,4 @@ class MarketLabContext(BaseModel):
             lines.append(f"Crypto: {self.crypto_snapshot}")
         if self.social_sentiment:
             lines.append(f"Social/sentiment: {self.social_sentiment}")
-        text = "\n".join(lines)
-        if len(text) > max_chars:
-            return text[: max_chars - 3] + "..."
-        return text
+        return "\n".join(lines)
