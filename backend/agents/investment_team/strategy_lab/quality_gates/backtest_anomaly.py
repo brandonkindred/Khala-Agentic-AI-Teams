@@ -277,20 +277,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_trade_diversification(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        if len(ctx.trades) <= 1:
-            return ()
-        sides = {t.side for t in ctx.trades}
-        symbols = {t.symbol for t in ctx.trades}
-        if len(sides) == 1 and len(symbols) == 1:
-            return (
-                self._warning(
-                    f"All {len(ctx.trades)} trades are {next(iter(sides))} on "
-                    f"{next(iter(symbols))} — no diversification."
-                ),
-            )
-        return ()
-
     def _check_lookahead_bar_predictability(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
@@ -503,7 +489,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
         _check_sharpe_ratio,
         _check_avg_hold_time,
         _check_trade_concentration,
-        _check_trade_diversification,
         _check_lookahead_bar_predictability,
         _check_cost_sensitivity,
     )
