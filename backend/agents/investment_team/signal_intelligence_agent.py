@@ -17,8 +17,6 @@ from .models import StrategyLabRecord
 from .signal_intelligence_models import SignalIntelligenceBriefV1
 from .strategy_lab_context import asset_class_mix_hint, format_prior_results
 
-_MAX_BRIEF_INJECT_CHARS = 12000
-
 _SIGNAL_SYSTEM = (
     "You are a Signal Intelligence Expert for a **simulated** strategy research lab. "
     "You synthesize macro/micro hypotheses and trade-style guidance from (1) prior lab results, "
@@ -44,13 +42,19 @@ Return ONLY a JSON object with these keys (no markdown):
 """
 
 
-def sanitize_brief_for_injection(text: str, *, max_chars: int = _MAX_BRIEF_INJECT_CHARS) -> str:
-    """Strip control characters and cap length to reduce nested-prompt abuse."""
+def sanitize_brief_for_injection(text: str) -> str:
+    """Strip control characters and flag injection patterns to reduce nested-prompt abuse.
+
+    Preconditions: ``text`` is a string (may be empty).
+    Postconditions: returns the full sanitized brief — control characters
+    (other than newline/tab) are stripped and a disallowed
+    "ignore previous instructions" pattern, when present, is prefixed with a
+    sanitization notice. The content itself is never length-truncated; the
+    whole brief reaches the prompt so no decision-relevant tail is lost.
+    """
     cleaned = "".join(ch for ch in text if ch == "\n" or ch == "\t" or ord(ch) >= 32)
     if re.search(r"(?i)ignore (all )?(previous|prior) instructions", cleaned):
-        cleaned = "[sanitized: disallowed instruction pattern removed]\n" + cleaned[:8000]
-    if len(cleaned) > max_chars:
-        return cleaned[: max_chars - 20] + "\n...[truncated]"
+        cleaned = "[sanitized: disallowed instruction pattern removed]\n" + cleaned
     return cleaned
 
 
