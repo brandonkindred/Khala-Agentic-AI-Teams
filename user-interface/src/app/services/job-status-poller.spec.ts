@@ -31,7 +31,7 @@ describe('pollJobStatus', () => {
     const api = { getJobStatus: vi.fn(() => throwError(() => new Error('boom'))) };
     const lost = vi.fn();
 
-    pollJobStatus(api, 'j', () => {}, lost);
+    pollJobStatus(api, 'j', vi.fn(), lost);
     vi.advanceTimersByTime(5000);
     vi.advanceTimersByTime(5000);
     expect(lost).not.toHaveBeenCalled(); // only 2 errors so far
