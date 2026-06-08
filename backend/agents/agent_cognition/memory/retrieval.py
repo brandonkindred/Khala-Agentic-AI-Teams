@@ -27,14 +27,11 @@ Postconditions. The module is stateless — all durable state lives in
 
 from __future__ import annotations
 
-import logging
 from datetime import datetime, timezone
 
 from agent_cognition.memory import store
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
 from agent_cognition.runtime_config import read_positive_int
-
-logger = logging.getLogger(__name__)
 
 # Default number of recent raw events used to represent the in-progress period.
 # Read at call time so operators/tests can override via the env var below.

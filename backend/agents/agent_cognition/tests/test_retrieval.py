@@ -107,11 +107,6 @@ def _no_late(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "fetch_recent_unfolded_events", lambda *a, **k: [])
 
 
-def _no_llm(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No-op: the digest builder makes no LLM call, so there is nothing to stub."""
-    return
-
-
 # ===========================================================================
 # Preconditions (DbC)
 # ===========================================================================
@@ -142,7 +137,6 @@ def test_mid_period_includes_closed_week_month_and_live_events(
     }
     events = [_event(content="just happened", salience=0.9)]
     _wire_store(monkeypatch, summaries=summaries, events=events)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -161,7 +155,6 @@ def test_section_and_scale_ordering(monkeypatch: pytest.MonkeyPatch) -> None:
     }
     events = [_event(content="E")]
     _wire_store(monkeypatch, summaries=summaries, events=events)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -181,7 +174,6 @@ def test_recent_events_request_uses_salience_and_preserves_order(
         _event(content="low", salience=0.1),
     ]
     captured = _wire_store(monkeypatch, summaries={}, events=events)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -194,7 +186,6 @@ def test_summaries_only_renders_without_recent_section(
 ) -> None:
     summaries = {Scale.DAY: _summary(scale=Scale.DAY, summary="only a day")}
     _wire_store(monkeypatch, summaries=summaries, events=[])
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -206,7 +197,6 @@ def test_events_only_renders_without_long_term_section(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _wire_store(monkeypatch, summaries={}, events=[_event(content="solo")])
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -226,7 +216,6 @@ def test_live_events_bounded_to_finest_summary_period_end(
     captured = _wire_store(
         monkeypatch, summaries={Scale.DAY: day}, events=[_event(content="today", salience=0.4)]
     )
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -250,7 +239,6 @@ def test_live_events_bounded_to_week_when_no_day_summary(
         Scale.WEEK: _summary(scale=Scale.WEEK, window=_WEEK, summary="w"),
     }
     captured = _wire_store(monkeypatch, summaries=summaries, events=[])
-    _no_llm(monkeypatch)
 
     retrieval.build_memory_digest("a")
 
@@ -268,7 +256,6 @@ def test_live_events_merge_capped_to_top_n(monkeypatch: pytest.MonkeyPatch) -> N
         _event(content="lo", salience=0.1),
     ]
     _wire_store(monkeypatch, summaries={Scale.DAY: day}, events=window_events)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -281,7 +268,6 @@ def test_cold_start_uses_unbounded_recent_fetch(monkeypatch: pytest.MonkeyPatch)
     # No summary shown at all → no lower bound (since=None): every retained event
     # is uncovered, so the window spans all history.
     captured = _wire_store(monkeypatch, summaries={}, events=[_event(content="all-history")])
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -311,7 +297,6 @@ def test_stale_latest_summary_falls_back_to_non_stale(
     )
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [])
     _no_late(monkeypatch)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -331,7 +316,6 @@ def test_all_recent_summaries_stale_contributes_nothing(
     )
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
     _no_late(monkeypatch)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -362,7 +346,6 @@ def test_stale_latest_day_late_event_surfaces_via_window(
         "fetch_summaries",
         lambda agent_id, scale, **k: [stale_day, prev_day] if scale is Scale.DAY else [],
     )
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -390,7 +373,6 @@ def test_latest_non_stale_summary_pages_past_long_stale_run(
     monkeypatch.setattr(store, "fetch_summaries", _fetch)
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [])
     _no_late(monkeypatch)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -416,7 +398,6 @@ def test_latest_non_stale_summary_stops_at_short_page(
     monkeypatch.setattr(store, "fetch_summaries", _fetch)
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: [_event(content="live")])
     _no_late(monkeypatch)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -449,7 +430,6 @@ def test_late_event_in_older_stale_day_surfaces(monkeypatch: pytest.MonkeyPatch)
         return [_event(content="late in old day", salience=0.2)]
 
     monkeypatch.setattr(store, "fetch_recent_unfolded_events", _fetch_unfolded)
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -473,7 +453,6 @@ def test_stale_late_events_merge_dedupe_and_rerank(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(store, "fetch_recent_events", lambda *a, **k: list(window))
     monkeypatch.setattr(retrieval, "_utcnow", lambda: _MID_DAY)
     monkeypatch.setattr(store, "fetch_recent_unfolded_events", lambda *a, **k: list(late))
-    _no_llm(monkeypatch)
 
     digest = retrieval.build_memory_digest("a")
 
@@ -485,19 +464,6 @@ def test_stale_late_events_merge_dedupe_and_rerank(monkeypatch: pytest.MonkeyPat
 def test_utcnow_is_timezone_aware_utc() -> None:
     now = retrieval._utcnow()
     assert now.tzinfo == timezone.utc
-
-
-# ===========================================================================
-# Budget enforcement
-# ===========================================================================
-def test_under_budget_returned_verbatim_without_compaction(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    _wire_store(monkeypatch, summaries={}, events=[_event(content="x")])
-    _no_llm(monkeypatch)  # asserts compaction / client are never touched
-
-    digest = retrieval.build_memory_digest("a")
-    assert "x" in digest
 
 
 # ===========================================================================
