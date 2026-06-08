@@ -498,11 +498,6 @@ def test_run_cycle_reroutes_on_stray_key_threshold(
     monkeypatch.setattr(orch.spec_readiness_gate, "validate", lambda *a, **kw: [])
     monkeypatch.setattr(orch.code_safety_checker, "check", lambda code, spec=None: [])
     monkeypatch.setattr(orch.strategy_validator, "validate", lambda s: [])
-    # Probe gate runs after CodeConformanceGate; this test asserts on
-    # ``failure_phase="execution"``, but the probe would route the
-    # ``# design code`` stub into validation. Stub the gate out so the
-    # synthesis loop reaches the execute phase the test exercises.
-    monkeypatch.setattr(orch.rule_probes_gate, "check", lambda *a, **kw: [])
 
     # Force every execution to fail so the loop stays in the "execution"
     # failure_phase and accumulates stray-key rounds against a single
