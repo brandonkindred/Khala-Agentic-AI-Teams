@@ -905,10 +905,8 @@ def _parse_dependency_concurrency(raw: str | None) -> int:
         - Returns a positive int; the default is 8. Empty, non-integer, or
           non-positive input falls back to 8.
     """
-    if not raw or not raw.strip():
-        return 8
     try:
-        value = int(raw.strip())
+        value = int((raw or "").strip())
     except ValueError:
         return 8
     return value if value > 0 else 8
@@ -1188,13 +1186,14 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
 
     raw_issues: list[dict[str, Any]] = []
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    last_resp: httpx.Response | None = None
+    # Tracks whether the last fetched page still advertised a "next" link, i.e. the page
+    # cap (rather than the end of the list) stopped pagination.
+    has_more = False
 
     async with httpx.AsyncClient(timeout=15.0) as client:
         page_iter = _iter_github_pages(client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES)
         async with contextlib.aclosing(page_iter) as pages:
             async for resp in pages:
-                last_resp = resp
                 if resp.status_code == 401:
                     raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
                 if resp.status_code == 404:
@@ -1202,6 +1201,7 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
                 if resp.status_code != 200:
                     raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
                 raw_issues.extend(raw for raw in resp.json() if "pull_request" not in raw)
+                has_more = bool(resp.links.get("next", {}).get("url"))
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -1214,9 +1214,7 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
     # at construction rather than mutated afterwards.
     items = [_build_issue_item(raw, raw_deps) for raw, raw_deps in zip(raw_issues, dep_results, strict=True)]
 
-    # The fetch stopped at the page cap (rather than exhausting the list) iff the last
-    # page still advertised a "next" link.
-    if last_resp is not None and last_resp.links.get("next", {}).get("url"):
+    if has_more:
         logger.warning(
             "list_github_issues hit the %d-page cap for %s/%s; returning the first %d open issues only",
             _GITHUB_MAX_ISSUE_PAGES,

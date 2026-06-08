@@ -140,6 +140,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return issue.dependencies.length > 0;
   }
 
+  /** All dependencies rendered as "#3, #5". */
+  allDepRefs(issue: GitHubIssueItem): string {
+    return issue.dependencies.map((d) => `#${d.number}`).join(', ');
+  }
+
   /** The still-open dependencies rendered as "#3, #5" for warnings and tooltips. */
   openDepRefs(issue: GitHubIssueItem): string {
     return issue.dependencies
@@ -150,11 +155,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   /** Hover/aria text describing the issue's dependencies and whether they block it. */
   dependencyTooltip(issue: GitHubIssueItem): string {
-    if (issue.blocked) {
-      return `Blocked by ${this.openDepRefs(issue)} — must be closed first`;
-    }
-    const refs = issue.dependencies.map((d) => `#${d.number}`).join(', ');
-    return `Depends on ${refs} (all complete)`;
+    return issue.blocked
+      ? `Blocked by ${this.openDepRefs(issue)} — must be closed first`
+      : `Depends on ${this.allDepRefs(issue)} (all complete)`;
   }
 
   confirmAndRun(): void {
