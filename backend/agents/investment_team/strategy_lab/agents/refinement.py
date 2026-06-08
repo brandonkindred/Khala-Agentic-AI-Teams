@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -14,6 +12,11 @@ from strands import Agent
 from ...models import BacktestResult, StrategySpec
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._parse_helpers import (
+    build_json_correction_prompt,
+    extract_json_object,
+    parse_retry_budget,
+)
 from ._response_schemas import REFINEMENT_SCHEMA
 from .model_factory import get_strands_model
 
@@ -28,6 +31,14 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # drift. Provider-agnostic: it constrains the model even when structured
 # output is disabled or the provider is Bedrock (which ignores ``format``).
 _REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
+
+# Spliced into the shared JSON-correction re-prompt so a malformed-output retry
+# still names the exact two keys the refinement response must carry. Leading
+# space so it reads as a sentence continuation in the shared preamble.
+_CORRECTION_KEYS_HINT = (
+    " Emit exactly the two keys `strategy_code` (the complete fixed Python "
+    "code) and `changes_made` (a 1-2 sentence summary)."
+)
 
 # Refinement output is code-only (#543). ``strategy_code`` is consumed
 # separately; ``changes_made`` is logged. Any other top-level key in the
@@ -205,7 +216,7 @@ class RefinementAgent:
         re-prompt must be read as "reissue the whole object correctly", not
         "continue from what you emitted".
         """
-        retries = _refinement_parse_retries()
+        retries = parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES")
         prompt = user_prompt
         for attempt in range(retries + 1):
             agent = Agent(
@@ -217,7 +228,7 @@ class RefinementAgent:
                 agent, prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
             )
             try:
-                return _extract_json(raw)
+                return extract_json_object(raw)
             except ValueError as exc:
                 logger.warning(
                     "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
@@ -229,75 +240,10 @@ class RefinementAgent:
                 )
                 if attempt >= retries:
                     raise
-                prompt = _build_json_correction_prompt(user_prompt, exc)
+                prompt = build_json_correction_prompt(
+                    user_prompt, exc, keys_hint=_CORRECTION_KEYS_HINT
+                )
 
         # Unreachable: the loop returns on success or re-raises on the final
         # attempt. Kept so type-checkers see a definite return.
         raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
-
-
-def _refinement_parse_retries() -> int:
-    """Resolve the retry budget for :meth:`RefinementAgent._invoke_and_parse`.
-
-    Reads ``STRATEGY_LAB_REFINEMENT_PARSE_RETRIES`` (default ``2`` → 3 attempts
-    total; sub-zero clamped to ``0`` = no retry; garbage falls back to the
-    default rather than raising — the surrounding refinement is best-effort).
-
-    Preconditions: none.
-    Postconditions: returns a non-negative int; never raises.
-    """
-    try:
-        return max(int(os.environ.get("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")), 0)
-    except ValueError:
-        return 2
-
-
-_JSON_CORRECTION_PREAMBLE = """\
-Your previous response could not be parsed as a single JSON object
-({error}). Return ONLY one JSON object with no surrounding prose, no
-markdown fences, and no trailing commentary — exactly the two keys
-`strategy_code` (the complete fixed Python code) and `changes_made`
-(a 1-2 sentence summary). Every brace must balance.
-
---- ORIGINAL TASK BELOW ---
-{original_prompt}
-"""
-
-
-def _build_json_correction_prompt(user_prompt: str, exc: ValueError) -> str:
-    """Render a re-prompt for a malformed-JSON (unparseable) response.
-
-    Preconditions: ``exc`` is the ``ValueError`` raised by
-    :func:`_extract_json` when no balanced JSON object is found; ``user_prompt``
-    is the original refinement task.
-    Postconditions: returns a string instructing the model to re-emit a single,
-    fence-free JSON object carrying the two refinement keys.
-    """
-    return _JSON_CORRECTION_PREAMBLE.format(error=str(exc), original_prompt=user_prompt)
-
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from LLM output."""
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in LLM response")
-
-    depth = 0
-    end = start
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON from LLM response: {e}") from e

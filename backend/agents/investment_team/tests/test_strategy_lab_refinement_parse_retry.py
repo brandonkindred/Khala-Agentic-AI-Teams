@@ -23,11 +23,11 @@ import pytest
 
 from investment_team.models import RiskLimits, StrategySpec
 from investment_team.strategy_lab.agents import refinement as mod
-from investment_team.strategy_lab.agents.refinement import (
-    RefinementAgent,
-    _build_json_correction_prompt,
-    _refinement_parse_retries,
+from investment_team.strategy_lab.agents._parse_helpers import (
+    build_json_correction_prompt,
+    parse_retry_budget,
 )
+from investment_team.strategy_lab.agents.refinement import RefinementAgent
 
 
 def _spec() -> StrategySpec:
@@ -248,7 +248,7 @@ def test_logs_warning_on_each_unparseable_attempt(
 
 def test_parse_retries_default(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", raising=False)
-    assert _refinement_parse_retries() == 2
+    assert parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES") == 2
 
 
 @pytest.mark.parametrize(
@@ -265,12 +265,16 @@ def test_parse_retries_env_parsing(
     monkeypatch: pytest.MonkeyPatch, raw: str, expected: int
 ) -> None:
     monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", raw)
-    assert _refinement_parse_retries() == expected
+    assert parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES") == expected
 
 
 def test_build_json_correction_prompt_quotes_error_and_task() -> None:
-    prompt = _build_json_correction_prompt(
-        "ORIGINAL REFINEMENT TASK", ValueError("No JSON object found in LLM response")
+    # The refinement agent passes its keys-hint so the retry still names the
+    # exact two output keys; assert that plumbing end-to-end.
+    prompt = build_json_correction_prompt(
+        "ORIGINAL REFINEMENT TASK",
+        ValueError("No JSON object found in LLM response"),
+        keys_hint=mod._CORRECTION_KEYS_HINT,
     )
     assert "No JSON object found in LLM response" in prompt
     assert "ORIGINAL REFINEMENT TASK" in prompt

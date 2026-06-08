@@ -34,7 +34,9 @@ from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
     StrategySpecParseError,
+    build_json_correction_prompt,
     extract_json_object,
+    parse_retry_budget,
     validate_structured_rules,
 )
 from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
@@ -271,7 +273,7 @@ class DesignAgent:
         would feed the model its own rejected JSON back as context and bias
         it toward defending the malformed shape it just produced.
         """
-        retries = _design_parse_retries()
+        retries = parse_retry_budget("STRATEGY_LAB_DESIGN_PARSE_RETRIES")
 
         prompt = user_prompt
         for attempt in range(retries + 1):
@@ -307,7 +309,7 @@ class DesignAgent:
                 )
                 if attempt >= retries:
                     raise
-                prompt = _build_json_correction_prompt(user_prompt, exc)
+                prompt = build_json_correction_prompt(user_prompt, exc)
                 continue
 
             # Logged-and-dropped (not raised): a stray ``strategy_code`` is
@@ -505,21 +507,6 @@ class DesignAgent:
         return _coerce_critique(parsed, readiness_findings=[], demote_min_severity="critical")
 
 
-def _design_parse_retries() -> int:
-    """Resolve the retry budget for ``_invoke_and_parse``.
-
-    Returns the configured number of retries on
-    :class:`StrategySpecParseError` from ``STRATEGY_LAB_DESIGN_PARSE_RETRIES``
-    (default 2, sub-zero values clamped to 0). Garbage values fall back
-    to the default rather than raising — the surrounding cycle is
-    already best-effort.
-    """
-    try:
-        return max(int(os.environ.get("STRATEGY_LAB_DESIGN_PARSE_RETRIES", "2")), 0)
-    except ValueError:
-        return 2
-
-
 def _design_self_review_enabled() -> bool:
     """Resolve the on/off toggle for :meth:`DesignAgent._with_self_review`.
 
@@ -586,32 +573,6 @@ match what you just emitted:
 --- ORIGINAL TASK BELOW ---
 {original_prompt}
 """
-
-
-_JSON_CORRECTION_PREAMBLE = """\
-Your previous response could not be parsed as a single JSON object
-({error}). Return ONLY one JSON object with no surrounding prose, no
-markdown fences, and no trailing commentary. Every brace must balance.
-
---- ORIGINAL TASK BELOW ---
-{original_prompt}
-"""
-
-
-def _build_json_correction_prompt(user_prompt: str, exc: ValueError) -> str:
-    """Render a re-prompt for a malformed-JSON (unparseable) response.
-
-    Pre: ``exc`` is the ``ValueError`` raised by
-    :func:`extract_json_object` when no balanced JSON object is found.
-    Post: returns a string instructing the model to re-emit a single,
-    fence-free JSON object. Distinct from
-    :func:`_build_correction_prompt`, which handles structurally-valid
-    JSON that fails DSL validation.
-    """
-    return _JSON_CORRECTION_PREAMBLE.format(
-        error=str(exc),
-        original_prompt=user_prompt,
-    )
 
 
 def _build_correction_prompt(user_prompt: str, exc: "StrategySpecParseError") -> str:
