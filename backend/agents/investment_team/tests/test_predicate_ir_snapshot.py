@@ -37,16 +37,16 @@ from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     PredicateGroup,
     Static,
     SymbolGate,
-    _build_or_group,
-    _collect_legs,
-    _eval_tree,
-    _find_or_groups,
-    _leg_gate_symbols,
-    _tree_and_unknown,
-    _tree_effective_symbols,
-    _tree_or_unknown,
+    build_or_group,
+    collect_legs,
+    eval_tree,
+    find_or_groups,
+    leg_gate_symbols,
     render_bar_predicate,
     render_predicate_group,
+    tree_and_unknown,
+    tree_effective_symbols,
+    tree_or_unknown,
 )
 
 from ._indicator_probe_fixtures import make_strategy
@@ -285,35 +285,35 @@ def test_render_indent_precondition() -> None:
 def test_eval_tree_empty_and_or_and_static() -> None:
     df = _df()
     # Empty AndOp is the conjunction identity (all-True); empty OrOp is all-False.
-    assert _eval_tree(AndOp(legs=()), df, "AAPL").tolist() == [True, True, True]
-    assert _eval_tree(OrOp(legs=()), df, "AAPL").tolist() == [False, False, False]
-    assert _eval_tree(Static(False), df, "AAPL").tolist() == [False, False, False]
+    assert eval_tree(AndOp(legs=()), df, "AAPL").tolist() == [True, True, True]
+    assert eval_tree(OrOp(legs=()), df, "AAPL").tolist() == [False, False, False]
+    assert eval_tree(Static(False), df, "AAPL").tolist() == [False, False, False]
 
 
 def test_eval_tree_symbol_gate_filters_by_symbol() -> None:
     df = _df()
     gate = SymbolGate(frozenset({"AAPL"}), _mask("always", True))
-    assert _eval_tree(gate, df, "AAPL").tolist() == [True, True, True]
+    assert eval_tree(gate, df, "AAPL").tolist() == [True, True, True]
     # Symbol not in the gate → forced all-False without invoking the inner mask.
-    assert _eval_tree(gate, df, "MSFT").tolist() == [False, False, False]
+    assert eval_tree(gate, df, "MSFT").tolist() == [False, False, False]
 
 
 def test_eval_tree_and_or_combine() -> None:
     df = _df()
     t, f = _mask("t", True), _mask("f", False)
-    assert _eval_tree(AndOp(legs=(t, f)), df, "AAPL").tolist() == [False, False, False]
-    assert _eval_tree(OrOp(legs=(t, f)), df, "AAPL").tolist() == [True, True, True]
+    assert eval_tree(AndOp(legs=(t, f)), df, "AAPL").tolist() == [False, False, False]
+    assert eval_tree(OrOp(legs=(t, f)), df, "AAPL").tolist() == [True, True, True]
 
 
 def test_collect_legs_on_bare_leaf_returns_empty() -> None:
     # A node that is neither a Leg nor a combinator/gate contributes no legs.
-    assert _collect_legs(_mask("x", True)) == []
-    assert _collect_legs(Static(True)) == []
+    assert collect_legs(_mask("x", True)) == []
+    assert collect_legs(Static(True)) == []
 
 
 def test_build_or_group_wraps_in_symbol_gate() -> None:
     leg = Leg("close > 0", _mask("close > 0", True))
-    group = _build_or_group(
+    group = build_or_group(
         ancestor_legs=[],
         or_alt_legs=[leg],
         or_unknown=False,
@@ -329,29 +329,29 @@ def test_build_or_group_wraps_in_symbol_gate() -> None:
 def test_tree_and_unknown_detects_any_and_flag() -> None:
     leg = Leg("x", _mask("x", True))
     # Clean AND → no unknown; AND with unknown=True, or a nested unknown AND, → True.
-    assert _tree_and_unknown(AndOp(legs=(leg,))) is False
-    assert _tree_and_unknown(AndOp(legs=(leg,), unknown=True)) is True
+    assert tree_and_unknown(AndOp(legs=(leg,))) is False
+    assert tree_and_unknown(AndOp(legs=(leg,), unknown=True)) is True
     nested = OrOp(legs=(SymbolGate(frozenset({"AAPL"}), AndOp(legs=(leg,), unknown=True)),))
-    assert _tree_and_unknown(nested) is True
+    assert tree_and_unknown(nested) is True
     # An OrOp.unknown does not count as an AND-unknown.
-    assert _tree_and_unknown(OrOp(legs=(leg,), unknown=True)) is False
+    assert tree_and_unknown(OrOp(legs=(leg,), unknown=True)) is False
 
 
 def test_tree_or_unknown_detects_any_or_flag() -> None:
     leg = Leg("x", _mask("x", True))
-    assert _tree_or_unknown(OrOp(legs=(leg,))) is False
-    assert _tree_or_unknown(OrOp(legs=(leg,), unknown=True)) is True
+    assert tree_or_unknown(OrOp(legs=(leg,))) is False
+    assert tree_or_unknown(OrOp(legs=(leg,), unknown=True)) is True
     nested = AndOp(legs=(SymbolGate(frozenset({"AAPL"}), OrOp(legs=(leg,), unknown=True)),))
-    assert _tree_or_unknown(nested) is True
+    assert tree_or_unknown(nested) is True
     # An AndOp.unknown does not count as an OR-unknown.
-    assert _tree_or_unknown(AndOp(legs=(leg,), unknown=True)) is False
+    assert tree_or_unknown(AndOp(legs=(leg,), unknown=True)) is False
 
 
 def test_leg_gate_symbols_returns_outer_gate_only() -> None:
     gated = Leg("x", SymbolGate(frozenset({"AAPL"}), _mask("x", True)))
-    assert _leg_gate_symbols(gated) == frozenset({"AAPL"})
+    assert leg_gate_symbols(gated) == frozenset({"AAPL"})
     # No outer SymbolGate on the leg's inner sub-tree → None.
-    assert _leg_gate_symbols(Leg("x", _mask("x", True))) is None
+    assert leg_gate_symbols(Leg("x", _mask("x", True))) is None
 
 
 def test_find_or_groups_orders_match_collect_legs() -> None:
@@ -359,20 +359,20 @@ def test_find_or_groups_orders_match_collect_legs() -> None:
     inner_or = OrOp(legs=(leg,))
     outer_or = OrOp(legs=(leg,))
     tree = AndOp(legs=(outer_or, SymbolGate(frozenset({"AAPL"}), inner_or)))
-    groups = _find_or_groups(tree)
-    # Two OR groups, id-ordered to match _collect_legs' assignment (outer first).
+    groups = find_or_groups(tree)
+    # Two OR groups, id-ordered to match collect_legs' assignment (outer first).
     assert [oid for oid, _ in groups] == [0, 1]
     assert [op for _, op in groups] == [outer_or, inner_or]
     # No OR anywhere → empty.
-    assert _find_or_groups(AndOp(legs=(leg,))) == []
+    assert find_or_groups(AndOp(legs=(leg,))) == []
 
 
 def test_tree_effective_symbols_union_and_universal() -> None:
     g_aapl = SymbolGate(frozenset({"AAPL"}), Leg("a", _mask("a", True)))
     g_msft = SymbolGate(frozenset({"MSFT"}), Leg("b", _mask("b", True)))
     # All legs gated → union of their symbols.
-    assert _tree_effective_symbols(OrOp(legs=(g_aapl, g_msft))) == frozenset({"AAPL", "MSFT"})
+    assert tree_effective_symbols(OrOp(legs=(g_aapl, g_msft))) == frozenset({"AAPL", "MSFT"})
     # Any ungated (universal) leg → None (symbol-unconstrained).
-    assert _tree_effective_symbols(OrOp(legs=(g_aapl, Leg("c", _mask("c", True))))) is None
+    assert tree_effective_symbols(OrOp(legs=(g_aapl, Leg("c", _mask("c", True))))) is None
     # No symbol info at all → None.
-    assert _tree_effective_symbols(AndOp(legs=(Leg("d", _mask("d", True)),))) is None
+    assert tree_effective_symbols(AndOp(legs=(Leg("d", _mask("d", True)),))) is None

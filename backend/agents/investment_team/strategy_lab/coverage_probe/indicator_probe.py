@@ -50,15 +50,15 @@ from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     PredicateGroup,
     Static,
     SymbolGate,
-    _build_and_group,
-    _build_or_group,
-    _collect_legs,
-    _eval_tree,
-    _find_or_groups,
-    _leg_gate_symbols,
-    _tree_and_unknown,
-    _tree_effective_symbols,
-    _tree_or_unknown,
+    build_and_group,
+    build_or_group,
+    collect_legs,
+    eval_tree,
+    find_or_groups,
+    leg_gate_symbols,
+    tree_and_unknown,
+    tree_effective_symbols,
+    tree_or_unknown,
 )
 from investment_team.strategy_lab.executor.indicators import INDICATORS
 
@@ -314,13 +314,13 @@ class CoverageAggregator:
         # Pre-collect legs per group (with their effective symbols and
         # OR-group ids) so each stage walks the same per-leg view.
         self._group_legs: List[List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]]] = [
-            _collect_legs(g.tree) for g in groups
+            collect_legs(g.tree) for g in groups
         ]
         # Pre-collect or-group records per group so the classifier can
         # look up the originating ``OrOp`` (for ``unknown`` and label
         # assembly) of any or_id reported on a leaf.
         self._group_or_groups: List[Dict[int, OrOp]] = [
-            dict(_find_or_groups(g.tree)) for g in groups
+            dict(find_or_groups(g.tree)) for g in groups
         ]
 
     def run(self) -> CoverageReport:
@@ -381,7 +381,7 @@ class CoverageAggregator:
                 legs = self._group_legs[group_idx]
                 # Per-leg masks (used for both per-leg hits and the group
                 # conjunction). Computing each leg's mask separately gives
-                # us symmetric data for the report; ``_eval_tree`` against
+                # us symmetric data for the report; ``eval_tree`` against
                 # the whole tree would conflate them.
                 per_leg_masks: List[pd.Series] = []
                 any_leg_evaluated = False
@@ -389,7 +389,7 @@ class CoverageAggregator:
                     if eff_syms is not None and symbol not in eff_syms:
                         per_leg_masks.append(pd.Series(False, index=df.index, dtype=bool))
                         continue
-                    mask = _eval_tree(leg, df, symbol)
+                    mask = eval_tree(leg, df, symbol)
                     per_leg_masks.append(mask)
                     any_leg_evaluated = True
                     hits = int(mask.sum())
@@ -401,11 +401,11 @@ class CoverageAggregator:
                             leg_last_true[group_idx][leg_idx] = last_bar
                 if not any_leg_evaluated:
                     continue
-                # Whole-tree conjunction mask: a single ``_eval_tree``
+                # Whole-tree conjunction mask: a single ``eval_tree``
                 # call against the group's root captures AND/OR/SymbolGate
                 # semantics in one place — including the implicit gating
                 # of legs whose ``SymbolGate`` excludes this symbol.
-                conjunction_mask = _eval_tree(group.tree, df, symbol)
+                conjunction_mask = eval_tree(group.tree, df, symbol)
                 group_conjunction_hits[group_idx] += int(conjunction_mask.sum())
                 group_evaluated[group_idx] = True
                 symbol_contributed = True
@@ -503,7 +503,7 @@ class CoverageAggregator:
                 continue
             group = result.group
             or_groups = self._group_or_groups[result_idx]
-            group_syms = _tree_effective_symbols(group.tree)
+            group_syms = tree_effective_symbols(group.tree)
             symbols_key = group_syms
 
             def _flag_zero_hit(leaf: _LeafResult, _sym_key=symbols_key) -> None:
@@ -531,7 +531,7 @@ class CoverageAggregator:
                     continue
                 if leaf.hits != 0:
                     continue
-                if _tree_or_unknown(leaf.leg.inner):
+                if tree_or_unknown(leaf.leg.inner):
                     continue
                 _flag_zero_hit(leaf)
 
@@ -571,7 +571,7 @@ class CoverageAggregator:
             # Any unknown anywhere in the tree suppresses the conjunction
             # blocker — we can't prove the conjunction never fires when
             # part of the predicate is un-modelled.
-            if _tree_or_unknown(group.tree):
+            if tree_or_unknown(group.tree):
                 continue
             # AND-only group (no OrOp): require >= 2 legs and all fire.
             # AND-with-nested-OR: require AND-required ancestors all
@@ -594,7 +594,7 @@ class CoverageAggregator:
                     break
 
         if conjunction_group is not None:
-            conj_leaves = _collect_legs(conjunction_group.tree)
+            conj_leaves = collect_legs(conjunction_group.tree)
             conjunction_blocker = LikelyBlocker(
                 reason="conjunction_never_true",
                 evidence=" AND ".join(leg.label for leg, _es, _io, _oi in conj_leaves),
@@ -662,8 +662,8 @@ class CoverageAggregator:
             if not result.evaluated:
                 continue
             tree = result.group.tree
-            group_or_unknown = _tree_or_unknown(tree)
-            group_and_unknown = _tree_and_unknown(tree)
+            group_or_unknown = tree_or_unknown(tree)
+            group_and_unknown = tree_and_unknown(tree)
             group_unknown = group_or_unknown or group_and_unknown
             any_leaf_fired = any(lf.hits > 0 for lf in result.leaf_results)
             if group_unknown:
@@ -712,7 +712,7 @@ def _aggregate(
     Postconditions:
         Returns a valid ``CoverageReport``.
     """
-    has_any_leg = any(_collect_legs(g.tree) for g in groups)
+    has_any_leg = any(collect_legs(g.tree) for g in groups)
     if not has_any_leg:
         return CoverageReport(
             coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
@@ -1075,7 +1075,7 @@ class SubconditionVisitor:
                     # instead of the actionable
                     # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` on the
                     # gated symbols.
-                    or_compound_gate = _leg_gate_symbols(or_compound)
+                    or_compound_gate = leg_gate_symbols(or_compound)
                     if (
                         or_compound_gate is not None
                     ):  # pragma: no cover — fully-symbol-gated nested-OR within AND rare in generated strategies
@@ -1124,7 +1124,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_legs:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_legs, effective_symbols, effective_unknown, effective_denied
                     )
                 )
@@ -1134,14 +1134,14 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_legs:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_legs, effective_symbols, effective_unknown, effective_denied
                     )
                 )
             return False
         if group_legs and not (effective_symbols is not None and not effective_symbols):
             self._groups.append(
-                _build_and_group(group_legs, effective_symbols, effective_unknown, effective_denied)
+                build_and_group(group_legs, effective_symbols, effective_unknown, effective_denied)
             )
         if not self._visit(
             body,
@@ -1273,7 +1273,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_ancestors:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_ancestors, ancestor_symbols, ancestor_unknown, denied_frozen
                     )
                 )
@@ -1284,7 +1284,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_ancestors or group_or_legs:
                 self._groups.append(
-                    _build_or_group(
+                    build_or_group(
                         group_ancestors,
                         group_or_legs,
                         has_unknown_leg,
@@ -1296,7 +1296,7 @@ class SubconditionVisitor:
             return False
         if group_ancestors or group_or_legs:
             self._groups.append(
-                _build_or_group(
+                build_or_group(
                     group_ancestors,
                     group_or_legs,
                     has_unknown_leg,
@@ -1335,10 +1335,10 @@ class SubconditionVisitor:
         )
         if or_compound is not None:
             body_ancestors = ancestors + [or_compound]
-            or_compound_gate = _leg_gate_symbols(or_compound)
+            or_compound_gate = leg_gate_symbols(or_compound)
             if or_compound_gate is not None:
                 body_symbols = _intersect_symbols(ancestor_symbols, set(or_compound_gate))
-            if _tree_or_unknown(or_compound.inner):
+            if tree_or_unknown(or_compound.inner):
                 body_unknown = True
         else:  # pragma: no cover — fully-unmodellable OR ancestor descent rare
             # OR was fully un-modellable — every nested predicate is
@@ -2906,7 +2906,7 @@ def _build_compound_subcond(
     # when *every* leg carries one. The aggregator uses this for
     # propagating the OR's effective symbol scope to sibling AND
     # conjuncts at the GROUP level.
-    leg_gates = [_leg_gate_symbols(lg) for lg in inner]
+    leg_gates = [leg_gate_symbols(lg) for lg in inner]
     if leg_gates and all(g is not None for g in leg_gates):
         union: frozenset = frozenset()
         for g in leg_gates:

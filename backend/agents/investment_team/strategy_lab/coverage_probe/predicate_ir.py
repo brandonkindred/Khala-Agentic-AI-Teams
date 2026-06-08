@@ -20,9 +20,11 @@ through this layer.
 The public surface other modules build on is the IR node types
 (:class:`MaskLeaf`, :class:`Static`, :class:`SymbolGate`, :class:`AndOp`,
 :class:`OrOp`, :class:`Leg`, the :data:`BarPredicate` union and
-:class:`PredicateGroup`) plus the canonical renderers. The underscore-prefixed
-tree helpers are shared implementation used by the sibling extractor and
-aggregator within this ``coverage_probe`` package, not a stable external API.
+:class:`PredicateGroup`), the public tree helpers (``eval_tree``,
+``collect_legs``, ``find_or_groups``, ``tree_and_unknown``,
+``tree_or_unknown``, ``tree_effective_symbols``, ``leg_gate_symbols``,
+``build_and_group``, ``build_or_group``), and the canonical renderers. Only the
+``*_walk`` recursion helpers are private to this module.
 
 Pure: no I/O, no LLM, no subprocess.
 """
@@ -162,33 +164,33 @@ class PredicateGroup:
 # ---------------------------------------------------------------------------
 
 
-def _tree_and_unknown(node: BarPredicate) -> bool:
+def tree_and_unknown(node: BarPredicate) -> bool:
     """Return True if any :class:`AndOp` in the tree has ``unknown=True``."""
     if isinstance(node, AndOp):
         if node.unknown:
             return True
-        return any(_tree_and_unknown(leg) for leg in node.legs)
+        return any(tree_and_unknown(leg) for leg in node.legs)
     if isinstance(node, OrOp):
-        return any(_tree_and_unknown(leg) for leg in node.legs)
+        return any(tree_and_unknown(leg) for leg in node.legs)
     if isinstance(node, (SymbolGate, Leg)):
-        return _tree_and_unknown(node.inner)
+        return tree_and_unknown(node.inner)
     return False
 
 
-def _tree_or_unknown(node: BarPredicate) -> bool:
+def tree_or_unknown(node: BarPredicate) -> bool:
     """Return True if any :class:`OrOp` in the tree has ``unknown=True``."""
     if isinstance(node, OrOp):
         if node.unknown:
             return True
-        return any(_tree_or_unknown(leg) for leg in node.legs)
+        return any(tree_or_unknown(leg) for leg in node.legs)
     if isinstance(node, AndOp):
-        return any(_tree_or_unknown(leg) for leg in node.legs)
+        return any(tree_or_unknown(leg) for leg in node.legs)
     if isinstance(node, (SymbolGate, Leg)):
-        return _tree_or_unknown(node.inner)
+        return tree_or_unknown(node.inner)
     return False
 
 
-def _collect_legs(
+def collect_legs(
     node: BarPredicate, accumulated_syms: Optional[frozenset] = None
 ) -> List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]]:
     """Walk the tree, collecting each :class:`Leg` along with its
@@ -238,7 +240,7 @@ def _collect_legs_walk(
     return []
 
 
-def _tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
+def tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
     """Return the union of symbols any leg in the tree could fire on, or
     ``None`` when at least one leg is symbol-unconstrained (universal).
 
@@ -252,7 +254,7 @@ def _tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
     This function powers warmup sizing in :func:`_union_target_symbols`
     and group-level symbol resolution.
     """
-    legs = _collect_legs(node)
+    legs = collect_legs(node)
     union: set = set()
     saw_universal = False
     for _leg, syms, _in_or, _or_id in legs:
@@ -265,9 +267,9 @@ def _tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
     return frozenset(union) if union else None
 
 
-def _find_or_groups(node: BarPredicate) -> List[Tuple[int, OrOp]]:
+def find_or_groups(node: BarPredicate) -> List[Tuple[int, OrOp]]:
     """Return a list of (or_id, OrOp) pairs in the same order that
-    :func:`_collect_legs` assigns or_ids — used so the classifier can
+    :func:`collect_legs` assigns or_ids — used so the classifier can
     look up the :class:`OrOp` (for ``unknown`` flag) of each OR group
     it sees in a leg's metadata.
     """
@@ -294,7 +296,7 @@ def _find_or_groups_walk(
         _find_or_groups_walk(node.inner, out, next_or_id)
 
 
-def _eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
+def eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
     """Recursively evaluate *node* against *df* for *symbol*, returning a
     boolean :class:`pandas.Series` indexed by ``df.index``.
 
@@ -314,27 +316,27 @@ def _eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
     if isinstance(node, SymbolGate):
         if symbol not in node.syms:
             return pd.Series(False, index=df.index, dtype=bool)
-        return _eval_tree(node.inner, df, symbol)
+        return eval_tree(node.inner, df, symbol)
     if isinstance(node, Leg):
-        return _eval_tree(node.inner, df, symbol)
+        return eval_tree(node.inner, df, symbol)
     if isinstance(node, AndOp):
         if not node.legs:
             return pd.Series(True, index=df.index, dtype=bool)
-        result = _eval_tree(node.legs[0], df, symbol)
+        result = eval_tree(node.legs[0], df, symbol)
         for leg in node.legs[1:]:
-            result = result & _eval_tree(leg, df, symbol)
+            result = result & eval_tree(leg, df, symbol)
         return result
     if isinstance(node, OrOp):
         if not node.legs:
             return pd.Series(False, index=df.index, dtype=bool)
-        result = _eval_tree(node.legs[0], df, symbol)
+        result = eval_tree(node.legs[0], df, symbol)
         for leg in node.legs[1:]:
-            result = result | _eval_tree(leg, df, symbol)
+            result = result | eval_tree(leg, df, symbol)
         return result
     raise AssertionError(f"unknown BarPredicate variant: {type(node)!r}")  # pragma: no cover
 
 
-def _leg_gate_symbols(leg: Leg) -> Optional[frozenset]:
+def leg_gate_symbols(leg: Leg) -> Optional[frozenset]:
     """Return the outermost :class:`SymbolGate` ``syms`` of *leg*'s inner
     sub-tree, or ``None`` if the leg has no outer gate. Used by the
     visitor to propagate a compound leg's effective symbol scope to the
@@ -346,7 +348,7 @@ def _leg_gate_symbols(leg: Leg) -> Optional[frozenset]:
     return None
 
 
-def _build_and_group(
+def build_and_group(
     legs: List[Leg],
     effective_symbols: Optional[set],
     effective_unknown: bool,
@@ -366,7 +368,7 @@ def _build_and_group(
     return PredicateGroup(tree=tree, denied_symbols=denied_symbols)
 
 
-def _build_or_group(
+def build_or_group(
     ancestor_legs: List[Leg],
     or_alt_legs: List[Leg],
     or_unknown: bool,
