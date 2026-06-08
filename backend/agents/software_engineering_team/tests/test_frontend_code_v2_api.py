@@ -37,6 +37,21 @@ def _autouse_patched_job_store(patched_job_store):
     return patched_job_store
 
 
+@pytest.fixture(autouse=True)
+def _stub_background_workflow(monkeypatch):
+    """Replace the fire-and-forget workflow worker with a no-op.
+
+    The ``POST /frontend-code-v2/run`` endpoint spawns a daemon thread that runs
+    the real (integration-only) 6-phase frontend workflow. These unit tests only
+    assert the endpoint contract, so without this stub the thread keeps executing
+    after the test returns and logs to closed pytest capture streams
+    ("ValueError: I/O operation on closed file"). Mirrors the
+    ``patch.object(_api_main, "_run_orchestrator_background")`` pattern used for
+    the /run-team endpoint tests.
+    """
+    monkeypatch.setattr(_api_main, "_run_frontend_code_v2_background", lambda *a, **k: None)
+
+
 @pytest.fixture
 def client() -> TestClient:
     return TestClient(app)
