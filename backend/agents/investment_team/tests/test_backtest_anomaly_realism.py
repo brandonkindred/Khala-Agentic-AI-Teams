@@ -723,3 +723,44 @@ def test_lookahead_combined_rate_uses_entry_and_exit_observations() -> None:
     # 20 entry bars + 20 exit bars all resolve and match → 40/40.
     assert "40/40" in look[0].details
     assert look[0].severity == "critical"
+
+
+# ---------------------------------------------------------------------------
+# A single-asset, single-side ledger is not an anomaly
+# ---------------------------------------------------------------------------
+
+
+def test_single_asset_no_diversification_warning() -> None:
+    """A strategy that intentionally trades one asset on one side must not be
+    flagged for "no diversification".
+
+    Diversification breadth is owned solely by
+    ``TargetSymbolCoverageGate.check_breadth``, which is spec-aware and only
+    warns when ``spec.target_symbols`` declares more than one intended symbol.
+    The anomaly detector — which has no view of the spec's intent — must not
+    second-guess a deliberately narrow hypothesis (e.g. EURUSD-only). This
+    guards against re-introducing the spec-unaware rule that produced a
+    user-visible false positive.
+    """
+    trades = [
+        _trade(
+            trade_num=i + 1,
+            entry_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 1):02d}",
+            exit_date=f"2024-{((i % 12) + 1):02d}-{((i % 27) + 2):02d}",
+            symbol="EURUSD=X",
+            side="long",
+        )
+        for i in range(20)
+    ]
+    detector = BacktestAnomalyDetector()
+    # No market_data → the look-ahead heuristic self-skips, isolating the
+    # remaining rules; the baseline metrics are anomaly-clean.
+    results = detector.check(_baseline_metrics(), trades)
+    # Guard against a vacuous pass: the detector's contract guarantees a
+    # non-empty result list (a clean ledger yields the "passed all anomaly
+    # checks" info), so an empty list would mean the detector silently stopped
+    # running rather than that the diversification warning was correctly absent.
+    assert results, "anomaly detector returned no results — checks did not run"
+    assert all(
+        "diversification" not in r.details and "trades are long" not in r.details for r in results
+    ), [r.details for r in results]

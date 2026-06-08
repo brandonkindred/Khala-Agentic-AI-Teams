@@ -277,20 +277,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
             )
         return ()
 
-    def _check_trade_diversification(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        if len(ctx.trades) <= 1:
-            return ()
-        sides = {t.side for t in ctx.trades}
-        symbols = {t.symbol for t in ctx.trades}
-        if len(sides) == 1 and len(symbols) == 1:
-            return (
-                self._warning(
-                    f"All {len(ctx.trades)} trades are {next(iter(sides))} on "
-                    f"{next(iter(symbols))} — no diversification."
-                ),
-            )
-        return ()
-
     def _check_lookahead_bar_predictability(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
@@ -496,6 +482,13 @@ class BacktestAnomalyDetector(GateResultsMixin):
         return ()
 
     # Rules iterated in order by ``check``. Adding a rule is a one-line edit.
+    #
+    # Diversification/breadth is intentionally NOT a rule here: it is owned by
+    # the spec-aware ``TargetSymbolCoverageGate.check_breadth``, which warns only
+    # when ``spec.target_symbols`` declares more than one intended symbol and the
+    # ledger traded just one. The anomaly detector has no view of spec intent, so
+    # a rule here would false-positive on deliberately single-asset strategies
+    # (e.g. an EURUSD-only hypothesis) — do not re-add a spec-unaware check.
     _RULES: ClassVar[tuple] = (
         _check_annualized_return_ceiling,
         _check_win_rate,
@@ -503,7 +496,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
         _check_sharpe_ratio,
         _check_avg_hold_time,
         _check_trade_concentration,
-        _check_trade_diversification,
         _check_lookahead_bar_predictability,
         _check_cost_sensitivity,
     )
