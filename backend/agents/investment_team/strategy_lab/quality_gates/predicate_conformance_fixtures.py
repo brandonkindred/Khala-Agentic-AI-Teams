@@ -24,7 +24,7 @@ import pandas as pd
 from ...market_data_service import OHLCVBar
 from ..executor.predicate_evaluator import PandasHistoryView, evaluate_predicate
 from ..spec_dsl import EntryRule, IndicatorRef, Predicate, SignalExitRule
-from .rule_probes.synthesizer import (
+from .conformance_bars import (
     _bars_to_df,
     _normalise_ohlc,
     _resolve_probe_symbol,
