@@ -21,6 +21,14 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# The JSON Schema the LLM response must conform to, rendered once for
+# injection into the prompt. This is the SAME schema passed to the model's
+# ``format`` field via ``get_strands_model(response_schema=REFINEMENT_SCHEMA)``,
+# so the prompt-level contract and the decoder-level constraint can never
+# drift. Provider-agnostic: it constrains the model even when structured
+# output is disabled or the provider is Bedrock (which ignores ``format``).
+_REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
+
 # Refinement output is code-only (#543). ``strategy_code`` is consumed
 # separately; ``changes_made`` is logged. Any other top-level key in the
 # LLM payload is dropped with a warning. ``risk_limits`` is passed through
@@ -61,7 +69,17 @@ Risk limits: {risk_limits}
    DSL objects; do NOT emit them back in your response.
 3. Ensure your fix doesn't re-introduce any previously fixed issues.
 
-Return ONLY a JSON object with no markdown — exactly these two keys:
+## Response format — JSON only
+Respond with a SINGLE valid JSON object and nothing else: no markdown
+fences, no prose before or after, every brace balanced. Your response
+MUST conform to this JSON Schema:
+
+```json
+{response_schema_json}
+```
+
+Concretely, emit exactly these keys (omit `risk_limits` unless you are
+tightening a risk limit):
 {{
   "strategy_code": "the complete fixed Python code",
   "changes_made": "1-2 sentence summary of what you changed and why"
@@ -131,6 +149,7 @@ class RefinementAgent:
             metrics_section=metrics_section,
             n_prior_attempts=len(prior_attempts) if prior_attempts else 0,
             prior_attempts_text=prior_text,
+            response_schema_json=_REFINEMENT_SCHEMA_JSON,
         )
 
         parsed = self._invoke_and_parse(system_prompt, user_prompt, failure_phase)

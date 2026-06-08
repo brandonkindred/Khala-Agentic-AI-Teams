@@ -15,6 +15,7 @@ The behaviour mirrors ``DesignAgent._invoke_and_parse``.
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import List
 
@@ -109,6 +110,45 @@ def test_correction_prompt_is_fed_back(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "could not be parsed as a single JSON object" in seen[1]
     assert "No JSON object found in LLM response" in seen[1]
     assert "Fix the following trading strategy code" in seen[1]
+
+
+def test_initial_prompt_embeds_response_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The first prompt sent to the LLM carries the JSON Schema and an explicit
+    JSON-only instruction so the model knows the exact expected response shape."""
+    seen: List[str] = []
+
+    class _CapturingAgent:
+        def __call__(self, prompt: str) -> str:
+            seen.append(prompt)
+            return _GOOD
+
+    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(mod, "Agent", lambda **_k: _CapturingAgent())
+
+    RefinementAgent().run(
+        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+    )
+
+    assert len(seen) == 1
+    prompt = seen[0]
+    # Explicit "respond in JSON" directive.
+    assert "Response format — JSON only" in prompt
+    assert "MUST conform to this JSON Schema" in prompt
+    # The actual schema (same object passed to the model's ``format`` field) is
+    # embedded verbatim — not just a loose two-key example.
+    assert mod._REFINEMENT_SCHEMA_JSON in prompt
+    schema = json.loads(mod._REFINEMENT_SCHEMA_JSON)
+    assert schema["type"] == "object"
+    assert schema["required"] == ["strategy_code"]
+    assert {"strategy_code", "changes_made", "risk_limits"} <= set(schema["properties"])
+
+
+def test_embedded_schema_matches_format_constraint() -> None:
+    """The schema in the prompt is the SAME one fed to the model decoder, so the
+    prompt-level contract and the structured-output constraint cannot drift."""
+    from investment_team.strategy_lab.agents._response_schemas import REFINEMENT_SCHEMA
+
+    assert json.loads(mod._REFINEMENT_SCHEMA_JSON) == REFINEMENT_SCHEMA
 
 
 def test_raises_after_budget_exhausted(monkeypatch: pytest.MonkeyPatch) -> None:
