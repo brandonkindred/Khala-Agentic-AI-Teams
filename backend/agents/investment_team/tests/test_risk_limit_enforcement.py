@@ -352,6 +352,77 @@ def test_risk_filter_allows_entry_under_all_limits() -> None:
     assert len(outcome.entry_fills) == 1
 
 
+def test_presized_entry_fills_when_fill_price_gaps_above_position_cap() -> None:
+    """A dispatcher-presized order (e.g. fixed_fraction sized AT the cap) must
+    still FILL when a price gap between the sizing bar and the fill bar pushes the
+    realised notional marginally above max_position_pct. The cap is a pre-entry
+    sizing bound, not a fill-time rejection — this is the regression for the
+    spurious "position 5.0% of equity > max_position_pct 5.0%" rejection."""
+    portfolio = Portfolio(initial_capital=100_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=5.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(enabled=False),
+    )
+    # 50 units * $101 fill = $5,050 = 5.05% of $100k equity — just over the 5%
+    # cap. Sized at the cap on the prior bar; the fill bar gapped up.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="c1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=50,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            risk_presized=True,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=100_000.0,
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-02", price=101.0))
+    assert len(outcome.entry_fills) == 1, "presized order must fill through the gap"
+    assert not any(e.kind == "rejected" for e in outcome.diagnostic_events), (
+        "no risk-gate rejection for a presized over-cap fill"
+    )
+
+
+def test_unpresized_entry_rejected_when_fill_price_exceeds_cap() -> None:
+    """Contrast: a custom-code (non-presized) order at the same over-cap notional
+    is still rejected — the fill-time gate remains the sole position-cap backstop
+    for orders the dispatcher never sized."""
+    portfolio = Portfolio(initial_capital=100_000.0)
+    order_book = OrderBook()
+    sim = FillSimulator(
+        portfolio=portfolio,
+        order_book=order_book,
+        risk_filter=RiskFilter(RiskLimits(max_position_pct=5.0)),
+        config=FillSimulatorConfig(slippage_bps=0.0, transaction_cost_bps=0.0),
+        bar_safety=BarSafetyAssertion(enabled=False),
+    )
+    order_book.submit(
+        OrderRequest(
+            client_order_id="c1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=50,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            risk_presized=False,
+        ),
+        submitted_at="2024-01-01",
+        submitted_equity=100_000.0,
+    )
+
+    outcome = sim.process_bar(_bar("2024-01-02", price=101.0))
+    assert len(outcome.entry_fills) == 0
+    rejected = [e for e in outcome.diagnostic_events if e.kind == "rejected"]
+    assert rejected and rejected[0].reason.startswith("risk_gate:")
+
+
 # ---------------------------------------------------------------------------
 # End-to-end — default spec still runs unchanged under the typed schema
 # ---------------------------------------------------------------------------
