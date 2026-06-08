@@ -90,6 +90,12 @@ def run_strategy_code(
             timeframe="1d",
             entry_rules=[],
             exit_rules=[],
+            # The ad-hoc ``strategy_code`` drives all trading itself (no engine
+            # entry rules), so it IS custom-code: mark it so the mode layers pass
+            # ``entry_rules=None`` and the runtime short-safety stop is injected for
+            # any short the code opens (an empty entry_rules list alone no longer
+            # triggers that injection).
+            requires_custom_code=True,
             strategy_code=strategy_code,
         )
     elif strategy.strategy_code != strategy_code:

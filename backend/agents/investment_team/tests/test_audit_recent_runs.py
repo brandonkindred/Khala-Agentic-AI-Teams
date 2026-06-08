@@ -964,7 +964,12 @@ class TestRiskLimitWhitelistSync:
 
         assert _RISK_LIMIT_TIGHTEN_DIR == _RISK_LIMIT_TIGHTEN_DIRECTION
 
-    def test_audit_keys_include_max_position_pct(self) -> None:
+    def test_audit_keys_exclude_retired_max_loss_per_trade_pct(self) -> None:
         from investment_team.scripts.audit_recent_runs import _RISK_LIMIT_KEYS
 
+        # The retired field must be gone from the audit replica (a meaningful
+        # regression guard — re-adding it would make audits mis-report a key the
+        # orchestrator's refinement merge no longer accepts). max_position_pct
+        # stays as the surviving deployed-capital cap.
+        assert "max_loss_per_trade_pct" not in _RISK_LIMIT_KEYS
         assert "max_position_pct" in _RISK_LIMIT_KEYS

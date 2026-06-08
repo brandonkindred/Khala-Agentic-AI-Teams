@@ -148,12 +148,13 @@ def test_fixed_fraction_over_cap_clamped_at_sizing():
 
 
 def test_maybe_emit_records_risk_capped_skip_when_position_cap_zeroes_entry():
-    """A matched signal that the position cap reduces to zero (a sub-1 whole-share
-    order whose one-share floor would breach max_position_pct) is recorded as a
-    'risk_capped_skip' diagnostic event rather than a silent no-emit, so a
-    zero-trade run is explainable. fraction=5% (<= the 6% cap) on a $500 stock at
-    $1k equity is 0.1 share raw; one share ($500) is 50% of equity, far above the
-    6% cap -> sized to 0."""
+    """A matched signal whose whole-share floor would breach the position cap is
+    recorded as a 'risk_capped_skip' diagnostic event rather than a silent
+    no-emit, so a zero-trade run is explainable. fraction=5% on a $500 stock at $1k
+    equity is 0.1 share raw — within the 6% cap (0.12 share), so the main clamp
+    does not reduce it; but a sub-1 order can't be fractional on a whole-share
+    venue, and flooring up to one share ($500 = 50% of equity) would breach the 6%
+    cap, so the one-share-floor probe skips the entry (qty -> 0)."""
     rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
     dispatcher = _EngineEntryDispatcher(
         entry_rules=rules,

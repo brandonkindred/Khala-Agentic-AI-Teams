@@ -600,11 +600,11 @@ class _EngineEntryDispatcher:
         rule, rule_idx = match
         qty = self._compute_qty(rule.side, cur_bar, portfolio, views)
         if qty <= 0:
-            # A matched entry signal that risk-sizing reduced to zero — an
-            # uncovered short (unbounded loss), or a sub-1 whole-share order that
-            # one share would push past a cap. Bump a counter AND record an event
-            # so a zero-trade run driven by risk-capping is distinguishable in the
-            # final category/summary from a dead entry predicate ("no signal").
+            # A matched entry signal that risk-sizing reduced to zero — a sub-1
+            # whole-share order whose one-share floor would push past
+            # max_position_pct, or non-positive equity. Bump a counter AND record
+            # an event so a zero-trade run driven by risk-capping is distinguishable
+            # in the final category/summary from a dead entry predicate ("no signal").
             result.execution_diagnostics.risk_capped_entries += 1
             _record_event(
                 result.execution_diagnostics,
@@ -1198,15 +1198,17 @@ class TradingService:
         # (``basis="entry_price"``, ``pct=1.0``) so the short exits at 2x entry —
         # bounding its modeled worst-case loss at the full deployed amount, like a
         # long. The readiness gate relies on this contract to pass uncovered
-        # shorts. Falsy ``entry_rules`` (``None`` or ``[]``) means the engine has
-        # no entry rules to enumerate — the custom-code path (``None``) and the
-        # ad-hoc / strategy-code-driven path (``[]``, e.g. the sandbox compat
-        # shim) both let the subprocess open shorts, so inject the backstop
-        # unconditionally there rather than assume long-only. The rule is a no-op
-        # for longs (entry_price/1.0 → long floor = 0, never fires), and
+        # shorts. The "sides unknown, might short" signal is ``entry_rules is None``
+        # — the custom-code path, where the mode layers pass ``entry_rules=None``
+        # (``requires_custom_code``) and the subprocess may open shorts. A populated
+        # list is enumerated for an explicit short side; an empty list (a no-trade
+        # engine spec, or a strategy-code-driven spec that did not mark itself
+        # custom-code) does NOT trigger injection, so its ``_exit_rules`` stays
+        # empty and the chunked-bar fast path is not needlessly disabled. The rule
+        # is a no-op for longs (entry_price/1.0 → long floor = 0, never fires), and
         # ``self._exit_rules`` is a fresh copy so this never mutates the caller's
         # list.
-        shorts_possible = not entry_rules or any(
+        shorts_possible = entry_rules is None or any(
             getattr(rule, "side", "long") == "short" for rule in entry_rules
         )
         if shorts_possible and first_side_stop_factor(self._exit_rules, "short") is None:

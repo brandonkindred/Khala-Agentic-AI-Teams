@@ -311,18 +311,20 @@ def test_custom_code_path_auto_injects_short_stop() -> None:
     assert _has_full_loss_short_stop(service._exit_rules)
 
 
-def test_empty_entry_rules_auto_injects_short_stop() -> None:
-    """An empty (not None) entry_rules list is also un-enumerable — e.g. the
-    sandbox-compat shim builds a strategy-code-driven spec with entry_rules=[] and
-    requires_custom_code=False, so run_backtest passes [] verbatim. The strategy
-    code can still open shorts, so the backstop must be injected here too."""
+def test_empty_entry_rules_is_not_auto_injected() -> None:
+    """An empty (not None) entry_rules list does NOT trigger injection — it is a
+    no-trade engine spec, or a strategy-code-driven spec that should mark itself
+    custom-code (which makes the mode layers pass entry_rules=None instead). Not
+    injecting keeps _exit_rules empty so the chunked-bar fast path is not
+    needlessly disabled for non-shorting engine/test specs. The 'sides unknown'
+    signal is entry_rules=None (custom-code), not an empty list."""
     service = TradingService(
         strategy_code=_NOOP_STRATEGY_CODE,
         config=_config(),
         entry_rules=[],
         exit_rules=[],
     )
-    assert _has_full_loss_short_stop(service._exit_rules)
+    assert service._exit_rules == []
 
 
 def test_trading_service_surfaces_lookahead_violation() -> None:
