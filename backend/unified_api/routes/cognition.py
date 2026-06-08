@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from enum import Enum
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -49,26 +50,17 @@ class ProposalDecision(BaseModel):
     decided_by: str = Field(..., min_length=1, description="Operator handle/email deciding.")
 
 
-def _parse_proposal_status(raw: str | None) -> ProposalStatus | None:
+def _parse_status(raw: str | None, enum_cls: type[Enum], label: str) -> Enum | None:
+    """Parse ``raw`` into ``enum_cls`` (``None`` passes through), 400 on a bad value."""
     if raw is None:
         return None
     try:
-        return ProposalStatus(raw)
+        return enum_cls(raw)
     except ValueError as exc:
-        valid = ", ".join(s.value for s in ProposalStatus)
+        valid = ", ".join(s.value for s in enum_cls)
         raise HTTPException(
-            status_code=400, detail=f"Invalid proposal status {raw!r}; expected one of: {valid}"
+            status_code=400, detail=f"Invalid {label} status {raw!r}; expected one of: {valid}"
         ) from exc
-
-
-def _parse_rule_status(raw: str | None) -> RuleStatus | None:
-    if raw is None:
-        return None
-    try:
-        return RuleStatus(raw)
-    except ValueError as exc:
-        valid = ", ".join(s.value for s in RuleStatus)
-        raise HTTPException(status_code=400, detail=f"Invalid rule status {raw!r}; expected one of: {valid}") from exc
 
 
 def _storage_guard(exc: AgentCognitionStorageUnavailable) -> HTTPException:
@@ -83,7 +75,7 @@ def list_proposals(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RuleProposal]:
-    parsed = _parse_proposal_status(status)
+    parsed = _parse_status(status, ProposalStatus, "proposal")
     try:
         return store.list_proposals(agent_id, status=parsed, limit=limit, offset=offset)
     except AgentCognitionStorageUnavailable as exc:
@@ -144,7 +136,7 @@ def list_rules(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[Rule]:
-    parsed = _parse_rule_status(status)
+    parsed = _parse_status(status, RuleStatus, "rule")
     try:
         return store.list_rules(agent_id, status=parsed, limit=limit, offset=offset)
     except AgentCognitionStorageUnavailable as exc:

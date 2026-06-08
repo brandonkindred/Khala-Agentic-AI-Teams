@@ -24,13 +24,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from datetime import datetime, timezone
 
 from agent_cognition.graph import watermark_store
 from agent_cognition.memory import rollup, store
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.rules import reflection
+from agent_cognition.runtime_config import read_int_with_floor
 from shared_postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
@@ -41,15 +41,9 @@ _MIN_INTERVAL_S = 60
 
 def scheduler_interval_seconds() -> int:
     """Seconds between scheduler passes (env ``AGENT_COGNITION_SCHEDULER_INTERVAL_S``)."""
-    raw = os.environ.get("AGENT_COGNITION_SCHEDULER_INTERVAL_S", str(_DEFAULT_INTERVAL_S))
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid AGENT_COGNITION_SCHEDULER_INTERVAL_S=%r; using %d", raw, _DEFAULT_INTERVAL_S
-        )
-        return _DEFAULT_INTERVAL_S
-    return max(_MIN_INTERVAL_S, value)
+    return read_int_with_floor(
+        "AGENT_COGNITION_SCHEDULER_INTERVAL_S", _DEFAULT_INTERVAL_S, _MIN_INTERVAL_S
+    )
 
 
 def _agent_retention_days(agent_id: str) -> int:

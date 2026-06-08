@@ -18,26 +18,18 @@ can never fail an agent invoke.
 from __future__ import annotations
 
 import logging
-import os
 
+from agent_cognition.runtime_config import CHARS_PER_TOKEN, read_positive_int
 from shared_neo4j import get_graphiti, is_neo4j_enabled
 
 logger = logging.getLogger(__name__)
 
-_CHARS_PER_TOKEN = 4
 _DEFAULT_TOP_K = 10
 
 
 def _search_top_k() -> int:
     """Max graph facts retrieved per query (env ``AGENT_COGNITION_GRAPH_SEARCH_TOP_K``)."""
-    raw = os.getenv("AGENT_COGNITION_GRAPH_SEARCH_TOP_K")
-    if raw is None:
-        return _DEFAULT_TOP_K
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_TOP_K
-    return value if value >= 1 else _DEFAULT_TOP_K
+    return read_positive_int("AGENT_COGNITION_GRAPH_SEARCH_TOP_K", _DEFAULT_TOP_K)
 
 
 async def build_graph_context(agent_id: str, query: str, token_budget: int) -> str:
@@ -74,7 +66,7 @@ async def build_graph_context(agent_id: str, query: str, token_budget: int) -> s
         return ""
 
     block = "## Knowledge graph\n" + "\n".join(f"- {fact}" for fact in facts)
-    char_budget = token_budget * _CHARS_PER_TOKEN
+    char_budget = token_budget * CHARS_PER_TOKEN
     if len(block) > char_budget:
         block = block[:char_budget]
     return block

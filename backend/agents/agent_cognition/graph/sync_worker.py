@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from typing import Any
 
 from agent_cognition.graph import watermark_store
 from agent_cognition.memory import store as memory_store
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
+from agent_cognition.runtime_config import read_int_with_floor
 from shared_neo4j import get_graphiti, is_neo4j_enabled, register_graph_indices
 from shared_postgres import is_postgres_enabled
 
@@ -43,26 +43,14 @@ _DEFAULT_BATCH = 50
 
 def graph_sync_interval_seconds() -> int:
     """Seconds between sync passes (env ``AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S``)."""
-    raw = os.environ.get("AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S", str(_DEFAULT_INTERVAL_S))
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "Invalid AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S=%r; using %d", raw, _DEFAULT_INTERVAL_S
-        )
-        return _DEFAULT_INTERVAL_S
-    return max(_MIN_INTERVAL_S, value)
+    return read_int_with_floor(
+        "AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S", _DEFAULT_INTERVAL_S, _MIN_INTERVAL_S
+    )
 
 
 def graph_sync_batch() -> int:
     """Max episodes of each kind ingested per agent per pass (env ``..._BATCH``)."""
-    raw = os.environ.get("AGENT_COGNITION_GRAPH_SYNC_BATCH", str(_DEFAULT_BATCH))
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning("Invalid AGENT_COGNITION_GRAPH_SYNC_BATCH=%r; using %d", raw, _DEFAULT_BATCH)
-        return _DEFAULT_BATCH
-    return max(1, value)
+    return read_int_with_floor("AGENT_COGNITION_GRAPH_SYNC_BATCH", _DEFAULT_BATCH, 1)
 
 
 def _agent_graph_scope(agent_id: str) -> tuple[bool, bool]:
@@ -148,74 +136,94 @@ async def _sync_one_agent(graphiti: Any, agent_id: str, batch: int) -> int:
     return count
 
 
-async def _ingest_events(graphiti: Any, agent_id: str, wm: Any, batch: int) -> int:
-    """Add up to ``batch`` new episodic events, then advance the event cursor."""
+async def _ingest_batch(
+    graphiti: Any,
+    agent_id: str,
+    rows: list,
+    *,
+    episode_of,
+    advance,
+) -> int:
+    """Add a batch's episodes (group_id-scoped), then advance the watermark.
+
+    Centralizes the at-least-once contract shared by event and summary ingestion:
+    every episode is added (under a stable ``name``) **before** the watermark
+    moves, so a crash re-ingests from the last committed cursor and a re-add is an
+    update, not a duplicate. ``episode_of(row)`` yields the per-row ``add_episode``
+    fields; ``advance(last_row, count)`` advances the cursor for the last row.
+
+    Postconditions: returns ``len(rows)``; no watermark write when ``rows`` is empty.
+    """
+    if not rows:
+        return 0
     from graphiti_core.nodes import EpisodeType  # noqa: PLC0415
 
-    after_recorded_at = wm.last_event_recorded_at if wm else None
-    after_id = wm.last_event_id if wm else None
+    for row in rows:
+        await graphiti.add_episode(group_id=agent_id, source=EpisodeType.text, **episode_of(row))
+    await asyncio.to_thread(advance, rows[-1], len(rows))
+    return len(rows)
+
+
+async def _ingest_events(graphiti: Any, agent_id: str, wm: Any, batch: int) -> int:
+    """Add up to ``batch`` new episodic events, then advance the event cursor."""
     rows = await asyncio.to_thread(
         memory_store.fetch_events_recorded_after,
         agent_id,
-        after_recorded_at=after_recorded_at,
-        after_id=after_id,
+        after_recorded_at=wm.last_event_recorded_at if wm else None,
+        after_id=wm.last_event_id if wm else None,
         limit=batch,
     )
-    if not rows:
-        return 0
-    for event, _recorded_at in rows:
-        await graphiti.add_episode(
-            name=f"event:{event.id}",
-            episode_body=f"[{event.kind.value}] {event.content}",
-            source=EpisodeType.text,
-            source_description="agent episodic memory event",
-            reference_time=event.occurred_at,
-            group_id=agent_id,
+
+    def episode_of(rec):
+        event, _recorded_at = rec
+        return {
+            "name": f"event:{event.id}",
+            "episode_body": f"[{event.kind.value}] {event.content}",
+            "source_description": "agent episodic memory event",
+            "reference_time": event.occurred_at,
+        }
+
+    def advance(last, count):
+        event, recorded_at = last
+        watermark_store.upsert_watermark(
+            agent_id,
+            last_event_recorded_at=recorded_at,
+            last_event_id=event.id,
+            ingested_delta=count,
         )
-    last_event, last_recorded_at = rows[-1]
-    await asyncio.to_thread(
-        watermark_store.upsert_watermark,
-        agent_id,
-        last_event_recorded_at=last_recorded_at,
-        last_event_id=last_event.id,
-        ingested_delta=len(rows),
-    )
-    return len(rows)
+
+    return await _ingest_batch(graphiti, agent_id, rows, episode_of=episode_of, advance=advance)
 
 
 async def _ingest_summaries(graphiti: Any, agent_id: str, wm: Any, batch: int) -> int:
     """Add up to ``batch`` new rollup summaries, then advance the summary cursor."""
-    from graphiti_core.nodes import EpisodeType  # noqa: PLC0415
-
-    after_created_at = wm.last_summary_created_at if wm else None
-    after_id = wm.last_summary_id if wm else None
     summaries = await asyncio.to_thread(
         memory_store.fetch_summaries_created_after,
         agent_id,
-        after_created_at=after_created_at,
-        after_id=after_id,
+        after_created_at=wm.last_summary_created_at if wm else None,
+        after_id=wm.last_summary_id if wm else None,
         limit=batch,
     )
-    if not summaries:
-        return 0
-    for summary in summaries:
-        await graphiti.add_episode(
-            name=f"summary:{summary.id}",
-            episode_body=_render_summary(summary),
-            source=EpisodeType.text,
-            source_description=f"{summary.scale.value} rollup summary",
-            reference_time=summary.period_start,
-            group_id=agent_id,
+
+    def episode_of(summary):
+        return {
+            "name": f"summary:{summary.id}",
+            "episode_body": _render_summary(summary),
+            "source_description": f"{summary.scale.value} rollup summary",
+            "reference_time": summary.period_start,
+        }
+
+    def advance(last, count):
+        watermark_store.upsert_watermark(
+            agent_id,
+            last_summary_created_at=last.created_at,
+            last_summary_id=last.id,
+            ingested_delta=count,
         )
-    last = summaries[-1]
-    await asyncio.to_thread(
-        watermark_store.upsert_watermark,
-        agent_id,
-        last_summary_created_at=last.created_at,
-        last_summary_id=last.id,
-        ingested_delta=len(summaries),
+
+    return await _ingest_batch(
+        graphiti, agent_id, summaries, episode_of=episode_of, advance=advance
     )
-    return len(summaries)
 
 
 def _render_summary(summary: Any) -> str:

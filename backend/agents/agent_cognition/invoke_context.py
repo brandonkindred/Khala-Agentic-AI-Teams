@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import os
 from collections.abc import Mapping
 from typing import Any
 
@@ -25,6 +24,7 @@ from agent_cognition.graph.retrieval import build_graph_context
 from agent_cognition.memory.retrieval import build_memory_digest
 from agent_cognition.models import CognitionContext, RuleStatus
 from agent_cognition.rules import store as rules_store
+from agent_cognition.runtime_config import read_positive_int
 
 logger = logging.getLogger(__name__)
 
@@ -33,14 +33,7 @@ _DEFAULT_DIGEST_TOKENS = 1024
 
 def invoke_digest_token_budget() -> int:
     """Token budget for each memory block (env ``AGENT_COGNITION_INVOKE_DIGEST_TOKENS``)."""
-    raw = os.getenv("AGENT_COGNITION_INVOKE_DIGEST_TOKENS")
-    if raw is None:
-        return _DEFAULT_DIGEST_TOKENS
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return _DEFAULT_DIGEST_TOKENS
-    return value if value >= 1 else _DEFAULT_DIGEST_TOKENS
+    return read_positive_int("AGENT_COGNITION_INVOKE_DIGEST_TOKENS", _DEFAULT_DIGEST_TOKENS)
 
 
 def extract_query_text(body: Any) -> str:

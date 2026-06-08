@@ -38,14 +38,15 @@ from datetime import datetime, timezone
 
 from agent_cognition.memory import store
 from agent_cognition.models import MemoryEvent, PeriodSummary, Scale
+from agent_cognition.runtime_config import CHARS_PER_TOKEN
 from llm_service import compact_text, get_client
 
 logger = logging.getLogger(__name__)
 
-# Token→char conversion. The repo uses a conservative ~4-chars-per-token
-# heuristic (see ``llm_service`` clients), reused here so callers express the
-# digest budget in tokens while ``compact_text`` works in characters.
-_CHARS_PER_TOKEN = 4
+# Token→char conversion (the repo's conservative ~4-chars-per-token heuristic),
+# sourced from the shared constant so the knowledge-graph context and this digest
+# never diverge. Kept under the module-private name for existing call sites.
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
 
 # Default number of recent raw events used to represent the in-progress period.
 # Read at call time so operators/tests can override via the env var below.
