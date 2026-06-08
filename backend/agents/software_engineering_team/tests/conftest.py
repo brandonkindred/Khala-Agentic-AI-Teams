@@ -13,6 +13,10 @@ import pytest
 # succeed; real HTTP calls will fail loudly.
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
 os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")
+# Disable the slow 429 rate-limit backoff so no test can ever sleep the 300s+
+# schedule.  Mirrored here because this team overrides pytest's rootdir, so the
+# matching default in ``backend/conftest.py`` is not auto-discovered.
+os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
 
 # Re-export the in-memory FakeJobServiceClient + ``fake_job_client`` fixture so
 # unit tests in this team can use them.  The SE team's ``pyproject.toml``
