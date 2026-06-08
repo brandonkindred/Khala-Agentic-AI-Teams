@@ -663,9 +663,15 @@ def test_missed_day_backfilled_on_next_pass(canned: CannedLLM) -> None:
 
 
 @pg
-def test_month_built_from_days_not_weeks_no_cross_month_bleed(canned: CannedLLM) -> None:
+def test_month_built_from_days_not_weeks_no_cross_month_bleed(
+    canned: CannedLLM, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # 2026-01-29 (Thu) and 2026-02-01 (Sun) fall in the SAME ISO week
     # (Mon 2026-01-26 .. Sun 2026-02-01) but DIFFERENT calendar months.
+    # `now` is 2026-03-02 (so Feb is closed), which puts the Jan month ~60 days
+    # back — beyond the `canned` fixture's 40-day lookback, which would (correctly)
+    # skip the floor-bisected January month. Widen it so January is in range.
+    monkeypatch.setenv("AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS", "400")
     agent = "a"
     store.append_event(agent, _event(agent, _dt(2026, 1, 29), seq=1))
     store.append_event(agent, _event(agent, _dt(2026, 1, 29), seq=2))
@@ -829,6 +835,11 @@ def test_hierarchical_day_week_month_year(
     canned: CannedLLM, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     agent = "a"
+    # The 2025 year spans Jan–Dec 2025; with now in Jan 2026 its start is ~370
+    # days back, so the lookback must reach it. The `canned` fixture's 40-day
+    # default would put the floor inside 2025 and (correctly) skip the
+    # floor-bisected year — override it so the year aggregate is in range.
+    monkeypatch.setenv("AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS", "400")
     store.append_event(agent, _event(agent, _dt(2025, 12, 30)))
     store.append_event(agent, _event(agent, _dt(2025, 12, 31)))
     # now in early 2026 so the 2025 year (and Dec month) are closed.
