@@ -78,6 +78,24 @@ def test_retries_unparseable_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
     assert agent.calls == 2  # one unparseable, one good
 
 
+def test_retries_malformed_braced_json_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A braced-but-invalid first response (the 'Failed to parse JSON' branch of
+    _extract_json, distinct from 'No JSON object found') is also retried."""
+    # Has a '{' so it passes the brace-scan, but is not valid JSON — exercises
+    # the json.JSONDecodeError -> ValueError wrapping path.
+    agent = _ScriptedAgent(['{"strategy_code": "# half', _GOOD])
+    monkeypatch.setattr(mod, "get_strands_model", lambda *_a, **_k: object())
+    monkeypatch.setattr(mod, "Agent", lambda **_k: agent)
+    monkeypatch.setenv("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")
+
+    updates, new_code = RefinementAgent().run(
+        spec=_spec(), code="# old", failure_phase="execution", failure_details="boom"
+    )
+
+    assert new_code == "# fixed"
+    assert agent.calls == 2
+
+
 def test_correction_prompt_is_fed_back(monkeypatch: pytest.MonkeyPatch) -> None:
     """The retry prompt carries the JSON-correction preamble, not the raw task."""
     seen: List[str] = []
