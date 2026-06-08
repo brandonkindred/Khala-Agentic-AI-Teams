@@ -132,6 +132,33 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+async def _maybe_build_cognition(agent_id: str, manifest: Any, body: Any) -> Any:
+    """Build the platform cognition context for an invoke, or ``None``.
+
+    Returns ``None`` (a normal uninjected invoke) when the agent has no cognition
+    manifest block, Postgres is unconfigured, or context assembly fails — building
+    the side channel must never break the invoke. Otherwise returns the
+    ``CognitionContext`` (active rules + memory digest + knowledge-graph context).
+    """
+    if getattr(manifest, "cognition", None) is None:
+        return None
+    try:
+        from shared_postgres import is_postgres_enabled
+
+        if not is_postgres_enabled():
+            return None
+        from agent_cognition.invoke_context import build_cognition_context, extract_query_text
+
+        return await build_cognition_context(agent_id, query=extract_query_text(body))
+    except Exception:
+        logger.warning(
+            "cognition: context build failed for %s; proceeding without injection",
+            agent_id,
+            exc_info=True,
+        )
+        return None
+
+
 @router.post("/{agent_id}/invoke")
 async def invoke_agent(
     agent_id: str,
@@ -167,6 +194,20 @@ async def invoke_agent(
             status_code=400,
             detail=f"Request body must not contain the reserved key {ENVELOPE_MARKER!r}.",
         )
+
+    # Build the platform cognition side channel (active rules + memory digest +
+    # knowledge-graph context) and gate enforced preconditions before spending a
+    # sandbox round-trip. No-op for agents without a cognition manifest block.
+    cognition_ctx = await _maybe_build_cognition(agent_id, manifest, body)
+    if cognition_ctx is not None:
+        from agent_cognition.rules.enforcement import evaluate_precondition
+
+        allowed, reason = evaluate_precondition({"input": body, "agent_id": agent_id}, cognition_ctx.rules)
+        if not allowed:
+            raise HTTPException(
+                status_code=422,
+                detail={"message": "Blocked by cognition precondition", "reason": reason},
+            )
 
     try:
         handle = await acquire(agent_id)
@@ -205,10 +246,18 @@ async def invoke_agent(
     # shim) is strictly shorter, so the shim always gets to surface a 504
     # envelope before this fires.
     timeout_s = TEAM_CONFIGS.get(manifest.team).timeout_seconds if manifest.team in TEAM_CONFIGS else 120.0
+    # Wrap the body with the cognition envelope when injecting; the original
+    # `body` is preserved for run persistence below (we store what the caller sent).
+    post_body = body
+    if cognition_ctx is not None:
+        from agent_cognition.tools.envelope import wrap_request
+
+        post_body = wrap_request(body, cognition_ctx.model_dump(mode="json"))
+
     target = f"{handle.url}/_agents/{agent_id}/invoke"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
-            upstream = await client.post(target, json=body)
+            upstream = await client.post(target, json=post_body)
     except httpx.HTTPError as exc:
         logger.exception("invoke proxy failed %s", target)
         raise HTTPException(status_code=502, detail=f"Sandbox invoke failed: {exc}") from exc
@@ -257,6 +306,20 @@ async def invoke_agent(
         sandbox_url=handle.url,
         boot_ms=handle.boot_ms,
     )
+
+    # Gate enforced postconditions on the agent's output. A violation drops the
+    # output with a 422 (the run is still persisted above for audit).
+    if cognition_ctx is not None and isinstance(content, dict):
+        from agent_cognition.rules.enforcement import evaluate_postcondition
+
+        output = content.get("output", content)
+        if isinstance(output, dict):
+            allowed, reason = evaluate_postcondition(output, cognition_ctx.rules)
+            if not allowed:
+                raise HTTPException(
+                    status_code=422,
+                    detail={"message": "Blocked by cognition postcondition", "reason": reason},
+                )
 
     return JSONResponse(status_code=upstream.status_code, content=content)
 

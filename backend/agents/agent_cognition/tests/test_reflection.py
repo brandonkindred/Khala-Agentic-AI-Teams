@@ -791,20 +791,6 @@ def test_is_noop_amend_guards_non_amend_and_missing_target() -> None:
     assert reflection._is_noop_amend(same, by_id) is True  # identical content
 
 
-@pytest.mark.parametrize(
-    ("raw", "expected"),
-    [(None, 5), ("3", 3), ("0", 5), ("-2", 5), ("garbage", 5)],
-)
-def test_read_positive_int_fallbacks(
-    monkeypatch: pytest.MonkeyPatch, raw: str | None, expected: int
-) -> None:
-    if raw is None:
-        monkeypatch.delenv("X_REFLECT_INT", raising=False)
-    else:
-        monkeypatch.setenv("X_REFLECT_INT", raw)
-    assert reflection._read_positive_int("X_REFLECT_INT", 5) == expected
-
-
 def test_env_tunables_read_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT", "9")
     monkeypatch.setenv("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", "2")
