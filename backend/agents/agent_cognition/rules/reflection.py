@@ -31,7 +31,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from datetime import datetime
 from typing import Any
 from uuid import uuid4
@@ -52,6 +51,7 @@ from agent_cognition.models import (
 )
 from agent_cognition.rules import store as rules_store
 from agent_cognition.rules.predicate import is_valid_predicate
+from agent_cognition.runtime_config import read_positive_int
 from llm_service import compact_text, complete_validated, get_client
 
 logger = logging.getLogger(__name__)
@@ -266,7 +266,8 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     # call, and structured-output validation can retry) so the report reflects
     # true usage for schedulers/budgets/observability rather than a hard-coded 1.
     llm = _CallCountingClient(get_client("cognition"))
-    result = _propose(summaries, active_rules, llm)
+    graph_block = _graph_grounding_block(agent_id, summaries)
+    result = _propose(summaries, active_rules, llm, graph_block=graph_block)
     report.llm_calls = llm.calls
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
@@ -357,16 +358,25 @@ def _recent_summaries(agent_id: str) -> list[PeriodSummary]:
 
 
 def _propose(
-    summaries: list[PeriodSummary], active_rules: list[Rule], llm: Any
+    summaries: list[PeriodSummary],
+    active_rules: list[Rule],
+    llm: Any,
+    *,
+    graph_block: str = "",
 ) -> _ReflectionResult:
     """Render the inputs, bound them to budget, and ask the LLM to propose.
 
     Preconditions: ``summaries`` is non-empty.
     Postconditions: returns a validated :class:`_ReflectionResult` (whose
     proposal list may be empty); the input is compacted to the configured char
-    budget before the call so a long memory window can't overflow the model.
+    budget before the call so a long memory window can't overflow the model. When
+    ``graph_block`` is non-empty it is prepended as additional grounding context —
+    additive only, it never changes what the engine writes (still only ``pending``
+    proposals via ``create_proposal``).
     """
     text = f"{_render_summaries_text(summaries)}\n\n{_render_rules_text(active_rules)}"
+    if graph_block:
+        text = f"{graph_block}\n\n{text}"
     bounded = compact_text(
         text, _input_char_budget(), llm, content_description="agent memory and rules"
     )
@@ -379,6 +389,42 @@ def _propose(
         temperature=0.0,
         correction_attempts=1,
     )
+
+
+def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str:
+    """Best-effort knowledge-graph grounding for reflection, or ``""``.
+
+    Returns a ``## Related knowledge (from graph)`` block of recency-ranked facts
+    related to the agent's recent memory, or ``""`` when the graph layer is
+    disabled, the agent opted out of grounding, or anything fails. The graph is a
+    read-only input here — it never proposes or activates a rule.
+
+    Postconditions:
+        * ``""`` unless ``is_neo4j_enabled()`` **and** the agent's manifest enables
+          ``knowledge_graph.ground_rule_proposals``; never raises.
+    """
+    try:
+        from shared_neo4j import is_neo4j_enabled  # noqa: PLC0415
+
+        if not is_neo4j_enabled():
+            return ""
+        from agent_cognition.manifest_scope import ground_rule_proposals  # noqa: PLC0415
+
+        if not ground_rule_proposals(agent_id):
+            return ""
+        from agent_cognition.graph.bridge import run_sync  # noqa: PLC0415
+        from agent_cognition.graph.retrieval import build_graph_context  # noqa: PLC0415
+
+        # Query the graph with the agent's recent memory text so the search
+        # surfaces facts related to what reflection is reasoning over.
+        query = _render_summaries_text(summaries)
+        block = run_sync(build_graph_context(agent_id, query), default="")
+        if not block:
+            return ""
+        return block.replace("## Knowledge graph", "## Related knowledge (from graph)", 1)
+    except Exception:
+        logger.warning("reflection: graph grounding failed; proceeding ungrounded", exc_info=True)
+        return ""
 
 
 # ---------------------------------------------------------------------------
@@ -665,30 +711,14 @@ def _render_rules_text(rules: list[Rule]) -> str:
 # ---------------------------------------------------------------------------
 def _summary_limit() -> int:
     """Summaries per scale fed to the reflector (env ``AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT", _DEFAULT_SUMMARY_LIMIT)
+    return read_positive_int("AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT", _DEFAULT_SUMMARY_LIMIT)
 
 
 def _max_proposals() -> int:
     """Cap on proposals written per run (env ``AGENT_COGNITION_REFLECTION_MAX_PROPOSALS``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", _DEFAULT_MAX_PROPOSALS)
+    return read_positive_int("AGENT_COGNITION_REFLECTION_MAX_PROPOSALS", _DEFAULT_MAX_PROPOSALS)
 
 
 def _input_char_budget() -> int:
     """Char budget for ``compact_text`` (env ``AGENT_COGNITION_REFLECTION_INPUT_CHARS``)."""
-    return _read_positive_int("AGENT_COGNITION_REFLECTION_INPUT_CHARS", _DEFAULT_INPUT_CHARS)
-
-
-def _read_positive_int(name: str, default: int) -> int:
-    """Parse a positive int env var, falling back to ``default``.
-
-    Postconditions: returns the parsed value when ``>= 1``; unset/garbage/
-    non-positive values fall back to ``default``.
-    """
-    raw = os.getenv(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return default
-    return value if value >= 1 else default
+    return read_positive_int("AGENT_COGNITION_REFLECTION_INPUT_CHARS", _DEFAULT_INPUT_CHARS)

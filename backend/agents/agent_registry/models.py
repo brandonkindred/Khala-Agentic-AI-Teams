@@ -60,13 +60,45 @@ class CognitionMemorySpec(BaseModel):
     )
 
 
+class CognitionKnowledgeGraphSpec(BaseModel):
+    """Per-agent knowledge-graph (Neo4j + Graphiti) config.
+
+    Controls the knowledge-graph layer that sits over the rote memory rollups:
+    what the sync worker ingests for this agent, and whether reflection grounds its
+    rule proposals with graph context. Every new cognition-enabled agent gets a
+    knowledge base by default (``enabled=True``); a specific agent opts out by
+    setting it false.
+
+    Invariants:
+        - Every field carries a safe default, so an omitted block (the common case)
+          behaves as the default-on graph.
+    """
+
+    enabled: bool = Field(
+        default=True,
+        description="Attach a Graphiti knowledge graph (group_id = agent_id) to this agent.",
+    )
+    ingest_events: bool = Field(
+        default=True, description="Ingest the agent's raw episodic events into the graph."
+    )
+    ingest_summaries: bool = Field(
+        default=True, description="Ingest the agent's rollup summaries into the graph."
+    )
+    ground_rule_proposals: bool = Field(
+        default=True,
+        description="Feed graph context into reflection so learned rule proposals are "
+        "better grounded. Never bypasses the human approval gate.",
+    )
+
+
 class CognitionSpec(BaseModel):
     """Declarative per-agent cognition config for the Agent Cognition Core.
 
     Metadata only — the registry never consumes it. Later phases do: the tools layer
     resolves ``tools``, the invoke proxy honours ``requires_idempotency_key``, the seed-pack
-    installer reads ``rule_packs``, and the central scheduler prunes memory per
-    ``memory.retention_days_events``.
+    installer reads ``rule_packs``, the central scheduler prunes memory per
+    ``memory.retention_days_events``, and the knowledge-graph sync worker / reflection read
+    ``knowledge_graph``.
 
     Invariants:
         - A manifest may omit the whole block (``AgentManifest.cognition is None``). When the
@@ -87,6 +119,10 @@ class CognitionSpec(BaseModel):
         default=False,
         description="When true the agent is side-effecting; invokes without a caller "
         "idempotency key are rejected.",
+    )
+    knowledge_graph: CognitionKnowledgeGraphSpec = Field(
+        default_factory=CognitionKnowledgeGraphSpec,
+        description="Knowledge-graph (Neo4j + Graphiti) attachment for this agent.",
     )
 
 

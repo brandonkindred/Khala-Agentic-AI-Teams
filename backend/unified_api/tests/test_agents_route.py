@@ -253,3 +253,118 @@ def test_invoke_rejects_caller_supplied_cognition_envelope(client: TestClient, m
     )
     assert resp.status_code == 400
     assert ENVELOPE_MARKER in resp.json()["detail"]
+
+
+def _cognition_ctx(rules):
+    from agent_cognition.models import CognitionContext
+
+    return CognitionContext(rules=rules, memory_digest="## Knowledge graph\n- fact")
+
+
+def _enforced_precondition_rule(predicate):
+    from datetime import datetime, timezone
+
+    from agent_cognition.models import Rule, RuleMode, RuleSource, RuleStatus
+
+    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    return Rule(
+        id="r-pre",
+        agent_id="blogging.planner",
+        text="enforced gate",
+        mode=RuleMode.ENFORCED,
+        status=RuleStatus.ACTIVE,
+        predicate=predicate,
+        source=RuleSource.OPERATOR,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def test_invoke_wraps_body_with_cognition_envelope(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """When a cognition context is built, the proxy wraps the body in the marked
+    envelope (input verbatim + cognition side channel) before sending to the shim."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_cognition.tools.envelope import ENVELOPE_MARKER, try_unwrap_request
+
+    captured: dict = {}
+    _install_capturing_upstream(monkeypatch, captured)
+
+    async def _ctx(agent_id, manifest, body):
+        return _cognition_ctx(rules=[])  # no enforced rules → precondition allows
+
+    monkeypatch.setattr(agents_route_mod, "_maybe_build_cognition", _ctx)
+
+    resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
+    assert resp.status_code == 200
+    sent = captured["json"]
+    assert sent[ENVELOPE_MARKER] == 1
+    unwrapped = try_unwrap_request(sent)
+    assert unwrapped.input == {"q": 1}  # original body verbatim
+    assert "## Knowledge graph" in unwrapped.cognition["memory_digest"]
+
+
+def test_invoke_blocked_by_enforced_precondition(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An active enforced precondition that fails blocks the invoke with 422 before
+    any sandbox round-trip."""
+    import unified_api.routes.agents as agents_route_mod
+
+    async def _fail_acquire(agent_id: str):  # pragma: no cover — must not run
+        raise AssertionError("acquire must not run when a precondition blocks")
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _fail_acquire)
+
+    rule = _enforced_precondition_rule(
+        {"phase": "precondition", "check": {"op": "==", "path": "input.q", "value": 999}}
+    )
+
+    async def _ctx(agent_id, manifest, body):
+        return _cognition_ctx(rules=[rule])
+
+    monkeypatch.setattr(agents_route_mod, "_maybe_build_cognition", _ctx)
+
+    resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
+    assert resp.status_code == 422
+    assert "precondition" in resp.json()["detail"]["message"].lower()
+
+
+def _install_capturing_upstream(monkeypatch: pytest.MonkeyPatch, captured: dict) -> None:
+    """Like _patch_upstream but records the JSON body the proxy posts upstream."""
+    import types
+
+    import unified_api.routes.agents as agents_route_mod
+    from agent_provisioning_team.sandbox import SandboxStatus
+
+    handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
+
+    async def _acquire(agent_id: str):
+        return handle
+
+    async def _note_activity(agent_id: str):
+        return None
+
+    class _Resp:
+        content = b'{"output": {"ok": true}}'
+        status_code = 200
+        text = '{"output": {"ok": true}}'
+
+        def json(self):
+            return {"output": {"ok": True}}
+
+    class _FakeClient:
+        def __init__(self, *a, **k) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None):
+            captured["json"] = json
+            return _Resp()
+
+    monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
+    monkeypatch.setattr(agents_route_mod, "note_activity", _note_activity)
+    monkeypatch.setattr(agents_route_mod, "_persist_run", lambda **k: None)
+    monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)

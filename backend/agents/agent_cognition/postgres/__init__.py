@@ -161,6 +161,34 @@ SCHEMA: TeamSchema = TeamSchema(
             completed_at      TIMESTAMPTZ,
             PRIMARY KEY (agent_id, source_run_id)
         )""",
+        # -----------------------------------------------------------------
+        # Knowledge-graph ingestion watermarks — one row per agent tracking how
+        # far the graph sync worker has consumed this agent's memory into the
+        # Graphiti/Neo4j knowledge graph. Two symmetric keyset cursors: events on
+        # ``(recorded_at, id)`` (arrival time, mirroring prune_events' fold
+        # semantics, so a late event with a fresh ``recorded_at`` re-sorts after
+        # the watermark and is picked up on a later pass) and rollup summaries on
+        # ``(created_at, id)``. All advances are monotonic — the worker reads the
+        # watermark then drains strictly after it, and the scheduler single-flights
+        # ingestion per agent, so the cursors never regress.
+        # -----------------------------------------------------------------
+        """CREATE TABLE IF NOT EXISTS agent_cognition_graph_watermarks (
+            agent_id                 TEXT PRIMARY KEY,
+            last_event_recorded_at   TIMESTAMPTZ,
+            last_event_id            TEXT,
+            last_summary_created_at  TIMESTAMPTZ,
+            last_summary_id          TEXT,
+            ingested_count           BIGINT NOT NULL DEFAULT 0,
+            updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
+        )""",
+        # Keyset-pagination indexes for the sync worker's delta scans: events by
+        # ``(agent_id, recorded_at, id)`` and summaries by ``(agent_id,
+        # created_at, id)``, so each scan reads strictly after the stored
+        # watermark without walking the whole partition.
+        """CREATE INDEX IF NOT EXISTS idx_agent_cognition_events_agent_recorded
+            ON agent_cognition_events(agent_id, recorded_at, id)""",
+        """CREATE INDEX IF NOT EXISTS idx_agent_cognition_summaries_agent_created
+            ON agent_cognition_summaries(agent_id, created_at, id)""",
     ],
     table_names=[
         "agent_cognition_events",
@@ -168,5 +196,6 @@ SCHEMA: TeamSchema = TeamSchema(
         "agent_cognition_rules",
         "agent_cognition_rule_proposals",
         "agent_cognition_runs",
+        "agent_cognition_graph_watermarks",
     ],
 )
