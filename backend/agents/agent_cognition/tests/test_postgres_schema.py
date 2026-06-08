@@ -22,6 +22,7 @@ EXPECTED_TABLES = [
     "agent_cognition_rules",
     "agent_cognition_rule_proposals",
     "agent_cognition_runs",
+    "agent_cognition_graph_watermarks",
 ]
 
 
@@ -34,12 +35,37 @@ def test_schema_identity() -> None:
     assert SCHEMA.database is None
 
 
-def test_schema_declares_all_five_tables() -> None:
+def test_schema_declares_all_tables() -> None:
     assert SCHEMA.table_names == EXPECTED_TABLES
     # Every declared table has a matching CREATE TABLE statement.
     joined = "\n".join(SCHEMA.statements)
     for table in EXPECTED_TABLES:
         assert f"CREATE TABLE IF NOT EXISTS {table}" in joined
+
+
+def test_graph_watermark_table_and_keyset_index_present() -> None:
+    # The knowledge-graph sync worker tracks per-agent ingestion progress in
+    # agent_cognition_graph_watermarks and scans events by (recorded_at, id);
+    # both the table and the supporting keyset index must be declared here.
+    joined = "".join(SCHEMA.statements)
+    watermark_ddl = next(
+        s
+        for s in SCHEMA.statements
+        if "CREATE TABLE IF NOT EXISTS agent_cognition_graph_watermarks" in s
+    )
+    assert "agent_id                TEXT PRIMARY KEY" in watermark_ddl
+    for col in (
+        "last_event_recorded_at",
+        "last_event_id",
+        "last_summary_id",
+        "last_summary_version",
+        "ingested_count",
+    ):
+        assert col in watermark_ddl
+    assert (
+        "idx_agent_cognition_events_agent_recorded" in joined
+        and "agent_cognition_events(agent_id, recorded_at, id)" in joined
+    )
 
 
 def test_all_ddl_is_idempotent() -> None:
