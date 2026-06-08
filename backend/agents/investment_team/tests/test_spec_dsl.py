@@ -25,7 +25,6 @@ from investment_team.strategy_lab.spec_dsl import (
     format_sizing_rule,
 )
 
-
 # ---------------------------------------------------------------------------
 # INDICATOR_OUTPUT_RANGES — derived bounded-indicator table.
 # ---------------------------------------------------------------------------
