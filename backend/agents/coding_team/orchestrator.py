@@ -93,7 +93,9 @@ class _ThinkingBuffer:
 
     def __init__(self, max_chars: int = _THINKING_MAX_CHARS) -> None:
         self._lock = threading.Lock()
-        self._max_chars = max_chars
+        # Floor to >=1: a non-positive cap would make the tail slice ``text[-0:]``
+        # return the WHOLE string, defeating the bound and growing unbounded.
+        self._max_chars = max(1, max_chars)
         self._text = ""
         self._flushed = ""
 
@@ -156,20 +158,22 @@ def _make_reasoning_llm_getter(record_reasoning: Callable[[str], None]) -> Calla
     Preconditions: ``record_reasoning`` is callable.
     Postconditions: returns a getter ``key -> strands model`` whose underlying client
         invokes ``record_reasoning`` for each reasoning delta; the same ``key`` yields
-        the same underlying client for the life of this getter. Called from the single
-        swarm thread, so the memo needs no lock.
+        the same model (and underlying client) for the life of this getter — so both
+        the ``/api/show`` context lookup and the wrapper allocation happen once per
+        role. Called from the single swarm thread, so the memo needs no lock.
     """
-    clients: Dict[str, Any] = {}
+    models: Dict[str, Any] = {}
 
     def _getter(key: str) -> Any:
-        sp = __import__("llm_service.strands_provider", fromlist=["get_strands_model"])
         resolved_key = key or "coding_team"
-        client = clients.get(resolved_key)
-        if client is None:
+        model = models.get(resolved_key)
+        if model is None:
             factory = __import__("llm_service.factory", fromlist=["get_client"])
+            sp = __import__("llm_service.strands_provider", fromlist=["get_strands_model"])
             client = factory.get_client(resolved_key, on_reasoning=record_reasoning)
-            clients[resolved_key] = client
-        return sp.get_strands_model(resolved_key, client=client)
+            model = sp.get_strands_model(resolved_key, client=client)
+            models[resolved_key] = model
+        return model
 
     return _getter
 

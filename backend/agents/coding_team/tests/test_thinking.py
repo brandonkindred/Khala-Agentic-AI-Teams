@@ -42,6 +42,14 @@ def test_buffer_keeps_only_recent_tail() -> None:
     assert buf.pending() == "defgh"  # last 5 chars only
 
 
+def test_buffer_nonpositive_max_chars_floored() -> None:
+    """max_chars<=0 must not defeat the bound (text[-0:] would return the whole
+    string). It is floored to >=1 so the buffer still caps."""
+    buf = _ThinkingBuffer(max_chars=0)
+    buf.append("abcdef")
+    assert buf.pending() == "f"  # floored to 1 char, not the full string
+
+
 def test_buffer_empty_is_no_change() -> None:
     buf = _ThinkingBuffer()
     # An empty buffer has nothing pending (last-flushed sentinel is "", == the tail).
@@ -144,12 +152,8 @@ def test_make_reasoning_llm_getter_threads_callback(monkeypatch) -> None:
     sentinel_client = object()
     sentinel_model = object()
 
-    def fake_get_strands_model(key, *, client=None, **_kw):
-        captured["model_key"] = key
-        captured["client"] = client
-        return sentinel_model
-
     get_client_calls: list[str] = []
+    strands_calls: list[str] = []
 
     def counting_get_client(key, *, on_reasoning=None):
         get_client_calls.append(key)
@@ -157,8 +161,14 @@ def test_make_reasoning_llm_getter_threads_callback(monkeypatch) -> None:
         captured["on_reasoning"] = on_reasoning
         return sentinel_client
 
+    def counting_get_strands_model(key, *, client=None, **_kw):
+        strands_calls.append(key)
+        captured["model_key"] = key
+        captured["client"] = client
+        return sentinel_model
+
     monkeypatch.setattr(factory, "get_client", counting_get_client)
-    monkeypatch.setattr(strands_provider, "get_strands_model", fake_get_strands_model)
+    monkeypatch.setattr(strands_provider, "get_strands_model", counting_get_strands_model)
 
     cb = lambda _t: None  # noqa: E731
     getter = _make_reasoning_llm_getter(cb)
@@ -169,13 +179,16 @@ def test_make_reasoning_llm_getter_threads_callback(monkeypatch) -> None:
     assert captured["on_reasoning"] is cb
     assert captured["client"] is sentinel_client
 
-    # Memoized per job: repeated calls with the same key reuse the client (one
-    # /api/show num_ctx fetch per role), but a new key builds a fresh client.
-    getter("tech_lead")
+    # Memoized per job: repeated calls with the same key reuse the SAME model (and
+    # client) — one /api/show fetch and one wrapper allocation per role — while a
+    # new key builds a fresh one.
+    assert getter("tech_lead") is model
     getter("tech_lead")
     assert get_client_calls == ["tech_lead"]
+    assert strands_calls == ["tech_lead"]
     getter("coding_team")
     assert get_client_calls == ["tech_lead", "coding_team"]
+    assert strands_calls == ["tech_lead", "coding_team"]
 
 
 # --------------------------------------------------------------------------- interval
