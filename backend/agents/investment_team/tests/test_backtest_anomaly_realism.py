@@ -730,7 +730,7 @@ def test_lookahead_combined_rate_uses_entry_and_exit_observations() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_single_symbol_single_side_ledger_emits_no_diversification_warning() -> None:
+def test_single_asset_no_diversification_warning() -> None:
     """A strategy that intentionally trades one asset on one side must not be
     flagged for "no diversification".
 
