@@ -38,3 +38,22 @@ def test_read_int_with_floor_unset(monkeypatch):
 def test_read_int_with_floor_values(monkeypatch, raw, expected):
     monkeypatch.setenv("X_FLOOR", raw)
     assert read_int_with_floor("X_FLOOR", 300, 30) == expected
+
+
+def test_garbage_value_logs_warning(monkeypatch, caplog):
+    # A set-but-unparseable value warns (so an operator notices a typo); an unset
+    # value stays silent. Covers both helpers.
+    monkeypatch.setenv("X_FLOOR", "oops")
+    monkeypatch.setenv("X_INT", "nope")
+    with caplog.at_level("WARNING"):
+        read_int_with_floor("X_FLOOR", 300, 30)
+        read_positive_int("X_INT", 10)
+    assert "Invalid X_FLOOR='oops'" in caplog.text
+    assert "Invalid X_INT='nope'" in caplog.text
+
+
+def test_unset_value_does_not_warn(monkeypatch, caplog):
+    monkeypatch.delenv("X_FLOOR", raising=False)
+    with caplog.at_level("WARNING"):
+        read_int_with_floor("X_FLOOR", 300, 30)
+    assert "Invalid" not in caplog.text
