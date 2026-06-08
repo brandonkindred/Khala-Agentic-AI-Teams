@@ -28,10 +28,19 @@ from ..spec_dsl import EntryRuleAdapter, ExitRuleAdapter, SizingRuleAdapter
 def extract_json_object(text: str) -> Dict[str, Any]:
     """Extract a JSON object from an LLM response, tolerating markdown fences.
 
+    The outermost ``{...}`` is located by a brace scanner that is **string-
+    aware**: braces (and quotes) appearing inside a JSON string literal do not
+    affect nesting depth. This matters because the refinement agent funnels a
+    full Python program through ``strategy_code`` — that string routinely holds
+    unbalanced ``{`` / ``}`` (comments, string/regex literals, f-string format
+    specs), and a naive counter would balance early and slice a partial object
+    out of otherwise-valid JSON. Escaped quotes (``\\"``) inside a string are
+    handled so the string is not closed prematurely.
+
     Preconditions: ``text`` is a string (possibly empty).
-    Postconditions: returns the parsed dict for the outermost ``{...}`` in
-    the response. Raises ``ValueError`` when no JSON object is present or
-    the substring is not valid JSON. Used by every spec-authoring or
+    Postconditions: returns the parsed dict for the outermost balanced
+    ``{...}`` in the response. Raises ``ValueError`` when no JSON object is
+    present or the substring is not valid JSON. Used by every spec-authoring or
     spec-reviewing agent in this package — keep behaviour stable.
     """
     fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
@@ -44,10 +53,25 @@ def extract_json_object(text: str) -> Dict[str, Any]:
 
     depth = 0
     end = start
+    in_string = False
+    escaped = False
     for i in range(start, len(text)):
-        if text[i] == "{":
+        ch = text[i]
+        if in_string:
+            # Inside a JSON string literal: ignore braces; only an unescaped
+            # double-quote closes it. A backslash escapes the next character.
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
             depth += 1
-        elif text[i] == "}":
+        elif ch == "}":
             depth -= 1
             if depth == 0:
                 end = i + 1
