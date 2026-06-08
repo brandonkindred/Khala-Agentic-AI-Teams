@@ -483,7 +483,12 @@ def test_dependency_fetch_stops_at_page_cap(mock_cfg, mock_cred, monkeypatch):
     assert resp.status_code == 200
     # Only the first two pages were fetched; page 3 (the open blocker) was never reached.
     assert fake.dep_calls == [1, 1]
-    assert {d["number"] for d in resp.json()[0]["dependencies"]} == {3, 5}
+    item = resp.json()[0]
+    assert {d["number"] for d in item["dependencies"]} == {3, 5}
+    # An incomplete (cap-truncated) fetch is NOT forced to blocked: ``blocked`` stays
+    # derived from the observed dependencies (both closed here) so the picker never shows
+    # a block with an empty open-dependency list.
+    assert item["blocked"] is False
 
 
 @patch(f"{_M}.get_credential", return_value="ghp_token")

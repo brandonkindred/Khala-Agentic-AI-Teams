@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ import subprocess
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any, Literal
 
@@ -1005,6 +1007,44 @@ async def delete_github() -> GitHubConfigResponse:
     return _build_github_config_response(get_github_config())
 
 
+async def _iter_github_pages(
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, Any] | None,
+    max_pages: int,
+    sem: asyncio.Semaphore | None = None,
+) -> AsyncIterator[httpx.Response]:
+    """Yield successive GitHub responses, following the ``Link`` header.
+
+    Shared pagination primitive for the issue list and the per-issue dependency fetch.
+    Query params ride only on the first request; GitHub's "next" Link URL already
+    carries them forward, so they are dropped on subsequent pages.
+
+    Preconditions:
+        - ``client`` is an open ``AsyncClient`` and ``headers`` carry a valid PAT.
+        - ``max_pages`` >= 1 bounds the number of pages followed.
+    Postconditions:
+        - Yields at most ``max_pages`` responses. Each request is made while holding
+          ``sem`` (when provided), so the semaphore is released between pages rather
+          than held for a whole issue's pagination. The caller inspects each response's
+          status/body and may stop early (e.g. on a non-200).
+    """
+    next_url: str | None = url
+    request_params = params
+    pages = 0
+    while next_url and pages < max_pages:
+        if sem is not None:
+            async with sem:
+                resp = await client.get(next_url, headers=headers, params=request_params)
+        else:
+            resp = await client.get(next_url, headers=headers, params=request_params)
+        yield resp
+        pages += 1
+        next_url = resp.links.get("next", {}).get("url")
+        request_params = None  # subsequent pages use the Link URL verbatim
+
+
 async def _fetch_blocked_by(
     client: httpx.AsyncClient,
     owner: str,
@@ -1020,26 +1060,27 @@ async def _fetch_blocked_by(
         - ``sem`` bounds the number of concurrent dependency fetches.
     Postconditions:
         - Returns the dependency issue objects across all result pages (the endpoint
-          paginates via the ``Link`` header just like the issue list), bounded by
+          paginates via the ``Link`` header like the issue list), bounded by
           ``_GITHUB_MAX_DEPENDENCY_PAGES`` pages of ``_GITHUB_DEPENDENCY_PER_PAGE``.
-        - Returns whatever was gathered before any non-200 status (404/410/422 =
-          feature disabled or no dependencies, 5xx, etc.) or transport error. A single
-          issue's dependency lookup is best-effort enrichment and must never fail the
-          whole list — degrading to the partial/empty result is the contract here, not
-          a swallowed failure.
+        - Best-effort: returns whatever was gathered before any non-200 status
+          (404/410/422 = feature disabled or no dependencies, 5xx, throttle) or transport
+          error — a single issue's lookup must never fail the whole list. ``blocked`` is
+          derived only from the dependencies actually observed; we deliberately do not
+          fail safe toward "blocked" on an incomplete fetch, because the picker's
+          ``blocked`` flag is paired with the open-dependency list (a forced block with no
+          known open dependency would render an empty, confusing warning), and a total
+          dependency-API outage would otherwise flag every issue. The only residual gap is
+          the rare case of an open blocker on an unfetched later page of a many-page list.
     """
     # The blocked_by endpoint returns standard issue objects, so the default
     # ``application/vnd.github+json`` Accept header (already in ``headers``) is correct.
-    # Query params ride only on the first request; GitHub's "next" Link URL already
-    # carries per_page forward, so we must not re-append them.
-    next_url: str | None = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
-    request_params: dict[str, Any] | None = {"per_page": _GITHUB_DEPENDENCY_PER_PAGE}
+    url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues/{issue_number}/dependencies/blocked_by"
+    params: dict[str, Any] | None = {"per_page": _GITHUB_DEPENDENCY_PER_PAGE}
     out: list[dict[str, Any]] = []
-    pages = 0
     try:
-        async with sem:
-            while next_url and pages < _GITHUB_MAX_DEPENDENCY_PAGES:
-                resp = await client.get(next_url, headers=headers, params=request_params)
+        pages = _iter_github_pages(client, url, headers, params, _GITHUB_MAX_DEPENDENCY_PAGES, sem=sem)
+        async with contextlib.aclosing(pages) as page_iter:
+            async for resp in page_iter:
                 if resp.status_code != 200:
                     logger.debug(
                         "blocked_by fetch for %s/%s#%d returned %d; treating as no further dependencies",
@@ -1053,9 +1094,6 @@ async def _fetch_blocked_by(
                 if not isinstance(payload, list):
                     return out
                 out.extend(payload)
-                pages += 1
-                next_url = resp.links.get("next", {}).get("url")
-                request_params = None  # subsequent pages use the Link URL verbatim
         return out
     except Exception as e:  # noqa: BLE001 - best-effort enrichment; see Postconditions
         logger.warning(
@@ -1150,30 +1188,21 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
     }
 
     raw_issues: list[dict[str, Any]] = []
-    next_url: str | None = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    # Query params ride only on the first request; GitHub's "next" Link URL already
-    # carries state/per_page/labels forward, so we must not re-append them.
-    request_params: dict[str, Any] | None = params
-    pages = 0
-    capped = False
+    base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
+    last_resp: httpx.Response | None = None
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        while next_url and pages < _GITHUB_MAX_ISSUE_PAGES:
-            resp = await client.get(next_url, headers=headers, params=request_params)
-
-            if resp.status_code == 401:
-                raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
-            if resp.status_code == 404:
-                raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
-            if resp.status_code != 200:
-                raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-
-            raw_issues.extend(raw for raw in resp.json() if "pull_request" not in raw)
-
-            pages += 1
-            next_url = resp.links.get("next", {}).get("url")
-            request_params = None  # subsequent pages use the Link URL verbatim
-        capped = bool(next_url)
+        page_iter = _iter_github_pages(client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES)
+        async with contextlib.aclosing(page_iter) as pages:
+            async for resp in pages:
+                last_resp = resp
+                if resp.status_code == 401:
+                    raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+                if resp.status_code == 404:
+                    raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+                raw_issues.extend(raw for raw in resp.json() if "pull_request" not in raw)
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -1186,7 +1215,9 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
     # at construction rather than mutated afterwards.
     items = [_build_issue_item(raw, raw_deps) for raw, raw_deps in zip(raw_issues, dep_results, strict=True)]
 
-    if capped:
+    # The fetch stopped at the page cap (rather than exhausting the list) iff the last
+    # page still advertised a "next" link.
+    if last_resp is not None and last_resp.links.get("next", {}).get("url"):
         logger.warning(
             "list_github_issues hit the %d-page cap for %s/%s; returning the first %d open issues only",
             _GITHUB_MAX_ISSUE_PAGES,
