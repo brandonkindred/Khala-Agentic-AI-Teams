@@ -35,6 +35,7 @@ from coding_team.github_source import (  # noqa: E402
     map_issues_to_comments,
     parse_valid_lines,
     pick_ready_issue,
+    render_annotated_hunks,
     scrub_token_from_text,
 )
 from coding_team.github_source.client import _is_safe_ref  # noqa: E402
@@ -629,10 +630,9 @@ def _env_int(name: str, default: int) -> int:
     return val if val > 0 else default
 
 
-# Cap how many changed files we fetch full content for, bounding the per-file
-# content API calls on a very large PR. Files past the cap still contribute their
-# diff lines to the commentable-line map (so an inline anchor on them is honored),
-# they are just not sent to the reviewer for inspection.
+# Cap how many changed files are sent to the reviewer, bounding the prompt size
+# on a very large PR. Reviewable files past the cap are reported as skipped (see
+# _build_review_code) so a partial review is never presented as a full one.
 PR_REVIEW_MAX_FILES = _env_int("PR_REVIEW_MAX_FILES", 50)
 
 
@@ -648,43 +648,37 @@ def _infer_review_language(files: List[Any]) -> str:
     return "typescript" if ts > py else "python"
 
 
-def _annotate_file_content(content: str) -> str:
-    """Prefix each line with its 1-based number so the reviewer can cite real lines."""
-    return "\n".join(f"{i}: {line}" for i, line in enumerate(content.splitlines(), start=1))
+def _build_review_code(files: List[Any]) -> Tuple[str, int, int]:
+    """Assemble the line-annotated ``code`` input for the reviewer from the diff.
 
-
-def _build_review_code(
-    client: GitHubClient, owner: str, repo: str, files: List[Any], head_sha: str
-) -> str:
-    """Assemble the line-annotated ``code`` input for the reviewer from changed files.
-
-    Only files with a non-empty diff that still exist on the head commit are
-    included (removed files are skipped). Each is fetched at ``head_sha`` and wrapped
-    in a ``### path ###`` block so the reviewer's coordinator can chunk large PRs and
-    every cited line maps 1:1 to a new-file line.
+    Renders each changed file's diff hunks (added + context lines, new-file line
+    numbers) — not whole files — so the reviewer is scoped to what the PR changed
+    and cited line numbers align with the commentable-line map. Each file is wrapped
+    in a ``### path ###`` block so the reviewer's coordinator can chunk large PRs.
+    Built entirely from the already-fetched ``files`` payload (no extra requests).
 
     Postconditions:
-        - Returns concatenated ``### filename ###`` blocks of line-numbered content,
-          bounded to ``PR_REVIEW_MAX_FILES`` reviewable files. A file whose content
-          cannot be fetched is skipped (best-effort) rather than failing the review.
+        - Returns ``(code, files_reviewed, files_skipped)``. ``files_skipped`` counts
+          reviewable files (non-empty patch, not removed) beyond ``PR_REVIEW_MAX_FILES``
+          that were left out, so the caller can disclose a partial review rather than
+          presenting it as complete. Binary/removed files are not reviewable and are
+          not counted as skipped.
     """
     blocks: List[str] = []
     reviewed = 0
+    skipped = 0
     for f in files:
-        if reviewed >= PR_REVIEW_MAX_FILES:
-            break
         if not f.patch or f.status == "removed":
             continue
-        try:
-            content = client.get_file_content(owner, repo, f.filename, head_sha)
-        except GitHubAPIError as e:
-            logger.warning("PR review: could not fetch %s@%s: %s", f.filename, head_sha[:8], e)
+        if reviewed >= PR_REVIEW_MAX_FILES:
+            skipped += 1
             continue
-        if not content:
+        rendered = render_annotated_hunks(f.patch)
+        if not rendered:
             continue
-        blocks.append(f"### {f.filename} ###\n{_annotate_file_content(content)}")
+        blocks.append(f"### {f.filename} ###\n{rendered}")
         reviewed += 1
-    return "\n\n".join(blocks)
+    return "\n\n".join(blocks), reviewed, skipped
 
 
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:
@@ -771,7 +765,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 return
 
             valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
-            code = _build_review_code(client, owner, repo, files, pr.head_sha)
+            code, files_reviewed, files_skipped = _build_review_code(files)
             if not code:
                 _safe_comment(
                     client, owner, repo, pr_number, "Code review: no reviewable file content."
@@ -809,6 +803,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
             body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)
+            if files_skipped:
+                # Disclose a partial review so a capped run is never presented as complete.
+                body += (
+                    f"\n\n_Note: this review covered the first {files_reviewed} changed file(s); "
+                    f"{files_skipped} further changed file(s) exceeded the per-review cap "
+                    f"(`PR_REVIEW_MAX_FILES`) and were not inspected._"
+                )
             event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
 
             _submit_review(client, owner, repo, pr_number, pr.head_sha, body, event, comments)
@@ -820,6 +821,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 status_text=(
                     f"Review posted: {len(output.issues)} finding(s), "
                     f"{len(comments)} inline, event={event}"
+                    + (f"; {files_skipped} file(s) skipped (cap)" if files_skipped else "")
                 ),
                 github_pr_url=pr.html_url,
                 review_summary={
@@ -827,14 +829,19 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                     "inline_comments": len(comments),
                     "body_findings": len(leftovers),
                     "event": event,
+                    "files_reviewed": files_reviewed,
+                    "files_skipped": files_skipped,
                 },
             )
-    except GitHubAPIError as e:
-        # Best-effort failure comment; build a fresh client since the context closed.
+    except Exception as e:  # noqa: BLE001 - any failure must mark the job, never wedge it
+        # The hook runs in a daemon thread; if we let an exception escape, the thread
+        # dies and the job is stuck in "running" forever. Mark it failed (mirroring
+        # post_run) and post a best-effort, token-scrubbed PR comment.
+        logger.exception("PR review hook failed: %s", e)
         try:
             with GitHubClient(token=token) as client:
-                _record_failure(client, owner, repo, pr_number, job_id, f"github api error: {e}")
-        except GitHubAPIError:
+                _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
+        except Exception:  # noqa: BLE001 - the status update below is the last resort
             update_job(job_id, status="failed", error=scrub_token_from_text(str(e)))
 
 

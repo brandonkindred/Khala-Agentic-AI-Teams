@@ -7,7 +7,6 @@ GitHubClient and a stubbed CodeReviewAgent — no network, no LLM).
 
 from __future__ import annotations
 
-import base64
 import sys
 import types
 from typing import Any, Callable, Optional
@@ -143,24 +142,6 @@ class TestGetPullRequestFiles:
 
 
 # ---------------------------------------------------------------------------
-# Client: get_file_content
-# ---------------------------------------------------------------------------
-
-
-class TestGetFileContent:
-    def test_base64_decode(self) -> None:
-        encoded = base64.b64encode(b"hello\nworld").decode()
-        client = _client_with(
-            lambda _req: httpx.Response(200, json={"content": encoded, "encoding": "base64"})
-        )
-        assert client.get_file_content("o", "r", "a.py", "sha") == "hello\nworld"
-
-    def test_non_base64_or_directory_returns_empty(self) -> None:
-        client = _client_with(lambda _req: httpx.Response(200, json=[{"name": "a"}]))
-        assert client.get_file_content("o", "r", "dir", "sha") == ""
-
-
-# ---------------------------------------------------------------------------
 # Client: create_pull_request_review
 # ---------------------------------------------------------------------------
 
@@ -268,6 +249,7 @@ class _FakeReviewClient:
         self.comments: list[tuple[int, str]] = []
         self.fail_get_pr = False
         self.review_fail_times = 0  # number of leading create_review calls that 422
+        self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -296,9 +278,6 @@ class _FakeReviewClient:
     def get_pull_request_files(self, _o: str, _r: str, _n: int) -> list[PullRequestFile]:
         return list(self.files)
 
-    def get_file_content(self, _o: str, _r: str, _path: str, _ref: str) -> str:
-        return "ctx\nadded\nmore\n"
-
     def get_authenticated_login(self) -> str:
         return self.login
 
@@ -306,6 +285,8 @@ class _FakeReviewClient:
         self.comments.append((n, body))
 
     def create_pull_request_review(self, **kwargs: Any) -> dict[str, Any]:
+        if self.review_exc is not None:
+            raise self.review_exc
         if len(self.reviews) < self.review_fail_times:
             self.reviews.append(kwargs)
             raise GitHubAPIError(422, "bad line")
@@ -429,3 +410,29 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert len(gh.reviews) == 2
         assert gh.reviews[-1]["event"] == "COMMENT"
+
+    def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
+        # A non-GitHubAPIError during submit must be caught by the broad outer
+        # handler so the job transitions to failed instead of wedging in 'running'.
+        review_app["github"]["client"].review_exc = RuntimeError("kaboom")
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+
+    def test_partial_review_discloses_skipped_files(self, review_app, monkeypatch) -> None:
+        gh = review_app["github"]["client"]
+        gh.files = [
+            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n c\n+x\n d", 1, 0, None),
+            PullRequestFile("b.py", "modified", "@@ -1,2 +1,3 @@\n c\n+y\n d", 1, 0, None),
+        ]
+        # Cap at one file so the second reviewable file is skipped.
+        monkeypatch.setattr(review_app["api"], "PR_REVIEW_MAX_FILES", 1)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert job["review_summary"]["files_reviewed"] == 1
+        assert job["review_summary"]["files_skipped"] == 1
+        # The posted review body discloses the partial coverage.
+        assert "were not inspected" in gh.reviews[-1]["body"]

@@ -13,6 +13,7 @@ from coding_team.github_source.pr_review_mapping import (
     format_comment_body,
     map_issues_to_comments,
     parse_valid_lines,
+    render_annotated_hunks,
 )
 
 
@@ -69,6 +70,39 @@ def test_parse_valid_lines_empty_patch() -> None:
 def test_parse_valid_lines_ignores_lines_before_first_hunk() -> None:
     patch = "garbage header\n+not in a hunk\n@@ -1 +1 @@\n+real"
     assert parse_valid_lines(patch) == {1}
+
+
+# ---------------------------------------------------------------------------
+# render_annotated_hunks
+# ---------------------------------------------------------------------------
+
+
+def test_render_annotated_hunks_single_hunk() -> None:
+    patch = "@@ -1,2 +1,3 @@\n ctx\n+added\n more"
+    assert render_annotated_hunks(patch) == "1: ctx\n2: added\n3: more"
+
+
+def test_render_annotated_hunks_omits_removed_lines() -> None:
+    patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
+    # Removed line has no new-file position and is dropped; numbering stays aligned.
+    assert render_annotated_hunks(patch) == "1: keep\n2: replacement"
+
+
+def test_render_annotated_hunks_separates_multiple_hunks() -> None:
+    patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d"
+    assert render_annotated_hunks(patch) == "1: a\n2: b\n...\n11: c\n12: d"
+
+
+def test_render_annotated_hunks_empty_patch() -> None:
+    assert render_annotated_hunks("") == ""
+
+
+def test_render_annotated_hunks_lines_align_with_valid_lines() -> None:
+    # Every commentable (added) line must appear in the rendered output with its number.
+    patch = "@@ -5,2 +5,3 @@\n keep\n+new1\n+new2"
+    rendered = render_annotated_hunks(patch)
+    for line in parse_valid_lines(patch):
+        assert f"{line}: " in rendered
 
 
 # ---------------------------------------------------------------------------

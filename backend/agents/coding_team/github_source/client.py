@@ -9,7 +9,6 @@ failures (502/503/504/transport), and rate-limit-aware backoff for 403s.
 
 from __future__ import annotations
 
-import base64
 import logging
 import os
 import re
@@ -522,32 +521,6 @@ class GitHubClient:
                 out.append(_pr_file_from_payload(item))
             url = _parse_next_link(response.headers.get("Link"))
         return out
-
-    def get_file_content(self, owner: str, repo: str, path: str, ref: str) -> str:
-        """Return the decoded text content of a file at a given ref.
-
-        Preconditions:
-            - ``path`` is a repository-relative file path; ``ref`` is a commit SHA,
-              branch, or tag.
-        Postconditions:
-            - Returns the file's UTF-8 text (base64-decoded from the contents API).
-              Raises ``GitHubAPIError`` on any non-2xx response; a directory or a
-              payload without ``content`` yields an empty string.
-        """
-        r = self._check(
-            self._request(
-                "GET",
-                f"/repos/{owner}/{repo}/contents/{path}",
-                params={"ref": ref},
-            )
-        )
-        payload = r.json()
-        if not isinstance(payload, dict):
-            return ""
-        encoded = payload.get("content")
-        if not encoded or payload.get("encoding") != "base64":
-            return ""
-        return base64.b64decode(encoded).decode("utf-8", errors="replace")
 
     def create_pull_request_review(
         self,

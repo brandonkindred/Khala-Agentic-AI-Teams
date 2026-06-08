@@ -71,6 +71,44 @@ def parse_valid_lines(patch: str, *, added_only: bool = COMMENT_ON_ADDED_LINES_O
     return valid
 
 
+def render_annotated_hunks(patch: str) -> str:
+    """Render a file's diff hunks as new-file line-numbered text for review.
+
+    Preconditions:
+        - ``patch`` is one file's unified-diff text (GitHub's ``files[].patch``),
+          or empty for a binary/oversized/unchanged file.
+    Postconditions:
+        - Returns the added (``+``) and context (`` ``) lines of each hunk, each
+          prefixed with its 1-based new-file line number (``123: <code>``), with a
+          ``...`` marker between non-contiguous hunks. Removed (``-``) lines are
+          omitted (they are not in the new file). The emitted line numbers align
+          1:1 with ``parse_valid_lines`` so a cited line maps to a real location.
+          Scoping the reviewer to the diff (plus its context) — rather than whole
+          files — keeps the review on what the PR actually changed. An empty/binary
+          patch yields an empty string.
+    """
+    out: list[str] = []
+    new_line = 0
+    in_hunk = False
+    first_hunk = True
+    for raw in (patch or "").splitlines():
+        if _HUNK_RE.match(raw):
+            if not first_hunk:
+                out.append("...")
+            first_hunk = False
+            new_line = int(_HUNK_RE.match(raw).group(1))  # type: ignore[union-attr]
+            in_hunk = True
+            continue
+        if not in_hunk:
+            continue
+        tag = raw[:1]
+        if tag == "+" or tag == " " or raw == "":
+            out.append(f"{new_line}: {raw[1:] if raw else ''}")
+            new_line += 1
+        # '-' removed lines and '\' ("\ No newline...") have no new-file line.
+    return "\n".join(out)
+
+
 def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optional[str]:
     """Resolve a finding's ``file_path`` to a key in ``valid_by_path``.
 

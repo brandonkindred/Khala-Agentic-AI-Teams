@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
 from llm_service import LLMClient, compact_text
 from software_engineering_team.shared.context_sizing import (
@@ -140,11 +140,13 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
                     )
                 )
 
-    # Dedupe issues by (file_path, description)
-    seen: set[Tuple[str, str]] = set()
+    # Dedupe issues by (file_path, line, description) — line is part of an issue's
+    # identity now that it anchors inline PR comments, so the same description on two
+    # different lines is two distinct findings, not a duplicate.
+    seen: set[Tuple[str, Optional[int], str]] = set()
     deduped: List[CodeReviewIssue] = []
     for issue in all_issues:
-        key = (issue.file_path, issue.description)
+        key = (issue.file_path, issue.line, issue.description)
         if key not in seen:
             seen.add(key)
             deduped.append(issue)

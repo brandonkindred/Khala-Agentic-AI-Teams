@@ -27,6 +27,7 @@ from .pr_review_mapping import (
     format_comment_body,
     map_issues_to_comments,
     parse_valid_lines,
+    render_annotated_hunks,
 )
 
 __all__ = [
@@ -49,5 +50,6 @@ __all__ = [
     "map_issues_to_comments",
     "parse_valid_lines",
     "pick_ready_issue",
+    "render_annotated_hunks",
     "scrub_token_from_text",
 ]

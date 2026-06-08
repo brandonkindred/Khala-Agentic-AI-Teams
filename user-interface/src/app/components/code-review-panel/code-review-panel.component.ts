@@ -6,10 +6,10 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
-import { EMPTY, Subscription, interval } from 'rxjs';
-import { catchError, switchMap, takeWhile } from 'rxjs/operators';
+import { Subscription } from 'rxjs';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
+import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import type { GitHubPullRequestItem, RunPrReviewResponse } from '../../models/integrations.model';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
@@ -67,7 +67,6 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   activeJob: RunPrReviewResponse | null = null;
   jobStatus: CodingTeamJobStatus | null = null;
   private pollSub: Subscription | null = null;
-  private pollErrors = 0;
 
   ngOnInit(): void {
     this.checkGitHubConfig();
@@ -153,29 +152,16 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
 
   private startPolling(jobId: string): void {
     this.stopPolling();
-    this.pollErrors = 0;
-    this.pollSub = interval(5000)
-      .pipe(
-        switchMap(() =>
-          this.api.getJobStatus(jobId).pipe(
-            catchError(() => {
-              this.pollErrors++;
-              if (this.pollErrors >= 3) {
-                this.pullError = 'Lost connection to the coding team — status polling failed.';
-                this.stopPolling();
-              }
-              return EMPTY;
-            }),
-          ),
-        ),
-        takeWhile((status) => !isCodingTeamTerminalStatus(status.status), true),
-      )
-      .subscribe({
-        next: (status: CodingTeamJobStatus) => {
-          this.pollErrors = 0;
-          this.jobStatus = status;
-        },
-      });
+    this.pollSub = pollJobStatus(
+      this.api,
+      jobId,
+      (status) => {
+        this.jobStatus = status;
+      },
+      () => {
+        this.pullError = 'Lost connection to the coding team — status polling failed.';
+      },
+    );
   }
 
   private stopPolling(): void {
