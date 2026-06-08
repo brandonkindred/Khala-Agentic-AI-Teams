@@ -467,6 +467,24 @@ def _build_exit_probe(
         if entry_bars is None:
             last_failure = f"entry_prefix_not_synthesizable: {entry_reason}"
             continue
+        # Trim the entry prefix so its final bar is the one the compiled
+        # strategy actually opens its position on, then append the exit tail
+        # directly after it. Without this trim the remainder of the entry
+        # prefix stays stitched between the open bar and the exit tail — and
+        # for any recipe that drives the predicate with sustained directional
+        # motion (RSI decline, MACD trend, Bollinger breakout, a price-ref
+        # spike that snaps back to baseline, …) that remainder keeps moving
+        # price *against* the just-opened position. The strategy's own
+        # engine-enforced stop-loss then fires (repeatedly) inside the prefix,
+        # long before the synthesised exit-trigger bar, so the stop-loss probe
+        # sees "all closed before trigger bar" and the take-profit probe never
+        # keeps a position alive long enough to reach its target. Trimming the
+        # prefix lets the targeted exit rule fire as designed.
+        trimmed = _truncate_entry_prefix_for_exit(entry_bars, entry_trigger_idx, entry_rule.when)
+        if trimmed is None:
+            last_failure = "entry_prefix_open_bar_unverifiable"
+            continue
+        entry_bars, entry_trigger_idx = trimmed
         entry_close = entry_bars[entry_trigger_idx].close
         entry_side = entry_rule.side
         probe = _build_exit_probe_with_prefix(
@@ -488,6 +506,67 @@ def _build_exit_probe(
         synthesizable=False,
         unprobeable_reason=last_failure,
     )
+
+
+def _predicate_warmup_min(pred: Predicate) -> int:
+    """Compiled-strategy warm-up gate for ``pred`` — the smallest bar index
+    at which the strategy can act on this predicate.
+
+    Mirrors ``synthesis/compiler.py``: the compiled ``on_bar`` returns until
+    ``len(history) >= max(per-indicator lookback, _MIN_WINDOW)``. With one bar
+    of history per index, that gate first opens at index
+    ``max(per-indicator lookback, _COMPILER_MIN_WINDOW)``. Price-ref-only
+    predicates carry no indicator lookback and warm up at the floor.
+
+    Postconditions: returns ``>= _COMPILER_MIN_WINDOW``.
+    """
+    warmup = _COMPILER_MIN_WINDOW
+    for side in (pred.lhs, pred.rhs):
+        if isinstance(side, IndicatorRef):
+            warmup = max(warmup, _lookback_for_synth(side))
+    return warmup
+
+
+def _truncate_entry_prefix_for_exit(
+    entry_bars: List[OHLCVBar],
+    entry_trigger_idx: int,
+    pred: Predicate,
+) -> Optional[Tuple[List[OHLCVBar], int]]:
+    """Trim ``entry_bars`` so its final bar is the bar the compiled strategy
+    opens its position on, and return ``(trimmed_bars, open_idx)``.
+
+    The harness suppresses ``on_bar`` until the compiled strategy's warm-up
+    gate (``len(history) >= warmup_min``) is satisfied, so the strategy opens
+    on the *first post-warm-up* bar whose predicate holds — never on the
+    recipe's earlier ``entry_trigger_idx`` when that index sits inside the
+    warm-up window. ``open_idx`` models that bar as
+    ``max(entry_trigger_idx, warmup_min)`` where ``warmup_min`` is the
+    compiler's gate for this predicate's indicators
+    (``_lookback_for_synth`` floored at ``_COMPILER_MIN_WINDOW``). Tracking
+    the real warm-up (rather than a fixed floor) keeps the truncation aligned
+    with the strategy's open bar for longer-period indicators too, so the
+    prefix is never trimmed shorter than the strategy needs to open.
+
+    Preconditions:
+      - ``entry_bars`` is a non-empty recipe prefix; ``entry_trigger_idx`` is
+        a valid index into it where ``pred`` is known to hold.
+    Postconditions:
+      - On success the returned bars are ``entry_bars[: open_idx + 1]`` and
+        ``pred`` holds at ``open_idx`` (the trimmed prefix's last bar), so the
+        compiled strategy opens there and the exit tail the caller appends
+        immediately follows the open bar — no adverse prefix motion in
+        between.
+      - Returns ``None`` when ``open_idx`` is out of range or ``pred`` does
+        not hold at ``open_idx`` (a recipe whose signal is not sustained to
+        the warm-up floor). The caller marks the probe unprobeable rather than
+        shipping a prefix the strategy can't actually open on.
+    """
+    open_idx = max(entry_trigger_idx, _predicate_warmup_min(pred))
+    if open_idx >= len(entry_bars):
+        return None
+    if not _eval_predicate_at(pred, entry_bars, open_idx):
+        return None
+    return entry_bars[: open_idx + 1], open_idx
 
 
 def _build_exit_probe_with_prefix(
