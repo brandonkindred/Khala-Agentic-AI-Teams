@@ -379,7 +379,7 @@ sequenceDiagram
 
 ### The swarm loop (`CodingTeamSwarm.run`, `orchestrator.py:895-953`)
 
-Each round, up to `max_rounds = 500`:
+Each round, up to `max_rounds = 50`:
 
 1. **Cancel check** — honor a cooperative cancel flag on the job record.
 2. **Repo-context refresh** — re-read the repo summary only when the merged-task
@@ -767,7 +767,7 @@ would otherwise do, all defensively hardened:
 
 Internal bounds: `MAX_TASK_REVISIONS = 20` (revisions **and** decision
 escalations, counted separately), `MAX_TECH_LEAD_QUESTION_ROUNDS = 5`
-(plan-time question loop), `max_rounds = 500` (swarm), `wait_for_answers` poll
+(plan-time question loop), `max_rounds = 50` (swarm), `wait_for_answers` poll
 interval 5s. LLM inputs are no longer character-capped — the previous review-
 evidence and implement-description truncation knobs were removed.
 
