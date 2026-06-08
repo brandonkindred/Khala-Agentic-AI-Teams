@@ -170,7 +170,9 @@ def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatc
     _patch_git(monkeypatch)
 
     class ErrTechLead(StubTechLead):
-        def run_code_review(self, task_title, task_description, acceptance_criteria, changes_summary):
+        def run_code_review(
+            self, task_title, task_description, acceptance_criteria, changes_summary
+        ):
             self.review_calls.append(changes_summary)
             return {
                 "approved": False,
@@ -281,7 +283,8 @@ def test_review_explicit_false_is_substantive_rejection(monkeypatch):
 
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
     monkeypatch.setattr(
-        tl_mod, "_agent_call_json",
+        tl_mod,
+        "_agent_call_json",
         lambda agent, prompt: {"approved": False, "reason": "needs tests"},
     )
     tl = tl_mod.TechLeadAgent(model=object())
@@ -714,6 +717,30 @@ def test_read_repo_context_includes_markdown(tmp_path):
     ctx = orch_mod._read_repo_context(tmp_path)
     assert "spec.md" in ctx
     assert "The plan lives here." in ctx
+
+
+def test_read_repo_context_is_not_truncated(tmp_path):
+    """The briefing renders each included file in full and never drops a file to fit a size budget.
+
+    Guards against reintroducing the old per-file 500-char slice and the 4000-char total budget:
+    the engineer's repo context is an LLM input and is never truncated. The 80-file scan ceiling is
+    a deliberate cap, not truncation, so this stays within it.
+    """
+    # A single file well past the old 500-char per-file slice — its tail must survive.
+    big_tail = "TAIL_MARKER_" + ("Z" * 4000)
+    (tmp_path / "big.py").write_text("# header\n" + big_tail)
+
+    # Several files whose combined size blows past the old 4000-char budget; a late file (by sorted
+    # order) must still appear rather than being dropped once the budget filled.
+    for i in range(10):
+        (tmp_path / f"mod_{i:02d}.py").write_text(f"VALUE_{i:02d} = " + "'" + ("x" * 1000) + "'\n")
+
+    ctx = orch_mod._read_repo_context(tmp_path)
+
+    assert big_tail in ctx  # full file contents, not a 500-char prefix
+    assert len(ctx) > 4000  # no total-size budget cut the briefing short
+    assert "mod_09.py" in ctx  # the last file survived; no file dropped to fit a budget
+    assert "VALUE_09" in ctx
 
 
 def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
