@@ -35,6 +35,7 @@ from ...symbols import (
     OTHER_SYMBOLS,
     STOCK_SYMBOLS,
 )
+from ..executor.predicate_evaluator import compare
 from ..spec_dsl import (
     EntryRule,
     IndicatorName,
@@ -357,6 +358,128 @@ class SpecReadinessCtx:
 
     spec: StrategySpec
     config: Optional[BacktestConfig]
+
+
+# Indicators whose output is bounded to a fixed numeric range. Rule 10 uses
+# these to decide — without any market data — whether a predicate comparing one
+# of them against a constant can ever (or can always) be true. Bounds confirmed
+# against ``executor/indicators.py``: RSI, ADX and Stochastic %K/%D are all
+# 0–100. Price-scaled / unbounded indicators (sma, ema, macd, atr, vwap,
+# bollinger bands) have no closed-form out-of-range constant, so they are
+# intentionally absent — predicates over them are left undecided here.
+_BOUNDED_INDICATOR_RANGES: dict[str, tuple[float, float]] = {
+    "rsi": (0.0, 100.0),
+    "adx": (0.0, 100.0),
+    "stochastic": (0.0, 100.0),
+}
+
+# Comparison ops whose truth is monotone in the indicator value, so the
+# satisfying set is a contiguous half-line ∩ [lo, hi] and endpoint evaluation
+# decides always-true / always-false. ``==`` and the ``cross_*`` ops are
+# handled separately (they are not monotone half-lines).
+_MONOTONE_COMPARISON_OPS: frozenset[str] = frozenset({"<", "<=", ">", ">="})
+
+
+def _ref_identity(side: object) -> Optional[str]:
+    """Stable identity key for a predicate side that is a *reference*.
+
+    Pre: ``side`` is a predicate ``lhs``/``rhs`` value (``IndicatorRef``,
+    ``PriceRefLiteral`` string, or ``float``).
+    Post: returns a string key for indicator / price-ref sides that compares
+    equal iff two sides reference the same value; returns ``None`` for a float
+    constant (not a reference).
+    """
+    if isinstance(side, IndicatorRef):
+        return f"ind:{side.sig_id}"
+    if isinstance(side, str):  # PriceRefLiteral, e.g. "bar.close"
+        return f"price:{side}"
+    return None
+
+
+def _identical_ref_verdict(pred: Predicate) -> Optional[tuple[str, str]]:
+    """Classify a predicate whose two sides reference the *same* value.
+
+    Post: ``("false", reason)`` for a contradiction (``x < x`` / ``x > x`` /
+    identical-ref cross), ``("true", reason)`` for a tautology (``x <= x`` /
+    ``x >= x`` / ``x == x``), or ``None`` when the sides are not identical refs.
+    """
+    lhs_id = _ref_identity(pred.lhs)
+    rhs_id = _ref_identity(pred.rhs)
+    if lhs_id is None or rhs_id is None or lhs_id != rhs_id:
+        return None
+    ref = lhs_id.split(":", 1)[1]
+    if pred.op in ("<", ">"):
+        return "false", f"both sides reference {ref} with op {pred.op!r} (a value is never strictly {'below' if pred.op == '<' else 'above'} itself)"
+    if pred.op in ("<=", ">=", "=="):
+        return "true", f"both sides reference {ref} with op {pred.op!r} (a value always equals itself)"
+    if pred.op in ("cross_above", "cross_below"):
+        return "false", f"both sides reference {ref} with op {pred.op!r} (identical series move together and never cross)"
+    return None
+
+
+def _bounded_indicator_verdict(pred: Predicate) -> Optional[tuple[str, str]]:
+    """Classify a predicate comparing a bounded indicator against a constant.
+
+    Only the shape the DSL can express is considered: a bounded ``IndicatorRef``
+    on the ``lhs`` against a float constant on the ``rhs``. (``lhs`` is never a
+    bare float, and indicator-vs-indicator / indicator-vs-price-ref comparisons
+    are data-dependent.)
+
+    Post: ``("false", reason)`` when no in-range indicator value can satisfy the
+    predicate, ``("true", reason)`` when every in-range value satisfies it, or
+    ``None`` when the shape does not match or the predicate is reachable.
+    """
+    lhs, rhs, op = pred.lhs, pred.rhs, pred.op
+    if not (isinstance(lhs, IndicatorRef) and lhs.name in _BOUNDED_INDICATOR_RANGES):
+        return None
+    if isinstance(rhs, bool) or not isinstance(rhs, (int, float)):
+        return None
+    const = float(rhs)
+    lo, hi = _BOUNDED_INDICATOR_RANGES[lhs.name]
+    label = f"{lhs.name} ∈ [{lo:.0f}, {hi:.0f}] compared against {const:g}"
+
+    if op in ("cross_above", "cross_below"):
+        # A crossing requires the indicator to pass through ``const``; a level
+        # strictly outside the indicator's range can never be crossed. A level
+        # inside the range is reachable → undecidable here.
+        if const < lo or const > hi:
+            return "false", f"{label} (a crossing through an out-of-range level is impossible)"
+        return None
+
+    if op == "==":
+        # Equality is reachable iff the constant lies within the range.
+        if const < lo or const > hi:
+            return "false", f"{label} (equality to an out-of-range value is impossible)"
+        return None
+
+    if op not in _MONOTONE_COMPARISON_OPS:
+        return None
+
+    # Monotone comparison: the satisfying set is a contiguous half-line ∩
+    # [lo, hi], so the predicate is always-true iff it holds at both endpoints
+    # and always-false iff it holds at neither.
+    t_lo = compare(op, lo, const)
+    t_hi = compare(op, hi, const)
+    if not t_lo and not t_hi:
+        return "false", f"{label} with op {op!r} (no in-range value satisfies it)"
+    if t_lo and t_hi:
+        return "true", f"{label} with op {op!r} (every in-range value satisfies it)"
+    return None
+
+
+def _classify_predicate(pred: Predicate) -> Optional[tuple[str, str]]:
+    """Closed-form classification of a predicate as always-false / always-true.
+
+    Pre: ``pred`` is a ``Predicate``.
+    Post: ``("false", reason)`` / ``("true", reason)`` when the predicate's truth
+    is decidable from the DSL alone (identical-reference tautology/contradiction,
+    or a bounded indicator vs an out-of-range constant), else ``None``.
+    """
+    assert isinstance(pred, Predicate)
+    ident = _identical_ref_verdict(pred)
+    if ident is not None:
+        return ident
+    return _bounded_indicator_verdict(pred)
 
 
 class SpecReadinessGate(GateResultsMixin):
@@ -1104,6 +1227,61 @@ class SpecReadinessGate(GateResultsMixin):
         return out
 
     # ------------------------------------------------------------------
+    # Rule 10: Predicate reachability / coherence — closed-form. Entry and
+    # signal-exit predicates are pure boolean conditions, so two defect
+    # classes are decidable WITHOUT market data and are caught here rather
+    # than discovered at runtime:
+    #   (a) a bounded indicator (RSI/ADX/Stochastic, all 0–100) compared
+    #       against an out-of-range constant — ``rsi > 100`` (never true →
+    #       a dead rule) or ``rsi < 101`` (always true → adds no signal);
+    #   (b) a predicate whose two sides are the *same* reference —
+    #       ``bar.close < bar.close`` (contradiction), ``rsi >= rsi``
+    #       (tautology), or an identical-ref ``cross_above`` (never crosses).
+    # Routing mirrors Rule 2 ("strategy cannot generate trades"): an
+    # always-false ENTRY predicate is critical (no position can ever open);
+    # an always-false SIGNAL-EXIT predicate is a warning (that exit leg never
+    # fires, but stop/take-profit can still close positions); a vacuous
+    # (always-true) predicate is a warning for both. Reachable predicates and
+    # shapes this analysis cannot decide (unbounded indicators,
+    # indicator-vs-indicator, mixed bar-field comparisons) emit nothing.
+    # ------------------------------------------------------------------
+    def _check_predicate_reachability(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        assert isinstance(ctx.spec, StrategySpec)
+        out: List[QualityGateResult] = []
+        for pred, kind, label in self._iter_predicates(ctx.spec):
+            verdict = _classify_predicate(pred)
+            if verdict is None:
+                continue
+            always, reason = verdict
+            if always == "false":
+                if kind == "entry":
+                    out.append(
+                        self._critical(
+                            f"{label}.when is unreachable: {reason}. An entry predicate that "
+                            "can never be true means the strategy can never open a position.",
+                            rule_id="predicate:unreachable",
+                        )
+                    )
+                else:
+                    out.append(
+                        self._warning(
+                            f"{label}.when is unreachable: {reason}. This signal-exit leg can "
+                            "never fire; positions would only close via stop-loss / take-profit "
+                            "or other exit rules.",
+                            rule_id="predicate:unreachable",
+                        )
+                    )
+            else:  # always == "true"
+                out.append(
+                    self._warning(
+                        f"{label}.when is vacuous: {reason}. The predicate is always true, so "
+                        "it adds no signal to the rule.",
+                        rule_id="predicate:vacuous",
+                    )
+                )
+        return out
+
+    # ------------------------------------------------------------------
     # Rule registry — declarative list iterated by ``validate``. Order is
     # preserved so error messages remain stable across runs.
     # ------------------------------------------------------------------
@@ -1117,11 +1295,29 @@ class SpecReadinessGate(GateResultsMixin):
         _check_timeframe_availability,
         _check_risk_limit_coherence,
         _check_risk_math_reconciliation,
+        _check_predicate_reachability,
     )
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+    @staticmethod
+    def _iter_predicates(spec: StrategySpec) -> Iterator[tuple[Predicate, str, str]]:
+        """Yield ``(predicate, kind, label)`` for every rule predicate in ``spec``.
+
+        ``kind`` is ``"entry"`` or ``"signal_exit"``; ``label`` is a stable
+        human-readable locator (e.g. ``"entry_rules[0]"``). Malformed rules
+        (non-``EntryRule`` / non-``Predicate``) are skipped — Rule 2 already
+        flags those as critical, so this rule does not double-report them.
+        """
+        assert isinstance(spec, StrategySpec)
+        for idx, rule in enumerate(spec.entry_rules):
+            if isinstance(rule, EntryRule) and isinstance(rule.when, Predicate):
+                yield rule.when, "entry", f"entry_rules[{idx}]"
+        for idx, rule in enumerate(spec.exit_rules):
+            if isinstance(rule, SignalExitRule) and isinstance(rule.when, Predicate):
+                yield rule.when, "signal_exit", f"exit_rules[{idx}]"
+
     @staticmethod
     def _iter_indicator_refs(spec: StrategySpec) -> Iterator[IndicatorRef]:
         assert isinstance(spec, StrategySpec)

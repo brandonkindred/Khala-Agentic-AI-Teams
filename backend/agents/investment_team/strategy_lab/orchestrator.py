@@ -101,7 +101,6 @@ from .quality_gates.realism import (
     RuleFiringRateGate,
     TradeClusteringGate,
 )
-from .quality_gates.rule_probes import RuleProbesGate
 from .quality_gates.spec_readiness import SpecReadinessGate
 from .quality_gates.strategy_validator import StrategySpecValidator
 from .quality_gates.target_symbol_coverage import TargetSymbolCoverageGate
@@ -238,17 +237,6 @@ def _mechanical_repair_enabled() -> bool:
     """
     raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
     return raw.strip().lower() in ("true", "1", "yes")
-
-
-def _orchestrator_runner(code, market_data, config, *, strategy=None, **kwargs):
-    """Late-binding adapter so ``RuleProbesGate`` resolves
-    ``run_strategy_code`` through this module's namespace at call time —
-    test monkey-patches of ``investment_team.strategy_lab.orchestrator.
-    run_strategy_code`` therefore apply to probe execution as well as
-    the main pipeline.
-    """
-    return run_strategy_code(code, market_data, config, strategy=strategy, **kwargs)
-
 
 MAX_CODE_REFINEMENT_ROUNDS = 50
 # Maximum number of trade-alignment problem-solving rounds. Each round
@@ -621,14 +609,6 @@ class StrategyLabOrchestrator:
         self.strategy_validator = StrategySpecValidator()
         self.code_safety_checker = CodeSafetyChecker()
         self.code_conformance_gate = CodeConformanceGate()
-        # Behavioural complement to CodeConformanceGate: runs the compiled
-        # strategy against per-rule synthetic-bar sequences and asserts
-        # each rule actually fires. Critical failures route back to
-        # refinement with the failing rule_id (see line ~836). The gate's
-        # runner is wired through this module so test monkey-patches of
-        # ``investment_team.strategy_lab.orchestrator.run_strategy_code``
-        # apply to probe execution as well as the main pipeline.
-        self.rule_probes_gate = RuleProbesGate(runner=_orchestrator_runner)
         self.predicate_conformance_gate = PredicateConformanceGate()
         self.anomaly_detector = BacktestAnomalyDetector()
         self.acceptance_gate = AcceptanceGate()
@@ -1720,14 +1700,10 @@ class StrategyLabOrchestrator:
             round_gate_results.extend(code_gates)
             conformance_gates = self.code_conformance_gate.check(code, spec)
             round_gate_results.extend(conformance_gates)
-            # Behavioural rule probes only run when every prior validation
-            # gate (spec readiness, code safety, code conformance) is clean.
-            # Probing code that an earlier gate already flagged as critical
-            # wastes sandbox subprocess time and adds noisy rule_id criticals
-            # on top of the cleaner upstream critical.
-            if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
-                probe_gates = self.rule_probes_gate.check(code, spec)
-                round_gate_results.extend(probe_gates)
+            # Predicate conformance only runs when every prior validation gate
+            # (spec readiness, code safety, code conformance) is clean. Checking
+            # code that an earlier gate already flagged as critical adds noisy
+            # rule_id criticals on top of the cleaner upstream critical.
             if not any(not g.passed and g.severity == "critical" for g in round_gate_results):
                 pred_conf_gates = self.predicate_conformance_gate.check(
                     code,
