@@ -38,6 +38,8 @@ jobs:
       lint_frontend: ${{ steps.filter.outputs.lint_frontend }}
       ui: ${{ steps.filter.outputs.ui }}
       shared_postgres: ${{ steps.filter.outputs.shared_postgres }}
+      shared_neo4j: ${{ steps.filter.outputs.shared_neo4j }}
+      agent_cognition: ${{ steps.filter.outputs.agent_cognition }}
       backend_any: ${{ steps.filter.outputs.backend_any }}
       needs_integration: ${{ steps.matrix.outputs.needs_integration }}
       docker_backend: ${{ steps.filter.outputs.docker_backend }}
@@ -113,6 +115,25 @@ jobs:
               - 'backend/unified_api/postgres/**'
               - 'backend/unified_api/postgres.py'
               - 'backend/job_service/postgres.py'
+              - '.github/workflows/ci.yml'
+            # shared_neo4j: env-gated Graphiti client; its tests fake graphiti_core
+            # and need no live backend, but transitively import llm_service.
+            shared_neo4j:
+              - 'backend/agents/shared_neo4j/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/requirements.txt'
+              - '.github/workflows/ci.yml'
+            # agent_cognition: the memory/rules substrate + knowledge-graph layer.
+            # Its store/rollup tests need a live Postgres (test-agent-cognition job
+            # provides one); the graph tests fake Graphiti (no Neo4j needed). Trigger
+            # on its own tree plus the shared infra it imports.
+            agent_cognition:
+              - 'backend/agents/agent_cognition/**'
+              - 'backend/agents/shared_neo4j/**'
+              - 'backend/agents/shared_postgres/**'
+              - 'backend/agents/llm_service/**'
+              - 'backend/agents/agent_registry/**'
+              - 'backend/agents/requirements.txt'
               - '.github/workflows/ci.yml'
             # SE imports coding_team, planning_v3_team, agent_repair_team
             # from its orchestrator and Temporal activities. agents/api is
@@ -226,8 +247,10 @@ jobs:
               - '!backend/agents/agent_provisioning_team/**'
               - '!backend/agents/agent_registry/**'
               - '!backend/agents/sales_team/**'
+              - '!backend/agents/agent_cognition/**'
               # shared_backend paths (already trigger fan-out separately)
               - '!backend/agents/shared_postgres/**'
+              - '!backend/agents/shared_neo4j/**'
               - '!backend/agents/shared_temporal/**'
               - '!backend/agents/shared_agent_invoke/**'
               - '!backend/agents/shared_graph/**'
@@ -483,6 +506,83 @@ jobs:
           --cov-report=term-missing
           --cov-fail-under=90
 
+  # shared_neo4j: the env-gated Graphiti client. Its tests fake graphiti_core and
+  # need no live Neo4j or Postgres, so this job carries no service container.
+  test-shared-neo4j:
+    name: Test – shared_neo4j
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.shared_neo4j == 'true'
+    defaults:
+      run:
+        working-directory: backend/agents
+    env:
+      LLM_PROVIDER: dummy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/agents/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: >-
+          pytest shared_neo4j/tests/ -v --tb=short -n 4
+          --cov=shared_neo4j
+          --cov-report=term-missing
+          --cov-fail-under=90
+
+  # agent_cognition: the memory/rules substrate + knowledge-graph layer. Its
+  # store/rollup tests need a live Postgres (provided here); the graph tests fake
+  # Graphiti, so NEO4J_BOLT_URL stays unset (the disabled seam). The live tests
+  # truncate shared tables before each case, so this job runs SERIALLY (no -n).
+  test-agent-cognition:
+    name: Test – agent_cognition (live Postgres)
+    runs-on: ubuntu-latest
+    needs: changes
+    if: >-
+      needs.changes.outputs.is_pull_request == 'true' &&
+      needs.changes.outputs.agent_cognition == 'true'
+    defaults:
+      run:
+        working-directory: backend/agents
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U postgres"
+          --health-interval=2s
+          --health-timeout=3s
+          --health-retries=25
+    env:
+      LLM_PROVIDER: dummy
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/agents/requirements.txt
+      - run: pip install -r requirements.txt
+      - run: >-
+          pytest agent_cognition/tests/ -v --tb=short
+          --cov=agent_cognition
+          --cov-report=term-missing
+          --cov-fail-under=90
+
   # All non-Postgres backend test suites run as a single matrix job. Matrix
   # entries are produced dynamically by the `changes` job — only teams whose
   # files were touched (directly or via shared deps) appear in the matrix.
@@ -710,6 +810,8 @@ jobs:
       - lint-python
       - lint-and-test-ui
       - test-shared-postgres
+      - test-shared-neo4j
+      - test-agent-cognition
       - test-backend
       - test-integration
     steps:
