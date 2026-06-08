@@ -6,6 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatExpansionModule } from '@angular/material/expansion';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
 import { Subscription } from 'rxjs';
@@ -29,6 +30,7 @@ import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
     MatProgressSpinnerModule,
     MatChipsModule,
     MatTooltipModule,
+    MatExpansionModule,
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,

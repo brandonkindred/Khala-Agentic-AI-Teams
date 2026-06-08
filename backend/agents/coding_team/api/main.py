@@ -177,6 +177,10 @@ class StatusResponse(BaseModel):
     status: str
     phase: Optional[str] = None
     status_text: Optional[str] = None
+    thinking: Optional[str] = Field(
+        default=None,
+        description="Most recent agent reasoning ('thinking') tokens, for live display.",
+    )
     repo_path: Optional[str] = None
     task_graph_snapshot: List[Dict[str, Any]] = Field(default_factory=list)
     agent_task_map: Dict[str, str] = Field(default_factory=dict)
@@ -309,6 +313,7 @@ def get_status(job_id: str) -> StatusResponse:
         status=data.get("status", "pending"),
         phase=data.get("phase"),
         status_text=data.get("status_text"),
+        thinking=data.get("thinking"),
         repo_path=data.get("repo_path"),
         task_graph_snapshot=data.get("task_graph_snapshot", []),
         agent_task_map=data.get("agent_task_map", {}),

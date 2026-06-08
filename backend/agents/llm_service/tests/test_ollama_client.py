@@ -673,6 +673,84 @@ def test_extract_json_tolerates_replacement_char_noise() -> None:
     assert parsed["summary"] == "ok"
 
 
+# ---------------------------------------------------------------------------
+# Reasoning ("thinking") token handling: on_reasoning hook + warning level
+# ---------------------------------------------------------------------------
+
+_REASONING_THEN_CONTENT_SSE = [
+    'data: {"choices":[{"delta":{"reasoning":"step1 "},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{"reasoning":"step2"},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{"content":"{\\"ok\\": 1}"},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    "data: [DONE]",
+]
+
+
+def test_on_reasoning_hook_receives_each_delta_then_returns_content(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The hook gets every reasoning delta in order; the stream is still read to the
+    final content (read-to-completion regression pin)."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    collected: list[str] = []
+    mock_client, _ = _make_streaming_mock(200, _REASONING_THEN_CONTENT_SSE)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="test", base_url="http://localhost:9999", timeout=5, on_reasoning=collected.append
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+    assert collected == ["step1 ", "step2"]
+
+
+def test_on_reasoning_hook_exception_does_not_break_call(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising hook is swallowed; the LLM call still returns its content."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+
+    def boom(_token: str) -> None:
+        raise RuntimeError("hook failure")
+
+    mock_client, _ = _make_streaming_mock(200, _REASONING_THEN_CONTENT_SSE)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="test", base_url="http://localhost:9999", timeout=5, on_reasoning=boom
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+
+
+def test_reasoning_only_logs_info_not_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A reasoning-only (no content) stream is an expected thinking case — logged at
+    INFO, never WARNING."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "0")
+    sse = [
+        'data: {"choices":[{"delta":{"reasoning":"thinking hard"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse)
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        # Empty content still surfaces downstream (transient), but the reasoning-only
+        # line itself must be INFO, not WARNING.
+        with pytest.raises(LLMTemporaryError):
+            client.complete_json("q", temperature=0)
+    records = [(r.levelname, r.getMessage()) for r in caplog.records]
+    assert any(lvl == "INFO" and "reasoning only" in msg for lvl, msg in records)
+    assert not any(lvl == "WARNING" and "reasoning" in msg.lower() for lvl, msg in records)
+
+
 def test_extract_json_json_repair_unescaped_quotes_in_strings() -> None:
     """Models often cite JSON/code with unescaped \" inside JSON string values."""
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
