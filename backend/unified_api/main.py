@@ -407,13 +407,34 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Agent Console run pruner failed to start", exc_info=True)
 
+    # 6. Start the Agent Cognition knowledge-graph sync worker. It self-disables
+    #    (returns without looping) when NEO4J_BOLT_URL / POSTGRES_HOST are unset.
+    graph_sync_task: asyncio.Task | None = None
+    try:
+        from agent_cognition.graph.sync_worker import run_graph_sync
+
+        graph_sync_task = asyncio.create_task(run_graph_sync())
+        logger.info("Started Agent Cognition graph sync worker")
+    except Exception:
+        logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
+
     yield
 
+    if graph_sync_task is not None:
+        graph_sync_task.cancel()
     if run_pruner_task is not None:
         run_pruner_task.cancel()
     if sandbox_reaper_task is not None:
         sandbox_reaper_task.cancel()
     health_task.cancel()
+
+    # Close the Graphiti client (and its Neo4j driver) owned by shared_neo4j.
+    try:
+        from shared_neo4j import close_graphiti
+
+        await close_graphiti()
+    except Exception:
+        logger.warning("shared_neo4j close_graphiti failed", exc_info=True)
 
     # Close Postgres connection pools owned by shared_postgres.
     try:

@@ -43,28 +43,33 @@ def test_schema_declares_all_tables() -> None:
         assert f"CREATE TABLE IF NOT EXISTS {table}" in joined
 
 
-def test_graph_watermark_table_and_keyset_index_present() -> None:
+def test_graph_watermark_table_and_keyset_indexes_present() -> None:
     # The knowledge-graph sync worker tracks per-agent ingestion progress in
-    # agent_cognition_graph_watermarks and scans events by (recorded_at, id);
-    # both the table and the supporting keyset index must be declared here.
+    # agent_cognition_graph_watermarks with symmetric keyset cursors over events
+    # (recorded_at, id) and summaries (created_at, id); the table and both
+    # supporting keyset indexes must be declared here.
     joined = "".join(SCHEMA.statements)
     watermark_ddl = next(
         s
         for s in SCHEMA.statements
         if "CREATE TABLE IF NOT EXISTS agent_cognition_graph_watermarks" in s
     )
-    assert "agent_id                TEXT PRIMARY KEY" in watermark_ddl
+    assert "agent_id                 TEXT PRIMARY KEY" in watermark_ddl
     for col in (
         "last_event_recorded_at",
         "last_event_id",
+        "last_summary_created_at",
         "last_summary_id",
-        "last_summary_version",
         "ingested_count",
     ):
         assert col in watermark_ddl
     assert (
         "idx_agent_cognition_events_agent_recorded" in joined
         and "agent_cognition_events(agent_id, recorded_at, id)" in joined
+    )
+    assert (
+        "idx_agent_cognition_summaries_agent_created" in joined
+        and "agent_cognition_summaries(agent_id, created_at, id)" in joined
     )
 
 
