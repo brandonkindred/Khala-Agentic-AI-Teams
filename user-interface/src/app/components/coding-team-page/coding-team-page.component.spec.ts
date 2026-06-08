@@ -255,6 +255,11 @@ describe('CodingTeamPageComponent', () => {
       expect(deps?.classList.contains('github-issue-row__deps--blocked')).toBe(true);
       expect(deps?.querySelector('mat-icon')?.textContent?.trim()).toBe('block');
       expect(el.querySelector('.github-issue-row__deps-count')?.textContent?.trim()).toBe('2');
+      // a11y: the indicator is a single labelled graphic; the icon ligature/count are
+      // not announced separately.
+      expect(deps?.getAttribute('role')).toBe('img');
+      expect(deps?.getAttribute('aria-label')).toBe('Blocked by #3, #5 — must be closed first');
+      expect(deps?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
     });
 
     it('renders a muted "dependencies met" indicator with no count', async () => {

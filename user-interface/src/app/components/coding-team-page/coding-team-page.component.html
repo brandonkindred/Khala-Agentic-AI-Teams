@@ -207,12 +207,13 @@
               @if (hasDependencies(issue)) {
                 <span
                   class="github-issue-row__deps"
+                  role="img"
                   [class.github-issue-row__deps--blocked]="issue.blocked"
                   [class.github-issue-row__deps--met]="!issue.blocked"
                   [matTooltip]="dependencyTooltip(issue)"
                   [attr.aria-label]="dependencyTooltip(issue)"
                 >
-                  <mat-icon>{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                  <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
                   @if (issue.blocked) {
                     <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
                   }

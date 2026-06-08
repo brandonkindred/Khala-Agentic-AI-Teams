@@ -53,18 +53,23 @@ class _FakeIssuesResp:
 
 
 class _FakeDepResp:
-    """Stand-in for an httpx.Response from GET /issues/{n}/dependencies/blocked_by."""
+    """Stand-in for an httpx.Response from GET /issues/{n}/dependencies/blocked_by.
 
-    def __init__(self, status_code=200, json_data=None, raise_exc=None):
+    ``next_url`` populates the ``links`` mapping (mirroring httpx.Response.links) so the
+    dependency fetch's ``Link``-header pagination can be exercised.
+    """
+
+    def __init__(self, status_code=200, json_data=None, raise_exc=None, next_url=None):
         self.status_code = status_code
         self._json = json_data if json_data is not None else []
         self._raise_exc = raise_exc
+        self.links = {"next": {"url": next_url, "rel": "next"}} if next_url else {}
 
     def json(self):
         return self._json
 
 
-_BLOCKED_BY_RE = re.compile(r"/issues/(\d+)/dependencies/blocked_by$")
+_BLOCKED_BY_RE = re.compile(r"/issues/(\d+)/dependencies/blocked_by")
 
 
 class _FakeIssuesClient:
@@ -72,14 +77,21 @@ class _FakeIssuesClient:
 
     Issues-list pages are served FIFO from ``responses``; ``blocked_by`` dependency
     requests are routed by issue number to ``dependency_responses`` (default: an empty
-    200), so dependency enrichment never consumes an issues-list response.
+    200), so dependency enrichment never consumes an issues-list response. A mapping
+    value may be a single ``_FakeDepResp`` or a list of them (one per dependency page),
+    served in order across successive blocked_by requests for that issue.
     """
 
     def __init__(self, responses, dependency_responses=None):
         self._responses = list(responses)
-        self._dependency_responses = dict(dependency_responses or {})
+        # Normalize each dependency entry to a FIFO list of pages.
+        self._dependency_pages = {
+            number: list(value) if isinstance(value, list) else [value]
+            for number, value in (dependency_responses or {}).items()
+        }
         self.calls = []  # list of (url, params) for issues-list requests
         self.dep_calls = []  # list of issue numbers whose dependencies were fetched
+        self.dep_params = []  # list of params dicts passed to each blocked_by request
 
     async def __aenter__(self):
         return self
@@ -92,7 +104,9 @@ class _FakeIssuesClient:
         if match:
             number = int(match.group(1))
             self.dep_calls.append(number)
-            resp = self._dependency_responses.get(number, _FakeDepResp(200, []))
+            self.dep_params.append(params)
+            pages = self._dependency_pages.get(number)
+            resp = pages.pop(0) if pages else _FakeDepResp(200, [])
             if resp._raise_exc is not None:
                 raise resp._raise_exc
             return resp
@@ -406,7 +420,7 @@ def test_one_dependency_fetch_failure_does_not_fail_list(mock_cfg, mock_cred):
 @patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
 def test_dependency_concurrency_knob_respected(mock_cfg, mock_cred, monkeypatch):
     # A small concurrency bound must not drop any dependency fetch.
-    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "2")
+    monkeypatch.setattr(integrations, "_GITHUB_DEPENDENCY_CONCURRENCY", 2)
     issues = [_issue(n) for n in (1, 2, 3, 4, 5)]
     fake = _FakeIssuesClient(
         [_FakeIssuesResp(200, issues)],
@@ -417,14 +431,87 @@ def test_dependency_concurrency_knob_respected(mock_cfg, mock_cred, monkeypatch)
     assert resp.status_code == 200
     assert sorted(fake.dep_calls) == [1, 2, 3, 4, 5]
     assert all(item["blocked"] for item in resp.json())
+    # The first page of each dependency fetch asks GitHub for the max page size.
+    assert all(p and p.get("per_page") == integrations._GITHUB_DEPENDENCY_PER_PAGE for p in fake.dep_params)
 
 
-def test_github_dependency_concurrency_falls_back_on_garbage(monkeypatch):
-    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "not-a-number")
-    assert integrations._github_dependency_concurrency() == 8
-    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "0")
-    assert integrations._github_dependency_concurrency() == 8
-    monkeypatch.setenv("GITHUB_DEPENDENCY_CONCURRENCY", "4")
-    assert integrations._github_dependency_concurrency() == 4
-    monkeypatch.delenv("GITHUB_DEPENDENCY_CONCURRENCY", raising=False)
-    assert integrations._github_dependency_concurrency() == 8
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_dependency_fetch_follows_link_header_across_pages(mock_cfg, mock_cred):
+    # A blocked_by list spanning two pages: the open blocker is on page 2, so dropping
+    # page 2 would wrongly mark the issue runnable. Both pages must be fetched.
+    page2 = "https://api.github.com/repos/acme/widget/issues/1/dependencies/blocked_by?page=2"
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={
+            1: [
+                _FakeDepResp(200, [_dep(3, state="closed")], next_url=page2),
+                _FakeDepResp(200, [_dep(5, state="open")]),
+            ]
+        },
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is True
+    assert item["open_dependencies"] == [5]
+    assert {d["number"] for d in item["dependencies"]} == {3, 5}
+    # Two blocked_by requests were made for issue #1; the second used the Link URL verbatim.
+    assert fake.dep_calls == [1, 1]
+    assert fake.dep_params == [{"per_page": integrations._GITHUB_DEPENDENCY_PER_PAGE}, None]
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_dependency_fetch_stops_at_page_cap(mock_cfg, mock_cred, monkeypatch):
+    # Pages that always advertise a "next" link must be bounded by the page cap.
+    monkeypatch.setattr(integrations, "_GITHUB_MAX_DEPENDENCY_PAGES", 2)
+    nxt = "https://api.github.com/repos/acme/widget/issues/1/dependencies/blocked_by?page=n"
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={
+            1: [
+                _FakeDepResp(200, [_dep(3, state="closed")], next_url=nxt),
+                _FakeDepResp(200, [_dep(5, state="closed")], next_url=nxt),
+                _FakeDepResp(200, [_dep(7, state="open")], next_url=nxt),
+            ]
+        },
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    # Only the first two pages were fetched; page 3 (the open blocker) was never reached.
+    assert fake.dep_calls == [1, 1]
+    assert {d["number"] for d in resp.json()[0]["dependencies"]} == {3, 5}
+
+
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_dependency_partial_pages_kept_on_mid_pagination_error(mock_cfg, mock_cred):
+    # A transport error on page 2 keeps page 1's dependencies rather than discarding them.
+    nxt = "https://api.github.com/repos/acme/widget/issues/1/dependencies/blocked_by?page=2"
+    fake = _FakeIssuesClient(
+        [_FakeIssuesResp(200, [_issue(1)])],
+        dependency_responses={
+            1: [
+                _FakeDepResp(200, [_dep(3, state="open")], next_url=nxt),
+                _FakeDepResp(raise_exc=RuntimeError("boom")),
+            ]
+        },
+    )
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_ISSUES)
+    assert resp.status_code == 200
+    item = resp.json()[0]
+    assert item["blocked"] is True
+    assert item["open_dependencies"] == [3]
+
+
+def test_parse_dependency_concurrency_falls_back_on_garbage():
+    assert integrations._parse_dependency_concurrency("not-a-number") == 8
+    assert integrations._parse_dependency_concurrency("0") == 8
+    assert integrations._parse_dependency_concurrency("-3") == 8
+    assert integrations._parse_dependency_concurrency("") == 8
+    assert integrations._parse_dependency_concurrency(None) == 8
+    assert integrations._parse_dependency_concurrency("  4 ") == 4
