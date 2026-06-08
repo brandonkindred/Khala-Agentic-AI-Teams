@@ -46,6 +46,29 @@ def test_risk_limits_from_legacy_dict_drops_retired_max_loss_per_trade_pct():
         assert rl.max_position_pct == 12.0
 
 
+def test_risk_limits_from_legacy_dict_only_retired_key_migrates_to_default_cap(caplog):
+    """A legacy spec that set ONLY the retired ``max_loss_per_trade_pct`` (no
+    explicit ``max_position_pct``) migrates to the default cap (6%) — the retired
+    value is NOT adopted as the deployed cap (it measured a different, stop-coupled
+    quantity). A WARN is emitted so the migrated cap is auditable."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        rl = RiskLimits.from_legacy_dict({"max_loss_per_trade_pct": 2.0})
+    assert rl.max_position_pct == 6.0  # the default, NOT 2.0
+    assert any("max_loss_per_trade_pct" in r.message for r in caplog.records)
+
+
+def test_risk_limits_from_legacy_dict_no_warning_without_retired_key(caplog):
+    """A modern dict (no retired key) migrates silently — the WARN fires only when
+    the retired key is actually present."""
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        RiskLimits.from_legacy_dict({"max_position_pct": 8.0})
+    assert not any("max_loss_per_trade_pct" in r.message for r in caplog.records)
+
+
 def test_risk_limits_from_empty_dict_matches_defaults():
     assert RiskLimits.from_legacy_dict({}) == RiskLimits()
 

@@ -15,11 +15,14 @@ methods, so risk limits are tested identically in backtest and live modes.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class RiskLimits(BaseModel):
@@ -75,7 +78,11 @@ class RiskLimits(BaseModel):
         stop-governed realised-loss tolerance, ``fraction × stop``), so importing
         it as a deployed-capital cap would wrongly shrink the position (and a
         legacy ``0``/negative/None value would either silently zero or fail to
-        validate the cap).
+        validate the cap). A legacy spec that set ONLY the retired key (no explicit
+        ``max_position_pct``) therefore migrates to the default ``max_position_pct``
+        (6%); the stop, if any, remains as a decoupled within-position safeguard.
+        A one-time WARN is logged when the retired key is present so operators
+        loading old specs can confirm the migrated cap is intended.
 
         Preconditions: ``raw`` is a mapping of risk-limit field names to values.
         Postconditions: returns a validated ``RiskLimits``; unknown/retired keys
@@ -83,6 +90,15 @@ class RiskLimits(BaseModel):
         """
         known_fields = set(cls.model_fields)
         filtered = {k: v for k, v in raw.items() if k in known_fields}
+        if "max_loss_per_trade_pct" in raw:
+            logger.warning(
+                "Dropping retired risk-limit 'max_loss_per_trade_pct'=%r; it is no "
+                "longer a separate field. max_position_pct=%r is the deployed-capital "
+                "cap (and the per-trade loss cap); stop_loss.pct is a decoupled "
+                "within-position safeguard. Verify the migrated cap is intended.",
+                raw.get("max_loss_per_trade_pct"),
+                filtered.get("max_position_pct", cls.model_fields["max_position_pct"].default),
+            )
         return cls(**filtered)
 
 
