@@ -80,8 +80,8 @@ def parse_retry_budget(env_name: str, default: int = 2) -> int:
 _JSON_CORRECTION_PREAMBLE = """\
 Your previous response could not be parsed as a single JSON object
 ({error}). Return ONLY one JSON object with no surrounding prose, no
-markdown fences, and no trailing commentary.{keys_hint} Every brace must
-balance.
+markdown fences, and no trailing commentary.{keys_hint}
+Every brace must balance.
 
 --- ORIGINAL TASK BELOW ---
 {original_prompt}

@@ -80,7 +80,7 @@ def test_retries_unparseable_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_retries_malformed_braced_json_then_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
     """A braced-but-invalid first response (the 'Failed to parse JSON' branch of
-    _extract_json, distinct from 'No JSON object found') is also retried."""
+    extract_json_object, distinct from 'No JSON object found') is also retried."""
     # Has a '{' so it passes the brace-scan, but is not valid JSON — exercises
     # the json.JSONDecodeError -> ValueError wrapping path.
     agent = _ScriptedAgent(['{"strategy_code": "# half', _GOOD])
@@ -268,15 +268,25 @@ def test_parse_retries_env_parsing(
     assert parse_retry_budget("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES") == expected
 
 
-def test_build_json_correction_prompt_quotes_error_and_task() -> None:
-    # The refinement agent passes its keys-hint so the retry still names the
-    # exact two output keys; assert that plumbing end-to-end.
+def test_refinement_keys_hint_names_both_output_keys() -> None:
+    """Guard the refinement constant itself: if someone edits _CORRECTION_KEYS_HINT
+    to drop a key, this fails (the helper-plumbing test below would not, since it
+    only proves the hint is echoed)."""
+    assert "strategy_code" in mod._CORRECTION_KEYS_HINT
+    assert "changes_made" in mod._CORRECTION_KEYS_HINT
+
+
+def test_build_json_correction_prompt_quotes_error_task_and_hint() -> None:
+    """Guard the shared helper's plumbing independently of the constant's content:
+    the error, the original task, and a distinct keys_hint marker all flow through."""
     prompt = build_json_correction_prompt(
         "ORIGINAL REFINEMENT TASK",
         ValueError("No JSON object found in LLM response"),
-        keys_hint=mod._CORRECTION_KEYS_HINT,
+        keys_hint=" SENTINEL_HINT_TOKEN",
     )
     assert "No JSON object found in LLM response" in prompt
     assert "ORIGINAL REFINEMENT TASK" in prompt
-    assert "strategy_code" in prompt
-    assert "changes_made" in prompt
+    assert "SENTINEL_HINT_TOKEN" in prompt
+    # Empty hint (the designer path) must not leave a dangling double space.
+    designer = build_json_correction_prompt("T", ValueError("e"))
+    assert "commentary.\nEvery brace" in designer
