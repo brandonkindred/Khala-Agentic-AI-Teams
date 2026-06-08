@@ -275,28 +275,24 @@ only for `requires_custom_code=True` strategies. Each retry feeds the per-bar di
 
 ### STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE
 Relative tolerance for `SpecReadinessGate`'s position-sizing coherence rule (default `0.05` = 5%;
-garbage/negative values fall back to the default). The rule uses the correct risk model — position
-size (`sizing.fraction` / `max_position_pct`) is capital *deployed* as a % of the account, while
-`stop_loss.pct` / `take_profit.pct` are price moves off entry (% of the *trade*), so the realised
-per-trade loss = deployed × stop and can never exceed the deployed amount. Three deterministic
-checks: (A) `sizing.fraction` ≤ `max_position_pct` (critical); (B) the **realised** per-trade loss
-(`sizing.fraction` × `stop_loss.pct`) ≤ `risk_limits.max_loss_per_trade_pct` when that tolerance is
-set — `max_loss_per_trade_pct` is the most a trade can lose, governed by the stop, so a position that
-deploys `sizing.fraction` and stops out at `stop_loss.pct` realises `fraction × stop` of the account
-(e.g. 10% deployed × 5% stop = 0.5%); critical when that exceeds the tolerance. Skipped when the
-tolerance is unset or the deployed fraction is unknown (`volatility_target`, unconfigured
-`fixed_notional`). A stop only caps loss for the entry side the executor fires it on
-(`trailing_high`→long, `trailing_low`→short, `entry_price`→both), so when the tolerance is set and
-deployment is known but some entry side has **no effective stop** (none declared, or only a
-side-incompatible one), the realised loss is unbounded — a declared limit with no mechanism to honor
-it — so that is its own critical (`risk_limits:loss_tolerance_no_stop`) rather than a skip; (C) a
-prose-stated per-trade deployment % ("deploy/allocate/risk X% per trade") reconciled against the
-**actual** deployed fraction (`sizing.fraction`) when known — the cap is an upper bound, not the
-deployed amount, so matching it alone does not satisfy the claim (warning); `volatility_target`
-deployment is dynamic so this check abstains. This tolerance applies **only** to the prose check (C)
-— the hard cap checks (A and B) are strict (a negligible float-noise epsilon only) so a real limit
-breach can never pass readiness. A critical routes through the synthetic-critique path and, if the
-reviser cannot resolve it, trips the existing `design_stalled` early-terminate.
+garbage/negative values fall back to the default). Risk model: `sizing.fraction` / `max_position_pct`
+is capital *deployed* per position as a % of the account — and **is** the per-trade loss cap, because
+an entered position can lose up to ~100% of what was deployed (there is no separate
+`max_loss_per_trade_pct`; it was a duplicate of `max_position_pct` and has been removed).
+`stop_loss.pct` is a price move off entry (% of the *trade*) — an independent, optional safeguard that
+limits a position's realised loss *below* a full wipeout; it is decoupled from sizing and never
+multiplied into the cap. Two deterministic checks: (A) `sizing.fraction` ≤ `max_position_pct`
+(critical; skipped when the deployed fraction is unknown — `volatility_target`, unconfigured
+`fixed_notional`); (C) a prose-stated per-trade deployment % ("deploy/allocate/risk X% per trade")
+reconciled against the **actual** deployed fraction (`sizing.fraction`) when known — the cap is an
+upper bound, not the deployed amount, so matching it alone does not satisfy the claim (warning);
+`volatility_target` deployment is dynamic so this check abstains. This tolerance applies **only** to
+the prose check (C) — the hard cap check (A) is strict (a negligible float-noise epsilon only) so a
+real limit breach can never pass readiness. A SHORT can lose more than 100% of deployed capital, so
+the runtime (`TradingService`) auto-injects a 100%-adverse-move stop for any short lacking an
+effective stop, bounding a short's modeled worst-case loss at the deployed amount too. A critical
+routes through the synthetic-critique path and, if the reviser cannot resolve it, trips the existing
+`design_stalled` early-terminate.
 
 ### STRATEGY_LAB_DESIGN_PARSE_RETRIES
 Number of times `DesignAgent._invoke_and_parse` re-prompts the LLM when its JSON parses but fails

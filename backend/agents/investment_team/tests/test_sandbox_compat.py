@@ -207,6 +207,28 @@ def test_clean_run_reports_success(monkeypatch) -> None:
     assert result.execution_diagnostics is diagnostics
 
 
+def test_adhoc_synthetic_spec_is_marked_custom_code(monkeypatch) -> None:
+    """When called with strategy=None, the synthetic ad-hoc spec must be marked
+    requires_custom_code=True so the mode layers pass entry_rules=None — that is
+    the signal TradingService uses to inject the 100%-adverse-move short-safety
+    stop. (An empty entry_rules list alone no longer triggers that injection.)"""
+    captured: dict[str, object] = {}
+
+    def _fake(*, strategy, config, market_data=None, **kwargs):
+        captured["strategy"] = strategy
+        return BacktestRunResult(
+            result=_empty_metrics(),
+            trades=[],
+            service_result=TradingServiceResult(),
+        )
+
+    monkeypatch.setattr(sandbox_compat, "run_backtest", _fake)
+    sandbox_compat.run_strategy_code("# adhoc code\n", {}, _config())  # strategy=None
+    spec = captured["strategy"]
+    assert spec.requires_custom_code is True
+    assert spec.entry_rules == []
+
+
 def test_initialisation_failure_with_empty_ledger_still_fails(monkeypatch) -> None:
     """Regression check — the happy path for initialisation-time errors
     (strategy module missing, subprocess startup failure) still reports

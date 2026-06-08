@@ -559,8 +559,8 @@ OrderLifecycleEventType = Literal[
     "entry_filled",
     "exit_filled",
     # A matched entry signal that the engine dispatcher's risk sizing reduced to
-    # zero (uncovered short, or a sub-1 whole-share order one share would push
-    # past a cap). Recorded so a zero-trade run is explainable rather than a
+    # zero (a sub-1 whole-share order whose one-share floor would push past
+    # max_position_pct). Recorded so a zero-trade run is explainable rather than a
     # silent no-emit; carries no order (it never reached the order book).
     "risk_capped_skip",
 ]
@@ -617,9 +617,9 @@ class BacktestExecutionDiagnostics(BaseModel):
     orders_unfilled: int = Field(default=0, ge=0)
     warmup_orders_dropped: int = Field(default=0, ge=0)
     # Matched entry signals the engine dispatcher's risk sizing reduced to zero
-    # (uncovered short, or a sub-1 whole-share order one share would push past a
-    # cap). Drives the ``ALL_ENTRIES_RISK_CAPPED`` zero-trade category so a run
-    # suppressed by risk sizing is not mis-triaged as a dead entry predicate.
+    # (a sub-1 whole-share order whose one-share floor would push past
+    # max_position_pct). Drives the ``ALL_ENTRIES_RISK_CAPPED`` zero-trade category
+    # so a run suppressed by risk sizing is not mis-triaged as a dead entry predicate.
     risk_capped_entries: int = Field(default=0, ge=0)
     entries_filled: int = Field(default=0, ge=0)
     exits_emitted: int = Field(default=0, ge=0)
