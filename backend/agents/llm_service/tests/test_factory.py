@@ -46,3 +46,25 @@ def test_get_client_none_uses_global_model(monkeypatch: pytest.MonkeyPatch) -> N
     c = get_client(None)
     assert isinstance(c, OllamaLLMClient)
     assert c.model == "default-model"
+
+
+def test_get_client_with_on_reasoning_is_uncached(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reasoning callback yields a fresh, uncached client carrying the hook."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "rx-model")
+    monkeypatch.setenv("LLM_BASE_URL", "http://127.0.0.1:11434")
+    cb = lambda _t: None  # noqa: E731
+    c1 = get_client("backend", on_reasoning=cb)
+    c2 = get_client("backend", on_reasoning=cb)
+    cached = get_client("backend")  # no hook → shared singleton
+    assert isinstance(c1, OllamaLLMClient)
+    assert c1.on_reasoning is cb
+    assert c1 is not c2  # each callback-bearing client is distinct (uncached)
+    assert c1 is not cached and c2 is not cached
+    assert cached.on_reasoning is None
+
+
+def test_get_client_dummy_ignores_on_reasoning(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_PROVIDER", "dummy")
+    c = get_client("soc2", on_reasoning=lambda _t: None)
+    assert isinstance(c, DummyLLMClient)

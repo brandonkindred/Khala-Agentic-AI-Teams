@@ -14,7 +14,7 @@ import random
 import re
 import threading
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 import httpx
 
@@ -264,10 +264,24 @@ class OllamaLLMClient(LLMClient):
         *,
         base_url: str = "https://ollama.com",
         timeout: float = 900.0,
+        on_reasoning: Optional[Callable[[str], None]] = None,
     ) -> None:
+        """Construct an Ollama-backed LLM client.
+
+        ``on_reasoning`` is an optional sink called once per reasoning ("thinking")
+        delta as it streams in, with that delta's text. It lets a caller surface
+        the model's thinking live (e.g. to a job record / UI) without changing the
+        return contract. Best-effort: a hook exception never affects the LLM call.
+
+        Preconditions: ``on_reasoning`` is callable or ``None``.
+        Postconditions: when set, the hook receives every reasoning delta of every
+            streamed response in arrival order; otherwise reasoning handling is
+            unchanged.
+        """
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
+        self.on_reasoning = on_reasoning
         self._model_num_ctx: Optional[int] = None
         # Provisional num_ctx fallback (set only when /api/show cannot be resolved),
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
@@ -871,11 +885,24 @@ class OllamaLLMClient(LLMClient):
                                         )
                                         if reasoning:
                                             has_reasoning = True
+                                            reasoning_text = str(reasoning)
                                             # Kept whole: DeepSeek thinking mode
                                             # requires tool-call turns to echo
                                             # reasoning_content back on the next
                                             # request (400 otherwise).
-                                            reasoning_parts.append(str(reasoning))
+                                            reasoning_parts.append(reasoning_text)
+                                            # Surface the thinking delta live to an
+                                            # optional sink (e.g. a job record / UI).
+                                            # Best-effort: a hook error must never
+                                            # affect the LLM call or the stream.
+                                            if self.on_reasoning is not None:
+                                                try:
+                                                    self.on_reasoning(reasoning_text)
+                                                except Exception:  # noqa: BLE001
+                                                    logger.debug(
+                                                        "on_reasoning hook raised; ignoring",
+                                                        exc_info=True,
+                                                    )
                                         for tc in delta.get("tool_calls") or []:
                                             idx = tc.get("index", 0)
                                             if idx not in tool_call_buffers:
@@ -920,10 +947,14 @@ class OllamaLLMClient(LLMClient):
                                     total_tokens,
                                 )
                                 if not joined_content.strip() and has_reasoning:
-                                    logger.warning(
-                                        "LLM produced reasoning tokens but no content (caller=%s) — "
-                                        "model likely spent its token budget on thinking. "
-                                        "Consider raising max_tokens or passing think=False.",
+                                    # Expected for thinking models — reasoning is normal
+                                    # stream data, not an error. The stream is still read
+                                    # to completion; if the model genuinely produced no
+                                    # answer the downstream empty-content / truncation
+                                    # handling deals with it. Logged at INFO, not WARNING.
+                                    logger.info(
+                                        "LLM returned reasoning only (no content) for caller=%s; "
+                                        "if a final answer was expected, consider raising max_tokens.",
                                         caller,
                                     )
                                 tool_calls = None

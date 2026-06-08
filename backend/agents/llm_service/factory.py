@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from . import config as llm_config
 from .clients import DummyLLMClient, OllamaLLMClient
@@ -20,12 +20,26 @@ _client_cache: dict[tuple[str, str, float], OllamaLLMClient] = {}
 _cache_lock = threading.Lock()
 
 
-def get_client(agent_key: Optional[str] = None) -> Union[DummyLLMClient, OllamaLLMClient]:
+def get_client(
+    agent_key: Optional[str] = None,
+    *,
+    on_reasoning: Optional[Callable[[str], None]] = None,
+) -> Union[DummyLLMClient, OllamaLLMClient]:
     """
     Return an LLM client for the given agent key or default.
 
     Model resolution: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
     When LLM_PROVIDER=dummy, returns DummyLLMClient. Otherwise returns OllamaLLMClient (cached by model, base_url, timeout).
+
+    ``on_reasoning`` is an optional per-caller thinking-token sink. When provided,
+    a FRESH (uncached) OllamaLLMClient is returned so the callback never leaks into
+    the shared cache; the cached singleton path is used only when it is ``None``.
+    The dummy provider produces no reasoning, so the hook is irrelevant there.
+
+    Preconditions: ``on_reasoning`` is callable or ``None``.
+    Postconditions: with ``on_reasoning is None`` the returned client is the cached
+        singleton for (model, base_url, timeout); otherwise it is a distinct,
+        uncached client carrying the hook.
     """
     provider = llm_config.resolve_provider()
     if provider == "dummy":
@@ -34,8 +48,14 @@ def get_client(agent_key: Optional[str] = None) -> Union[DummyLLMClient, OllamaL
     model = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
     timeout = llm_config.resolve_timeout(agent_key)
-    cache_key = (model, base_url, timeout)
 
+    if on_reasoning is not None:
+        # Uncached: a per-job/per-caller callback must not be shared via the cache.
+        return OllamaLLMClient(
+            model=model, base_url=base_url, timeout=timeout, on_reasoning=on_reasoning
+        )
+
+    cache_key = (model, base_url, timeout)
     with _cache_lock:
         if cache_key not in _client_cache:
             _client_cache[cache_key] = OllamaLLMClient(

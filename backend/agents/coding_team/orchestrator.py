@@ -9,6 +9,8 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 from __future__ import annotations
 
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -42,6 +44,102 @@ MAX_TECH_LEAD_QUESTION_ROUNDS = 5
 # block until answered, and return (resolved_answers, ok). ok=False means the job went terminal or
 # timed out while waiting (the cycle has already set the failure status) and the caller must stop.
 PauseCycle = Callable[[List[Any], str], "tuple[List[Dict[str, Any]], bool]"]
+
+# How often the orchestrator flushes captured agent "thinking" (reasoning tokens)
+# to the job record so the UI poll can surface it. Defaults to 2s; garbage/non-positive
+# falls back to the default.
+_ENV_THINKING_FLUSH_INTERVAL_S = "AGENT_THINKING_FLUSH_INTERVAL_S"
+_DEFAULT_THINKING_FLUSH_INTERVAL_S = 2.0
+# Keep only the most recent tail of reasoning so the field (and DB write) stays bounded.
+_THINKING_MAX_CHARS = 8000
+
+
+def _thinking_flush_interval_s() -> float:
+    """Resolve the thinking-flush interval (seconds) from env, defensively.
+
+    Preconditions: none.
+    Postconditions: returns a positive float; missing/garbage/non-positive yields
+        ``_DEFAULT_THINKING_FLUSH_INTERVAL_S``. Never raises.
+    """
+    raw = os.environ.get(_ENV_THINKING_FLUSH_INTERVAL_S)
+    if not raw:
+        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
+    return value if value > 0 else _DEFAULT_THINKING_FLUSH_INTERVAL_S
+
+
+class _ThinkingBuffer:
+    """Thread-safe, capped accumulator for streamed reasoning ("thinking") tokens.
+
+    The LLM client's ``on_reasoning`` hook (called from a streaming worker thread)
+    appends tokens; a heartbeat thread periodically reads ``snapshot_if_changed``
+    and writes the tail to the job record. Only the most recent
+    ``_THINKING_MAX_CHARS`` characters are retained so memory and the persisted
+    field stay bounded.
+
+    Invariants: all access is guarded by an internal lock; ``snapshot_if_changed``
+    returns the current tail only when it differs from the previously returned tail.
+    """
+
+    def __init__(self, max_chars: int = _THINKING_MAX_CHARS) -> None:
+        self._lock = threading.Lock()
+        self._max_chars = max_chars
+        self._text = ""
+        self._last_flushed: Optional[str] = None
+
+    def append(self, token: str) -> None:
+        """Append a reasoning delta, trimming to the most recent ``max_chars``."""
+        with self._lock:
+            self._text = (self._text + token)[-self._max_chars :]
+
+    def snapshot_if_changed(self) -> Optional[str]:
+        """Return the current tail if it changed since the last call, else ``None``."""
+        with self._lock:
+            if self._text == self._last_flushed:
+                return None
+            self._last_flushed = self._text
+            return self._text
+
+
+def _flush_thinking(buffer: _ThinkingBuffer, update_fn: Callable[..., None]) -> None:
+    """Write the buffer's latest thinking tail to the job record, if it changed.
+
+    Preconditions: ``update_fn`` accepts a ``thinking=`` keyword.
+    Postconditions: calls ``update_fn(thinking=<tail>)`` exactly when the tail
+        changed since the last flush; a write failure is swallowed (surfacing
+        thinking must never break the job). Never raises.
+    """
+    text = buffer.snapshot_if_changed()
+    if text is None:
+        return
+    try:
+        update_fn(thinking=text)
+    except Exception:  # noqa: BLE001 — surfacing thinking must never break the job
+        logger.debug("failed to flush thinking to job record", exc_info=True)
+
+
+def _make_reasoning_llm_getter(record_reasoning: Callable[[str], None]) -> Callable[[str], Any]:
+    """Build the default per-job model getter that streams reasoning into ``record_reasoning``.
+
+    Each role gets a FRESH, uncached client carrying the hook (via
+    ``factory.get_client(on_reasoning=…)``) so reasoning tokens flow to this job's
+    buffer without leaking the callback into the shared client cache.
+
+    Preconditions: ``record_reasoning`` is callable.
+    Postconditions: returns a getter ``key -> strands model`` whose underlying
+        client invokes ``record_reasoning`` for each reasoning delta.
+    """
+
+    def _getter(key: str) -> Any:
+        sp = __import__("llm_service.strands_provider", fromlist=["get_strands_model"])
+        factory = __import__("llm_service.factory", fromlist=["get_client"])
+        client = factory.get_client(key or "coding_team", on_reasoning=record_reasoning)
+        return sp.get_strands_model(key or "coding_team", client=client)
+
+    return _getter
 
 
 def _build_review_evidence(summary: str, diff: str) -> str:
@@ -309,11 +407,12 @@ def run_coding_team_orchestrator(
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
-    llm_getter = get_llm or (
-        lambda key: __import__(
-            "llm_service.strands_provider", fromlist=["get_strands_model"]
-        ).get_strands_model(key or "coding_team")
-    )
+
+    # Capture agents' streamed reasoning ("thinking") so the UI can show what is
+    # happening. Tokens land in an in-memory buffer (cheap, off the DB path); a
+    # heartbeat below flushes the tail to the job record's ``thinking`` field.
+    thinking = _ThinkingBuffer()
+    llm_getter = get_llm or _make_reasoning_llm_getter(thinking.append)
 
     def _check_cancel() -> bool:
         data = _get_job(job_id)
@@ -444,12 +543,27 @@ def run_coding_team_orchestrator(
         agent_ids=agent_ids,
         llm_getter=llm_getter,
     )
-    swarm.run(
-        check_cancel=_check_cancel,
-        persist_fn=_persist_graph,
-        update_fn=_update,
-        pause_for_questions=_pause_cycle,
+    # Flush captured "thinking" to the job record on an interval for the UI poll.
+    # beat_first surfaces any planning-phase reasoning immediately; the final flush
+    # after the block captures the tail emitted since the last tick.
+    from shared_concurrency import BackgroundHeartbeat  # noqa: PLC0415 - local, optional dep path
+
+    thinking_hb = BackgroundHeartbeat(
+        lambda: _flush_thinking(thinking, _update),
+        _thinking_flush_interval_s(),
+        name=f"coding-thinking-{job_id}",
+        beat_first=True,
     )
+    try:
+        with thinking_hb:
+            swarm.run(
+                check_cancel=_check_cancel,
+                persist_fn=_persist_graph,
+                update_fn=_update,
+                pause_for_questions=_pause_cycle,
+            )
+    finally:
+        _flush_thinking(thinking, _update)
 
     # A worker raising a decision that ended without answers (terminal/timeout) aborts the swarm;
     # the pause cycle has already set the failure status, so do not overwrite it with "completed".

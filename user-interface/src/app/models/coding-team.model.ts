@@ -3,6 +3,8 @@ export interface CodingTeamJobStatus {
   status: string;
   phase?: string;
   status_text?: string;
+  /** Most recent agent reasoning ("thinking") tokens, for live display. */
+  thinking?: string;
   error?: string;
   github_context?: {
     owner: string;

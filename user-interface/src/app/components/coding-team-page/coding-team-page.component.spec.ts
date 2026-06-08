@@ -311,4 +311,36 @@ describe('CodingTeamPageComponent', () => {
       expect(confirmBtn.disabled).toBe(false);
     });
   });
+
+  it('renders the Agent thinking panel when jobStatus.thinking is present', async () => {
+    await setup();
+    component.activeJob = {
+      job_id: 'j1',
+      issue_number: 5,
+      issue_url: 'u',
+      status: 'queued',
+      message: '',
+    };
+    component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'weighing the approach' };
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    const stream = el.querySelector('.thinking-stream');
+    expect(stream).not.toBeNull();
+    expect(stream?.textContent).toContain('weighing the approach');
+  });
+
+  it('hides the Agent thinking panel when there is no thinking text', async () => {
+    await setup();
+    component.activeJob = {
+      job_id: 'j1',
+      issue_number: 5,
+      issue_url: 'u',
+      status: 'queued',
+      message: '',
+    };
+    component.jobStatus = { job_id: 'j1', status: 'running' };
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.thinking-stream')).toBeNull();
+  });
 });
