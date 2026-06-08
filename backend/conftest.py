@@ -38,6 +38,10 @@ import pytest
 # ---------------------------------------------------------------------------
 
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
+# Disable the slow 429 rate-limit backoff in tests so no test can ever sleep the
+# 300s+ rate-limit schedule. Tests that exercise the schedule override this via
+# monkeypatch and patch time.sleep.
+os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
 # Placeholder URL: makes JobServiceClient(team=…) construction succeed at
 # import time.  Real HTTP calls will fail with a connection error.
 os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")

@@ -33,7 +33,24 @@ class LLMError(Exception):
 
 
 class LLMRateLimitError(LLMError):
-    """Raised when the LLM returns 429 Too Many Requests and retries are exhausted."""
+    """Raised when the LLM returns 429 Too Many Requests and retries are exhausted.
+
+    ``retry_after_seconds`` optionally carries the value parsed from a provider
+    ``Retry-After`` response header so the retry loop that catches this error can
+    honor it (raising the wait to at least that long, never below the configured
+    floor). ``None`` when no header was present or honoring is disabled.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: Optional[int] = None,
+        cause: Optional[Exception] = None,
+        retry_after_seconds: Optional[float] = None,
+    ):
+        super().__init__(message, status_code=status_code, cause=cause)
+        self.retry_after_seconds = retry_after_seconds
 
 
 class LLMTemporaryError(LLMError):

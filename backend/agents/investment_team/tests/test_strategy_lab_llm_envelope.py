@@ -22,6 +22,7 @@ from investment_team.strategy_lab.agents._llm_envelope import (
     _backoff_delay,
     _call_with_timeout,
     _EnvelopeTimeout,
+    _is_rate_limit_kind,
     _resolve_config,
     classify_strands_exception,
     invoke_agent,
@@ -238,6 +239,102 @@ def test_classify_strands_exception(exc: BaseException, expected: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 429 rate-limit schedule (slow backoff, separate from transient)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "exc,expected",
+    [
+        (LLMRateLimitError("429 slow down", status_code=429), True),
+        (LLMError("rate", status_code=429), True),
+        (RuntimeError("ModelThrottledException: too fast"), True),
+        (RuntimeError("rate limit exceeded"), True),
+        (LLMRateLimitError(OLLAMA_WEEKLY_LIMIT_MESSAGE, status_code=429), False),
+        (httpx.ConnectError("net"), False),
+        (LLMError("server", status_code=503), False),
+        (RuntimeError("totally unknown"), False),
+    ],
+)
+def test_is_rate_limit_kind(exc: BaseException, expected: bool) -> None:
+    assert _is_rate_limit_kind(exc) is expected
+
+
+def test_envelope_rate_limit_uses_slow_schedule(
+    no_sleep: List[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A retriable 429 backs off on the slow rate-limit schedule (~300s), not ~1-2s."""
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", "300")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", "3600")
+    stub = _Stub(LLMRateLimitError("rate limited", status_code=429), "ok")
+    out = invoke_agent(
+        stub,
+        "p",
+        agent_key="strategy_design",
+        phase="design_generate",
+        max_attempts=2,
+        total_budget_s=5000.0,  # large so the 300s delay is not budget-clamped
+    )
+    assert out == "ok"
+    assert stub.calls == 2
+    assert len(no_sleep) == 1
+    assert no_sleep[0] >= 300.0
+
+
+def test_envelope_transient_uses_fast_schedule(
+    no_sleep: List[float], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A transient fault keeps the fast schedule even when the rate-limit floor is huge."""
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", "300")
+    stub = _Stub(httpx.ConnectError("boom"), "ok")
+    out = invoke_agent(
+        stub,
+        "p",
+        agent_key="strategy_design",
+        phase="design_generate",
+        max_attempts=2,
+        backoff_base=2.0,
+        backoff_max=60.0,
+        total_budget_s=5000.0,
+    )
+    assert out == "ok"
+    assert len(no_sleep) == 1
+    assert no_sleep[0] <= 5.0  # fast transient backoff, not the 300s rate-limit floor
+
+
+def test_envelope_weekly_cap_is_fatal(no_sleep: List[float]) -> None:
+    """A weekly-usage cap 429 is fatal: no retry, no backoff sleep."""
+    stub = _Stub(LLMRateLimitError(OLLAMA_WEEKLY_LIMIT_MESSAGE, status_code=429))
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(stub, "p", agent_key="k", phase="x", max_attempts=5)
+    assert ei.value.outcome == "fatal"
+    assert stub.calls == 1
+    assert no_sleep == []
+
+
+def test_envelope_rate_limit_delay_clamped_to_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 300s rate-limit delay is clamped to the remaining budget and terminates the loop.
+
+    Does NOT patch time.sleep — the clamp means the real sleep is tiny (<= the
+    0.05s budget), proving the loop never actually waits 300s.
+    """
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", "300")
+    stub = _Stub(LLMRateLimitError("rate limited", status_code=429))
+    with pytest.raises(StrategyLabLLMError) as ei:
+        invoke_agent(
+            stub,
+            "p",
+            agent_key="k",
+            phase="x",
+            max_attempts=1000,
+            timeout_s=10.0,
+            total_budget_s=0.05,
+        )
+    assert ei.value.outcome == "budget_exhausted"
+    assert stub.calls < 1000
+
+
+# ---------------------------------------------------------------------------
 # Config resolution
 # ---------------------------------------------------------------------------
 
@@ -293,6 +390,30 @@ def test_resolve_config_floors_sub_minimum(monkeypatch: pytest.MonkeyPatch) -> N
     assert cfg.total_budget_s >= 0.001
     assert cfg.backoff_base >= 1.0
     assert cfg.backoff_max >= 0.0
+
+
+def test_resolve_config_rate_limit_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    for k in (
+        "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL",
+        "STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX",
+        "LLM_RATE_LIMIT_BACKOFF_INITIAL",
+        "LLM_RATE_LIMIT_BACKOFF_MAX",
+    ):
+        monkeypatch.delenv(k, raising=False)
+    cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
+    assert cfg.rl_initial == 300.0
+    assert cfg.rl_cap == 3600.0
+
+
+def test_resolve_config_rate_limit_cascade_and_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Global LLM_RATE_LIMIT_* provides defaults; STRATEGY_LAB_* overrides win.
+    monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "200")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_INITIAL", "450")
+    # A cap below the resolved initial is floored up so the schedule stays valid.
+    monkeypatch.setenv("STRATEGY_LAB_LLM_RATE_LIMIT_BACKOFF_MAX", "100")
+    cfg = _resolve_config("strategy_ideation", None, None, None, None, None)
+    assert cfg.rl_initial == 450.0
+    assert cfg.rl_cap >= cfg.rl_initial
 
 
 # ---------------------------------------------------------------------------
