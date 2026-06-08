@@ -1,13 +1,8 @@
 """Realism extensions of ``BacktestAnomalyDetector``.
 
-Covers two additions:
-
-* Frequency-aware trade-count adequacy — scales the floor by
-  ``window_days / expected_hold_days`` instead of the legacy hard
-  ``< 5 trades`` minimum.
-* Look-ahead pattern in returns — flags trades whose return sign agrees
-  suspiciously well with the entry bar's intrabar direction, a heuristic
-  for look-ahead bias that AST checks miss.
+Covers the look-ahead pattern in returns — flags trades whose return sign
+agrees suspiciously well with the entry bar's intrabar direction, a
+heuristic for look-ahead bias that AST checks miss.
 
 The legacy gates (Sharpe, win-rate, profit factor, hold time, ...) are
 covered by ``test_backtest_anomaly_dsr_aware.py`` and
@@ -70,123 +65,6 @@ def _trade(
         outcome="win" if return_pct > 0 else "loss",
         cumulative_pnl=net,
     )
-
-
-def _trade_count_results(results):
-    return [
-        r
-        for r in results
-        if "expected" in r.details and ("trades" in r.details or "Observed" in r.details)
-    ]
-
-
-# ---------------------------------------------------------------------------
-# Trade-count adequacy
-# ---------------------------------------------------------------------------
-
-
-def test_trade_count_adequacy_critical_when_under_25_pct_of_expected():
-    """5-year daily window with 2-week observed holds expects ~130 trades; 8
-    realised trades is ~6% of expected → critical."""
-    trades = [
-        _trade(
-            trade_num=i + 1,
-            entry_date=f"2020-{(i % 12) + 1:02d}-15",
-            exit_date=f"2020-{(i % 12) + 1:02d}-28",
-            hold_days=14,
-        )
-        for i in range(8)
-    ]
-    detector = BacktestAnomalyDetector()
-    results = detector.check(
-        _baseline_metrics(),
-        trades,
-        start_date="2020-01-01",
-        end_date="2025-01-01",
-        timeframe="1d",
-    )
-    tc = _trade_count_results(results)
-    assert len(tc) == 1
-    assert tc[0].severity == "critical"
-    assert "below the 25%" in tc[0].details or "25%" in tc[0].details
-
-
-def test_trade_count_adequacy_warning_between_25_and_50_pct():
-    """About 40 trades against ~130 expected is ~30% → warning, not critical."""
-    trades = [
-        _trade(
-            trade_num=i + 1,
-            entry_date=f"2021-{((i % 12) + 1):02d}-10",
-            exit_date=f"2021-{((i % 12) + 1):02d}-24",
-            hold_days=14,
-        )
-        for i in range(40)
-    ]
-    detector = BacktestAnomalyDetector()
-    results = detector.check(
-        _baseline_metrics(),
-        trades,
-        start_date="2020-01-01",
-        end_date="2025-01-01",
-        timeframe="1d",
-    )
-    tc = _trade_count_results(results)
-    assert len(tc) == 1
-    assert tc[0].severity == "warning"
-
-
-def test_trade_count_adequacy_passes_above_50_pct():
-    """About 100 trades vs ~130 expected (~77%) → no result emitted."""
-    trades = [
-        _trade(
-            trade_num=i + 1,
-            entry_date=f"202{((i // 24) % 5)}-{((i % 12) + 1):02d}-05",
-            exit_date=f"202{((i // 24) % 5)}-{((i % 12) + 1):02d}-19",
-            hold_days=14,
-        )
-        for i in range(100)
-    ]
-    detector = BacktestAnomalyDetector()
-    results = detector.check(
-        _baseline_metrics(),
-        trades,
-        start_date="2020-01-01",
-        end_date="2025-01-01",
-        timeframe="1d",
-    )
-    assert _trade_count_results(results) == []
-
-
-def test_trade_count_adequacy_falls_back_to_legacy_floor_when_kwargs_missing():
-    """Without dates/timeframe the gate must keep the legacy ``< 5`` floor so
-    older call sites that haven't been updated still produce the prior
-    verdict."""
-    trades = [
-        _trade(trade_num=i + 1, entry_date="2024-01-02", exit_date="2024-01-09") for i in range(3)
-    ]
-    detector = BacktestAnomalyDetector()
-    results = detector.check(_baseline_metrics(), trades)
-    legacy = [r for r in results if "statistically meaningless" in r.details]
-    assert len(legacy) == 1
-    assert legacy[0].severity == "critical"
-
-
-def test_trade_count_adequacy_skipped_in_paper_mode():
-    """Paper sessions run over short windows; the trade-count gate is skipped
-    entirely regardless of which kwargs were threaded in."""
-    trades = [_trade(trade_num=1, entry_date="2024-05-01", exit_date="2024-05-08")]
-    detector = BacktestAnomalyDetector()
-    results = detector.check(
-        _baseline_metrics(),
-        trades,
-        mode="paper",
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
-    )
-    assert _trade_count_results(results) == []
-    legacy = [r for r in results if "statistically meaningless" in r.details]
-    assert legacy == []
 
 
 # ---------------------------------------------------------------------------
@@ -269,9 +147,6 @@ def test_lookahead_critical_when_perfect_intrabar_sign_match():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -287,9 +162,6 @@ def test_lookahead_passes_when_agreement_under_threshold():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -304,9 +176,6 @@ def test_lookahead_skipped_when_market_data_missing():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=None,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -321,9 +190,6 @@ def test_lookahead_skipped_when_no_entry_bars_resolve():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data={"NOT_IN_LEDGER": [_bar("2024-01-02", open_=100.0, close=101.0)]},
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -355,9 +221,6 @@ def test_lookahead_smallsample_perfect_match_is_critical():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -388,9 +251,6 @@ def test_lookahead_warning_between_80_and_95_pct():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -437,9 +297,6 @@ def test_lookahead_intraday_exact_match_uses_specific_bar_not_prefix():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1h",
         market_data=bars_by_symbol,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -491,9 +348,6 @@ def test_lookahead_falls_back_to_day_aggregate_when_trade_date_is_date_only():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1h",
         market_data=bars_by_symbol,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -513,9 +367,6 @@ def test_lookahead_returns_no_result_when_no_same_day_bars_exist():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data={"QQQ": [_bar("2099-12-31", open_=100.0, close=101.0)]},
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -558,9 +409,6 @@ def test_lookahead_critical_for_short_only_strategy_picking_down_bars():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -599,9 +447,6 @@ def test_lookahead_critical_on_mixed_long_short_ledger_with_aligned_bets():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -649,9 +494,6 @@ def test_lookahead_critical_on_mixed_long_short_with_winners_and_losers():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -698,9 +540,6 @@ def test_lookahead_passes_when_short_strategy_is_genuinely_signal_driven():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -727,9 +566,6 @@ def test_lookahead_skips_trades_with_unrecognised_side():
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -780,9 +616,6 @@ def test_lookahead_emits_info_when_zero_trades_resolve_a_bar() -> None:
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data={"NOT_IN_LEDGER": [_bar("2024-01-02", open_=100.0, close=101.0)]},
     )
     info = [
@@ -803,9 +636,6 @@ def test_lookahead_emits_degraded_sample_warning_when_under_half_resolve() -> No
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     degraded = [r for r in results if r.severity == "warning" and "degraded sample" in r.details]
@@ -822,9 +652,6 @@ def test_lookahead_does_not_emit_degraded_warning_when_sample_is_small() -> None
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     degraded = [r for r in results if r.severity == "warning" and "degraded sample" in r.details]
@@ -858,9 +685,6 @@ def test_lookahead_thresholds_key_off_trade_count_not_bar_observation_count() ->
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]
@@ -892,9 +716,6 @@ def test_lookahead_combined_rate_uses_entry_and_exit_observations() -> None:
     results = detector.check(
         _baseline_metrics(),
         trades,
-        start_date="2024-01-01",
-        end_date="2024-12-31",
-        timeframe="1d",
         market_data=market,
     )
     look = [r for r in results if "look-ahead" in r.details or "look_ahead" in r.details]

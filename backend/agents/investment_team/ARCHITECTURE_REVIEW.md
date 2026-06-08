@@ -260,7 +260,6 @@ When `ideate_strategy()` returns a strategy dict, the only check is JSON validit
 
 The 8% annualized return threshold is the only quality gate. No detection of:
 - Suspiciously high returns (>200% annualized = likely bug or data issue)
-- Too few trades (<5 in a year = statistically meaningless)
 - Unrealistic win rates (>90% on swing trades = almost certainly overfitting)
 - Extreme profit factors (>10 = usually data snooping)
 

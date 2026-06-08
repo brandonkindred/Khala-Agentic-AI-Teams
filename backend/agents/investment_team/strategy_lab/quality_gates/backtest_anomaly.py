@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
 from functools import cached_property
 from typing import ClassVar, Dict, Iterable, List, Optional
 
@@ -28,9 +27,6 @@ class BacktestAnomalyCtx:
     dsr_aware: bool
     diagnostics: Optional[BacktestExecutionDiagnostics]
     coverage_report: Optional[CoverageReport]
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    timeframe: Optional[str] = None
     market_data: Optional[Dict[str, List[OHLCVBar]]] = None
 
     # Per-trade reductions multiple rules need. Computed once and memoised on
@@ -145,9 +141,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
         diagnostics: Optional[BacktestExecutionDiagnostics] = None,
         coverage_report: Optional[CoverageReport] = None,
         phase: StrategyLabPhase = "synthesis",
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        timeframe: Optional[str] = None,
         market_data: Optional[Dict[str, List[OHLCVBar]]] = None,
     ) -> List[QualityGateResult]:
         """Run anomaly checks and tag every result with ``phase``.
@@ -169,11 +162,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
         result with a deterministic failure category and order counters.
         Other rules ignore them.
 
-        ``start_date`` / ``end_date`` / ``timeframe`` are required by the
-        frequency-aware trade-count gate. When omitted the gate falls back
-        to the legacy ``< 5 trades`` floor so callers that don't yet wire
-        them through keep their previous behaviour.
-
         ``market_data`` is required by the look-ahead pattern gate (needs
         entry-bar OHLC). When omitted the gate emits no result.
         """
@@ -189,9 +177,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
                 dsr_aware=dsr_aware,
                 diagnostics=diagnostics,
                 coverage_report=coverage_report,
-                start_date=start_date,
-                end_date=end_date,
-                timeframe=timeframe,
                 market_data=market_data,
             )
             results = [r for rule in self._RULES for r in rule(self, ctx)]
@@ -201,66 +186,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
     # Rules — each takes the per-call ``BacktestAnomalyCtx`` and yields zero
     # or more results. Listed in ``_RULES`` below.
     # ------------------------------------------------------------------
-    def _check_trade_count_floor(self, ctx: BacktestAnomalyCtx) -> Iterable[QualityGateResult]:
-        """Frequency-aware trade-count adequacy gate.
-
-        Preconditions:
-          - ``ctx.trades`` is non-empty (the ``check`` zero-trade short-circuit
-            handles the empty case before this rule fires).
-        Postconditions:
-          - Returns an empty tuple in ``paper`` mode (legacy behaviour).
-          - When ``start_date`` / ``end_date`` / ``timeframe`` are missing,
-            falls back to the legacy ``< 5 trades → critical`` floor so
-            callers that haven't yet wired the new kwargs keep their prior
-            verdicts.
-          - When all three are supplied, the expected trade count is
-            ``window_days / expected_hold_days``: realised count below
-            ``25 %`` of expected → critical, ``25–50 %`` → warning, above
-            50 % → pass.
-        Invariants:
-          - Never returns more than one result.
-        """
-        if ctx.mode == "paper":
-            return ()
-
-        observed = len(ctx.trades)
-        expected = _expected_trade_count(
-            start_date=ctx.start_date,
-            end_date=ctx.end_date,
-            timeframe=ctx.timeframe,
-            trades=ctx.trades,
-        )
-        if expected is None:
-            # Legacy fallback: callers that don't yet pass dates/timeframe
-            # still get the original floor so behaviour is unchanged.
-            if observed < 5:
-                return (
-                    self._critical(
-                        f"Only {observed} trades — "
-                        "statistically meaningless for a multi-year backtest."
-                    ),
-                )
-            return ()
-
-        ratio = observed / expected if expected > 0 else 0.0
-        if ratio < 0.25:
-            return (
-                self._critical(
-                    f"Observed {observed} trades vs ~{expected} expected "
-                    f"({ratio:.0%} of expected) given window and holding period — "
-                    "well below the 25% floor for a meaningful sample."
-                ),
-            )
-        if ratio < 0.50:
-            return (
-                self._warning(
-                    f"Observed {observed} trades vs ~{expected} expected "
-                    f"({ratio:.0%} of expected) — review whether the signal "
-                    "is firing as designed."
-                ),
-            )
-        return ()
-
     def _check_annualized_return_ceiling(
         self, ctx: BacktestAnomalyCtx
     ) -> Iterable[QualityGateResult]:
@@ -572,7 +497,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
 
     # Rules iterated in order by ``check``. Adding a rule is a one-line edit.
     _RULES: ClassVar[tuple] = (
-        _check_trade_count_floor,
         _check_annualized_return_ceiling,
         _check_win_rate,
         _check_profit_factor,
@@ -588,82 +512,6 @@ class BacktestAnomalyDetector(GateResultsMixin):
 # ──────────────────────────────────────────────────────────────────────────
 # Module-level helpers used by the rules above.
 # ──────────────────────────────────────────────────────────────────────────
-
-
-# Default expected holding period in CALENDAR DAYS per spec timeframe.
-# Daily-bar swing strategies hold roughly two weeks; intraday holds collapse
-# to fractions of a day. These defaults are the fallback when neither the
-# average observed hold period supplies a value.
-_DEFAULT_EXPECTED_HOLD_DAYS: Dict[str, float] = {
-    "1d": 10.0,
-    "1h": 0.5,
-    "15m": 0.1,
-    "5m": 0.04,
-    "1m": 0.01,
-}
-
-
-def _expected_trade_count(
-    *,
-    start_date: Optional[str],
-    end_date: Optional[str],
-    timeframe: Optional[str],
-    trades: List[TradeRecord],
-) -> Optional[int]:
-    """Estimate the expected number of trades over the backtest window.
-
-    Preconditions:
-      - ``trades`` is non-empty (callers skip the empty-ledger case before
-        invoking this helper).
-    Postconditions:
-      - Returns ``None`` whenever any required input is missing or unparseable
-        — the gate then falls back to its legacy floor.
-      - Returns ``max(1, round(window_days / expected_hold_days))`` when the
-        inputs are usable. ``expected_hold_days`` is the average observed
-        hold when at least one trade reports ``hold_days > 0``, otherwise the
-        per-timeframe default.
-    Invariants:
-      - Never returns a value ``<= 0``.
-    """
-    if not start_date or not end_date or not timeframe:
-        return None
-    window_days = _window_days(start_date, end_date)
-    if window_days is None or window_days <= 0:
-        return None
-
-    observed_holds = [t.hold_days for t in trades if t.hold_days and t.hold_days > 0]
-    if observed_holds:
-        expected_hold = sum(observed_holds) / len(observed_holds)
-    else:
-        expected_hold = _DEFAULT_EXPECTED_HOLD_DAYS.get(timeframe)
-    if not expected_hold or expected_hold <= 0:
-        return None
-
-    expected = round(window_days / expected_hold)
-    return max(1, expected)
-
-
-def _window_days(start_date: str, end_date: str) -> Optional[int]:
-    start = _parse_iso_date(start_date)
-    end = _parse_iso_date(end_date)
-    if start is None or end is None:
-        return None
-    return (end - start).days
-
-
-def _parse_iso_date(value: str) -> Optional[date]:
-    """Parse ``YYYY-MM-DD`` or full ISO datetime strings; returns ``None`` on
-    malformed input rather than raising so the gate can fall back gracefully.
-    """
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(value[:10])
-    except (TypeError, ValueError):
-        try:
-            return datetime.fromisoformat(value).date()
-        except (TypeError, ValueError):
-            return None
 
 
 def _sign(value: float) -> int:

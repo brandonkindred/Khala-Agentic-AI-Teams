@@ -446,26 +446,6 @@ def test_zero_trade_baseline_carries_execution_diagnostics() -> None:
 # ---------------------------------------------------------------------------
 
 
-def _trade(entry: str, exit_: str, net_pnl: float = 10.0, shares: float = 1.0) -> TradeRecord:
-    return TradeRecord(
-        trade_num=1,
-        entry_date=entry,
-        exit_date=exit_,
-        symbol="AAA",
-        side="long",
-        entry_price=100.0,
-        exit_price=100.0 + net_pnl,
-        shares=shares,
-        position_value=100.0,
-        gross_pnl=net_pnl,
-        net_pnl=net_pnl,
-        return_pct=net_pnl,
-        hold_days=2,
-        outcome="win" if net_pnl > 0 else "loss",
-        cumulative_pnl=net_pnl,
-    )
-
-
 def _healthy_metrics() -> BacktestResult:
     return BacktestResult(
         total_return_pct=5.0,
@@ -479,18 +459,6 @@ def _healthy_metrics() -> BacktestResult:
         deflated_sharpe=0.0,
         sortino_ratio=0.0,
     )
-
-
-def test_anomaly_paper_mode_skips_too_few_trades_gate() -> None:
-    detector = BacktestAnomalyDetector()
-    few_trades = [_trade(f"2024-01-{i + 1:02d}", f"2024-01-{i + 2:02d}") for i in range(3)]
-    paper = detector.check(_healthy_metrics(), few_trades, mode="paper")
-    backtest = detector.check(_healthy_metrics(), few_trades, mode="backtest")
-    # Backtest mode flags "Only 3 trades"; paper mode skips it.
-    paper_reasons = " ".join(r.details for r in paper if not r.passed)
-    backtest_reasons = " ".join(r.details for r in backtest if not r.passed)
-    assert "statistically meaningless" in backtest_reasons
-    assert "statistically meaningless" not in paper_reasons
 
 
 def test_anomaly_zero_trades_still_flagged_in_paper_mode() -> None:
