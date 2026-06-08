@@ -15,11 +15,14 @@ methods, so risk limits are tested identically in backtest and live modes.
 
 from __future__ import annotations
 
+import logging
 import math
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Sequence
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class RiskLimits(BaseModel):
@@ -32,24 +35,26 @@ class RiskLimits(BaseModel):
     """
 
     max_gross_leverage: float = Field(default=1.0, ge=0)
-    max_position_pct: float = Field(default=6.0, ge=0, le=100)
-    max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
-    max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
-    max_open_positions: int = Field(default=10, ge=1)
-    max_loss_per_trade_pct: Optional[float] = Field(
-        default=None,
+    max_position_pct: float = Field(
+        default=6.0,
         ge=0,
         le=100,
         description=(
-            "Maximum realised loss on a single trade as a % of the account — the "
-            "loss when the stop fires, i.e. deployed fraction × ``stop_loss.pct`` "
-            "(e.g. a 10% position with a 5% stop realises 0.5%). The readiness "
-            "gate flags a critical when the spec's actual realised loss "
-            "(sizing.fraction × stop_loss.pct) exceeds this tolerance. ``None`` "
-            "means no explicit tolerance is declared (the check is then skipped); "
-            "the check is also skipped when the spec has no stop_loss rule."
+            "Maximum capital deployed on a single position as a % of the account. "
+            "This is also the most a single trade can lose, because an entered "
+            "position can lose up to ~100% of the capital deployed — so the deployed "
+            "size IS the per-trade loss budget. ``stop_loss.pct`` is a separate, "
+            "optional within-position safeguard (a price move off entry, measured "
+            "against the trade) that limits a position's realised loss below a full "
+            "wipeout; it is decoupled from sizing and must never be multiplied into "
+            "this cap. A short with no effective stop is auto-protected at runtime "
+            "with a 100%-adverse-move stop so its modeled worst-case loss is also "
+            "bounded by the deployed size."
         ),
     )
+    max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
+    max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
+    max_open_positions: int = Field(default=10, ge=1)
     target_annual_vol: Optional[float] = Field(
         default=None,
         ge=0,
@@ -65,10 +70,36 @@ class RiskLimits(BaseModel):
     def from_legacy_dict(cls, raw: Dict[str, Any]) -> "RiskLimits":
         """Upgrade a raw ``StrategySpec.risk_limits`` dict into the new schema.
 
-        Unknown keys are silently ignored so old specs don't break.
+        Unknown keys are silently ignored so old specs don't break. The retired
+        ``max_loss_per_trade_pct`` is one such key: it is dropped, and the authored
+        ``max_position_pct`` (the deployed-capital cap, which is itself the most a
+        single trade can lose) stands. The two are NOT folded together — under the
+        old model ``max_loss_per_trade_pct`` was a different quantity (a
+        stop-governed realised-loss tolerance, ``fraction × stop``), so importing
+        it as a deployed-capital cap would wrongly shrink the position (and a
+        legacy ``0``/negative/None value would either silently zero or fail to
+        validate the cap). A legacy spec that set ONLY the retired key (no explicit
+        ``max_position_pct``) therefore migrates to the default ``max_position_pct``
+        (6%); the stop, if any, remains as a decoupled within-position safeguard.
+        A WARN is logged whenever the retired key is present (once per migration
+        call, not process-deduplicated) so operators loading old specs can confirm
+        the migrated cap is intended.
+
+        Preconditions: ``raw`` is a mapping of risk-limit field names to values.
+        Postconditions: returns a validated ``RiskLimits``; unknown/retired keys
+        are ignored, never folded into another field.
         """
         known_fields = set(cls.model_fields)
         filtered = {k: v for k, v in raw.items() if k in known_fields}
+        if "max_loss_per_trade_pct" in raw:
+            logger.warning(
+                "Dropping retired risk-limit 'max_loss_per_trade_pct'=%r; it is no "
+                "longer a separate field. max_position_pct=%r is the deployed-capital "
+                "cap (and the per-trade loss cap); stop_loss.pct is a decoupled "
+                "within-position safeguard. Verify the migrated cap is intended.",
+                raw.get("max_loss_per_trade_pct"),
+                filtered.get("max_position_pct", cls.model_fields["max_position_pct"].default),
+            )
         return cls(**filtered)
 
 
@@ -88,7 +119,6 @@ _RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
     "max_symbol_concentration_pct": "lower",
     "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
-    "max_loss_per_trade_pct": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
 }
