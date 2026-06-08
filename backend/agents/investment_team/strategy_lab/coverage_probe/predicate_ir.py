@@ -454,9 +454,11 @@ def render_predicate_group(group: PredicateGroup) -> str:
         ``group`` is a :class:`PredicateGroup`.
     Postconditions:
         Returns ``"denied: {<sorted syms>}|none\\n<tree render>"`` —
-        deterministic for a given group.
+        deterministic for a given group. ``None`` renders as ``none``; an
+        explicit (even empty) denylist renders as a brace set, so the two
+        are never conflated.
     """
-    if group.denied_symbols:
+    if group.denied_symbols is not None:
         denied = "{" + ", ".join(sorted(group.denied_symbols)) + "}"
     else:
         denied = "none"

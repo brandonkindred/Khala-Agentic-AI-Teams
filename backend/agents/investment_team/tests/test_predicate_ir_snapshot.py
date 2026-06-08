@@ -40,7 +40,12 @@ from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     _build_or_group,
     _collect_legs,
     _eval_tree,
+    _find_or_groups,
+    _leg_gate_symbols,
     _strip_symbol_gates,
+    _tree_and_unknown,
+    _tree_effective_symbols,
+    _tree_or_unknown,
     render_bar_predicate,
     render_predicate_group,
 )
@@ -140,18 +145,28 @@ def _live_renders() -> dict[str, str]:
     return {case_id: _render_case(code) for case_id, code in CASES.items()}
 
 
-def _load_snapshots() -> dict[str, str]:
-    live = _live_renders()
-    if UPDATE_SNAPSHOTS or not SNAPSHOT_PATH.exists():
+def _load_snapshots(live: dict[str, str]) -> dict[str, str]:
+    """Return the committed golden, writing it only on explicit opt-in.
+
+    Regeneration is gated strictly behind ``UPDATE_PREDICATE_IR_SNAPSHOTS`` so a
+    missing or accidentally-deleted golden fails loudly instead of being
+    silently re-created from the current (possibly regressed) output.
+    """
+    if UPDATE_SNAPSHOTS:
         SNAPSHOT_PATH.parent.mkdir(parents=True, exist_ok=True)
         SNAPSHOT_PATH.write_text(
             json.dumps(live, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+    elif not SNAPSHOT_PATH.exists():
+        raise FileNotFoundError(
+            f"Snapshot file {SNAPSHOT_PATH} not found. "
+            "Run with UPDATE_PREDICATE_IR_SNAPSHOTS=1 to generate it."
         )
     return json.loads(SNAPSHOT_PATH.read_text(encoding="utf-8"))
 
 
 _LIVE = _live_renders()
-_SNAPSHOTS = _load_snapshots()
+_SNAPSHOTS = _load_snapshots(_LIVE)
 
 
 @pytest.mark.parametrize("case_id", sorted(CASES))
@@ -242,6 +257,10 @@ def test_render_predicate_group_denied_none_vs_set() -> None:
     )
     assert render_predicate_group(with_deny).startswith("denied: {AAPL, TSLA}\n")
 
+    # An explicit (even empty) denylist is rendered distinctly from None.
+    empty_deny = PredicateGroup(tree=AndOp(legs=(Leg("x", leaf),)), denied_symbols=frozenset())
+    assert render_predicate_group(empty_deny).startswith("denied: {}\n")
+
 
 def test_render_indent_precondition() -> None:
     with pytest.raises(AssertionError):
@@ -307,3 +326,55 @@ def test_build_or_group_wraps_in_symbol_gate() -> None:
     assert isinstance(group.tree, SymbolGate)
     assert group.tree.syms == frozenset({"AAPL"})
     assert isinstance(group.tree.inner, OrOp)
+
+
+def test_tree_and_unknown_detects_any_and_flag() -> None:
+    leg = Leg("x", _mask("x", True))
+    # Clean AND → no unknown; AND with unknown=True, or a nested unknown AND, → True.
+    assert _tree_and_unknown(AndOp(legs=(leg,))) is False
+    assert _tree_and_unknown(AndOp(legs=(leg,), unknown=True)) is True
+    nested = OrOp(legs=(SymbolGate(frozenset({"AAPL"}), AndOp(legs=(leg,), unknown=True)),))
+    assert _tree_and_unknown(nested) is True
+    # An OrOp.unknown does not count as an AND-unknown.
+    assert _tree_and_unknown(OrOp(legs=(leg,), unknown=True)) is False
+
+
+def test_tree_or_unknown_detects_any_or_flag() -> None:
+    leg = Leg("x", _mask("x", True))
+    assert _tree_or_unknown(OrOp(legs=(leg,))) is False
+    assert _tree_or_unknown(OrOp(legs=(leg,), unknown=True)) is True
+    nested = AndOp(legs=(SymbolGate(frozenset({"AAPL"}), OrOp(legs=(leg,), unknown=True)),))
+    assert _tree_or_unknown(nested) is True
+    # An AndOp.unknown does not count as an OR-unknown.
+    assert _tree_or_unknown(AndOp(legs=(leg,), unknown=True)) is False
+
+
+def test_leg_gate_symbols_returns_outer_gate_only() -> None:
+    gated = Leg("x", SymbolGate(frozenset({"AAPL"}), _mask("x", True)))
+    assert _leg_gate_symbols(gated) == frozenset({"AAPL"})
+    # No outer SymbolGate on the leg's inner sub-tree → None.
+    assert _leg_gate_symbols(Leg("x", _mask("x", True))) is None
+
+
+def test_find_or_groups_orders_match_collect_legs() -> None:
+    leg = Leg("x", _mask("x", True))
+    inner_or = OrOp(legs=(leg,))
+    outer_or = OrOp(legs=(leg,))
+    tree = AndOp(legs=(outer_or, SymbolGate(frozenset({"AAPL"}), inner_or)))
+    groups = _find_or_groups(tree)
+    # Two OR groups, id-ordered to match _collect_legs' assignment (outer first).
+    assert [oid for oid, _ in groups] == [0, 1]
+    assert [op for _, op in groups] == [outer_or, inner_or]
+    # No OR anywhere → empty.
+    assert _find_or_groups(AndOp(legs=(leg,))) == []
+
+
+def test_tree_effective_symbols_union_and_universal() -> None:
+    g_aapl = SymbolGate(frozenset({"AAPL"}), Leg("a", _mask("a", True)))
+    g_msft = SymbolGate(frozenset({"MSFT"}), Leg("b", _mask("b", True)))
+    # All legs gated → union of their symbols.
+    assert _tree_effective_symbols(OrOp(legs=(g_aapl, g_msft))) == frozenset({"AAPL", "MSFT"})
+    # Any ungated (universal) leg → None (symbol-unconstrained).
+    assert _tree_effective_symbols(OrOp(legs=(g_aapl, Leg("c", _mask("c", True))))) is None
+    # No symbol info at all → None.
+    assert _tree_effective_symbols(AndOp(legs=(Leg("d", _mask("d", True)),))) is None
