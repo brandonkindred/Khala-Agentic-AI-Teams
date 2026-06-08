@@ -199,6 +199,11 @@ SCHEMA: TeamSchema = TeamSchema(
         )""",
         """ALTER TABLE agent_cognition_graph_watermarks
             ADD COLUMN IF NOT EXISTS last_summary_updated_at TIMESTAMPTZ""",
+        # Drop the pre-rename summary cursor column on upgraded clusters (the
+        # cursor moved from created_at to updated_at). IF EXISTS keeps it re-run
+        # safe and a no-op on fresh databases that never had it.
+        """ALTER TABLE agent_cognition_graph_watermarks
+            DROP COLUMN IF EXISTS last_summary_created_at""",
         # Keyset-pagination indexes for the sync worker's delta scans: events by
         # ``(agent_id, recorded_at, id)`` and summaries by ``(agent_id,
         # updated_at, id)``, so each scan reads strictly after the stored
@@ -207,6 +212,11 @@ SCHEMA: TeamSchema = TeamSchema(
             ON agent_cognition_events(agent_id, recorded_at, id)""",
         """CREATE INDEX IF NOT EXISTS idx_agent_cognition_summaries_agent_updated
             ON agent_cognition_summaries(agent_id, updated_at, id)""",
+        # Drop the superseded created_at summary keyset index on upgraded
+        # clusters so upsert_summary stops maintaining a dead index. IF EXISTS is
+        # re-run safe and a no-op on fresh databases (the index is no longer
+        # created there).
+        """DROP INDEX IF EXISTS idx_agent_cognition_summaries_agent_created""",
     ],
     table_names=[
         "agent_cognition_events",

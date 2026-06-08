@@ -410,8 +410,11 @@ def fetch_summaries_updated_after(
     ``created_at``, which is preserved across recompute) means a recomputed summary
     — whose ``version`` advanced — re-sorts *after* the watermark and is re-fetched
     on a subsequent pass, where the worker ingests it as a fresh per-version
-    episode. A stable, non-stale summary is never recomputed, so its ``updated_at``
-    does not move and it is returned exactly once. No ``stale`` filter — a
+    episode. A summary that is never re-written keeps its ``updated_at`` and is
+    returned once; note any accepted ``upsert_summary`` advances ``updated_at``,
+    so a content-unchanged re-write (e.g. the rollup engine clearing a spurious
+    stale flag) re-emits the row under the *same* ``summary:<id>:<version>`` episode
+    name — an idempotent graph update, not a duplicate. No ``stale`` filter — a
     momentarily stale period is still ingested; recency is resolved at retrieval
     time and by the fresher event episodes.
 

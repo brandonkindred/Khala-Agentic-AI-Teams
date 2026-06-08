@@ -74,9 +74,13 @@ def test_graph_watermark_table_and_keyset_indexes_present() -> None:
 
 
 def test_all_ddl_is_idempotent() -> None:
-    # Pattern B requires startup DDL to be safe to re-run.
+    # Pattern B requires startup DDL to be safe to re-run. CREATE/ALTER-ADD
+    # statements guard with IF NOT EXISTS; the migration cleanup DROPs (the dead
+    # pre-rename summary cursor index/column) guard with IF EXISTS — both forms
+    # re-run safely. "IF NOT EXISTS" does not contain "IF EXISTS", so an unguarded
+    # statement still fails this check.
     for stmt in SCHEMA.statements:
-        assert "IF NOT EXISTS" in stmt, stmt
+        assert "IF NOT EXISTS" in stmt or "IF EXISTS" in stmt, stmt
 
 
 def test_events_idempotency_key_present() -> None:
@@ -118,6 +122,28 @@ def test_summaries_have_events_pruned_column() -> None:
         "ALTER TABLE agent_cognition_summaries" in joined
         and "ADD COLUMN IF NOT EXISTS events_pruned" in joined
     )
+
+
+def test_summaries_have_updated_at_column() -> None:
+    # Content-write time for the knowledge-graph keyset cursor. Present in the
+    # CREATE for fresh clusters and back-filled via an idempotent ALTER — the
+    # ALTER is load-bearing: without it, fetch_summaries_updated_after's
+    # `SELECT ..., updated_at` projection errors on upgraded clusters.
+    joined = "".join(SCHEMA.statements)
+    assert "updated_at" in joined
+    assert (
+        "ALTER TABLE agent_cognition_summaries" in joined
+        and "ADD COLUMN IF NOT EXISTS updated_at" in joined
+    )
+
+
+def test_superseded_summary_cursor_ddl_dropped() -> None:
+    # The summary graph cursor moved created_at → updated_at. The pre-rename
+    # index and watermark column are dropped (IF EXISTS) so upgraded clusters
+    # don't carry a dead index (per-write cost) or an orphan column.
+    joined = "".join(SCHEMA.statements)
+    assert "DROP INDEX IF EXISTS idx_agent_cognition_summaries_agent_created" in joined
+    assert "DROP COLUMN IF EXISTS last_summary_created_at" in joined
 
 
 def test_retention_guard_columns_present() -> None:

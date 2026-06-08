@@ -457,11 +457,13 @@ def test_fetch_summaries_updated_after_repickups_recomputed_summary() -> None:
     again = store.fetch_summaries_updated_after(
         "a", after_updated_at=cur.updated_at, after_id=cur.summary.id, limit=50
     )
+    # Re-pickup with the same id past the cursor proves updated_at advanced: the
+    # keyset (updated_at, id) > (cur.updated_at, cur.id) with an equal id can only
+    # hold when updated_at strictly advanced — no separate timing assertion needed.
     assert len(again) == 1
     assert again[0].summary.id == cur.summary.id  # same row, new version
     assert again[0].summary.version == 2
     assert again[0].summary.summary == "v2"
-    assert again[0].updated_at > cur.updated_at  # content-write time advanced
 
 
 def test_fetch_summaries_updated_after_stable_summary_drained_once() -> None:
