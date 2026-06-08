@@ -26,27 +26,39 @@ def test_buffer_accumulates_and_reports_change() -> None:
     buf = _ThinkingBuffer()
     buf.append("thinking ")
     buf.append("hard")
-    assert buf.snapshot_if_changed() == "thinking hard"
-    # No change since the last snapshot → None (so the flusher skips a redundant write).
-    assert buf.snapshot_if_changed() is None
+    assert buf.pending() == "thinking hard"
+    # pending() does NOT commit, so it keeps reporting the tail until commit().
+    assert buf.pending() == "thinking hard"
+    buf.commit("thinking hard")
+    assert buf.pending() is None  # committed → no change
     buf.append("er")
-    assert buf.snapshot_if_changed() == "thinking harder"
+    assert buf.pending() == "thinking harder"
 
 
 def test_buffer_keeps_only_recent_tail() -> None:
     buf = _ThinkingBuffer(max_chars=5)
     buf.append("abcdef")
     buf.append("gh")
-    assert buf.snapshot_if_changed() == "defgh"  # last 5 chars only
+    assert buf.pending() == "defgh"  # last 5 chars only
 
 
 def test_buffer_empty_is_no_change() -> None:
     buf = _ThinkingBuffer()
-    # Initial empty text equals the never-flushed sentinel only after a first flush;
-    # before any append the snapshot is the empty string (a change from None once).
-    first = buf.snapshot_if_changed()
-    assert first == ""
-    assert buf.snapshot_if_changed() is None
+    # An empty buffer has nothing pending (last-flushed sentinel is "", == the tail).
+    assert buf.pending() is None
+
+
+def test_buffer_commit_only_marks_given_text() -> None:
+    """A failed write commits nothing, so the same tail stays pending for retry; a
+    later commit of exactly the written text clears it even if more arrived since."""
+    buf = _ThinkingBuffer()
+    buf.append("ab")
+    assert buf.pending() == "ab"
+    # Simulate a write failure: we never commit. New token arrives.
+    buf.append("cd")
+    assert buf.pending() == "abcd"  # still pending (nothing committed)
+    buf.commit("abcd")
+    assert buf.pending() is None
 
 
 # --------------------------------------------------------------------------- flush
@@ -99,6 +111,26 @@ def test_flush_thinking_swallows_update_errors() -> None:
     _flush_thinking(buf, boom)
 
 
+def test_flush_thinking_retries_after_write_failure() -> None:
+    """A write that raises is not committed, so the next flush retries the same tail
+    instead of dropping it (lost-update regression)."""
+    buf = _ThinkingBuffer()
+    buf.append("abc")
+    calls: list[str] = []
+
+    def flaky(**kw: Any) -> None:
+        calls.append(kw["thinking"])
+        if len(calls) == 1:
+            raise RuntimeError("db down")
+
+    _flush_thinking(buf, flaky)  # attempt 1 raises → not committed
+    _flush_thinking(buf, flaky)  # attempt 2 retries the same tail (still pending)
+    assert calls == ["abc", "abc"]
+    # Now committed → no redundant re-write.
+    _flush_thinking(buf, flaky)
+    assert calls == ["abc", "abc"]
+
+
 # --------------------------------------------------------------------------- getter
 
 
@@ -112,17 +144,20 @@ def test_make_reasoning_llm_getter_threads_callback(monkeypatch) -> None:
     sentinel_client = object()
     sentinel_model = object()
 
-    def fake_get_client(key, *, on_reasoning=None):
-        captured["key"] = key
-        captured["on_reasoning"] = on_reasoning
-        return sentinel_client
-
     def fake_get_strands_model(key, *, client=None, **_kw):
         captured["model_key"] = key
         captured["client"] = client
         return sentinel_model
 
-    monkeypatch.setattr(factory, "get_client", fake_get_client)
+    get_client_calls: list[str] = []
+
+    def counting_get_client(key, *, on_reasoning=None):
+        get_client_calls.append(key)
+        captured["key"] = key
+        captured["on_reasoning"] = on_reasoning
+        return sentinel_client
+
+    monkeypatch.setattr(factory, "get_client", counting_get_client)
     monkeypatch.setattr(strands_provider, "get_strands_model", fake_get_strands_model)
 
     cb = lambda _t: None  # noqa: E731
@@ -133,6 +168,14 @@ def test_make_reasoning_llm_getter_threads_callback(monkeypatch) -> None:
     assert captured["key"] == "tech_lead"
     assert captured["on_reasoning"] is cb
     assert captured["client"] is sentinel_client
+
+    # Memoized per job: repeated calls with the same key reuse the client (one
+    # /api/show num_ctx fetch per role), but a new key builds a fresh client.
+    getter("tech_lead")
+    getter("tech_lead")
+    assert get_client_calls == ["tech_lead"]
+    getter("coding_team")
+    assert get_client_calls == ["tech_lead", "coding_team"]
 
 
 # --------------------------------------------------------------------------- interval
