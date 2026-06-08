@@ -34,27 +34,32 @@ class _Issue:
 # ---------------------------------------------------------------------------
 
 
-def test_parse_valid_lines_added_only_single_hunk() -> None:
+def test_parse_valid_lines_added_only_excludes_context() -> None:
     patch = "@@ -1,2 +1,3 @@\n context\n+added line\n more context"
-    # +1 start: line1 context, line2 added, line3 context
-    assert parse_valid_lines(patch) == {2}
+    # added_only: only line2 (the +added line) is commentable.
+    assert parse_valid_lines(patch, added_only=True) == {2}
 
 
-def test_parse_valid_lines_includes_context_when_not_added_only() -> None:
+def test_parse_valid_lines_default_includes_context() -> None:
+    # Default now matches what render_annotated_hunks shows (added + context lines),
+    # both of which GitHub allows inline comments on within a hunk.
     patch = "@@ -1,2 +1,3 @@\n context\n+added\n ctx2"
+    assert parse_valid_lines(patch) == {1, 2, 3}
     assert parse_valid_lines(patch, added_only=False) == {1, 2, 3}
 
 
 def test_parse_valid_lines_removed_lines_excluded() -> None:
     patch = "@@ -1,3 +1,2 @@\n keep\n-deleted\n+replacement"
-    # new file: line1 keep (context), line2 replacement (added). deleted is left-only.
-    assert parse_valid_lines(patch) == {2}
+    # new file: line1 keep (context), line2 replacement (added); deleted is left-only.
+    assert parse_valid_lines(patch) == {1, 2}
+    assert parse_valid_lines(patch, added_only=True) == {2}
 
 
 def test_parse_valid_lines_multiple_hunks() -> None:
     patch = "@@ -1,1 +1,2 @@\n a\n+b\n@@ -10,1 +11,2 @@\n c\n+d"
-    # hunk1: +1 -> line1 ctx, line2 added(+). hunk2: +11 -> line11 ctx, line12 added(+).
-    assert parse_valid_lines(patch) == {2, 12}
+    # hunk1: +1 -> line1 ctx, line2 added. hunk2: +11 -> line11 ctx, line12 added.
+    assert parse_valid_lines(patch) == {1, 2, 11, 12}
+    assert parse_valid_lines(patch, added_only=True) == {2, 12}
 
 
 def test_parse_valid_lines_no_newline_marker_skipped() -> None:

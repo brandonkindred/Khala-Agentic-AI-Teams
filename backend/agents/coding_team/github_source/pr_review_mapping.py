@@ -21,10 +21,11 @@ import re
 from typing import Any, Iterable, Optional
 
 # GitHub inline review comments on side=RIGHT must target a line the diff adds
-# (`+`) or carries as context (` `). Commenting only on added lines keeps reviews
-# on the lines the PR actually changed; flip this to include context lines if a
-# future caller wants broader anchoring.
-COMMENT_ON_ADDED_LINES_ONLY = True
+# (`+`) or carries as context (` `). We accept both so the commentable set matches
+# exactly what the reviewer is shown by render_annotated_hunks (added + context
+# lines) — a finding cited on a context line can still be posted inline rather than
+# silently demoted to the body. Set this True to restrict anchoring to added lines.
+COMMENT_ON_ADDED_LINES_ONLY = False
 
 # Severities that should block the PR (drive a REQUEST_CHANGES review).
 _BLOCKING_SEVERITIES = {"critical", "high"}
@@ -92,11 +93,12 @@ def render_annotated_hunks(patch: str) -> str:
     in_hunk = False
     first_hunk = True
     for raw in (patch or "").splitlines():
-        if _HUNK_RE.match(raw):
+        header = _HUNK_RE.match(raw)
+        if header:
             if not first_hunk:
                 out.append("...")
             first_hunk = False
-            new_line = int(_HUNK_RE.match(raw).group(1))  # type: ignore[union-attr]
+            new_line = int(header.group(1))
             in_hunk = True
             continue
         if not in_hunk:

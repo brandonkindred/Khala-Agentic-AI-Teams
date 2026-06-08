@@ -31,11 +31,12 @@ describe('pollJobStatus', () => {
     const api = { getJobStatus: vi.fn(() => throwError(() => new Error('boom'))) };
     const lost = vi.fn();
 
-    pollJobStatus(api, 'j', vi.fn(), lost);
+    const sub = pollJobStatus(api, 'j', vi.fn(), lost);
     vi.advanceTimersByTime(5000);
     vi.advanceTimersByTime(5000);
     expect(lost).not.toHaveBeenCalled(); // only 2 errors so far
     vi.advanceTimersByTime(5000);
     expect(lost).toHaveBeenCalledTimes(1); // 3rd error trips the budget
+    expect(sub.closed).toBe(true); // polling stops (no leak / no further API calls)
   });
 });

@@ -13,7 +13,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 # Ensure backend/agents is on path for coding_team and job_service_client
 _agents_root = Path(__file__).resolve().parent.parent.parent
@@ -648,7 +648,15 @@ def _infer_review_language(files: List[Any]) -> str:
     return "typescript" if ts > py else "python"
 
 
-def _build_review_code(files: List[Any]) -> Tuple[str, int, int]:
+class ReviewCode(NamedTuple):
+    """Result of assembling the reviewer's ``code`` input from a PR's diff."""
+
+    code: str
+    files_reviewed: int
+    files_skipped: int
+
+
+def _build_review_code(files: List[Any]) -> ReviewCode:
     """Assemble the line-annotated ``code`` input for the reviewer from the diff.
 
     Renders each changed file's diff hunks (added + context lines, new-file line
@@ -658,11 +666,11 @@ def _build_review_code(files: List[Any]) -> Tuple[str, int, int]:
     Built entirely from the already-fetched ``files`` payload (no extra requests).
 
     Postconditions:
-        - Returns ``(code, files_reviewed, files_skipped)``. ``files_skipped`` counts
-          reviewable files (non-empty patch, not removed) beyond ``PR_REVIEW_MAX_FILES``
-          that were left out, so the caller can disclose a partial review rather than
-          presenting it as complete. Binary/removed files are not reviewable and are
-          not counted as skipped.
+        - Returns ``ReviewCode(code, files_reviewed, files_skipped)``. ``files_skipped``
+          counts only files with reviewable rendered content that were left out beyond
+          ``PR_REVIEW_MAX_FILES`` — so the caller can honestly disclose a partial review.
+          Binary/removed files and files whose diff renders empty are not reviewable and
+          are never counted as skipped.
     """
     blocks: List[str] = []
     reviewed = 0
@@ -670,15 +678,18 @@ def _build_review_code(files: List[Any]) -> Tuple[str, int, int]:
     for f in files:
         if not f.patch or f.status == "removed":
             continue
-        if reviewed >= PR_REVIEW_MAX_FILES:
-            skipped += 1
-            continue
         rendered = render_annotated_hunks(f.patch)
         if not rendered:
             continue
+        # Only files that actually have content to review count toward the cap and
+        # the skipped disclosure — checked after rendering so an empty render is not
+        # miscounted as a skipped file.
+        if reviewed >= PR_REVIEW_MAX_FILES:
+            skipped += 1
+            continue
         blocks.append(f"### {f.filename} ###\n{rendered}")
         reviewed += 1
-    return "\n\n".join(blocks), reviewed, skipped
+    return ReviewCode("\n\n".join(blocks), reviewed, skipped)
 
 
 def _start_pr_review_thread(job_id: str, request: ReviewPrRequest, token: str) -> None:

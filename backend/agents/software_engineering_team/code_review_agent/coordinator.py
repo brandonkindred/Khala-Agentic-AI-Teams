@@ -142,10 +142,16 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     # Dedupe issues by (file_path, line, description) — line is part of an issue's
     # identity now that it anchors inline PR comments, so the same description on two
-    # different lines is two distinct findings, not a duplicate.
+    # different lines is two distinct findings, not a duplicate. An unanchored copy
+    # (line=None) of a finding that also appears anchored (same file_path+description)
+    # is dropped in favour of the anchored one, so the issue isn't reported twice
+    # (once in the body, once inline).
+    anchored_pairs = {(i.file_path, i.description) for i in all_issues if i.line is not None}
     seen: set[Tuple[str, Optional[int], str]] = set()
     deduped: List[CodeReviewIssue] = []
     for issue in all_issues:
+        if issue.line is None and (issue.file_path, issue.description) in anchored_pairs:
+            continue
         key = (issue.file_path, issue.line, issue.description)
         if key not in seen:
             seen.add(key)

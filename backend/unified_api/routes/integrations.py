@@ -1167,6 +1167,73 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     )
 
 
+def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
+    """Validate GitHub integration config and return (cfg, token, owner, repo).
+
+    Preconditions:
+        - The GitHub integration is enabled with a stored PAT and a configured
+          owner/repo.
+    Postconditions:
+        - Returns the config dict plus the resolved token/owner/repo. Each missing
+          prerequisite raises ``HTTPException(400)``. Shared by the issue- and
+          PR-listing routes so their validation cannot drift.
+    """
+    cfg = get_github_config()
+    if not cfg["enabled"]:
+        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
+    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    if not token:
+        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
+    owner = cfg["owner"]
+    repo = cfg["repo"]
+    if not owner or not repo:
+        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    return cfg, token, owner, repo
+
+
+def _github_api_headers(token: str) -> dict[str, str]:
+    """Standard GitHub REST headers for the configured PAT."""
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "khala-integrations",
+    }
+
+
+async def _collect_github_pages(
+    client: httpx.AsyncClient,
+    base_url: str,
+    headers: dict[str, str],
+    params: dict[str, Any],
+    max_pages: int,
+    owner: str,
+    repo: str,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Fetch every page of a GitHub list endpoint, mapping HTTP errors to HTTPException.
+
+    Postconditions:
+        - Returns ``(raw_items, has_more)`` where ``has_more`` is True iff the page
+          cap (rather than the end of the list) stopped pagination. 401/404/non-200
+          responses raise ``HTTPException`` (401/404/502). Shared by the issue- and
+          PR-listing routes so their pagination and error mapping cannot drift.
+    """
+    raw: list[dict[str, Any]] = []
+    has_more = False
+    page_iter = _iter_github_pages(client, base_url, headers, params, max_pages)
+    async with contextlib.aclosing(page_iter) as pages:
+        async for resp in pages:
+            if resp.status_code == 401:
+                raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
+            if resp.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
+            if resp.status_code != 200:
+                raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
+            raw.extend(resp.json())
+            has_more = bool(resp.links.get("next", {}).get("url"))
+    return raw, has_more
+
+
 @router.get("/github/issues", response_model=list[GitHubIssueItem])
 async def list_github_issues(label: str | None = Query(default=None)) -> list[GitHubIssueItem]:
     """List every open issue from the configured GitHub repository.
@@ -1190,47 +1257,21 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
           issue and never fails the list. This adds roughly one extra request wave per
           ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    cfg, token, owner, repo = _resolve_github_target()
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     use_label = label or cfg["default_label"]
     if use_label:
         params["labels"] = use_label
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "khala-integrations",
-    }
-
-    raw_issues: list[dict[str, Any]] = []
+    headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/issues"
-    # Tracks whether the last fetched page still advertised a "next" link, i.e. the page
-    # cap (rather than the end of the list) stopped pagination.
-    has_more = False
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        page_iter = _iter_github_pages(client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES)
-        async with contextlib.aclosing(page_iter) as pages:
-            async for resp in pages:
-                if resp.status_code == 401:
-                    raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
-                if resp.status_code == 404:
-                    raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-                raw_issues.extend(raw for raw in resp.json() if "pull_request" not in raw)
-                has_more = bool(resp.links.get("next", {}).get("url"))
+        raw_pages, has_more = await _collect_github_pages(
+            client, base_url, headers, params, _GITHUB_MAX_ISSUE_PAGES, owner, repo
+        )
+        # Exclude pull requests (the issues endpoint returns both).
+        raw_issues = [raw for raw in raw_pages if "pull_request" not in raw]
 
         # Enrich each issue with its blocked_by dependencies. Fan out under a bounded
         # semaphore so a large page is not an N+1 storm of serial round-trips.
@@ -1291,41 +1332,17 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
           ``_GITHUB_MAX_PR_PAGES`` pages of 100 items. Hitting that bound logs a
           warning and returns the PRs gathered so far rather than failing.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    _cfg, token, owner, repo = _resolve_github_target()
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-        "User-Agent": "khala-integrations",
-    }
-
-    items: list[GitHubPullRequestItem] = []
+    headers = _github_api_headers(token)
     base_url = f"{_GITHUB_API_BASE}/repos/{owner}/{repo}/pulls"
-    has_more = False
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        page_iter = _iter_github_pages(client, base_url, headers, params, _GITHUB_MAX_PR_PAGES)
-        async with contextlib.aclosing(page_iter) as pages:
-            async for resp in pages:
-                if resp.status_code == 401:
-                    raise HTTPException(status_code=401, detail="GitHub token is invalid or expired.")
-                if resp.status_code == 404:
-                    raise HTTPException(status_code=404, detail=f"Repository {owner}/{repo} not found.")
-                if resp.status_code != 200:
-                    raise HTTPException(status_code=502, detail=f"GitHub API returned {resp.status_code}.")
-                items.extend(_build_pull_request_item(raw) for raw in resp.json())
-                has_more = bool(resp.links.get("next", {}).get("url"))
+        raw_pulls, has_more = await _collect_github_pages(
+            client, base_url, headers, params, _GITHUB_MAX_PR_PAGES, owner, repo
+        )
+    items = [_build_pull_request_item(raw) for raw in raw_pulls]
 
     if has_more:
         logger.warning(
