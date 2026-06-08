@@ -1875,9 +1875,6 @@ class StrategyLabOrchestrator:
                 dsr_aware=config.walk_forward_enabled,
                 diagnostics=exec_result.execution_diagnostics,
                 coverage_report=metrics.coverage_report,
-                start_date=config.start_date,
-                end_date=config.end_date,
-                timeframe=spec.timeframe,
                 market_data=market_data,
             )
             self.record_gates(anomaly_gates, all_gate_results, refinement_round=round_num)
@@ -2475,9 +2472,6 @@ class StrategyLabOrchestrator:
             diagnostics=align_exec.execution_diagnostics,
             coverage_report=new_metrics.coverage_report,
             phase="verification",
-            start_date=config.start_date,
-            end_date=config.end_date,
-            timeframe=proposed_spec.timeframe,
             market_data=market_data,
         )
         self.record_gates(
@@ -2709,9 +2703,6 @@ class StrategyLabOrchestrator:
                 dsr_aware=False,
                 coverage_report=metrics.coverage_report,
                 phase="verification",
-                start_date=config.start_date,
-                end_date=config.end_date,
-                timeframe=spec.timeframe,
                 market_data=market_data,
             )
             fallback_criticals = [
