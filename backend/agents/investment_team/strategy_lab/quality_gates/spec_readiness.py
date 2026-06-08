@@ -1241,32 +1241,26 @@ class SpecReadinessGate(GateResultsMixin):
             if verdict is None:
                 continue
             always, reason = verdict
-            if always == "false":
-                if kind == "entry":
-                    out.append(
-                        self._critical(
-                            f"{label}.when is unreachable: {reason}. An entry predicate that "
-                            "can never be true means the strategy can never open a position.",
-                            rule_id="predicate:unreachable",
-                        )
-                    )
-                else:
-                    out.append(
-                        self._warning(
-                            f"{label}.when is unreachable: {reason}. This signal-exit leg can "
-                            "never fire; positions would only close via stop-loss / take-profit "
-                            "or other exit rules.",
-                            rule_id="predicate:unreachable",
-                        )
-                    )
-            else:  # always == "true"
-                out.append(
-                    self._warning(
-                        f"{label}.when is vacuous: {reason}. The predicate is always true, so "
-                        "it adds no signal to the rule.",
-                        rule_id="predicate:vacuous",
-                    )
+            if always == "true":
+                result = self._warning(
+                    f"{label}.when is vacuous: {reason}. The predicate is always true, so "
+                    "it adds no signal to the rule.",
+                    rule_id="predicate:vacuous",
                 )
+            elif kind == "entry":
+                result = self._critical(
+                    f"{label}.when is unreachable: {reason}. An entry predicate that "
+                    "can never be true means the strategy can never open a position.",
+                    rule_id="predicate:unreachable",
+                )
+            else:
+                result = self._warning(
+                    f"{label}.when is unreachable: {reason}. This signal-exit leg can "
+                    "never fire; positions would only close via stop-loss / take-profit "
+                    "or other exit rules.",
+                    rule_id="predicate:unreachable",
+                )
+            out.append(result)
         return out
 
     # ------------------------------------------------------------------
