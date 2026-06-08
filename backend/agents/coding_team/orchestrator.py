@@ -9,6 +9,7 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 from pathlib import Path
@@ -58,8 +59,10 @@ def _thinking_flush_interval_s() -> float:
     """Resolve the thinking-flush interval (seconds) from env, defensively.
 
     Preconditions: none.
-    Postconditions: returns a positive float; missing/garbage/non-positive yields
-        ``_DEFAULT_THINKING_FLUSH_INTERVAL_S``. Never raises.
+    Postconditions: returns a finite, positive float; missing/garbage/non-positive/
+        non-finite (``inf``/``nan``) yields ``_DEFAULT_THINKING_FLUSH_INTERVAL_S``.
+        Never raises. A non-finite interval would make the heartbeat's
+        ``Event.wait(interval)`` block forever, defeating periodic flushing.
     """
     raw = os.environ.get(_ENV_THINKING_FLUSH_INTERVAL_S)
     if not raw:
@@ -68,7 +71,9 @@ def _thinking_flush_interval_s() -> float:
         value = float(raw)
     except ValueError:
         return _DEFAULT_THINKING_FLUSH_INTERVAL_S
-    return value if value > 0 else _DEFAULT_THINKING_FLUSH_INTERVAL_S
+    if not math.isfinite(value) or value <= 0:
+        return _DEFAULT_THINKING_FLUSH_INTERVAL_S
+    return value
 
 
 class _ThinkingBuffer:
@@ -109,11 +114,14 @@ def _flush_thinking(buffer: _ThinkingBuffer, update_fn: Callable[..., None]) -> 
 
     Preconditions: ``update_fn`` accepts a ``thinking=`` keyword.
     Postconditions: calls ``update_fn(thinking=<tail>)`` exactly when the tail
-        changed since the last flush; a write failure is swallowed (surfacing
-        thinking must never break the job). Never raises.
+        changed since the last flush AND is non-blank; a write failure is swallowed
+        (surfacing thinking must never break the job). Never raises. Blank tails are
+        skipped so the first ``beat_first`` tick on an empty buffer — and every tick
+        on a path where no reasoning is captured — does not write an empty
+        ``thinking`` field (which the UI would render as a hidden/blank panel).
     """
     text = buffer.snapshot_if_changed()
-    if text is None:
+    if not text or not text.strip():
         return
     try:
         update_fn(thinking=text)

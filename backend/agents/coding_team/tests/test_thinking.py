@@ -67,6 +67,27 @@ def test_flush_thinking_writes_only_on_change() -> None:
     assert calls == ["abc", "abcdef"]
 
 
+def test_flush_thinking_skips_blank() -> None:
+    """An empty/whitespace buffer (e.g. the beat_first tick before any reasoning, or a
+    path that never captures reasoning) must not write an empty thinking field."""
+    calls: list[str] = []
+
+    def update(**kw: Any) -> None:
+        calls.append(kw["thinking"])
+
+    empty = _ThinkingBuffer()
+    _flush_thinking(empty, update)  # buffer is "" → no write
+    blank = _ThinkingBuffer()
+    blank.append("   \n")
+    _flush_thinking(blank, update)  # whitespace-only → no write
+    assert calls == []
+
+    # Once real content arrives it flushes.
+    blank.append("real")
+    _flush_thinking(blank, update)
+    assert calls == ["   \nreal"]
+
+
 def test_flush_thinking_swallows_update_errors() -> None:
     buf = _ThinkingBuffer()
     buf.append("x")
@@ -128,7 +149,9 @@ def test_flush_interval_override(monkeypatch) -> None:
 
 
 def test_flush_interval_garbage_and_nonpositive_fall_back(monkeypatch) -> None:
-    for bad in ("", "abc", "0", "-3"):
+    # Includes non-finite (inf/nan): a non-finite interval would make the heartbeat's
+    # Event.wait(interval) block forever, never flushing.
+    for bad in ("", "abc", "0", "-3", "inf", "-inf", "nan"):
         monkeypatch.setenv("AGENT_THINKING_FLUSH_INTERVAL_S", bad)
         assert _thinking_flush_interval_s() == _DEFAULT_THINKING_FLUSH_INTERVAL_S
 
