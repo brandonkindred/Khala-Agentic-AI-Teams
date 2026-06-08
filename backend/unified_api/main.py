@@ -418,8 +418,21 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Agent Cognition graph sync worker failed to start", exc_info=True)
 
+    # 7. Start the Agent Cognition scheduler (rollups → reflection → pruning). It
+    #    self-disables when POSTGRES_HOST is unset and never activates a rule.
+    cognition_scheduler_task: asyncio.Task | None = None
+    try:
+        from agent_cognition.scheduler import run_cognition_scheduler
+
+        cognition_scheduler_task = asyncio.create_task(run_cognition_scheduler())
+        logger.info("Started Agent Cognition scheduler")
+    except Exception:
+        logger.warning("Agent Cognition scheduler failed to start", exc_info=True)
+
     yield
 
+    if cognition_scheduler_task is not None:
+        cognition_scheduler_task.cancel()
     if graph_sync_task is not None:
         graph_sync_task.cancel()
     if run_pruner_task is not None:
