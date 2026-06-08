@@ -2,10 +2,22 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
 import pytest
+
+# Fire-and-forget daemon threads (job heartbeats, the stale-job monitor, the
+# background workflow workers) can emit a log record after pytest has torn down
+# a test's capture streams, surfacing as a noisy
+# "--- Logging error --- ValueError: I/O operation on closed file" traceback on
+# stderr. That is a teardown-race artifact, not a test failure: the handler's
+# emit() raises because the captured stream is already closed. Flip logging to
+# its documented production setting so a failed handler emit is swallowed instead
+# of dumping a traceback. (The heavy workers are still stubbed at the source in
+# the per-endpoint API tests; this only silences the residual race.)
+logging.raiseExceptions = False
 
 # Mirror the env defaults from ``backend/conftest.py`` (not auto-discovered
 # here because this team overrides pytest's rootdir).  The placeholder
@@ -13,6 +25,10 @@ import pytest
 # succeed; real HTTP calls will fail loudly.
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
 os.environ.setdefault("JOB_SERVICE_URL", "http://127.0.0.1:1")
+# Disable the slow 429 rate-limit backoff so no test can ever sleep the 300s+
+# schedule.  Mirrored here because this team overrides pytest's rootdir, so the
+# matching default in ``backend/conftest.py`` is not auto-discovered.
+os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
 
 # Re-export the in-memory FakeJobServiceClient + ``fake_job_client`` fixture so
 # unit tests in this team can use them.  The SE team's ``pyproject.toml``

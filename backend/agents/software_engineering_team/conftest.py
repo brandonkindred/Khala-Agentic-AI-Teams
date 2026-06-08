@@ -11,6 +11,9 @@ from pathlib import Path
 
 # Disable LLM retries so tests that hit an unavailable LLM fail fast.
 os.environ.setdefault("LLM_MAX_RETRIES", "0")
+# Disable the slow 429 rate-limit backoff so no test can ever sleep the 300s+
+# schedule (this team overrides pytest's rootdir, hiding backend/conftest.py).
+os.environ.setdefault("LLM_RATE_LIMIT_MAX_RETRIES", "0")
 
 # Add software_engineering_team and agents to path so imports resolve.
 # software_engineering_team must come first so its modules take precedence over agents/.

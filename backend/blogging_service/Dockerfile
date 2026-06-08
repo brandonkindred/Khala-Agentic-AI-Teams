@@ -26,6 +26,9 @@ COPY agents/llm_service /app/llm_service
 # Job service HTTP client
 COPY agents/job_service_client.py /app/job_service_client.py
 
+# Shared concurrency primitives (BackgroundHeartbeat) imported by job_service_client
+COPY agents/shared_concurrency /app/shared_concurrency
+
 # Integration contracts (used by integrations_store)
 COPY agents/integrations /app/integrations
 

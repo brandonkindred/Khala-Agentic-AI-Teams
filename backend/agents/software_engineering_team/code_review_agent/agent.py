@@ -14,7 +14,7 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .coordinator import run_coordinator
-from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput
+from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput, coerce_line
 from .prompts import CODE_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -145,6 +145,8 @@ class CodeReviewAgent:
                         severity=issue_data.get("severity", "high"),
                         category=issue_data.get("category", "general"),
                         file_path=issue_data.get("file_path", ""),
+                        line=coerce_line(issue_data.get("line")),
+                        start_line=coerce_line(issue_data.get("start_line")),
                         description=issue_data.get("description", ""),
                         suggestion=issue_data.get("suggestion", ""),
                     )

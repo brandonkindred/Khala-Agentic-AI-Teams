@@ -905,7 +905,7 @@ class CodingTeamSwarm:
 
     def run(
         self,
-        max_rounds: int = 500,
+        max_rounds: int = 50,
         check_cancel: Optional[Callable[[], bool]] = None,
         persist_fn: Optional[Callable] = None,
         update_fn: Optional[Callable] = None,

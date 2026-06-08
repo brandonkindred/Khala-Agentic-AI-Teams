@@ -50,6 +50,7 @@ export const NAV_GROUPS: NavGroup[] = [
       { id: 'software-engineering', label: 'Software Engineering', icon: 'terminal', route: '/software-engineering', group: 'development', exact: true },
       { id: 'se-planning', label: 'Planning', icon: 'description', route: '/software-engineering/planning-v3', group: 'development', nested: true },
       { id: 'se-coding-team', label: 'Coding Team', icon: 'code', route: '/software-engineering/coding-team', group: 'development', nested: true },
+      { id: 'se-code-review', label: 'Code Review', icon: 'rate_review', route: '/software-engineering/code-review', group: 'development', nested: true },
     ],
   },
   {

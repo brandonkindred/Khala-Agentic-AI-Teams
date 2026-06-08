@@ -20,9 +20,16 @@ from llm_service import (
 
 
 def test_ollama_429_raises_rate_limit_error_after_retries() -> None:
-    """When Ollama returns 429 repeatedly, LLMRateLimitError is raised after max retries."""
+    """When Ollama returns 429 repeatedly, LLMRateLimitError is raised once the
+    rate-limit retry budget is exhausted.
+
+    The 429 path uses the dedicated *slow* rate-limit schedule (first wait 300s+),
+    so this test pins ``LLM_RATE_LIMIT_MAX_RETRIES`` and patches ``time.sleep`` to
+    a no-op: it exercises the retry-then-raise path without ever waiting the real
+    backoff, independent of the ambient conftest defaults.
+    """
     client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-    with patch("httpx.Client") as mock_client_cls:
+    with patch("httpx.Client") as mock_client_cls, patch("time.sleep") as mock_sleep:
         mock_response = MagicMock()
         mock_response.status_code = 429
         mock_response.headers = {}
@@ -31,12 +38,18 @@ def test_ollama_429_raises_rate_limit_error_after_retries() -> None:
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
-        with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
+        with patch.dict(
+            os.environ,
+            {"LLM_MAX_RETRIES": "1", "LLM_RATE_LIMIT_MAX_RETRIES": "1"},
+            clear=False,
+        ):
             with pytest.raises(LLMRateLimitError) as exc_info:
                 client.complete_json("test prompt")
 
     assert exc_info.value.status_code == 429
     assert "429" in str(exc_info.value) or "rate" in str(exc_info.value).lower()
+    # One 429 retry was taken on the slow schedule — but no real time was spent.
+    assert mock_sleep.called
 
 
 def test_ollama_weekly_limit_message_constant() -> None:

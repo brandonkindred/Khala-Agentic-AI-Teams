@@ -19,6 +19,7 @@ from typing import Any, Dict, Optional
 import httpx
 
 from .. import config as llm_config
+from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -168,6 +169,72 @@ def _exponential_retry_delay(
     base = initial_seconds * (2**failed_attempt_index)
     jitter = random.uniform(0, min(2.0, max(0.25, base * 0.1)))
     return min(base + jitter, cap_seconds)
+
+
+def _honor_retry_after_enabled() -> bool:
+    """Whether a 429 ``Retry-After`` header should be honored (default: on).
+
+    Preconditions: none.
+    Postconditions: returns ``False`` only for an explicit ``"false"``/``"0"``/
+        ``"no"`` (case-insensitive) ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``; unset or
+        any other value means enabled. Never raises.
+    """
+    return (
+        os.environ.get(llm_config.ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER) or ""
+    ).strip().lower() not in ("false", "0", "no")
+
+
+def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
+    """Extract an integer-seconds ``Retry-After`` value from response headers.
+
+    Only the integer-seconds form is honored. The HTTP-date form, a non-numeric
+    value, a missing header, or a non-positive value all yield ``None`` (fall
+    back to the computed schedule). Honoring is gated by
+    ``_honor_retry_after_enabled`` at the call site.
+
+    Preconditions: ``headers`` is a mapping-like object exposing ``.get`` (an
+        httpx ``Headers`` or a plain dict) or ``None``.
+    Postconditions: returns a positive ``float`` or ``None``; never raises.
+    """
+    if headers is None:
+        return None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except AttributeError:
+        return None
+    if raw is None:
+        return None
+    try:
+        value = float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _rate_limit_backoff_sleep(
+    rate_limit_attempt: int,
+    rate_limit_max_retries: int,
+    rate_limit_initial: float,
+    rate_limit_cap: float,
+    retry_after_seconds: Optional[float],
+) -> None:
+    """Sleep the slow 429 backoff for the given attempt index, logging one warning.
+
+    Preconditions: ``0 <= rate_limit_attempt < rate_limit_max_retries``; the caller
+        has already exited the concurrency semaphore and HTTP stream contexts —
+        this sleep can be minutes long and must not hold a shared resource.
+    Postconditions: sleeps ``rate_limit_retry_delay(...)`` seconds; never raises.
+    """
+    wait = rate_limit_retry_delay(
+        rate_limit_attempt, rate_limit_initial, rate_limit_cap, retry_after_seconds
+    )
+    logger.warning(
+        "LLM 429 (rate-limit attempt %d/%d). Retrying in %.1fs",
+        rate_limit_attempt + 1,
+        rate_limit_max_retries + 1,
+        wait,
+    )
+    time.sleep(wait)
 
 
 _ollama_semaphore: Optional[threading.BoundedSemaphore] = None
@@ -676,25 +743,53 @@ class OllamaLLMClient(LLMClient):
         max_retries: int,
         initial_backoff: float,
         backoff_max: float,
+        rate_limit_max_retries: int,
+        rate_limit_initial: float,
+        rate_limit_cap: float,
         sem: threading.BoundedSemaphore,
     ) -> str:
         """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
 
         Token usage from the response is stored in ``self._last_usage`` after each
         successful call so callers can inspect prompt/completion token counts.
+
+        Retries use two INDEPENDENT budgets: transient 5xx/network faults retry on
+        the fast schedule (``max_retries`` / ``initial_backoff`` / ``backoff_max``),
+        while HTTP 429 rate limits retry on the slow rate-limit schedule
+        (``rate_limit_max_retries`` / ``rate_limit_initial`` / ``rate_limit_cap``).
+
+        Preconditions: ``max_retries`` and ``rate_limit_max_retries`` are ``>= 0``;
+            ``rate_limit_cap >= rate_limit_initial > 0``; ``sem`` is the global
+            concurrency semaphore.
+        Postconditions: returns the raw assistant content on success. A 429 retry's
+            ``time.sleep`` happens at the loop-level handler — AFTER the semaphore
+            and HTTP stream contexts have been released — never while holding them.
+            The transient schedule is unaffected by the rate-limit schedule and
+            vice versa. Raises ``LLMRateLimitError`` only after the rate-limit
+            budget is exhausted, ``LLMTemporaryError`` after the transient budget,
+            or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
         """
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
         headers = self._ollama_auth_headers()
         stream_payload = {**payload, "stream": True}
-        for attempt in range(max_retries + 1):
+        # Two INDEPENDENT retry budgets share one loop: a 429 must never consume a
+        # transient attempt and vice versa. The loop is bounded by the sum of both
+        # budgets (+1) so it always terminates by returning or raising.
+        transient_attempt = 0
+        rate_limit_attempt = 0
+        max_total_attempts = max_retries + rate_limit_max_retries + 1
+        rl_log_body: Optional[str] = None
+        rl_log_headers: Any = None
+        while True:
+            attempt = transient_attempt + rate_limit_attempt
             try:
                 with sem:
                     logger.info(
                         "Waiting for LLM response (timeout=%ss, attempt %d/%d)...",
                         int(self.timeout),
                         attempt + 1,
-                        max_retries + 1,
+                        max_total_attempts,
                     )
                     t0 = time.monotonic()
                     with httpx.Client(timeout=self.timeout) as client:
@@ -857,30 +952,24 @@ class OllamaLLMClient(LLMClient):
                                 }
                                 return self._parse_response_content(synthetic)
                             if status == 429:
-                                last_error = LLMRateLimitError(
+                                # Capture the body/headers for exhaustion logging,
+                                # then RAISE so the `with stream / with Client /
+                                # with sem` contexts unwind (releasing the
+                                # concurrency slot and closing the stream) BEFORE
+                                # the slow 429 backoff sleep, which is owned by the
+                                # loop-level `except LLMRateLimitError` handler.
+                                rl_log_body = response.text
+                                rl_log_headers = response.headers
+                                retry_after = (
+                                    _parse_retry_after_seconds(response.headers)
+                                    if _honor_retry_after_enabled()
+                                    else None
+                                )
+                                raise LLMRateLimitError(
                                     f"LLM rate limited (429) after {attempt + 1} attempt(s)",
                                     status_code=429,
+                                    retry_after_seconds=retry_after,
                                 )
-                                if attempt < max_retries:
-                                    wait = _exponential_retry_delay(
-                                        attempt, initial_backoff, backoff_max
-                                    )
-                                    logger.warning(
-                                        "LLM 429 (attempt %d/%d). Retrying in %.1fs",
-                                        attempt + 1,
-                                        max_retries + 1,
-                                        wait,
-                                    )
-                                    time.sleep(wait)
-                                    continue
-                                self._log_llm_server_error(
-                                    429,
-                                    response.text,
-                                    response.headers,
-                                    attempt + 1,
-                                    reason="rate limited",
-                                )
-                                raise last_error
                             if 500 <= status < 600:
                                 hint = ""
                                 if (
@@ -892,11 +981,12 @@ class OllamaLLMClient(LLMClient):
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
                                     status_code=status,
                                 )
-                                if attempt < max_retries:
+                                if transient_attempt < max_retries:
                                     wait = _exponential_retry_delay(
-                                        attempt, initial_backoff, backoff_max
+                                        transient_attempt, initial_backoff, backoff_max
                                     )
                                     time.sleep(wait)
+                                    transient_attempt += 1
                                     continue
                                 self._log_llm_server_error(
                                     status,
@@ -946,20 +1036,41 @@ class OllamaLLMClient(LLMClient):
                                 f"Unexpected LLM response status {status}: {response.text[:200]}",
                                 status_code=status,
                             )
-            except (LLMPermanentError, LLMRateLimitError, LLMTruncatedError):
+            except (LLMPermanentError, LLMTruncatedError):
                 raise
+            except LLMRateLimitError as e:
+                # The single owner of 429 backoff. Control reaches here only after
+                # the `with sem / with Client / with stream` contexts have unwound,
+                # so the (slow, possibly multi-minute) sleep holds no shared
+                # resource — the headline fix.
+                if rate_limit_attempt < rate_limit_max_retries:
+                    _rate_limit_backoff_sleep(
+                        rate_limit_attempt,
+                        rate_limit_max_retries,
+                        rate_limit_initial,
+                        rate_limit_cap,
+                        e.retry_after_seconds,
+                    )
+                    rate_limit_attempt += 1
+                    continue
+                if rl_log_body is not None:
+                    self._log_llm_server_error(
+                        429, rl_log_body, rl_log_headers, attempt + 1, reason="rate limited"
+                    )
+                raise e
             except LLMTemporaryError as e:
                 last_error = e
-                if attempt < max_retries:
-                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                if transient_attempt < max_retries:
+                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
                     logger.warning(
                         "LLM temporary error (attempt %d/%d): %s. Retrying in %.1fs",
                         attempt + 1,
-                        max_retries + 1,
+                        max_total_attempts,
                         e,
                         wait,
                     )
                     time.sleep(wait)
+                    transient_attempt += 1
                     continue
                 raise last_error
             except httpx.HTTPStatusError as e:
@@ -974,17 +1085,35 @@ class OllamaLLMClient(LLMClient):
                         reason="HTTPStatusError",
                     )
                 if status == 429:
-                    last_error = LLMRateLimitError(str(e), status_code=429, cause=e)
-                    if attempt < max_retries:
-                        wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
-                        time.sleep(wait)
+                    # This sibling except clause cannot funnel into the dedicated
+                    # `except LLMRateLimitError` above (a raise here is not caught
+                    # by a sibling clause of the same try), so apply the rate-limit
+                    # schedule inline using the SAME shared counter. We are already
+                    # outside the semaphore/stream contexts here.
+                    if rate_limit_attempt < rate_limit_max_retries:
+                        retry_after = (
+                            _parse_retry_after_seconds(resp.headers)
+                            if (resp is not None and _honor_retry_after_enabled())
+                            else None
+                        )
+                        _rate_limit_backoff_sleep(
+                            rate_limit_attempt,
+                            rate_limit_max_retries,
+                            rate_limit_initial,
+                            rate_limit_cap,
+                            retry_after,
+                        )
+                        rate_limit_attempt += 1
                         continue
-                    raise last_error
+                    raise LLMRateLimitError(str(e), status_code=429, cause=e)
                 if status and 500 <= status < 600:
                     last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
-                    if attempt < max_retries:
-                        wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                    if transient_attempt < max_retries:
+                        wait = _exponential_retry_delay(
+                            transient_attempt, initial_backoff, backoff_max
+                        )
                         time.sleep(wait)
+                        transient_attempt += 1
                         continue
                     raise last_error
                 if status and 400 <= status < 500:
@@ -1012,16 +1141,17 @@ class OllamaLLMClient(LLMClient):
                     f"LLM connection/transport error ({type(e).__name__}): {e}.{hint}",
                     cause=e,
                 )
-                if attempt < max_retries:
-                    wait = _exponential_retry_delay(attempt, initial_backoff, backoff_max)
+                if transient_attempt < max_retries:
+                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
                     logger.warning(
                         "LLM transport error (attempt %d/%d): %s. Retrying in %.1fs",
                         attempt + 1,
-                        max_retries + 1,
+                        max_total_attempts,
                         type(e).__name__,
                         wait,
                     )
                     time.sleep(wait)
+                    transient_attempt += 1
                     continue
                 timeout_hint = ""
                 if isinstance(e, httpx.ReadTimeout):
@@ -1039,9 +1169,14 @@ class OllamaLLMClient(LLMClient):
                     timeout_hint,
                 )
                 raise last_error
-        if last_error:
+        # Unreachable: the `while True` loop above always returns or raises (every
+        # status/exception branch ends in return/continue/raise, and both retry
+        # budgets are finite). Kept as a defensive guard.
+        if last_error:  # pragma: no cover - defensive, loop is exhaustive
             raise last_error
-        raise LLMTemporaryError("LLM request failed after all retries")
+        raise LLMTemporaryError(  # pragma: no cover - defensive, loop is exhaustive
+            "LLM request failed after all retries"
+        )
 
     def complete_json(
         self,
@@ -1060,6 +1195,7 @@ class OllamaLLMClient(LLMClient):
         """
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
+        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
         self._current_caller = caller
@@ -1101,7 +1237,16 @@ class OllamaLLMClient(LLMClient):
         else:
             payload["response_format"] = {"type": "json_object"}
         try:
-            content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            content = self._ollama_post(
+                payload,
+                max_retries,
+                backoff_base,
+                backoff_max,
+                rl_max_retries,
+                rl_initial,
+                rl_cap,
+                sem,
+            )
             # Defensive: retry on empty content (e.g. thinking model or API quirk)
             for empty_attempt in range(2):
                 if (content or "").strip():
@@ -1112,7 +1257,16 @@ class OllamaLLMClient(LLMClient):
                     backoff_base + random.uniform(0, 1),
                 )
                 time.sleep(backoff_base + random.uniform(0, 1))
-                content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+                content = self._ollama_post(
+                    payload,
+                    max_retries,
+                    backoff_base,
+                    backoff_max,
+                    rl_max_retries,
+                    rl_initial,
+                    rl_cap,
+                    sem,
+                )
             if not (content or "").strip():
                 self._record_telemetry(status="error", error_type="empty_response")
                 raise LLMTemporaryError(
@@ -1132,6 +1286,9 @@ class OllamaLLMClient(LLMClient):
                 max_retries=max_retries,
                 backoff_base=backoff_base,
                 backoff_max=backoff_max,
+                rl_max_retries=rl_max_retries,
+                rl_initial=rl_initial,
+                rl_cap=rl_cap,
                 sem=sem,
                 use_think=think,
             )
@@ -1157,6 +1314,9 @@ class OllamaLLMClient(LLMClient):
                     max_retries=max_retries,
                     backoff_base=backoff_base,
                     backoff_max=backoff_max,
+                    rl_max_retries=rl_max_retries,
+                    rl_initial=rl_initial,
+                    rl_cap=rl_cap,
                     sem=sem,
                     use_think=think,
                 )
@@ -1194,6 +1354,9 @@ class OllamaLLMClient(LLMClient):
         max_retries: int,
         backoff_base: float,
         backoff_max: float,
+        rl_max_retries: int,
+        rl_initial: float,
+        rl_cap: float,
         sem: threading.BoundedSemaphore,
         use_think: "bool | str",
     ) -> Dict[str, Any]:
@@ -1223,7 +1386,14 @@ class OllamaLLMClient(LLMClient):
 
             try:
                 next_content = self._ollama_post(
-                    payload, max_retries, backoff_base, backoff_max, sem
+                    payload,
+                    max_retries,
+                    backoff_base,
+                    backoff_max,
+                    rl_max_retries,
+                    rl_initial,
+                    rl_cap,
+                    sem,
                 )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return self._extract_json(accumulated)
@@ -1258,6 +1428,7 @@ class OllamaLLMClient(LLMClient):
         """
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
+        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
         self._current_caller = caller
@@ -1292,7 +1463,16 @@ class OllamaLLMClient(LLMClient):
         if tools:
             payload["tools"] = tools
         try:
-            result = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+            result = self._ollama_post(
+                payload,
+                max_retries,
+                backoff_base,
+                backoff_max,
+                rl_max_retries,
+                rl_initial,
+                rl_cap,
+                sem,
+            )
             self._record_telemetry(status="success", prompt_text=prompt, response_text=result)
             return result
         except LLMTruncatedError as e:
@@ -1306,6 +1486,9 @@ class OllamaLLMClient(LLMClient):
                 max_retries=max_retries,
                 backoff_base=backoff_base,
                 backoff_max=backoff_max,
+                rl_max_retries=rl_max_retries,
+                rl_initial=rl_initial,
+                rl_cap=rl_cap,
                 sem=sem,
                 use_think=think,
             )
@@ -1320,6 +1503,9 @@ class OllamaLLMClient(LLMClient):
         max_retries: int,
         backoff_base: float,
         backoff_max: float,
+        rl_max_retries: int,
+        rl_initial: float,
+        rl_cap: float,
         sem: threading.BoundedSemaphore,
         use_think: "bool | str",
     ) -> str:
@@ -1350,7 +1536,14 @@ class OllamaLLMClient(LLMClient):
             }
             try:
                 next_content = self._ollama_post(
-                    payload, max_retries, backoff_base, backoff_max, sem
+                    payload,
+                    max_retries,
+                    backoff_base,
+                    backoff_max,
+                    rl_max_retries,
+                    rl_initial,
+                    rl_cap,
+                    sem,
                 )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return accumulated
@@ -1392,6 +1585,7 @@ class OllamaLLMClient(LLMClient):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
+        rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         self._current_caller = _caller_tag()
         if max_tokens is None:
@@ -1415,7 +1609,9 @@ class OllamaLLMClient(LLMClient):
             payload["tools"] = tools
         elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
-        content = self._ollama_post(payload, max_retries, backoff_base, backoff_max, sem)
+        content = self._ollama_post(
+            payload, max_retries, backoff_base, backoff_max, rl_max_retries, rl_initial, rl_cap, sem
+        )
         stripped = (content or "").strip()
         if stripped.startswith("{") and "__tool_calls__" in stripped:
             try:

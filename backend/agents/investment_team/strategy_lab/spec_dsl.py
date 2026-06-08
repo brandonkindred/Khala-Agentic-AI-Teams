@@ -122,6 +122,7 @@ _INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
         "required": {},
         "optional": {"period": (14, _int_in(2, 200))},
         "allow_source": True,
+        "output_range": (0.0, 100.0),
     },
     "macd": {
         "required": {},
@@ -151,6 +152,7 @@ _INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
         "required": {},
         "optional": {"period": (14, _int_in(2, 200))},
         "allow_source": False,
+        "output_range": (0.0, 100.0),
     },
     "stochastic": {
         "required": {},
@@ -160,12 +162,29 @@ _INDICATOR_PARAM_SPECS: dict[str, dict[str, Any]] = {
             "output": ("k", _one_of("k", "d")),
         },
         "allow_source": False,
+        "output_range": (0.0, 100.0),
     },
     "vwap": {
         "required": {},
         "optional": {},
         "allow_source": False,
     },
+}
+
+
+# Indicators whose output is bounded to a fixed numeric range, derived from the
+# registry above (an indicator is bounded iff its spec carries an
+# ``output_range``). For the bounded indicators here every output selector
+# (e.g. stochastic ``%K`` / ``%D``) shares the same range, so a single
+# name → range mapping is sufficient. Consumed by the deterministic
+# spec-readiness reachability check, which decides whether a predicate comparing
+# the indicator against a constant can ever (or can always) be true. Keeping the
+# range on the registry means a future bounded indicator stays in sync
+# automatically — there is no separate table to update.
+INDICATOR_OUTPUT_RANGES: dict[str, tuple[float, float]] = {
+    name: spec["output_range"]
+    for name, spec in _INDICATOR_PARAM_SPECS.items()
+    if "output_range" in spec
 }
 
 
