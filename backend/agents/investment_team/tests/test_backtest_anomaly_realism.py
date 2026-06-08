@@ -756,6 +756,11 @@ def test_single_asset_no_diversification_warning() -> None:
     # No market_data → the look-ahead heuristic self-skips, isolating the
     # remaining rules; the baseline metrics are anomaly-clean.
     results = detector.check(_baseline_metrics(), trades)
+    # Guard against a vacuous pass: the detector's contract guarantees a
+    # non-empty result list (a clean ledger yields the "passed all anomaly
+    # checks" info), so an empty list would mean the detector silently stopped
+    # running rather than that the diversification warning was correctly absent.
+    assert results, "anomaly detector returned no results — checks did not run"
     assert all(
         "diversification" not in r.details and "trades are long" not in r.details for r in results
     ), [r.details for r in results]

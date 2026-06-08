@@ -482,6 +482,13 @@ class BacktestAnomalyDetector(GateResultsMixin):
         return ()
 
     # Rules iterated in order by ``check``. Adding a rule is a one-line edit.
+    #
+    # Diversification/breadth is intentionally NOT a rule here: it is owned by
+    # the spec-aware ``TargetSymbolCoverageGate.check_breadth``, which warns only
+    # when ``spec.target_symbols`` declares more than one intended symbol and the
+    # ledger traded just one. The anomaly detector has no view of spec intent, so
+    # a rule here would false-positive on deliberately single-asset strategies
+    # (e.g. an EURUSD-only hypothesis) — do not re-add a spec-unaware check.
     _RULES: ClassVar[tuple] = (
         _check_annualized_return_ceiling,
         _check_win_rate,
