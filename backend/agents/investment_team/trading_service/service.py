@@ -47,6 +47,7 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
+    StopLossRule,
     VolatilityTargetSizing,
     first_side_stop_factor,
 )
@@ -533,10 +534,9 @@ class _EngineEntryDispatcher:
     exit_rules: Sequence[Any] = ()
     target_symbols: frozenset[str] = frozenset()
     #: Runtime risk limits. When set, ``_compute_qty`` clamps order sizes so
-    #: vol-target sizing never deploys past ``max_position_pct`` and the
-    #: worst-case realised per-trade loss respects ``max_loss_per_trade_pct``.
-    #: ``None`` (the default) disables both clamps — used by unit tests that
-    #: exercise raw sizing.
+    #: vol-target / fixed-notional sizing never deploys past ``max_position_pct``
+    #: (the deployed cap, which is also the per-trade loss cap). ``None`` (the
+    #: default) disables the clamp — used by unit tests that exercise raw sizing.
     risk_limits: Optional[RiskLimits] = None
     #: Canonical asset class of the run. Determines whether ``_compute_qty``
     #: produces whole-share (equities) or fractional (crypto / forex) order
@@ -546,12 +546,11 @@ class _EngineEntryDispatcher:
     _next_seq: int = 0
 
     def __post_init__(self) -> None:
-        # Derive the per-run sizing constants once: asset_class, exit_rules, and
-        # risk_limits are all fixed at construction, so the fractional-venue flag
-        # and the worst-case per-side stop factor never change across bars. The
-        # sizing hot loop (``_compute_qty`` / ``_cap_qty_to_loss``) reads these
-        # cached values instead of re-normalizing the asset class and re-scanning
-        # the exit rules on every entry.
+        # Derive the per-run sizing constants once: asset_class and sizing kind
+        # are fixed at construction, so the fractional-venue flag and the
+        # position-clamp gate never change across bars. The sizing hot loop
+        # (``_compute_qty``) reads these cached values instead of re-normalizing
+        # the asset class on every entry.
         self._fractional: bool = is_fractional_asset_class(self.asset_class)
         # Whether the dispatcher applies the runtime position clamp for this
         # sizing kind. ``fixed_fraction`` is exempt (it deploys exactly its
@@ -561,10 +560,6 @@ class _EngineEntryDispatcher:
         self._cap_position: bool = isinstance(
             self.sizing, (FixedNotionalSizing, VolatilityTargetSizing)
         )
-        self._stop_factor_by_side: Dict[str, Optional[float]] = {
-            "long": first_side_stop_factor(self.exit_rules, "long"),
-            "short": first_side_stop_factor(self.exit_rules, "short"),
-        }
 
     def maybe_emit(
         self,
@@ -609,7 +604,7 @@ class _EngineEntryDispatcher:
                 symbol=sym,
                 side=rule.side,
                 reason=f"{ENGINE_ENTRY_REASON_PREFIX}entry[{rule_idx}]",
-                detail="entry sized to 0 by max_position_pct / max_loss_per_trade_pct",
+                detail="entry sized to 0 by max_position_pct",
             )
             return
         self._next_seq += 1
@@ -668,12 +663,15 @@ class _EngineEntryDispatcher:
         # ``self._cap_position`` (precomputed) gates the runtime position clamp.
         # ``fixed_fraction`` is exempt: it deploys exactly ``fraction`` of CURRENT
         # equity every bar, so a readiness-verified ``fraction <= max_position_pct``
-        # holds at any equity level. ``fixed_notional`` and ``volatility_target``
-        # are NOT exempt — their fraction OF EQUITY drifts as equity moves (a
-        # fixed dollar notional becomes a larger share of a shrunken account;
-        # vol-target is data-dependent), so the readiness check against initial
-        # capital can be breached on later entries. Both go through the position
-        # clamp at runtime; every kind still goes through the loss clamp.
+        # holds at any equity level (``RiskFilter.can_enter`` is the order-gate
+        # backstop if it ever over-deploys). ``fixed_notional`` and
+        # ``volatility_target`` are NOT exempt — their fraction OF EQUITY drifts as
+        # equity moves (a fixed dollar notional becomes a larger share of a shrunken
+        # account; vol-target is data-dependent), so the readiness check against
+        # initial capital can be breached on later entries. Both go through the
+        # position clamp at runtime. ``max_position_pct`` is the only deployed cap
+        # (it is also the per-trade loss cap — the deployed size is the most a
+        # trade can lose).
         if isinstance(sizing, FixedFractionSizing):
             raw_qty = equity * float(sizing.fraction) / close
         elif isinstance(sizing, FixedNotionalSizing):
@@ -699,12 +697,10 @@ class _EngineEntryDispatcher:
         qty = raw_qty
         if self._cap_position:
             qty = self._cap_qty_to_position(qty, equity=equity, close=close)
-        qty = self._cap_qty_to_loss(qty, side=side, equity=equity, close=close)
         if self._fractional:
             # Crypto / forex trade in fractional units, so a risk-capped sub-1
             # order is a valid trade — submit the fractional size as-is, with no
-            # whole-share floor or skip. A cap that drove qty to ~0 (or an
-            # uncovered-short skip) is dropped.
+            # whole-share floor or skip. A cap that drove qty to ~0 is dropped.
             return qty if qty > 0.0 else 0.0
         return self._floor_or_skip_whole_share(qty, side=side, equity=equity, close=close)
 
@@ -725,14 +721,16 @@ class _EngineEntryDispatcher:
         an order only to be rejected by ``RiskFilter.can_enter``. With no caps
         the probe is a no-op and the legacy 1-share floor stands.
 
-        Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
+        ``side`` is accepted for call-site symmetry but does not affect the
+        result — the position cap is side-independent.
+
+        Preconditions: ``close`` > 0.
         Postconditions: returns ``0.0`` (skip) or a positive whole number of
         shares whose one-share floor respects every active cap.
         """
         if qty >= 1.0:
             return float(int(qty))
         one_share = self._cap_qty_to_position(1.0, equity=equity, close=close)
-        one_share = self._cap_qty_to_loss(one_share, side=side, equity=equity, close=close)
         return 1.0 if one_share >= 1.0 else 0.0
 
     def _trades_fractional(self) -> bool:
@@ -762,56 +760,6 @@ class _EngineEntryDispatcher:
             # negative max_qty (a broken clamp). Skip the entry instead.
             return 0.0
         max_qty = equity * float(limits.max_position_pct) / 100.0 / close
-        return min(qty, max_qty)
-
-    def _cap_qty_to_loss(self, qty: float, *, side: str, equity: float, close: float) -> float:
-        """Clamp ``qty`` so the worst-case realised per-trade loss respects ``max_loss_per_trade_pct``.
-
-        The position exits on the FIRST side-compatible stop in spec order
-        (``evaluate_exit_rules`` breaks on the first triggered rule). On a gap
-        that crosses several stops at once an earlier-but-looser stop wins, so
-        the worst-case realised loss is governed by the first side-compatible
-        stop's pct — NOT the tightest. (A later stop only wins when nothing
-        earlier triggered, which for a monotonic move means it is tighter than
-        every earlier stop, so it can only realise LESS.) With no such stop the
-        entire deployed amount is at risk (stop factor 1.0). The realised loss
-        is ``deployed × stop_factor``, so ``qty`` is capped at
-        ``max_loss% × equity / (close × stop_factor)``.
-
-        This is a MODELED bound that assumes the stop fills at its trigger
-        price. Engine exits queue after bar ``t`` and fill at bar ``t+1``'s
-        open, so a gap THROUGH the stop realises more than ``stop_loss.pct`` —
-        and no finite position size can bound a gap-to-zero loss. The cap
-        therefore enforces the modeled per-stop loss, not a gap-proof guarantee;
-        the ``max_drawdown_pct`` circuit breaker is the backstop for that gap
-        tail.
-
-        Preconditions: ``close`` > 0; ``side`` in {"long", "short"}.
-        Postconditions: returns ``qty`` unchanged when no tolerance is set or
-        ``qty``/``equity`` <= 0; otherwise a share count whose worst-case
-        realised loss is <= ``max_loss_per_trade_pct%`` of equity.
-        """
-        limits = self.risk_limits
-        if limits is None or limits.max_loss_per_trade_pct is None or qty <= 0 or equity <= 0:
-            return qty
-        # First side-compatible stop in spec order (precomputed in __post_init__
-        # via the shared ``first_side_stop_factor`` — the same primitive the
-        # readiness gate uses, so the two cannot drift). It is the stop the engine
-        # can actually fire on a multi-stop gap.
-        stop_factor = self._stop_factor_by_side[side]
-        if stop_factor is None:
-            if side == "short":
-                # A short with no effective stop has unbounded loss — price can
-                # gap up arbitrarily, so the realised loss is not capped at the
-                # deployed notional and NO position size can honour the declared
-                # per-trade loss tolerance. Skip the entry rather than emit an
-                # unenforceable one.
-                return 0.0
-            # An uncovered long loses at most its full deployed amount (price
-            # floors at zero), so the deployed notional itself is the worst-case
-            # loss (stop factor 1.0).
-            stop_factor = 1.0
-        max_qty = float(limits.max_loss_per_trade_pct) / 100.0 * equity / (close * stop_factor)
         return min(qty, max_qty)
 
     def _find_atr_ref(self):
@@ -1142,8 +1090,8 @@ def _finalize_diagnostics(result: TradingServiceResult) -> TradingServiceResult:
         diagnostics.zero_trade_category = "ALL_ENTRIES_RISK_CAPPED"
         diagnostics.summary = (
             f"Backtest closed zero trades; {diagnostics.risk_capped_entries} matched "
-            "entry signal(s) were sized to zero by max_position_pct / "
-            f"max_loss_per_trade_pct across {diagnostics.bars_processed} post-warmup "
+            "entry signal(s) were sized to zero by max_position_pct across "
+            f"{diagnostics.bars_processed} post-warmup "
             "bar(s) — risk sizing suppressed every entry, not a dead predicate."
         )
     elif diagnostics.orders_emitted == 0:
@@ -1230,6 +1178,24 @@ class TradingService:
         # each bar's strategy response. Empty list (or None) preserves the
         # legacy behaviour where strategy code is the only source of exits.
         self._exit_rules: List[ExitRule] = list(exit_rules or [])
+        # Short-safety floor: a short can lose more than 100% of the deployed
+        # capital (price can more than double), so the deployed-size cap
+        # (``max_position_pct``) is only a true per-trade loss bound for a short
+        # that has a stop. When a short can be opened and the spec declares no
+        # stop the executor can fire for it, auto-inject a 100%-adverse-move stop
+        # (``basis="entry_price"``, ``pct=1.0``) so the short exits at 2x entry —
+        # bounding its modeled worst-case loss at the full deployed amount, like a
+        # long. The readiness gate relies on this contract to pass uncovered
+        # shorts. ``entry_rules is None`` is the custom-code path (sides unknown
+        # at construction): inject the backstop unconditionally there since the
+        # generated code may short. The rule is a no-op for longs (entry_price/1.0
+        # → long floor = 0, never fires), and ``self._exit_rules`` is a fresh copy
+        # so this never mutates the caller's list.
+        shorts_possible = entry_rules is None or any(
+            getattr(rule, "side", "long") == "short" for rule in entry_rules
+        )
+        if shorts_possible and first_side_stop_factor(self._exit_rules, "short") is None:
+            self._exit_rules.append(StopLossRule(pct=1.0, basis="entry_price"))
         self._entry_rules: List[EntryRule] = list(entry_rules or [])
         self._sizing = sizing
         self._target_symbols: frozenset[str] = frozenset(target_symbols or ())

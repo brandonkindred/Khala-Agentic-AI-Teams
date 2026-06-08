@@ -24,7 +24,7 @@ Return `ready = true` only when **both** of the following hold:
 - **Universe ↔ thesis fit** — if the hypothesis names QQQ, does `target_symbols` include it? If the hypothesis is asset-class-wide ("US large-caps"), is `target_symbols` empty as intended?
 - **Mathematical coherence of sizing + risk + stops** — verify the algebra:
   - `sizing` position size ≤ `risk_limits.max_position_pct` (e.g. `fraction=0.10` with `max_position_pct=5` is a contradiction).
-  - Per-trade risk = position size × `stop_loss.pct`. Reject "10% fraction × 20% stop = 2% per trade" if the hypothesis claims tight risk control.
+  - The deployed position size IS the per-trade loss cap (a trade can lose up to ~100% of what it deploys), so `sizing.fraction × 100 ≤ max_position_pct` is the per-trade risk check. `stop_loss.pct` is a separate, optional safeguard that limits a position's loss below a full wipeout — do NOT multiply it into the per-trade risk or treat it as part of sizing.
   - `take_profit.pct` vs `stop_loss.pct` — payoff ratio implies a required win rate (`p ≥ stop / (stop + tp)`). Reject if the hypothesis cannot defend that win rate.
   - `volatility_target` sizing implies stops sized to that vol budget — a 5% annual vol target with a 20% stop is incoherent.
   - `max_drawdown_pct` must be reachable but not trivial (single losing streak shouldn't blow through it; nor should it be unreachable by design).

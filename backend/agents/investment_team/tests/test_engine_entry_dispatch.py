@@ -118,22 +118,24 @@ def test_entry_fixed_fraction_not_marked_risk_presized():
     assert len(pending) == 1 and pending[0].risk_presized is False
 
 
-def test_maybe_emit_records_risk_capped_skip_for_uncovered_short():
-    """A matched signal that risk-sizing reduces to zero (uncovered short with a
-    declared loss tolerance) is recorded as a 'risk_capped_skip' diagnostic event
-    rather than a silent no-emit, so a zero-trade run is explainable."""
-    rules = [EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
+def test_maybe_emit_records_risk_capped_skip_when_position_cap_zeroes_entry():
+    """A matched signal that the position cap reduces to zero (a sub-1 whole-share
+    order whose one-share floor would breach max_position_pct) is recorded as a
+    'risk_capped_skip' diagnostic event rather than a silent no-emit, so a
+    zero-trade run is explainable. fraction=5% (<= the 6% cap) on a $500 stock at
+    $1k equity is 0.1 share raw; one share ($500) is 50% of equity, far above the
+    6% cap -> sized to 0."""
+    rules = [EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=90.0))]
     dispatcher = _EngineEntryDispatcher(
         entry_rules=rules,
-        sizing=FixedFractionSizing(fraction=0.02),
-        exit_rules=[],  # no stop -> uncovered short -> sized to 0
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+        sizing=FixedFractionSizing(fraction=0.05),
+        risk_limits=RiskLimits(max_position_pct=6),
     )
     pending: list = []
     result = TradingServiceResult()
     dispatcher.maybe_emit(
-        cur_bar=_make_bar(close=100.0),
-        portfolio=_make_portfolio(),
+        cur_bar=_make_bar(close=500.0),
+        portfolio=_make_portfolio(capital=1000.0),
         pending_for_prev=pending,
         views={"AAA": _build_view([80.0, 90.0, 100.0])},
         result=result,
@@ -284,83 +286,21 @@ def test_cap_qty_to_position_noop_without_limits():
     assert disp._cap_qty_to_position(300.0, equity=100000.0, close=100.0) == 300.0
 
 
-def test_cap_qty_to_loss_sizes_down_to_tolerance_with_stop():
-    """qty is capped so deployed x tightest stop <= max_loss_per_trade_pct."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    # max_loss 1% / (stop 5%) = 20% deployable -> 200 shares @ $100 on $100k.
-    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 200.0
-
-
-def test_cap_qty_to_loss_uses_first_stop_in_spec_order_not_tightest():
-    """The engine fires the FIRST side-compatible stop in spec order, so a
-    looser stop ahead of a tighter one governs the worst-case loss (it wins on
-    a gap crossing both). With [20%, 5%], the 20% stop sets the cap: max_loss 1%
-    / 20% = 5% deployable = 50 shares @ $100 on $100k — NOT 200 (which the 5%
-    min would wrongly allow, breaching the tolerance on a gap)."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[
-            StopLossRule(basis="entry_price", pct=0.20),  # loose FIRST
-            StopLossRule(basis="entry_price", pct=0.05),
-        ],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 50.0
-
-
-def test_cap_qty_to_loss_no_stop_caps_full_deployment():
-    """Without an effective stop the whole position is at risk, so deployment
-    is capped at max_loss_per_trade_pct itself (stop factor 1.0)."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    # 1% of $100k = $1000 -> 10 shares @ $100.
-    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 10.0
-
-
-def test_cap_qty_to_loss_ignores_side_incompatible_stop():
-    """A trailing_low stop cannot fire for a long, so it does not cap the loss
-    and the full-deployment (stop factor 1.0) cap applies."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[StopLossRule(basis="trailing_low", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 10.0
-
-
-def test_cap_qty_to_loss_noop_without_tolerance():
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
-        risk_limits=RiskLimits(),  # max_loss_per_trade_pct defaults to None
-    )
-    assert disp._cap_qty_to_loss(1000.0, side="long", equity=100000.0, close=100.0) == 1000.0
-
-
-def test_compute_qty_applies_loss_cap_for_fixed_fraction():
-    """End-to-end: a 50% fixed fraction with a 5% stop and a 1% loss tolerance
-    is sized down from 500 to 200 shares."""
+def test_compute_qty_fixed_fraction_not_clamped_at_dispatcher():
+    """fixed_fraction is exempt from the dispatcher position clamp (it deploys its
+    readiness-verified fraction) and there is no separate per-trade loss clamp —
+    the deployed size IS the per-trade loss budget, and the stop does not change
+    it. A 50% fraction at $100k/$100 deploys 500 shares regardless of the stop;
+    RiskFilter.can_enter is the order-gate backstop if it ever over-deploys."""
     disp = _EngineEntryDispatcher(
         entry_rules=[],
         sizing=FixedFractionSizing(fraction=0.50),
         exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
+        risk_limits=RiskLimits(max_position_pct=50),
     )
     bar = _make_bar(close=100.0)
     portfolio = _make_portfolio(capital=100000.0)
-    assert disp._compute_qty("long", bar, portfolio, {}) == 200
+    assert disp._compute_qty("long", bar, portfolio, {}) == 500
 
 
 def test_compute_qty_fixed_fraction_sub1_skips_when_one_share_breaches_position_cap():
@@ -410,21 +350,6 @@ def test_compute_qty_vol_target_clamped_to_position_cap():
     assert qty == 50
 
 
-def test_compute_qty_returns_zero_when_cap_below_one_share():
-    """When a risk cap reduces the order below one whole share, skip the entry
-    rather than floor to 1 (which would breach the declared cap). $1k equity,
-    $500 stock, 1% loss tolerance, no stop -> 0.02 shares -> skip."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=FixedFractionSizing(fraction=0.50),
-        exit_rules=[],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
-    )
-    bar = _make_bar(close=500.0)
-    portfolio = _make_portfolio(capital=1000.0)
-    assert disp._compute_qty("long", bar, portfolio, {}) == 0
-
-
 def test_compute_qty_sub_one_raw_without_cap_keeps_legacy_floor():
     """A sub-1 raw size that no risk cap touched keeps the legacy 1-share floor
     (no risk_limits attached)."""
@@ -439,17 +364,17 @@ def test_compute_qty_sub_one_raw_without_cap_keeps_legacy_floor():
 
 def test_compute_qty_vol_target_warmup_fallback_is_capped():
     """The vol-target ATR-warmup fallback (no view yet) is a 1-share probe, but
-    it still runs through the caps: a 1% loss tolerance with no stop on a
-    high-priced stock forbids even one share, so the entry is skipped."""
+    it still runs through the position cap: a 5% cap on a $500 stock at $1k equity
+    allows only 0.1 share, so the entry is skipped rather than floored to one."""
     disp = _EngineEntryDispatcher(
         entry_rules=[],
         sizing=VolatilityTargetSizing(target_annual_vol=0.15),
         exit_rules=[],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1, max_position_pct=50),
+        risk_limits=RiskLimits(max_position_pct=5),
     )
     bar = _make_bar(close=500.0)
     portfolio = _make_portfolio(capital=1000.0)
-    # No view -> ATR warmup fallback (raw 1 share); loss cap -> 0.02 -> skip.
+    # No view -> ATR warmup fallback (raw 1 share); position cap -> 0.1 -> skip.
     assert disp._compute_qty("long", bar, portfolio, {}) == 0
 
 
@@ -465,52 +390,25 @@ def test_compute_qty_vol_target_warmup_fallback_emits_one_when_within_caps():
     assert disp._compute_qty("long", bar, portfolio, {}) == 1
 
 
-def test_cap_qty_to_loss_uncovered_short_is_skipped():
-    """A short with no effective stop has unbounded loss, so no size honours the
-    tolerance — the entry is skipped (qty 0) rather than sized at full
-    deployment."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[],  # no stop
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 0.0
-
-
-def test_cap_qty_to_loss_short_with_effective_stop_sizes_down():
-    """A short WITH a side-compatible stop (trailing_low) is bounded, so it is
-    sized down rather than skipped."""
-    disp = _EngineEntryDispatcher(
-        entry_rules=[],
-        sizing=None,
-        exit_rules=[StopLossRule(basis="trailing_low", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
-    )
-    # 1% / 5% stop = 20% deployable -> 200 shares @ $100 on $100k.
-    assert disp._cap_qty_to_loss(1000.0, side="short", equity=100000.0, close=100.0) == 200.0
-
-
 def test_compute_qty_fractional_asset_preserves_capped_sub1_order():
-    """For a fractional asset class (crypto/forex), a risk-capped order below one
-    unit is a valid fractional trade, not a no-op. With 50% of $100k deployed on
-    a $60k asset (0.833 units raw) and a 5% stop under a 1% loss tolerance, the
-    loss cap clamps to 0.333 units — a crypto run submits 0.333, while the
+    """For a fractional asset class (crypto/forex), a position-capped order below
+    one unit is a valid fractional trade, not a no-op. A $100k fixed-notional
+    order on a $60k asset is 1.667 units raw; a 50% position cap on $100k equity
+    ($50k) clamps it to 0.833 units — a crypto run submits 0.833, while the
     whole-share path would skip it (return 0)."""
     common = dict(
         entry_rules=[],
-        sizing=FixedFractionSizing(fraction=0.50),
-        exit_rules=[StopLossRule(basis="entry_price", pct=0.05)],
-        risk_limits=RiskLimits(max_loss_per_trade_pct=1),
+        sizing=FixedNotionalSizing(notional_usd=100000.0),
+        risk_limits=RiskLimits(max_position_pct=50),
     )
     bar = _make_bar(close=60000.0)
     port = _make_portfolio(capital=100000.0)
 
     crypto = _EngineEntryDispatcher(asset_class="crypto", **common)
-    assert crypto._compute_qty("long", bar, port, {}) == pytest.approx(1.0 / 3.0)
+    assert crypto._compute_qty("long", bar, port, {}) == pytest.approx(5.0 / 6.0)
 
     forex = _EngineEntryDispatcher(asset_class="forex", **common)
-    assert forex._compute_qty("long", bar, port, {}) == pytest.approx(1.0 / 3.0)
+    assert forex._compute_qty("long", bar, port, {}) == pytest.approx(5.0 / 6.0)
 
     # Whole-share (equities) skips the sub-1 capped order, as before.
     equity_disp = _EngineEntryDispatcher(asset_class="stocks", **common)

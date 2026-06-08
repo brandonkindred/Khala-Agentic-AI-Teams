@@ -778,11 +778,11 @@ def _merge_risk_limits_tighten_only(
         # Ordinary numeric limits: ``None`` means "no limit" — the loosest
         # possible setting. Introducing a value from ``None`` adds a constraint
         # (a tightening) and is accepted regardless of direction; clearing a
-        # value to ``None`` removes the constraint (a loosening). Without this,
-        # a refinement that tightens a previously-unset cap (e.g.
-        # ``max_loss_per_trade_pct``) would be silently dropped by the
-        # ``cmp_current is None`` guard below.
-        if current_value is None and new_value is not None:
+        # value to ``None`` removes the constraint (a loosening). The None→value
+        # branch is retained for the Optional-cap contract but no current schema
+        # field exercises it: every numeric cap has a non-None default, and the
+        # only Optional field (``target_annual_vol``) is special-cased above.
+        if current_value is None and new_value is not None:  # pragma: no cover - no generic Optional cap today
             merged_data[key] = new_value
             continue
         if current_value is not None and new_value is None:

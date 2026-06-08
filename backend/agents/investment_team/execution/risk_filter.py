@@ -32,24 +32,26 @@ class RiskLimits(BaseModel):
     """
 
     max_gross_leverage: float = Field(default=1.0, ge=0)
-    max_position_pct: float = Field(default=6.0, ge=0, le=100)
-    max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
-    max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
-    max_open_positions: int = Field(default=10, ge=1)
-    max_loss_per_trade_pct: Optional[float] = Field(
-        default=None,
+    max_position_pct: float = Field(
+        default=6.0,
         ge=0,
         le=100,
         description=(
-            "Maximum realised loss on a single trade as a % of the account — the "
-            "loss when the stop fires, i.e. deployed fraction × ``stop_loss.pct`` "
-            "(e.g. a 10% position with a 5% stop realises 0.5%). The readiness "
-            "gate flags a critical when the spec's actual realised loss "
-            "(sizing.fraction × stop_loss.pct) exceeds this tolerance. ``None`` "
-            "means no explicit tolerance is declared (the check is then skipped); "
-            "the check is also skipped when the spec has no stop_loss rule."
+            "Maximum capital deployed on a single position as a % of the account. "
+            "This is also the most a single trade can lose, because an entered "
+            "position can lose up to ~100% of the capital deployed — so the deployed "
+            "size IS the per-trade loss budget. ``stop_loss.pct`` is a separate, "
+            "optional within-position safeguard (a price move off entry, measured "
+            "against the trade) that limits a position's realised loss below a full "
+            "wipeout; it is decoupled from sizing and must never be multiplied into "
+            "this cap. A short with no effective stop is auto-protected at runtime "
+            "with a 100%-adverse-move stop so its modeled worst-case loss is also "
+            "bounded by the deployed size."
         ),
     )
+    max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
+    max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
+    max_open_positions: int = Field(default=10, ge=1)
     target_annual_vol: Optional[float] = Field(
         default=None,
         ge=0,
@@ -66,9 +68,26 @@ class RiskLimits(BaseModel):
         """Upgrade a raw ``StrategySpec.risk_limits`` dict into the new schema.
 
         Unknown keys are silently ignored so old specs don't break.
+
+        Migration: the retired ``max_loss_per_trade_pct`` field was a duplicate of
+        ``max_position_pct`` (the deployed position size is the most a single trade
+        can lose). A legacy dict carrying it is folded into ``max_position_pct`` by
+        taking the tighter (min) of the two so any narrower legacy intent survives
+        the consolidation; the obsolete key is then dropped.
+
+        Preconditions: ``raw`` is a mapping of risk-limit field names to values.
+        Postconditions: returns a validated ``RiskLimits``; a legacy
+        ``max_loss_per_trade_pct`` (when numeric) only ever tightens
+        ``max_position_pct``, never loosens it.
         """
         known_fields = set(cls.model_fields)
         filtered = {k: v for k, v in raw.items() if k in known_fields}
+        legacy_loss = raw.get("max_loss_per_trade_pct")
+        if isinstance(legacy_loss, (int, float)) and not isinstance(legacy_loss, bool):
+            current_cap = filtered.get(
+                "max_position_pct", cls.model_fields["max_position_pct"].default
+            )
+            filtered["max_position_pct"] = min(float(current_cap), float(legacy_loss))
         return cls(**filtered)
 
 
@@ -88,7 +107,6 @@ _RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
     "max_symbol_concentration_pct": "lower",
     "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
-    "max_loss_per_trade_pct": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
 }

@@ -37,7 +37,6 @@ _RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
     "max_symbol_concentration_pct": "lower",
     "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
-    "max_loss_per_trade_pct": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
 }

@@ -45,8 +45,6 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
-    first_side_stop_factor,
-    stop_caps_side,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -932,43 +930,29 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Rule 9: Position-sizing / risk-policy coherence.
     #
-    # Corrected risk model (do NOT re-introduce the "position = risk / stop"
-    # inversion or a runtime "loss budget"):
+    # Risk model (do NOT re-introduce the "position = risk / stop" inversion,
+    # a runtime "loss budget", or a separate per-trade-loss field):
     #   * ``sizing.fraction`` / ``max_position_pct`` = capital DEPLOYED per
-    #     position as a fraction of the account. This is the worst-case loss
-    #     (a trade can lose up to 100% of what was deployed).
+    #     position as a fraction of the account. This deployed size IS the most
+    #     a single trade can lose, because an entered position can lose up to
+    #     ~100% of what was deployed — so the position cap is also the per-trade
+    #     loss cap. (The retired ``max_loss_per_trade_pct`` was a duplicate of
+    #     ``max_position_pct``; do NOT bring it back.)
     #   * ``stop_loss.pct`` is a price move off ENTRY measured against the
-    #     trade, so the realised per-trade loss = deployed × stop and can
-    #     NEVER exceed the deployed amount — there is no runtime budget to
-    #     breach.
-    # Three deterministic checks, all using correct algebra:
+    #     trade — an independent, OPTIONAL safeguard that limits a position's
+    #     realised loss BELOW a full wipeout. It is decoupled from sizing and is
+    #     never multiplied into the cap.
+    # A SHORT can lose more than 100% of deployed capital (price can more than
+    # double), so the runtime auto-injects a 100%-adverse-move stop for any
+    # short that lacks an effective stop (see ``TradingService.__init__``),
+    # bounding a short's modeled worst-case loss at the deployed amount too.
+    # That runtime contract is why an uncovered short needs no special gate
+    # critical here.
+    # Two deterministic checks, both using correct algebra:
     #   A. Deployed capital must not exceed the position cap
     #      (``sizing.fraction`` ≤ ``max_position_pct``) — critical. Only when
     #      the deployed fraction is known (skipped for ``volatility_target`` and
     #      unconfigured ``fixed_notional``).
-    #   B. The REALISED loss on a stopped-out trade
-    #      (``sizing.fraction`` × ``stop_loss.pct``) must not exceed the declared
-    #      per-trade loss tolerance (``max_loss_per_trade_pct`` when set) —
-    #      critical. ``max_loss_per_trade_pct`` is the most you can lose on a
-    #      trade, governed by the stop. This is a MODELED bound assuming the stop
-    #      fills at its trigger price; engine exits fill at the next bar's open,
-    #      so a gap THROUGH the stop realises more (no finite size bounds a
-    #      gap-to-zero loss — ``max_drawdown_pct`` is the runtime backstop for
-    #      that tail). The check verifies the spec is coherent under the modeled
-    #      fill, not gap-proof. A stop only caps loss for an entry side
-    #      the executor lets it fire on (``trailing_high`` → long,
-    #      ``trailing_low`` → short, ``entry_price`` → both). When the tolerance
-    #      is set but some entry side has no effective stop, that is its own
-    #      critical (``risk_limits:loss_tolerance_no_stop``) — but side-asym­
-    #      metrically, mirroring the runtime loss-clamp: an uncovered LONG is
-    #      clamped to deploy at most ``max_loss_per_trade_pct`` (full-deployment
-    #      loss == tolerance, gap-proof), so it is honoured without a stop and is
-    #      never a critical; an uncovered SHORT is unbounded, sized to zero by the
-    #      runtime, so it is always a critical. The realised-loss
-    #      *magnitude* check additionally needs a known deployed fraction, so it
-    #      is skipped when the tolerance is unset or the deployment is
-    #      dynamic/unknown (``volatility_target`` / unconfigured
-    #      ``fixed_notional``) — runtime sizing enforces the tolerance there.
     #   C. A prose-stated per-trade deployment % must agree with the ACTUAL
     #      deployed fraction (``sizing.fraction``) when it is known — warning
     #      (prose hygiene). The cap is an upper bound, not the deployed amount,
@@ -998,40 +982,16 @@ class SpecReadinessGate(GateResultsMixin):
                 assert capital > 0, "initial_capital must be strictly positive"
                 pos_fraction = float(ctx.spec.sizing.notional_usd) / capital
 
-        # Custom-code guard — a custom-code spec bypasses the engine dispatcher
-        # entirely (backtest / paper_trade pass entry_rules=sizing=None when
-        # ``requires_custom_code``), so the dispatcher's deterministic per-trade
-        # LOSS clamp never runs and the spec's sizing rule does not constrain
-        # what the generated code actually submits. ``max_position_pct`` is still
-        # enforced for every order — including custom-code orders — at the
-        # fill-simulator choke point (``RiskFilter.can_enter``), but
-        # ``max_loss_per_trade_pct`` cannot be enforced there (the order gate has
-        # no stop context) and the dispatcher loss clamp is bypassed. So a
-        # custom-code spec that DECLARES a per-trade loss tolerance has no
-        # mechanism to honor it — block it rather than pass a limit the runtime
-        # cannot enforce. (Compiled specs keep the dispatcher loss clamp, so they
-        # are unaffected.)
-        max_loss_pct_val = ctx.spec.risk_limits.max_loss_per_trade_pct
-        if max_loss_pct_val is not None and getattr(ctx.spec, "requires_custom_code", False):
-            out.append(
-                self._critical(
-                    f"custom-code strategy declares max_loss_per_trade_pct="
-                    f"{float(max_loss_pct_val):.2f}% but a custom-code spec bypasses the engine "
-                    "dispatcher's per-trade loss clamp and the order gate cannot enforce a loss "
-                    "tolerance (it has no stop context), so the limit cannot be honored. Remove "
-                    "max_loss_per_trade_pct, or use a compiled (non-custom-code) strategy so the "
-                    "dispatcher enforces the stop-based loss cap.",
-                    rule_id="risk_limits:custom_code_unenforceable",
-                )
-            )
-
         # Check A — deployed capital must not exceed the position cap. Both
         # sides are account-capital fractions, so this is the one genuine
         # structural contradiction (e.g. fraction=0.10 with max_position_pct=5).
-        # Skipped when the deployed fraction is unknown (volatility_target /
-        # unconfigured fixed_notional). This is a HARD cap, so the comparison is
-        # strict (``_HARD_LIMIT_REL_EPS`` only absorbs float noise) — the prose
-        # tolerance must not let the spec deploy more than the declared limit.
+        # Because the deployed size is also the most a single trade can lose,
+        # this same cap is the per-trade loss bound — there is no separate loss
+        # field to reconcile. Skipped when the deployed fraction is unknown
+        # (volatility_target / unconfigured fixed_notional). This is a HARD cap,
+        # so the comparison is strict (``_HARD_LIMIT_REL_EPS`` only absorbs float
+        # noise) — the prose tolerance must not let the spec deploy more than the
+        # declared limit.
         if pos_fraction is not None:
             pos_pct = pos_fraction * 100.0
             if pos_pct > max_position_pct * (1.0 + _HARD_LIMIT_REL_EPS):
@@ -1050,127 +1010,6 @@ class SpecReadinessGate(GateResultsMixin):
                         rule_id="sizing:position_cap",
                     )
                 )
-
-        # Check B — the REALISED loss on a single trade must not exceed the
-        # declared per-trade loss tolerance. ``max_loss_per_trade_pct`` is the
-        # most you can lose on a trade, which the stop governs: a position that
-        # deploys ``sizing.fraction`` of the account and stops out at
-        # ``stop_loss.pct`` realises ``sizing.fraction × stop_loss.pct`` of the
-        # account (e.g. 10% deployed × 5% stop = 0.5%). Critical when that
-        # realised loss exceeds the tolerance. Hard limit → strict.
-        #
-        # Skipped when the tolerance is unset. The per-trade loss is only capped
-        # if every entry side has a stop the executor will actually fire for it
-        # — a stop is side-specific (``trailing_high`` → long, ``trailing_low``
-        # → short, ``entry_price`` → both), so a declared/mis-sided stop that
-        # no-ops for the spec's side leaves that side without an effective stop.
-        # Whether a *missing* stop makes the tolerance UNENFORCEABLE is
-        # side-asymmetric, mirroring the runtime loss-clamp: an uncovered LONG is
-        # clamped to deploy at most ``max_loss_per_trade_pct`` (full-deployment
-        # loss == the tolerance, gap-proof), so it is honoured without a stop and
-        # is never a critical; an uncovered SHORT is unbounded, sized to zero by
-        # the runtime, and is always a critical. See the no-stop block below.
-        # The realised-loss magnitude check (the fully-covered branch)
-        # additionally requires a known deployed fraction.
-        max_loss_pct = ctx.spec.risk_limits.max_loss_per_trade_pct
-        if max_loss_pct is not None:
-            max_loss_pct = float(max_loss_pct)
-            # A zero per-trade loss tolerance is degenerate: the runtime
-            # loss-clamp sizes EVERY entry to deploy at most ``max_loss%`` (an
-            # uncovered long) or ``max_loss% / stop`` (a covered side), both of
-            # which are 0 when the tolerance is 0 — so no entry can ever execute,
-            # for any side or sizing kind. The schema permits 0 (``ge=0``), so
-            # catch it here before it passes as coherent and stalls at runtime.
-            if max_loss_pct == 0.0:
-                out.append(
-                    self._critical(
-                        "max_loss_per_trade_pct=0 makes every entry size to zero "
-                        "(the runtime loss-clamp deploys nothing at a 0% tolerance), so the "
-                        "strategy can never open a position. Set a positive "
-                        "max_loss_per_trade_pct, or remove it.",
-                        rule_id="risk_limits:zero_loss_tolerance",
-                    )
-                )
-            entry_sides = {r.side for r in ctx.spec.entry_rules} or {"long"}
-            stop_rules = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
-            uncovered_sides = sorted(
-                s for s in entry_sides if not any(stop_caps_side(r.basis, s) for r in stop_rules)
-            )
-            short_uncovered = [s for s in uncovered_sides if s == "short"]
-            # Check B-no-stop — a declared per-trade loss tolerance the runtime
-            # has no mechanism to honour. This is side-asymmetric because the
-            # runtime loss-clamp (``_cap_qty_to_loss``) handles the sides
-            # differently:
-            #   * LONG: an uncovered long is clamped with ``stop_factor=1.0`` —
-            #     deployment is capped at ``max_loss_per_trade_pct`` itself, so
-            #     the worst-case loss (full deployment; gap-proof since a long
-            #     bottoms at zero) is exactly the tolerance. The limit is honoured
-            #     WITHOUT a stop by deploying less, so an uncovered long is NOT a
-            #     critical regardless of its sizing rule or deployed fraction.
-            #   * SHORT: an uncovered short has unbounded loss (price can gap up
-            #     arbitrarily), so NO size honours the tolerance — the runtime
-            #     sizes it to zero and the short entries never execute. A declared
-            #     short with a loss limit and no effective stop is therefore a
-            #     critical (it can never trade).
-            # Custom-code specs bypass the dispatcher clamp entirely and are
-            # caught by ``risk_limits:custom_code_unenforceable`` above, so this
-            # branch reasons purely about the compiled runtime.
-            if short_uncovered:
-                out.append(
-                    self._critical(
-                        f"max_loss_per_trade_pct={max_loss_pct:.2f}% is declared but the spec "
-                        "has no stop_loss rule that can cap its short position(s) — a short with "
-                        "no effective stop has unbounded loss, so no size honours the tolerance "
-                        "and the runtime sizes the short to zero (it never executes). Add a "
-                        "stop_loss rule whose basis fires for short entries (entry_price or "
-                        "trailing_low), OR drop the short entry / max_loss_per_trade_pct.",
-                        rule_id="risk_limits:loss_tolerance_no_stop",
-                    )
-                )
-            # Realised-loss magnitude check — evaluate the COVERED sides (those
-            # with an effective stop) independently of the no-stop critical
-            # above. A non-rejected uncovered long (small enough to fit the
-            # tolerance) must NOT suppress this check for the other sides, or a
-            # covered side whose stop is too wide would escape it in a mixed-side
-            # spec. Needs a known deployed fraction.
-            covered_sides = [s for s in entry_sides if s not in uncovered_sides]
-            if covered_sides and pos_fraction is not None:
-                # Each covered side's realised loss is governed by the FIRST
-                # side-compatible stop in spec order. ``evaluate_exit_rules``
-                # closes a position on the first triggered rule (it breaks on
-                # the first match), so on a gap that crosses several stops at
-                # once an earlier-but-looser stop wins — the worst-case loss is
-                # the first side-compatible stop's pct, NOT the tightest. Using
-                # the tightest (min) would under-state the loss and pass a spec
-                # whose emitted size breaches the tolerance on a gap. (A later
-                # stop only wins when no earlier one triggered, which for a
-                # monotonic move means it is tighter, so it can only realise
-                # less.) The spec's worst per-trade loss is the loosest of those
-                # per-side caps.
-                # Shared with the runtime loss-clamp (``_cap_qty_to_loss``) via
-                # ``first_side_stop_factor`` so the gate and the engine cannot
-                # drift on which stop bounds the loss. ``covered_sides`` only
-                # contains sides with a compatible stop, so the result is never
-                # ``None`` here.
-                per_side_stop_pct = {
-                    s: first_side_stop_factor(ctx.spec.exit_rules, s) for s in covered_sides
-                }
-                worst_stop_pct = max(per_side_stop_pct.values())
-                realised_loss_pct = pos_fraction * worst_stop_pct * 100.0
-                if realised_loss_pct > max_loss_pct * (1.0 + _HARD_LIMIT_REL_EPS):
-                    out.append(
-                        self._critical(
-                            f"realised per-trade loss {realised_loss_pct:.2f}% "
-                            f"(sizing.fraction={pos_fraction * 100.0:.2f}% × stop_loss.pct="
-                            f"{worst_stop_pct * 100.0:.2f}%) exceeds "
-                            f"max_loss_per_trade_pct={max_loss_pct:.2f}% — a stopped-out trade "
-                            "loses more than the declared per-trade loss tolerance. Resolve by "
-                            "tightening the stop or the position size so the product is "
-                            f"<={max_loss_pct:.2f}%, OR raising max_loss_per_trade_pct to "
-                            f">={realised_loss_pct:.2f}.",
-                            rule_id="risk_limits:loss_tolerance",
-                        )
-                    )
 
         # Check C — prose claim vs ACTUAL deployment. "risk/deploy X% per trade"
         # denotes capital deployed, which the engine computes from the sizing
