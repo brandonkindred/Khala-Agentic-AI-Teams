@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -132,16 +133,7 @@ class RefinementAgent:
             prior_attempts_text=prior_text,
         )
 
-        agent = Agent(
-            model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
-            system_prompt=system_prompt,
-            tools=[],
-        )
-
-        raw = invoke_agent(
-            agent, user_prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
-        )
-        parsed = _extract_json(raw)
+        parsed = self._invoke_and_parse(system_prompt, user_prompt, failure_phase)
 
         updated_code = parsed.pop("strategy_code", code)
 
@@ -163,6 +155,106 @@ class RefinementAgent:
             if k in parsed
         }
         return narrowed, updated_code
+
+    def _invoke_and_parse(
+        self, system_prompt: str, user_prompt: str, failure_phase: str
+    ) -> Dict[str, Any]:
+        """Call the LLM and recover its JSON object, retrying on unparseable output.
+
+        Preconditions: ``system_prompt`` / ``user_prompt`` are non-empty
+        strings; ``failure_phase`` is a non-empty diagnostic label.
+        Postconditions: returns the parsed JSON dict for the LLM's response.
+        Raises ``ValueError`` when the retry budget is exhausted and no
+        balanced JSON object could be recovered, or
+        :class:`~..exceptions.StrategyLabLLMError` when the envelope exhausts
+        its transport retries / budget.
+
+        Why retry here: the LLM occasionally returns an empty, thinking-only,
+        or prose-only response with no JSON object. That is not a transport
+        fault — ``invoke_agent`` sees a "successful" string and returns it — so
+        the envelope cannot recover it. A code-only refinement asks the model
+        to emit the *complete* fixed program as a JSON string, which is exactly
+        the kind of long generation prone to this slip. Without a retry, a
+        single such response wastes the whole refinement round (the orchestrator
+        falls back to the unchanged code). Re-prompting with the parse error as
+        feedback recovers the common transient case; the budget bounds the rare
+        persistent one. Mirrors :meth:`DesignAgent._invoke_and_parse`.
+
+        Each attempt builds a fresh ``Agent`` deliberately: ``strands.Agent``
+        accumulates conversation history, so reusing one instance would feed
+        the model its own unparseable output back as context. The correction
+        re-prompt must be read as "reissue the whole object correctly", not
+        "continue from what you emitted".
+        """
+        retries = _refinement_parse_retries()
+        prompt = user_prompt
+        for attempt in range(retries + 1):
+            agent = Agent(
+                model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
+                system_prompt=system_prompt,
+                tools=[],
+            )
+            raw = invoke_agent(
+                agent, prompt, agent_key="strategy_ideation", phase="refinement", logger=logger
+            )
+            try:
+                return _extract_json(raw)
+            except ValueError as exc:
+                logger.warning(
+                    "RefinementAgent emitted unparseable JSON (attempt %d/%d) "
+                    "for failure_phase=%s: %s",
+                    attempt + 1,
+                    retries + 1,
+                    failure_phase,
+                    exc,
+                )
+                if attempt >= retries:
+                    raise
+                prompt = _build_json_correction_prompt(user_prompt, exc)
+
+        # Unreachable: the loop returns on success or re-raises on the final
+        # attempt. Kept so type-checkers see a definite return.
+        raise AssertionError("unreachable: _invoke_and_parse loop exited without return")
+
+
+def _refinement_parse_retries() -> int:
+    """Resolve the retry budget for :meth:`RefinementAgent._invoke_and_parse`.
+
+    Reads ``STRATEGY_LAB_REFINEMENT_PARSE_RETRIES`` (default ``2`` → 3 attempts
+    total; sub-zero clamped to ``0`` = no retry; garbage falls back to the
+    default rather than raising — the surrounding refinement is best-effort).
+
+    Preconditions: none.
+    Postconditions: returns a non-negative int; never raises.
+    """
+    try:
+        return max(int(os.environ.get("STRATEGY_LAB_REFINEMENT_PARSE_RETRIES", "2")), 0)
+    except ValueError:
+        return 2
+
+
+_JSON_CORRECTION_PREAMBLE = """\
+Your previous response could not be parsed as a single JSON object
+({error}). Return ONLY one JSON object with no surrounding prose, no
+markdown fences, and no trailing commentary — exactly the two keys
+`strategy_code` (the complete fixed Python code) and `changes_made`
+(a 1-2 sentence summary). Every brace must balance.
+
+--- ORIGINAL TASK BELOW ---
+{original_prompt}
+"""
+
+
+def _build_json_correction_prompt(user_prompt: str, exc: ValueError) -> str:
+    """Render a re-prompt for a malformed-JSON (unparseable) response.
+
+    Preconditions: ``exc`` is the ``ValueError`` raised by
+    :func:`_extract_json` when no balanced JSON object is found; ``user_prompt``
+    is the original refinement task.
+    Postconditions: returns a string instructing the model to re-emit a single,
+    fence-free JSON object carrying the two refinement keys.
+    """
+    return _JSON_CORRECTION_PREAMBLE.format(error=str(exc), original_prompt=user_prompt)
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
