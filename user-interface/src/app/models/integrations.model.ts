@@ -143,3 +143,32 @@ export interface RunGitHubIssueResponse {
   status: string;
   message: string;
 }
+
+/** Single open pull request from GET /api/integrations/github/pulls. */
+export interface GitHubPullRequestItem {
+  number: number;
+  title: string;
+  body_preview: string;
+  author: string;
+  html_url: string;
+  head: string;
+  base: string;
+  draft: boolean;
+  labels: string[];
+  updated_at: string;
+}
+
+/** Request body for POST /api/integrations/github/review-pr. */
+export interface RunPrReviewRequest {
+  pr_number: number;
+  base_branch?: string;
+}
+
+/** Response from POST /api/integrations/github/review-pr. */
+export interface RunPrReviewResponse {
+  job_id: string;
+  pr_number: number;
+  pr_url: string;
+  status: string;
+  message: string;
+}

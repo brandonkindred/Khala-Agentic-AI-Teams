@@ -7,6 +7,23 @@ from pydantic import BaseModel, Field
 from software_engineering_team.shared.models import SystemArchitecture
 
 
+def coerce_line(value: Any) -> Optional[int]:
+    """Parse an LLM-provided line number into a positive int, or None.
+
+    Postconditions:
+        - Returns a positive ``int`` when ``value`` is a valid positive number;
+          returns None for None, non-numeric, zero, or negative values (so a bad
+          line never becomes an invalid inline-comment anchor).
+    """
+    if value is None:
+        return None
+    try:
+        line = int(value)
+    except (TypeError, ValueError):
+        return None
+    return line if line > 0 else None
+
+
 class ChunkReviewInput(BaseModel):
     """Input for reviewing one chunk of code (used by ChunkReviewAgent)."""
 
@@ -56,6 +73,15 @@ class CodeReviewIssue(BaseModel):
     file_path: str = Field(
         default="",
         description="File path where the issue was found",
+    )
+    line: Optional[int] = Field(
+        default=None,
+        description="1-based line number in the NEW version of file_path where the issue occurs, "
+        "when the issue is tied to a specific line. None for file-wide/structural issues.",
+    )
+    start_line: Optional[int] = Field(
+        default=None,
+        description="Optional start line for a multi-line issue; `line` is then the end line.",
     )
     description: str = Field(
         default="",

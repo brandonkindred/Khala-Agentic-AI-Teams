@@ -1,10 +1,8 @@
 import { Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
-import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
@@ -13,35 +11,34 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
-import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
-import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
+import type { GitHubPullRequestItem, RunPrReviewResponse } from '../../models/integrations.model';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
+/**
+ * Code Review panel: lists open pull requests from the configured GitHub repo and
+ * lets the user start an AI code review on one. The review runs the Software
+ * Engineering code-reviewer agents, which post a GitHub review with inline comments.
+ */
 @Component({
-  selector: 'app-coding-team-page',
+  selector: 'app-code-review-panel',
   standalone: true,
   imports: [
     CommonModule,
-    FormsModule,
     MatIconModule,
     MatButtonModule,
     MatProgressSpinnerModule,
-    MatChipsModule,
     MatTooltipModule,
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
-    TeamAssistantChatComponent,
   ],
-  templateUrl: './coding-team-page.component.html',
-  styleUrl: './coding-team-page.component.scss',
+  templateUrl: './code-review-panel.component.html',
+  styleUrl: './code-review-panel.component.scss',
 })
-export class CodingTeamPageComponent implements OnInit, OnDestroy {
+export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
-
-  latestJobId: string | null = null;
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -51,23 +48,23 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   githubRepo = '';
   loadingConfig = true;
 
-  // Issue list
-  issues: GitHubIssueItem[] = [];
-  loadingIssues = false;
-  issuesLoaded = false;
-  issueError: string | null = null;
+  // Pull-request list
+  pulls: GitHubPullRequestItem[] = [];
+  loadingPulls = false;
+  pullsLoaded = false;
+  pullError: string | null = null;
 
-  // Issue list pagination (client-side over the fully-fetched issue array)
+  // Client-side pagination over the fully-fetched PR array
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
   pageSize = 10;
   pageIndex = 0;
 
-  // Issue selection & confirmation
-  selectedIssue: GitHubIssueItem | null = null;
-  runningIssue = false;
+  // Selection & confirmation
+  selectedPull: GitHubPullRequestItem | null = null;
+  startingReview = false;
 
-  // Active job tracking
-  activeJob: RunGitHubIssueResponse | null = null;
+  // Active review job tracking
+  activeJob: RunPrReviewResponse | null = null;
   jobStatus: CodingTeamJobStatus | null = null;
   private pollSub: Subscription | null = null;
 
@@ -88,7 +85,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.githubRepo = cfg.repo;
         this.loadingConfig = false;
         if (this.githubConfigured) {
-          this.loadIssues();
+          this.loadPulls();
         }
       },
       error: () => {
@@ -98,28 +95,28 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     });
   }
 
-  loadIssues(): void {
-    this.loadingIssues = true;
-    this.issueError = null;
-    this.selectedIssue = null;
-    this.integrationsApi.getGitHubIssues().subscribe({
-      next: (issues) => {
-        this.issues = issues;
+  loadPulls(): void {
+    this.loadingPulls = true;
+    this.pullError = null;
+    this.selectedPull = null;
+    this.integrationsApi.getGitHubPullRequests().subscribe({
+      next: (pulls) => {
+        this.pulls = pulls;
         this.pageIndex = 0;
-        this.issuesLoaded = true;
-        this.loadingIssues = false;
+        this.pullsLoaded = true;
+        this.loadingPulls = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.issueError = err?.error?.detail || err?.message || 'Failed to load issues.';
-        this.loadingIssues = false;
+        this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
+        this.loadingPulls = false;
       },
     });
   }
 
-  /** The slice of issues visible on the current page. */
-  get pagedIssues(): GitHubIssueItem[] {
+  /** The slice of PRs visible on the current page. */
+  get pagedPulls(): GitHubPullRequestItem[] {
     const start = this.pageIndex * this.pageSize;
-    return this.issues.slice(start, start + this.pageSize);
+    return this.pulls.slice(start, start + this.pageSize);
   }
 
   onPageChange(event: PageEvent): void {
@@ -127,53 +124,28 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.pageSize = event.pageSize;
   }
 
-  selectIssue(issue: GitHubIssueItem): void {
-    this.selectedIssue = issue;
+  selectPull(pull: GitHubPullRequestItem): void {
+    this.selectedPull = pull;
   }
 
   cancelSelection(): void {
-    this.selectedIssue = null;
+    this.selectedPull = null;
   }
 
-  /** True when the issue is blocked by, or depends on, one or more other issues. */
-  hasDependencies(issue: GitHubIssueItem): boolean {
-    return issue.dependencies.length > 0;
-  }
-
-  /** All dependencies rendered as "#3, #5". */
-  allDepRefs(issue: GitHubIssueItem): string {
-    return issue.dependencies.map((d) => `#${d.number}`).join(', ');
-  }
-
-  /** The still-open dependencies rendered as "#3, #5" for warnings and tooltips. */
-  openDepRefs(issue: GitHubIssueItem): string {
-    return issue.dependencies
-      .filter((d) => d.state === 'open')
-      .map((d) => `#${d.number}`)
-      .join(', ');
-  }
-
-  /** Hover/aria text describing the issue's dependencies and whether they block it. */
-  dependencyTooltip(issue: GitHubIssueItem): string {
-    return issue.blocked
-      ? `Blocked by ${this.openDepRefs(issue)} — must be closed first`
-      : `Depends on ${this.allDepRefs(issue)} (all complete)`;
-  }
-
-  confirmAndRun(): void {
-    if (!this.selectedIssue) return;
-    this.runningIssue = true;
-    this.issueError = null;
-    this.integrationsApi.runGitHubIssue({ issue_number: this.selectedIssue.number }).subscribe({
-      next: (resp: RunGitHubIssueResponse) => {
+  confirmAndReview(): void {
+    if (!this.selectedPull) return;
+    this.startingReview = true;
+    this.pullError = null;
+    this.integrationsApi.runGitHubReviewPr({ pr_number: this.selectedPull.number }).subscribe({
+      next: (resp: RunPrReviewResponse) => {
         this.activeJob = resp;
-        this.selectedIssue = null;
-        this.runningIssue = false;
+        this.selectedPull = null;
+        this.startingReview = false;
         this.startPolling(resp.job_id);
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.issueError = err?.error?.detail || err?.message || 'Failed to start job.';
-        this.runningIssue = false;
+        this.pullError = err?.error?.detail || err?.message || 'Failed to start review.';
+        this.startingReview = false;
       },
     });
   }
@@ -187,7 +159,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.jobStatus = status;
       },
       () => {
-        this.issueError = 'Lost connection to the coding team — status polling failed.';
+        this.pullError = 'Lost connection to the coding team — status polling failed.';
       },
     );
   }
@@ -199,7 +171,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** True once the active job has reached a terminal state (finished — pollable no further). */
+  /** True once the active review job has reached a terminal state. */
   isJobTerminal(): boolean {
     return isCodingTeamTerminalStatus(this.jobStatus?.status);
   }
@@ -208,9 +180,5 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.stopPolling();
     this.activeJob = null;
     this.jobStatus = null;
-  }
-
-  onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
-    this.latestJobId = event.job_id;
   }
 }

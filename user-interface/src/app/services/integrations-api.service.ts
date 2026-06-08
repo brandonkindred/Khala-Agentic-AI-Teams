@@ -6,6 +6,7 @@ import type {
   GitHubConfigResponse,
   GitHubConfigUpdate,
   GitHubIssueItem,
+  GitHubPullRequestItem,
   GoogleBrowserLoginCredentialsBody,
   GoogleBrowserLoginStatusResponse,
   IntegrationListItem,
@@ -14,6 +15,8 @@ import type {
   MediumSessionImportBody,
   RunGitHubIssueRequest,
   RunGitHubIssueResponse,
+  RunPrReviewRequest,
+  RunPrReviewResponse,
   SlackConfigResponse,
   SlackConfigUpdate,
   SlackOAuthConnectResponse,
@@ -128,5 +131,15 @@ export class IntegrationsApiService {
   /** POST /api/integrations/github/run-issue */
   runGitHubIssue(body: RunGitHubIssueRequest): Observable<RunGitHubIssueResponse> {
     return this.http.post<RunGitHubIssueResponse>(`${this.baseUrl}/github/run-issue`, body);
+  }
+
+  /** GET /api/integrations/github/pulls */
+  getGitHubPullRequests(): Observable<GitHubPullRequestItem[]> {
+    return this.http.get<GitHubPullRequestItem[]>(`${this.baseUrl}/github/pulls`);
+  }
+
+  /** POST /api/integrations/github/review-pr */
+  runGitHubReviewPr(body: RunPrReviewRequest): Observable<RunPrReviewResponse> {
+    return this.http.post<RunPrReviewResponse>(`${this.baseUrl}/github/review-pr`, body);
   }
 }

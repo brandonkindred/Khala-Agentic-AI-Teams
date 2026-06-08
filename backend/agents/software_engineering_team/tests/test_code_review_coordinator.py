@@ -178,6 +178,87 @@ def test_run_coordinator_merges_issues_and_rejects_if_critical() -> None:
     assert result.issues[0].file_path == "app/main.py"
 
 
+def test_run_coordinator_keeps_same_description_on_different_lines() -> None:
+    """Two findings sharing file_path + description but on different lines are
+    distinct (line anchors inline comments), so dedup must keep both."""
+    code = "### app/main.py ###\n" + ("x" * 20_000)
+
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "medium",
+                        "category": "logic",
+                        "file_path": "app/main.py",
+                        "line": 10,
+                        "description": "duplicate string literal",
+                        "suggestion": "extract a constant",
+                    },
+                    {
+                        "severity": "medium",
+                        "category": "logic",
+                        "file_path": "app/main.py",
+                        "line": 80,
+                        "description": "duplicate string literal",
+                        "suggestion": "extract a constant",
+                    },
+                ],
+                "summary": "Two occurrences.",
+            }
+        ]
+    )
+
+    result = run_coordinator(
+        client,
+        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+    )
+
+    assert sorted(i.line for i in result.issues) == [10, 80]
+
+
+def test_run_coordinator_drops_unanchored_twin_of_anchored_finding() -> None:
+    """An unanchored (line=None) finding that duplicates an anchored one (same
+    file_path + description) is dropped, so the issue is reported once (inline),
+    not twice (once in the body, once inline)."""
+    code = "### app/main.py ###\n" + ("x" * 20_000)
+
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        "file_path": "app/main.py",
+                        "description": "missing null check",
+                        "suggestion": "guard it",
+                    },
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        "file_path": "app/main.py",
+                        "line": 12,
+                        "description": "missing null check",
+                        "suggestion": "guard it",
+                    },
+                ],
+                "summary": "One issue, reported twice.",
+            }
+        ]
+    )
+
+    result = run_coordinator(
+        client,
+        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+    )
+
+    assert len(result.issues) == 1
+    assert result.issues[0].line == 12
+
+
 def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
     """End-to-end: ``CodeReviewAgent.run`` with code larger than the
     single-call limit dispatches to the coordinator and returns a

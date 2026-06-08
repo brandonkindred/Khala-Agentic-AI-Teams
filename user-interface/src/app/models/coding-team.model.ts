@@ -7,11 +7,23 @@ export interface CodingTeamJobStatus {
   github_context?: {
     owner: string;
     repo: string;
-    issue_number: number;
-    issue_url: string;
+    issue_number?: number;
+    issue_url?: string;
+    pr_number?: number;
+    pr_url?: string;
   };
   github_pr_url?: string;
+  /** Set by the PR-review flow with the posted-review stats. */
+  review_summary?: CodeReviewSummary;
   task_graph_snapshot?: TaskSnapshot[];
+}
+
+/** Summary of a posted PR review (from the /review-pr flow). */
+export interface CodeReviewSummary {
+  total_issues: number;
+  inline_comments: number;
+  body_findings: number;
+  event: string;
 }
 
 export interface TaskSnapshot {

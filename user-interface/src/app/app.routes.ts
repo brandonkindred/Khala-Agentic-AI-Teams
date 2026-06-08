@@ -27,6 +27,7 @@ import { PersonaTestingDashboardComponent } from './components/persona-testing-d
 import { PersonaTestAuditPanelComponent } from './components/persona-test-audit-panel/persona-test-audit-panel.component';
 import { DeepthoughtDashboardComponent } from './components/deepthought-dashboard/deepthought-dashboard.component';
 import { RoadTripPlanningDashboardComponent } from './components/road-trip-planning-dashboard/road-trip-planning-dashboard.component';
+import { CodeReviewPanelComponent } from './components/code-review-panel/code-review-panel.component';
 
 export const routes: Routes = [
   {
@@ -41,6 +42,7 @@ export const routes: Routes = [
       { path: 'software-engineering', component: SoftwareEngineeringDashboardComponent, data: { breadcrumb: 'Software Engineering', title: 'Software Engineering' } },
       { path: 'software-engineering/planning-v3', component: PlanningV3PageComponent, data: { breadcrumb: 'Planning', title: 'Planning' } },
       { path: 'software-engineering/coding-team', component: CodingTeamPageComponent, data: { breadcrumb: 'Coding Team', title: 'Coding Team' } },
+      { path: 'software-engineering/code-review', component: CodeReviewPanelComponent, data: { breadcrumb: 'Code Review', title: 'Code Review' } },
       { path: 'software-engineering/planning-v2/jobs/:jobId/artifacts/:artifactName', component: PlanningArtifactDetailComponent, data: { breadcrumb: 'Artifact', title: 'Planning Artifact' } },
       { path: 'market-research', component: MarketResearchDashboardComponent, data: { breadcrumb: 'Market Research', title: 'Market Research' } },
       { path: 'soc2-compliance', component: Soc2ComplianceDashboardComponent, data: { breadcrumb: 'SOC2 Compliance', title: 'SOC2 Compliance' } },

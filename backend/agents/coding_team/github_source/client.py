@@ -58,6 +58,45 @@ class PullRequest:
 
 
 @dataclass(frozen=True)
+class PullRequestDetail:
+    """Rich detail for a single pull request, including the head commit SHA.
+
+    The head SHA is the ``commit_id`` an inline review must be anchored to so its
+    comments resolve against the exact commit that was reviewed.
+    """
+
+    number: int
+    html_url: str
+    head: str
+    base: str
+    head_sha: str
+    title: str
+    body: str
+    draft: bool
+    author: str
+    state: str
+    updated_at: str
+    labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class PullRequestFile:
+    """One file changed by a pull request.
+
+    ``patch`` is the unified-diff hunk text GitHub returns; it is empty for
+    binary files and files whose diff is too large to inline. ``previous_filename``
+    is set only for renames.
+    """
+
+    filename: str
+    status: str
+    patch: str
+    additions: int
+    deletions: int
+    previous_filename: Optional[str]
+
+
+@dataclass(frozen=True)
 class Repo:
     default_branch: str
 
@@ -153,6 +192,40 @@ def _pr_from_payload(payload: dict[str, Any]) -> PullRequest:
         html_url=payload.get("html_url") or "",
         head=head,
         base=base,
+    )
+
+
+def _pr_detail_from_payload(payload: dict[str, Any]) -> PullRequestDetail:
+    head = payload.get("head") or {}
+    base = payload.get("base") or {}
+    return PullRequestDetail(
+        number=int(payload["number"]),
+        html_url=payload.get("html_url") or "",
+        head=head.get("ref") or "",
+        base=base.get("ref") or "",
+        head_sha=head.get("sha") or "",
+        title=payload.get("title") or "",
+        body=payload.get("body") or "",
+        draft=bool(payload.get("draft", False)),
+        author=(payload.get("user") or {}).get("login") or "",
+        state=payload.get("state") or "open",
+        updated_at=payload.get("updated_at") or "",
+        labels=tuple(
+            label["name"]
+            for label in (payload.get("labels") or [])
+            if isinstance(label, dict) and label.get("name")
+        ),
+    )
+
+
+def _pr_file_from_payload(payload: dict[str, Any]) -> PullRequestFile:
+    return PullRequestFile(
+        filename=payload.get("filename") or "",
+        status=payload.get("status") or "",
+        patch=payload.get("patch") or "",
+        additions=int(payload.get("additions") or 0),
+        deletions=int(payload.get("deletions") or 0),
+        previous_filename=payload.get("previous_filename"),
     )
 
 
@@ -274,6 +347,17 @@ class GitHubClient:
         r = self._check(self._request("GET", f"/repos/{owner}/{repo}"))
         return Repo(default_branch=r.json().get("default_branch") or "main")
 
+    def get_authenticated_login(self) -> str:
+        """Return the login of the user the token authenticates as (``GET /user``).
+
+        Postconditions:
+            - Returns the ``login`` string, or "" when it cannot be determined.
+              Used to avoid requesting changes on a PR the reviewer authored.
+        """
+        r = self._check(self._request("GET", "/user"))
+        payload = r.json()
+        return (payload.get("login") or "") if isinstance(payload, dict) else ""
+
     def list_open_issues(
         self,
         owner: str,
@@ -387,6 +471,95 @@ class GitHubClient:
         )
         return _pr_from_payload(r.json())
 
+    # ----- pull-request review -----------------------------------------------
+
+    def list_open_pull_requests(self, owner: str, repo: str) -> Iterator[PullRequest]:
+        """Yield every open pull request, following ``Link``-header pagination.
+
+        Postconditions:
+            - Yields one ``PullRequest`` per open PR in GitHub's response order,
+              bounded by ``MAX_ISSUES_TRAVERSED`` to cap an unbounded traversal.
+        """
+        path = f"/repos/{owner}/{repo}/pulls"
+        params: Optional[dict[str, Any]] = {"state": "open", "per_page": 100}
+        url: Optional[str] = path
+        seen = 0
+        while url:
+            response = self._check(self._request("GET", url, params=params))
+            params = None  # only on first page
+            for item in response.json() or []:
+                seen += 1
+                if seen > MAX_ISSUES_TRAVERSED:
+                    logger.warning(
+                        "list_open_pull_requests hit MAX_ISSUES_TRAVERSED=%d; stopping",
+                        MAX_ISSUES_TRAVERSED,
+                    )
+                    return
+                yield _pr_from_payload(item)
+            url = _parse_next_link(response.headers.get("Link"))
+
+    def get_pull_request(self, owner: str, repo: str, number: int) -> PullRequestDetail:
+        """Fetch full detail for one pull request, including its head commit SHA."""
+        r = self._check(self._request("GET", f"/repos/{owner}/{repo}/pulls/{number}"))
+        return _pr_detail_from_payload(r.json())
+
+    def get_pull_request_files(self, owner: str, repo: str, number: int) -> list[PullRequestFile]:
+        """List every file a pull request changes, following ``Link`` pagination.
+
+        Postconditions:
+            - Returns one ``PullRequestFile`` per changed file (binary/oversized
+              files carry an empty ``patch``), bounded by GitHub's own 3000-file cap.
+        """
+        path = f"/repos/{owner}/{repo}/pulls/{number}/files"
+        params: Optional[dict[str, Any]] = {"per_page": 100}
+        url: Optional[str] = path
+        out: list[PullRequestFile] = []
+        while url:
+            response = self._check(self._request("GET", url, params=params))
+            params = None
+            for item in response.json() or []:
+                out.append(_pr_file_from_payload(item))
+            url = _parse_next_link(response.headers.get("Link"))
+        return out
+
+    def create_pull_request_review(
+        self,
+        *,
+        owner: str,
+        repo: str,
+        number: int,
+        commit_id: str,
+        body: str,
+        event: str = "COMMENT",
+        comments: Optional[list[dict[str, Any]]] = None,
+    ) -> dict[str, Any]:
+        """Submit one pull-request review, optionally with inline comments.
+
+        Preconditions:
+            - ``event`` is one of ``COMMENT``/``REQUEST_CHANGES``/``APPROVE``.
+            - Each entry in ``comments`` is ``{"path", "line", "side", "body"}`` and
+              its ``line`` falls on a line present in the diff for ``commit_id`` —
+              GitHub rejects the *entire* review (422) if any comment line is invalid.
+        Postconditions:
+            - Returns the created review payload (carries ``id`` and ``html_url``).
+              Raises ``GitHubAPIError`` on any non-2xx response.
+        """
+        json_body: dict[str, Any] = {
+            "commit_id": commit_id,
+            "body": body,
+            "event": event,
+        }
+        if comments:
+            json_body["comments"] = comments
+        r = self._check(
+            self._request(
+                "POST",
+                f"/repos/{owner}/{repo}/pulls/{number}/reviews",
+                json=json_body,
+            )
+        )
+        return r.json()
+
     # ----- lifecycle ---------------------------------------------------------
 
     def close(self) -> None:
@@ -407,6 +580,8 @@ __all__ = [
     "MAX_ISSUES_TRAVERSED",
     "NotAnIssueError",
     "PullRequest",
+    "PullRequestDetail",
+    "PullRequestFile",
     "Repo",
     "SubIssue",
     "scrub_token_from_text",

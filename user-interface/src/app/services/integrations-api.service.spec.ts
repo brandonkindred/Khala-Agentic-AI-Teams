@@ -123,4 +123,19 @@ describe('IntegrationsApiService', () => {
     expect(req.request.method).toBe('DELETE');
     req.flush({});
   });
+
+  it('getGitHubPullRequests GET', () => {
+    service.getGitHubPullRequests().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/pulls`);
+    expect(req.request.method).toBe('GET');
+    req.flush([]);
+  });
+
+  it('runGitHubReviewPr POST with body', () => {
+    service.runGitHubReviewPr({ pr_number: 7 }).subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/review-pr`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({ pr_number: 7 });
+    req.flush({ job_id: 'j1', pr_number: 7, pr_url: 'u', status: 'pending', message: '' });
+  });
 });
