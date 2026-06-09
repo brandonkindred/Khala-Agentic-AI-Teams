@@ -21,7 +21,7 @@ _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))
 
-from fastapi import FastAPI, HTTPException  # noqa: E402
+from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from coding_team.github_source import (  # noqa: E402
@@ -744,7 +744,13 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
 
 
 def _review_author() -> str:
-    """Resolve the author handle for a review row (best-effort, never raises)."""
+    """Resolve the author handle for a review row (best-effort, never raises).
+
+    The ``agent_console`` import is intentionally inline rather than module-level:
+    author tagging is an optional convenience for persisted history, and keeping
+    the import out of module load means a missing/broken ``agent_console`` (or its
+    transitive deps) can never break importing this API or running a review.
+    """
     try:
         from agent_console.author import resolve_author
 
@@ -815,7 +821,7 @@ def get_reviews(
     owner: str,
     repo: str,
     pr_number: Optional[int] = None,
-    limit: int = 500,
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> List[ReviewRunItem]:
     """List persisted code-review runs for a repository (optionally one PR).
 

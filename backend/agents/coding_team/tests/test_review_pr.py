@@ -517,3 +517,10 @@ class TestReviewPersistence:
         assert data[0]["job_id"] == "j1"
         assert data[0]["review_summary"]["event"] == "COMMENT"
         assert captured["args"] == ("o", "r", 7, 500)
+
+    def test_get_reviews_rejects_out_of_range_limit(self, review_app) -> None:
+        # limit is validated at the API layer (1..2000); out-of-range -> 422.
+        assert review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 0}).status_code == 422
+        assert (
+            review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 3000}).status_code == 422
+        )

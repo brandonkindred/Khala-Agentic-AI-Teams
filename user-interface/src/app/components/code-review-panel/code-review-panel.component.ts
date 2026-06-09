@@ -6,7 +6,8 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
-import { Subscription } from 'rxjs';
+import { Subject, Subscription } from 'rxjs';
+import { takeUntil } from 'rxjs/operators';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
@@ -94,50 +95,62 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   // Live status pollers keyed by job id, so ngOnDestroy can tear them all down.
   private pollers = new Map<string, Subscription>();
 
+  // Completes on destroy; every HTTP subscription is gated on it so a late
+  // response can't update a torn-down component.
+  private readonly destroy$ = new Subject<void>();
+
   ngOnInit(): void {
     this.checkGitHubConfig();
   }
 
   ngOnDestroy(): void {
+    this.destroy$.next();
+    this.destroy$.complete();
     this.stopAllPollers();
   }
 
   checkGitHubConfig(): void {
     this.loadingConfig = true;
-    this.integrationsApi.getGitHubConfig().subscribe({
-      next: (cfg) => {
-        this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
-        this.githubOwner = cfg.owner;
-        this.githubRepo = cfg.repo;
-        this.loadingConfig = false;
-        if (this.githubConfigured) {
-          this.loadPulls();
-        }
-      },
-      error: () => {
-        this.githubConfigured = false;
-        this.loadingConfig = false;
-      },
-    });
+    this.integrationsApi
+      .getGitHubConfig()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (cfg) => {
+          this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
+          this.githubOwner = cfg.owner;
+          this.githubRepo = cfg.repo;
+          this.loadingConfig = false;
+          if (this.githubConfigured) {
+            this.loadPulls();
+          }
+        },
+        error: () => {
+          this.githubConfigured = false;
+          this.loadingConfig = false;
+        },
+      });
   }
 
   loadPulls(): void {
     this.loadingPulls = true;
     this.pullError = null;
     this.expandedPrNumber = null;
-    this.integrationsApi.getGitHubPullRequests().subscribe({
-      next: (pulls) => {
-        this.pulls = pulls;
-        this.pageIndex = 0;
-        this.pullsLoaded = true;
-        this.loadingPulls = false;
-        this.hydrateReviews();
-      },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
-        this.loadingPulls = false;
-      },
-    });
+    this.integrationsApi
+      .getGitHubPullRequests()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (pulls) => {
+          this.pulls = pulls;
+          this.pageIndex = 0;
+          this.pullsLoaded = true;
+          this.loadingPulls = false;
+          this.hydrateReviews();
+        },
+        error: (err: { error?: { detail?: string }; message?: string }) => {
+          this.pullError = err?.error?.detail || err?.message || 'Failed to load pull requests.';
+          this.loadingPulls = false;
+        },
+      });
   }
 
   /**
@@ -147,29 +160,32 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    * Best-effort: a failure leaves the page usable without history.
    */
   private hydrateReviews(): void {
-    this.integrationsApi.getGitHubReviewHistory().subscribe({
-      next: (items) => {
-        this.stopAllPollers();
-        const map = new Map<number, PrReviewRecord[]>();
-        for (const item of items) {
-          const record = this.toRecord(item);
-          const list = map.get(record.prNumber) ?? [];
-          list.push(record); // backend returns newest-first; preserve that order
-          map.set(record.prNumber, list);
-        }
-        this.reviews = map;
-        for (const list of map.values()) {
-          for (const record of list) {
-            if (!isCodingTeamTerminalStatus(record.status)) {
-              this.startPolling(record);
+    this.integrationsApi
+      .getGitHubReviewHistory()
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (items) => {
+          this.stopAllPollers();
+          const map = new Map<number, PrReviewRecord[]>();
+          for (const item of items) {
+            const record = this.toRecord(item);
+            const list = map.get(record.prNumber) ?? [];
+            list.push(record); // backend returns newest-first; preserve that order
+            map.set(record.prNumber, list);
+          }
+          this.reviews = map;
+          for (const list of map.values()) {
+            for (const record of list) {
+              if (!isCodingTeamTerminalStatus(record.status)) {
+                this.startPolling(record);
+              }
             }
           }
-        }
-      },
-      error: () => {
-        // History is a best-effort enhancement; the PR list still works without it.
-      },
-    });
+        },
+        error: () => {
+          // History is a best-effort enhancement; the PR list still works without it.
+        },
+      });
   }
 
   private toRecord(item: CodeReviewRunItem): PrReviewRecord {
@@ -207,26 +223,29 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     if (this.starting.has(pull.number)) return;
     this.starting.add(pull.number);
     this.pullError = null;
-    this.integrationsApi.runGitHubReviewPr({ pr_number: pull.number }).subscribe({
-      next: (resp: RunPrReviewResponse) => {
-        this.starting.delete(pull.number);
-        const record: PrReviewRecord = {
-          jobId: resp.job_id,
-          prNumber: pull.number,
-          startedAt: Date.now(),
-          status: resp.status,
-          prUrl: resp.pr_url,
-        };
-        const list = this.reviews.get(pull.number) ?? [];
-        list.unshift(record); // newest-first
-        this.reviews.set(pull.number, list);
-        this.startPolling(record);
-      },
-      error: (err: { error?: { detail?: string }; message?: string }) => {
-        this.starting.delete(pull.number);
-        this.pullError = err?.error?.detail || err?.message || 'Failed to start review.';
-      },
-    });
+    this.integrationsApi
+      .runGitHubReviewPr({ pr_number: pull.number })
+      .pipe(takeUntil(this.destroy$))
+      .subscribe({
+        next: (resp: RunPrReviewResponse) => {
+          this.starting.delete(pull.number);
+          const record: PrReviewRecord = {
+            jobId: resp.job_id,
+            prNumber: pull.number,
+            startedAt: Date.now(),
+            status: resp.status,
+            prUrl: resp.pr_url,
+          };
+          const list = this.reviews.get(pull.number) ?? [];
+          list.unshift(record); // newest-first
+          this.reviews.set(pull.number, list);
+          this.startPolling(record);
+        },
+        error: (err: { error?: { detail?: string }; message?: string }) => {
+          this.starting.delete(pull.number);
+          this.pullError = err?.error?.detail || err?.message || 'Failed to start review.';
+        },
+      });
   }
 
   private startPolling(record: PrReviewRecord): void {

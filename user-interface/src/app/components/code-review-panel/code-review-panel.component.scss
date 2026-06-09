@@ -183,50 +183,6 @@
   background: transparent;
 }
 
-// ---------------------------------------------------------------------------
-// Confirmation panel
-// ---------------------------------------------------------------------------
-
-.cr-confirm-panel {
-  padding: 1.25rem;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
-  border-radius: 10px;
-  background: var(--mat-sys-surface-container, #f7f7f7);
-
-  h3 {
-    margin: 0 0 0.75rem;
-  }
-
-  &__pr {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 1.05rem;
-  }
-
-  &__meta,
-  &__preview,
-  &__hint {
-    margin: 0.5rem 0 0;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
-  }
-
-  &__preview {
-    font-size: 0.9rem;
-    white-space: pre-wrap;
-  }
-
-  &__hint {
-    font-size: 0.85rem;
-  }
-
-  &__actions {
-    display: flex;
-    gap: 0.75rem;
-    margin-top: 1rem;
-  }
-}
-
 .cr-pr-number {
   font-variant-numeric: tabular-nums;
   color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
@@ -325,6 +281,35 @@
   padding: 1rem 1.25rem 1.25rem;
   border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
   background: var(--mat-sys-surface-container, #f7f7f7);
+
+  &__pr {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
+  }
+
+  &__meta,
+  &__preview,
+  &__hint {
+    margin: 0.5rem 0 0;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
+
+  &__preview {
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
 }
 
 .cr-reviews-table {

@@ -33,6 +33,13 @@ from shared_postgres.metrics import timed_query
 logger = logging.getLogger(__name__)
 _STORE = "coding_team"
 
+# Columns `update_review` is permitted to write. The SET clause is composed only
+# from these constants — never from caller-supplied identifiers — so the query
+# can never carry user-controlled SQL.
+_UPDATABLE_COLUMNS = frozenset(
+    {"status", "status_text", "review_summary", "error", "completed_at"}
+)
+
 
 def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
@@ -92,25 +99,28 @@ def update_review(
     """
     if not is_postgres_enabled():
         return
-    sets = ["status = %s"]
-    params: list[Any] = [status]
+    # Build the SET clause from (column, value) pairs whose column names are all
+    # hardcoded constants below. The composed clause can therefore never carry a
+    # user-controlled identifier; an assertion against the allowlist makes that
+    # invariant explicit and fails loudly if a future edit introduces a stray one.
+    assignments: list[tuple[str, Any]] = [("status", status)]
     if status_text is not None:
-        sets.append("status_text = %s")
-        params.append(status_text)
+        assignments.append(("status_text", status_text))
     if review_summary is not None:
-        sets.append("review_summary = %s")
-        params.append(Json(review_summary))
+        assignments.append(("review_summary", Json(review_summary)))
     if error is not None:
-        sets.append("error = %s")
-        params.append(error)
+        assignments.append(("error", error))
     if completed:
-        sets.append("completed_at = %s")
-        params.append(_now())
+        assignments.append(("completed_at", _now()))
+    columns = [col for col, _ in assignments]
+    assert set(columns) <= _UPDATABLE_COLUMNS, f"non-allowlisted column(s): {set(columns) - _UPDATABLE_COLUMNS}"
+    set_clause = ", ".join(f"{col} = %s" for col in columns)
+    params: list[Any] = [val for _, val in assignments]
     params.append(job_id)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                f"UPDATE code_review_runs SET {', '.join(sets)} WHERE job_id = %s",
+                f"UPDATE code_review_runs SET {set_clause} WHERE job_id = %s",
                 params,
             )
     except Exception:  # noqa: BLE001 - persistence must never break the review

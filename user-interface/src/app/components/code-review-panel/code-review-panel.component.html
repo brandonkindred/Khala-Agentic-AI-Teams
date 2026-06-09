@@ -96,26 +96,26 @@
               @if (expandedPrNumber === pull.number) {
                 <div class="cr-pull-detail">
                   <!-- PR details -->
-                  <div class="cr-confirm-panel__pr">
+                  <div class="cr-pull-detail__pr">
                     <span class="cr-pr-number">#{{ pull.number }}</span>
                     <span class="cr-pr-title">{{ pull.title }}</span>
                     @if (pull.draft) {
                       <span class="cr-chip cr-chip--draft">draft</span>
                     }
                   </div>
-                  <p class="cr-confirm-panel__meta">
+                  <p class="cr-pull-detail__meta">
                     <code>{{ pull.head }}</code> → <code>{{ pull.base }}</code>
                     @if (pull.author) { · by {{ pull.author }} }
                   </p>
                   @if (pull.body_preview) {
-                    <p class="cr-confirm-panel__preview">{{ pull.body_preview }}</p>
+                    <p class="cr-pull-detail__preview">{{ pull.body_preview }}</p>
                   }
-                  <p class="cr-confirm-panel__hint">
+                  <p class="cr-pull-detail__hint">
                     The reviewer will read the diff and post one GitHub review with inline comments on the
                     problematic lines.
                   </p>
 
-                  <div class="cr-confirm-panel__actions">
+                  <div class="cr-pull-detail__actions">
                     <button
                       mat-flat-button
                       color="primary"
