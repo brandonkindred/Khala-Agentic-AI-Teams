@@ -538,43 +538,108 @@ def test_design_invoke_charges_once_despite_transport_retry(
 
 
 # ---------------------------------------------------------------------------
-# model_factory._construct_with_optional_timeout
+# model_factory transport-timeout construction
 # ---------------------------------------------------------------------------
 
 
-def test_construct_forwards_timeout_when_accepted() -> None:
-    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+def test_accepts_kwarg_ignores_var_keyword() -> None:
+    """A name reachable only via ``**kwargs`` must NOT count as accepted — the
+    strands constructors swallow such keys into ``**model_config`` and warn.
+    """
+    from investment_team.strategy_lab.agents.model_factory import _accepts_kwarg
+
+    class _Explicit:
+        def __init__(self, ollama_client_args=None) -> None: ...
+
+    class _OnlyVarKw:
+        def __init__(self, **model_config) -> None: ...
+
+    assert _accepts_kwarg(_Explicit, "ollama_client_args") is True
+    assert _accepts_kwarg(_OnlyVarKw, "ollama_client_args") is False
+    assert _accepts_kwarg(_Explicit, "nope") is False
+    # An un-introspectable target degrades to False rather than raising.
+    assert _accepts_kwarg(42, "anything") is False
+
+
+def test_ollama_construct_forwards_timeout_via_client_args() -> None:
+    from investment_team.strategy_lab.agents.model_factory import (
+        _construct_ollama_with_timeout,
+    )
 
     class _Model:
-        def __init__(self, host=None, timeout=None) -> None:
+        def __init__(self, host=None, model_id=None, ollama_client_args=None) -> None:
             self.host = host
-            self.timeout = timeout
+            self.model_id = model_id
+            self.ollama_client_args = ollama_client_args
 
-    model = _construct_with_optional_timeout(_Model, 12.5, host="h")
-    assert model.timeout == 12.5
+    model = _construct_ollama_with_timeout(_Model, 12.5, host="h", model_id="m")
+    assert model.ollama_client_args == {"timeout": 12.5}
     assert model.host == "h"
+    assert model.model_id == "m"
 
 
-def test_construct_falls_back_on_signature_mismatch() -> None:
-    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+def test_ollama_construct_supports_legacy_client_args_name() -> None:
+    from investment_team.strategy_lab.agents.model_factory import (
+        _construct_ollama_with_timeout,
+    )
 
     class _Model:
-        def __init__(self, host=None) -> None:  # accepts neither timeout nor client_args
+        def __init__(self, host=None, client_args=None) -> None:
             self.host = host
+            self.client_args = client_args
 
-    model = _construct_with_optional_timeout(_Model, 12.5, host="h")
-    assert isinstance(model, _Model)
-    assert model.host == "h"
+    model = _construct_ollama_with_timeout(_Model, 7.0, host="h")
+    assert model.client_args == {"timeout": 7.0}
 
 
-def test_construct_propagates_unrelated_type_error() -> None:
-    from investment_team.strategy_lab.agents.model_factory import _construct_with_optional_timeout
+def test_ollama_construct_falls_back_when_no_channel() -> None:
+    from investment_team.strategy_lab.agents.model_factory import (
+        _construct_ollama_with_timeout,
+    )
 
     class _Model:
-        def __init__(self, host=None, timeout=None) -> None:
-            # A TypeError unrelated to the call signature must NOT be swallowed
-            # as a "timeout not supported" fallback.
-            raise TypeError("internal: host must be a tuple")
+        # No client-args channel; **kwargs must NOT be smuggled a timeout (the
+        # old bug: strands warns-and-drops unknown keys, so doing so would be a
+        # silent no-op rather than an applied timeout).
+        def __init__(self, host=None, **model_config) -> None:
+            self.host = host
+            self.model_config = model_config
 
-    with pytest.raises(TypeError, match="host must be a tuple"):
-        _construct_with_optional_timeout(_Model, 12.5, host="h")
+    model = _construct_ollama_with_timeout(_Model, 9.0, host="h")
+    assert model.host == "h"
+    assert "timeout" not in model.model_config
+    assert "ollama_client_args" not in model.model_config
+
+
+def test_bedrock_construct_forwards_timeout_via_boto_config() -> None:
+    from investment_team.strategy_lab.agents.model_factory import (
+        _construct_bedrock_with_timeout,
+    )
+
+    class _Model:
+        def __init__(self, model_id=None, boto_client_config=None) -> None:
+            self.model_id = model_id
+            self.boto_client_config = boto_client_config
+
+    # A fractional timeout must be preserved verbatim (regression: the old code
+    # did int(timeout), truncating 12.5 -> 12 and a sub-second value -> 0).
+    model = _construct_bedrock_with_timeout(_Model, 12.5, model_id="m")
+    assert model.model_id == "m"
+    assert model.boto_client_config is not None
+    assert model.boto_client_config.read_timeout == 12.5
+    assert model.boto_client_config.connect_timeout == 12.5
+
+
+def test_bedrock_construct_falls_back_when_no_channel() -> None:
+    from investment_team.strategy_lab.agents.model_factory import (
+        _construct_bedrock_with_timeout,
+    )
+
+    class _Model:
+        def __init__(self, model_id=None, **model_config) -> None:
+            self.model_id = model_id
+            self.model_config = model_config
+
+    model = _construct_bedrock_with_timeout(_Model, 30.0, model_id="m")
+    assert model.model_id == "m"
+    assert "boto_client_config" not in model.model_config

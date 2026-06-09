@@ -681,17 +681,24 @@ def test_get_strands_model_bedrock_branch(monkeypatch: pytest.MonkeyPatch) -> No
         model_factory, "resolve_model", lambda key: "anthropic.claude-3-haiku-20240307-v1:0"
     )
     monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "")
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "77")
 
+    # Declare ``boto_client_config`` explicitly so the factory's introspection
+    # forwards the transport timeout through it (the real strands BedrockModel
+    # signature shape).
     class _StubBedrock:
-        def __init__(self, **kwargs):
-            self.kwargs = kwargs
+        def __init__(self, *, model_id=None, boto_client_config=None):
+            self.model_id = model_id
+            self.boto_client_config = boto_client_config
 
     import strands.models as strands_models
 
     monkeypatch.setattr(strands_models, "BedrockModel", _StubBedrock)
     result = model_factory.get_strands_model()
     assert isinstance(result, _StubBedrock)
-    assert result.kwargs["model_id"] == "anthropic.claude-3-haiku-20240307-v1:0"
+    assert result.model_id == "anthropic.claude-3-haiku-20240307-v1:0"
+    assert result.boto_client_config is not None
+    assert result.boto_client_config.read_timeout == 77
 
 
 def test_get_strands_model_ollama_cloud_without_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -748,12 +755,14 @@ def _patch_ollama_local(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
 
     class _RecordingOllama:
-        # Accept timeout so the factory's first construction attempt wins and
-        # we observe the real (timeout-carrying) kwargs the schema path emits.
-        def __init__(self, host=None, model_id=None, timeout=None, additional_args=None):
+        # Mirror the real strands ``OllamaModel`` signature shape: the transport
+        # timeout travels via ``ollama_client_args`` (NOT a bare ``timeout=``,
+        # which strands warns-and-drops), and the schema travels via
+        # ``additional_args``.
+        def __init__(self, host=None, model_id=None, ollama_client_args=None, additional_args=None):
             self.host = host
             self.model_id = model_id
-            self.timeout = timeout
+            self.ollama_client_args = ollama_client_args
             self.additional_args = additional_args
 
     import strands.models as strands_models
@@ -793,6 +802,55 @@ def test_get_strands_model_no_schema_leaves_format_unset(monkeypatch: pytest.Mon
     result = model_factory.get_strands_model("strategy_design")
 
     assert result.additional_args is None
+
+
+def test_resolve_strands_timeout_garbage_value_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-numeric ``STRATEGY_LAB_LLM_TIMEOUT`` falls back to ``resolve_timeout``."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "not-a-number")
+    monkeypatch.setattr(model_factory, "resolve_timeout", lambda key: 321.0)
+
+    assert model_factory._resolve_strands_timeout("strategy_design") == 321.0
+
+
+@pytest.mark.parametrize("bad", ["-5", "0", "-0.5"])
+def test_resolve_strands_timeout_non_positive_value_falls_back(
+    monkeypatch: pytest.MonkeyPatch, bad: str
+) -> None:
+    """A cleanly-parsing but non-positive timeout is a misconfiguration and
+    falls back (honouring the documented "returns a positive float" postcondition)."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", bad)
+    monkeypatch.setattr(model_factory, "resolve_timeout", lambda key: 321.0)
+
+    assert model_factory._resolve_strands_timeout("strategy_design") == 321.0
+
+
+def test_get_strands_model_rejects_non_positive_explicit_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An explicit non-positive ``timeout`` violates the construction precondition."""
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+
+    with pytest.raises(AssertionError, match="timeout must be > 0"):
+        model_factory.get_strands_model("strategy_design", timeout=-1.0)
+
+
+def test_get_strands_model_forwards_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The resolved timeout reaches the Ollama transport via ``ollama_client_args``.
+
+    Regression: a bare ``timeout=`` kwarg is swallowed by strands'
+    ``**model_config`` (warned and dropped), so the timeout must travel through
+    the client-args channel to actually cancel a hung HTTP call.
+    """
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "123")
+
+    result = model_factory.get_strands_model("strategy_design")
+
+    assert result.ollama_client_args == {"timeout": 123.0}
 
 
 def test_get_strands_model_toggle_off_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:
