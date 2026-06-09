@@ -12,13 +12,20 @@ are respected consistently with the rest of the platform.
 
 from __future__ import annotations
 
+import inspect
 import logging
+import math
 import os
 from typing import Any, Dict, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
 
 logger = logging.getLogger(__name__)
+
+# Last-resort transport timeout (seconds) when even ``resolve_timeout`` returns a
+# non-positive / non-finite value. Mirrors the platform default so the resolver's
+# "positive, finite float" postcondition holds unconditionally.
+_DEFAULT_TRANSPORT_TIMEOUT = 900.0
 
 
 def structured_output_enabled() -> bool:
@@ -44,46 +51,143 @@ def _resolve_strands_timeout(agent_key: str) -> float:
     platform-wide ``resolve_timeout`` (which honours ``LLM_TIMEOUT``).
 
     Preconditions: ``agent_key`` is a non-empty model key.
-    Postconditions: returns a positive float — garbage env values fall back.
+    Postconditions: returns a **positive, finite** float, unconditionally.
+    Garbage, non-positive, or non-finite (``inf`` parses cleanly and ``inf > 0``
+    is ``True``, so an infinite read timeout would never cancel a hung call) env
+    values fall back to ``resolve_timeout``; a non-positive/non-finite
+    ``resolve_timeout`` result in turn falls back to
+    ``_DEFAULT_TRANSPORT_TIMEOUT`` so the contract holds even if the platform
+    resolver misbehaves.
     """
     raw = os.environ.get("STRATEGY_LAB_LLM_TIMEOUT")
     if raw is not None and raw.strip() != "":
         try:
-            return float(raw)
+            parsed = float(raw)
         except ValueError:
             pass
-    return resolve_timeout(agent_key)
-
-
-def _construct_with_optional_timeout(model_cls, timeout: float, **kwargs):
-    """Construct ``model_cls`` forwarding a transport timeout if the SDK accepts it.
-
-    The installed strands ``OllamaModel`` / ``BedrockModel`` signatures vary by
-    version (``timeout=`` vs ``client_args={"timeout": ...}`` vs neither). We try
-    each shape in turn and fall back to constructing without a timeout so a
-    signature mismatch degrades to "envelope wall-clock guard only" rather than
-    breaking agent construction. Only a *signature* ``TypeError`` (an unexpected
-    keyword argument) triggers the fallback — a ``TypeError`` raised from inside
-    the constructor for an unrelated reason propagates so the real
-    misconfiguration is not masked.
-
-    Preconditions: ``model_cls`` is a strands Model class; ``timeout > 0``.
-    Postconditions: returns a constructed model instance.
-    """
-    for attempt_kwargs in (
-        {**kwargs, "timeout": timeout},
-        {**kwargs, "client_args": {"timeout": timeout}},
+        else:
+            if parsed > 0 and math.isfinite(parsed):
+                return parsed
+    # ``resolve_timeout`` is a total function — it reads an env var (defaulting
+    # to "900") and catches the only failure mode (``float()`` ValueError),
+    # returning 900.0 — so it cannot raise. No ``try/except`` wraps it by design:
+    # per the project DbC rule we never try/except around a callee's contract
+    # failure to hide it; a future ``resolve_timeout`` that violated its
+    # ``-> float`` contract by raising should surface, not silently degrade.
+    resolved = resolve_timeout(agent_key)
+    # We still guard the returned *value* defensively: a misconfigured resolver
+    # returning a non-numeric (str/None) would make ``resolved > 0`` raise
+    # ``TypeError`` and break this function's "positive, finite float"
+    # postcondition. ``bool`` is excluded because ``True``/``False`` are not
+    # meaningful timeouts (and ``bool`` is an ``int`` subclass). The
+    # ``isinstance`` check also gates ``math.isfinite``, which itself raises
+    # ``TypeError`` on a non-number.
+    if (
+        isinstance(resolved, (int, float))
+        and not isinstance(resolved, bool)
+        and math.isfinite(resolved)
+        and resolved > 0
     ):
-        try:
-            return model_cls(**attempt_kwargs)
-        except TypeError as exc:
-            if "unexpected keyword argument" not in str(exc):
-                raise
-            continue
+        return resolved
     logger.warning(
-        "Strands model %s did not accept a transport timeout; relying on the "
-        "envelope wall-clock guard only.",
-        getattr(model_cls, "__name__", model_cls),
+        "resolve_timeout(%s) returned an invalid value %r; falling back to the "
+        "default transport timeout %.0fs.",
+        agent_key,
+        resolved,
+        _DEFAULT_TRANSPORT_TIMEOUT,
+    )
+    return _DEFAULT_TRANSPORT_TIMEOUT
+
+
+def _accepts_kwarg(target: Any, name: str) -> bool:
+    """Return ``True`` iff ``target``'s signature declares an *explicit* keyword
+    parameter ``name``.
+
+    A name reachable only through ``**kwargs`` (``VAR_KEYWORD``) does **not**
+    count. The strands model constructors accept arbitrary ``**model_config``
+    and merely *warn* on unknown keys (``validate_config_keys``) before silently
+    dropping them — so a kwarg routed there never reaches the transport.
+    Probing the constructor for a ``TypeError`` (the previous strategy) is
+    therefore useless: an unknown kwarg is swallowed, not rejected. Introspecting
+    for an explicitly-declared parameter is the only reliable signal that the
+    installed SDK will actually honour the argument.
+
+    Preconditions: ``target`` is introspectable (a class or callable); ``name``
+    is a non-empty string.
+    Postconditions: returns a ``bool``; never raises — an un-introspectable
+    target degrades to ``False``.
+    """
+    try:
+        params = inspect.signature(target).parameters
+    except (TypeError, ValueError):
+        return False
+    param = params.get(name)
+    return param is not None and param.kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+
+
+def _construct_ollama_with_timeout(model_cls, timeout: float, **kwargs):
+    """Construct a strands ``OllamaModel``, forwarding ``timeout`` as the
+    transport (httpx) read/connect timeout.
+
+    strands' ``OllamaModel`` passes ``ollama_client_args`` straight to
+    ``ollama.AsyncClient(host, **client_args)``, which forwards them to httpx —
+    where ``timeout`` is the read/connect timeout, the only mechanism that
+    actually cancels a hung HTTP call. A bare ``timeout=`` (or ``client_args=``)
+    kwarg is swallowed by the constructor's ``**model_config``, which only
+    *warns* and then drops it, so it must never be used. The current strands
+    range (>=1.35,<2.0) declares ``ollama_client_args``; ``client_args`` (the
+    client-args name strands' *other* model providers use) is probed only as a
+    defensive fallback should a release within the pinned range unify on it. The
+    timeout is forwarded through whichever the installed signature explicitly
+    declares, degrading to "no transport timeout" (envelope wall-clock guard
+    only) if neither exists.
+
+    Preconditions: ``model_cls`` is the strands ``OllamaModel`` class (or a
+    stand-in); ``timeout > 0``.
+    Postconditions: returns a constructed model. The returned model carries the
+    transport timeout iff ``model_cls`` exposes a client-args channel.
+    """
+    for param in ("ollama_client_args", "client_args"):
+        if _accepts_kwarg(model_cls, param):
+            return model_cls(**kwargs, **{param: {"timeout": timeout}})
+    logger.warning(
+        "Strands OllamaModel exposes no client-args channel for a transport "
+        "timeout; relying on the envelope wall-clock guard only."
+    )
+    return model_cls(**kwargs)
+
+
+def _construct_bedrock_with_timeout(model_cls, timeout: float, **kwargs):
+    """Construct a strands ``BedrockModel``, forwarding ``timeout`` as the
+    botocore read/connect timeout via ``boto_client_config``.
+
+    A bare ``timeout=`` kwarg is swallowed by the constructor's
+    ``**model_config`` (warned then dropped), so the timeout must travel through
+    the explicit ``boto_client_config`` parameter as a botocore ``Config``.
+    Degrades to "no transport timeout" if the SDK exposes no such parameter.
+
+    Preconditions: ``model_cls`` is the strands ``BedrockModel`` class (or a
+    stand-in); ``timeout > 0``.
+    Postconditions: returns a constructed model. The returned model carries the
+    transport timeout iff ``model_cls`` exposes a ``boto_client_config``
+    parameter.
+    """
+    if _accepts_kwarg(model_cls, "boto_client_config"):
+        # botocore is a hard dependency of the strands Bedrock path, so this
+        # import only runs when a real Bedrock model is being constructed.
+        from botocore.config import Config as BotocoreConfig
+
+        # botocore accepts float read/connect timeouts; forward ``timeout``
+        # verbatim. (Do NOT ``int()`` it — that truncates a sub-second timeout
+        # to ``0`` and diverges from the Ollama path, which preserves the float.)
+        client_config = BotocoreConfig(read_timeout=timeout, connect_timeout=timeout)
+        return model_cls(**kwargs, boto_client_config=client_config)
+    logger.warning(
+        "Strands BedrockModel exposes no boto_client_config channel for a "
+        "transport timeout; relying on the envelope wall-clock guard only."
     )
     return model_cls(**kwargs)
 
@@ -114,7 +218,11 @@ def get_strands_model(
     unconditionally.
 
     Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
-    if given, is a JSON-serializable schema dict.
+    if given, is a JSON-serializable schema dict. ``timeout``, if passed
+    explicitly, must be a positive, finite *number* of seconds — a non-numeric
+    value raises ``TypeError`` and a non-positive or non-finite value raises
+    ``ValueError`` (a resolved timeout is guaranteed positive and finite by
+    :func:`_resolve_strands_timeout`).
     Postconditions: returns a constructed strands model. Adding a schema never
     changes which provider/model is selected — only whether the Ollama request
     carries a ``format`` constraint.
@@ -124,6 +232,16 @@ def get_strands_model(
     base_url = resolve_base_url()
     if timeout is None:
         timeout = _resolve_strands_timeout(agent_key)
+    # Boundary enforcement of the construction helpers' ``timeout > 0``
+    # precondition: a bad transport timeout is a caller bug (an explicit bad
+    # kwarg), never a value we should forward to httpx/botocore. Check the type
+    # first so a non-numeric kwarg raises a clear ``TypeError`` (rather than an
+    # obscure one from ``math.isfinite``); use explicit raises rather than
+    # ``assert`` so the guards survive ``python -O``.
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise TypeError(f"timeout must be a number of seconds (got {type(timeout).__name__})")
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"timeout must be a positive, finite number of seconds (got {timeout!r})")
 
     use_schema = response_schema is not None and structured_output_enabled()
 
@@ -131,7 +249,7 @@ def get_strands_model(
         from strands.models import BedrockModel
 
         logger.info("Strands model: Bedrock model_id=%s timeout=%.0fs", model_id, timeout)
-        return _construct_with_optional_timeout(BedrockModel, timeout, model_id=model_id)
+        return _construct_bedrock_with_timeout(BedrockModel, timeout, model_id=model_id)
 
     if provider == "dummy":
         raise ValueError(
@@ -173,6 +291,6 @@ def get_strands_model(
         # uses). Unknown config keys only warn — they never raise — so this is
         # safe across the supported strands range.
         extra["additional_args"] = {"format": response_schema}
-    return _construct_with_optional_timeout(
+    return _construct_ollama_with_timeout(
         OllamaModel, timeout, host=host, model_id=model_id, **extra
     )
