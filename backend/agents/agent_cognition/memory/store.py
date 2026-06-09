@@ -325,6 +325,20 @@ class RecordedEvent(NamedTuple):
     recorded_at: datetime
 
 
+class RecordedSummary(NamedTuple):
+    """A summary paired with its store-managed ``updated_at`` content-write time.
+
+    ``PeriodSummary`` carries ``created_at`` (preserved across recompute) but not
+    ``updated_at`` (write bookkeeping), so this rides the content-write time
+    alongside the summary for the knowledge-graph sync worker, which keysets on
+    ``(updated_at, id)`` to advance its watermark — symmetric with
+    :class:`RecordedEvent`.
+    """
+
+    summary: PeriodSummary
+    updated_at: datetime
+
+
 @timed_query(store=_STORE, op="fetch_events_recorded_after")
 def fetch_events_recorded_after(
     agent_id: str,
@@ -379,53 +393,69 @@ def fetch_events_recorded_after(
         ]
 
 
-@timed_query(store=_STORE, op="fetch_summaries_created_after")
-def fetch_summaries_created_after(
+@timed_query(store=_STORE, op="fetch_summaries_updated_after")
+def fetch_summaries_updated_after(
     agent_id: str,
     *,
-    after_created_at: datetime | None,
+    after_updated_at: datetime | None,
     after_id: str | None,
     limit: int,
-) -> list[PeriodSummary]:
-    """Return this agent's rollup summaries after a ``(created_at, id)`` cursor.
+) -> list[RecordedSummary]:
+    """Return this agent's rollup summaries after an ``(updated_at, id)`` cursor.
 
-    The forward, creation-ordered scan the knowledge-graph sync worker uses to
+    The forward, content-write-ordered scan the knowledge-graph sync worker uses to
     drain rollup summaries into the graph, symmetric with
-    :func:`fetch_events_recorded_after`. Every summary across all scales is
-    returned exactly once in keyset order (no ``stale`` filter — a momentarily
-    stale period is still ingested; recency/staleness is resolved at retrieval
-    time and by the fresher event episodes). ``created_at`` is stable across
-    recompute (``upsert_summary``'s ``ON CONFLICT DO UPDATE`` never touches it),
-    so the cursor never skips or re-emits a period.
+    :func:`fetch_events_recorded_after`. Ordering on ``updated_at`` (the
+    content-write time advanced by every accepted ``upsert_summary``, not
+    ``created_at``, which is preserved across recompute) means a recomputed summary
+    — whose ``version`` advanced — re-sorts *after* the watermark and is re-fetched
+    on a subsequent pass, where the worker ingests it as a fresh per-version
+    episode. A summary that is never re-written keeps its ``updated_at`` and is
+    returned once; note any accepted ``upsert_summary`` advances ``updated_at``,
+    so a content-unchanged re-write (e.g. the rollup engine clearing a spurious
+    stale flag) re-emits the row under the *same* ``summary:<id>:<version>`` episode
+    name — an idempotent graph update, not a duplicate. No ``stale`` filter — a
+    momentarily stale period is still ingested; recency is resolved at retrieval
+    time and by the fresher event episodes.
 
     Args:
-        after_created_at / after_id: the exclusive ``(created_at, id)`` cursor;
+        after_updated_at / after_id: the exclusive ``(updated_at, id)`` cursor;
             pass both ``None`` for no lower bound (cold start). Advanced together.
         limit: maximum rows to return (the worker's batch size).
 
     Preconditions:
         * ``agent_id`` is non-empty and ``limit >= 1``.
-        * ``after_created_at`` and ``after_id`` are both set or both ``None``.
+        * ``after_updated_at`` and ``after_id`` are both set or both ``None``.
     Postconditions:
         * At most ``limit`` summaries owned by ``agent_id``, ordered
-          ``(created_at ASC, id ASC)``, each strictly after the cursor. No rows
-          are modified.
+          ``(updated_at ASC, id ASC)``, each strictly after the cursor;
+          ``updated_at`` rides back on each :class:`RecordedSummary`. No rows are
+          modified.
     """
-    assert agent_id, "fetch_summaries_created_after: agent_id must be non-empty"
-    assert limit >= 1, "fetch_summaries_created_after: limit must be >= 1"
-    assert (after_created_at is None) == (after_id is None), (
-        "fetch_summaries_created_after: after_created_at and after_id must both be set or both None"
+    assert agent_id, "fetch_summaries_updated_after: agent_id must be non-empty"
+    assert limit >= 1, "fetch_summaries_updated_after: limit must be >= 1"
+    assert (after_updated_at is None) == (after_id is None), (
+        "fetch_summaries_updated_after: after_updated_at and after_id must both be set or both None"
     )
-    sql = f"SELECT {_SUMMARY_READ_COLS} FROM agent_cognition_summaries WHERE agent_id = %s"
+    sql = f"SELECT {_SUMMARY_READ_COLS}, updated_at FROM agent_cognition_summaries WHERE agent_id = %s"
     params: list[object] = [agent_id]
-    if after_created_at is not None:
-        sql += " AND (created_at, id) > (%s, %s)"
-        params.extend([after_created_at, after_id])
-    sql += " ORDER BY created_at ASC, id ASC LIMIT %s"
+    if after_updated_at is not None:
+        # Row-comparison keyset: strictly after the (updated_at, id) cursor.
+        sql += " AND (updated_at, id) > (%s, %s)"
+        params.extend([after_updated_at, after_id])
+    sql += " ORDER BY updated_at ASC, id ASC LIMIT %s"
     params.append(limit)
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
-        return [PeriodSummary.model_validate(row) for row in cur.fetchall()]
+        rows = cur.fetchall()
+    summaries: list[RecordedSummary] = []
+    for row in rows:
+        # ``updated_at`` is the keyset cursor, not a PeriodSummary field — pop it
+        # before validation so the read never depends on the model tolerating an
+        # extra key (defensive if PeriodSummary ever becomes strict / extra='forbid').
+        updated_at = row.pop("updated_at")
+        summaries.append(RecordedSummary(PeriodSummary.model_validate(row), updated_at))
+    return summaries
 
 
 @timed_query(store=_STORE, op="upsert_summary")
@@ -451,7 +481,9 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
         * Exactly one row exists for ``(agent_id, scale, period_start)``; a
           second call with the same key updates the mutable columns in place
           rather than inserting a duplicate. ``id`` and ``created_at`` of the
-          original row are preserved on update; ``computed_at`` is refreshed.
+          original row are preserved on update; ``computed_at`` is refreshed, and
+          ``updated_at`` is advanced to ``NOW()`` on every *accepted* update (the
+          knowledge-graph keyset cursor) but not on a skipped/superseded one.
         * ``version`` is monotonic non-decreasing: an update carrying a lower
           ``version`` than the stored row (e.g. a freshly-built summary after
           ``mark_period_stale`` bumped it) keeps the higher stored value, so a
@@ -508,7 +540,13 @@ def upsert_summary(agent_id: str, summary: PeriodSummary, *, computed_at: dateti
                         THEN agent_cognition_summaries.stale_since
                         ELSE NULL
                     END,
-                    computed_at = EXCLUDED.computed_at
+                    computed_at = EXCLUDED.computed_at,
+                    -- Content-write time for the knowledge-graph keyset cursor:
+                    -- advanced only on an accepted update, so a recomputed (version-
+                    -- advanced) summary re-sorts after the graph watermark and is
+                    -- re-ingested, while a superseded/no-op upsert (skipped by the
+                    -- WHERE below) leaves it untouched and is not re-ingested.
+                    updated_at = NOW()
                 WHERE agent_cognition_summaries.computed_at IS NULL
                     OR EXCLUDED.computed_at >= agent_cognition_summaries.computed_at""",
             (

@@ -46,7 +46,7 @@ def test_schema_declares_all_tables() -> None:
 def test_graph_watermark_table_and_keyset_indexes_present() -> None:
     # The knowledge-graph sync worker tracks per-agent ingestion progress in
     # agent_cognition_graph_watermarks with symmetric keyset cursors over events
-    # (recorded_at, id) and summaries (created_at, id); the table and both
+    # (recorded_at, id) and summaries (updated_at, id); the table and both
     # supporting keyset indexes must be declared here.
     joined = "".join(SCHEMA.statements)
     watermark_ddl = next(
@@ -58,7 +58,7 @@ def test_graph_watermark_table_and_keyset_indexes_present() -> None:
     for col in (
         "last_event_recorded_at",
         "last_event_id",
-        "last_summary_created_at",
+        "last_summary_updated_at",
         "last_summary_id",
         "ingested_count",
     ):
@@ -68,15 +68,19 @@ def test_graph_watermark_table_and_keyset_indexes_present() -> None:
         and "agent_cognition_events(agent_id, recorded_at, id)" in joined
     )
     assert (
-        "idx_agent_cognition_summaries_agent_created" in joined
-        and "agent_cognition_summaries(agent_id, created_at, id)" in joined
+        "idx_agent_cognition_summaries_agent_updated" in joined
+        and "agent_cognition_summaries(agent_id, updated_at, id)" in joined
     )
 
 
 def test_all_ddl_is_idempotent() -> None:
-    # Pattern B requires startup DDL to be safe to re-run.
+    # Pattern B requires startup DDL to be safe to re-run. CREATE/ALTER-ADD
+    # statements guard with IF NOT EXISTS; the migration cleanup DROPs (the dead
+    # pre-rename summary cursor index/column) guard with IF EXISTS — both forms
+    # re-run safely. "IF NOT EXISTS" does not contain "IF EXISTS", so an unguarded
+    # statement still fails this check.
     for stmt in SCHEMA.statements:
-        assert "IF NOT EXISTS" in stmt, stmt
+        assert "IF NOT EXISTS" in stmt or "IF EXISTS" in stmt, stmt
 
 
 def test_events_idempotency_key_present() -> None:
@@ -118,6 +122,28 @@ def test_summaries_have_events_pruned_column() -> None:
         "ALTER TABLE agent_cognition_summaries" in joined
         and "ADD COLUMN IF NOT EXISTS events_pruned" in joined
     )
+
+
+def test_summaries_have_updated_at_column() -> None:
+    # Content-write time for the knowledge-graph keyset cursor. Present in the
+    # CREATE for fresh clusters and back-filled via an idempotent ALTER — the
+    # ALTER is load-bearing: without it, fetch_summaries_updated_after's
+    # `SELECT ..., updated_at` projection errors on upgraded clusters.
+    joined = "".join(SCHEMA.statements)
+    assert "updated_at" in joined
+    assert (
+        "ALTER TABLE agent_cognition_summaries" in joined
+        and "ADD COLUMN IF NOT EXISTS updated_at" in joined
+    )
+
+
+def test_superseded_summary_cursor_ddl_dropped() -> None:
+    # The summary graph cursor moved created_at → updated_at. The pre-rename
+    # index and watermark column are dropped (IF EXISTS) so upgraded clusters
+    # don't carry a dead index (per-write cost) or an orphan column.
+    joined = "".join(SCHEMA.statements)
+    assert "DROP INDEX IF EXISTS idx_agent_cognition_summaries_agent_created" in joined
+    assert "DROP COLUMN IF EXISTS last_summary_created_at" in joined
 
 
 def test_retention_guard_columns_present() -> None:

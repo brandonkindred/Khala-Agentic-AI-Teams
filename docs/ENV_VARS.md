@@ -426,8 +426,11 @@ The model must be available on the Ollama `/v1/embeddings` endpoint or hybrid se
 ### AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S / AGENT_COGNITION_GRAPH_SYNC_BATCH
 Cadence (seconds, default `300`) and per-pass batch size (default `50`) for the background graph sync
 worker that ingests new `agent_cognition_events` and rollup summaries into the knowledge graph per
-agent since a watermark (`agent_cognition_graph_watermarks`). The worker is a no-op when
-`NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
+agent since a watermark (`agent_cognition_graph_watermarks`). Events keyset on `(recorded_at, id)` and
+are added as `event:<id>` episodes; summaries keyset on `(updated_at, id)` (the content-write time
+advanced by each accepted `upsert_summary`) and are added as `summary:<id>:<version>` episodes, so a
+recomputed summary — whose `version` advanced — is re-ingested as a fresh per-version episode rather
+than overwriting the prior one. The worker is a no-op when `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
 
 ### NEO4J_SLOW_OP_MS
 Slow-call log threshold (ms, default `1000`) for `shared_neo4j.timed_graph_op`.
