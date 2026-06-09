@@ -14,12 +14,18 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import os
 from typing import Any, Dict, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
 
 logger = logging.getLogger(__name__)
+
+# Last-resort transport timeout (seconds) when even ``resolve_timeout`` returns a
+# non-positive / non-finite value. Mirrors the platform default so the resolver's
+# "positive, finite float" postcondition holds unconditionally.
+_DEFAULT_TRANSPORT_TIMEOUT = 900.0
 
 
 def structured_output_enabled() -> bool:
@@ -45,9 +51,13 @@ def _resolve_strands_timeout(agent_key: str) -> float:
     platform-wide ``resolve_timeout`` (which honours ``LLM_TIMEOUT``).
 
     Preconditions: ``agent_key`` is a non-empty model key.
-    Postconditions: returns a positive float — garbage *or non-positive* env
-    values fall back (``float("-5")`` parses cleanly but a non-positive timeout
-    is a misconfiguration, not a valid transport bound).
+    Postconditions: returns a **positive, finite** float, unconditionally.
+    Garbage, non-positive, or non-finite (``inf`` parses cleanly and ``inf > 0``
+    is ``True``, so an infinite read timeout would never cancel a hung call) env
+    values fall back to ``resolve_timeout``; a non-positive/non-finite
+    ``resolve_timeout`` result in turn falls back to
+    ``_DEFAULT_TRANSPORT_TIMEOUT`` so the contract holds even if the platform
+    resolver misbehaves.
     """
     raw = os.environ.get("STRATEGY_LAB_LLM_TIMEOUT")
     if raw is not None and raw.strip() != "":
@@ -56,9 +66,19 @@ def _resolve_strands_timeout(agent_key: str) -> float:
         except ValueError:
             pass
         else:
-            if parsed > 0:
+            if parsed > 0 and math.isfinite(parsed):
                 return parsed
-    return resolve_timeout(agent_key)
+    resolved = resolve_timeout(agent_key)
+    if resolved > 0 and math.isfinite(resolved):
+        return resolved
+    logger.warning(
+        "resolve_timeout(%s) returned a non-positive/non-finite value %r; "
+        "falling back to the default transport timeout %.0fs.",
+        agent_key,
+        resolved,
+        _DEFAULT_TRANSPORT_TIMEOUT,
+    )
+    return _DEFAULT_TRANSPORT_TIMEOUT
 
 
 def _accepts_kwarg(target: Any, name: str) -> bool:
@@ -179,10 +199,11 @@ def get_strands_model(
     prompt-only JSON) and when the toggle is off, so callers can pass a schema
     unconditionally.
 
-    Preconditions: ``agent_key`` is a non-empty model key; ``timeout``, if
-    passed explicitly, is ``> 0`` (a resolved timeout is guaranteed positive by
-    :func:`_resolve_strands_timeout`); ``response_schema``, if given, is a
-    JSON-serializable schema dict.
+    Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
+    if given, is a JSON-serializable schema dict. ``timeout``, if passed
+    explicitly, must be a positive, finite number of seconds — a non-positive or
+    non-finite value raises ``ValueError`` (a resolved timeout is guaranteed
+    positive and finite by :func:`_resolve_strands_timeout`).
     Postconditions: returns a constructed strands model. Adding a schema never
     changes which provider/model is selected — only whether the Ollama request
     carries a ``format`` constraint.
@@ -193,9 +214,12 @@ def get_strands_model(
     if timeout is None:
         timeout = _resolve_strands_timeout(agent_key)
     # Boundary enforcement of the construction helpers' ``timeout > 0``
-    # precondition: a non-positive transport timeout is a caller bug (an
-    # explicit bad kwarg), never a value we should forward to httpx/botocore.
-    assert timeout > 0, f"timeout must be > 0 (got {timeout!r})"
+    # precondition: a non-positive or non-finite transport timeout is a caller
+    # bug (an explicit bad kwarg), never a value we should forward to
+    # httpx/botocore. Use an explicit raise rather than ``assert`` so the guard
+    # survives ``python -O``.
+    if not math.isfinite(timeout) or timeout <= 0:
+        raise ValueError(f"timeout must be a positive, finite number of seconds (got {timeout!r})")
 
     use_schema = response_schema is not None and structured_output_enabled()
 

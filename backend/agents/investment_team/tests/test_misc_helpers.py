@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict
 
 import pytest
@@ -814,12 +815,13 @@ def test_resolve_strands_timeout_garbage_value_falls_back(monkeypatch: pytest.Mo
     assert model_factory._resolve_strands_timeout("strategy_design") == 321.0
 
 
-@pytest.mark.parametrize("bad", ["-5", "0", "-0.5"])
-def test_resolve_strands_timeout_non_positive_value_falls_back(
+@pytest.mark.parametrize("bad", ["-5", "0", "-0.5", "inf", "-inf", "nan"])
+def test_resolve_strands_timeout_non_positive_or_nonfinite_value_falls_back(
     monkeypatch: pytest.MonkeyPatch, bad: str
 ) -> None:
-    """A cleanly-parsing but non-positive timeout is a misconfiguration and
-    falls back (honouring the documented "returns a positive float" postcondition)."""
+    """A cleanly-parsing but non-positive OR non-finite timeout is a
+    misconfiguration and falls back (``inf > 0`` is ``True`` but an infinite read
+    timeout would never cancel a hung call)."""
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", bad)
@@ -828,14 +830,32 @@ def test_resolve_strands_timeout_non_positive_value_falls_back(
     assert model_factory._resolve_strands_timeout("strategy_design") == 321.0
 
 
-def test_get_strands_model_rejects_non_positive_explicit_timeout(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("bad_resolved", [0.0, -1.0, float("inf"), float("nan")])
+def test_resolve_strands_timeout_guards_resolve_timeout_postcondition(
+    monkeypatch: pytest.MonkeyPatch, bad_resolved: float
 ) -> None:
-    """An explicit non-positive ``timeout`` violates the construction precondition."""
+    """A non-positive/non-finite ``resolve_timeout`` result falls back to the
+    default, so the function's positive-finite postcondition holds unconditionally."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.delenv("STRATEGY_LAB_LLM_TIMEOUT", raising=False)
+    monkeypatch.setattr(model_factory, "resolve_timeout", lambda key: bad_resolved)
+
+    result = model_factory._resolve_strands_timeout("strategy_design")
+    assert result == model_factory._DEFAULT_TRANSPORT_TIMEOUT
+    assert result > 0 and math.isfinite(result)
+
+
+@pytest.mark.parametrize("bad", [-1.0, 0.0, float("inf"), float("nan")])
+def test_get_strands_model_rejects_non_positive_or_nonfinite_explicit_timeout(
+    monkeypatch: pytest.MonkeyPatch, bad: float
+) -> None:
+    """An explicit non-positive/non-finite ``timeout`` raises ``ValueError`` — an
+    explicit ``raise`` (not ``assert``) so the guard survives ``python -O``."""
     model_factory, _ = _patch_ollama_local(monkeypatch)
 
-    with pytest.raises(AssertionError, match="timeout must be > 0"):
-        model_factory.get_strands_model("strategy_design", timeout=-1.0)
+    with pytest.raises(ValueError, match="positive, finite"):
+        model_factory.get_strands_model("strategy_design", timeout=bad)
 
 
 def test_get_strands_model_forwards_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
