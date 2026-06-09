@@ -66,6 +66,12 @@ _TERMINAL_STATUSES = frozenset({"completed", "blocked"})
 _DEFAULT_LEASE_S = 120
 _MIN_LEASE_S = 30
 
+# Generous cap on an event's free-text ``content`` at the writeback boundary —
+# large enough for a legitimate multi-sentence summary, bounded enough that a
+# hostile/oversized string can't bloat a row. (Distinct from the redactor's
+# tighter per-value cap used for nested ``data`` structures.)
+_MAX_CONTENT_CHARS = 8192
+
 __all__ = [
     "ClaimState",
     "ClaimResult",
@@ -223,7 +229,7 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
       triple-based dedup intact (a re-persist of the same writeback gets new ids
       but the same triples, so ``DO NOTHING`` still no-ops).
     * ``data`` is re-run through the secret stripper and ``content`` is bounded
-      to the same size cap (an oversized content string can't bloat the row).
+      to a generous char cap (an oversized content string can't bloat the row).
     * ``salience`` is clamped to ``[0, 1]`` (non-finite → ``0.0``).
     * ``occurred_at`` is normalized to tz-aware UTC and never allowed into the
       future (a future timestamp would land the event in a calendar period that
@@ -256,7 +262,7 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
                 "id": str(uuid4()),
                 "agent_id": agent_id,
                 "source_run_id": source_run_id,
-                "content": sanitize_for_memory(event.content),
+                "content": _bound_content(event.content),
                 "data": sanitize_for_memory(event.data),
                 "salience": _clamp01(event.salience),
                 "occurred_at": _safe_occurred_at(event.occurred_at, now),
@@ -283,14 +289,17 @@ class ClaimResult:
     """The result of :func:`claim_run`.
 
     Invariants:
-        * ``state is CLAIMED``  -> ``response is None`` (caller executes, then
-          calls :func:`complete_run`).
-        * ``state is REPLAY``   -> ``response`` is the stored terminal envelope.
-        * ``state is CONFLICT`` -> ``response is None``.
+        * ``state is CLAIMED``  -> ``response is None`` and ``claim_token`` is the
+          per-claim fencing nonce the caller must pass back to
+          :func:`complete_run` (the executor proves it still owns the claim).
+        * ``state is REPLAY``   -> ``response`` is the stored terminal envelope;
+          ``claim_token is None``.
+        * ``state is CONFLICT`` -> ``response is None`` and ``claim_token is None``.
     """
 
     state: ClaimState
     response: dict[str, Any] | None = None
+    claim_token: str | None = None
 
 
 # A single statement claims (first sight) or reclaims an expired lease in place.
@@ -299,13 +308,16 @@ class ClaimResult:
 # its WHERE requires request_hash = EXCLUDED.request_hash, so an expired-lease
 # retry with a *different* body does not reclaim — it leaves the row untouched
 # (hash intact) and falls through to the classify read, which returns CONFLICT.
+# Both the insert and the reclaim stamp a fresh ``claim_token`` so a reclaim
+# rotates ownership away from the previous (now-zombie) claimer.
 _CLAIM_SQL = """
 INSERT INTO agent_cognition_runs
-    (agent_id, source_run_id, status, request_hash, lease_expires_at, created_at)
-VALUES (%(agent_id)s, %(srid)s, 'in_progress', %(hash)s, %(now)s + %(lease)s, %(now)s)
+    (agent_id, source_run_id, status, request_hash, lease_expires_at, claim_token, created_at)
+VALUES (%(agent_id)s, %(srid)s, 'in_progress', %(hash)s, %(now)s + %(lease)s, %(token)s, %(now)s)
 ON CONFLICT (agent_id, source_run_id) DO UPDATE
     SET status = 'in_progress',
         lease_expires_at = %(now)s + %(lease)s,
+        claim_token = EXCLUDED.claim_token,
         response = NULL,
         completed_at = NULL
     WHERE agent_cognition_runs.status = 'in_progress'
@@ -332,19 +344,22 @@ def claim_run(
           ``lease`` is a positive duration.
     Postconditions:
         * first sight -> insert ``in_progress(request_hash, lease)`` ->
-          ``CLAIMED``.
+          ``CLAIMED`` with a fresh ``claim_token``.
         * terminal (``completed``/``blocked``) row, ``request_hash`` matches ->
           ``REPLAY`` carrying the stored ``response``.
         * any existing row whose ``request_hash`` differs -> ``CONFLICT``; the
           stored row is left untouched (the reclaim never overwrites the hash).
         * ``in_progress`` row with a still-valid lease -> ``CONFLICT``.
         * ``in_progress`` row with an expired lease and matching hash ->
-          reclaimed in place (fresh lease, response/completed_at cleared,
-          ``request_hash`` retained) -> ``CLAIMED``.
+          reclaimed in place (fresh lease + fresh ``claim_token``,
+          response/completed_at cleared, ``request_hash`` retained) -> ``CLAIMED``.
+        * The stored lease is ``max(lease, AGENT_COGNITION_RUN_LEASE_S floor)`` —
+          a sub-floor caller lease is raised to the floor so a too-short lease
+          can't let a retry reclaim a still-in-flight run.
     Invariant:
         * The claim/reclaim decision and any mutation happen in one transaction,
           so concurrent claimers cannot both observe "first sight" or both
-          reclaim.
+          reclaim. A reclaim rotates ``claim_token``, fencing the prior claimer.
     """
     assert agent_id, "claim_run: agent_id must be non-empty"
     assert source_run_id, "claim_run: source_run_id must be non-empty"
@@ -355,18 +370,20 @@ def claim_run(
     # lease (with the inclusive `lease_expires_at <= now` reclaim test) would let
     # a concurrent retry reclaim a run that is still genuinely in flight.
     effective_lease = max(lease, timedelta(seconds=_MIN_LEASE_S))
+    token = str(uuid4())
     params = {
         "agent_id": agent_id,
         "srid": source_run_id,
         "hash": request_hash,
         "now": _now(),
         "lease": effective_lease,
+        "token": token,
     }
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_CLAIM_SQL, params)
         if cur.fetchone() is not None:
             # Inserted (first sight) or reclaimed an expired lease (matching hash).
-            return ClaimResult(ClaimState.CLAIMED)
+            return ClaimResult(ClaimState.CLAIMED, claim_token=token)
         # A conflicting row exists but was not reclaimable; classify it.
         cur.execute(_CLASSIFY_SQL, {"agent_id": agent_id, "srid": source_run_id})
         row = cur.fetchone()
@@ -383,53 +400,77 @@ def claim_run(
 
 
 def complete_run(
-    agent_id: str, source_run_id: str, *, status: str, response: Mapping[str, Any]
+    agent_id: str,
+    source_run_id: str,
+    *,
+    status: str,
+    response: Mapping[str, Any],
+    claim_token: str,
 ) -> None:
     """Write the terminal ledger row for a previously claimed run.
 
-    Only an ``in_progress`` row is transitioned: the ``WHERE status =
-    'in_progress'`` guard makes completing an **already-terminal** row a
-    no-op rather than overwriting a stored (and possibly already-replayed)
-    envelope — so a retried ``complete_run`` is idempotent and cannot corrupt
-    the replay contract. (A run whose lease was reclaimed by *another* claimer
-    is back in ``in_progress``; fully fencing that loser-overwrite would need a
-    per-claim token in the ledger, which is a deliberate follow-up.)
+    The UPDATE matches only an ``in_progress`` row **whose ``claim_token``
+    matches the caller's** — the nonce :func:`claim_run` returned on ``CLAIMED``.
+    This fences two ways:
+
+    * An **already-terminal** row is not matched, so a retried ``complete_run``
+      is an idempotent no-op rather than overwriting a stored (possibly
+      already-replayed) envelope.
+    * A **zombie** completer whose lease was reclaimed by another worker is not
+      matched either: the reclaim rotated ``claim_token``, so the original
+      claimer's token no longer fences the row — it can't clobber the new
+      claimer's in-flight run.
 
     Preconditions:
         * ``agent_id`` / ``source_run_id`` are non-empty; ``status`` is
-          ``"completed"`` or ``"blocked"``; a prior :func:`claim_run` returned
-          ``CLAIMED`` for this key.
+          ``"completed"`` or ``"blocked"``; ``claim_token`` is the token a prior
+          :func:`claim_run` returned ``CLAIMED`` for this key.
     Postconditions:
-        * When the row is ``in_progress``: its ``status``/``response``/
-          ``completed_at`` are set, ``lease_expires_at`` is cleared, and
-          ``request_hash`` is untouched. A subsequent :func:`claim_run` with the
-          same hash replays ``response``.
-        * When the row is **already terminal**: a no-op (the existing envelope is
-          preserved).
-        * Raises :class:`RunLedgerError` when no row exists (the run was never
-          claimed) — enforced with a real branch, not an ``assert`` (which would
-          vanish under ``python -O`` and silently lose the run).
+        * When the caller still owns the in-progress claim: its ``status`` /
+          ``response`` / ``completed_at`` are set, ``lease_expires_at`` is
+          cleared, ``request_hash`` is untouched; a later same-hash
+          :func:`claim_run` replays ``response``.
+        * When the row is already terminal, or held by a different (reclaimed)
+          claim, or the caller's token doesn't match: a no-op (the stored state
+          is preserved). A terminal re-complete whose ``status``/``response``
+          **differs** from what is stored is logged at WARNING (a likely
+          double-completion bug); a matching one is logged at DEBUG.
+        * Raises :class:`RunLedgerError` when no row exists at all (the run was
+          never claimed) — a real branch, not an ``assert`` (which ``python -O``
+          would strip, silently losing the run).
     """
     assert agent_id, "complete_run: agent_id must be non-empty"
     assert source_run_id, "complete_run: source_run_id must be non-empty"
+    assert claim_token, "complete_run: claim_token must be non-empty"
     if status not in _TERMINAL_STATUSES:
         raise ValueError(
             f"complete_run: status must be one of {sorted(_TERMINAL_STATUSES)}, got {status!r}"
         )
+    new_response = dict(response)
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """UPDATE agent_cognition_runs
                   SET status = %s, response = %s, completed_at = %s, lease_expires_at = NULL
-                WHERE agent_id = %s AND source_run_id = %s AND status = %s
+                WHERE agent_id = %s AND source_run_id = %s
+                      AND status = %s AND claim_token = %s
             RETURNING source_run_id""",
-            (status, Json(dict(response)), _now(), agent_id, source_run_id, _IN_PROGRESS),
+            (
+                status,
+                Json(new_response),
+                _now(),
+                agent_id,
+                source_run_id,
+                _IN_PROGRESS,
+                claim_token,
+            ),
         )
         if cur.fetchone() is not None:
             return
-        # No in_progress row matched: the key is either already terminal (an
-        # idempotent re-complete — leave the stored envelope intact) or absent.
+        # No owned in_progress row matched: the key is terminal, reclaimed by a
+        # different claim, or absent. Read the current state to decide.
         cur.execute(
-            "SELECT status FROM agent_cognition_runs WHERE agent_id = %s AND source_run_id = %s",
+            "SELECT status, response FROM agent_cognition_runs "
+            "WHERE agent_id = %s AND source_run_id = %s",
             (agent_id, source_run_id),
         )
         existing = cur.fetchone()
@@ -438,12 +479,26 @@ def complete_run(
             "complete_run: no claimed run to complete for "
             f"agent_id={agent_id!r} source_run_id={source_run_id!r}"
         )
-    logger.debug(
-        "complete_run: run %s/%s already terminal (%s); treating as idempotent no-op",
-        agent_id,
-        source_run_id,
-        existing["status"],
-    )
+    if existing["status"] in _TERMINAL_STATUSES and (
+        existing["status"] != status or existing["response"] != new_response
+    ):
+        # A second, *conflicting* terminal completion for the same key — a likely
+        # double-completion bug, distinct from a benign identical retry.
+        logger.warning(
+            "complete_run: run %s/%s already terminal (%s) with a different envelope; "
+            "discarding conflicting %s completion",
+            agent_id,
+            source_run_id,
+            existing["status"],
+            status,
+        )
+    else:
+        logger.debug(
+            "complete_run: run %s/%s not owned by this claim (state=%s); no-op",
+            agent_id,
+            source_run_id,
+            existing["status"],
+        )
 
 
 def replay_run(agent_id: str, source_run_id: str) -> dict[str, Any] | None:
@@ -495,14 +550,35 @@ def _clamp01(value: float) -> float:
     return max(0.0, min(1.0, value))
 
 
+def _bound_content(content: str) -> str:
+    """Bound an event's free-text ``content`` to ``_MAX_CONTENT_CHARS``.
+
+    A generous cap (vs the per-value redactor cap used for nested ``data``) so a
+    legitimate multi-sentence summary survives intact while a hostile/oversized
+    content string can't bloat the row. Untyped/empty input degrades gracefully.
+    """
+    if not isinstance(content, str):
+        content = str(content)
+    if len(content) > _MAX_CONTENT_CHARS:
+        return content[:_MAX_CONTENT_CHARS] + "…<truncated>"
+    return content
+
+
 def _safe_occurred_at(value: datetime, now: datetime) -> datetime:
     """Normalize an event timestamp to tz-aware UTC and bound it to ``now``.
 
-    A naive timestamp is read as UTC; a future timestamp is clamped to ``now``
-    so an untrusted writeback can't place an event in a calendar period that
-    never closes (which would wedge the rollup engine).
+    A timestamp that is naive — or carries a degenerate ``tzinfo`` whose
+    ``utcoffset()`` is ``None`` (which ``min`` would treat as offset-naive and
+    refuse to compare against an aware ``now``, raising ``TypeError``) — is read
+    as UTC. A future timestamp is clamped to ``now`` so an untrusted writeback
+    can't place an event in a calendar period that never closes (which would
+    wedge the rollup engine).
+
+    Agents are expected to emit tz-aware UTC timestamps; a naive value is taken
+    as UTC, matching how Postgres reads a naive value into a ``TIMESTAMPTZ``
+    column under a UTC session.
     """
-    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    aware = value if value.utcoffset() is not None else value.replace(tzinfo=timezone.utc)
     return min(aware, now)
 
 

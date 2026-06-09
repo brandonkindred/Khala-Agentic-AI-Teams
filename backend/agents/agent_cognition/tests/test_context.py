@@ -15,7 +15,7 @@ Two halves:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from uuid import uuid4
 
 import pytest
@@ -174,6 +174,17 @@ def test_clamp01_bounds() -> None:
     assert context._clamp01(float("-inf")) == 0.0
 
 
+def test_bound_content() -> None:
+    # Sub-cap strings pass through; over-cap strings get the truncation marker.
+    assert context._bound_content("short") == "short"
+    big = "y" * (context._MAX_CONTENT_CHARS + 50)
+    out = context._bound_content(big)
+    assert out.endswith("…<truncated>")
+    assert len(out) == context._MAX_CONTENT_CHARS + len("…<truncated>")
+    # A non-str degrades gracefully to its string form rather than crashing.
+    assert context._bound_content(123) == "123"  # type: ignore[arg-type]
+
+
 def test_safe_occurred_at_normalizes_and_bounds() -> None:
     now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
     # A naive timestamp is read as UTC.
@@ -234,9 +245,10 @@ def test_persist_writeback_sanitizes_clamps_and_pins(monkeypatch) -> None:
 def test_persist_writeback_bounds_content_and_clamps_future_and_nonfinite(monkeypatch) -> None:
     captured = _capture_append_events(monkeypatch)
     future = datetime(2999, 1, 1, tzinfo=timezone.utc)
+    big = "x" * (context._MAX_CONTENT_CHARS + 100)
     wb = CognitionWriteback(
         events=[
-            _event(seq=0, content="x" * 5000, salience=float("nan"), kind=EventKind.ERROR),
+            _event(seq=0, content=big, salience=float("nan"), kind=EventKind.ERROR),
             _event(seq=1, content="ok", salience=float("inf")),
         ]
     )
@@ -247,9 +259,11 @@ def test_persist_writeback_bounds_content_and_clamps_future_and_nonfinite(monkey
 
     assert len(captured) == 2
     long_ev, ok_ev = captured[0], captured[1]
-    # content bounded with the redactor's truncation marker.
+    # content bounded to the generous cap with a truncation marker.
     assert long_ev.content.endswith("…<truncated>")
-    assert len(long_ev.content) < 5000
+    assert len(long_ev.content) <= context._MAX_CONTENT_CHARS + len("…<truncated>")
+    # a sub-cap content passes through unchanged.
+    assert ok_ev.content == "ok"
     # non-finite salience -> 0.0 (lowest), not inflated to 1.0.
     assert long_ev.salience == 0.0
     assert ok_ev.salience == 0.0
@@ -311,7 +325,31 @@ def test_complete_run_rejects_bad_status() -> None:
     # The status check fires before any DB access, so no Postgres needed. It
     # raises ValueError (not assert) so it survives `python -O`.
     with pytest.raises(ValueError):
-        context.complete_run("a", "run-1", status="weird", response={})
+        context.complete_run("a", "run-1", status="weird", response={}, claim_token="t")
+
+
+def test_complete_run_requires_claim_token() -> None:
+    with pytest.raises(AssertionError):
+        context.complete_run("a", "run-1", status="completed", response={}, claim_token="")
+
+
+def test_safe_occurred_at_handles_degenerate_tzinfo() -> None:
+    # A tzinfo whose utcoffset() is None is offset-naive for comparison; it must
+    # be normalized to UTC rather than raising TypeError in the min() clamp.
+    class _NoOffsetTz(tzinfo):
+        def utcoffset(self, dt):
+            return None
+
+        def tzname(self, dt):
+            return "X"
+
+        def dst(self, dt):
+            return None
+
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    value = datetime(2026, 5, 1, 9, 0, tzinfo=_NoOffsetTz())
+    out = context._safe_occurred_at(value, now)
+    assert out == datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
 
 
 def test_claim_run_precondition_asserts() -> None:
@@ -408,13 +446,16 @@ def test_claim_first_sight_then_complete_then_replay() -> None:
     res = context.claim_run("a", "run-1", "H1", _LEASE)
     assert res.state is ClaimState.CLAIMED
     assert res.response is None
+    assert res.claim_token  # a fencing token is minted on claim
     row = _read_run("a", "run-1")
     assert row["status"] == "in_progress"
     assert row["request_hash"] == "H1"
     assert row["lease_expires_at"] is not None
 
     envelope = {"output": {"answer": 42}, "cognition_writeback": {"events": []}}
-    context.complete_run("a", "run-1", status="completed", response=envelope)
+    context.complete_run(
+        "a", "run-1", status="completed", response=envelope, claim_token=res.claim_token
+    )
 
     row = _read_run("a", "run-1")
     assert row["status"] == "completed"
@@ -429,9 +470,11 @@ def test_claim_first_sight_then_complete_then_replay() -> None:
 
 @_PG
 def test_blocked_run_replays_its_4xx_envelope() -> None:
-    context.claim_run("a", "run-b", "H1", _LEASE)
+    claimed = context.claim_run("a", "run-b", "H1", _LEASE)
     blocked = {"error": "blocked by enforced precondition", "status_code": 422}
-    context.complete_run("a", "run-b", status="blocked", response=blocked)
+    context.complete_run(
+        "a", "run-b", status="blocked", response=blocked, claim_token=claimed.claim_token
+    )
     res = context.claim_run("a", "run-b", "H1", _LEASE)
     assert res.state is ClaimState.REPLAY
     assert res.response == blocked
@@ -439,8 +482,10 @@ def test_blocked_run_replays_its_4xx_envelope() -> None:
 
 @_PG
 def test_claim_different_body_on_terminal_row_conflicts() -> None:
-    context.claim_run("a", "run-2", "H1", _LEASE)
-    context.complete_run("a", "run-2", status="completed", response={"output": 1})
+    claimed = context.claim_run("a", "run-2", "H1", _LEASE)
+    context.complete_run(
+        "a", "run-2", status="completed", response={"output": 1}, claim_token=claimed.claim_token
+    )
     res = context.claim_run("a", "run-2", "H2", _LEASE)
     assert res.state is ClaimState.CONFLICT
     assert res.response is None
@@ -496,29 +541,69 @@ def test_replay_run_returns_none_for_in_progress_and_missing() -> None:
 @_PG
 def test_complete_run_without_claim_raises() -> None:
     with pytest.raises(context.RunLedgerError):
-        context.complete_run("a", "ghost", status="completed", response={"x": 1})
+        context.complete_run("a", "ghost", status="completed", response={"x": 1}, claim_token="t")
 
 
 @_PG
 def test_complete_run_is_idempotent_and_does_not_overwrite_terminal() -> None:
-    context.claim_run("a", "run-8", "H1", _LEASE)
+    claimed = context.claim_run("a", "run-8", "H1", _LEASE)
     first = {"output": 1}
-    context.complete_run("a", "run-8", status="completed", response=first)
+    context.complete_run(
+        "a", "run-8", status="completed", response=first, claim_token=claimed.claim_token
+    )
     # A second complete with a DIFFERENT response must NOT overwrite the stored
     # (and possibly already-replayed) terminal envelope — it is a no-op.
-    context.complete_run("a", "run-8", status="blocked", response={"output": "OVERWRITE"})
+    context.complete_run(
+        "a",
+        "run-8",
+        status="blocked",
+        response={"output": "OVERWRITE"},
+        claim_token=claimed.claim_token,
+    )
     row = _read_run("a", "run-8")
     assert row["status"] == "completed"
     assert context.replay_run("a", "run-8") == first
 
 
 @_PG
+def test_complete_run_fences_zombie_after_reclaim() -> None:
+    # Proxy-1 claims, lease expires, Proxy-2 reclaims (token rotates). Proxy-1's
+    # late complete_run with its STALE token must not overwrite Proxy-2's run.
+    p1 = context.claim_run("a", "run-z", "H1", _LEASE)
+    _expire_lease("a", "run-z")
+    p2 = context.claim_run("a", "run-z", "H1", _LEASE)
+    assert p2.state is ClaimState.CLAIMED
+    assert p2.claim_token != p1.claim_token  # reclaim rotated the token
+
+    # Zombie completion with the stale token is fenced (no-op): the row stays
+    # in_progress, owned by Proxy-2.
+    context.complete_run(
+        "a", "run-z", status="completed", response={"loser": True}, claim_token=p1.claim_token
+    )
+    row = _read_run("a", "run-z")
+    assert row["status"] == "in_progress"
+    assert context.replay_run("a", "run-z") is None
+
+    # Proxy-2 completes with its own token and wins.
+    context.complete_run(
+        "a", "run-z", status="completed", response={"winner": True}, claim_token=p2.claim_token
+    )
+    assert context.replay_run("a", "run-z") == {"winner": True}
+
+
+@_PG
 def test_complete_run_propagates_db_error_through_conn() -> None:
     # An error raised inside the `with _conn()` body (here: a non-JSON-serializable
     # response) propagates out via _conn's re-raise path, rather than being masked.
-    context.claim_run("a", "run-err", "H1", _LEASE)
+    claimed = context.claim_run("a", "run-err", "H1", _LEASE)
     with pytest.raises(Exception):
-        context.complete_run("a", "run-err", status="completed", response={"bad": object()})
+        context.complete_run(
+            "a",
+            "run-err",
+            status="completed",
+            response={"bad": object()},
+            claim_token=claimed.claim_token,
+        )
 
 
 @_PG
@@ -547,6 +632,7 @@ def test_persist_writeback_round_trip_and_idempotent() -> None:
             ),
         ]
     )
+    # First persist inserts both rows.
     assert context.persist_writeback("a", "run-7", wb) == 2
 
     got = store.fetch_events_for_period("a", _DAY[0], _DAY[1])
@@ -556,6 +642,7 @@ def test_persist_writeback_round_trip_and_idempotent() -> None:
     assert by_seq[0].source_run_id == "run-7"
     assert by_seq[1].salience == 1.0  # clamped
 
-    # Re-persisting the same writeback is a no-op (idempotent on the triple).
-    assert context.persist_writeback("a", "run-7", wb) == 2
+    # Re-persisting the same writeback inserts nothing (idempotent on the triple);
+    # the honest inserted-count is 0.
+    assert context.persist_writeback("a", "run-7", wb) == 0
     assert len(store.fetch_events_for_period("a", _DAY[0], _DAY[1])) == 2
