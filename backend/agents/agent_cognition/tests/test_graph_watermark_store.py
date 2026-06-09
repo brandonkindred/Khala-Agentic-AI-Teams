@@ -82,7 +82,7 @@ def test_insert_and_get_roundtrip():
         "agent-1",
         last_event_recorded_at=_T0,
         last_event_id="e1",
-        last_summary_created_at=_T0,
+        last_summary_updated_at=_T0,
         last_summary_id="s1",
         ingested_delta=3,
     )
@@ -90,7 +90,7 @@ def test_insert_and_get_roundtrip():
     assert wm is not None
     assert wm.last_event_recorded_at == _T0
     assert wm.last_event_id == "e1"
-    assert wm.last_summary_created_at == _T0
+    assert wm.last_summary_updated_at == _T0
     assert wm.last_summary_id == "s1"
     assert wm.ingested_count == 3
 
@@ -103,12 +103,12 @@ def test_partial_update_preserves_other_cursor_and_accumulates_count():
     )
     # Second pass advances only the summary cursor — the event cursor must survive.
     watermark_store.upsert_watermark(
-        "agent-1", last_summary_created_at=_T1, last_summary_id="s9", ingested_delta=5
+        "agent-1", last_summary_updated_at=_T1, last_summary_id="s9", ingested_delta=5
     )
     wm = watermark_store.get_watermark("agent-1")
     assert wm.last_event_recorded_at == _T0  # preserved
     assert wm.last_event_id == "e1"
-    assert wm.last_summary_created_at == _T1
+    assert wm.last_summary_updated_at == _T1
     assert wm.last_summary_id == "s9"
     assert wm.ingested_count == 7  # 2 + 5 accumulated
 

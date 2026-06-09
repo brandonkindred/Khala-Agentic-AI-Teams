@@ -406,6 +406,126 @@ def test_upsert_summary_older_snapshot_is_skipped() -> None:
     assert row.version == 2  # skipped update never reached the GREATEST bump
 
 
+def test_upsert_summary_updated_at_advances_only_on_accepted_update() -> None:
+    # updated_at is the knowledge-graph keyset cursor: an accepted update must
+    # advance it (so a recompute is re-ingested), a superseded (staler
+    # computed_at) update must leave it untouched (so a no-op is not re-ingested).
+    def _updated_at() -> datetime:
+        rows = store.fetch_summaries_updated_after(
+            "a", after_updated_at=None, after_id=None, limit=50
+        )
+        assert len(rows) == 1
+        return rows[0].updated_at
+
+    _upsert("a", _summary("a", window=_DAY, version=1, summary="v1"), computed_at=_PRECOMPUTED_AT)
+    first = _updated_at()
+
+    # Accepted update (fresher computed_at) advances updated_at.
+    _upsert("a", _summary("a", window=_DAY, version=2, summary="v2"), computed_at=_FOLDED_AT)
+    advanced = _updated_at()
+    assert advanced > first
+
+    # Superseded update (staler computed_at) is skipped wholesale → updated_at frozen.
+    _upsert(
+        "a", _summary("a", window=_DAY, version=99, summary="stale"), computed_at=_PRECOMPUTED_AT
+    )
+    assert _updated_at() == advanced
+
+
+# ---------------------------------------------------------------------------
+# fetch_summaries_updated_after — the knowledge-graph keyset drain. Keysets on
+# (updated_at, id) so a recomputed (version-advanced) summary re-sorts after the
+# cursor and is re-ingested, while a stable summary is drained exactly once.
+# ---------------------------------------------------------------------------
+def test_fetch_summaries_updated_after_cold_start_keyset_ordered() -> None:
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY))
+    _upsert("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
+    rows = store.fetch_summaries_updated_after("a", after_updated_at=None, after_id=None, limit=50)
+    assert len(rows) == 2
+    assert all(isinstance(r, store.RecordedSummary) for r in rows)
+    # Each row rides its updated_at; the scan is non-decreasing in (updated_at, id).
+    keys = [(r.updated_at, r.summary.id) for r in rows]
+    assert keys == sorted(keys)
+
+
+def test_fetch_summaries_updated_after_excludes_cursor_row() -> None:
+    _upsert("a", _summary("a", scale=Scale.DAY, window=_DAY))
+    _upsert("a", _summary("a", scale=Scale.WEEK, window=_WEEK))
+    first = store.fetch_summaries_updated_after("a", after_updated_at=None, after_id=None, limit=1)
+    assert len(first) == 1
+    cur = first[0]
+    rest = store.fetch_summaries_updated_after(
+        "a", after_updated_at=cur.updated_at, after_id=cur.summary.id, limit=50
+    )
+    assert len(rest) == 1
+    assert rest[0].summary.id != cur.summary.id
+
+
+def test_fetch_summaries_updated_after_repickups_recomputed_summary() -> None:
+    # Drain a summary to its cursor; recompute it (version advances, updated_at
+    # moves) → it re-sorts strictly after the cursor and is re-fetched.
+    _upsert("a", _summary("a", window=_DAY, version=1, summary="v1"))
+    drained = store.fetch_summaries_updated_after(
+        "a", after_updated_at=None, after_id=None, limit=50
+    )
+    assert len(drained) == 1
+    cur = drained[0]
+    # Nothing new strictly after the cursor yet.
+    assert (
+        store.fetch_summaries_updated_after(
+            "a", after_updated_at=cur.updated_at, after_id=cur.summary.id, limit=50
+        )
+        == []
+    )
+    # A late event bumps version; the rollup recompute then writes fresh content.
+    store.mark_period_stale("a", _MID_DAY)
+    _upsert("a", _summary("a", window=_DAY, version=2, summary="v2"))
+    again = store.fetch_summaries_updated_after(
+        "a", after_updated_at=cur.updated_at, after_id=cur.summary.id, limit=50
+    )
+    # Re-pickup with the same id past the cursor proves updated_at advanced: the
+    # keyset (updated_at, id) > (cur.updated_at, cur.id) with an equal id can only
+    # hold when updated_at strictly advanced — no separate timing assertion needed.
+    assert len(again) == 1
+    assert again[0].summary.id == cur.summary.id  # same row, new version
+    assert again[0].summary.version == 2
+    assert again[0].summary.summary == "v2"
+
+
+def test_fetch_summaries_updated_after_stable_summary_drained_once() -> None:
+    # A summary that is never recomputed keeps its updated_at, so it is not
+    # returned again after the cursor advances past it (no wasted re-ingestion).
+    _upsert("a", _summary("a", window=_DAY, version=1))
+    drained = store.fetch_summaries_updated_after(
+        "a", after_updated_at=None, after_id=None, limit=50
+    )
+    cur = drained[0]
+    assert (
+        store.fetch_summaries_updated_after(
+            "a", after_updated_at=cur.updated_at, after_id=cur.summary.id, limit=50
+        )
+        == []
+    )
+
+
+def test_fetch_summaries_updated_after_agent_isolation() -> None:
+    _upsert("a", _summary("a", window=_DAY))
+    _upsert("b", _summary("b", window=_DAY))
+    rows = store.fetch_summaries_updated_after("a", after_updated_at=None, after_id=None, limit=50)
+    assert len(rows) == 1
+    assert all(r.summary.agent_id == "a" for r in rows)
+
+
+def test_fetch_summaries_updated_after_precondition_asserts() -> None:
+    with pytest.raises(AssertionError):
+        store.fetch_summaries_updated_after("", after_updated_at=None, after_id=None, limit=50)
+    with pytest.raises(AssertionError):
+        store.fetch_summaries_updated_after("a", after_updated_at=None, after_id=None, limit=0)
+    with pytest.raises(AssertionError):
+        # Half-set cursor (updated_at without id) is a caller bug.
+        store.fetch_summaries_updated_after("a", after_updated_at=_MID_DAY, after_id=None, limit=5)
+
+
 def test_fetch_summaries_filters_scale_and_paginates() -> None:
     months = [
         _summary(

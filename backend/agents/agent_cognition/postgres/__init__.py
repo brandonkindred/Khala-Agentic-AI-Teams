@@ -76,8 +76,20 @@ SCHEMA: TeamSchema = TeamSchema(
             events_pruned   BOOLEAN NOT NULL DEFAULT FALSE,
             computed_at     TIMESTAMPTZ,
             stale_since     TIMESTAMPTZ,
-            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+            updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        # ``updated_at`` is the summary's last-content-write time, advanced to NOW()
+        # by every accepted ``upsert_summary`` (insert or recompute) and left
+        # untouched by a no-op/superseded upsert. It is distinct from ``created_at``
+        # (preserved across recompute): the knowledge-graph sync worker keysets on
+        # ``(updated_at, id)`` so a recomputed summary — whose ``version`` advanced —
+        # re-sorts after the watermark and is re-ingested as a fresh per-version
+        # episode, mirroring how events keyset on ``recorded_at``. Idempotent ALTER
+        # back-fills clusters provisioned before this column (existing rows default
+        # to NOW(), so each is re-ingested once under its current version).
+        """ALTER TABLE agent_cognition_summaries
+            ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()""",
         # ``events_pruned`` is the durable recompute-vs-amend marker: the memory
         # store latches it TRUE on a day summary when retention deletes that
         # day's raw events, so a later late arrival is amended onto the existing
@@ -168,27 +180,43 @@ SCHEMA: TeamSchema = TeamSchema(
         # ``(recorded_at, id)`` (arrival time, mirroring prune_events' fold
         # semantics, so a late event with a fresh ``recorded_at`` re-sorts after
         # the watermark and is picked up on a later pass) and rollup summaries on
-        # ``(created_at, id)``. All advances are monotonic — the worker reads the
-        # watermark then drains strictly after it, and the scheduler single-flights
-        # ingestion per agent, so the cursors never regress.
+        # ``(updated_at, id)`` (content-write time, so a recomputed summary whose
+        # ``version`` advanced re-sorts after the watermark and is re-ingested as a
+        # fresh per-version episode). All advances are monotonic — the worker reads
+        # the watermark then drains strictly after it, and the scheduler
+        # single-flights ingestion per agent, so the cursors never regress. The
+        # idempotent ALTER adds ``last_summary_updated_at`` to clusters provisioned
+        # before the cursor moved off ``created_at``.
         # -----------------------------------------------------------------
         """CREATE TABLE IF NOT EXISTS agent_cognition_graph_watermarks (
             agent_id                 TEXT PRIMARY KEY,
             last_event_recorded_at   TIMESTAMPTZ,
             last_event_id            TEXT,
-            last_summary_created_at  TIMESTAMPTZ,
+            last_summary_updated_at  TIMESTAMPTZ,
             last_summary_id          TEXT,
             ingested_count           BIGINT NOT NULL DEFAULT 0,
             updated_at               TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
+        """ALTER TABLE agent_cognition_graph_watermarks
+            ADD COLUMN IF NOT EXISTS last_summary_updated_at TIMESTAMPTZ""",
+        # Drop the pre-rename summary cursor column on upgraded clusters (the
+        # cursor moved from created_at to updated_at). IF EXISTS keeps it re-run
+        # safe and a no-op on fresh databases that never had it.
+        """ALTER TABLE agent_cognition_graph_watermarks
+            DROP COLUMN IF EXISTS last_summary_created_at""",
         # Keyset-pagination indexes for the sync worker's delta scans: events by
         # ``(agent_id, recorded_at, id)`` and summaries by ``(agent_id,
-        # created_at, id)``, so each scan reads strictly after the stored
+        # updated_at, id)``, so each scan reads strictly after the stored
         # watermark without walking the whole partition.
         """CREATE INDEX IF NOT EXISTS idx_agent_cognition_events_agent_recorded
             ON agent_cognition_events(agent_id, recorded_at, id)""",
-        """CREATE INDEX IF NOT EXISTS idx_agent_cognition_summaries_agent_created
-            ON agent_cognition_summaries(agent_id, created_at, id)""",
+        """CREATE INDEX IF NOT EXISTS idx_agent_cognition_summaries_agent_updated
+            ON agent_cognition_summaries(agent_id, updated_at, id)""",
+        # Drop the superseded created_at summary keyset index on upgraded
+        # clusters so upsert_summary stops maintaining a dead index. IF EXISTS is
+        # re-run safe and a no-op on fresh databases (the index is no longer
+        # created there).
+        """DROP INDEX IF EXISTS idx_agent_cognition_summaries_agent_created""",
     ],
     table_names=[
         "agent_cognition_events",
