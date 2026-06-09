@@ -426,7 +426,8 @@ def render_bar_predicate(node: BarPredicate, indent: int = 0) -> str:
         IR trees equal by shape, labels, ``unknown`` flags and gate
         symbols render to byte-identical strings.
     """
-    assert indent >= 0, "indent must be non-negative"
+    if indent < 0:
+        raise ValueError(f"indent must be non-negative, got {indent}")
     pad = "  " * indent
     if isinstance(node, MaskLeaf):
         return f"{pad}Mask({node.label})"

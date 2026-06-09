@@ -28,6 +28,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+# White-box import on purpose: this suite drives the extractor's entry point so
+# the golden render is a regression guard on its *output*. If a change to
+# _extract_subconditions alters the IR shape these snapshots should break — that
+# is the test's job, not accidental coupling to an implementation detail.
 from investment_team.strategy_lab.coverage_probe.indicator_probe import _extract_subconditions
 from investment_team.strategy_lab.coverage_probe.predicate_ir import (
     AndOp,
@@ -278,7 +282,7 @@ def test_render_predicate_group_denied_none_vs_set() -> None:
 
 
 def test_render_indent_precondition() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         render_bar_predicate(Static(True), indent=-1)
 
 
