@@ -92,7 +92,21 @@
 .cr-pulls-list {
   display: flex;
   flex-direction: column;
-  gap: 0.25rem;
+  gap: 0.5rem;
+}
+
+// Each PR is a card: a clickable header row plus an inline detail panel.
+.cr-pull {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.1));
+  border-radius: 8px;
+  background: var(--mat-sys-surface-container-lowest, #fff);
+  overflow: hidden;
+
+  &--expanded {
+    border-color: var(--mat-sys-primary, #1a73e8);
+  }
 }
 
 .cr-pull-row {
@@ -101,9 +115,8 @@
   gap: 0.75rem;
   width: 100%;
   padding: 0.75rem 1rem;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.1));
-  border-radius: 8px;
-  background: var(--mat-sys-surface-container-lowest, #fff);
+  border: none;
+  background: transparent;
   text-align: left;
   cursor: pointer;
   font: inherit;
@@ -168,50 +181,6 @@
 .cr-pulls-paginator {
   margin-top: 0.5rem;
   background: transparent;
-}
-
-// ---------------------------------------------------------------------------
-// Confirmation panel
-// ---------------------------------------------------------------------------
-
-.cr-confirm-panel {
-  padding: 1.25rem;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
-  border-radius: 10px;
-  background: var(--mat-sys-surface-container, #f7f7f7);
-
-  h3 {
-    margin: 0 0 0.75rem;
-  }
-
-  &__pr {
-    display: flex;
-    align-items: center;
-    gap: 0.5rem;
-    font-size: 1.05rem;
-  }
-
-  &__meta,
-  &__preview,
-  &__hint {
-    margin: 0.5rem 0 0;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
-  }
-
-  &__preview {
-    font-size: 0.9rem;
-    white-space: pre-wrap;
-  }
-
-  &__hint {
-    font-size: 0.85rem;
-  }
-
-  &__actions {
-    display: flex;
-    gap: 0.75rem;
-    margin-top: 1rem;
-  }
 }
 
 .cr-pr-number {
@@ -287,4 +256,101 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.4rem;
+}
+
+// ---------------------------------------------------------------------------
+// Inline PR expansion: row status badge, detail panel, reviews table
+// ---------------------------------------------------------------------------
+
+.cr-row-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  flex: 0 0 auto;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.72rem;
+  background: var(--mat-sys-surface-container-high, #ececec);
+
+  mat-spinner {
+    flex: 0 0 auto;
+  }
+}
+
+.cr-pull-detail {
+  padding: 1rem 1.25rem 1.25rem;
+  border-top: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--mat-sys-surface-container, #f7f7f7);
+
+  &__pr {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 1.05rem;
+  }
+
+  &__meta,
+  &__preview,
+  &__hint {
+    margin: 0.5rem 0 0;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  }
+
+  &__preview {
+    font-size: 0.9rem;
+    white-space: pre-wrap;
+  }
+
+  &__hint {
+    font-size: 0.85rem;
+  }
+
+  &__actions {
+    display: flex;
+    gap: 0.75rem;
+    margin-top: 1rem;
+  }
+}
+
+.cr-reviews-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 1rem;
+  font-size: 0.85rem;
+
+  th,
+  td {
+    text-align: left;
+    padding: 0.4rem 0.6rem;
+    border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+    vertical-align: top;
+  }
+
+  th {
+    font-weight: 600;
+    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.65));
+  }
+
+  td {
+    > span,
+    > a {
+      vertical-align: middle;
+    }
+
+    mat-spinner {
+      display: inline-block;
+      vertical-align: middle;
+      margin-left: 0.3rem;
+    }
+
+    a {
+      color: var(--mat-sys-primary, #1a73e8);
+    }
+  }
+}
+
+.cr-findings {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0.3rem;
 }

@@ -50,107 +50,8 @@
       </div>
     }
 
-    <!-- Active review job status -->
-    @if (activeJob) {
-      <div class="cr-job-panel">
-        <div class="cr-job-panel__header">
-          <mat-icon>rate_review</mat-icon>
-          <h3>Reviewing PR #{{ activeJob.pr_number }}</h3>
-          @if (isJobTerminal()) {
-            <button mat-button (click)="dismissJob()">
-              <mat-icon>close</mat-icon>
-              Dismiss
-            </button>
-          }
-        </div>
-
-        <div class="cr-job-panel__body">
-          <div class="cr-job-panel__field">
-            <span class="cr-job-panel__label">Job</span>
-            <code>{{ activeJob.job_id | slice: 0 : 12 }}…</code>
-          </div>
-          @if (jobStatus) {
-            <div class="cr-job-panel__field">
-              <span class="cr-job-panel__label">Status</span>
-              <span class="cr-job-status cr-job-status--{{ jobStatus.status }}">{{ jobStatus.status }}</span>
-            </div>
-            @if (jobStatus.status_text) {
-              <div class="cr-job-panel__field">
-                <span class="cr-job-panel__label">Detail</span>
-                <span>{{ jobStatus.status_text }}</span>
-              </div>
-            }
-            @if (jobStatus.review_summary) {
-              <div class="cr-review-summary">
-                <span class="cr-chip cr-chip--event">{{ jobStatus.review_summary.event }}</span>
-                <span class="cr-chip">{{ jobStatus.review_summary.total_issues }} finding(s)</span>
-                <span class="cr-chip">{{ jobStatus.review_summary.inline_comments }} inline</span>
-                <span class="cr-chip">{{ jobStatus.review_summary.body_findings }} in summary</span>
-              </div>
-            }
-            @if (jobStatus.github_pr_url) {
-              <div class="cr-job-panel__field cr-job-panel__field--pr">
-                <mat-icon>open_in_new</mat-icon>
-                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">{{ jobStatus.github_pr_url }}</a>
-              </div>
-            }
-            @if (jobStatus.error) {
-              <div class="cr-banner cr-banner--error">
-                <mat-icon>error_outline</mat-icon>
-                <span>{{ jobStatus.error }}</span>
-              </div>
-            }
-          } @else {
-            <div class="cr-job-panel__field">
-              <mat-spinner diameter="18"></mat-spinner>
-              <span>Starting…</span>
-            </div>
-          }
-        </div>
-      </div>
-    }
-
-    <!-- PR confirmation -->
-    @if (selectedPull && !activeJob) {
-      <div class="cr-confirm-panel">
-        <h3>Start a code review on this pull request?</h3>
-        <div class="cr-confirm-panel__pr">
-          <span class="cr-pr-number">#{{ selectedPull.number }}</span>
-          <span class="cr-pr-title">{{ selectedPull.title }}</span>
-          @if (selectedPull.draft) {
-            <span class="cr-chip cr-chip--draft">draft</span>
-          }
-        </div>
-        <p class="cr-confirm-panel__meta">
-          <code>{{ selectedPull.head }}</code> → <code>{{ selectedPull.base }}</code>
-          @if (selectedPull.author) { · by {{ selectedPull.author }} }
-        </p>
-        @if (selectedPull.body_preview) {
-          <p class="cr-confirm-panel__preview">{{ selectedPull.body_preview }}</p>
-        }
-        <p class="cr-confirm-panel__hint">
-          The reviewer will read the diff and post one GitHub review with inline comments on the
-          problematic lines.
-        </p>
-        <div class="cr-confirm-panel__actions">
-          <button mat-flat-button color="primary" (click)="confirmAndReview()" [disabled]="startingReview">
-            @if (startingReview) {
-              <mat-spinner diameter="18"></mat-spinner>
-              Starting…
-            } @else {
-              <ng-container>
-                <mat-icon>play_arrow</mat-icon>
-                Start Review
-              </ng-container>
-            }
-          </button>
-          <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
-        </div>
-      </div>
-    }
-
-    <!-- PR list -->
-    @if (pullsLoaded && !selectedPull && !activeJob) {
+    <!-- PR list (always visible); each row expands inline -->
+    @if (pullsLoaded) {
       @if (pulls.length === 0) {
         <div class="cr-empty">
           <mat-icon>check_circle_outline</mat-icon>
@@ -159,19 +60,148 @@
       } @else {
         <div class="cr-pulls-list">
           @for (pull of pagedPulls; track pull.number) {
-            <button class="cr-pull-row" type="button" (click)="selectPull(pull)">
-              <span class="cr-pull-row__number">#{{ pull.number }}</span>
-              <span class="cr-pull-row__title">{{ pull.title }}</span>
-              @if (pull.draft) {
-                <span class="cr-chip cr-chip--draft">draft</span>
-              }
-              <span class="cr-pull-row__labels">
-                @for (label of pull.labels; track label) {
-                  <span class="cr-label-chip">{{ label }}</span>
+            <div class="cr-pull" [class.cr-pull--expanded]="expandedPrNumber === pull.number">
+              <button
+                class="cr-pull-row"
+                type="button"
+                (click)="togglePull(pull)"
+                [attr.aria-expanded]="expandedPrNumber === pull.number"
+              >
+                <span class="cr-pull-row__number">#{{ pull.number }}</span>
+                <span class="cr-pull-row__title">{{ pull.title }}</span>
+                @if (pull.draft) {
+                  <span class="cr-chip cr-chip--draft">draft</span>
                 }
-              </span>
-              <mat-icon class="cr-pull-row__arrow">chevron_right</mat-icon>
-            </button>
+
+                <!-- Live status badge from the PR's latest review run -->
+                @if (badgeLabel(pull.number); as label) {
+                  <span class="cr-row-badge cr-job-status {{ badgeClass(pull.number) }}">
+                    @if (isLatestRunning(pull.number)) {
+                      <mat-spinner diameter="14"></mat-spinner>
+                    }
+                    {{ label }}
+                  </span>
+                }
+
+                <span class="cr-pull-row__labels">
+                  @for (label of pull.labels; track label) {
+                    <span class="cr-label-chip">{{ label }}</span>
+                  }
+                </span>
+                <mat-icon class="cr-pull-row__arrow">
+                  {{ expandedPrNumber === pull.number ? 'expand_less' : 'chevron_right' }}
+                </mat-icon>
+              </button>
+
+              @if (expandedPrNumber === pull.number) {
+                <div class="cr-pull-detail">
+                  <!-- PR details -->
+                  <div class="cr-pull-detail__pr">
+                    <span class="cr-pr-number">#{{ pull.number }}</span>
+                    <span class="cr-pr-title">{{ pull.title }}</span>
+                    @if (pull.draft) {
+                      <span class="cr-chip cr-chip--draft">draft</span>
+                    }
+                  </div>
+                  <p class="cr-pull-detail__meta">
+                    <code>{{ pull.head }}</code> → <code>{{ pull.base }}</code>
+                    @if (pull.author) { · by {{ pull.author }} }
+                  </p>
+                  @if (pull.body_preview) {
+                    <p class="cr-pull-detail__preview">{{ pull.body_preview }}</p>
+                  }
+                  <p class="cr-pull-detail__hint">
+                    The reviewer will read the diff and post one GitHub review with inline comments on the
+                    problematic lines.
+                  </p>
+
+                  <div class="cr-pull-detail__actions">
+                    <button
+                      mat-flat-button
+                      color="primary"
+                      (click)="startReview(pull)"
+                      [disabled]="starting.has(pull.number)"
+                    >
+                      @if (starting.has(pull.number)) {
+                        <mat-spinner diameter="18"></mat-spinner>
+                        Starting…
+                      } @else {
+                        <ng-container>
+                          <mat-icon>play_arrow</mat-icon>
+                          Start Review
+                        </ng-container>
+                      }
+                    </button>
+                  </div>
+
+                  @if (reviewErrorFor(pull.number); as reviewError) {
+                    <div class="cr-banner cr-banner--error">
+                      <mat-icon>error_outline</mat-icon>
+                      <span>{{ reviewError }}</span>
+                    </div>
+                  }
+
+                  <!-- All review runs for this PR -->
+                  @if (hasReviews(pull.number)) {
+                    <table class="cr-reviews-table">
+                      <thead>
+                        <tr>
+                          <th>Status</th>
+                          <th>Outcome</th>
+                          <th>Findings</th>
+                          <th>Started</th>
+                          <th>Link</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        @for (rec of reviewsFor(pull.number); track rec.jobId) {
+                          <tr>
+                            <td>
+                              <span class="cr-job-status cr-job-status--{{ rec.status }}">
+                                {{ rec.status }}
+                              </span>
+                              @if (!isRecordTerminal(rec) && !rec.error) {
+                                <mat-spinner diameter="14"></mat-spinner>
+                              }
+                            </td>
+                            <td>
+                              @if (rec.error) {
+                                <span class="cr-job-status--failed">{{ rec.error }}</span>
+                              } @else if (rec.reviewSummary) {
+                                <span class="cr-chip cr-chip--event">{{ rec.reviewSummary.event }}</span>
+                              } @else {
+                                —
+                              }
+                            </td>
+                            <td>
+                              @if (rec.reviewSummary; as s) {
+                                <span class="cr-findings">
+                                  <span class="cr-chip">{{ s.total_issues }} finding(s)</span>
+                                  <span class="cr-chip">{{ s.inline_comments }} inline</span>
+                                  <span class="cr-chip">{{ s.body_findings }} in summary</span>
+                                </span>
+                              } @else {
+                                —
+                              }
+                            </td>
+                            <td>{{ rec.startedAt | date: 'short' }}</td>
+                            <td>
+                              @if (rec.prUrl) {
+                                <a [href]="rec.prUrl" target="_blank" rel="noopener" aria-label="Open PR">
+                                  <mat-icon>open_in_new</mat-icon>
+                                </a>
+                              } @else {
+                                —
+                              }
+                            </td>
+                          </tr>
+                        }
+                      </tbody>
+                    </table>
+                  }
+                </div>
+              }
+            </div>
           }
         </div>
         @if (pulls.length > PAGE_SIZE_OPTIONS[0]) {

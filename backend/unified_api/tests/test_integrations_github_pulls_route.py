@@ -299,3 +299,165 @@ def test_review_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, mo
     fake = _FakeAsyncClient(result=_FakeResp(200, {"unexpected": "shape"}))
     with patch(f"{_M}._ensure_repo_clone"), patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         assert client.post(_REVIEW, json={"pr_number": 7}).status_code == 502
+
+
+# ---------------------------------------------------------------------------
+# GET /github/reviews — proxy to the coding-team review history
+# ---------------------------------------------------------------------------
+
+_REVIEWS = "/api/integrations/github/reviews"
+
+
+class _FakeReviewsClient:
+    """Async-client double whose only verb is GET (the reviews proxy reads)."""
+
+    def __init__(self, *, result=None, exc=None):
+        self._result = result
+        self._exc = exc
+        self.calls = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc_info):
+        return False
+
+    async def get(self, url, params=None):
+        self.calls.append((url, params))
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "enabled": False})
+def test_reviews_400_when_disabled(mock_cfg):
+    assert client.get(_REVIEWS).status_code == 400
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
+    assert client.get(_REVIEWS).status_code == 503
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
+    rows = [
+        {
+            "job_id": "j1",
+            "pr_number": 7,
+            "pr_url": "u",
+            "status": "completed",
+            "status_text": "done",
+            "review_summary": {"total_issues": 1, "inline_comments": 1, "body_findings": 0, "event": "COMMENT"},
+            "error": None,
+            "created_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:01:00Z",
+        }
+    ]
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=rows))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"pr_number": 7})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data[0]["job_id"] == "j1"
+    assert data[0]["review_summary"]["event"] == "COMMENT"
+    # owner/repo are injected from config; pr_number + default limit are forwarded.
+    url, params = fake.calls[0]
+    assert url == "http://coding:8103/reviews"
+    assert params["owner"] == "acme"
+    assert params["repo"] == "widget"
+    assert params["pr_number"] == 7
+    assert params["limit"] == 500
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_omits_pr_number_when_absent(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 200
+    _url, params = fake.calls[0]
+    assert "pr_number" not in params
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_forwards_limit(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"limit": 10})
+    assert resp.status_code == 200
+    _url, params = fake.calls[0]
+    assert params["limit"] == 10
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    # Validated by FastAPI before any upstream call.
+    assert client.get(_REVIEWS, params={"limit": 0}).status_code == 422
+    assert client.get(_REVIEWS, params={"limit": 5000}).status_code == 422
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(exc=httpx.ReadTimeout("slow"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        assert client.get(_REVIEWS).status_code == 504
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(exc=httpx.ConnectError("nope"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        assert client.get(_REVIEWS).status_code == 502
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_propagates_upstream_error(mock_cfg, mock_cred, monkeypatch):
+    # Upstream detail is sanitized: the status code is preserved but the client
+    # gets a generic message (the real detail is only logged server-side).
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(500, json_data={"detail": "boom"}))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to retrieve review history."
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_propagates_upstream_error_with_plain_text_body(mock_cfg, mock_cred, monkeypatch):
+    # A non-JSON (plain text) error body is also sanitized to the generic message.
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(500, json_raises=True, text="internal boom"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to retrieve review history."
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_502_on_malformed_success_body(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=None, json_raises=True))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        assert client.get(_REVIEWS).status_code == 502

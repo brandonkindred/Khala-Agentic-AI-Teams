@@ -436,3 +436,91 @@ class TestReviewEndpoint:
         assert job["review_summary"]["files_skipped"] == 1
         # The posted review body discloses the partial coverage.
         assert "were not inspected" in gh.reviews[-1]["body"]
+
+
+class TestReviewPersistence:
+    """The review flow records a code_review_runs row on start and keeps it in
+    lockstep with job state. These tests capture the store calls (the real store
+    is a best-effort no-op without Postgres) and exercise GET /reviews."""
+
+    def _capture(self, review_app, monkeypatch) -> tuple[list, list]:
+        api_main = review_app["api"]
+        starts: list = []
+        updates: list = []
+        monkeypatch.setattr(
+            api_main, "record_review_start", lambda *a, **kw: starts.append((a, kw))
+        )
+        monkeypatch.setattr(api_main, "update_review", lambda *a, **kw: updates.append((a, kw)))
+        return starts, updates
+
+    def test_happy_path_persists_start_and_completion(self, review_app, monkeypatch) -> None:
+        starts, updates = self._capture(review_app, monkeypatch)
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job_id = resp.json()["job_id"]
+        # Started exactly once with the PR identity (job_id, owner, repo, pr_number, ...).
+        assert len(starts) == 1
+        start_args = starts[0][0]
+        assert start_args[:4] == (job_id, "o", "r", 7)
+        # Status transitions persisted: running then completed (completed flagged).
+        statuses = [kw.get("status") for (_a, kw) in updates]
+        assert "running" in statuses
+        assert "completed" in statuses
+        completed = [kw for (_a, kw) in updates if kw.get("status") == "completed"][0]
+        assert completed["completed"] is True
+        assert completed["review_summary"]["inline_comments"] == 1
+
+    def test_failure_persists_failed_status(self, review_app, monkeypatch) -> None:
+        _starts, updates = self._capture(review_app, monkeypatch)
+        review_app["github"]["agent_output"] = RuntimeError("llm down")
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        statuses = [kw.get("status") for (_a, kw) in updates]
+        assert "failed" in statuses
+
+    def test_get_reviews_lists_persisted_runs(self, review_app, monkeypatch) -> None:
+        from datetime import datetime, timezone
+
+        api_main = review_app["api"]
+        rows = [
+            {
+                "job_id": "j1",
+                "owner": "o",
+                "repo": "r",
+                "pr_number": 7,
+                "pr_url": "https://x/pull/7",
+                "status": "completed",
+                "status_text": "done",
+                "review_summary": {
+                    "total_issues": 1,
+                    "inline_comments": 1,
+                    "body_findings": 0,
+                    "event": "COMMENT",
+                },
+                "error": None,
+                "author": "alice",
+                "created_at": datetime(2026, 1, 1, tzinfo=timezone.utc),
+                "completed_at": datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
+            }
+        ]
+        captured: dict = {}
+
+        def _fake_list(owner, repo, pr_number=None, *, limit=500):
+            captured["args"] = (owner, repo, pr_number, limit)
+            return rows
+
+        monkeypatch.setattr(api_main, "list_reviews", _fake_list)
+        resp = review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "pr_number": 7})
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data) == 1
+        assert data[0]["job_id"] == "j1"
+        assert data[0]["review_summary"]["event"] == "COMMENT"
+        assert captured["args"] == ("o", "r", 7, 500)
+
+    def test_get_reviews_rejects_out_of_range_limit(self, review_app) -> None:
+        # limit is validated at the API layer (1..2000); out-of-range -> 422.
+        assert review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 0}).status_code == 422
+        assert (
+            review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 3000}).status_code == 422
+        )

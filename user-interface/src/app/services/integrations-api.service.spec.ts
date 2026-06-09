@@ -138,4 +138,20 @@ describe('IntegrationsApiService', () => {
     expect(req.request.body).toEqual({ pr_number: 7 });
     req.flush({ job_id: 'j1', pr_number: 7, pr_url: 'u', status: 'pending', message: '' });
   });
+
+  it('getGitHubReviewHistory GET without pr_number', () => {
+    service.getGitHubReviewHistory().subscribe();
+    const req = httpMock.expectOne(`${baseUrl}/github/reviews`);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.has('pr_number')).toBe(false);
+    req.flush([]);
+  });
+
+  it('getGitHubReviewHistory GET with pr_number param', () => {
+    service.getGitHubReviewHistory(7).subscribe();
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/github/reviews`);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.get('pr_number')).toBe('7');
+    req.flush([]);
+  });
 });
