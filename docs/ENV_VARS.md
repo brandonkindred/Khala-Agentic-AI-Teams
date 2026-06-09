@@ -4,9 +4,10 @@ Complete reference for every Khala environment variable — defaults, behavior, 
 and edge cases. `CLAUDE.md` carries a one-line quick index of these variables and links here for
 the full detail.
 
-All numeric env vars in this reference parse defensively: unparseable/garbage values fall back to
-the documented default, and out-of-range values are clamped to the documented floor/ceiling unless
-a row states otherwise.
+All numeric env vars in this reference parse defensively: unparseable, blank, unset, or non-positive
+values fall back to the documented default, and out-of-range values are clamped to the documented
+floor/ceiling unless a row states otherwise. Per-row notes call out only the cases that deviate
+(e.g. a non-standard floor) or that interact with other settings.
 
 ---
 
@@ -30,12 +31,11 @@ context size is not in `KNOWN_MODEL_CONTEXT` / `LLM_CONTEXT_SIZE` and `/api/show
 degrades to a 16384-token context but only caches it for this window before re-attempting — a
 transient `/api/show` outage can no longer poison the process into silently truncating large prompts
 for its whole lifetime. A successfully-resolved (or known/env) context size is still cached
-permanently. Garbage values fall back to the default; negative floors to `0` (retry on next call).
+permanently. Negative floors to `0` (retry on next call).
 
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
 `10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row).
-Garbage values fall back to the defaults.
 
 ### LLM_ENABLE_THINKING
 Global thinking default for all LLM calls that don't specify `think` explicitly (default enabled;
@@ -60,8 +60,7 @@ additive jitter up to `LLM_RATE_LIMIT_BACKOFF_MAX` (default `3600`), for `LLM_RA
 retries (default `5` → 6 attempts, worst-case ~2h15m of waiting) before raising `LLMRateLimitError`.
 The 429 backoff `time.sleep` runs **after** the concurrency semaphore and HTTP stream are released
 (never while holding them); a 429 retry never consumes a transient attempt and vice-versa. The
-shared schedule lives in `llm_service/backoff.py` and is reused by the Strategy Lab envelope. All
-three parse defensively (garbage → default).
+shared schedule lives in `llm_service/backoff.py` and is reused by the Strategy Lab envelope.
 
 ### LLM_RATE_LIMIT_HONOR_RETRY_AFTER
 When truthy (default on; `false`/`0`/`no` disables), the central Ollama client honors an
@@ -183,7 +182,7 @@ audit).
 
 ### STRATEGY_LAB_ALIGNMENT_ADJUDICATION_CONCURRENCY
 Max number of near-miss LLM adjudications the `DeterministicAlignmentChecker` runs concurrently per
-`check()` (default `4`; sub-1 floors to `1` = fully serial; garbage values fall back to the default).
+`check()` (default `4`; sub-1 floors to `1` = fully serial).
 Near-miss candidates are collected during the trade loop and dispatched through a bounded
 `ThreadPoolExecutor` (the adjudicator is synchronous) instead of blocking the loop one trade at a
 time; verdicts are slotted back in trade order so the output is identical to the serial path
@@ -201,7 +200,6 @@ on top). Falls back to `LLM_TIMEOUT` / the platform default (900).
 Retries (attempts = retries + 1) the envelope makes on a *retriable* (transient transport / 5xx /
 connection / timeout / throttle) failure before raising `StrategyLabLLMError`. Fatal failures (4xx /
 auth / malformed, or a weekly rate cap) are never retried. Falls back to `LLM_MAX_RETRIES`, else `2`.
-Garbage values fall back.
 
 ### STRATEGY_LAB_LLM_BACKOFF_BASE / STRATEGY_LAB_LLM_BACKOFF_MAX
 Jittered exponential backoff between envelope retries for **transient** (5xx / connection / timeout)
@@ -230,14 +228,14 @@ raises `StrategyLabLLMError` with `outcome="budget_exhausted"`. Defaults to
 
 ### STRATEGY_LAB_DESIGN_REVIEW_ROUNDS
 Cap on the design ↔ design-review loop inside `_run_design_attempt` (default `20`, sub-1 values
-floored to `1`, garbage values fall back to `20`). The loop runs
+floored to `1`). The loop runs
 `DesignAgent → SpecReadinessGate → DesignReviewAgent → DesignAgent.revise` until the reviewer marks
 the spec ready or this cap is reached; exhaustion short-circuits the cycle with
 `status="failed: design_not_ready"` rather than running code against a spec that never converged.
 
 ### STRATEGY_LAB_DESIGN_REVIEW_STALL_ROUNDS
-Within-loop stall threshold (default `3`, sub-1 values floored to `1`, garbage values fall back to
-`3`). A `CritiqueLedger` assigns each reviewer critique a deterministic, content-derived `issue_id`
+Within-loop stall threshold (default `3`, sub-1 values floored to `1`). A `CritiqueLedger` assigns
+each reviewer critique a deterministic, content-derived `issue_id`
 and tracks the blocking (warning/critical) open-issue set round over round. When that set is
 non-empty and **unchanged for this many consecutive rounds** the loop short-circuits early with
 `status="failed: design_stalled"` — distinct from honest round-cap exhaustion
@@ -268,14 +266,14 @@ defects (empty entry/exit rules, thesis coherence) are left to the LLM. Disable 
 LLM-revise behaviour.
 
 ### STRATEGY_LAB_CODE_CONFORMANCE_RETRIES
-Number of predicate-conformance gate retries before demoting criticals to warnings (default `2`,
-garbage values fall back to `2`). The gate runs in the synthesis loop after `CodeConformanceGate`,
+Number of predicate-conformance gate retries before demoting criticals to warnings (default `2`).
+The gate runs in the synthesis loop after `CodeConformanceGate`,
 only for `requires_custom_code=True` strategies. Each retry feeds the per-bar diff back through
 `_refine_or_exhaust`; after exhaustion the pipeline proceeds to backtest with the best-effort code.
 
 ### STRATEGY_LAB_SIZING_COHERENCE_TOLERANCE
-Relative tolerance for `SpecReadinessGate`'s position-sizing coherence rule (default `0.05` = 5%;
-garbage/negative values fall back to the default). Risk model: `sizing.fraction` / `max_position_pct`
+Relative tolerance for `SpecReadinessGate`'s position-sizing coherence rule (default `0.05` = 5%).
+Risk model: `sizing.fraction` / `max_position_pct`
 is capital *deployed* per position as a % of the account — and **is** the per-trade loss cap, because
 an entered position can lose up to ~100% of what was deployed (there is no separate
 `max_loss_per_trade_pct`; it was a duplicate of `max_position_pct` and has been removed).
@@ -296,16 +294,16 @@ routes through the synthetic-critique path and, if the reviser cannot resolve it
 
 ### STRATEGY_LAB_DESIGN_PARSE_RETRIES
 Number of times `DesignAgent._invoke_and_parse` re-prompts the LLM when its JSON parses but fails
-structured-DSL validation (default `2` → 3 attempts total; `0` disables retry; garbage values fall
-back to `2`). The re-prompt quotes the offending field and the pydantic error so the model can
+structured-DSL validation (default `2` → 3 attempts total; `0` disables retry). The re-prompt quotes
+the offending field and the pydantic error so the model can
 self-correct one-off slips (e.g. wrapping `bar.close` in an `IndicatorRef`, or setting `source` to
 an indicator name). Exhaustion still raises `StrategySpecParseError` — the cycle short-circuits
 exactly as before.
 
 ### STRATEGY_LAB_REFINEMENT_PARSE_RETRIES
 Number of times `RefinementAgent._invoke_and_parse` re-prompts the LLM when its response carries no
-recoverable JSON object (default `2` → 3 attempts total; `0` disables retry; sub-zero clamps to `0`;
-garbage values fall back to `2`). Refinement asks the model to emit the *complete* fixed program as
+recoverable JSON object (default `2` → 3 attempts total; `0` disables retry; sub-zero clamps to `0`).
+Refinement asks the model to emit the *complete* fixed program as
 a JSON string — a long generation that occasionally comes back empty, thinking-only, or prose-only.
 That is not a transport fault (the fault-tolerance envelope sees a "successful" string), so without
 this retry a single such response wastes the whole refinement round and the orchestrator falls back
@@ -331,7 +329,7 @@ Disable to restore the pre-change single-call behaviour.
 
 ### STRATEGY_LAB_DESIGN_SELF_REVISION_ROUNDS
 Cap on internal self-revision rounds inside `DesignAgent._with_self_review` (default `1`, sub-0
-floored to `0`, garbage values fall back to `1`). Each round is one self-revision LLM call followed
+floored to `0`). Each round is one self-revision LLM call followed
 by a re-audit through self-review; the re-audit closes the gap where a self-revision could introduce
 a fresh prose↔predicate / risk-math contradiction that then reached the external `DesignReviewAgent`
 loop unchecked. `0` disables self-revision (audit-only — the spec is audited but never internally
@@ -357,7 +355,7 @@ honour `format`-as-schema).
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single
 `run_cycle`, spanning all `MAX_DESIGN_REENTRIES` re-entries (default `120`, sub-1 values floored to
-`1`, garbage values fall back to `120`). A `LLMCallBudget` is created once per cycle and charged
+`1`). A `LLMCallBudget` is created once per cycle and charged
 before every design/review LLM call (generation, each parse-retry, the self-review verdict, each
 self-revision, and each `DesignReviewAgent` round); when it trips the cycle short-circuits with
 `status="failed: budget_exhausted"` (distinct from `failed: design_not_ready`) before runaway cloud
@@ -391,18 +389,16 @@ manifest.
 
 ### AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT
 Most-recent memory summaries the cognition reflection engine (`agent_cognition/rules/reflection.py`)
-fetches **per scale** (month/week/day) as input when proposing rule changes (default `6`;
-unset/garbage/non-positive falls back to the default).
+fetches **per scale** (month/week/day) as input when proposing rule changes (default `6`).
 
 ### AGENT_COGNITION_REFLECTION_MAX_PROPOSALS
 Hard cap on the number of `pending` rule proposals reflection writes in one `reflect` run; LLM
-suggestions beyond the cap are ignored (default `5`; unset/garbage/non-positive falls back to the
-default).
+suggestions beyond the cap are ignored (default `5`).
 
 ### AGENT_COGNITION_REFLECTION_INPUT_CHARS
 Character budget passed to `compact_text` for the rendered summaries + active-rules block before the
-reflection LLM call (default `8000`; unset/garbage/non-positive falls back to the default). The
-reflection LLM uses the shared `cognition` model key, so `LLM_MODEL_cognition` overrides its model.
+reflection LLM call (default `8000`). The reflection LLM uses the shared `cognition` model key, so
+`LLM_MODEL_cognition` overrides its model.
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
@@ -424,9 +420,8 @@ platform's Ollama via its OpenAI-compatible `/v1` endpoint, reusing `LLM_BASE_UR
 `OLLAMA_API_KEY`.
 
 ### GRAPHITI_EMBED_MODEL / GRAPHITI_EMBED_DIM
-Embedding model and dimensionality for Graphiti hybrid search (defaults `nomic-embed-text` / `768`;
-garbage/non-positive dim falls back to `768`). The model must be available on the Ollama
-`/v1/embeddings` endpoint or hybrid search degrades.
+Embedding model and dimensionality for Graphiti hybrid search (defaults `nomic-embed-text` / `768`).
+The model must be available on the Ollama `/v1/embeddings` endpoint or hybrid search degrades.
 
 ### AGENT_COGNITION_GRAPH_SYNC_INTERVAL_S / AGENT_COGNITION_GRAPH_SYNC_BATCH
 Cadence (seconds, default `300`) and per-pass batch size (default `50`) for the background graph sync
@@ -435,8 +430,7 @@ agent since a watermark (`agent_cognition_graph_watermarks`). The worker is a no
 `NEO4J_BOLT_URL`/`POSTGRES_HOST` are unset.
 
 ### NEO4J_SLOW_OP_MS
-Slow-call log threshold (ms, default `1000`) for `shared_neo4j.timed_graph_op`; garbage values fall
-back to the default.
+Slow-call log threshold (ms, default `1000`) for `shared_neo4j.timed_graph_op`.
 
 ### AGENT_COGNITION_SCHEDULER_INTERVAL_S
 Cadence (seconds, default `3600`, floored to `60`) of the Agent Cognition scheduler — the live driver
@@ -446,8 +440,8 @@ approval API serves; it **never** activates a rule (reflection only writes propo
 `POSTGRES_HOST` is unset.
 
 ### AGENT_COGNITION_GRAPH_SEARCH_TOP_K
-Max related facts retrieved per knowledge-graph search in `build_graph_context` (default `10`;
-garbage/non-positive falls back), scoped to the agent's `group_id`.
+Max related facts retrieved per knowledge-graph search in `build_graph_context` (default `10`),
+scoped to the agent's `group_id`.
 
 ---
 
@@ -468,18 +462,18 @@ Bounds the concurrent per-issue `blocked_by` dependency fetches that enrich
 `GET /api/integrations/github/issues` (the coding-team issue picker). Each open issue is annotated
 with the issues it depends on so the UI can flag blocked issues; the lookups fan out under a
 semaphore of this width (default `8`). A failed/absent lookup degrades to no dependencies for that
-issue and never fails the list. Garbage or non-positive values fall back to the default.
+issue and never fails the list.
 
 ### CODING_TEAM_REVIEW_RETRIES
 Number of times the coding-team Tech Lead `run_code_review` LLM call is retried (with jittered
 exponential backoff) on a transient failure (rate limit / timeout / provider outage) before the
-review is flagged as an infrastructure error (default `2` → 3 attempts; blank/garbage falls back to
-the default; floored at 1 attempt). On exhaustion the orchestrator fails the task once with a clear
+review is flagged as an infrastructure error (default `2` → 3 attempts; floored at 1 attempt). On
+exhaustion the orchestrator fails the task once with a clear
 diagnostic rather than re-sending the same failing prompt through the revision loop.
 
 ### CODING_TEAM_ANSWER_WAIT_TIMEOUT_S
-Wall-clock cap (seconds, default `3600`; garbage/non-positive falls back to the default) the coding
-team's human-in-the-loop decision gate blocks waiting for the user to answer escalated open
+Wall-clock cap (seconds, default `3600`) the coding team's human-in-the-loop decision gate blocks
+waiting for the user to answer escalated open
 questions. When the Tech Lead or a Senior SWE hits a product/design/policy/safety decision the plan
 does not answer, the job pauses (`status="waiting_for_user"`, `waiting_for_answers=true`, questions
 on `pending_questions`) and surfaces them (via `GET /status/{job_id}`, and as a GitHub issue comment
