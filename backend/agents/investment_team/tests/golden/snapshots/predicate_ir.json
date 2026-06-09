@@ -1,0 +1,22 @@
+{
+  "01_simple_compare": "denied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 200))\n    Mask(close > sma(close, 200))",
+  "02_pure_or": "denied: none\nOr(unknown=False)\n  Leg(close > 100)\n    Mask(close > 100)\n  Leg(close < 50)\n    Mask(close < 50)",
+  "03_nested_and": "denied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50))\n    Mask(close > sma(close, 50))\n========\ndenied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50))\n    Mask(close > sma(close, 50))\n  Leg(close < sma(close, 10))\n    Mask(close < sma(close, 10))",
+  "04_and_unknown_conjunct": "denied: none\nAnd(unknown=True)\n  Leg(close > 100)\n    Mask(close > 100)",
+  "05_or_unknown_alt": "denied: none\nOr(unknown=True)\n  Leg(close > 100)\n    Mask(close > 100)",
+  "06_symbol_gate_single": "denied: none\nSymbolGate({AAPL})\n  And(unknown=False)\n    Leg(close > sma(close, 50))\n      Mask(close > sma(close, 50))",
+  "07_symbol_gate_multi": "denied: none\nSymbolGate({AAPL, MSFT})\n  And(unknown=False)\n    Leg(rsi(close, 14) < 30)\n      Mask(rsi(close, 14) < 30)",
+  "08_ancestors_plus_or": "denied: none\nAnd(unknown=False)\n  Leg(rsi(close, 14) < 30)\n    Mask(rsi(close, 14) < 30)\n========\ndenied: none\nAnd(unknown=False)\n  Leg(rsi(close, 14) < 30)\n    Mask(rsi(close, 14) < 30)\n  Or(unknown=False)\n    Leg(close > 100)\n      Mask(close > 100)\n    Leg(close < 50)\n      Mask(close < 50)",
+  "09_symbol_only_or_alt": "denied: none\nOr(unknown=False)\n  Leg(bar.symbol == 'AAPL')\n    SymbolGate({AAPL})\n      Static(True)\n  Leg(close > 100)\n    Mask(close > 100)",
+  "10_bollinger_subscript": "denied: none\nAnd(unknown=False)\n  Leg(close > bollinger_bands(close, 20)[0])\n    Mask(close > bollinger_bands(close, 20)[0])",
+  "11_macd_multi_output": "denied: none\nAnd(unknown=False)\n  Leg(macd(close, 5, 10, 4)[0] > 0)\n    Mask(macd(close, 5, 10, 4)[0] > 0)",
+  "12_stochastic": "denied: none\nAnd(unknown=False)\n  Leg(stochastic(high, low, close, 3)[0] > 0)\n    Mask(stochastic(high, low, close, 3)[0] > 0)",
+  "13_vwap": "denied: none\nAnd(unknown=False)\n  Leg(close > vwap(high, low, close, volume))\n    Mask(close > vwap(high, low, close, volume))",
+  "14_denylist": "denied: {AAPL}\nAnd(unknown=False)\n  Leg(close > sma(close, 150))\n    Mask(close > sma(close, 150))",
+  "15_position_gate": "denied: none\nAnd(unknown=False)\n  Leg(close > 0)\n    Mask(close > 0)",
+  "16_binop_operand": "denied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50) * 1.02)\n    Mask(close > sma(close, 50) * 1.02)",
+  "17_multi_leg_and": "denied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50))\n    Mask(close > sma(close, 50))\n========\ndenied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50))\n    Mask(close > sma(close, 50))\n  Leg(close > ema(close, 20))\n    Mask(close > ema(close, 20))\n========\ndenied: none\nAnd(unknown=False)\n  Leg(close > sma(close, 50))\n    Mask(close > sma(close, 50))\n  Leg(close > ema(close, 20))\n    Mask(close > ema(close, 20))\n  Leg(rsi(close, 14) < 70)\n    Mask(rsi(close, 14) < 70)",
+  "18_empty_symbol_intersection": "<no groups>",
+  "19_or_of_ands": "denied: none\nOr(unknown=False)\n  Leg(bar.symbol == 'AAPL' and close > 1000)\n    SymbolGate({AAPL})\n      And(unknown=False)\n        Leg(close > 1000)\n          Mask(close > 1000)\n  Leg(bar.symbol == 'MSFT' and close < 50)\n    SymbolGate({MSFT})\n      And(unknown=False)\n        Leg(close < 50)\n          Mask(close < 50)",
+  "20_custom_var_binding": "denied: none\nAnd(unknown=False)\n  Leg(close > threshold)\n    Mask(close > threshold)"
+}
