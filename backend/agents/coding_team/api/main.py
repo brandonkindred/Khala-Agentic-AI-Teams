@@ -975,8 +975,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
             with GitHubClient(token=token) as client:
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}")
         except Exception:  # noqa: BLE001 - the status update below is the last resort
-            # ``review_exc`` is the original review failure (the inner except has no
-            # exception of its own); surface it on both the job and the review row.
+            # Safety net: ``_record_failure`` above may already have marked the
+            # job/review failed, but if it raised (e.g. the GitHub client itself
+            # failed) these direct updates ensure the job never wedges in
+            # "running". Both writes are idempotent, so a duplicate update here
+            # (when _record_failure had partly succeeded) is harmless.
+            # ``review_exc`` is the original review failure (the inner except has
+            # no exception of its own); surface it on both the job and review row.
             safe_err = scrub_token_from_text(str(review_exc))
             update_job(job_id, status="failed", error=safe_err)
             update_review(job_id, status="failed", error=safe_err, completed=True)

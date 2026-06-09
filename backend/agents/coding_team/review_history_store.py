@@ -155,20 +155,21 @@ def list_reviews(
     if not is_postgres_enabled():
         return []
     limit = max(1, min(limit, 2000))
-    sql = (
+    # ``query`` (not ``sql``) so we don't shadow the imported ``psycopg.sql`` module.
+    query = (
         "SELECT job_id, owner, repo, pr_number, pr_url, status, status_text, "
         "       review_summary, error, author, created_at, completed_at "
         "FROM code_review_runs WHERE owner = %s AND repo = %s"
     )
     params: list[Any] = [owner, repo]
     if pr_number is not None:
-        sql += " AND pr_number = %s"
+        query += " AND pr_number = %s"
         params.append(pr_number)
-    sql += " ORDER BY created_at DESC LIMIT %s"
+    query += " ORDER BY created_at DESC LIMIT %s"
     params.append(limit)
     try:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(sql, params)
+            cur.execute(query, params)
             return list(cur.fetchall())
     except Exception:  # noqa: BLE001 - degrade to no history rather than error
         logger.warning("code_review_runs: list_reviews failed", exc_info=True)
