@@ -743,18 +743,27 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
     return ReviewCode("\n\n".join(blocks), reviewed, skipped)
 
 
+# Optional dependency: author tagging for persisted review history. Imported once
+# at module load behind a try/except so a missing/broken ``agent_console`` (or its
+# transitive deps) can never break importing this API; ``_review_author`` falls
+# back to "anonymous" when it is unavailable.
+try:
+    from agent_console.author import resolve_author as _resolve_author  # noqa: E402
+except Exception:  # noqa: BLE001 - author tagging is optional, never fatal at import
+    _resolve_author = None
+
+
 def _review_author() -> str:
     """Resolve the author handle for a review row (best-effort, never raises).
 
-    The ``agent_console`` import is intentionally inline rather than module-level:
-    author tagging is an optional convenience for persisted history, and keeping
-    the import out of module load means a missing/broken ``agent_console`` (or its
-    transitive deps) can never break importing this API or running a review.
+    Postconditions:
+        - Returns the resolved author handle, or ``"anonymous"`` when the optional
+          ``agent_console`` author helper is unavailable or raises.
     """
+    if _resolve_author is None:
+        return "anonymous"
     try:
-        from agent_console.author import resolve_author
-
-        return resolve_author()
+        return _resolve_author()
     except Exception:  # noqa: BLE001 - author tagging must never block a review
         return "anonymous"
 
@@ -957,16 +966,18 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 review_summary=review_summary,
                 completed=True,
             )
-    except Exception as e:  # noqa: BLE001 - any failure must mark the job, never wedge it
+    except Exception as review_exc:  # noqa: BLE001 - any failure must mark the job, never wedge it
         # The hook runs in a daemon thread; if we let an exception escape, the thread
         # dies and the job is stuck in "running" forever. Mark it failed (mirroring
         # post_run) and post a best-effort, token-scrubbed PR comment.
-        logger.exception("PR review hook failed: %s", e)
+        logger.exception("PR review hook failed: %s", review_exc)
         try:
             with GitHubClient(token=token) as client:
-                _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
+                _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}")
         except Exception:  # noqa: BLE001 - the status update below is the last resort
-            safe_err = scrub_token_from_text(str(e))
+            # ``review_exc`` is the original review failure (the inner except has no
+            # exception of its own); surface it on both the job and the review row.
+            safe_err = scrub_token_from_text(str(review_exc))
             update_job(job_id, status="failed", error=safe_err)
             update_review(job_id, status="failed", error=safe_err, completed=True)
 

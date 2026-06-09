@@ -165,11 +165,13 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
    * was on the wire is never dropped and its poller is never killed (closing a
    * hydrate-vs-startReview race).
    *
-   * Note: this fetches the repository's recent reviews in one call (bounded by
-   * the backend `limit`) rather than per-PR, because the row status badges need
+   * Note: this fetches the repository's recent reviews in one call (the backend
+   * `limit`, default 500) rather than per-PR, because the row status badges need
    * the latest review for *every* listed PR up front; a per-PR-on-expand fetch
-   * would leave the list without badges. Best-effort: a failure leaves the page
-   * usable without history.
+   * would leave the list without badges. Consequence of the cap: in a repo with
+   * more than ~500 recent runs, the oldest runs (and the badges for the least
+   * active PRs) may be absent until a future "latest run per PR" backend query
+   * lands. Best-effort: a failure leaves the page usable without history.
    */
   private hydrateReviews(): void {
     this.integrationsApi
@@ -271,6 +273,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
           list.unshift(record); // newest-first
           this.reviews.set(pull.number, list);
           this.startPolling(record);
+          this.cdr.markForCheck();
         },
         error: (err: { error?: { detail?: string }; message?: string }) => {
           this.starting.delete(pull.number);
@@ -278,6 +281,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
             pull.number,
             err?.error?.detail || err?.message || 'Failed to start review.',
           );
+          this.cdr.markForCheck();
         },
       });
   }
@@ -287,6 +291,14 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return this.reviewErrors.get(prNumber) ?? null;
   }
 
+  /**
+   * Begin polling a review job's status. Mutates `record` in place on each
+   * update (and calls `markForCheck()` so the UI refreshes under any change
+   * detection strategy). The subscription is registered in `pollers` for
+   * teardown and is explicitly unsubscribed — and removed from `pollers` — once
+   * the job reaches a terminal state or the connection is lost, so no poller
+   * outlives the job. `ngOnDestroy` tears down any still-running pollers.
+   */
   private startPolling(record: PrReviewRecord): void {
     if (this.pollers.has(record.jobId)) return;
     const sub = pollJobStatus(
@@ -301,17 +313,23 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         record.prUrl = status.github_pr_url ?? record.prUrl;
         record.error = status.error;
         if (isCodingTeamTerminalStatus(status.status)) {
-          this.pollers.delete(record.jobId);
+          this.disposePoller(record.jobId);
         }
         this.cdr.markForCheck();
       },
       () => {
         record.error = 'Lost connection to the coding team — status polling failed.';
-        this.pollers.delete(record.jobId);
+        this.disposePoller(record.jobId);
         this.cdr.markForCheck();
       },
     );
     this.pollers.set(record.jobId, sub);
+  }
+
+  /** Unsubscribe a poller and drop it from the registry (idempotent). */
+  private disposePoller(jobId: string): void {
+    this.pollers.get(jobId)?.unsubscribe();
+    this.pollers.delete(jobId);
   }
 
   private stopAllPollers(): void {

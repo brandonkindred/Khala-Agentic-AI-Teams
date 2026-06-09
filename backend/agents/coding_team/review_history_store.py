@@ -24,6 +24,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from psycopg import sql
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -100,9 +101,9 @@ def update_review(
     if not is_postgres_enabled():
         return
     # Build the SET clause from (column, value) pairs whose column names are all
-    # hardcoded constants below. The composed clause can therefore never carry a
-    # user-controlled identifier; an assertion against the allowlist makes that
-    # invariant explicit and fails loudly if a future edit introduces a stray one.
+    # hardcoded constants below. An allowlist guard (further down) refuses any
+    # stray column, and the clause is composed with sql.Identifier — so it can
+    # never carry a user-controlled identifier.
     assignments: list[tuple[str, Any]] = [("status", status)]
     if status_text is not None:
         assignments.append(("status_text", status_text))
@@ -121,15 +122,16 @@ def update_review(
         # guard active even under ``python -O``.
         logger.error("code_review_runs: refusing update with non-allowlisted column(s): %s", unexpected)
         return
-    set_clause = ", ".join(f"{col} = %s" for col in columns)
+    # Compose the SET clause with psycopg.sql.Identifier so column names are
+    # quoted as identifiers (never string-interpolated), making the injection
+    # safety structurally evident; values stay parameterized via %s placeholders.
+    set_clause = sql.SQL(", ").join(sql.SQL("{} = %s").format(sql.Identifier(col)) for col in columns)
+    query = sql.SQL("UPDATE code_review_runs SET {set_clause} WHERE job_id = %s").format(set_clause=set_clause)
     params: list[Any] = [val for _, val in assignments]
     params.append(job_id)
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                f"UPDATE code_review_runs SET {set_clause} WHERE job_id = %s",
-                params,
-            )
+            cur.execute(query, params)
     except Exception:  # noqa: BLE001 - persistence must never break the review
         logger.warning("code_review_runs: update_review failed", exc_info=True)
 

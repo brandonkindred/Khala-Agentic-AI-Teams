@@ -288,6 +288,24 @@ describe('CodeReviewPanelComponent', () => {
     expect(component['pollers'].has('j1')).toBe(false);
   });
 
+  it('stops polling once a review reaches a terminal status', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 0, inline_comments: 0, body_findings: 0, event: 'APPROVE' },
+      }),
+    );
+    component.startReview(component.pulls[0]);
+    vi.advanceTimersByTime(5000); // first poll -> terminal -> poller disposed
+    expect(component['pollers'].has('j1')).toBe(false);
+    // No further polling after the job is terminal (subscription was torn down).
+    const callsAfterTerminal = apiSpy.getJobStatus.mock.calls.length;
+    vi.advanceTimersByTime(20000);
+    expect(apiSpy.getJobStatus.mock.calls.length).toBe(callsAfterTerminal);
+  });
+
   it('ignores a second startReview while one is already starting', async () => {
     await setup();
     component.starting.add(1);
