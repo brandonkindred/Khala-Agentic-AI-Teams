@@ -68,14 +68,20 @@ def _resolve_strands_timeout(agent_key: str) -> float:
         else:
             if parsed > 0 and math.isfinite(parsed):
                 return parsed
+    # ``resolve_timeout`` is a total function — it reads an env var (defaulting
+    # to "900") and catches the only failure mode (``float()`` ValueError),
+    # returning 900.0 — so it cannot raise. No ``try/except`` wraps it by design:
+    # per the project DbC rule we never try/except around a callee's contract
+    # failure to hide it; a future ``resolve_timeout`` that violated its
+    # ``-> float`` contract by raising should surface, not silently degrade.
     resolved = resolve_timeout(agent_key)
-    # ``resolve_timeout`` is typed ``-> float``, but guard defensively: a
-    # misconfigured resolver returning a non-numeric (str/None) would make
-    # ``resolved > 0`` raise ``TypeError`` and break this function's
-    # unconditional "positive, finite float" postcondition. ``bool`` is excluded
-    # because ``True``/``False`` are not meaningful timeouts (and ``bool`` is an
-    # ``int`` subclass). The ``isinstance`` check also gates ``math.isfinite``,
-    # which itself raises ``TypeError`` on a non-number.
+    # We still guard the returned *value* defensively: a misconfigured resolver
+    # returning a non-numeric (str/None) would make ``resolved > 0`` raise
+    # ``TypeError`` and break this function's "positive, finite float"
+    # postcondition. ``bool`` is excluded because ``True``/``False`` are not
+    # meaningful timeouts (and ``bool`` is an ``int`` subclass). The
+    # ``isinstance`` check also gates ``math.isfinite``, which itself raises
+    # ``TypeError`` on a non-number.
     if (
         isinstance(resolved, (int, float))
         and not isinstance(resolved, bool)
@@ -213,9 +219,10 @@ def get_strands_model(
 
     Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
     if given, is a JSON-serializable schema dict. ``timeout``, if passed
-    explicitly, must be a positive, finite number of seconds — a non-positive or
-    non-finite value raises ``ValueError`` (a resolved timeout is guaranteed
-    positive and finite by :func:`_resolve_strands_timeout`).
+    explicitly, must be a positive, finite *number* of seconds — a non-numeric
+    value raises ``TypeError`` and a non-positive or non-finite value raises
+    ``ValueError`` (a resolved timeout is guaranteed positive and finite by
+    :func:`_resolve_strands_timeout`).
     Postconditions: returns a constructed strands model. Adding a schema never
     changes which provider/model is selected — only whether the Ollama request
     carries a ``format`` constraint.
@@ -226,10 +233,13 @@ def get_strands_model(
     if timeout is None:
         timeout = _resolve_strands_timeout(agent_key)
     # Boundary enforcement of the construction helpers' ``timeout > 0``
-    # precondition: a non-positive or non-finite transport timeout is a caller
-    # bug (an explicit bad kwarg), never a value we should forward to
-    # httpx/botocore. Use an explicit raise rather than ``assert`` so the guard
-    # survives ``python -O``.
+    # precondition: a bad transport timeout is a caller bug (an explicit bad
+    # kwarg), never a value we should forward to httpx/botocore. Check the type
+    # first so a non-numeric kwarg raises a clear ``TypeError`` (rather than an
+    # obscure one from ``math.isfinite``); use explicit raises rather than
+    # ``assert`` so the guards survive ``python -O``.
+    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+        raise TypeError(f"timeout must be a number of seconds (got {type(timeout).__name__})")
     if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError(f"timeout must be a positive, finite number of seconds (got {timeout!r})")
 

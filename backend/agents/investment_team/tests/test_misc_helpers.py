@@ -863,6 +863,19 @@ def test_get_strands_model_rejects_non_positive_or_nonfinite_explicit_timeout(
         model_factory.get_strands_model("strategy_design", timeout=bad)
 
 
+@pytest.mark.parametrize("bad", ["900", True, [900]])
+def test_get_strands_model_rejects_non_numeric_explicit_timeout(
+    monkeypatch: pytest.MonkeyPatch, bad: object
+) -> None:
+    """A non-numeric explicit ``timeout`` raises a clear ``TypeError`` at the
+    boundary rather than an obscure one from ``math.isfinite`` (``bool`` counts
+    as non-numeric here — ``True``/``False`` are not meaningful timeouts)."""
+    model_factory, _ = _patch_ollama_local(monkeypatch)
+
+    with pytest.raises(TypeError, match="must be a number"):
+        model_factory.get_strands_model("strategy_design", timeout=bad)
+
+
 def test_get_strands_model_forwards_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     """The resolved timeout reaches the Ollama transport via ``ollama_client_args``.
 
