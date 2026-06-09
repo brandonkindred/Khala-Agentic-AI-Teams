@@ -41,6 +41,25 @@ from investment_team.models import (
     LikelyBlocker,
     SubconditionCoverage,
 )
+from investment_team.strategy_lab.coverage_probe.predicate_ir import (
+    AndOp,
+    BarPredicate,
+    Leg,
+    MaskLeaf,
+    OrOp,
+    PredicateGroup,
+    Static,
+    SymbolGate,
+    build_and_group,
+    build_or_group,
+    collect_legs,
+    eval_tree,
+    find_or_groups,
+    leg_gate_symbols,
+    tree_and_unknown,
+    tree_effective_symbols,
+    tree_or_unknown,
+)
 from investment_team.strategy_lab.executor.indicators import INDICATORS
 
 logger = logging.getLogger(__name__)
@@ -100,383 +119,6 @@ class _Operand:
 
     fn: Callable[[pd.DataFrame], pd.Series]
     data_dependent: bool
-
-
-# ---------------------------------------------------------------------------
-# BarPredicate IR
-# ---------------------------------------------------------------------------
-#
-# The extractor produces a tree of these nodes; the aggregator pattern-matches
-# the tree to compute hit rates, classify blockers, and assemble the report.
-# Tree shape replaces the flag-based encoding that used ``combinator``,
-# ``ancestor_count``, ``has_unknown_or_leg``, ``has_unknown_and_conjunct``,
-# and ``has_unknown_leg`` on the old ``_Group`` / ``_Subcond`` dataclasses.
-
-
-@dataclass(frozen=True)
-class MaskLeaf:
-    """A terminal: a single evaluable comparison or truthiness mask."""
-
-    label: str
-    evaluator: Callable[[pd.DataFrame], pd.Series]
-
-
-@dataclass(frozen=True)
-class Static:
-    """A terminal whose mask is a constant.
-
-    ``Static(True)`` is used as the inner body of a pure symbol-gate leg
-    (e.g. ``bar.symbol == "AAPL"`` as a standalone OR alternative — the
-    enclosing :class:`SymbolGate` restricts the leg to AAPL bars where
-    the predicate is unconditionally true).
-    """
-
-    value: bool
-
-
-@dataclass(frozen=True)
-class SymbolGate:
-    """Wraps an inner predicate, restricting it to specific symbols.
-
-    Replaces ``_Subcond.target_symbols`` / ``_Group.target_symbols``.
-    During evaluation, when the current symbol is not in ``syms`` the
-    inner mask is forced to all-False.
-    """
-
-    syms: frozenset
-    inner: "BarPredicate"
-
-
-@dataclass(frozen=True)
-class AndOp:
-    """Conjunction: all legs must hold.
-
-    ``unknown=True`` when at least one original conjunct was un-modellable
-    (e.g. ``self.custom_ok(bar)``). The recognised legs' mask is then
-    only a SUPERSET of the real predicate, so the aggregator must not
-    conclude ``COVERAGE_OK`` from them alone. Replaces
-    ``_Group.has_unknown_and_conjunct``.
-    """
-
-    legs: Tuple["BarPredicate", ...]
-    unknown: bool = False
-
-
-@dataclass(frozen=True)
-class OrOp:
-    """Disjunction: at least one leg must hold.
-
-    ``unknown=True`` when at least one original alternative was
-    un-modellable. With an un-modelled alternative present we can't
-    prove the OR is unreachable, so the aggregator must suppress
-    ``or_group_never_fires`` / zero-hit blockers under this node.
-    Replaces ``_Group.has_unknown_or_leg`` and ``_Subcond.has_unknown_leg``.
-    """
-
-    legs: Tuple["BarPredicate", ...]
-    unknown: bool = False
-
-
-@dataclass(frozen=True)
-class Leg:
-    """One reportable subcondition in :class:`CoverageReport.subconditions`.
-
-    Wraps a sub-tree with the human-readable label used in coverage
-    output. The wrapped sub-tree is what's evaluated for the leg's
-    hits; the label is what's displayed. Leg boundaries also define
-    the granularity of blocker classification: a leg in AND context
-    can be flagged zero-hit, alternatives directly under an :class:`OrOp`
-    are classified as an OR group, and deeper structure inside a leg
-    is internal (not separately reported).
-    """
-
-    label: str
-    inner: "BarPredicate"
-
-
-BarPredicate = Union[AndOp, OrOp, SymbolGate, MaskLeaf, Static, Leg]
-
-
-@dataclass(frozen=True)
-class PredicateGroup:
-    """One ``if``-predicate's worth of coverage-relevant content.
-
-    ``tree`` is the :data:`BarPredicate` IR — its shape encodes the
-    combinator (AND vs OR), AND-required ancestors of an OR (as
-    ``AndOp(legs=(anc, OrOp(alts)))``), symbol filters (``SymbolGate``
-    wrapping), and un-modelled conjuncts/alternatives (``AndOp.unknown``
-    / ``OrOp.unknown``). Empty-symbol intersections (e.g. two
-    ``bar.symbol == "X"`` and ``bar.symbol == "Y"`` conjoined) collapse
-    to a ``SymbolGate(frozenset(), ...)`` and the group is dropped
-    before emission.
-
-    ``denied_symbols`` carries the exclude-shaped early-return denylist
-    (``if bar.symbol == "AAPL": return``) — symbols dropped from
-    evaluation regardless of any positive ``SymbolGate``. Independent
-    of the tree's positive filters: a group can have an allowlist gate
-    AND a denylist; effective scope is
-    ``tree_symbols ∩ (universe - denied_symbols)``.
-    """
-
-    tree: BarPredicate
-    denied_symbols: Optional[frozenset] = None
-
-
-# ---------------------------------------------------------------------------
-# Tree utilities
-# ---------------------------------------------------------------------------
-
-
-def _strip_symbol_gates(node: BarPredicate) -> Tuple[BarPredicate, Optional[frozenset]]:
-    """Peel any outer :class:`SymbolGate` nodes off *node* and return the inner
-    predicate plus the intersected gate symbols. ``None`` symbols means
-    no gate at this level. Used to inspect the structural shape of a
-    sub-tree without fragile dispatch on ``SymbolGate``.
-    """
-    syms: Optional[frozenset] = None
-    while isinstance(node, SymbolGate):
-        syms = node.syms if syms is None else (syms & node.syms)
-        node = node.inner
-    return node, syms
-
-
-def _tree_and_unknown(node: BarPredicate) -> bool:
-    """Return True if any :class:`AndOp` in the tree has ``unknown=True``."""
-    if isinstance(node, AndOp):
-        if node.unknown:
-            return True
-        return any(_tree_and_unknown(leg) for leg in node.legs)
-    if isinstance(node, OrOp):
-        return any(_tree_and_unknown(leg) for leg in node.legs)
-    if isinstance(node, (SymbolGate, Leg)):
-        return _tree_and_unknown(node.inner)
-    return False
-
-
-def _tree_or_unknown(node: BarPredicate) -> bool:
-    """Return True if any :class:`OrOp` in the tree has ``unknown=True``."""
-    if isinstance(node, OrOp):
-        if node.unknown:
-            return True
-        return any(_tree_or_unknown(leg) for leg in node.legs)
-    if isinstance(node, AndOp):
-        return any(_tree_or_unknown(leg) for leg in node.legs)
-    if isinstance(node, (SymbolGate, Leg)):
-        return _tree_or_unknown(node.inner)
-    return False
-
-
-def _collect_legs(
-    node: BarPredicate, accumulated_syms: Optional[frozenset] = None
-) -> List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]]:
-    """Walk the tree, collecting each :class:`Leg` along with its
-    effective symbol filter (intersection of all enclosing
-    :class:`SymbolGate` syms), whether it sits directly under an
-    :class:`OrOp` (i.e. is an OR alternative rather than an AND-required
-    leg), and an integer identifier of the closest enclosing
-    :class:`OrOp` (used to group OR alternatives for the "all-zero OR"
-    blocker). Stops at each :class:`Leg` — does *not* descend into
-    ``Leg.inner``.
-    """
-    return _collect_legs_walk(node, accumulated_syms, in_or=False, or_id=None, next_or_id=[0])
-
-
-def _collect_legs_walk(
-    node: BarPredicate,
-    accumulated_syms: Optional[frozenset],
-    in_or: bool,
-    or_id: Optional[int],
-    next_or_id: List[int],
-) -> List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]]:
-    if isinstance(node, Leg):
-        return [(node, accumulated_syms, in_or, or_id)]
-    if isinstance(node, SymbolGate):
-        new_syms = node.syms if accumulated_syms is None else (accumulated_syms & node.syms)
-        return _collect_legs_walk(node.inner, new_syms, in_or, or_id, next_or_id)
-    if isinstance(node, AndOp):
-        results: List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]] = []
-        for leg in node.legs:
-            results.extend(
-                _collect_legs_walk(
-                    leg, accumulated_syms, in_or=False, or_id=None, next_or_id=next_or_id
-                )
-            )
-        return results
-    if isinstance(node, OrOp):
-        this_or_id = next_or_id[0]
-        next_or_id[0] += 1
-        results = []
-        for leg in node.legs:
-            results.extend(
-                _collect_legs_walk(
-                    leg, accumulated_syms, in_or=True, or_id=this_or_id, next_or_id=next_or_id
-                )
-            )
-        return results
-    return []
-
-
-def _tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
-    """Return the union of symbols any leg in the tree could fire on, or
-    ``None`` when at least one leg is symbol-unconstrained (universal).
-
-    AND combinator: a single universal leg leaves the AND unconstrained
-    only if no other AND leg gates the symbol space — but for warmup
-    sizing we conservatively treat the AND as universal whenever any
-    leg is universal (the predicate could fire on any symbol from a
-    universal leg's perspective). OR combinator: a single universal
-    alternative makes the disjunction universal.
-
-    This function powers warmup sizing in :func:`_union_target_symbols`
-    and group-level symbol resolution.
-    """
-    legs = _collect_legs(node)
-    union: set = set()
-    saw_universal = False
-    for _leg, syms, _in_or, _or_id in legs:
-        if syms is None:
-            saw_universal = True
-        else:
-            union |= syms
-    if saw_universal:
-        return None
-    return frozenset(union) if union else None
-
-
-def _find_or_groups(node: BarPredicate) -> List[Tuple[int, OrOp]]:
-    """Return a list of (or_id, OrOp) pairs in the same order that
-    :func:`_collect_legs` assigns or_ids — used so the classifier can
-    look up the :class:`OrOp` (for ``unknown`` flag) of each OR group
-    it sees in a leg's metadata.
-    """
-    out: List[Tuple[int, OrOp]] = []
-    _find_or_groups_walk(node, out, next_or_id=[0])
-    return out
-
-
-def _find_or_groups_walk(
-    node: BarPredicate, out: List[Tuple[int, OrOp]], next_or_id: List[int]
-) -> None:
-    if isinstance(node, OrOp):
-        this_id = next_or_id[0]
-        next_or_id[0] += 1
-        out.append((this_id, node))
-        for leg in node.legs:
-            _find_or_groups_walk(leg, out, next_or_id)
-        return
-    if isinstance(node, AndOp):
-        for leg in node.legs:
-            _find_or_groups_walk(leg, out, next_or_id)
-        return
-    if isinstance(node, (SymbolGate, Leg)):
-        _find_or_groups_walk(node.inner, out, next_or_id)
-
-
-def _eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
-    """Recursively evaluate *node* against *df* for *symbol*, returning a
-    boolean :class:`pandas.Series` indexed by ``df.index``.
-
-    The :class:`SymbolGate` dispatch is the per-symbol filter: when
-    ``symbol`` is not in the gate's ``syms``, the entire sub-tree below
-    it evaluates to all-False without invoking the inner mask.
-    """
-    if isinstance(node, MaskLeaf):
-        try:
-            series = node.evaluator(df)
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive
-            logger.debug("subcondition %r failed on %s: %s", node.label, symbol, exc)
-            return pd.Series(False, index=df.index, dtype=bool)
-        return pd.Series(series, index=df.index).fillna(False).astype(bool)
-    if isinstance(node, Static):
-        return pd.Series(node.value, index=df.index, dtype=bool)
-    if isinstance(node, SymbolGate):
-        if symbol not in node.syms:
-            return pd.Series(False, index=df.index, dtype=bool)
-        return _eval_tree(node.inner, df, symbol)
-    if isinstance(node, Leg):
-        return _eval_tree(node.inner, df, symbol)
-    if isinstance(node, AndOp):
-        if not node.legs:
-            return pd.Series(True, index=df.index, dtype=bool)
-        result = _eval_tree(node.legs[0], df, symbol)
-        for leg in node.legs[1:]:
-            result = result & _eval_tree(leg, df, symbol)
-        return result
-    if isinstance(node, OrOp):
-        if not node.legs:
-            return pd.Series(False, index=df.index, dtype=bool)
-        result = _eval_tree(node.legs[0], df, symbol)
-        for leg in node.legs[1:]:
-            result = result | _eval_tree(leg, df, symbol)
-        return result
-    raise AssertionError(f"unknown BarPredicate variant: {type(node)!r}")  # pragma: no cover
-
-
-def _leg_gate_symbols(leg: Leg) -> Optional[frozenset]:
-    """Return the outermost :class:`SymbolGate` ``syms`` of *leg*'s inner
-    sub-tree, or ``None`` if the leg has no outer gate. Used by the
-    visitor to propagate a compound leg's effective symbol scope to the
-    group level so sibling AND-conjuncts inherit it.
-    """
-    inner = leg.inner
-    if isinstance(inner, SymbolGate):
-        return inner.syms
-    return None
-
-
-def _build_and_group(
-    legs: List[Leg],
-    effective_symbols: Optional[set],
-    effective_unknown: bool,
-    denied_symbols: Optional[frozenset],
-) -> PredicateGroup:
-    """Assemble a :class:`PredicateGroup` whose root predicate is an
-    :class:`AndOp` over *legs*, optionally wrapped in a
-    :class:`SymbolGate` when ``effective_symbols`` constrains the
-    group.
-
-    ``effective_unknown`` becomes ``AndOp.unknown`` — replaces the old
-    ``_Group.has_unknown_and_conjunct`` flag.
-    """
-    tree: BarPredicate = AndOp(legs=tuple(legs), unknown=effective_unknown)
-    if effective_symbols is not None:
-        tree = SymbolGate(syms=frozenset(effective_symbols), inner=tree)
-    return PredicateGroup(tree=tree, denied_symbols=denied_symbols)
-
-
-def _build_or_group(
-    ancestor_legs: List[Leg],
-    or_alt_legs: List[Leg],
-    or_unknown: bool,
-    effective_symbols: Optional[set],
-    ancestor_unknown: bool,
-    denied_symbols: Optional[frozenset],
-) -> PredicateGroup:
-    """Assemble a :class:`PredicateGroup` for an ``if A or B or C:`` shape,
-    optionally with AND-required ancestors from enclosing ``if``s.
-
-    Tree shape:
-
-    * No ancestors → root is :class:`OrOp` over *or_alt_legs*.
-    * With ancestors → ``AndOp(legs=(*ancestor_legs, OrOp(legs=or_alt_legs)))``.
-
-    ``or_unknown`` becomes the :class:`OrOp` ``unknown`` flag (replaces
-    the old ``_Group.has_unknown_or_leg``); ``ancestor_unknown`` becomes
-    the :class:`AndOp` ``unknown`` flag when ancestors are present
-    (replaces ``_Group.has_unknown_and_conjunct``). Optional outer
-    :class:`SymbolGate` wraps the root when *effective_symbols* is set.
-    """
-    or_node = OrOp(legs=tuple(or_alt_legs), unknown=or_unknown)
-    if ancestor_legs:
-        tree: BarPredicate = AndOp(
-            legs=tuple(ancestor_legs) + (or_node,),
-            unknown=ancestor_unknown,
-        )
-    else:
-        tree = or_node
-    if effective_symbols is not None:
-        tree = SymbolGate(syms=frozenset(effective_symbols), inner=tree)
-    return PredicateGroup(tree=tree, denied_symbols=denied_symbols)
 
 
 def run_indicator_probe(
@@ -672,13 +314,13 @@ class CoverageAggregator:
         # Pre-collect legs per group (with their effective symbols and
         # OR-group ids) so each stage walks the same per-leg view.
         self._group_legs: List[List[Tuple[Leg, Optional[frozenset], bool, Optional[int]]]] = [
-            _collect_legs(g.tree) for g in groups
+            collect_legs(g.tree) for g in groups
         ]
         # Pre-collect or-group records per group so the classifier can
         # look up the originating ``OrOp`` (for ``unknown`` and label
         # assembly) of any or_id reported on a leaf.
         self._group_or_groups: List[Dict[int, OrOp]] = [
-            dict(_find_or_groups(g.tree)) for g in groups
+            dict(find_or_groups(g.tree)) for g in groups
         ]
 
     def run(self) -> CoverageReport:
@@ -739,7 +381,7 @@ class CoverageAggregator:
                 legs = self._group_legs[group_idx]
                 # Per-leg masks (used for both per-leg hits and the group
                 # conjunction). Computing each leg's mask separately gives
-                # us symmetric data for the report; ``_eval_tree`` against
+                # us symmetric data for the report; ``eval_tree`` against
                 # the whole tree would conflate them.
                 per_leg_masks: List[pd.Series] = []
                 any_leg_evaluated = False
@@ -747,7 +389,7 @@ class CoverageAggregator:
                     if eff_syms is not None and symbol not in eff_syms:
                         per_leg_masks.append(pd.Series(False, index=df.index, dtype=bool))
                         continue
-                    mask = _eval_tree(leg, df, symbol)
+                    mask = eval_tree(leg, df, symbol)
                     per_leg_masks.append(mask)
                     any_leg_evaluated = True
                     hits = int(mask.sum())
@@ -759,11 +401,11 @@ class CoverageAggregator:
                             leg_last_true[group_idx][leg_idx] = last_bar
                 if not any_leg_evaluated:
                     continue
-                # Whole-tree conjunction mask: a single ``_eval_tree``
+                # Whole-tree conjunction mask: a single ``eval_tree``
                 # call against the group's root captures AND/OR/SymbolGate
                 # semantics in one place — including the implicit gating
                 # of legs whose ``SymbolGate`` excludes this symbol.
-                conjunction_mask = _eval_tree(group.tree, df, symbol)
+                conjunction_mask = eval_tree(group.tree, df, symbol)
                 group_conjunction_hits[group_idx] += int(conjunction_mask.sum())
                 group_evaluated[group_idx] = True
                 symbol_contributed = True
@@ -861,7 +503,7 @@ class CoverageAggregator:
                 continue
             group = result.group
             or_groups = self._group_or_groups[result_idx]
-            group_syms = _tree_effective_symbols(group.tree)
+            group_syms = tree_effective_symbols(group.tree)
             symbols_key = group_syms
 
             def _flag_zero_hit(leaf: _LeafResult, _sym_key=symbols_key) -> None:
@@ -889,7 +531,7 @@ class CoverageAggregator:
                     continue
                 if leaf.hits != 0:
                     continue
-                if _tree_or_unknown(leaf.leg.inner):
+                if tree_or_unknown(leaf.leg.inner):
                     continue
                 _flag_zero_hit(leaf)
 
@@ -929,7 +571,7 @@ class CoverageAggregator:
             # Any unknown anywhere in the tree suppresses the conjunction
             # blocker — we can't prove the conjunction never fires when
             # part of the predicate is un-modelled.
-            if _tree_or_unknown(group.tree):
+            if tree_or_unknown(group.tree):
                 continue
             # AND-only group (no OrOp): require >= 2 legs and all fire.
             # AND-with-nested-OR: require AND-required ancestors all
@@ -952,7 +594,7 @@ class CoverageAggregator:
                     break
 
         if conjunction_group is not None:
-            conj_leaves = _collect_legs(conjunction_group.tree)
+            conj_leaves = collect_legs(conjunction_group.tree)
             conjunction_blocker = LikelyBlocker(
                 reason="conjunction_never_true",
                 evidence=" AND ".join(leg.label for leg, _es, _io, _oi in conj_leaves),
@@ -1020,8 +662,8 @@ class CoverageAggregator:
             if not result.evaluated:
                 continue
             tree = result.group.tree
-            group_or_unknown = _tree_or_unknown(tree)
-            group_and_unknown = _tree_and_unknown(tree)
+            group_or_unknown = tree_or_unknown(tree)
+            group_and_unknown = tree_and_unknown(tree)
             group_unknown = group_or_unknown or group_and_unknown
             any_leaf_fired = any(lf.hits > 0 for lf in result.leaf_results)
             if group_unknown:
@@ -1070,7 +712,7 @@ def _aggregate(
     Postconditions:
         Returns a valid ``CoverageReport``.
     """
-    has_any_leg = any(_collect_legs(g.tree) for g in groups)
+    has_any_leg = any(collect_legs(g.tree) for g in groups)
     if not has_any_leg:
         return CoverageReport(
             coverage_category=CoverageCategory.UNKNOWN_LOW_COVERAGE,
@@ -1433,7 +1075,7 @@ class SubconditionVisitor:
                     # instead of the actionable
                     # ``INDICATOR_FILTER_TOO_RESTRICTIVE`` on the
                     # gated symbols.
-                    or_compound_gate = _leg_gate_symbols(or_compound)
+                    or_compound_gate = leg_gate_symbols(or_compound)
                     if (
                         or_compound_gate is not None
                     ):  # pragma: no cover — fully-symbol-gated nested-OR within AND rare in generated strategies
@@ -1482,7 +1124,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_legs:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_legs, effective_symbols, effective_unknown, effective_denied
                     )
                 )
@@ -1492,14 +1134,14 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_legs:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_legs, effective_symbols, effective_unknown, effective_denied
                     )
                 )
             return False
         if group_legs and not (effective_symbols is not None and not effective_symbols):
             self._groups.append(
-                _build_and_group(group_legs, effective_symbols, effective_unknown, effective_denied)
+                build_and_group(group_legs, effective_symbols, effective_unknown, effective_denied)
             )
         if not self._visit(
             body,
@@ -1631,7 +1273,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_ancestors:
                 self._groups.append(
-                    _build_and_group(
+                    build_and_group(
                         group_ancestors, ancestor_symbols, ancestor_unknown, denied_frozen
                     )
                 )
@@ -1642,7 +1284,7 @@ class SubconditionVisitor:
         ):  # pragma: no cover — budget exhaustion (>16 legs) unreachable in production
             if group_ancestors or group_or_legs:
                 self._groups.append(
-                    _build_or_group(
+                    build_or_group(
                         group_ancestors,
                         group_or_legs,
                         has_unknown_leg,
@@ -1654,7 +1296,7 @@ class SubconditionVisitor:
             return False
         if group_ancestors or group_or_legs:
             self._groups.append(
-                _build_or_group(
+                build_or_group(
                     group_ancestors,
                     group_or_legs,
                     has_unknown_leg,
@@ -1693,10 +1335,10 @@ class SubconditionVisitor:
         )
         if or_compound is not None:
             body_ancestors = ancestors + [or_compound]
-            or_compound_gate = _leg_gate_symbols(or_compound)
+            or_compound_gate = leg_gate_symbols(or_compound)
             if or_compound_gate is not None:
                 body_symbols = _intersect_symbols(ancestor_symbols, set(or_compound_gate))
-            if _tree_or_unknown(or_compound.inner):
+            if tree_or_unknown(or_compound.inner):
                 body_unknown = True
         else:  # pragma: no cover — fully-unmodellable OR ancestor descent rare
             # OR was fully un-modellable — every nested predicate is
@@ -3264,7 +2906,7 @@ def _build_compound_subcond(
     # when *every* leg carries one. The aggregator uses this for
     # propagating the OR's effective symbol scope to sibling AND
     # conjuncts at the GROUP level.
-    leg_gates = [_leg_gate_symbols(lg) for lg in inner]
+    leg_gates = [leg_gate_symbols(lg) for lg in inner]
     if leg_gates and all(g is not None for g in leg_gates):
         union: frozenset = frozenset()
         for g in leg_gates:
