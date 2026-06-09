@@ -1668,6 +1668,7 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
 @router.get("/github/reviews", response_model=list[CodeReviewRunItem])
 async def list_github_reviews(
     pr_number: int | None = Query(default=None),
+    limit: int = Query(default=500, ge=1, le=2000),
 ) -> list[CodeReviewRunItem]:
     """List persisted code-review runs for the configured repository.
 
@@ -1679,10 +1680,11 @@ async def list_github_reviews(
     Preconditions:
         - GitHub integration is enabled with a configured owner/repo.
         - ``CODING_TEAM_SERVICE_URL`` points at a reachable coding-team service.
+        - ``limit`` is in ``[1, 2000]`` (validated by FastAPI).
     Postconditions:
-        - Returns the review runs (optionally filtered to ``pr_number``),
-          newest-first. Every failure path raises ``HTTPException``; no ``httpx``
-          error escapes unhandled.
+        - Returns up to ``limit`` review runs (optionally filtered to
+          ``pr_number``), newest-first. Every failure path raises
+          ``HTTPException``; no ``httpx`` error escapes unhandled.
     """
     _cfg, _token, owner, repo = _resolve_github_target()
 
@@ -1690,7 +1692,7 @@ async def list_github_reviews(
     if not coding_team_url:
         raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
 
-    params: dict[str, Any] = {"owner": owner, "repo": repo}
+    params: dict[str, Any] = {"owner": owner, "repo": repo, "limit": limit}
     if pr_number is not None:
         params["pr_number"] = pr_number
 

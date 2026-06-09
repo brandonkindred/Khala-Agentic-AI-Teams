@@ -134,6 +134,13 @@
                     </button>
                   </div>
 
+                  @if (reviewErrorFor(pull.number); as reviewError) {
+                    <div class="cr-banner cr-banner--error">
+                      <mat-icon>error_outline</mat-icon>
+                      <span>{{ reviewError }}</span>
+                    </div>
+                  }
+
                   <!-- All review runs for this PR -->
                   @if (hasReviews(pull.number)) {
                     <table class="cr-reviews-table">

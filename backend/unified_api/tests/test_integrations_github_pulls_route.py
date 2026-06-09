@@ -365,12 +365,13 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
     data = resp.json()
     assert data[0]["job_id"] == "j1"
     assert data[0]["review_summary"]["event"] == "COMMENT"
-    # owner/repo are injected from config; pr_number is forwarded.
+    # owner/repo are injected from config; pr_number + default limit are forwarded.
     url, params = fake.calls[0]
     assert url == "http://coding:8103/reviews"
     assert params["owner"] == "acme"
     assert params["repo"] == "widget"
     assert params["pr_number"] == 7
+    assert params["limit"] == 500
 
 
 @patch(f"{_M}.get_credential", return_value="ghp")
@@ -383,6 +384,27 @@ def test_reviews_omits_pr_number_when_absent(mock_cfg, mock_cred, monkeypatch):
     assert resp.status_code == 200
     _url, params = fake.calls[0]
     assert "pr_number" not in params
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_forwards_limit(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS, params={"limit": 10})
+    assert resp.status_code == 200
+    _url, params = fake.calls[0]
+    assert params["limit"] == 10
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    # Validated by FastAPI before any upstream call.
+    assert client.get(_REVIEWS, params={"limit": 0}).status_code == 422
+    assert client.get(_REVIEWS, params={"limit": 5000}).status_code == 422
 
 
 @patch(f"{_M}.get_credential", return_value="ghp")

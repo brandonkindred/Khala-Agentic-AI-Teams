@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
+import { ChangeDetectorRef, Component, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
@@ -62,6 +62,7 @@ export interface PrReviewRecord {
 export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
+  private readonly cdr = inject(ChangeDetectorRef);
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -75,7 +76,11 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   pulls: GitHubPullRequestItem[] = [];
   loadingPulls = false;
   pullsLoaded = false;
+  // Top-level banner: errors loading the PR list only.
   pullError: string | null = null;
+  // Per-PR "Start Review" failures, shown inside that PR's expanded panel so a
+  // start error and a list-load error never clobber each other.
+  reviewErrors = new Map<number, string>();
 
   // Client-side pagination over the fully-fetched PR array
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
@@ -222,7 +227,7 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   startReview(pull: GitHubPullRequestItem): void {
     if (this.starting.has(pull.number)) return;
     this.starting.add(pull.number);
-    this.pullError = null;
+    this.reviewErrors.delete(pull.number);
     this.integrationsApi
       .runGitHubReviewPr({ pr_number: pull.number })
       .pipe(takeUntil(this.destroy$))
@@ -243,9 +248,17 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         },
         error: (err: { error?: { detail?: string }; message?: string }) => {
           this.starting.delete(pull.number);
-          this.pullError = err?.error?.detail || err?.message || 'Failed to start review.';
+          this.reviewErrors.set(
+            pull.number,
+            err?.error?.detail || err?.message || 'Failed to start review.',
+          );
         },
       });
+  }
+
+  /** The "Start Review" error for a PR, if its last attempt failed. */
+  reviewErrorFor(prNumber: number): string | null {
+    return this.reviewErrors.get(prNumber) ?? null;
   }
 
   private startPolling(record: PrReviewRecord): void {
@@ -254,7 +267,8 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       this.api,
       record.jobId,
       (status: CodingTeamJobStatus) => {
-        // Mutate the record in place so the row badge + table re-render live.
+        // Mutate the record in place; markForCheck() makes the live badge/table
+        // refresh independent of the change-detection strategy (safe under OnPush).
         record.status = status.status;
         record.statusText = status.status_text;
         record.reviewSummary = status.review_summary ?? record.reviewSummary;
@@ -263,10 +277,12 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
         if (isCodingTeamTerminalStatus(status.status)) {
           this.pollers.delete(record.jobId);
         }
+        this.cdr.markForCheck();
       },
       () => {
         record.error = 'Lost connection to the coding team — status polling failed.';
         this.pollers.delete(record.jobId);
+        this.cdr.markForCheck();
       },
     );
     this.pollers.set(record.jobId, sub);

@@ -251,13 +251,15 @@ describe('CodeReviewPanelComponent', () => {
     expect(integrationsSpy.runGitHubReviewPr).not.toHaveBeenCalled();
   });
 
-  it('surfaces an error when starting the review fails', async () => {
+  it('surfaces a start-review error per PR without touching the list-load banner', async () => {
     integrationsSpy.runGitHubReviewPr.mockReturnValue(
       throwError(() => ({ error: { detail: 'no such PR' } })),
     );
     await setup();
     component.startReview(component.pulls[0]);
-    expect(component.pullError).toBe('no such PR');
+    expect(component.reviewErrorFor(1)).toBe('no such PR');
+    expect(component.reviewErrorFor(2)).toBeNull();
+    expect(component.pullError).toBeNull(); // list-load banner untouched
     expect(component.starting.has(1)).toBe(false);
   });
 
@@ -393,5 +395,42 @@ describe('CodeReviewPanelComponent', () => {
     component.togglePull(component.pulls[0]);
     fixture.detectChanges();
     expect(el.querySelector('.cr-pull-detail')).toBeNull();
+  });
+
+  it('updates the rendered row badge + table as a live poll completes', async () => {
+    await setup();
+    apiSpy.getJobStatus.mockReturnValue(
+      of({
+        job_id: 'j1',
+        status: 'completed',
+        review_summary: { total_issues: 2, inline_comments: 1, body_findings: 1, event: 'REQUEST_CHANGES' },
+      }),
+    );
+    const el: HTMLElement = fixture.nativeElement;
+
+    component.startReview(component.pulls[0]);
+    component.togglePull(component.pulls[0]);
+    fixture.detectChanges();
+    // Before the first poll the row badge shows the initial (pending) status.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('pending');
+
+    vi.advanceTimersByTime(5000); // one poll tick -> completed
+    fixture.detectChanges();
+    // The row badge now reflects the terminal outcome and the table row updated.
+    expect(el.querySelector('.cr-row-badge')?.textContent).toContain('REQUEST_CHANGES');
+    const statusCell = el.querySelector('.cr-reviews-table tbody tr td');
+    expect(statusCell?.textContent).toContain('completed');
+  });
+
+  it('renders the per-PR start-review error inside the expanded detail', async () => {
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      throwError(() => ({ error: { detail: 'no such PR' } })),
+    );
+    await setup();
+    component.togglePull(component.pulls[0]);
+    component.startReview(component.pulls[0]);
+    fixture.detectChanges();
+    const detail = fixture.nativeElement.querySelector('.cr-pull-detail');
+    expect(detail?.textContent).toContain('no such PR');
   });
 });
