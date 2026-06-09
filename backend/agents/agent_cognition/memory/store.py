@@ -447,10 +447,15 @@ def fetch_summaries_updated_after(
     params.append(limit)
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(sql, params)
-        return [
-            RecordedSummary(PeriodSummary.model_validate(row), row["updated_at"])
-            for row in cur.fetchall()
-        ]
+        rows = cur.fetchall()
+    summaries: list[RecordedSummary] = []
+    for row in rows:
+        # ``updated_at`` is the keyset cursor, not a PeriodSummary field — pop it
+        # before validation so the read never depends on the model tolerating an
+        # extra key (defensive if PeriodSummary ever becomes strict / extra='forbid').
+        updated_at = row.pop("updated_at")
+        summaries.append(RecordedSummary(PeriodSummary.model_validate(row), updated_at))
+    return summaries
 
 
 @timed_query(store=_STORE, op="upsert_summary")

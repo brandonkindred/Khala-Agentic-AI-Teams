@@ -406,6 +406,32 @@ def test_upsert_summary_older_snapshot_is_skipped() -> None:
     assert row.version == 2  # skipped update never reached the GREATEST bump
 
 
+def test_upsert_summary_updated_at_advances_only_on_accepted_update() -> None:
+    # updated_at is the knowledge-graph keyset cursor: an accepted update must
+    # advance it (so a recompute is re-ingested), a superseded (staler
+    # computed_at) update must leave it untouched (so a no-op is not re-ingested).
+    def _updated_at() -> datetime:
+        rows = store.fetch_summaries_updated_after(
+            "a", after_updated_at=None, after_id=None, limit=50
+        )
+        assert len(rows) == 1
+        return rows[0].updated_at
+
+    _upsert("a", _summary("a", window=_DAY, version=1, summary="v1"), computed_at=_PRECOMPUTED_AT)
+    first = _updated_at()
+
+    # Accepted update (fresher computed_at) advances updated_at.
+    _upsert("a", _summary("a", window=_DAY, version=2, summary="v2"), computed_at=_FOLDED_AT)
+    advanced = _updated_at()
+    assert advanced > first
+
+    # Superseded update (staler computed_at) is skipped wholesale → updated_at frozen.
+    _upsert(
+        "a", _summary("a", window=_DAY, version=99, summary="stale"), computed_at=_PRECOMPUTED_AT
+    )
+    assert _updated_at() == advanced
+
+
 # ---------------------------------------------------------------------------
 # fetch_summaries_updated_after — the knowledge-graph keyset drain. Keysets on
 # (updated_at, id) so a recomputed (version-advanced) summary re-sorts after the
