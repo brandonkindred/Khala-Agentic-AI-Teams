@@ -380,3 +380,50 @@ def test_tree_effective_symbols_union_and_universal() -> None:
     assert tree_effective_symbols(OrOp(legs=(g_aapl, Leg("c", _mask("c", True))))) is None
     # No symbol info at all → None.
     assert tree_effective_symbols(AndOp(legs=(Leg("d", _mask("d", True)),))) is None
+
+
+def test_build_or_group_ancestor_unknown_sets_and_flag() -> None:
+    # `if self.custom_ok(bar) and (a or b):` — an un-modellable AND-required
+    # ancestor sets AndOp.unknown so the aggregator won't claim coverage from
+    # the recognised legs alone.
+    anc = Leg("custom_ok", _mask("custom_ok", True))
+    alt = Leg("close > 100", _mask("close > 100", True))
+    group = build_or_group(
+        ancestor_legs=[anc],
+        or_alt_legs=[alt],
+        or_unknown=False,
+        effective_symbols=None,
+        ancestor_unknown=True,
+        denied_symbols=None,
+    )
+    # With ancestors present the root is an AndOp carrying the ancestor-unknown flag.
+    assert isinstance(group.tree, AndOp)
+    assert group.tree.unknown is True
+    assert tree_and_unknown(group.tree) is True
+    # The OrOp alternative is the last leg and is unaffected by ancestor_unknown.
+    assert isinstance(group.tree.legs[-1], OrOp)
+    assert group.tree.legs[-1].unknown is False
+
+
+def test_collect_legs_seeded_accumulated_syms_intersects() -> None:
+    # A caller-supplied symbol seed is intersected with each enclosing SymbolGate.
+    tree = SymbolGate(frozenset({"AAPL", "MSFT"}), Leg("x", _mask("x", True)))
+    legs = collect_legs(tree, frozenset({"AAPL", "GOOG"}))
+    assert len(legs) == 1
+    _leg, syms, _in_or, _or_id = legs[0]
+    assert syms == frozenset({"AAPL"})  # seed ∩ gate == {AAPL}
+
+
+def test_eval_tree_maskleaf_evaluator_exception_returns_all_false(caplog) -> None:
+    # A leaf whose evaluator raises must fail closed to all-False (and log), never
+    # propagate — a broken subcondition can't crash the whole probe.
+    def boom(_df: pd.DataFrame) -> pd.Series:
+        raise ValueError("evaluator blew up")
+
+    leaf = MaskLeaf(label="boom", evaluator=boom)
+    df = _df()
+    with caplog.at_level("DEBUG"):
+        result = eval_tree(leaf, df, "AAPL")
+    assert result.tolist() == [False, False, False]
+    assert result.dtype == bool
+    assert any("boom" in rec.getMessage() for rec in caplog.records)

@@ -251,6 +251,13 @@ def tree_effective_symbols(node: BarPredicate) -> Optional[frozenset]:
     universal leg's perspective). OR combinator: a single universal
     alternative makes the disjunction universal.
 
+    Edge case: when every leg is symbol-gated but the union of their
+    gates is empty (only reachable if all gates are empty frozensets,
+    which the extractor collapses and the group is then dropped before
+    emission), this returns ``None`` — not an empty ``frozenset``.
+    Callers never observe it because empty-intersection groups are
+    pruned upstream.
+
     This function powers warmup sizing in :func:`_union_target_symbols`
     and group-level symbol resolution.
     """
@@ -307,7 +314,7 @@ def eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
     if isinstance(node, MaskLeaf):
         try:
             series = node.evaluator(df)
-        except Exception as exc:  # noqa: BLE001  # pragma: no cover — defensive
+        except Exception as exc:  # noqa: BLE001
             logger.debug("subcondition %r failed on %s: %s", node.label, symbol, exc)
             return pd.Series(False, index=df.index, dtype=bool)
         return pd.Series(series, index=df.index).fillna(False).astype(bool)
