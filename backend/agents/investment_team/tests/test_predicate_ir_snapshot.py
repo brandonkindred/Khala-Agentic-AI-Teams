@@ -382,6 +382,14 @@ def test_tree_effective_symbols_union_and_universal() -> None:
     assert tree_effective_symbols(AndOp(legs=(Leg("d", _mask("d", True)),))) is None
 
 
+def test_tree_effective_symbols_empty_gates_returns_none() -> None:
+    # All legs gated but the union is empty (every gate empty) → None, not an
+    # empty frozenset. Unreachable in practice (such groups are pruned upstream),
+    # but the documented edge-case contract is locked here directly.
+    tree = AndOp(legs=(SymbolGate(frozenset(), Leg("x", _mask("x", True))),))
+    assert tree_effective_symbols(tree) is None
+
+
 def test_build_or_group_ancestor_unknown_sets_and_flag() -> None:
     # `if self.custom_ok(bar) and (a or b):` — an un-modellable AND-required
     # ancestor sets AndOp.unknown so the aggregator won't claim coverage from

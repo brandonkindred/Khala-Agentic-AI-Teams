@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable, List, Optional, Tuple, Union
+from typing import Callable, List, Optional, Set, Tuple, Union
 
 import pandas as pd
 
@@ -202,6 +202,10 @@ def collect_legs(
     blocker). Stops at each :class:`Leg` — does *not* descend into
     ``Leg.inner``.
     """
+    # next_or_id is a single-element mutable cell (list) threading a monotonic
+    # OR-group counter through the recursion: ints are immutable so they can't be
+    # incremented in place across recursive calls, but mutating next_or_id[0]
+    # gives each OrOp a distinct id shared by all of its alternatives.
     return _collect_legs_walk(node, accumulated_syms, in_or=False, or_id=None, next_or_id=[0])
 
 
@@ -281,6 +285,8 @@ def find_or_groups(node: BarPredicate) -> List[Tuple[int, OrOp]]:
     it sees in a leg's metadata.
     """
     out: List[Tuple[int, OrOp]] = []
+    # Same monotonic OR-id cell as collect_legs (see the note there) so the ids
+    # assigned here line up one-to-one with the or_ids that collect_legs reports.
     _find_or_groups_walk(node, out, next_or_id=[0])
     return out
 
@@ -314,8 +320,11 @@ def eval_tree(node: BarPredicate, df: pd.DataFrame, symbol: str) -> pd.Series:
     if isinstance(node, MaskLeaf):
         try:
             series = node.evaluator(df)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("subcondition %r failed on %s: %s", node.label, symbol, exc)
+        except Exception:  # noqa: BLE001
+            # Fail closed: a single broken subcondition must not crash the probe.
+            # exc_info=True records the full traceback at DEBUG so the underlying
+            # bug (TypeError, AttributeError, …) is still diagnosable.
+            logger.debug("subcondition %r failed on %s", node.label, symbol, exc_info=True)
             return pd.Series(False, index=df.index, dtype=bool)
         return pd.Series(series, index=df.index).fillna(False).astype(bool)
     if isinstance(node, Static):
@@ -357,7 +366,7 @@ def leg_gate_symbols(leg: Leg) -> Optional[frozenset]:
 
 def build_and_group(
     legs: List[Leg],
-    effective_symbols: Optional[set],
+    effective_symbols: Optional[Set[str]],
     effective_unknown: bool,
     denied_symbols: Optional[frozenset],
 ) -> PredicateGroup:
@@ -379,7 +388,7 @@ def build_or_group(
     ancestor_legs: List[Leg],
     or_alt_legs: List[Leg],
     or_unknown: bool,
-    effective_symbols: Optional[set],
+    effective_symbols: Optional[Set[str]],
     ancestor_unknown: bool,
     denied_symbols: Optional[frozenset],
 ) -> PredicateGroup:
