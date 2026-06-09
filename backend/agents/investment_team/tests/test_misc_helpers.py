@@ -699,7 +699,8 @@ def test_get_strands_model_bedrock_branch(monkeypatch: pytest.MonkeyPatch) -> No
     assert isinstance(result, _StubBedrock)
     assert result.model_id == "anthropic.claude-3-haiku-20240307-v1:0"
     assert result.boto_client_config is not None
-    assert result.boto_client_config.read_timeout == 77
+    # The timeout is forwarded as a float verbatim (no int() truncation).
+    assert result.boto_client_config.read_timeout == 77.0
 
 
 def test_get_strands_model_ollama_cloud_without_key_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -830,12 +831,16 @@ def test_resolve_strands_timeout_non_positive_or_nonfinite_value_falls_back(
     assert model_factory._resolve_strands_timeout("strategy_design") == 321.0
 
 
-@pytest.mark.parametrize("bad_resolved", [0.0, -1.0, float("inf"), float("nan")])
+@pytest.mark.parametrize(
+    "bad_resolved",
+    [0.0, -1.0, float("inf"), float("nan"), "not-a-number", None, True],
+)
 def test_resolve_strands_timeout_guards_resolve_timeout_postcondition(
-    monkeypatch: pytest.MonkeyPatch, bad_resolved: float
+    monkeypatch: pytest.MonkeyPatch, bad_resolved: object
 ) -> None:
-    """A non-positive/non-finite ``resolve_timeout`` result falls back to the
-    default, so the function's positive-finite postcondition holds unconditionally."""
+    """A non-positive, non-finite, or non-numeric ``resolve_timeout`` result
+    falls back to the default, so the function's positive-finite postcondition
+    holds unconditionally (a non-numeric return must NOT raise ``TypeError``)."""
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.delenv("STRATEGY_LAB_LLM_TIMEOUT", raising=False)

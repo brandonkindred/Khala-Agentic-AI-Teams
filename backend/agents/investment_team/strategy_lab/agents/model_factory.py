@@ -69,11 +69,23 @@ def _resolve_strands_timeout(agent_key: str) -> float:
             if parsed > 0 and math.isfinite(parsed):
                 return parsed
     resolved = resolve_timeout(agent_key)
-    if resolved > 0 and math.isfinite(resolved):
+    # ``resolve_timeout`` is typed ``-> float``, but guard defensively: a
+    # misconfigured resolver returning a non-numeric (str/None) would make
+    # ``resolved > 0`` raise ``TypeError`` and break this function's
+    # unconditional "positive, finite float" postcondition. ``bool`` is excluded
+    # because ``True``/``False`` are not meaningful timeouts (and ``bool`` is an
+    # ``int`` subclass). The ``isinstance`` check also gates ``math.isfinite``,
+    # which itself raises ``TypeError`` on a non-number.
+    if (
+        isinstance(resolved, (int, float))
+        and not isinstance(resolved, bool)
+        and math.isfinite(resolved)
+        and resolved > 0
+    ):
         return resolved
     logger.warning(
-        "resolve_timeout(%s) returned a non-positive/non-finite value %r; "
-        "falling back to the default transport timeout %.0fs.",
+        "resolve_timeout(%s) returned an invalid value %r; falling back to the "
+        "default transport timeout %.0fs.",
         agent_key,
         resolved,
         _DEFAULT_TRANSPORT_TIMEOUT,
