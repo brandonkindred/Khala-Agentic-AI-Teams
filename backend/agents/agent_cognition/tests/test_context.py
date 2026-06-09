@@ -168,25 +168,48 @@ def test_clamp01_bounds() -> None:
     assert context._clamp01(-3.0) == 0.0
     assert context._clamp01(42.0) == 1.0
     assert context._clamp01(0.5) == 0.5
+    # Non-finite must map to 0.0 (lowest), not inflate to 1.0.
+    assert context._clamp01(float("nan")) == 0.0
+    assert context._clamp01(float("inf")) == 0.0
+    assert context._clamp01(float("-inf")) == 0.0
+
+
+def test_safe_occurred_at_normalizes_and_bounds() -> None:
+    now = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
+    # A naive timestamp is read as UTC.
+    naive = datetime(2026, 5, 1, 9, 0)
+    out = context._safe_occurred_at(naive, now)
+    assert out.tzinfo is not None and out == naive.replace(tzinfo=timezone.utc)
+    # A future timestamp is clamped to now.
+    future = datetime(2999, 1, 1, tzinfo=timezone.utc)
+    assert context._safe_occurred_at(future, now) == now
+    # A past timestamp passes through unchanged.
+    past = datetime(2020, 1, 1, tzinfo=timezone.utc)
+    assert context._safe_occurred_at(past, now) == past
+
+
+def _capture_append_events(monkeypatch) -> list[MemoryEvent]:
+    """Patch context.append_events to record the events it would persist."""
+    captured: list[MemoryEvent] = []
+
+    def _fake(agent_id: str, events: list[MemoryEvent]) -> int:
+        captured.extend(events)
+        return len(events)
+
+    monkeypatch.setattr(context, "append_events", _fake)
+    return captured
 
 
 def test_persist_writeback_sanitizes_clamps_and_pins(monkeypatch) -> None:
-    captured: list[MemoryEvent] = []
-    monkeypatch.setattr(context, "append_event", lambda agent_id, ev: captured.append(ev))
-
-    wb = CognitionWriteback(
-        events=[
-            _event(
-                seq=0,
-                salience=99.0,  # out of range -> clamp to 1.0
-                data={"api_key": "shh", "nested": {"password": "p"}, "ok": "keep"},
-                agent_id="forged-other",  # must be pinned to the call's agent_id
-                run_id="forged-run",  # must be pinned to source_run_id
-            )
-        ],
-        # tool_calls must NOT be separately persisted.
-        tool_calls=[],
+    captured = _capture_append_events(monkeypatch)
+    original = _event(
+        seq=0,
+        salience=99.0,  # out of range -> clamp to 1.0
+        data={"api_key": "shh", "nested": {"password": "p"}, "ok": "keep"},
+        agent_id="forged-other",  # must be pinned to the call's agent_id
+        run_id="forged-run",  # must be pinned to source_run_id
     )
+    wb = CognitionWriteback(events=[original], tool_calls=[])  # tool_calls not persisted
 
     count = context.persist_writeback("a", "run-1", wb)
 
@@ -199,21 +222,49 @@ def test_persist_writeback_sanitizes_clamps_and_pins(monkeypatch) -> None:
     assert safe.data["api_key"] == "***"
     assert safe.data["nested"]["password"] == "***"
     assert safe.data["ok"] == "keep"
+    # id is regenerated (platform owns the PK), not the agent-supplied one.
+    assert safe.id != original.id
     # The caller's writeback is not mutated (rebuild via model_copy).
     assert wb.events[0].agent_id == "forged-other"
     assert wb.events[0].data["api_key"] == "shh"
     assert wb.events[0].salience == 99.0
+    assert wb.events[0].id == original.id
+
+
+def test_persist_writeback_bounds_content_and_clamps_future_and_nonfinite(monkeypatch) -> None:
+    captured = _capture_append_events(monkeypatch)
+    future = datetime(2999, 1, 1, tzinfo=timezone.utc)
+    wb = CognitionWriteback(
+        events=[
+            _event(seq=0, content="x" * 5000, salience=float("nan"), kind=EventKind.ERROR),
+            _event(seq=1, content="ok", salience=float("inf")),
+        ]
+    )
+    # Pin a future occurred_at on the first event to exercise the clamp.
+    wb.events[0].occurred_at = future
+
+    context.persist_writeback("a", "run-1", wb)
+
+    assert len(captured) == 2
+    long_ev, ok_ev = captured[0], captured[1]
+    # content bounded with the redactor's truncation marker.
+    assert long_ev.content.endswith("…<truncated>")
+    assert len(long_ev.content) < 5000
+    # non-finite salience -> 0.0 (lowest), not inflated to 1.0.
+    assert long_ev.salience == 0.0
+    assert ok_ev.salience == 0.0
+    # future occurred_at clamped to <= now.
+    assert long_ev.occurred_at <= datetime.now(timezone.utc)
 
 
 def test_persist_writeback_ignores_tool_calls_and_requires_ids(monkeypatch) -> None:
-    calls: list[MemoryEvent] = []
-    monkeypatch.setattr(context, "append_event", lambda agent_id, ev: calls.append(ev))
+    captured = _capture_append_events(monkeypatch)
     wb = CognitionWriteback(
         events=[_event(seq=0), _event(seq=1)],
         tool_calls=[ToolCall(tool_id="git")],
     )
     assert context.persist_writeback("a", "run-1", wb) == 2
-    assert len(calls) == 2  # tool_calls did not add rows
+    assert len(captured) == 2  # tool_calls did not add rows
     with pytest.raises(AssertionError):
         context.persist_writeback("", "run-1", wb)
     with pytest.raises(AssertionError):
@@ -257,8 +308,9 @@ def test_ensure_rollups_current_delegates(monkeypatch) -> None:
 
 
 def test_complete_run_rejects_bad_status() -> None:
-    # The status assertion fires before any DB access, so no Postgres needed.
-    with pytest.raises(AssertionError):
+    # The status check fires before any DB access, so no Postgres needed. It
+    # raises ValueError (not assert) so it survives `python -O`.
+    with pytest.raises(ValueError):
         context.complete_run("a", "run-1", status="weird", response={})
 
 
@@ -443,8 +495,44 @@ def test_replay_run_returns_none_for_in_progress_and_missing() -> None:
 
 @_PG
 def test_complete_run_without_claim_raises() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(context.RunLedgerError):
         context.complete_run("a", "ghost", status="completed", response={"x": 1})
+
+
+@_PG
+def test_complete_run_is_idempotent_and_does_not_overwrite_terminal() -> None:
+    context.claim_run("a", "run-8", "H1", _LEASE)
+    first = {"output": 1}
+    context.complete_run("a", "run-8", status="completed", response=first)
+    # A second complete with a DIFFERENT response must NOT overwrite the stored
+    # (and possibly already-replayed) terminal envelope — it is a no-op.
+    context.complete_run("a", "run-8", status="blocked", response={"output": "OVERWRITE"})
+    row = _read_run("a", "run-8")
+    assert row["status"] == "completed"
+    assert context.replay_run("a", "run-8") == first
+
+
+@_PG
+def test_complete_run_propagates_db_error_through_conn() -> None:
+    # An error raised inside the `with _conn()` body (here: a non-JSON-serializable
+    # response) propagates out via _conn's re-raise path, rather than being masked.
+    context.claim_run("a", "run-err", "H1", _LEASE)
+    with pytest.raises(Exception):
+        context.complete_run("a", "run-err", status="completed", response={"bad": object()})
+
+
+@_PG
+def test_claim_run_enforces_lease_floor() -> None:
+    # A sub-floor caller lease is bumped to the floor, so an immediate re-claim
+    # still sees a valid lease (CONFLICT) rather than reclaiming an in-flight run.
+    res = context.claim_run("a", "run-9", "H1", timedelta(milliseconds=1))
+    assert res.state is ClaimState.CLAIMED
+    again = context.claim_run("a", "run-9", "H1", timedelta(milliseconds=1))
+    assert again.state is ClaimState.CONFLICT
+    row = _read_run("a", "run-9")
+    # Lease was floored to at least _MIN_LEASE_S into the future.
+    floor = context._MIN_LEASE_S
+    assert row["lease_expires_at"] > datetime.now(timezone.utc) + timedelta(seconds=floor - 5)
 
 
 @_PG

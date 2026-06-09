@@ -104,6 +104,56 @@ def append_event(agent_id: str, event: MemoryEvent) -> None:
         )
 
 
+@timed_query(store=_STORE, op="append_events")
+def append_events(agent_id: str, events: list[MemoryEvent]) -> int:
+    """Append many episodic events in a single transaction, idempotent per event.
+
+    The batched sibling of :func:`append_event`: one connection, one
+    transaction, one ``executemany`` — so a multi-event writeback persists
+    **atomically** (all rows commit together or none do) instead of leaving a
+    torn partial write when one row fails midway.
+
+    Preconditions:
+        * ``agent_id`` is non-empty and every ``event.agent_id == agent_id``.
+        * Each ``event.id`` is unique across the batch and the table (the caller
+          owns minting ids; the ``id`` PK is not part of the ``ON CONFLICT``
+          target, so a duplicate id would abort the whole batch).
+    Postconditions:
+        * Each event is inserted, or — when its ``(agent_id, source_run_id,
+          source_seq)`` already exists — skipped, all within one transaction.
+        * Returns the number of events presented (an idempotent skip still
+          counts as presented). A no-op on an empty list.
+    """
+    assert agent_id, "append_events: agent_id must be non-empty"
+    assert all(e.agent_id == agent_id for e in events), (
+        "append_events: every event.agent_id must match agent_id"
+    )
+    if not events:
+        return 0
+    rows = [
+        (
+            e.id,
+            e.agent_id,
+            e.kind.value,
+            e.content,
+            Json(e.data),
+            e.salience,
+            e.occurred_at,
+            e.source_run_id,
+            e.source_seq,
+        )
+        for e in events
+    ]
+    with _conn() as conn, conn.cursor() as cur:
+        cur.executemany(
+            f"""INSERT INTO agent_cognition_events ({_EVENT_COLS})
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (agent_id, source_run_id, source_seq) DO NOTHING""",
+            rows,
+        )
+    return len(events)
+
+
 @timed_query(store=_STORE, op="fetch_events_for_period")
 def fetch_events_for_period(
     agent_id: str,

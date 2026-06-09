@@ -6,30 +6,16 @@ queue, and an invoke idempotency ledger) that the platform attaches to
 generated agents. See ``DESIGN.md`` / ``IMPLEMENTATION_PLAN.md`` in this
 directory for the full design and the staged delivery plan.
 
-This module re-exports the domain models and the CognitiveContext facade for
-convenience. Importing it has no side effects (the Postgres schema is registered
-explicitly from the unified API lifespan via ``register_team_schemas``, and the
-facade only opens a connection when its functions are called).
+This module re-exports the domain models only, so importing the package root
+stays cheap and dependency-light (pure pydantic — no psycopg / shared_postgres
+pulled in). The CognitiveContext facade lives in :mod:`agent_cognition.context`
+and is imported from there directly by the few callers that need it (the invoke
+proxy, the scheduler), keeping its psycopg + storage/rules import chain off the
+package-root path. Importing this module has no side effects.
 """
 
 from __future__ import annotations
 
-from agent_cognition.context import (
-    ClaimResult,
-    ClaimState,
-    CognitionBlocked,
-    PostconditionViolation,
-    PreconditionBlocked,
-    claim_run,
-    complete_run,
-    default_run_lease,
-    enforce_postcondition,
-    enforce_precondition,
-    ensure_rollups_current,
-    load_context,
-    persist_writeback,
-    replay_run,
-)
 from agent_cognition.models import (
     CognitionContext,
     CognitionWriteback,
@@ -48,7 +34,6 @@ from agent_cognition.models import (
 )
 
 __all__ = [
-    # Domain models
     "CognitionContext",
     "CognitionWriteback",
     "EventKind",
@@ -63,19 +48,4 @@ __all__ = [
     "RuleStatus",
     "Scale",
     "ToolCall",
-    # CognitiveContext facade (Step 8)
-    "ClaimResult",
-    "ClaimState",
-    "CognitionBlocked",
-    "PreconditionBlocked",
-    "PostconditionViolation",
-    "claim_run",
-    "complete_run",
-    "default_run_lease",
-    "enforce_postcondition",
-    "enforce_precondition",
-    "ensure_rollups_current",
-    "load_context",
-    "persist_writeback",
-    "replay_run",
 ]

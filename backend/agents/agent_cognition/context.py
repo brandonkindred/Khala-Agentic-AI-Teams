@@ -33,29 +33,29 @@ filtered by ``agent_id`` — the ledger never reads or writes another agent's ro
 from __future__ import annotations
 
 import logging
+import math
 from collections.abc import Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from typing import TYPE_CHECKING, Any
+from uuid import uuid4
 
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from agent_cognition.memory.store import AgentCognitionStorageUnavailable, append_event
+from agent_cognition.memory.store import AgentCognitionStorageUnavailable, append_events
 from agent_cognition.models import CognitionContext, CognitionWriteback, Rule
 from agent_cognition.redaction import sanitize_for_memory
 from agent_cognition.rules.enforcement import evaluate_postcondition, evaluate_precondition
 from agent_cognition.runtime_config import read_int_with_floor
 from shared_postgres import get_conn, is_postgres_enabled
-from shared_postgres.metrics import timed_query
 
 if TYPE_CHECKING:
     from agent_cognition.memory.rollup import RollupReport
 
 logger = logging.getLogger(__name__)
-_STORE = "agent_cognition"
 
 # Ledger statuses (mirror DESIGN §10 / the agent_cognition_runs.status column).
 _IN_PROGRESS = "in_progress"
@@ -72,6 +72,7 @@ __all__ = [
     "CognitionBlocked",
     "PreconditionBlocked",
     "PostconditionViolation",
+    "RunLedgerError",
     "default_run_lease",
     "ensure_rollups_current",
     "load_context",
@@ -82,6 +83,15 @@ __all__ = [
     "complete_run",
     "replay_run",
 ]
+
+
+class RunLedgerError(RuntimeError):
+    """A run-ledger operation found the ledger in a state its caller's contract forbids.
+
+    Distinct from :class:`~agent_cognition.memory.store.AgentCognitionStorageUnavailable`
+    (an infrastructure outage): this is a logical violation, e.g. completing a
+    run that was never claimed.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -196,16 +206,31 @@ async def load_context(agent_id: str, *, query: str = "") -> CognitionContext:
 # ---------------------------------------------------------------------------
 # Writeback persistence — append events, strip secrets, bound salience.
 # ---------------------------------------------------------------------------
-@timed_query(store=_STORE, op="persist_writeback")
 def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWriteback) -> int:
     """Persist an agent's cognition writeback events, defensively re-sanitized.
 
-    Appends each event in ``writeback.events`` to the episodic store. The
+    Appends ``writeback.events`` to the episodic store in **one transaction**
+    (atomic — see :func:`agent_cognition.memory.store.append_events`). The
     writeback rode the wire back from an untrusted sandboxed agent, so this is a
-    trust boundary: each event's ``data`` is re-run through the secret stripper,
-    its ``salience`` is clamped to ``[0, 1]``, and ``agent_id`` / ``source_run_id``
-    are pinned to the caller's authoritative values (a writeback cannot forge
-    another agent's id or scribble into a different run's idempotency key).
+    trust boundary; every field that could harm the platform is normalized
+    rather than trusted:
+
+    * ``id`` is **regenerated** (a fresh UUID) — the agent does not control the
+      episodic-event primary key. The ``ON CONFLICT`` idempotency target is the
+      ``(agent_id, source_run_id, source_seq)`` triple, so a forged or colliding
+      agent-supplied id could otherwise raise a ``UniqueViolation`` and abort
+      the whole batch; regenerating it removes that vector while keeping the
+      triple-based dedup intact (a re-persist of the same writeback gets new ids
+      but the same triples, so ``DO NOTHING`` still no-ops).
+    * ``data`` is re-run through the secret stripper and ``content`` is bounded
+      to the same size cap (an oversized content string can't bloat the row).
+    * ``salience`` is clamped to ``[0, 1]`` (non-finite → ``0.0``).
+    * ``occurred_at`` is normalized to tz-aware UTC and never allowed into the
+      future (a future timestamp would land the event in a calendar period that
+      never closes, wedging rollups).
+    * ``agent_id`` / ``source_run_id`` are pinned to the caller's authoritative
+      values (a writeback cannot forge another agent's id or scribble into a
+      different run's idempotency key).
 
     ``writeback.tool_calls`` is **not** separately persisted: the tool broker
     already emits per-call ``tool_call`` / ``outcome`` events into
@@ -216,24 +241,30 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
     Preconditions:
         * ``agent_id`` and ``source_run_id`` are non-empty.
     Postconditions:
-        * Each event is appended idempotently on ``(agent_id, source_run_id,
-          source_seq)`` (a duplicated writeback is a no-op). Events are rebuilt
-          via ``model_copy`` — the caller's ``writeback`` is never mutated.
+        * Events are appended atomically and idempotently on ``(agent_id,
+          source_run_id, source_seq)`` (a duplicated writeback is a no-op).
+          Events are rebuilt via ``model_copy`` — the caller's ``writeback`` is
+          never mutated.
         * Returns the number of events presented for append.
     """
     assert agent_id, "persist_writeback: agent_id must be non-empty"
     assert source_run_id, "persist_writeback: source_run_id must be non-empty"
-    for event in writeback.events:
-        safe = event.model_copy(
+    now = _now()
+    safe_events = [
+        event.model_copy(
             update={
+                "id": str(uuid4()),
                 "agent_id": agent_id,
                 "source_run_id": source_run_id,
+                "content": sanitize_for_memory(event.content),
                 "data": sanitize_for_memory(event.data),
                 "salience": _clamp01(event.salience),
+                "occurred_at": _safe_occurred_at(event.occurred_at, now),
             }
         )
-        append_event(agent_id, safe)
-    return len(writeback.events)
+        for event in writeback.events
+    ]
+    return append_events(agent_id, safe_events)
 
 
 # ---------------------------------------------------------------------------
@@ -320,12 +351,16 @@ def claim_run(
     assert request_hash, "claim_run: request_hash must be non-empty"
     assert lease > timedelta(0), "claim_run: lease must be a positive duration"
 
+    # Enforce the lease floor here rather than trusting the caller: a too-short
+    # lease (with the inclusive `lease_expires_at <= now` reclaim test) would let
+    # a concurrent retry reclaim a run that is still genuinely in flight.
+    effective_lease = max(lease, timedelta(seconds=_MIN_LEASE_S))
     params = {
         "agent_id": agent_id,
         "srid": source_run_id,
         "hash": request_hash,
         "now": _now(),
-        "lease": lease,
+        "lease": effective_lease,
     }
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(_CLAIM_SQL, params)
@@ -352,31 +387,63 @@ def complete_run(
 ) -> None:
     """Write the terminal ledger row for a previously claimed run.
 
+    Only an ``in_progress`` row is transitioned: the ``WHERE status =
+    'in_progress'`` guard makes completing an **already-terminal** row a
+    no-op rather than overwriting a stored (and possibly already-replayed)
+    envelope — so a retried ``complete_run`` is idempotent and cannot corrupt
+    the replay contract. (A run whose lease was reclaimed by *another* claimer
+    is back in ``in_progress``; fully fencing that loser-overwrite would need a
+    per-claim token in the ledger, which is a deliberate follow-up.)
+
     Preconditions:
         * ``agent_id`` / ``source_run_id`` are non-empty; ``status`` is
           ``"completed"`` or ``"blocked"``; a prior :func:`claim_run` returned
-          ``CLAIMED`` for this key (the ``in_progress`` row exists).
+          ``CLAIMED`` for this key.
     Postconditions:
-        * The row's ``status``/``response``/``completed_at`` are set and
-          ``lease_expires_at`` is cleared; ``request_hash`` is untouched. A
-          subsequent :func:`claim_run` with the same hash replays ``response``.
+        * When the row is ``in_progress``: its ``status``/``response``/
+          ``completed_at`` are set, ``lease_expires_at`` is cleared, and
+          ``request_hash`` is untouched. A subsequent :func:`claim_run` with the
+          same hash replays ``response``.
+        * When the row is **already terminal**: a no-op (the existing envelope is
+          preserved).
+        * Raises :class:`RunLedgerError` when no row exists (the run was never
+          claimed) — enforced with a real branch, not an ``assert`` (which would
+          vanish under ``python -O`` and silently lose the run).
     """
     assert agent_id, "complete_run: agent_id must be non-empty"
     assert source_run_id, "complete_run: source_run_id must be non-empty"
-    assert status in _TERMINAL_STATUSES, (
-        f"complete_run: status must be one of {sorted(_TERMINAL_STATUSES)}, got {status!r}"
-    )
-    with _conn() as conn, conn.cursor() as cur:
+    if status not in _TERMINAL_STATUSES:
+        raise ValueError(
+            f"complete_run: status must be one of {sorted(_TERMINAL_STATUSES)}, got {status!r}"
+        )
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """UPDATE agent_cognition_runs
                   SET status = %s, response = %s, completed_at = %s, lease_expires_at = NULL
-                WHERE agent_id = %s AND source_run_id = %s""",
-            (status, Json(dict(response)), _now(), agent_id, source_run_id),
+                WHERE agent_id = %s AND source_run_id = %s AND status = %s
+            RETURNING source_run_id""",
+            (status, Json(dict(response)), _now(), agent_id, source_run_id, _IN_PROGRESS),
         )
-        assert cur.rowcount == 1, (
+        if cur.fetchone() is not None:
+            return
+        # No in_progress row matched: the key is either already terminal (an
+        # idempotent re-complete — leave the stored envelope intact) or absent.
+        cur.execute(
+            "SELECT status FROM agent_cognition_runs WHERE agent_id = %s AND source_run_id = %s",
+            (agent_id, source_run_id),
+        )
+        existing = cur.fetchone()
+    if existing is None:
+        raise RunLedgerError(
             "complete_run: no claimed run to complete for "
             f"agent_id={agent_id!r} source_run_id={source_run_id!r}"
         )
+    logger.debug(
+        "complete_run: run %s/%s already terminal (%s); treating as idempotent no-op",
+        agent_id,
+        source_run_id,
+        existing["status"],
+    )
 
 
 def replay_run(agent_id: str, source_run_id: str) -> dict[str, Any] | None:
@@ -417,8 +484,26 @@ def default_run_lease() -> timedelta:
 
 
 def _clamp01(value: float) -> float:
-    """Clamp a salience weight to the ``[0.0, 1.0]`` the schema expects."""
+    """Clamp a salience weight to ``[0.0, 1.0]``; map non-finite values to ``0.0``.
+
+    ``max(0.0, min(1.0, nan))`` would return ``1.0`` (all NaN comparisons are
+    False), inflating a forged non-finite salience to the *maximum* — the inverse
+    of the defensive intent. So reject NaN/±inf to the lowest weight first.
+    """
+    if not math.isfinite(value):
+        return 0.0
     return max(0.0, min(1.0, value))
+
+
+def _safe_occurred_at(value: datetime, now: datetime) -> datetime:
+    """Normalize an event timestamp to tz-aware UTC and bound it to ``now``.
+
+    A naive timestamp is read as UTC; a future timestamp is clamped to ``now``
+    so an untrusted writeback can't place an event in a calendar period that
+    never closes (which would wedge the rollup engine).
+    """
+    aware = value if value.tzinfo is not None else value.replace(tzinfo=timezone.utc)
+    return min(aware, now)
 
 
 @contextmanager
