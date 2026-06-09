@@ -163,7 +163,7 @@ Pick whichever option best matches your real signal — DO NOT silently encode a
 
 - **Position size ≤ position cap.** If `sizing.fraction = 0.10` (10% per trade) but `risk_limits.max_position_pct = 5`, you have a contradiction — the sizing rule asks for 10% of capital but the risk limit caps positions at 5%. Either lower the fraction or raise the cap. Same applies to `fixed_notional`: with `initial_capital = $100k` and `risk_limits.max_position_pct = 5`, `notional_usd ≤ $5,000`.
 
-- **Per-trade $ risk = position size × stop_loss.pct.** Sanity-check this. A 10% fraction with a 5% stop risks 0.5% of equity per trade — defensible. A 25% fraction with a 10% stop risks 2.5% per trade — aggressive but consistent. A 50% fraction with a 20% stop risks 10% per trade — likely a typo. Document this number in `risk_limits` (e.g. `"max_loss_per_trade_pct": 1.5`) and confirm it falls out of your sizing math. **Only declare `max_loss_per_trade_pct` when the spec has a `stop_loss` rule** — without a stop the realised loss is unbounded, so a declared per-trade loss limit has no mechanism to honour it and the readiness gate rejects it as unenforceable. Either add a stop sized so `fraction × stop_loss.pct ≤ max_loss_per_trade_pct`, or omit the field.
+- **The deployed position size IS the per-trade loss cap.** An entered position can lose up to ~100% of the capital deployed, so the capital you commit is the most a single trade can lose. There is no separate per-trade-loss field: `max_position_pct` (and the `sizing.fraction` it caps) is the per-trade loss budget. `stop_loss.pct` is a **separate, optional** safeguard — a price move off entry, measured against the trade — that tries to limit a position's realised loss *below* a full wipeout. Do NOT compute per-trade risk as `fraction × stop`, and never treat the stop as part of sizing. (For a `$100` account with `max_position_pct = 5`, you deploy up to `$5`; an optional 20% stop on that `$5` caps the position's loss at ~`$1`, independent of the sizing decision.) Shorts without a declared stop are auto-protected at runtime with a 100%-adverse-move stop, so a short's worst case is also bounded by the deployed size — but add an explicit stop when you want a tighter bound.
 
 - **Take-profit ≥ stop in magnitude when targeting positive expectancy at <50% win rate.** A 1% take-profit paired with a 5% stop needs >83% wins to break even before costs — almost no real edge clears that bar. If your `take_profit.pct < stop_loss.pct`, your `hypothesis` must explicitly defend the high win-rate assumption.
 
@@ -171,7 +171,7 @@ Pick whichever option best matches your real signal — DO NOT silently encode a
 
 - **`max_drawdown_pct` should be reachable but not trivial.** A 50-trade strategy with 2% per-trade risk should not declare `max_drawdown_pct = 5` (one losing streak of 3 trades crosses it). Conversely, `max_drawdown_pct = 80` is not a meaningful limit. Aim for 2-3× the standard deviation of cumulative losses under your sizing.
 
-When in doubt, add an explicit `note` on the sizing or stop rule that shows the arithmetic ("5% fraction × 4% stop = 0.20% portfolio risk per trade"). The reviewer should not have to do the multiplication.
+When in doubt, add an explicit `note` on the sizing rule that states the deployed fraction and the cap ("deploy 4% per trade, within max_position_pct=5%"). Keep any `stop_loss` rationale separate — it bounds a position's loss below a full wipeout and is not part of the sizing math.
 
 ## Asset class diversity
 

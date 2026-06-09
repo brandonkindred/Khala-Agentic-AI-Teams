@@ -24,9 +24,11 @@ from investment_team.models import (
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    FixedFractionSizing,
     IndicatorRef,
     Predicate,
     SignalExitRule,
+    StopLossRule,
 )
 from investment_team.trading_service.data_stream.historical_replay import (
     HistoricalReplayStream,
@@ -245,6 +247,84 @@ def test_trading_service_runs_sma_strategy_and_produces_trade() -> None:
     assert diagnostics.bars_processed == run.service_result.bars_processed
     assert diagnostics.warmup_orders_dropped == run.service_result.warmup_orders_dropped
     assert diagnostics.summary
+
+
+def _has_full_loss_short_stop(exit_rules) -> bool:
+    """Whether ``exit_rules`` carries the auto-injected 100% short-safety stop."""
+    return any(
+        isinstance(r, StopLossRule) and r.basis == "entry_price" and r.pct == 1.0
+        for r in exit_rules
+    )
+
+
+def test_uncovered_short_entry_auto_injects_full_loss_stop() -> None:
+    """A short entry with no effective stop gets a 100%-adverse-move stop injected
+    so the short's modeled worst-case loss is bounded by the deployed size (a
+    short can otherwise lose more than 100% of deployed capital)."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=[EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=0.0))],
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_rules=[],
+    )
+    assert _has_full_loss_short_stop(service._exit_rules)
+
+
+def test_short_with_effective_stop_is_not_auto_injected() -> None:
+    """A short that already declares a side-compatible stop is left untouched —
+    no redundant 100% backstop is appended."""
+    stop = StopLossRule(basis="entry_price", pct=0.05)
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=[EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=0.0))],
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_rules=[stop],
+    )
+    assert service._exit_rules == [stop]
+
+
+def test_long_only_spec_is_not_auto_injected() -> None:
+    """A long-only spec gets no short stop: a long bottoms at zero, so its loss is
+    already bounded by the deployed size."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=[EntryRule(side="long", when=Predicate(lhs="bar.close", op=">", rhs=0.0))],
+        sizing=FixedFractionSizing(fraction=0.02),
+        exit_rules=[],
+    )
+    assert service._exit_rules == []
+
+
+def test_custom_code_path_auto_injects_short_stop() -> None:
+    """The custom-code path (entry_rules=None) cannot enumerate sides at
+    construction, so the short backstop is injected defensively — it is a no-op
+    for any long the generated code opens (entry_price/1.0 floors at zero)."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=None,
+        exit_rules=[],
+    )
+    assert _has_full_loss_short_stop(service._exit_rules)
+
+
+def test_empty_entry_rules_is_not_auto_injected() -> None:
+    """An empty (not None) entry_rules list does NOT trigger injection — it is a
+    no-trade engine spec, or a strategy-code-driven spec that should mark itself
+    custom-code (which makes the mode layers pass entry_rules=None instead). Not
+    injecting keeps _exit_rules empty so the chunked-bar fast path is not
+    needlessly disabled for non-shorting engine/test specs. The 'sides unknown'
+    signal is entry_rules=None (custom-code), not an empty list."""
+    service = TradingService(
+        strategy_code=_NOOP_STRATEGY_CODE,
+        config=_config(),
+        entry_rules=[],
+        exit_rules=[],
+    )
+    assert service._exit_rules == []
 
 
 def test_trading_service_surfaces_lookahead_violation() -> None:

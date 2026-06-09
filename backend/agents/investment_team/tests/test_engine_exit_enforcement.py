@@ -141,6 +141,46 @@ _ENTRY_ONLY_STRATEGY = textwrap.dedent(
 )
 
 
+# Opens a single SHORT and never exits, so any close comes from engine
+# enforcement — here the auto-injected 100%-adverse-move short-safety stop.
+_SHORT_ENTRY_ONLY_STRATEGY = textwrap.dedent(
+    '''\
+    """Open one short, never exit. Engine enforcement is on its own."""
+    from contract import OrderSide, OrderType, Strategy
+
+
+    class ShortEntryOnly(Strategy):
+        def on_bar(self, ctx, bar):
+            if ctx.position(bar.symbol) is not None:
+                return
+            ctx.submit_order(
+                symbol=bar.symbol,
+                side=OrderSide.SHORT,
+                qty=10,
+                order_type=OrderType.MARKET,
+                reason="short_entry_only",
+            )
+    '''
+)
+
+
+def _doubling_bars(n_pre: int = 6, n_post: int = 10) -> Dict[str, List[OHLCVBar]]:
+    """Flat ~100 (short opens here), then price doubles to ~200 and holds.
+
+    A short entered near 100 is bounded by the auto-injected ``entry_price``
+    100% stop (ceiling ≈ 2× entry); once a bar's high clears ~200 the engine
+    fires it, and the post-doubling bars hold near 200 so the next-bar fill
+    realises ~100% loss rather than recovering.
+    """
+    out: List[OHLCVBar] = []
+    for i in range(n_pre):
+        out.append(_mk_bar(f"2024-01-{i + 1:02d}", 100.0))
+    for i in range(n_post):
+        day = n_pre + 1 + i
+        out.append(_mk_bar(f"2024-01-{day:02d}", 200.0))
+    return {"AAA": out}
+
+
 def _config() -> BacktestConfig:
     return BacktestConfig(
         start_date="2024-01-01",
@@ -217,6 +257,32 @@ def test_stop_loss_closes_when_price_breaks_floor() -> None:
     assert len(run.trades) >= 1
     diag = run.service_result.execution_diagnostics
     assert diag.exit_rule_firings.get("stop_loss", 0) >= 1, diag.exit_rule_firings
+
+
+def test_uncovered_short_auto_stop_closes_at_full_loss() -> None:
+    """A SHORT spec that declares no stop is auto-protected: the runtime injects a
+    100%-adverse-move stop, so when price doubles the short is force-closed by the
+    engine rather than left to lose more than 100% of the deployed capital. No
+    stop_loss rule is on the spec, so any stop_loss firing must be the injected
+    one."""
+    spec = StrategySpec(
+        strategy_id="strat-short-autostop",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="a short with no declared stop is auto-protected at 100%",
+        signal_definition="enter short once, leave the engine to close",
+        timeframe="1d",
+        entry_rules=[EntryRule(side="short", when=Predicate(lhs="bar.close", op=">", rhs=0.0))],
+        exit_rules=[],  # no stop -> engine auto-injects the 100% short-safety stop
+        requires_custom_code=True,
+        strategy_code=_SHORT_ENTRY_ONLY_STRATEGY,
+    )
+    run = run_backtest(strategy=spec, config=_config(), market_data=_doubling_bars())
+
+    assert run.service_result.error is None, run.service_result.error
+    diag = run.service_result.execution_diagnostics
+    assert diag.exit_rule_firings.get("stop_loss", 0) >= 1, diag.exit_rule_firings
+    assert len(run.trades) >= 1
 
 
 def test_take_profit_closes_when_price_clears_target() -> None:

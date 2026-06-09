@@ -96,26 +96,13 @@ def test_merge_target_annual_vol_lowering_is_tightening() -> None:
     assert loosened == []
 
 
-def test_merge_introduces_loss_tolerance_from_unset_is_tightening() -> None:
-    """Introducing a previously-unset cap (None → value) adds a constraint and
-    must be accepted, not silently dropped by the ``cmp_current is None`` guard."""
-    rl = RiskLimits()
-    assert rl.max_loss_per_trade_pct is None
-    merged, loosened, unknown = _merge_risk_limits_tighten_only(rl, {"max_loss_per_trade_pct": 5.0})
-    assert merged.max_loss_per_trade_pct == 5.0
-    assert loosened == []
-    assert unknown == []
-
-
-def test_merge_clearing_loss_tolerance_to_none_is_loosened() -> None:
-    """Clearing a set cap to None removes the constraint — a loosening."""
-    rl = RiskLimits(max_loss_per_trade_pct=5.0)
-    merged, loosened, _unknown = _merge_risk_limits_tighten_only(
-        rl, {"max_loss_per_trade_pct": None}
-    )
-    # Original kept; loosening tracked so the caller can raise.
-    assert merged.max_loss_per_trade_pct == 5.0
-    assert "max_loss_per_trade_pct" in loosened
+def test_merge_clearing_numeric_cap_to_none_is_loosened() -> None:
+    """Clearing a numeric cap to None removes the constraint — a loosening. The
+    original value is kept and the loosening is tracked so the caller can raise."""
+    rl = RiskLimits(max_position_pct=5.0)
+    merged, loosened, _unknown = _merge_risk_limits_tighten_only(rl, {"max_position_pct": None})
+    assert merged.max_position_pct == 5.0
+    assert "max_position_pct" in loosened
 
 
 def test_merge_records_unknown_for_immutable_field() -> None:

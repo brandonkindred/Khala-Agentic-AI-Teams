@@ -370,9 +370,8 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
     (possibly loosest) side-compatible stop wins — its pct bounds the modeled
     realised loss. A later stop only wins when no earlier one triggered, which
     for a monotonic move means it is tighter, so the first side-compatible stop
-    is the true worst case. Shared by the runtime loss-clamp
-    (``_cap_qty_to_loss``) and the readiness covered-side check so the two
-    cannot drift on this rule.
+    is the true worst case. ``TradingService`` uses the ``None`` result to detect
+    a side with no effective stop (the short-safety auto-stop injection).
 
     Preconditions: ``side`` is ``"long"`` or ``"short"``.
     Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
