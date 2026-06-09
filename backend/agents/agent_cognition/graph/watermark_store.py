@@ -2,7 +2,9 @@
 
 Tracks how far the :mod:`agent_cognition.graph.sync_worker` has consumed each
 agent's memory into the knowledge graph: a keyset cursor over episodic events
-(``(recorded_at, id)``) plus the last rollup summary id/version ingested. Mirrors
+(``(recorded_at, id)``) plus a keyset cursor over rollup summaries on their
+content-write time (``(updated_at, id)``), so a recomputed (version-advanced)
+summary re-sorts after the cursor and is re-ingested. Mirrors
 :mod:`agent_cognition.memory.store` — synchronous psycopg via the shared
 ``_conn`` helper, one ``@timed_query`` function per operation, agent-scoped, and a
 no-op-free contract (it raises :class:`AgentCognitionStorageUnavailable` when
@@ -35,15 +37,15 @@ class GraphWatermark:
     """Ingestion progress for one agent's knowledge graph.
 
     Two symmetric keyset cursors: ``(last_event_recorded_at, last_event_id)`` over
-    episodic events and ``(last_summary_created_at, last_summary_id)`` over rollup
-    summaries. ``None`` on a cursor pair means the worker has ingested nothing of
-    that kind yet (cold start).
+    episodic events (arrival time) and ``(last_summary_updated_at, last_summary_id)``
+    over rollup summaries (content-write time). ``None`` on a cursor pair means the
+    worker has ingested nothing of that kind yet (cold start).
     """
 
     agent_id: str
     last_event_recorded_at: datetime | None
     last_event_id: str | None
-    last_summary_created_at: datetime | None
+    last_summary_updated_at: datetime | None
     last_summary_id: str | None
     ingested_count: int
 
@@ -62,7 +64,7 @@ def get_watermark(agent_id: str) -> GraphWatermark | None:
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """SELECT agent_id, last_event_recorded_at, last_event_id,
-                      last_summary_created_at, last_summary_id, ingested_count
+                      last_summary_updated_at, last_summary_id, ingested_count
                FROM agent_cognition_graph_watermarks
                WHERE agent_id = %s""",
             (agent_id,),
@@ -74,7 +76,7 @@ def get_watermark(agent_id: str) -> GraphWatermark | None:
         agent_id=row["agent_id"],
         last_event_recorded_at=row["last_event_recorded_at"],
         last_event_id=row["last_event_id"],
-        last_summary_created_at=row["last_summary_created_at"],
+        last_summary_updated_at=row["last_summary_updated_at"],
         last_summary_id=row["last_summary_id"],
         ingested_count=row["ingested_count"],
     )
@@ -86,7 +88,7 @@ def upsert_watermark(
     *,
     last_event_recorded_at: datetime | None = None,
     last_event_id: str | None = None,
-    last_summary_created_at: datetime | None = None,
+    last_summary_updated_at: datetime | None = None,
     last_summary_id: str | None = None,
     ingested_delta: int = 0,
 ) -> None:
@@ -112,14 +114,14 @@ def upsert_watermark(
     assert (last_event_recorded_at is None) == (last_event_id is None), (
         "upsert_watermark: last_event_recorded_at and last_event_id must both be set or both None"
     )
-    assert (last_summary_created_at is None) == (last_summary_id is None), (
-        "upsert_watermark: last_summary_created_at and last_summary_id must both be set or both None"
+    assert (last_summary_updated_at is None) == (last_summary_id is None), (
+        "upsert_watermark: last_summary_updated_at and last_summary_id must both be set or both None"
     )
     with _conn() as conn, conn.cursor() as cur:
         cur.execute(
             """INSERT INTO agent_cognition_graph_watermarks
                    (agent_id, last_event_recorded_at, last_event_id,
-                    last_summary_created_at, last_summary_id, ingested_count, updated_at)
+                    last_summary_updated_at, last_summary_id, ingested_count, updated_at)
                VALUES (%s, %s, %s, %s, %s, %s, NOW())
                ON CONFLICT (agent_id) DO UPDATE SET
                    last_event_recorded_at = COALESCE(
@@ -128,9 +130,9 @@ def upsert_watermark(
                    last_event_id = COALESCE(
                        EXCLUDED.last_event_id,
                        agent_cognition_graph_watermarks.last_event_id),
-                   last_summary_created_at = COALESCE(
-                       EXCLUDED.last_summary_created_at,
-                       agent_cognition_graph_watermarks.last_summary_created_at),
+                   last_summary_updated_at = COALESCE(
+                       EXCLUDED.last_summary_updated_at,
+                       agent_cognition_graph_watermarks.last_summary_updated_at),
                    last_summary_id = COALESCE(
                        EXCLUDED.last_summary_id,
                        agent_cognition_graph_watermarks.last_summary_id),
@@ -141,7 +143,7 @@ def upsert_watermark(
                 agent_id,
                 last_event_recorded_at,
                 last_event_id,
-                last_summary_created_at,
+                last_summary_updated_at,
                 last_summary_id,
                 ingested_delta,
             ),
