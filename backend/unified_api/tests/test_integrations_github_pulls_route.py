@@ -432,24 +432,26 @@ def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
 @patch(f"{_M}.get_credential", return_value="ghp")
 @patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
 def test_reviews_propagates_upstream_error(mock_cfg, mock_cred, monkeypatch):
+    # Upstream detail is sanitized: the status code is preserved but the client
+    # gets a generic message (the real detail is only logged server-side).
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(500, json_data={"detail": "boom"}))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.get(_REVIEWS)
     assert resp.status_code == 500
-    assert resp.json()["detail"] == "boom"
+    assert resp.json()["detail"] == "Failed to retrieve review history."
 
 
 @patch(f"{_M}.get_credential", return_value="ghp")
 @patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
 def test_reviews_propagates_upstream_error_with_plain_text_body(mock_cfg, mock_cred, monkeypatch):
-    # A non-JSON (plain text) error body falls back to resp.text as the detail.
+    # A non-JSON (plain text) error body is also sanitized to the generic message.
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(500, json_raises=True, text="internal boom"))
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.get(_REVIEWS)
     assert resp.status_code == 500
-    assert resp.json()["detail"] == "internal boom"
+    assert resp.json()["detail"] == "Failed to retrieve review history."
 
 
 @patch(f"{_M}.get_credential", return_value="ghp")

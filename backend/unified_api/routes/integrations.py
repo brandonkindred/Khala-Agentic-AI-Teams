@@ -1714,11 +1714,15 @@ async def list_github_reviews(
         ) from e
 
     if resp.status_code != 200:
+        # Sanitize: the upstream body could carry internal detail (a stack trace
+        # on an unhandled 500, etc.). Log it server-side and return a generic
+        # message to the client, preserving the upstream status code.
         try:
-            detail = resp.json().get("detail", resp.text[:300])
+            upstream_detail = resp.json().get("detail", resp.text[:300])
         except Exception:
-            detail = resp.text[:300]
-        raise HTTPException(status_code=resp.status_code, detail=detail)
+            upstream_detail = resp.text[:300]
+        logger.warning("github reviews: coding team service returned %s: %s", resp.status_code, upstream_detail)
+        raise HTTPException(status_code=resp.status_code, detail="Failed to retrieve review history.")
 
     try:
         data = resp.json()

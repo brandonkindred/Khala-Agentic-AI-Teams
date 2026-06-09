@@ -325,6 +325,20 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.starting.has(1)).toBe(false);
   });
 
+  it('falls back to err.message when a start-review error has no detail', async () => {
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({ message: 'Network down' })));
+    await setup();
+    component.startReview(component.pulls[0]);
+    expect(component.reviewErrorFor(1)).toBe('Network down');
+  });
+
+  it('falls back to a default message when a start-review error has no detail or message', async () => {
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(throwError(() => ({})));
+    await setup();
+    component.startReview(component.pulls[0]);
+    expect(component.reviewErrorFor(1)).toBe('Failed to start review.');
+  });
+
   it('accumulates multiple reviews on the same PR, newest-first', async () => {
     await setup();
     integrationsSpy.runGitHubReviewPr
