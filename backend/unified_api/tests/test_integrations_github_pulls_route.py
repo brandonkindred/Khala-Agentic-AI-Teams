@@ -420,6 +420,18 @@ def test_reviews_propagates_upstream_error(mock_cfg, mock_cred, monkeypatch):
 
 @patch(f"{_M}.get_credential", return_value="ghp")
 @patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_reviews_propagates_upstream_error_with_plain_text_body(mock_cfg, mock_cred, monkeypatch):
+    # A non-JSON (plain text) error body falls back to resp.text as the detail.
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeReviewsClient(result=_FakeResp(500, json_raises=True, text="internal boom"))
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.get(_REVIEWS)
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "internal boom"
+
+
+@patch(f"{_M}.get_credential", return_value="ghp")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
 def test_reviews_502_on_malformed_success_body(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(200, json_data=None, json_raises=True))
