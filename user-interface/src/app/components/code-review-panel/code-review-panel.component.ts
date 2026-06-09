@@ -159,10 +159,17 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Re-load persisted review history from the backend and rebuild the per-PR map,
-   * resuming a live poller for any review still in a non-terminal state. The
-   * backend is the source of truth, so this reconciles in-memory records with it.
-   * Best-effort: a failure leaves the page usable without history.
+   * Reconcile the in-memory review map with the backend. The backend is the
+   * source of truth, but any review that still has a live poller is preserved as
+   * the *same* object its poller mutates — so a review started while this request
+   * was on the wire is never dropped and its poller is never killed (closing a
+   * hydrate-vs-startReview race).
+   *
+   * Note: this fetches the repository's recent reviews in one call (bounded by
+   * the backend `limit`) rather than per-PR, because the row status badges need
+   * the latest review for *every* listed PR up front; a per-PR-on-expand fetch
+   * would leave the list without badges. Best-effort: a failure leaves the page
+   * usable without history.
    */
   private hydrateReviews(): void {
     this.integrationsApi
@@ -170,22 +177,41 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
       .pipe(takeUntil(this.destroy$))
       .subscribe({
         next: (items) => {
-          this.stopAllPollers();
+          // Records that still have a live poller must survive the rebuild as the
+          // same object their poller writes to, or the UI stops updating.
+          const live = new Map<string, PrReviewRecord>();
+          for (const list of this.reviews.values()) {
+            for (const record of list) {
+              if (this.pollers.has(record.jobId)) live.set(record.jobId, record);
+            }
+          }
           const map = new Map<number, PrReviewRecord[]>();
+          const seen = new Set<string>();
           for (const item of items) {
-            const record = this.toRecord(item);
+            // Prefer the live record so its poller keeps updating the shown object.
+            const record = live.get(item.job_id) ?? this.toRecord(item);
+            seen.add(record.jobId);
             const list = map.get(record.prNumber) ?? [];
             list.push(record); // backend returns newest-first; preserve that order
+            map.set(record.prNumber, list);
+          }
+          // Carry over any still-polling review the snapshot didn't include yet
+          // (e.g. one started while this request was in flight).
+          for (const [jobId, record] of live) {
+            if (seen.has(jobId)) continue;
+            const list = map.get(record.prNumber) ?? [];
+            list.unshift(record); // newest-first
             map.set(record.prNumber, list);
           }
           this.reviews = map;
           for (const list of map.values()) {
             for (const record of list) {
-              if (!isCodingTeamTerminalStatus(record.status)) {
-                this.startPolling(record);
+              if (!isCodingTeamTerminalStatus(record.status) && !record.error) {
+                this.startPolling(record); // guarded against double-start
               }
             }
           }
+          this.cdr.markForCheck();
         },
         error: () => {
           // History is a best-effort enhancement; the PR list still works without it.

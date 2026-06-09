@@ -113,7 +113,14 @@ def update_review(
     if completed:
         assignments.append(("completed_at", _now()))
     columns = [col for col, _ in assignments]
-    assert set(columns) <= _UPDATABLE_COLUMNS, f"non-allowlisted column(s): {set(columns) - _UPDATABLE_COLUMNS}"
+    unexpected = set(columns) - _UPDATABLE_COLUMNS
+    if unexpected:
+        # Defense-in-depth: refuse to compose a query with a non-allowlisted
+        # column rather than risk an injected identifier. Cannot happen with the
+        # hardcoded columns above; using an ``if`` (not ``assert``) keeps the
+        # guard active even under ``python -O``.
+        logger.error("code_review_runs: refusing update with non-allowlisted column(s): %s", unexpected)
+        return
     set_clause = ", ".join(f"{col} = %s" for col in columns)
     params: list[Any] = [val for _, val in assignments]
     params.append(job_id)

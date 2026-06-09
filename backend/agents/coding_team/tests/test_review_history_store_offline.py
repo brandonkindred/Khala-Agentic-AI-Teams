@@ -36,3 +36,17 @@ def test_writes_swallow_db_errors_and_reads_degrade(monkeypatch) -> None:
     )
     # The read degrades to an empty list (exercises the pr_number filter + limit clamp).
     assert store.list_reviews("o", "r", 1, limit=10) == []
+
+
+def test_update_refuses_non_allowlisted_column(monkeypatch) -> None:
+    monkeypatch.setattr(store, "is_postgres_enabled", lambda: True)
+    # Shrink the allowlist so a normally-valid column is now disallowed; the guard
+    # must refuse to build the query (no get_conn call) rather than proceed.
+    monkeypatch.setattr(store, "_UPDATABLE_COLUMNS", frozenset({"status"}))
+
+    def _no_conn(*_a, **_kw):
+        raise AssertionError("get_conn must not be called when the guard trips")
+
+    monkeypatch.setattr(store, "get_conn", _no_conn)
+    # status_text is no longer allowlisted -> the guard logs and returns early.
+    store.update_review("j", status="running", status_text="x")

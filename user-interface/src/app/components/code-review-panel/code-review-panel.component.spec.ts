@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of, throwError } from 'rxjs';
+import { of, Subject, throwError } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -213,6 +213,50 @@ describe('CodeReviewPanelComponent', () => {
     await setup();
     expect(component.pullsLoaded).toBe(true);
     expect(component.reviews.size).toBe(0);
+  });
+
+  it('keeps an in-flight review that a concurrent hydrate snapshot omits', async () => {
+    await setup();
+    // A hydrate is in flight (response deferred) when the user starts a review.
+    const hydrate$ = new Subject<CodeReviewRunItem[]>();
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(hydrate$.asObservable());
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'A', status: 'running' }));
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
+    );
+
+    component.loadPulls(); // hydrate request fired, not yet resolved
+    component.startReview(component.pulls[0]); // record A + live poller A
+    expect(component.reviewsFor(1).map((r) => r.jobId)).toContain('A');
+    expect(component['pollers'].has('A')).toBe(true);
+
+    // The snapshot (taken before A was persisted) arrives without A.
+    hydrate$.next([]);
+    expect(component.reviewsFor(1).map((r) => r.jobId)).toContain('A');
+    expect(component['pollers'].has('A')).toBe(true);
+  });
+
+  it('prefers the live in-flight record over a stale hydrate snapshot copy', async () => {
+    await setup();
+    const hydrate$ = new Subject<CodeReviewRunItem[]>();
+    integrationsSpy.getGitHubReviewHistory.mockReturnValue(hydrate$.asObservable());
+    apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'A', status: 'running', status_text: 'live' }));
+    integrationsSpy.runGitHubReviewPr.mockReturnValue(
+      of({ job_id: 'A', pr_number: 1, pr_url: 'u', status: 'pending', message: '' }),
+    );
+
+    component.loadPulls();
+    component.startReview(component.pulls[0]);
+    vi.advanceTimersByTime(5000); // poll advances A to running + status_text 'live'
+    const liveRec = component.reviewsFor(1).find((r) => r.jobId === 'A')!;
+
+    // The snapshot includes A but with stale 'pending' status.
+    hydrate$.next([{ job_id: 'A', pr_number: 1, status: 'pending', created_at: '2026-01-01T00:00:00Z' }]);
+
+    const afterRec = component.reviewsFor(1).find((r) => r.jobId === 'A')!;
+    expect(afterRec).toBe(liveRec); // same object, not a fresh snapshot copy
+    expect(afterRec.statusText).toBe('live'); // live state retained
+    expect(component['pollers'].has('A')).toBe(true);
   });
 
   // -------------------------------------------------------------------------
