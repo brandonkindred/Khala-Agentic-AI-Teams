@@ -1280,12 +1280,7 @@ class OllamaLLMClient(LLMClient):
                     raise LLMRateLimitError(str(e), status_code=429, cause=e)
                 if status and 500 <= status < 600:
                     last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
-                    if transient_attempt < max_retries:
-                        wait = _exponential_retry_delay(
-                            transient_attempt, initial_backoff, backoff_max
-                        )
-                        time.sleep(wait)
-                        transient_attempt += 1
+                    if _retry_transient_step(f"server error {status}", kind="server error"):
                         continue
                     raise last_error
                 if status and 400 <= status < 500:

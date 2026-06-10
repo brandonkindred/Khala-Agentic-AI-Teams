@@ -12,6 +12,7 @@ from strands import Agent
 
 from llm_service import (
     LLMClient,
+    LLMSemanticExhaustionError,
     LLMUnreachableAfterRetriesError,
     call_llm_with_retries,
 )
@@ -602,6 +603,14 @@ class FrontendExpertAgent:
             return plan.to_markdown()
         except LLMUnreachableAfterRetriesError:
             raise
+        except LLMSemanticExhaustionError as e:
+            # Terminal for this prompt only (the LLM produced no content even
+            # after its reduced-thinking retry); planning is optional, so
+            # degrade to no-plan instead of aborting the whole workflow.
+            logger.warning(
+                "[%s] Planning semantically exhausted, proceeding without plan: %s", task.id, e
+            )
+            return ""
         except Exception as e:
             logger.warning("[%s] Planning step failed, proceeding without plan: %s", task.id, e)
             return ""
@@ -1616,12 +1625,21 @@ class FrontendExpertAgent:
                 success=False,
                 failure_reason="Review loop exhausted without merge",
             )
-        except LLMUnreachableAfterRetriesError:
+        except (LLMSemanticExhaustionError, LLMUnreachableAfterRetriesError) as e:
+            # Both are terminal LLM conditions: unreachable after the retry
+            # budget, or semantically exhausted (no content even after the
+            # reduced-thinking retry — call_llm_with_retries re-raises it
+            # without conversion). Either way the job should pause with a
+            # structured result instead of crashing the workflow caller.
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return FrontendWorkflowResult(
                 task_id=task_id,
                 success=False,
-                failure_reason=LLM_UNREACHABLE_AFTER_RETRIES,
+                failure_reason=(
+                    f"LLM semantic exhaustion: {e}"
+                    if isinstance(e, LLMSemanticExhaustionError)
+                    else LLM_UNREACHABLE_AFTER_RETRIES
+                ),
                 llm_unreachable=True,
             )
 

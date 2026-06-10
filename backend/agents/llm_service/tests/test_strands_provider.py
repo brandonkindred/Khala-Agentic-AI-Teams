@@ -41,18 +41,24 @@ class TestResolveOllamaAuthHeaders:
 
 class TestGetStrandsModel:
     def test_returns_ollama_model(self):
-        with mock.patch.dict(os.environ, {"LLM_MODEL": "test-model", "LLM_BASE_URL": "http://localhost:11434"}):
+        with mock.patch.dict(
+            os.environ, {"LLM_MODEL": "test-model", "LLM_BASE_URL": "http://localhost:11434"}
+        ):
             model = get_strands_model()
             assert isinstance(model, OllamaModel)
 
     def test_caches_by_model_and_url(self):
-        with mock.patch.dict(os.environ, {"LLM_MODEL": "test-model", "LLM_BASE_URL": "http://localhost:11434"}):
+        with mock.patch.dict(
+            os.environ, {"LLM_MODEL": "test-model", "LLM_BASE_URL": "http://localhost:11434"}
+        ):
             m1 = get_strands_model()
             m2 = get_strands_model()
             assert m1 is m2
 
     def test_different_agent_keys_with_same_model_share_cache(self):
-        with mock.patch.dict(os.environ, {"LLM_MODEL": "shared-model", "LLM_BASE_URL": "http://localhost:11434"}):
+        with mock.patch.dict(
+            os.environ, {"LLM_MODEL": "shared-model", "LLM_BASE_URL": "http://localhost:11434"}
+        ):
             m1 = get_strands_model("agent_a")
             m2 = get_strands_model("agent_b")
             assert m1 is m2
@@ -73,7 +79,11 @@ class TestGetStrandsModel:
     def test_max_tokens_from_env(self):
         with mock.patch.dict(
             os.environ,
-            {"LLM_MODEL": "test-model", "LLM_BASE_URL": "http://localhost:11434", "LLM_MAX_TOKENS": "4096"},
+            {
+                "LLM_MODEL": "test-model",
+                "LLM_BASE_URL": "http://localhost:11434",
+                "LLM_MAX_TOKENS": "4096",
+            },
         ):
             model = get_strands_model()
             assert isinstance(model, OllamaModel)

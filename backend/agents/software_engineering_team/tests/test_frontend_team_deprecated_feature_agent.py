@@ -81,9 +81,7 @@ def test_extract_affected_file_paths_caps_at_10(tmp_path: Path):
         f = tmp_path / "src" / f"comp{i}.ts"
         f.write_text("x")
         errs_lines.append(f"src/comp{i}.ts:1 - error")
-    paths = _extract_affected_file_paths_from_frontend_build_errors(
-        "\n".join(errs_lines), tmp_path
-    )
+    paths = _extract_affected_file_paths_from_frontend_build_errors("\n".join(errs_lines), tmp_path)
     assert len(paths) <= 10
 
 
@@ -337,3 +335,72 @@ def test_llm_allowed_root_paths_exception(monkeypatch):
     out = _llm_allowed_root_paths(None, ["foo.js"])
     # Returns empty set (or None depending on implementation)
     assert out == set() or out is None or isinstance(out, set)
+
+
+def _make_task() -> Task:
+    return Task(
+        id="t-sem",
+        type=TaskType.FRONTEND,
+        title="Login",
+        description="login form",
+        assignee="frontend",
+        requirements="reqs",
+    )
+
+
+def test_plan_task_degrades_on_semantic_exhaustion(monkeypatch):
+    """Planning is optional: a semantically exhausted planning call degrades to
+    no-plan instead of aborting the workflow."""
+    from llm_service import LLMSemanticExhaustionError
+
+    agent = feature_mod.FrontendExpertAgent(llm_client=MagicMock())
+
+    def exhausted(fn, **kwargs):
+        raise LLMSemanticExhaustionError("no content", attempts_used=2)
+
+    monkeypatch.setattr(feature_mod, "call_llm_with_retries", exhausted)
+    plan = agent._plan_task(
+        task=_make_task(),
+        existing_code="",
+        spec_content="spec",
+        architecture=None,
+    )
+    assert plan == ""
+
+
+def test_run_workflow_returns_structured_result_on_semantic_exhaustion(monkeypatch, tmp_path: Path):
+    """A semantic-exhaustion receipt escaping the workflow body produces the same
+    structured llm_unreachable result as LLMUnreachableAfterRetriesError —
+    call_llm_with_retries re-raises it without converting, so the workflow
+    handler must catch the receipt type explicitly."""
+    from llm_service import LLMSemanticExhaustionError
+    from software_engineering_team.shared import context_sizing, git_utils
+
+    monkeypatch.setattr(git_utils, "create_feature_branch", lambda *a, **k: (True, "ok"))
+    monkeypatch.setattr(git_utils, "checkout_branch", lambda *a, **k: None)
+
+    def exhausted(_llm):
+        raise LLMSemanticExhaustionError(
+            "no content",
+            attempts_used=2,
+            original_thinking_level="max",
+            retry_thinking_level="high",
+        )
+
+    monkeypatch.setattr(context_sizing, "compute_existing_code_chars", exhausted)
+    agent = feature_mod.FrontendExpertAgent(llm_client=MagicMock())
+    result = agent.run_workflow(
+        repo_path=tmp_path,
+        backend_dir=tmp_path,
+        task=_make_task(),
+        spec_content="spec",
+        architecture=None,
+        qa_agent=MagicMock(),
+        accessibility_agent=MagicMock(),
+        security_agent=MagicMock(),
+        code_review_agent=MagicMock(),
+        build_verifier=lambda **k: (True, "ok"),
+    )
+    assert result.success is False
+    assert result.llm_unreachable is True
+    assert "semantic exhaustion" in result.failure_reason
