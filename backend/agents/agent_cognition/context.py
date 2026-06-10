@@ -434,9 +434,12 @@ def complete_run(
           :func:`claim_run` replays ``response``.
         * When the row is already terminal, or held by a different (reclaimed)
           claim, or the caller's token doesn't match: a no-op (the stored state
-          is preserved). A terminal re-complete whose ``status``/``response``
-          **differs** from what is stored is logged at WARNING (a likely
-          double-completion bug); a matching one is logged at DEBUG.
+          is preserved). A terminal re-complete whose terminal ``status``
+          **differs** from what is stored (e.g. ``blocked`` after ``completed``)
+          is logged at WARNING (a likely double-completion bug); every other
+          unmatched case is a DEBUG no-op. (The stored ``response`` is not
+          compared — a JSONB round-trip vs the in-memory dict would false-positive
+          on benign retries.)
         * Raises :class:`RunLedgerError` when no row exists at all (the run was
           never claimed) — a real branch, not an ``assert`` (which ``python -O``
           would strip, silently losing the run).
@@ -452,7 +455,6 @@ def complete_run(
         raise ValueError(
             f"complete_run: status must be one of {sorted(_TERMINAL_STATUSES)}, got {status!r}"
         )
-    new_response = dict(response)
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
             """UPDATE agent_cognition_runs
@@ -462,7 +464,7 @@ def complete_run(
             RETURNING source_run_id""",
             (
                 status,
-                Json(new_response),
+                Json(dict(response)),
                 _now(),
                 agent_id,
                 source_run_id,
@@ -498,8 +500,10 @@ def complete_run(
             status,
         )
     else:
+        # Already terminal with the same status (benign idempotent re-complete),
+        # or in_progress under a different/reclaimed claim_token (zombie fenced).
         logger.debug(
-            "complete_run: run %s/%s not owned by this claim (state=%s); no-op",
+            "complete_run: run %s/%s already terminal or reclaimed (state=%s); no-op",
             agent_id,
             source_run_id,
             existing["status"],

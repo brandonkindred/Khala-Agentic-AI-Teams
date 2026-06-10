@@ -227,12 +227,11 @@ def test_persist_writeback_sanitizes_clamps_and_pins(monkeypatch) -> None:
     )
     wb = CognitionWriteback(events=[original], tool_calls=[])  # tool_calls not persisted
 
-    result = context.persist_writeback("a", "run-1", wb)
+    context.persist_writeback("a", "run-1", wb)
 
-    # One event reached the store; persist_writeback passes the store's count
-    # through (real inserted-count is covered by the live round-trip test).
+    # One event reached the store, sanitized (the inserted-count return value is
+    # covered by the live round-trip test, not this fake).
     assert len(captured) == 1
-    assert result == len(captured)
     safe = captured[0]
     assert safe.agent_id == "a"
     assert safe.source_run_id == "run-1"
@@ -284,9 +283,8 @@ def test_persist_writeback_ignores_tool_calls_and_requires_ids(monkeypatch) -> N
         events=[_event(seq=0), _event(seq=1)],
         tool_calls=[ToolCall(tool_id="git")],
     )
-    result = context.persist_writeback("a", "run-1", wb)
+    context.persist_writeback("a", "run-1", wb)
     assert len(captured) == 2  # tool_calls did not add rows
-    assert result == len(captured)
     with pytest.raises(AssertionError):
         context.persist_writeback("", "run-1", wb)
     with pytest.raises(AssertionError):
