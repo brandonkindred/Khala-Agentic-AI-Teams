@@ -69,6 +69,26 @@ class AgentCognitionStorageUnavailable(RuntimeError):
 # ---------------------------------------------------------------------------
 # Episodic events
 # ---------------------------------------------------------------------------
+def _event_row(event: MemoryEvent) -> tuple:
+    """Build the positional INSERT tuple for ``_EVENT_COLS`` from an event.
+
+    Single source of truth for the column→value mapping shared by
+    :func:`append_event` and :func:`append_events`, so the two write paths can
+    never drift out of sync with ``_EVENT_COLS``.
+    """
+    return (
+        event.id,
+        event.agent_id,
+        event.kind.value,
+        event.content,
+        Json(event.data),
+        event.salience,
+        event.occurred_at,
+        event.source_run_id,
+        event.source_seq,
+    )
+
+
 @timed_query(store=_STORE, op="append_event")
 def append_event(agent_id: str, event: MemoryEvent) -> None:
     """Append one episodic event, idempotent on the writeback key.
@@ -90,18 +110,47 @@ def append_event(agent_id: str, event: MemoryEvent) -> None:
             f"""INSERT INTO agent_cognition_events ({_EVENT_COLS})
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (agent_id, source_run_id, source_seq) DO NOTHING""",
-            (
-                event.id,
-                event.agent_id,
-                event.kind.value,
-                event.content,
-                Json(event.data),
-                event.salience,
-                event.occurred_at,
-                event.source_run_id,
-                event.source_seq,
-            ),
+            _event_row(event),
         )
+
+
+@timed_query(store=_STORE, op="append_events")
+def append_events(agent_id: str, events: list[MemoryEvent]) -> int:
+    """Append many episodic events in a single transaction, idempotent per event.
+
+    The batched sibling of :func:`append_event`: one connection, one
+    transaction, one ``executemany`` — so a multi-event writeback persists
+    **atomically** (all rows commit together or none do) instead of leaving a
+    torn partial write when one row fails midway.
+
+    Preconditions:
+        * ``agent_id`` is non-empty and every ``event.agent_id == agent_id``.
+        * Each ``event.id`` is unique across the batch and the table (the caller
+          owns minting ids; the ``id`` PK is not part of the ``ON CONFLICT``
+          target, so a duplicate id would abort the whole batch).
+    Postconditions:
+        * Each event is inserted, or — when its ``(agent_id, source_run_id,
+          source_seq)`` already exists — skipped, all within one transaction.
+        * Returns the number of rows **actually inserted** (``cur.rowcount``), so
+          a fully-deduped re-persist returns ``0`` and the caller can tell a real
+          append from an idempotent no-op. A no-op on an empty list.
+    """
+    assert agent_id, "append_events: agent_id must be non-empty"
+    assert all(e.agent_id == agent_id for e in events), (
+        "append_events: every event.agent_id must match agent_id"
+    )
+    if not events:
+        return 0
+    with _conn() as conn, conn.cursor() as cur:
+        cur.executemany(
+            f"""INSERT INTO agent_cognition_events ({_EVENT_COLS})
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (agent_id, source_run_id, source_seq) DO NOTHING""",
+            [_event_row(e) for e in events],
+        )
+        # rowcount after executemany is the total rows actually inserted across
+        # all param sets (conflicting rows count 0) — the honest "newly stored".
+        return cur.rowcount
 
 
 @timed_query(store=_STORE, op="fetch_events_for_period")

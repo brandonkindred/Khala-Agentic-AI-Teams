@@ -6,9 +6,12 @@ queue, and an invoke idempotency ledger) that the platform attaches to
 generated agents. See ``DESIGN.md`` / ``IMPLEMENTATION_PLAN.md`` in this
 directory for the full design and the staged delivery plan.
 
-This module re-exports the domain models for convenience; importing it has
-no side effects (the Postgres schema is registered explicitly from the
-unified API lifespan via ``register_team_schemas``).
+This module re-exports the domain models only, so importing the package root
+stays cheap and dependency-light (pure pydantic — no psycopg / shared_postgres
+pulled in). The CognitiveContext facade lives in :mod:`agent_cognition.context`
+and is imported from there directly by the few callers that need it (the invoke
+proxy, the scheduler), keeping its psycopg + storage/rules import chain off the
+package-root path. Importing this module has no side effects.
 """
 
 from __future__ import annotations
