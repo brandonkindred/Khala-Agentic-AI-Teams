@@ -1293,3 +1293,100 @@ def test_length_empty_is_semantic_exhaustion_with_finish_reason(
     assert exc_info.value.finish_reason == "length"
     assert len(captured) == 2
     assert captured[1]["reasoning_effort"] == "high"
+
+
+def test_semantic_exhaustion_error_exported_from_package() -> None:
+    """The receipt exception is part of the public llm_service namespace like its siblings."""
+    import llm_service
+    from llm_service.interface import LLMSemanticExhaustionError as canonical
+
+    assert llm_service.LLMSemanticExhaustionError is canonical
+    assert "LLMSemanticExhaustionError" in llm_service.__all__
+
+
+def test_sha256_fingerprint_is_stable_and_truncated() -> None:
+    from llm_service.util import sha256_fingerprint
+
+    fp = sha256_fingerprint("hello")
+    assert fp == sha256_fingerprint("hello")
+    assert len(fp) == 16
+    assert all(c in "0123456789abcdef" for c in fp)
+    assert len(sha256_fingerprint("hello", length=12)) == 12
+    assert sha256_fingerprint("hello", length=64) == sha256_fingerprint("hello", length=64)
+
+
+def test_complete_records_semantic_exhaustion_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """complete() records error_type=semantic_exhaustion before re-raising, matching complete_json."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        "llm_service.clients.ollama.record_llm_call", lambda **kw: recorded.append(kw)
+    )
+    cms = [
+        _stream_cm(
+            200,
+            sse_lines=['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}', "data: [DONE]"],
+        )
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.complete("q", think=False)
+    assert any(r.get("error_type") == "semantic_exhaustion" for r in recorded)
+
+
+def test_chat_records_semantic_exhaustion_telemetry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """chat() records error_type=semantic_exhaustion before re-raising, matching complete_json."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    recorded: list[dict] = []
+    monkeypatch.setattr(
+        "llm_service.clients.ollama.record_llm_call", lambda **kw: recorded.append(kw)
+    )
+    cms = [
+        _stream_cm(
+            200,
+            sse_lines=['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}', "data: [DONE]"],
+        )
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError):
+            client.chat([{"role": "user", "content": "q"}], think=False)
+    assert any(r.get("error_type") == "semantic_exhaustion" for r in recorded)
+
+
+def test_continuation_resumes_at_downgraded_thinking_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A truncation AFTER an in-call downgrade continues at the downgraded level,
+    not the original level that already failed to produce content."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    truncated_partial_sse = [
+        'data: {"choices":[{"delta":{"content":"{\\"ok\\":"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+        "data: [DONE]",
+    ]
+    continuation_ok_sse = [
+        'data: {"choices":[{"delta":{"content":" 1}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),  # downgrade max -> high
+        _stream_cm(200, sse_lines=truncated_partial_sse),  # downgraded attempt truncates
+        _stream_cm(200, sse_lines=continuation_ok_sse),  # continuation request
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+    assert captured[0]["reasoning_effort"] == "max"
+    assert captured[1]["reasoning_effort"] == "high"
+    assert captured[2]["reasoning_effort"] == "high"  # continuation inherits the downgrade

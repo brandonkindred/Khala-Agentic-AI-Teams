@@ -152,3 +152,31 @@ def test_downgrade_think(model: str, think: "bool | str", expected: "bool | str 
 def test_downgrade_think_lowest_level_returns_none_not_false() -> None:
     """The lowest registered level must yield None (no proof of change), not False."""
     assert config.downgrade_think("deepseek-v4-pro:cloud", "low") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("true", True),
+        ("yes", True),
+        ("1", True),
+        ("garbage", True),
+        ("false", False),
+        ("FALSE", False),
+        (" false ", False),
+        ("0", False),
+        ("no", False),
+        ("No", False),
+    ],
+)
+def test_env_flag_enabled(
+    monkeypatch: pytest.MonkeyPatch, raw: "str | None", expected: bool
+) -> None:
+    """Shared default-on toggle parser: off only for explicit falsy values."""
+    if raw is None:
+        monkeypatch.delenv("KHALA_TEST_FLAG", raising=False)
+    else:
+        monkeypatch.setenv("KHALA_TEST_FLAG", raw)
+    assert config.env_flag_enabled("KHALA_TEST_FLAG") is expected

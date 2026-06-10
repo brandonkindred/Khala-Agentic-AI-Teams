@@ -59,7 +59,8 @@ with reduced thinking: one level down for models registered in `KNOWN_MODEL_THIN
 (e.g. `max` → `high`), `think=False` for boolean/unregistered thinking. If the downgraded attempt
 is also empty — or thinking is already off / at the lowest level, leaving no provable change — the
 call fails hard with `LLMSemanticExhaustionError`, whose receipt carries `failure_class`,
-`attempts_used`, the original and retry thinking levels, whether any content bytes were ever seen,
+`attempts_used`, the original and retry thinking levels, whether any raw (necessarily
+whitespace-only) content bytes were ever seen,
 the `finish_reason`, and a fingerprint of the last payload (also logged at ERROR; the downgrade
 itself is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
 independent schedules before and after the downgrade. Disabling the toggle restores the legacy

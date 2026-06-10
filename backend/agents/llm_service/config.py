@@ -71,6 +71,19 @@ KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
 }
 
 
+def env_flag_enabled(env_name: str) -> bool:
+    """Shared parser for default-on boolean env toggles.
+
+    Preconditions:
+        - ``env_name`` is a non-empty environment variable name.
+    Postconditions:
+        - Returns False only for an explicit "false"/"0"/"no"
+          (case-insensitive, whitespace-tolerant); unset or any other value
+          means enabled. Never raises.
+    """
+    return (os.environ.get(env_name) or "").strip().lower() not in ("false", "0", "no")
+
+
 def thinking_enabled_by_default() -> bool:
     """Global thinking default: enabled unless LLM_ENABLE_THINKING is falsy.
 
@@ -78,11 +91,7 @@ def thinking_enabled_by_default() -> bool:
         - Returns False only for explicit "false"/"0"/"no" (case-insensitive);
           unset or any other value means enabled.
     """
-    return (os.environ.get(ENV_LLM_ENABLE_THINKING) or "").strip().lower() not in (
-        "false",
-        "0",
-        "no",
-    )
+    return env_flag_enabled(ENV_LLM_ENABLE_THINKING)
 
 
 def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | str":

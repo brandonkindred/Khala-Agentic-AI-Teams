@@ -83,8 +83,11 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
         - ``retry_thinking_level`` is the reduced thinking value used on the
           proof-of-change retry, or ``None`` when no downgrade was available
           (thinking already off / at the lowest registered level).
-        - ``content_bytes_seen`` is True iff any attempt produced at least one
-          content byte.
+        - ``content_bytes_seen`` is True iff any failing attempt produced raw
+          content bytes. Those bytes are necessarily whitespace-only: an
+          attempt with non-whitespace content succeeds and never contributes
+          to this error, so the field distinguishes "model emitted whitespace"
+          from "model emitted nothing at all".
     """
 
     failure_class = "semantic_exhaustion"
@@ -154,7 +157,15 @@ class LLMSchemaValidationError(LLMPermanentError):
 
 
 class LLMTruncatedError(LLMError):
-    """Raised when LLM response was truncated due to token limit (finish_reason=length)."""
+    """Raised when LLM response was truncated due to token limit (finish_reason=length).
+
+    Invariants:
+        - ``think_used`` is the thinking wire value of the attempt that
+          produced the truncated content (set by the client when known, e.g.
+          after an in-call thinking downgrade), or ``None`` when unknown.
+          Continuation paths use it so a downgraded call is not silently
+          resumed at the original thinking level.
+    """
 
     def __init__(
         self,
@@ -162,10 +173,12 @@ class LLMTruncatedError(LLMError):
         *,
         partial_content: str = "",
         finish_reason: str = "length",
+        think_used: "bool | str | None" = None,
     ):
         super().__init__(message)
         self.partial_content = partial_content
         self.finish_reason = finish_reason
+        self.think_used = think_used
 
 
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)
