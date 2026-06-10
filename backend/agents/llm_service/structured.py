@@ -25,7 +25,6 @@ Persona" ``LLMJsonParseError``).
 from __future__ import annotations
 
 import copy
-import hashlib
 import json
 import logging
 from typing import Any, TypeVar
@@ -33,6 +32,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel, ValidationError
 
 from .interface import LLMClient, LLMJsonParseError, LLMSchemaValidationError
+from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ _CORRECTIVE_SUFFIX = (
 
 
 def _prompt_hash(prompt: str) -> str:
-    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:12]
+    return sha256_fingerprint(prompt, length=12)
 
 
 def _build_corrective_prompt(

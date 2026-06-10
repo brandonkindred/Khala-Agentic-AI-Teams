@@ -61,6 +61,61 @@ class LLMUnreachableAfterRetriesError(LLMTemporaryError):
     """Raised when the caller exhausted retries and could not reach the LLM. Orchestrator should pause job."""
 
 
+class LLMSemanticExhaustionError(LLMTemporaryError):
+    """Raised when the model produced no assistant content and no proof-of-change retry remains.
+
+    A semantically exhausted call is one where the request transport succeeded
+    (HTTP 200) but the model returned zero content — typically because it spent
+    its whole generation on reasoning. Unlike transport faults, re-sending the
+    identical payload is very unlikely to help, so the client performs at most
+    one retry with reduced thinking and then raises this error as a terminal
+    receipt instead of looping on the transient schedule.
+
+    Subclasses ``LLMTemporaryError`` so existing pause/degrade handlers keep
+    working: at the macro level the condition is temporary (a different prompt
+    may succeed later), mirroring ``LLMUnreachableAfterRetriesError``.
+
+    Preconditions:
+        - ``attempts_used >= 1``; ``payload_fingerprint`` is a stable digest of
+          the last request payload sent. The keyword defaults exist only so
+          exception-reconstruction protocols (pickle rebuilds via
+          ``cls(*self.args)`` then restores ``__dict__``) can round-trip the
+          receipt; the client always supplies every field.
+    Postconditions / Invariants:
+        - ``failure_class`` is always ``"semantic_exhaustion"``.
+        - ``retry_thinking_level`` is the reduced thinking value used on the
+          proof-of-change retry, or ``None`` when no downgrade was available
+          (thinking already off / at the lowest registered level).
+        - ``content_bytes_seen`` is True iff any failing attempt produced raw
+          content bytes. Those bytes are necessarily whitespace-only: an
+          attempt with non-whitespace content succeeds and never contributes
+          to this error, so the field distinguishes "model emitted whitespace"
+          from "model emitted nothing at all".
+    """
+
+    failure_class = "semantic_exhaustion"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        attempts_used: int = 0,
+        original_thinking_level: "bool | str | None" = None,
+        retry_thinking_level: "bool | str | None" = None,
+        content_bytes_seen: bool = False,
+        payload_fingerprint: str = "",
+        finish_reason: str = "",
+        cause: Optional[Exception] = None,
+    ):
+        super().__init__(message, cause=cause)
+        self.attempts_used = attempts_used
+        self.original_thinking_level = original_thinking_level
+        self.retry_thinking_level = retry_thinking_level
+        self.content_bytes_seen = content_bytes_seen
+        self.payload_fingerprint = payload_fingerprint
+        self.finish_reason = finish_reason
+
+
 class LLMPermanentError(LLMError):
     """Raised for 4xx errors (except 429) or malformed responses. Do not retry."""
 
@@ -105,7 +160,15 @@ class LLMSchemaValidationError(LLMPermanentError):
 
 
 class LLMTruncatedError(LLMError):
-    """Raised when LLM response was truncated due to token limit (finish_reason=length)."""
+    """Raised when LLM response was truncated due to token limit (finish_reason=length).
+
+    Invariants:
+        - ``think_used`` is the thinking wire value of the attempt that
+          produced the truncated content (set by the client when known, e.g.
+          after an in-call thinking downgrade), or ``None`` when unknown.
+          Continuation paths use it so a downgraded call is not silently
+          resumed at the original thinking level.
+    """
 
     def __init__(
         self,
@@ -113,10 +176,12 @@ class LLMTruncatedError(LLMError):
         *,
         partial_content: str = "",
         finish_reason: str = "length",
+        think_used: "bool | str | None" = None,
     ):
         super().__init__(message)
         self.partial_content = partial_content
         self.finish_reason = finish_reason
+        self.think_used = think_used
 
 
 # Message used when Ollama 429 indicates weekly usage limit exceeded (for logging and job state)

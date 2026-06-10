@@ -37,6 +37,14 @@ JOB_STATUS_PAUSED_LLM_CONNECTIVITY = "paused_llm_connectivity"
 # Sentinel failure reason when LLM is unreachable after 3 attempts (frontend team retry + circuit breaker)
 LLM_UNREACHABLE_AFTER_RETRIES = "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
 
+# Sentinel failure reason when the LLM was reachable but produced no content even after the
+# client's reduced-thinking retry. Distinct from connectivity: resuming with the identical
+# prompt re-burns the thinking budget, so the prompt should be simplified or split first.
+LLM_SEMANTIC_EXHAUSTION = (
+    "LLM semantic exhaustion: the model returned no content for this prompt even after a "
+    "reduced-thinking retry. Simplify or split the request before resuming."
+)
+
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 
 

@@ -126,3 +126,57 @@ def test_resolve_think_env_high_selects_documented_lower_level(
 ) -> None:
     monkeypatch.setenv("LLM_THINKING_LEVEL", "high")
     assert config.resolve_think_for_model("deepseek-v4-pro:cloud", None) == "high"
+
+
+@pytest.mark.parametrize(
+    ("model", "think", "expected"),
+    [
+        # Registered-levels model: step down one level; lowest has nothing below.
+        ("deepseek-v4-pro:cloud", "max", "high"),
+        ("deepseek-v4-pro:cloud", "high", "medium"),
+        ("deepseek-v4-pro:cloud", "medium", "low"),
+        ("deepseek-v4-pro:cloud", "low", None),
+        # Boolean thinking: True -> False; False is already off.
+        ("unknown-model", True, False),
+        ("unknown-model", False, None),
+        ("deepseek-v4-pro:cloud", True, False),
+        # Unregistered level string: disabling reasoning is the only provable change.
+        ("unknown-model", "high", False),
+        ("deepseek-v4-pro:cloud", "xhigh", False),
+    ],
+)
+def test_downgrade_think(model: str, think: "bool | str", expected: "bool | str | None") -> None:
+    assert config.downgrade_think(model, think) == expected
+
+
+def test_downgrade_think_lowest_level_returns_none_not_false() -> None:
+    """The lowest registered level must yield None (no proof of change), not False."""
+    assert config.downgrade_think("deepseek-v4-pro:cloud", "low") is None
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        (None, True),
+        ("", True),
+        ("true", True),
+        ("yes", True),
+        ("1", True),
+        ("garbage", True),
+        ("false", False),
+        ("FALSE", False),
+        (" false ", False),
+        ("0", False),
+        ("no", False),
+        ("No", False),
+    ],
+)
+def test_env_flag_enabled(
+    monkeypatch: pytest.MonkeyPatch, raw: "str | None", expected: bool
+) -> None:
+    """Shared default-on toggle parser: off only for explicit falsy values."""
+    if raw is None:
+        monkeypatch.delenv("KHALA_TEST_FLAG", raising=False)
+    else:
+        monkeypatch.setenv("KHALA_TEST_FLAG", raw)
+    assert config.env_flag_enabled("KHALA_TEST_FLAG") is expected
