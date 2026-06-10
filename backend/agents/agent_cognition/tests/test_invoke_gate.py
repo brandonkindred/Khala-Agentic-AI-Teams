@@ -16,9 +16,10 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
+from pydantic import BaseModel as PydanticBaseModel
 
 from agent_cognition import invoke_gate as gate
-from agent_cognition.context import ClaimResult, ClaimState
+from agent_cognition.memory.rollup import RollupReport
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
 from agent_cognition.models import (
     CognitionContext,
@@ -30,6 +31,7 @@ from agent_cognition.models import (
     RuleSource,
     RuleStatus,
 )
+from agent_cognition.testing import FakeRunLedger
 from agent_cognition.tools.envelope import try_unwrap_request
 
 _NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -80,53 +82,16 @@ def _event(seq: int = 0, **overrides: Any) -> MemoryEvent:
     return MemoryEvent(**fields)
 
 
-class FakeLedger:
-    """In-memory stand-in for the ``agent_cognition_runs`` claim/complete pair."""
-
-    def __init__(self) -> None:
-        self.rows: dict[tuple[str, str], dict[str, Any]] = {}
-        self.claim_calls = 0
-
-    def claim_run(self, agent_id, source_run_id, request_hash, lease) -> ClaimResult:
-        self.claim_calls += 1
-        key = (agent_id, source_run_id)
-        row = self.rows.get(key)
-        if row is None:
-            token = f"tok-{self.claim_calls}"
-            self.rows[key] = {
-                "status": "in_progress",
-                "hash": request_hash,
-                "token": token,
-                "response": None,
-                "lease_valid": True,
-            }
-            return ClaimResult(ClaimState.CLAIMED, claim_token=token)
-        if row["hash"] != request_hash:
-            return ClaimResult(ClaimState.CONFLICT)
-        if row["status"] in ("completed", "blocked"):
-            return ClaimResult(ClaimState.REPLAY, response=row["response"])
-        if row["lease_valid"]:
-            return ClaimResult(ClaimState.CONFLICT)
-        row["lease_valid"] = True
-        row["token"] = f"tok-{self.claim_calls}"
-        return ClaimResult(ClaimState.CLAIMED, claim_token=row["token"])
-
-    def complete_run(self, agent_id, source_run_id, *, status, response, claim_token) -> None:
-        row = self.rows[(agent_id, source_run_id)]
-        assert row["token"] == claim_token, "complete with a stale claim token"
-        row["status"] = status
-        row["response"] = dict(response)
-
-
 @pytest.fixture()
 def seams(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """Patch every storage/context seam; return the recorders + fake ledger."""
-    ledger = FakeLedger()
+    ledger = FakeRunLedger()
     s = SimpleNamespace(
         ledger=ledger,
-        persisted=[],  # (agent_id, source_run_id, CognitionWriteback)
-        rollups=[],
+        persisted=[],  # (agent_id, event_run_id, CognitionWriteback)
+        rollups=[],  # (agent_id, max_periods)
         context=CognitionContext(rules=[], memory_digest="digest"),
+        rollup_report=RollupReport(agent_id=_AGENT),
     )
 
     def _persist(agent_id, source_run_id, writeback):
@@ -138,11 +103,16 @@ def seams(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
             raise s.context
         return s.context
 
+    def _rollups(agent_id, now, *, max_periods=None):
+        s.rollups.append((agent_id, max_periods))
+        return s.rollup_report
+
     monkeypatch.setattr(gate, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(gate, "claim_run", ledger.claim_run)
     monkeypatch.setattr(gate, "complete_run", ledger.complete_run)
+    monkeypatch.setattr(gate, "abandon_run", ledger.abandon_run)
     monkeypatch.setattr(gate, "persist_writeback", _persist)
-    monkeypatch.setattr(gate, "ensure_rollups_current", lambda a, now: s.rollups.append(a))
+    monkeypatch.setattr(gate, "ensure_rollups_current", _rollups)
     monkeypatch.setattr(gate, "load_context", _load)
     return s
 
@@ -193,10 +163,34 @@ def test_prepare_first_sight_claims_and_wraps(seams: SimpleNamespace) -> None:
     assert out.kind is gate.GateOutcomeKind.PROCEED
     prepared = out.prepared
     assert prepared.claim_token == "tok-1"
-    assert seams.rollups == [_AGENT]  # lazy catch-up ran
+    assert prepared.attempt_token == "tok-1"  # ledgered: attempt = claim
+    assert prepared.event_run_id == f"{prepared.source_run_id}#tok-1"
+    # Lazy catch-up ran under the default per-invoke period budget.
+    assert seams.rollups == [(_AGENT, gate._DEFAULT_INVOKE_ROLLUP_BUDGET)]
     unwrapped = try_unwrap_request(prepared.envelope)
     assert unwrapped.input == {"q": 1}  # caller body verbatim inside the envelope
     assert unwrapped.cognition["memory_digest"] == "digest"
+
+
+def test_prepare_rollup_budget_env_override_and_truncation_tolerated(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_COGNITION_INVOKE_ROLLUP_BUDGET", "3")
+    seams.rollup_report = RollupReport(agent_id=_AGENT, truncated=True)
+    out = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+    assert seams.rollups == [(_AGENT, 3)]
+    assert out.kind is gate.GateOutcomeKind.PROCEED  # a truncated pass never blocks
+
+
+def test_prepare_unledgered_attempts_get_distinct_event_run_ids(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Without a ledger every invoke is its own attempt — two identical calls
+    must never share an event keyspace (their events would silently dedup)."""
+    monkeypatch.setattr(gate, "is_postgres_enabled", lambda: False)
+    first = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+    second = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+    assert first.prepared.event_run_id != second.prepared.event_run_id
 
 
 def test_prepare_replays_terminal_row(seams: SimpleNamespace) -> None:
@@ -299,7 +293,7 @@ def test_prepare_postgres_off_side_effecting_is_unavailable(
 def test_prepare_tolerates_rollup_and_context_failures(
     seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    def _rollup_boom(agent_id, now):
+    def _rollup_boom(agent_id, now, *, max_periods=None):
         raise RuntimeError("rollup hiccup")
 
     monkeypatch.setattr(gate, "ensure_rollups_current", _rollup_boom)
@@ -319,11 +313,13 @@ def test_prepare_precondition_block_is_durable(seams: SimpleNamespace) -> None:
     assert out.status_code == 422
     assert out.content["detail"]["phase"] == "precondition"
 
-    # One ERROR memory event persisted…
+    # One ERROR memory event persisted, under the attempt-scoped run id…
     ((agent_id, srid, writeback),) = seams.persisted
-    assert (agent_id, srid) == (_AGENT, "k1")
+    assert agent_id == _AGENT
+    assert srid == "k1#tok-1"
     assert [e.kind for e in writeback.events] == [EventKind.ERROR]
     assert writeback.events[0].data["phase"] == "precondition"
+    assert out.reason  # structured cause carried on the outcome
 
     # …and the 4xx envelope stored as blocked, so a retry replays it verbatim.
     row = seams.ledger.rows[(_AGENT, "k1")]
@@ -361,18 +357,19 @@ def test_prepare_block_response_survives_persistence_failure(
     assert out.kind is gate.GateOutcomeKind.BLOCKED  # the 4xx is never masked
 
 
-def test_prepare_envelope_cap_applies_to_wrapped_envelope(seams: SimpleNamespace) -> None:
+def test_prepare_envelope_cap_applies_to_wrapped_envelope_and_abandons(
+    seams: SimpleNamespace,
+) -> None:
     seams.context = CognitionContext(rules=[], memory_digest="D" * 512)
     body = {"q": "x" * 256}
     # The body alone fits the cap, but body + digest does not.
     out = _run(gate.prepare_invoke(_AGENT, body, max_envelope_bytes=600))
     assert out.kind is gate.GateOutcomeKind.ENVELOPE_TOO_LARGE
     assert "envelope cap" in out.reason
-    # An oversize outcome is not terminal: the claim is left to its lease (the
-    # digest varies over time, so the rejection is not a stable property of the
-    # key). Once it expires, a retry under a generous cap re-executes.
-    srid, _ = gate.derive_source_run_id(body)
-    seams.ledger.rows[(_AGENT, srid)]["lease_valid"] = False
+    # The agent provably never ran, so the claim was abandoned — an IMMEDIATE
+    # retry under a generous cap re-executes instead of 409-ing until lease
+    # expiry.
+    assert seams.ledger.rows == {}
     out = _run(gate.prepare_invoke(_AGENT, body, max_envelope_bytes=100_000))
     assert out.kind is gate.GateOutcomeKind.PROCEED
 
@@ -576,6 +573,118 @@ def test_in_process_runner_exception_propagates_and_lease_holds(seams: SimpleNam
 def test_in_process_jsonable_output(seams: SimpleNamespace) -> None:
     fin = _run(gate.invoke_in_process(_AGENT, {"q": 1}, lambda b, c: {"at": _NOW}))
     assert fin.content["output"] == {"at": str(_NOW)}  # datetime stringified, not crashed
+
+    class Nested(PydanticBaseModel):
+        n: int
+
+    # A model nested INSIDE a plain container is also dumped, not stringified.
+    fin = _run(gate.invoke_in_process(_AGENT, {"q": 2}, lambda b, c: {"inner": Nested(n=7)}))
+    assert fin.content["output"] == {"inner": {"n": 7}}
+
+
+def test_in_process_pydantic_output_stays_structured_and_gated(seams: SimpleNamespace) -> None:
+    """A runner returning a Pydantic model must yield a structured ``output``
+    dict — NOT a stringified repr — so enforced postconditions still apply."""
+
+    class TeamResult(PydanticBaseModel):
+        ok: bool
+        detail: str = "fine"
+
+    seams.context = CognitionContext(rules=[_post_rule_requiring_ok()], memory_digest="")
+    fin = _run(gate.invoke_in_process(_AGENT, {"q": 1}, lambda b, c: TeamResult(ok=True)))
+    assert not fin.blocked
+    assert fin.content["output"] == {"ok": True, "detail": "fine"}  # dict, not a string
+
+    # And a violating model output is caught by the gate, not silently skipped.
+    seams.ledger.rows.clear()
+    seams.persisted.clear()
+    fin = _run(gate.invoke_in_process(_AGENT, {"q": 2}, lambda b, c: TeamResult(ok=False)))
+    assert fin.blocked and fin.status_code == 422
+
+
+def test_finalize_fails_closed_on_missing_or_non_object_output(seams: SimpleNamespace) -> None:
+    """An agent carrying enforced postcondition rules whose 2xx response has no
+    mapping ``output`` is BLOCKED (rules evaluate against {}), never skipped."""
+    seams.context = CognitionContext(rules=[_post_rule_requiring_ok()], memory_digest="")
+    for envelope in ({"raw": "not-json"}, {"output": "plain string"}, {"output": None}):
+        seams.ledger.rows.clear()
+        prepared = _prepared(seams, body={"q": str(envelope)}, idempotency_key=str(envelope))
+        fin = _run(gate.finalize_invoke(prepared, 200, envelope))
+        assert fin.blocked, f"envelope {envelope!r} must fail closed"
+        assert fin.block_phase == "postcondition"
+    # Without enforced postcondition rules the same envelopes pass untouched.
+    seams.context = CognitionContext(rules=[], memory_digest="")
+    seams.ledger.rows.clear()
+    prepared = _prepared(seams, idempotency_key="k-norules")
+    fin = _run(gate.finalize_invoke(prepared, 200, {"output": "plain string"}))
+    assert not fin.blocked
+
+
+def test_retry_attempt_events_do_not_collide_with_failed_attempt(
+    seams: SimpleNamespace,
+) -> None:
+    """An expired-lease re-execution persists its events under a DIFFERENT
+    attempt-scoped run id, so the retry's real side effects can never be
+    silently dropped against the failed attempt's rows by the
+    (agent_id, run_id, seq) ON CONFLICT dedup."""
+    first = _prepared(seams, idempotency_key="k1")
+    fail_envelope = {
+        "detail": {"tool_audit": [{"tool_id": "git", "ok": True}], "memory_events": []}
+    }
+    _run(gate.finalize_invoke(first, 504, fail_envelope))
+
+    seams.ledger.rows[(_AGENT, "k1")]["lease_valid"] = False  # lease expires
+    second = _prepared(seams, idempotency_key="k1")
+    assert second.event_run_id != first.event_run_id
+    _run(gate.finalize_invoke(second, 504, fail_envelope))
+
+    (a_run, b_run) = (p[1] for p in seams.persisted)
+    assert a_run != b_run  # disjoint keyspaces — same seq values cannot collide
+    assert {e.source_seq for p in seams.persisted for e in p[2].events} == {0}
+
+
+def test_finalize_blocked_outcome_carries_structured_cause(seams: SimpleNamespace) -> None:
+    seams.context = CognitionContext(rules=[_post_rule_requiring_ok()], memory_digest="")
+    prepared = _prepared(seams, idempotency_key="k1")
+    fin = _run(gate.finalize_invoke(prepared, 200, {"output": {"ok": False}}))
+    assert fin.blocked
+    assert fin.block_phase == "postcondition"
+    assert fin.block_reason  # callers read these, not the content shape
+
+
+def test_outcome_as_finalized_uses_shared_status_map(seams: SimpleNamespace) -> None:
+    """The in-process status mapping IS the exported map the HTTP route uses —
+    a drift between the two transports is structurally impossible."""
+    for kind, status in gate.GATE_ERROR_HTTP_STATUS.items():
+        fin = gate._outcome_as_finalized(gate.GateOutcome(kind=kind, reason="x"))
+        assert fin.status_code == status
+    blocked = gate._outcome_as_finalized(
+        gate.GateOutcome(kind=gate.GateOutcomeKind.BLOCKED, status_code=422, reason="r")
+    )
+    assert blocked.blocked and blocked.block_phase == "precondition" and blocked.block_reason == "r"
+
+
+def test_abandon_invoke_paths(seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unledgered: nothing to abandon.
+    monkeypatch.setattr(gate, "is_postgres_enabled", lambda: False)
+    unledgered = _prepared(seams)
+    assert _run(gate.abandon_invoke(unledgered)) is False
+    monkeypatch.setattr(gate, "is_postgres_enabled", lambda: True)
+
+    # Ledgered: the owned in-progress row is released; a second abandon (or one
+    # against a terminal/reclaimed row) is a no-op False.
+    prepared = _prepared(seams, idempotency_key="k1")
+    assert _run(gate.abandon_invoke(prepared)) is True
+    assert seams.ledger.rows == {}
+    assert _run(gate.abandon_invoke(prepared)) is False
+
+    # Storage failure: best-effort False, never raises.
+    def _boom(*a, **k):
+        raise AgentCognitionStorageUnavailable("pg down")
+
+    prepared = _prepared(seams, idempotency_key="k2")
+    monkeypatch.setattr(gate, "abandon_run", _boom)
+    assert _run(gate.abandon_invoke(prepared)) is False
 
 
 # ---------------------------------------------------------------------------

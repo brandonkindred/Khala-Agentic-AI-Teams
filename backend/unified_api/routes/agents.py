@@ -28,7 +28,13 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
-from agent_cognition.invoke_gate import GateOutcomeKind, finalize_invoke, prepare_invoke
+from agent_cognition.invoke_gate import (
+    GATE_ERROR_HTTP_STATUS,
+    GateOutcomeKind,
+    abandon_invoke,
+    finalize_invoke,
+    prepare_invoke,
+)
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
 from agent_console import (
     AgentConsoleStorageUnavailable,
@@ -133,16 +139,6 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-# Maps the gate's pre-flight outcomes onto this route's error statuses. REPLAY,
-# BLOCKED, and PROCEED are handled structurally (they carry payloads, not reasons).
-_GATE_ERROR_STATUS = {
-    GateOutcomeKind.MISSING_IDEMPOTENCY_KEY: 400,
-    GateOutcomeKind.CONFLICT: 409,
-    GateOutcomeKind.LEDGER_UNAVAILABLE: 503,
-    GateOutcomeKind.ENVELOPE_TOO_LARGE: 413,
-}
-
-
 @router.post("/{agent_id}/invoke")
 async def invoke_agent(
     agent_id: str,
@@ -228,8 +224,8 @@ async def invoke_agent(
             idempotency_key=request.headers.get("Idempotency-Key"),
             max_envelope_bytes=max_payload_bytes(),
         )
-        if outcome.kind in _GATE_ERROR_STATUS:
-            raise HTTPException(status_code=_GATE_ERROR_STATUS[outcome.kind], detail=outcome.reason)
+        if outcome.kind in GATE_ERROR_HTTP_STATUS:
+            raise HTTPException(status_code=GATE_ERROR_HTTP_STATUS[outcome.kind], detail=outcome.reason)
         if outcome.kind is GateOutcomeKind.REPLAY:
             # Terminal row replayed verbatim (covers blocked runs too) — the
             # sandbox is not invoked and no duplicate console run row is written.
@@ -258,6 +254,11 @@ async def invoke_agent(
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
             upstream = await client.post(target, json=post_body)
     except httpx.HTTPError as exc:
+        # The cognition claim (if any) is deliberately LEFT leased: a transport
+        # error does not prove the agent isn't still executing in the sandbox,
+        # and the lease is exactly what prevents a concurrent double-run. A
+        # same-key retry inside the lease window gets 409 by design; after
+        # expiry it re-executes.
         logger.exception("invoke proxy failed %s", target)
         raise HTTPException(status_code=502, detail=f"Sandbox invoke failed: {exc}") from exc
 
@@ -275,6 +276,11 @@ async def invoke_agent(
     cap = max_output_bytes() + max_writeback_bytes() + RESPONSE_ENVELOPE_OVERHEAD_BYTES
     if raw_len > cap:
         logger.warning("upstream response for %s exceeded %d bytes (got %d)", agent_id, cap, raw_len)
+        # The agent ran to completion but its response is unusable — there is
+        # nothing to gate, persist, or replay. Release the claim so an
+        # immediate retry re-executes instead of 409-ing until lease expiry.
+        if prepared is not None:
+            await abandon_invoke(prepared)
         return JSONResponse(
             status_code=502,
             content={
@@ -303,14 +309,13 @@ async def invoke_agent(
             # The model output is dropped (console row keeps only the error for
             # audit); the gate already recorded the trusted tool audit + the
             # blocked ledger envelope so a retried violation replays this 4xx.
-            detail = fin.content.get("detail", {}) if isinstance(fin.content, dict) else {}
             _persist_run(
                 agent_id=agent_id,
                 team=manifest.team,
                 saved_input_id=saved_input_id,
                 request_body=body,
                 upstream_status=fin.status_code,
-                envelope={"detail": {"error": f"{detail.get('message')}: {detail.get('reason')}"}},
+                envelope={"detail": {"error": f"Blocked by cognition {fin.block_phase}: {fin.block_reason}"}},
                 sandbox_url=handle.url,
                 boot_ms=handle.boot_ms,
             )

@@ -328,58 +328,20 @@ def cog_client(tmp_path: Path) -> TestClient:
         loader.get_registry.cache_clear()
 
 
-class _FakeLedger:
-    """In-memory stand-in for the agent_cognition_runs claim/complete pair."""
-
-    def __init__(self) -> None:
-        self.rows: dict = {}
-        self.claims = 0
-
-    def claim_run(self, agent_id, source_run_id, request_hash, lease):
-        from agent_cognition.context import ClaimResult, ClaimState
-
-        self.claims += 1
-        key = (agent_id, source_run_id)
-        row = self.rows.get(key)
-        if row is None:
-            token = f"tok-{self.claims}"
-            self.rows[key] = {
-                "status": "in_progress",
-                "hash": request_hash,
-                "token": token,
-                "response": None,
-                "lease_valid": True,
-            }
-            return ClaimResult(ClaimState.CLAIMED, claim_token=token)
-        if row["hash"] != request_hash:
-            return ClaimResult(ClaimState.CONFLICT)
-        if row["status"] in ("completed", "blocked"):
-            return ClaimResult(ClaimState.REPLAY, response=row["response"])
-        if row["lease_valid"]:
-            return ClaimResult(ClaimState.CONFLICT)
-        row["lease_valid"] = True
-        row["token"] = f"tok-{self.claims}"
-        return ClaimResult(ClaimState.CLAIMED, claim_token=row["token"])
-
-    def complete_run(self, agent_id, source_run_id, *, status, response, claim_token):
-        row = self.rows[(agent_id, source_run_id)]
-        assert row["token"] == claim_token
-        row["status"] = status
-        row["response"] = dict(response)
-
-
 @pytest.fixture()
 def gate_seams(monkeypatch: pytest.MonkeyPatch):
     """Patch every gate storage/context seam; return the recorders + fake ledger."""
     import types
 
     from agent_cognition import invoke_gate as gate_mod
+    from agent_cognition.memory.rollup import RollupReport
     from agent_cognition.models import CognitionContext
+    from agent_cognition.testing import FakeRunLedger
 
-    ledger = _FakeLedger()
+    ledger = FakeRunLedger()
     seams = types.SimpleNamespace(
         ledger=ledger,
-        persisted=[],  # (agent_id, source_run_id, CognitionWriteback)
+        persisted=[],  # (agent_id, event_run_id, CognitionWriteback)
         context=CognitionContext(rules=[], memory_digest="## Knowledge graph\n- fact"),
     )
 
@@ -393,8 +355,13 @@ def gate_seams(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(gate_mod, "is_postgres_enabled", lambda: True)
     monkeypatch.setattr(gate_mod, "claim_run", ledger.claim_run)
     monkeypatch.setattr(gate_mod, "complete_run", ledger.complete_run)
+    monkeypatch.setattr(gate_mod, "abandon_run", ledger.abandon_run)
     monkeypatch.setattr(gate_mod, "persist_writeback", _persist)
-    monkeypatch.setattr(gate_mod, "ensure_rollups_current", lambda a, now: None)
+    monkeypatch.setattr(
+        gate_mod,
+        "ensure_rollups_current",
+        lambda a, now, max_periods=None: RollupReport(agent_id=a),
+    )
     monkeypatch.setattr(gate_mod, "load_context", _load)
     return seams
 
@@ -637,7 +604,8 @@ def test_invoke_blocked_by_enforced_precondition_and_retry_replays(
     assert captured["posts"] == 0  # blocked before the sandbox round-trip
 
     ((agent_id, srid, writeback),) = gate_seams.persisted
-    assert agent_id == "blogging.cog" and srid == "k1"
+    assert agent_id == "blogging.cog"
+    assert srid.startswith("k1#")  # events are attempt-scoped under the ledger key
     assert [e.kind for e in writeback.events] == [EventKind.ERROR]
 
     retry = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
@@ -715,7 +683,7 @@ def test_invoke_success_persists_writeback_and_completes_ledger(
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers={"Idempotency-Key": "k1"})
     assert resp.status_code == 200
     ((_, srid, writeback),) = gate_seams.persisted
-    assert srid == "k1"
+    assert srid.startswith("k1#")  # events are attempt-scoped under the ledger key
     assert [e.kind for e in writeback.events] == [EventKind.OBSERVATION]  # junk dropped
     assert gate_seams.ledger.rows[("blogging.cog", "k1")]["status"] == "completed"
 
@@ -749,8 +717,33 @@ def test_invoke_warming_sandbox_returns_202_without_claiming(
     for _ in range(3):  # the UI polls; every poll must stay 202, never 409
         resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
         assert resp.status_code == 202
-    assert gate_seams.ledger.claims == 0
+    assert gate_seams.ledger.claim_calls == 0
     assert gate_seams.ledger.rows == {}
+
+
+def test_invoke_oversized_response_releases_claim_for_immediate_retry(
+    cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When the agent ran but its response blew the proxy cap (502), the claim
+    is abandoned — an immediate retry re-executes instead of 409-ing until the
+    lease expires (there is nothing to gate, persist, or replay)."""
+    from shared_agent_invoke.limits import RESPONSE_ENVELOPE_OVERHEAD_BYTES
+
+    monkeypatch.setenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", "100")
+    monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "100")
+    cap = 100 + 100 + RESPONSE_ENVELOPE_OVERHEAD_BYTES
+    big = {"output": "x" * (cap + 100)}
+
+    captured: dict = {}
+    _install_capturing_upstream(monkeypatch, captured, response_json=big)
+    headers = {"Idempotency-Key": "k1"}
+    resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
+    assert resp.status_code == 502
+    assert gate_seams.ledger.rows == {}  # claim released, not left leased
+
+    retry = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
+    assert retry.status_code == 502  # re-executed (and failed the same way), not 409
+    assert captured["posts"] == 2
 
 
 def test_invoke_storage_outage_degrades_unless_side_effecting(

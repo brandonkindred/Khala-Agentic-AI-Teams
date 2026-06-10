@@ -201,6 +201,14 @@ Character budget passed to `compact_text` for the rendered summaries + active-ru
 reflection LLM call (default `8000`). The reflection LLM uses the shared `cognition` model key, so
 `LLM_MODEL_cognition` overrides its model.
 
+### AGENT_COGNITION_INVOKE_ROLLUP_BUDGET
+Max rollup periods the invoke gate's lazy catch-up (`agent_cognition/invoke_gate.py`) may process
+inline per cognition invoke (default `8`, floor `1`; garbage falls back to the default). Each
+processed period costs one LLM summarization call, so the budget keeps a cold-start backlog (up to
+`AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS` of unsummarized periods) from running hundreds of
+sequential LLM calls on the invoke hot path. The pass is oldest-first and idempotent: repeated
+budgeted invokes — and the unbudgeted central scheduler — drain the remainder.
+
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
 `bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared_neo4j.is_neo4j_enabled()`): a

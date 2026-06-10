@@ -175,15 +175,38 @@ degrades to an unledgered invoke with a warning (a cognition outage never breaks
 invoke). Upstream failures (shim 4xx/5xx) are **not** stored as terminal — only the trusted
 tool audit is persisted and the lease is left to expire, so a retry re-executes.
 
-**Gates and persistence ordering.** Pre-flight: lazy rollup catch-up → context load →
-enforced **precondition** (a block persists an `error` memory event, stores the 422
-envelope as `blocked`, and returns it) → marker-envelope wrap → the *full* envelope is
-re-checked against `AGENT_INVOKE_MAX_PAYLOAD_BYTES` (413 — the side channel shares the
-payload budget). On return the enforced **postcondition** runs *before* any persistence: a
+**Claim release semantics.** Where the boundary *knows* the agent produced nothing the
+lease still protects, the claim is **abandoned** (`abandon_run`) so an immediate retry
+re-executes instead of 409-ing until the lease expires: an oversize wrapped envelope
+(`413` — the agent never ran) and an over-cap upstream response (`502` — the agent ran but
+the response is unusable: nothing to gate, persist, or replay). Transport errors
+(connection failures/timeouts on the proxy→sandbox hop) deliberately **hold** the lease —
+the agent may still be executing, and the lease is the guard against a concurrent
+double-run; a same-key retry inside that window gets `409` by design.
+
+**Attempt-scoped memory keys.** Episodic-event idempotency is keyed
+`(agent_id, run_id, source_seq)`, but a ledger key can legitimately execute more than once
+(expired-lease reclaim). The gate therefore persists events under
+`{source_run_id}#{attempt_token}` so a retry's *new* side-effect events can never be
+silently dropped against a previous attempt's rows, while a re-sent writeback within one
+attempt still dedups.
+
+**Gates and persistence ordering.** Pre-flight: lazy rollup catch-up (budgeted —
+`AGENT_COGNITION_INVOKE_ROLLUP_BUDGET`, default 8 periods per invoke, so a cold-start
+backlog can't run hundreds of sequential LLM summarization calls inline; the central
+scheduler and later invokes drain the remainder) → context load → enforced
+**precondition** (a block persists an `error` memory event, stores the 422 envelope as
+`blocked`, and returns it) → marker-envelope wrap → the *full* envelope is re-checked
+against `AGENT_INVOKE_MAX_PAYLOAD_BYTES` (413 — the side channel shares the payload
+budget). On return the enforced **postcondition** runs *before* any persistence: a
 violation drops the model output and the agent-authored memory everywhere (response,
 console run history, episodic store) while persisting the shim's trusted `tool_audit` plus
-a blocked-run event, and stores the 422 as `blocked`. A pass persists the envelope's
-`memory_events` (validated defensively — one malformed event is dropped with a warning,
-never failing the call) and completes the ledger row with `{status_code, content}` for
-replay. The stored envelope never carries the per-invoke `sandbox` block, so a replay
-cannot masquerade as a fresh boot.
+a blocked-run event, and stores the 422 as `blocked`. The postcondition **fails closed**
+when an agent carrying enforced postcondition rules returns a 2xx without an object
+`output` — the rules evaluate against an empty mapping (missing paths block) rather than
+being silently skipped. A pass persists the envelope's `memory_events` (validated
+defensively — one malformed event is dropped with a warning, never failing the call) and
+completes the ledger row with `{status_code, content}` for replay. The stored envelope
+never carries the per-invoke `sandbox` block, so a replay cannot masquerade as a fresh
+boot. Blocked outcomes carry structured `block_phase` / `block_reason` fields — callers
+read those, never parse the stored HTTP body.

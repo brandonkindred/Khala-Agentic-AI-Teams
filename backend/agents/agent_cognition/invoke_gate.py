@@ -39,6 +39,24 @@ Storage-outage policy: when the ledger is unreachable, a
 agent; any other cognition agent degrades to an unledgered invoke with a
 warning, matching the invoke path's never-break posture.
 
+Attempt-scoped memory keys: episodic-event idempotency is keyed on
+``(agent_id, source_run_id, source_seq)`` with ``ON CONFLICT DO NOTHING``,
+but a ledger run may legitimately execute **more than once** (an
+expired-lease reclaim re-executes under the same ``source_run_id``). To stop
+a retry's *new* side-effect events from silently colliding with — and being
+dropped against — a previous attempt's rows, the gate persists every event
+under an **attempt-scoped** run id, ``{source_run_id}#{attempt_token}``
+(:meth:`PreparedInvoke.event_run_id`). Within one attempt the triple still
+dedups a re-sent writeback; across attempts the keyspaces are disjoint.
+
+Stored-envelope shape: the ledger's purpose is to replay the exact response
+a retry would otherwise recompute, so the stored ``content`` (and a blocked
+outcome's ``content``) is deliberately the full HTTP response body —
+including the FastAPI-style ``{"detail": ...}`` framing for rule blocks.
+Transport-agnostic callers should read the structured
+``FinalizeOutcome.block_phase`` / ``block_reason`` (and
+``GateOutcome.reason``) fields instead of parsing ``content``.
+
 Design by Contract: every public function documents explicit Preconditions /
 Postconditions and asserts its preconditions. Invariant: this module never
 mints a second ``source_run_id`` for one request — prepare and finalize
@@ -52,17 +70,20 @@ import hashlib
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
 from uuid import uuid4
+
+from pydantic import BaseModel
 
 from agent_cognition.context import (
     ClaimState,
     PostconditionViolation,
     PreconditionBlocked,
     RunLedgerError,
+    abandon_run,
     claim_run,
     complete_run,
     default_run_lease,
@@ -80,12 +101,14 @@ from agent_cognition.models import (
     MemoryEvent,
     ToolCall,
 )
+from agent_cognition.runtime_config import read_int_with_floor
 from agent_cognition.tools.envelope import wrap_request
 from shared_postgres import is_postgres_enabled
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
+    "GATE_ERROR_HTTP_STATUS",
     "GateOutcome",
     "GateOutcomeKind",
     "PreparedInvoke",
@@ -93,6 +116,7 @@ __all__ = [
     "derive_source_run_id",
     "prepare_invoke",
     "finalize_invoke",
+    "abandon_invoke",
     "invoke_in_process",
 ]
 
@@ -100,6 +124,19 @@ __all__ = [
 # reflection engine should weigh; a tool-call audit row is routine.
 _BLOCK_EVENT_SALIENCE = 0.8
 _AUDIT_EVENT_SALIENCE = 0.5
+
+# Max rollup periods the lazy catch-up may process inline per invoke (each
+# costs one LLM call); env AGENT_COGNITION_INVOKE_ROLLUP_BUDGET. The budget
+# keeps a cold-start backlog from running hundreds of sequential LLM calls on
+# the hot path — repeated invokes (and the central scheduler) drain the rest.
+_DEFAULT_INVOKE_ROLLUP_BUDGET = 8
+
+
+def _invoke_rollup_budget() -> int:
+    """Per-invoke rollup-period budget (floored at 1 so catch-up always advances)."""
+    return read_int_with_floor(
+        "AGENT_COGNITION_INVOKE_ROLLUP_BUDGET", _DEFAULT_INVOKE_ROLLUP_BUDGET, 1
+    )
 
 
 class GateOutcomeKind(str, Enum):
@@ -114,6 +151,18 @@ class GateOutcomeKind(str, Enum):
     ENVELOPE_TOO_LARGE = "envelope_too_large"  # 413 — body + cognition over the cap
 
 
+# Single source of truth for the HTTP status each reason-carrying outcome maps
+# to, shared by the HTTP route and the in-process helper so the two transports
+# can never drift. REPLAY/BLOCKED/PROCEED are handled structurally (they carry
+# payloads, not reasons) and are deliberately absent.
+GATE_ERROR_HTTP_STATUS: dict[GateOutcomeKind, int] = {
+    GateOutcomeKind.CONFLICT: 409,
+    GateOutcomeKind.MISSING_IDEMPOTENCY_KEY: 400,
+    GateOutcomeKind.LEDGER_UNAVAILABLE: 503,
+    GateOutcomeKind.ENVELOPE_TOO_LARGE: 413,
+}
+
+
 @dataclass(frozen=True)
 class PreparedInvoke:
     """Everything :func:`finalize_invoke` needs to close out a prepared run.
@@ -122,6 +171,10 @@ class PreparedInvoke:
         * ``claim_token`` is ``None`` exactly when the run is unledgered
           (Postgres off, or a tolerated storage outage) — finalize then skips
           ledger completion but still runs the gates.
+        * ``attempt_token`` is always set: the ``claim_token`` when ledgered,
+          else a fresh per-prepare nonce. It scopes this attempt's memory
+          events (see :meth:`event_run_id`) so an at-least-once re-execution
+          can never collide with a prior attempt's rows.
         * ``context`` is ``None`` when context assembly failed or storage is
           off — finalize then has no rules to enforce and no digest was
           injected (``envelope`` is the caller body, unwrapped).
@@ -129,10 +182,23 @@ class PreparedInvoke:
 
     agent_id: str
     source_run_id: str
-    request_hash: str
+    attempt_token: str
     claim_token: str | None
     context: CognitionContext | None
     envelope: Any
+
+    @property
+    def event_run_id(self) -> str:
+        """The attempt-scoped run id memory events are persisted under.
+
+        ``{source_run_id}#{attempt_token}`` — the ledger key stays
+        ``source_run_id`` (replay/conflict semantics are per-key), while event
+        idempotency is per-attempt: a re-sent writeback within one attempt
+        still no-ops on ``(agent_id, event_run_id, source_seq)``, and a
+        re-executed attempt writes into a disjoint keyspace instead of being
+        silently dropped against the previous attempt's rows.
+        """
+        return f"{self.source_run_id}#{self.attempt_token}"
 
 
 @dataclass(frozen=True)
@@ -144,8 +210,10 @@ class GateOutcome:
         * ``kind is REPLAY``   → ``status_code`` + ``content`` carry the stored
           terminal envelope.
         * ``kind is BLOCKED``  → ``status_code`` + ``content`` carry the 4xx
-          envelope (also stored in the ledger when the run was claimed).
-        * every other kind     → ``reason`` carries a human-readable cause.
+          envelope (also stored in the ledger when the run was claimed) and
+          ``reason`` carries the failing rule's reason.
+        * every other kind     → ``reason`` carries a human-readable cause and
+          ``GATE_ERROR_HTTP_STATUS[kind]`` is its HTTP status.
     """
 
     kind: GateOutcomeKind
@@ -157,12 +225,14 @@ class GateOutcome:
 
 @dataclass(frozen=True)
 class FinalizeOutcome:
-    """Result of :func:`finalize_invoke`.
+    """Result of :func:`finalize_invoke` (and :func:`invoke_in_process`).
 
     Invariants:
-        * ``blocked`` is ``True`` exactly when an enforced postcondition
-          violated — ``status_code``/``content`` then carry the 4xx envelope
-          and the model output was **not** persisted.
+        * ``blocked`` is ``True`` exactly when an enforced rule blocked —
+          ``status_code``/``content`` then carry the 4xx envelope, the model
+          output was **not** persisted, and ``block_phase`` / ``block_reason``
+          carry the structured cause (read these instead of parsing
+          ``content``, whose shape is the stored HTTP body).
         * otherwise ``status_code``/``content`` echo the upstream response.
     """
 
@@ -170,6 +240,8 @@ class FinalizeOutcome:
     content: Any
     blocked: bool = False
     persisted_events: int = 0
+    block_phase: str | None = None
+    block_reason: str | None = None
 
 
 def derive_source_run_id(body: Any, idempotency_key: str | None = None) -> tuple[str, str]:
@@ -216,7 +288,9 @@ async def prepare_invoke(
         * ``BLOCKED`` has already persisted the block memory event and (when
           claimed) stored the 4xx envelope as ``blocked`` — a retry replays it.
         * No ledger row is written for ``MISSING_IDEMPOTENCY_KEY`` or
-          ``LEDGER_UNAVAILABLE``.
+          ``LEDGER_UNAVAILABLE``; an ``ENVELOPE_TOO_LARGE`` outcome has
+          **abandoned** its claim (the agent provably never ran), so an
+          immediate retry re-executes instead of 409-ing until lease expiry.
     """
     assert agent_id, "prepare_invoke: agent_id must be non-empty"
     assert max_envelope_bytes is None or max_envelope_bytes > 0, (
@@ -236,13 +310,19 @@ async def prepare_invoke(
     source_run_id, request_hash = derive_source_run_id(body, key)
 
     claim_token: str | None = None
-    if is_postgres_enabled():
+    if not is_postgres_enabled():
+        outage = _storage_outage_outcome(
+            agent_id, requires_idempotency_key, "Postgres is not configured"
+        )
+        if outage is not None:
+            return outage
+    else:
         try:
             claim = await asyncio.to_thread(
                 claim_run, agent_id, source_run_id, request_hash, default_run_lease()
             )
         except AgentCognitionStorageUnavailable as exc:
-            outage = _storage_outage_outcome(agent_id, requires_idempotency_key, exc)
+            outage = _storage_outage_outcome(agent_id, requires_idempotency_key, str(exc))
             if outage is not None:
                 return outage
         else:
@@ -257,19 +337,31 @@ async def prepare_invoke(
                     ),
                 )
             claim_token = claim.claim_token
-    elif requires_idempotency_key:
-        return GateOutcome(
-            kind=GateOutcomeKind.LEDGER_UNAVAILABLE,
-            reason=(
-                f"Agent {agent_id!r} requires run-once semantics but the cognition run "
-                "ledger is unavailable (Postgres is not configured)."
-            ),
-        )
+
+    prepared = PreparedInvoke(
+        agent_id=agent_id,
+        source_run_id=source_run_id,
+        attempt_token=claim_token or str(uuid4()),
+        claim_token=claim_token,
+        context=None,
+        envelope=body,
+    )
 
     # Lazy catch-up + context load — both best-effort; a cognition subsystem
     # hiccup must never break the invoke (matching the proxy's prior posture).
+    # The catch-up is budgeted: a cold-start backlog must not run hundreds of
+    # sequential LLM summarization calls inline on the invoke hot path —
+    # repeated invokes and the central scheduler drain the remainder.
     try:
-        await asyncio.to_thread(ensure_rollups_current, agent_id, _now())
+        report = await asyncio.to_thread(
+            ensure_rollups_current, agent_id, _now(), max_periods=_invoke_rollup_budget()
+        )
+        if report.truncated:
+            logger.info(
+                "cognition: rollup catch-up for %s hit the per-invoke budget; "
+                "remainder deferred to later passes",
+                agent_id,
+            )
     except Exception:
         logger.warning(
             "cognition: rollup catch-up failed for %s; continuing", agent_id, exc_info=True
@@ -288,28 +380,34 @@ async def prepare_invoke(
 
     post_body: Any = body
     if context is not None:
+        prepared = replace(prepared, context=context)
         try:
             enforce_precondition(agent_id, body, context.rules)
         except PreconditionBlocked as exc:
             content = _blocked_content("precondition", exc.reason)
             await asyncio.to_thread(
                 _record_block,
-                agent_id,
-                source_run_id,
-                claim_token,
+                prepared,
                 phase="precondition",
                 reason=exc.reason,
                 content=content,
             )
-            return GateOutcome(kind=GateOutcomeKind.BLOCKED, status_code=422, content=content)
+            return GateOutcome(
+                kind=GateOutcomeKind.BLOCKED,
+                status_code=422,
+                content=content,
+                reason=exc.reason,
+            )
         post_body = wrap_request(body, context.model_dump(mode="json"))
 
         if max_envelope_bytes is not None:
             size = len(json.dumps(post_body, default=str).encode("utf-8"))
             if size > max_envelope_bytes:
-                # Not stored as a terminal row: the digest half of the envelope
-                # varies over time, so this is not a stable property of the key.
-                # The claim's lease simply expires and a later retry re-executes.
+                # Not stored as a terminal row — the digest half of the envelope
+                # varies over time, so this is not a stable property of the key —
+                # and the agent provably never ran, so the claim protects nothing:
+                # release it rather than 409-ing retries until the lease expires.
+                await abandon_invoke(prepared)
                 return GateOutcome(
                     kind=GateOutcomeKind.ENVELOPE_TOO_LARGE,
                     reason=(
@@ -321,14 +419,7 @@ async def prepare_invoke(
 
     return GateOutcome(
         kind=GateOutcomeKind.PROCEED,
-        prepared=PreparedInvoke(
-            agent_id=agent_id,
-            source_run_id=source_run_id,
-            request_hash=request_hash,
-            claim_token=claim_token,
-            context=context,
-            envelope=post_body,
-        ),
+        prepared=replace(prepared, envelope=post_body),
     )
 
 
@@ -343,16 +434,21 @@ async def finalize_invoke(
           status (an in-process success passes ``200``); ``content`` is the
           response body (the shim's envelope, or an envelope-shaped dict).
     Postconditions:
-        * **Postcondition violation** (2xx upstream, enforced rule fails on the
-          envelope's mapping ``output``): the model output and agent-authored
-          memory events are **not** persisted; the shim's trusted ``tool_audit``
-          *is* (as ``tool_call`` events) plus one blocked-run event; the 4xx
-          envelope is stored as ``blocked`` when the run was claimed. Returns
-          ``blocked=True`` with the 4xx envelope.
+        * **Postcondition violation** (2xx upstream, enforced rule fails): the
+          model output and agent-authored memory events are **not** persisted;
+          the shim's trusted ``tool_audit`` *is* (as ``tool_call`` events) plus
+          one blocked-run event; the 4xx envelope is stored as ``blocked`` when
+          the run was claimed. Returns ``blocked=True`` with the 4xx envelope
+          and the structured ``block_phase``/``block_reason``. The gate **fails
+          closed** when the agent has active enforced postcondition rules but
+          its ``output`` is missing or not an object: such rules are evaluated
+          against an empty mapping (path predicates then fail → block), never
+          silently skipped.
         * **2xx pass**: the envelope's ``memory_events`` are validated
           (malformed entries dropped with a warning, never failing the call)
-          and persisted; the ledger row completes as ``completed`` storing
-          ``{status_code, content}`` for replay. Returns the upstream response.
+          and persisted under :meth:`PreparedInvoke.event_run_id`; the ledger
+          row completes as ``completed`` storing ``{status_code, content}`` for
+          replay. Returns the upstream response.
         * **Non-2xx**: only the trusted ``tool_audit`` is persisted (side
           effects that ran are recorded even on failure); the ledger row is
           left to its lease — a transient failure is not a replayable terminal
@@ -366,38 +462,46 @@ async def finalize_invoke(
     success = 200 <= upstream_status < 300
 
     if not success:
-        events = _audit_events(inner, prepared.agent_id, prepared.source_run_id)
+        events = _audit_events(inner, prepared.agent_id, prepared.event_run_id)
         if events:
             await asyncio.to_thread(
-                _persist_events_best_effort, prepared.agent_id, prepared.source_run_id, events
+                _persist_events_best_effort, prepared.agent_id, prepared.event_run_id, events
             )
         return FinalizeOutcome(status_code=upstream_status, content=content)
 
     rules = prepared.context.rules if prepared.context is not None else []
     output = inner.get("output") if isinstance(inner, Mapping) else None
-    if isinstance(output, Mapping) and rules:
+    if rules:
         try:
-            enforce_postcondition(output, rules)
+            # Fail closed on a missing/non-object output: an agent carrying
+            # enforced postcondition contracts implies an object output, so its
+            # path predicates evaluate against {} (missing path → block) rather
+            # than the gate being silently skipped.
+            enforce_postcondition(output if isinstance(output, Mapping) else {}, rules)
         except PostconditionViolation as exc:
             blocked = _blocked_content("postcondition", exc.reason)
-            events = _audit_events(inner, prepared.agent_id, prepared.source_run_id)
+            events = _audit_events(inner, prepared.agent_id, prepared.event_run_id)
             await asyncio.to_thread(
                 _record_block,
-                prepared.agent_id,
-                prepared.source_run_id,
-                prepared.claim_token,
+                prepared,
                 phase="postcondition",
                 reason=exc.reason,
                 content=blocked,
                 audit_events=events,
             )
-            return FinalizeOutcome(status_code=422, content=blocked, blocked=True)
+            return FinalizeOutcome(
+                status_code=422,
+                content=blocked,
+                blocked=True,
+                block_phase="postcondition",
+                block_reason=exc.reason,
+            )
 
     persisted = 0
     events = _writeback_events(inner, prepared.agent_id)
     if events:
         persisted = await asyncio.to_thread(
-            _persist_events_best_effort, prepared.agent_id, prepared.source_run_id, events
+            _persist_events_best_effort, prepared.agent_id, prepared.event_run_id, events
         )
     if prepared.claim_token is not None:
         await asyncio.to_thread(
@@ -531,9 +635,7 @@ def _blocked_content(phase: str, reason: str) -> dict[str, Any]:
 
 
 def _record_block(
-    agent_id: str,
-    source_run_id: str,
-    claim_token: str | None,
+    prepared: PreparedInvoke,
     *,
     phase: str,
     reason: str,
@@ -542,19 +644,21 @@ def _record_block(
 ) -> None:
     """Persist a rule block durably: memory event(s) + ``blocked`` ledger envelope.
 
-    Preconditions: ``agent_id``/``source_run_id`` non-empty; ``phase`` is
-    ``precondition`` or ``postcondition``.
+    Preconditions: ``prepared`` identifies the claimed (or unledgered) attempt;
+    ``phase`` is ``precondition`` or ``postcondition``.
     Postconditions: best-effort — the trusted audit events (if any) and one
-    block event are appended, and the 4xx envelope is stored as ``blocked``
-    when the run was claimed; storage failures are logged, never raised (the
-    block response must not be masked by a persistence error).
+    block event are appended under the attempt-scoped
+    :meth:`PreparedInvoke.event_run_id`, and the 4xx envelope is stored as
+    ``blocked`` (under the ledger's ``source_run_id``) when the run was
+    claimed; storage failures are logged, never raised (the block response
+    must not be masked by a persistence error).
     """
     assert phase in ("precondition", "postcondition"), f"_record_block: bad phase {phase!r}"
     events = list(audit_events or [])
     events.append(
         _gate_event(
-            agent_id,
-            source_run_id,
+            prepared.agent_id,
+            prepared.event_run_id,
             kind=EventKind.ERROR,
             content=f"Invoke blocked by enforced {phase}: {reason}",
             data={"phase": phase, "reason": reason},
@@ -562,15 +666,54 @@ def _record_block(
             seq=len(events),
         )
     )
-    _persist_events_best_effort(agent_id, source_run_id, events)
-    if claim_token is not None:
+    _persist_events_best_effort(prepared.agent_id, prepared.event_run_id, events)
+    if prepared.claim_token is not None:
         _complete_best_effort(
-            agent_id,
-            source_run_id,
-            claim_token,
+            prepared.agent_id,
+            prepared.source_run_id,
+            prepared.claim_token,
             status="blocked",
             response={"status_code": 422, "content": dict(content)},
         )
+
+
+async def abandon_invoke(prepared: PreparedInvoke) -> bool:
+    """Release a claimed run that provably produced nothing to protect or replay.
+
+    For boundary paths that exit between claim and finalize where the lease no
+    longer guards anything: the wrapped envelope was rejected oversize before
+    dispatch, or the agent's response arrived but was unusable (e.g. over the
+    proxy's response cap). Releasing lets an immediate retry re-execute —
+    the same semantics lease expiry would eventually grant, just without the
+    409 window. It must NOT be used while the agent may still be executing
+    (transport errors/timeouts): there the lease is the double-run guard.
+
+    Preconditions:
+        * ``prepared`` came from a ``PROCEED`` (or internal pre-PROCEED)
+          prepare for this request.
+    Postconditions:
+        * Returns ``True`` when the owned in-progress ledger row was deleted;
+          ``False`` for an unledgered run, a lost race (already terminal or
+          reclaimed), or a storage failure — all best-effort no-ops that never
+          raise.
+    """
+    if prepared.claim_token is None:
+        return False
+    try:
+        return await asyncio.to_thread(
+            abandon_run,
+            prepared.agent_id,
+            prepared.source_run_id,
+            claim_token=prepared.claim_token,
+        )
+    except Exception:
+        logger.warning(
+            "cognition: abandoning claim failed for %s/%s; lease will expire instead",
+            prepared.agent_id,
+            prepared.source_run_id,
+            exc_info=True,
+        )
+        return False
 
 
 def _persist_events_best_effort(
@@ -706,19 +849,38 @@ def _outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
         assert outcome.status_code is not None, "_outcome_as_finalized: replay lacks status"
         return FinalizeOutcome(status_code=outcome.status_code, content=outcome.content)
     if outcome.kind is GateOutcomeKind.BLOCKED:
-        return FinalizeOutcome(status_code=422, content=outcome.content, blocked=True)
-    status = {
-        GateOutcomeKind.CONFLICT: 409,
-        GateOutcomeKind.MISSING_IDEMPOTENCY_KEY: 400,
-        GateOutcomeKind.LEDGER_UNAVAILABLE: 503,
-        GateOutcomeKind.ENVELOPE_TOO_LARGE: 413,
-    }[outcome.kind]
-    return FinalizeOutcome(status_code=status, content={"detail": outcome.reason})
+        return FinalizeOutcome(
+            status_code=422,
+            content=outcome.content,
+            blocked=True,
+            block_phase="precondition",
+            block_reason=outcome.reason,
+        )
+    return FinalizeOutcome(
+        status_code=GATE_ERROR_HTTP_STATUS[outcome.kind], content={"detail": outcome.reason}
+    )
+
+
+def _json_default(obj: Any) -> Any:
+    """``json.dumps`` fallback: dump nested Pydantic models, stringify the rest."""
+    if isinstance(obj, BaseModel):
+        return obj.model_dump(mode="json")
+    return str(obj)
 
 
 def _jsonable(value: Any) -> Any:
-    """Force ``value`` into plain JSON data (stringifying unknown leaves)."""
-    return json.loads(json.dumps(value, default=str))
+    """Force ``value`` into plain JSON data.
+
+    Pydantic models (top-level or nested) are dumped to dicts — NOT stringified
+    — so a team runner returning a ``BaseModel`` keeps a structured ``output``
+    that the postcondition gate and the stored replay envelope can read. A
+    near-duplicate lives in ``shared_agent_invoke.shim``; it cannot be imported
+    here because that package depends (lazily) on this one — the shapes are
+    kept behaviourally aligned instead.
+    """
+    if isinstance(value, BaseModel):
+        value = value.model_dump(mode="json")
+    return json.loads(json.dumps(value, default=_json_default))
 
 
 def _now() -> datetime:

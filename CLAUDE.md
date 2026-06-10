@@ -278,6 +278,7 @@ One-line index below. The full reference — defaults, backoff math, fallback se
 | `AGENT_COGNITION_REFLECTION_SUMMARY_LIMIT` | Most-recent summaries per scale fed to the reflection engine (default `6`). [details](docs/ENV_VARS.md#agent-cognition-and-knowledge-graph) |
 | `AGENT_COGNITION_REFLECTION_MAX_PROPOSALS` | Cap on `pending` rule proposals per `reflect` run (default `5`). [details](docs/ENV_VARS.md#agent-cognition-and-knowledge-graph) |
 | `AGENT_COGNITION_REFLECTION_INPUT_CHARS` | Character budget for the reflection LLM input block (default `8000`; uses the `cognition` model). [details](docs/ENV_VARS.md#agent-cognition-and-knowledge-graph) |
+| `AGENT_COGNITION_INVOKE_ROLLUP_BUDGET` | Max rollup periods (≈ LLM calls) the invoke gate's lazy catch-up may process inline per cognition invoke (default `8`); the scheduler drains the rest. [details](docs/ENV_VARS.md#agent-cognition-and-knowledge-graph) |
 | `GITHUB_TOKEN` | Default token for the coding team's `run-from-github` flow; per-request `github_token` overrides. Needs Issues/PRs/Contents read-write + Metadata read. [details](docs/ENV_VARS.md#coding-team-and-github) |
 | `GITHUB_API_URL` | Optional override for the GitHub REST base URL (default `https://api.github.com`; set for GH Enterprise). [details](docs/ENV_VARS.md#coding-team-and-github) |
 | `GITHUB_DEPENDENCY_CONCURRENCY` | Semaphore width for per-issue `blocked_by` dependency fetches enriching the issue picker (default `8`). [details](docs/ENV_VARS.md#coding-team-and-github) |
