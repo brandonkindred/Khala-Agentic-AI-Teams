@@ -251,7 +251,8 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
           source_run_id, source_seq)`` (a duplicated writeback is a no-op).
           Events are rebuilt via ``model_copy`` — the caller's ``writeback`` is
           never mutated.
-        * Returns the number of events presented for append.
+        * Returns the number of events **actually inserted** (``0`` when an
+          idempotent re-persist hits every row's ``ON CONFLICT DO NOTHING``).
     """
     assert agent_id, "persist_writeback: agent_id must be non-empty"
     assert source_run_id, "persist_writeback: source_run_id must be non-empty"
@@ -353,8 +354,9 @@ def claim_run(
         * ``in_progress`` row with an expired lease and matching hash ->
           reclaimed in place (fresh lease + fresh ``claim_token``,
           response/completed_at cleared, ``request_hash`` retained) -> ``CLAIMED``.
-        * The stored lease is ``max(lease, AGENT_COGNITION_RUN_LEASE_S floor)`` —
-          a sub-floor caller lease is raised to the floor so a too-short lease
+        * The stored lease is ``max(lease, _MIN_LEASE_S)`` (a hardcoded 30s
+          floor, distinct from the ``AGENT_COGNITION_RUN_LEASE_S`` default lease)
+          — a sub-floor caller lease is raised to the floor so a too-short lease
           can't let a retry reclaim a still-in-flight run.
     Invariant:
         * The claim/reclaim decision and any mutation happen in one transaction,
@@ -441,7 +443,11 @@ def complete_run(
     """
     assert agent_id, "complete_run: agent_id must be non-empty"
     assert source_run_id, "complete_run: source_run_id must be non-empty"
-    assert claim_token, "complete_run: claim_token must be non-empty"
+    # A missing token is enforced with a real raise (not an ``assert``, which
+    # ``python -O`` strips): under -O a None/empty token would otherwise make the
+    # UPDATE's ``claim_token = NULL`` match nothing and silently lose the run.
+    if not claim_token:
+        raise ValueError("complete_run: claim_token must be non-empty")
     if status not in _TERMINAL_STATUSES:
         raise ValueError(
             f"complete_run: status must be one of {sorted(_TERMINAL_STATUSES)}, got {status!r}"
@@ -469,8 +475,7 @@ def complete_run(
         # No owned in_progress row matched: the key is terminal, reclaimed by a
         # different claim, or absent. Read the current state to decide.
         cur.execute(
-            "SELECT status, response FROM agent_cognition_runs "
-            "WHERE agent_id = %s AND source_run_id = %s",
+            "SELECT status FROM agent_cognition_runs WHERE agent_id = %s AND source_run_id = %s",
             (agent_id, source_run_id),
         )
         existing = cur.fetchone()
@@ -479,14 +484,14 @@ def complete_run(
             "complete_run: no claimed run to complete for "
             f"agent_id={agent_id!r} source_run_id={source_run_id!r}"
         )
-    if existing["status"] in _TERMINAL_STATUSES and (
-        existing["status"] != status or existing["response"] != new_response
-    ):
-        # A second, *conflicting* terminal completion for the same key — a likely
-        # double-completion bug, distinct from a benign identical retry.
+    if existing["status"] in _TERMINAL_STATUSES and existing["status"] != status:
+        # A second terminal completion with a *different terminal status* (e.g.
+        # blocked after completed) — a likely double-completion bug. We key the
+        # warning on the status alone, not the response: comparing a JSONB
+        # round-tripped envelope against the in-memory dict would false-positive
+        # on benign retries (tuples decode as lists, etc.).
         logger.warning(
-            "complete_run: run %s/%s already terminal (%s) with a different envelope; "
-            "discarding conflicting %s completion",
+            "complete_run: run %s/%s already terminal (%s); discarding conflicting %s completion",
             agent_id,
             source_run_id,
             existing["status"],
@@ -551,11 +556,12 @@ def _clamp01(value: float) -> float:
 
 
 def _bound_content(content: str) -> str:
-    """Bound an event's free-text ``content`` to ``_MAX_CONTENT_CHARS``.
+    """Bound an event's free-text ``content`` to ``_MAX_CONTENT_CHARS`` characters.
 
-    A generous cap (vs the per-value redactor cap used for nested ``data``) so a
-    legitimate multi-sentence summary survives intact while a hostile/oversized
-    content string can't bloat the row. Untyped/empty input degrades gracefully.
+    A generous cap *in characters* (vs the per-value redactor cap used for nested
+    ``data``) so a legitimate multi-sentence summary survives intact while a
+    hostile/oversized content string can't grow a row without bound. Untyped/empty
+    input degrades gracefully.
     """
     if not isinstance(content, str):
         content = str(content)
@@ -567,18 +573,23 @@ def _bound_content(content: str) -> str:
 def _safe_occurred_at(value: datetime, now: datetime) -> datetime:
     """Normalize an event timestamp to tz-aware UTC and bound it to ``now``.
 
-    A timestamp that is naive — or carries a degenerate ``tzinfo`` whose
-    ``utcoffset()`` is ``None`` (which ``min`` would treat as offset-naive and
-    refuse to compare against an aware ``now``, raising ``TypeError``) — is read
-    as UTC. A future timestamp is clamped to ``now`` so an untrusted writeback
-    can't place an event in a calendar period that never closes (which would
-    wedge the rollup engine).
+    * A naive timestamp — or one carrying a degenerate ``tzinfo`` whose
+      ``utcoffset()`` is ``None`` (which ``min`` would treat as offset-naive and
+      refuse to compare against an aware ``now``, raising ``TypeError``) — is
+      read as UTC, matching how Postgres reads a naive value into a
+      ``TIMESTAMPTZ`` column under a UTC session.
+    * A real offset-aware timestamp is **converted** to UTC (not merely passed
+      through with its original offset), so the returned value is genuinely UTC
+      regardless of the agent's zone.
+    * The result is clamped to ``now`` so an untrusted writeback can't place an
+      event in a calendar period that never closes (which would wedge rollups).
 
-    Agents are expected to emit tz-aware UTC timestamps; a naive value is taken
-    as UTC, matching how Postgres reads a naive value into a ``TIMESTAMPTZ``
-    column under a UTC session.
+    Agents are expected to emit tz-aware UTC timestamps.
     """
-    aware = value if value.utcoffset() is not None else value.replace(tzinfo=timezone.utc)
+    if value.utcoffset() is None:
+        aware = value.replace(tzinfo=timezone.utc)
+    else:
+        aware = value.astimezone(timezone.utc)
     return min(aware, now)
 
 

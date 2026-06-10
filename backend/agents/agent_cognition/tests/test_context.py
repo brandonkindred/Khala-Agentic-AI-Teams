@@ -197,6 +197,11 @@ def test_safe_occurred_at_normalizes_and_bounds() -> None:
     # A past timestamp passes through unchanged.
     past = datetime(2020, 1, 1, tzinfo=timezone.utc)
     assert context._safe_occurred_at(past, now) == past
+    # A real non-UTC offset is converted to UTC (same instant, UTC tzinfo).
+    plus5 = datetime(2026, 5, 1, 14, 0, tzinfo=timezone(timedelta(hours=5)))
+    out5 = context._safe_occurred_at(plus5, now)
+    assert out5.tzinfo == timezone.utc
+    assert out5 == datetime(2026, 5, 1, 9, 0, tzinfo=timezone.utc)
 
 
 def _capture_append_events(monkeypatch) -> list[MemoryEvent]:
@@ -222,10 +227,12 @@ def test_persist_writeback_sanitizes_clamps_and_pins(monkeypatch) -> None:
     )
     wb = CognitionWriteback(events=[original], tool_calls=[])  # tool_calls not persisted
 
-    count = context.persist_writeback("a", "run-1", wb)
+    result = context.persist_writeback("a", "run-1", wb)
 
-    assert count == 1
+    # One event reached the store; persist_writeback passes the store's count
+    # through (real inserted-count is covered by the live round-trip test).
     assert len(captured) == 1
+    assert result == len(captured)
     safe = captured[0]
     assert safe.agent_id == "a"
     assert safe.source_run_id == "run-1"
@@ -277,8 +284,9 @@ def test_persist_writeback_ignores_tool_calls_and_requires_ids(monkeypatch) -> N
         events=[_event(seq=0), _event(seq=1)],
         tool_calls=[ToolCall(tool_id="git")],
     )
-    assert context.persist_writeback("a", "run-1", wb) == 2
+    result = context.persist_writeback("a", "run-1", wb)
     assert len(captured) == 2  # tool_calls did not add rows
+    assert result == len(captured)
     with pytest.raises(AssertionError):
         context.persist_writeback("", "run-1", wb)
     with pytest.raises(AssertionError):
@@ -329,7 +337,8 @@ def test_complete_run_rejects_bad_status() -> None:
 
 
 def test_complete_run_requires_claim_token() -> None:
-    with pytest.raises(AssertionError):
+    # A real raise (not assert) so an empty token can't silently no-op under -O.
+    with pytest.raises(ValueError):
         context.complete_run("a", "run-1", status="completed", response={}, claim_token="")
 
 
