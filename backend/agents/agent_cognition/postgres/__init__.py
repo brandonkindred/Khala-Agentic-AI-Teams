@@ -161,6 +161,10 @@ SCHEMA: TeamSchema = TeamSchema(
         # Run ledger — invoke idempotency + leasing. PK ``(agent_id,
         # source_run_id)``; the proxy stores the final envelope on both
         # terminal outcomes (completed/blocked) so retries replay either.
+        # ``claim_token`` is a per-claim nonce minted on every claim/reclaim so
+        # complete_run can fence a stale claimer: after a lease is reclaimed by
+        # another worker the token rotates, and the original (zombie) completer's
+        # token no longer matches, so it can't overwrite the new claimer's run.
         # -----------------------------------------------------------------
         """CREATE TABLE IF NOT EXISTS agent_cognition_runs (
             agent_id          TEXT NOT NULL,
@@ -169,10 +173,15 @@ SCHEMA: TeamSchema = TeamSchema(
             request_hash      TEXT NOT NULL,
             response          JSONB,
             lease_expires_at  TIMESTAMPTZ,
+            claim_token       TEXT,
             created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             completed_at      TIMESTAMPTZ,
             PRIMARY KEY (agent_id, source_run_id)
         )""",
+        # ``claim_token`` is the per-claim fencing nonce (see the table comment).
+        # Idempotent ALTER back-fills clusters provisioned before the column.
+        """ALTER TABLE agent_cognition_runs
+            ADD COLUMN IF NOT EXISTS claim_token TEXT""",
         # -----------------------------------------------------------------
         # Knowledge-graph ingestion watermarks — one row per agent tracking how
         # far the graph sync worker has consumed this agent's memory into the

@@ -43,10 +43,10 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from itertools import islice
 from typing import Any
 from uuid import uuid4
 
+from agent_cognition import redaction as _redaction
 from agent_cognition.models import EventKind, MemoryEvent, Rule, ToolCall
 from agent_cognition.rules.enforcement import evaluate_tool_call
 from agent_cognition.tools.binding import BoundToolset, ExecutionSite
@@ -63,22 +63,16 @@ __all__ = [
     "drive_platform_bound_loop",
 ]
 
-# Substring denylist for sanitizing args/results before they touch memory. Tool
-# secrets ride env / secure stores, never the episodic log (DESIGN §11 Secrets).
-_SECRET_KEY_HINTS = (
-    "password",
-    "secret",
-    "token",
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth",
-    "credential",
-    "private_key",
-)
-_MAX_STR = 512
-_MAX_DEPTH = 4
-_MAX_ITEMS = 50
+# Secret redaction + size bounding live in ``agent_cognition.redaction`` (a pure,
+# import-cheap module). Re-export them under their historical private names so the
+# broker below — and the existing runner tests — keep referencing them unchanged
+# while the implementation stays a single source of truth.
+_sanitize = _redaction.sanitize_for_memory
+_is_secret_key = _redaction.is_secret_key
+_SECRET_KEY_HINTS = _redaction.SECRET_KEY_HINTS
+_MAX_STR = _redaction.MAX_STR
+_MAX_DEPTH = _redaction.MAX_DEPTH
+_MAX_ITEMS = _redaction.MAX_ITEMS
 
 # Salience weights (bounded to [0, 1]) — errors and refusals are the most worth
 # remembering; routine call/outcome pairs are low-salience.
@@ -531,37 +525,6 @@ def _result_ok(result: Any) -> bool:
     if isinstance(result, Mapping) and result.get("success") is False:
         return False
     return True
-
-
-def _sanitize(value: Any, *, _depth: int = 0) -> Any:
-    """Redact secret-like keys and bound size before a value touches memory."""
-    if _depth >= _MAX_DEPTH:
-        return "<truncated:depth>"
-    if isinstance(value, Mapping):
-        out: dict[str, Any] = {}
-        # islice bounds the traversal to _MAX_ITEMS without first materialising
-        # every item of a large mapping (which would defeat the cap).
-        for key, item in islice(value.items(), _MAX_ITEMS):
-            key_s = str(key)
-            if _is_secret_key(key_s):
-                out[key_s] = "***"
-            else:
-                out[key_s] = _sanitize(item, _depth=_depth + 1)
-        return out
-    if isinstance(value, (list, tuple)):
-        return [_sanitize(item, _depth=_depth + 1) for item in islice(value, _MAX_ITEMS)]
-    if isinstance(value, str) and len(value) > _MAX_STR:
-        return value[:_MAX_STR] + "…<truncated>"
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return value
-    # Unknown object — stringify defensively (never let logging crash the loop).
-    text = repr(value)
-    return text[:_MAX_STR] + "…<truncated>" if len(text) > _MAX_STR else text
-
-
-def _is_secret_key(key: str) -> bool:
-    low = key.lower()
-    return any(hint in low for hint in _SECRET_KEY_HINTS)
 
 
 def _utcnow() -> datetime:
