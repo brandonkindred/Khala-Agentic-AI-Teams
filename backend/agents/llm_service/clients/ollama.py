@@ -25,10 +25,12 @@ from ..interface import (
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
+    LLMSemanticExhaustionError,
     LLMTemporaryError,
     LLMTruncatedError,
 )
 from ..telemetry import record_llm_call
+from ..util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
 
@@ -139,6 +141,39 @@ def _think_payload_fields(think: "bool | str") -> dict:
     return fields
 
 
+def _thinking_downgrade_enabled() -> bool:
+    """Whether the proof-of-change thinking-downgrade retry is enabled (default: on).
+
+    Preconditions: none.
+    Postconditions: returns ``False`` only for an explicit ``"false"``/``"0"``/
+        ``"no"`` (case-insensitive) ``LLM_THINKING_DOWNGRADE_RETRY``; unset or
+        any other value means enabled. Never raises.
+    """
+    return llm_config.env_flag_enabled(llm_config.ENV_LLM_THINKING_DOWNGRADE_RETRY)
+
+
+class _EmptyResponseSignal(Exception):
+    """Internal control-flow signal: a 200 response produced no assistant content.
+
+    Deliberately subclasses plain ``Exception`` (not ``LLMError``) so the retry
+    loop's ``except LLMTemporaryError`` clause can never swallow it — only the
+    dedicated semantic-exhaustion handler in ``_ollama_post`` consumes it.
+
+    Preconditions: ``finish_reason`` is the response's finish reason;
+        ``has_reasoning`` is True iff the response carried reasoning tokens;
+        ``content_len`` is the (stripped-empty) raw content length in chars.
+    Invariants: never escapes ``_ollama_post``.
+    """
+
+    def __init__(self, finish_reason: str, has_reasoning: bool, content_len: int):
+        super().__init__(
+            f"empty response (finish_reason={finish_reason}, has_reasoning={has_reasoning})"
+        )
+        self.finish_reason = finish_reason
+        self.has_reasoning = has_reasoning
+        self.content_len = content_len
+
+
 def _parse_retry_config() -> tuple[int, float, float]:
     """Parse retry env vars. Returns (max_retries, initial_backoff_seconds, backoff_max_seconds).
 
@@ -179,9 +214,7 @@ def _honor_retry_after_enabled() -> bool:
         ``"no"`` (case-insensitive) ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``; unset or
         any other value means enabled. Never raises.
     """
-    return (
-        os.environ.get(llm_config.ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER) or ""
-    ).strip().lower() not in ("false", "0", "no")
+    return llm_config.env_flag_enabled(llm_config.ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER)
 
 
 def _parse_retry_after_seconds(headers: Any) -> Optional[float]:
@@ -688,7 +721,12 @@ class OllamaLLMClient(LLMClient):
 
         Returns content string for normal replies, or a JSON-serialized
         ``{"__tool_calls__": [...]}`` dict string when the model invokes tools.
-        Raises LLMTruncatedError if finish_reason=length.
+        Raises LLMTruncatedError if finish_reason=length with partial content.
+        Empty content (no tool calls) always raises ``_EmptyResponseSignal``;
+        retry POLICY (proof-of-change downgrade vs the legacy transient
+        schedule) is decided solely by ``_ollama_post``'s handler, never here.
+
+        Postconditions: a returned string is never empty after ``strip()``.
         """
         choices = data.get("choices")
         if not choices or not isinstance(choices, list):
@@ -719,16 +757,12 @@ class OllamaLLMClient(LLMClient):
             if msg.get("reasoning_content"):
                 envelope["__reasoning_content__"] = msg["reasoning_content"]
             return json.dumps(envelope)
+        has_reasoning = bool(msg.get("reasoning_content"))
         if finish_reason == "length":
             partial_content = msg.get("content", "")
             partial_content = str(partial_content) if partial_content else ""
             if not partial_content.strip():
-                logger.warning(
-                    "LLM returned empty response (finish_reason=length). Treating as transient error for retry."
-                )
-                raise LLMTemporaryError(
-                    "Empty response (finish_reason=length); treating as transient for retry",
-                )
+                raise _EmptyResponseSignal("length", has_reasoning, len(partial_content))
             logger.warning(
                 "LLM response truncated (finish_reason=length). Partial content: %d chars",
                 len(partial_content),
@@ -743,11 +777,8 @@ class OllamaLLMClient(LLMClient):
             raise LLMPermanentError("Unexpected response format from LLM: missing 'content'")
         content_str = str(content)
         if not content_str.strip():
-            logger.warning(
-                "LLM returned empty response (200). Treating as transient error for retry."
-            )
-            raise LLMTemporaryError(
-                "Empty response from LLM; treating as transient for retry",
+            raise _EmptyResponseSignal(
+                str(finish_reason or "stop"), has_reasoning, len(content_str)
             )
         return content_str
 
@@ -761,6 +792,8 @@ class OllamaLLMClient(LLMClient):
         rate_limit_initial: float,
         rate_limit_cap: float,
         sem: threading.BoundedSemaphore,
+        *,
+        resolved_think: "bool | str | None" = None,
     ) -> str:
         """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
 
@@ -772,31 +805,81 @@ class OllamaLLMClient(LLMClient):
         while HTTP 429 rate limits retry on the slow rate-limit schedule
         (``rate_limit_max_retries`` / ``rate_limit_initial`` / ``rate_limit_cap``).
 
+        Semantic exhaustion (HTTP 200 with zero assistant content, typically a
+        reasoning-only response) is a THIRD failure class with its own budget:
+        at most ONE immediate proof-of-change retry with reduced thinking
+        (``downgrade_think``), after which the call fails hard with
+        ``LLMSemanticExhaustionError`` instead of re-sending the same payload on
+        the transient schedule.
+
         Preconditions: ``max_retries`` and ``rate_limit_max_retries`` are ``>= 0``;
             ``rate_limit_cap >= rate_limit_initial > 0``; ``sem`` is the global
-            concurrency semaphore.
+            concurrency semaphore. ``resolved_think`` is the resolved thinking
+            wire value baked into ``payload`` (bool or level string), or ``None``
+            when the caller cannot offer a thinking downgrade.
         Postconditions: returns the raw assistant content on success. A 429 retry's
             ``time.sleep`` happens at the loop-level handler — AFTER the semaphore
             and HTTP stream contexts have been released — never while holding them.
             The transient schedule is unaffected by the rate-limit schedule and
             vice versa. Raises ``LLMRateLimitError`` only after the rate-limit
             budget is exhausted, ``LLMTemporaryError`` after the transient budget,
-            or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
+            ``LLMSemanticExhaustionError`` after the (at most one) thinking
+            downgrade, or ``LLMPermanentError``/``LLMTruncatedError`` immediately.
         """
         url = f"{self.base_url}/v1/chat/completions"
         last_error: Optional[Exception] = None
         headers = self._ollama_auth_headers()
         stream_payload = {**payload, "stream": True}
-        # Two INDEPENDENT retry budgets share one loop: a 429 must never consume a
-        # transient attempt and vice versa. The loop is bounded by the sum of both
-        # budgets (+1) so it always terminates by returning or raising.
+        # Three INDEPENDENT retry budgets share one loop: a 429 must never consume
+        # a transient attempt and vice versa, and the semantic-exhaustion budget
+        # (at most one thinking-downgrade retry) is separate from both. The loop
+        # is bounded by the sum of all budgets (+1 for the first attempt) so it
+        # always terminates by returning or raising.
         transient_attempt = 0
         rate_limit_attempt = 0
-        max_total_attempts = max_retries + rate_limit_max_retries + 1
+        # Semantic-exhaustion state: `semantic_attempt > 0` means the one
+        # proof-of-change downgrade retry has been spent for this call.
+        semantic_attempt = 0
+        active_think: "bool | str | None" = resolved_think
+        any_content_bytes = False
+        # Log denominator: one slot for the first attempt plus every budget —
+        # the proof-of-change downgrade slot only exists when the feature is on.
+        max_total_attempts = (
+            max_retries + rate_limit_max_retries + (2 if _thinking_downgrade_enabled() else 1)
+        )
         rl_log_body: Optional[str] = None
         rl_log_headers: Any = None
+        attempt = 0
+
+        def _retry_transient_step(detail: str, kind: str = "temporary error") -> bool:
+            """Consume one transient-schedule attempt: log, sleep, count.
+
+            Single owner of the transient backoff mechanics for every handler
+            in this loop, so the schedule cannot drift between failure kinds.
+
+            Preconditions: called only from a failure branch of the request loop.
+            Postconditions: True → one attempt was consumed (slept on the
+                exponential schedule; caller must ``continue``); False → the
+                transient budget is exhausted and nothing changed (caller raises).
+            """
+            nonlocal transient_attempt
+            if transient_attempt >= max_retries:
+                return False
+            wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
+            logger.warning(
+                "LLM %s (attempt %d/%d): %s. Retrying in %.1fs",
+                kind,
+                attempt + 1,
+                max_total_attempts,
+                detail,
+                wait,
+            )
+            time.sleep(wait)
+            transient_attempt += 1
+            return True
+
         while True:
-            attempt = transient_attempt + rate_limit_attempt
+            attempt = transient_attempt + rate_limit_attempt + semantic_attempt
             try:
                 with sem:
                     logger.info(
@@ -950,11 +1033,12 @@ class OllamaLLMClient(LLMClient):
                                     # Expected for thinking models — reasoning is normal
                                     # stream data, not an error. The stream is still read
                                     # to completion; if the model genuinely produced no
-                                    # answer the downstream empty-content / truncation
-                                    # handling deals with it. Logged at INFO, not WARNING.
+                                    # answer the downstream empty-content handling applies
+                                    # the proof-of-change thinking-downgrade retry.
+                                    # Logged at INFO, not WARNING.
                                     logger.info(
                                         "LLM returned reasoning only (no content) for caller=%s; "
-                                        "if a final answer was expected, consider raising max_tokens.",
+                                        "the empty-response handler will retry once with reduced thinking.",
                                         caller,
                                     )
                                 tool_calls = None
@@ -1012,12 +1096,9 @@ class OllamaLLMClient(LLMClient):
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
                                     status_code=status,
                                 )
-                                if transient_attempt < max_retries:
-                                    wait = _exponential_retry_delay(
-                                        transient_attempt, initial_backoff, backoff_max
-                                    )
-                                    time.sleep(wait)
-                                    transient_attempt += 1
+                                if _retry_transient_step(
+                                    f"server error {status}", kind="server error"
+                                ):
                                     continue
                                 self._log_llm_server_error(
                                     status,
@@ -1067,7 +1148,14 @@ class OllamaLLMClient(LLMClient):
                                 f"Unexpected LLM response status {status}: {response.text[:200]}",
                                 status_code=status,
                             )
-            except (LLMPermanentError, LLMTruncatedError):
+            except LLMPermanentError:
+                raise
+            except LLMTruncatedError as e:
+                # Stamp the thinking level of the attempt that produced the
+                # partial content so continuation requests resume at the SAME
+                # level — a call downgraded mid-flight must not be silently
+                # continued at the original (just-failed) thinking level.
+                e.think_used = active_think
                 raise
             except LLMRateLimitError as e:
                 # The single owner of 429 backoff. Control reaches here only after
@@ -1089,19 +1177,76 @@ class OllamaLLMClient(LLMClient):
                         429, rl_log_body, rl_log_headers, attempt + 1, reason="rate limited"
                     )
                 raise e
+            except _EmptyResponseSignal as sig:
+                if not _thinking_downgrade_enabled():
+                    # Kill switch off: legacy behavior — empty responses retry
+                    # verbatim on the transient schedule, then fail as a plain
+                    # LLMTemporaryError. Handled inline because a raise here
+                    # cannot be caught by the sibling LLMTemporaryError clause.
+                    logger.warning(
+                        "LLM returned empty response (finish_reason=%s). Treating as transient error for retry.",
+                        sig.finish_reason,
+                    )
+                    last_error = LLMTemporaryError(
+                        "Empty response from LLM; treating as transient for retry",
+                    )
+                    if _retry_transient_step(str(last_error)):
+                        continue
+                    raise last_error
+                # Receipt state — only consumed by the semantic-exhaustion
+                # receipt below, so only tracked on the downgrade path.
+                any_content_bytes = any_content_bytes or sig.content_len > 0
+                new_think = (
+                    None
+                    if (semantic_attempt or active_think is None)
+                    else llm_config.downgrade_think(self.model, active_think)
+                )
+                if new_think is not None:
+                    logger.warning(
+                        "LLM produced no assistant content (finish=%s, has_reasoning=%s, attempt %d); "
+                        "proof-of-change retry with thinking %r -> %r",
+                        sig.finish_reason,
+                        sig.has_reasoning,
+                        attempt + 1,
+                        active_think,
+                        new_think,
+                    )
+                    semantic_attempt += 1
+                    active_think = new_think
+                    stream_payload = {**stream_payload, **_think_payload_fields(new_think)}
+                    # Immediate retry: the changed payload IS the proof of
+                    # change — backoff would not alter the outcome.
+                    continue
+                fingerprint = sha256_fingerprint(
+                    json.dumps(stream_payload, sort_keys=True, default=str)
+                )
+                retry_level = active_think if semantic_attempt else None
+                logger.error(
+                    "LLM semantic exhaustion: failure_class=semantic_exhaustion attempts_used=%d "
+                    "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
+                    "finish_reason=%s payload_fingerprint=%s",
+                    attempt + 1,
+                    resolved_think,
+                    retry_level,
+                    any_content_bytes,
+                    sig.finish_reason,
+                    fingerprint,
+                )
+                # Raising inside this handler guarantees the sibling
+                # `except LLMTemporaryError` clause can never catch it — the
+                # call terminates here, with no fall-back into the transient loop.
+                raise LLMSemanticExhaustionError(
+                    "LLM produced no assistant content and no further proof-of-change retry is available",
+                    attempts_used=attempt + 1,
+                    original_thinking_level=resolved_think,
+                    retry_thinking_level=retry_level,
+                    content_bytes_seen=any_content_bytes,
+                    payload_fingerprint=fingerprint,
+                    finish_reason=sig.finish_reason,
+                )
             except LLMTemporaryError as e:
                 last_error = e
-                if transient_attempt < max_retries:
-                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
-                    logger.warning(
-                        "LLM temporary error (attempt %d/%d): %s. Retrying in %.1fs",
-                        attempt + 1,
-                        max_total_attempts,
-                        e,
-                        wait,
-                    )
-                    time.sleep(wait)
-                    transient_attempt += 1
+                if _retry_transient_step(str(e)):
                     continue
                 raise last_error
             except httpx.HTTPStatusError as e:
@@ -1139,12 +1284,7 @@ class OllamaLLMClient(LLMClient):
                     raise LLMRateLimitError(str(e), status_code=429, cause=e)
                 if status and 500 <= status < 600:
                     last_error = LLMTemporaryError(str(e), status_code=status, cause=e)
-                    if transient_attempt < max_retries:
-                        wait = _exponential_retry_delay(
-                            transient_attempt, initial_backoff, backoff_max
-                        )
-                        time.sleep(wait)
-                        transient_attempt += 1
+                    if _retry_transient_step(f"server error {status}", kind="server error"):
                         continue
                     raise last_error
                 if status and 400 <= status < 500:
@@ -1172,17 +1312,7 @@ class OllamaLLMClient(LLMClient):
                     f"LLM connection/transport error ({type(e).__name__}): {e}.{hint}",
                     cause=e,
                 )
-                if transient_attempt < max_retries:
-                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
-                    logger.warning(
-                        "LLM transport error (attempt %d/%d): %s. Retrying in %.1fs",
-                        attempt + 1,
-                        max_total_attempts,
-                        type(e).__name__,
-                        wait,
-                    )
-                    time.sleep(wait)
-                    transient_attempt += 1
+                if _retry_transient_step(type(e).__name__, kind="transport error"):
                     continue
                 timeout_hint = ""
                 if isinstance(e, httpx.ReadTimeout):
@@ -1277,28 +1407,13 @@ class OllamaLLMClient(LLMClient):
                 rl_initial,
                 rl_cap,
                 sem,
+                resolved_think=think,
             )
-            # Defensive: retry on empty content (e.g. thinking model or API quirk)
-            for empty_attempt in range(2):
-                if (content or "").strip():
-                    break
-                logger.warning(
-                    "Empty JSON response (attempt %d/2). Retrying in %.1fs...",
-                    empty_attempt + 1,
-                    backoff_base + random.uniform(0, 1),
-                )
-                time.sleep(backoff_base + random.uniform(0, 1))
-                content = self._ollama_post(
-                    payload,
-                    max_retries,
-                    backoff_base,
-                    backoff_max,
-                    rl_max_retries,
-                    rl_initial,
-                    rl_cap,
-                    sem,
-                )
-            if not (content or "").strip():
+            if not (
+                content or ""
+            ).strip():  # pragma: no cover - _ollama_post raises on empty content
+                # Postcondition guard only: _parse_response_content never
+                # returns empty-stripped content in either retry mode.
                 self._record_telemetry(status="error", error_type="empty_response")
                 raise LLMTemporaryError(
                     "Empty response from LLM after retries; try again or pass think=False if thinking is enabled."
@@ -1306,6 +1421,9 @@ class OllamaLLMClient(LLMClient):
             result = self._extract_json(content)
             self._record_telemetry(status="success", prompt_text=prompt, response_text=content)
             return result
+        except LLMSemanticExhaustionError:
+            self._record_telemetry(status="error", error_type="semantic_exhaustion")
+            raise
         except LLMTruncatedError as e:
             self._record_telemetry(status="truncated", error_type="truncated")
             return self._complete_json_with_continuation(
@@ -1321,7 +1439,7 @@ class OllamaLLMClient(LLMClient):
                 rl_initial=rl_initial,
                 rl_cap=rl_cap,
                 sem=sem,
-                use_think=think,
+                use_think=e.think_used if e.think_used is not None else think,
             )
         except LLMJsonParseError:
             self._record_telemetry(
@@ -1425,6 +1543,7 @@ class OllamaLLMClient(LLMClient):
                     rl_initial,
                     rl_cap,
                     sem,
+                    resolved_think=use_think,
                 )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return self._extract_json(accumulated)
@@ -1503,9 +1622,13 @@ class OllamaLLMClient(LLMClient):
                 rl_initial,
                 rl_cap,
                 sem,
+                resolved_think=think,
             )
             self._record_telemetry(status="success", prompt_text=prompt, response_text=result)
             return result
+        except LLMSemanticExhaustionError:
+            self._record_telemetry(status="error", error_type="semantic_exhaustion")
+            raise
         except LLMTruncatedError as e:
             self._record_telemetry(status="truncated", error_type="truncated")
             return self._complete_text_with_continuation(
@@ -1521,7 +1644,7 @@ class OllamaLLMClient(LLMClient):
                 rl_initial=rl_initial,
                 rl_cap=rl_cap,
                 sem=sem,
-                use_think=think,
+                use_think=e.think_used if e.think_used is not None else think,
             )
 
     def _complete_text_with_continuation(
@@ -1575,6 +1698,7 @@ class OllamaLLMClient(LLMClient):
                     rl_initial,
                     rl_cap,
                     sem,
+                    resolved_think=use_think,
                 )
                 accumulated = self._merge_continuation(accumulated, next_content)
                 return accumulated
@@ -1640,9 +1764,21 @@ class OllamaLLMClient(LLMClient):
             payload["tools"] = tools
         elif response_format == "json":
             payload["response_format"] = {"type": "json_object"}
-        content = self._ollama_post(
-            payload, max_retries, backoff_base, backoff_max, rl_max_retries, rl_initial, rl_cap, sem
-        )
+        try:
+            content = self._ollama_post(
+                payload,
+                max_retries,
+                backoff_base,
+                backoff_max,
+                rl_max_retries,
+                rl_initial,
+                rl_cap,
+                sem,
+                resolved_think=think,
+            )
+        except LLMSemanticExhaustionError:
+            self._record_telemetry(status="error", error_type="semantic_exhaustion")
+            raise
         stripped = (content or "").strip()
         if stripped.startswith("{") and "__tool_calls__" in stripped:
             try:

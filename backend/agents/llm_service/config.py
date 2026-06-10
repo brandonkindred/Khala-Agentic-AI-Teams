@@ -37,6 +37,7 @@ ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
 ENV_LLM_THINKING_LEVEL = "LLM_THINKING_LEVEL"
+ENV_LLM_THINKING_DOWNGRADE_RETRY = "LLM_THINKING_DOWNGRADE_RETRY"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
 
 # Default cap for max_tokens (many APIs limit output to 32K even when context is 256K)
@@ -70,6 +71,19 @@ KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
 }
 
 
+def env_flag_enabled(env_name: str) -> bool:
+    """Shared parser for default-on boolean env toggles.
+
+    Preconditions:
+        - ``env_name`` is a non-empty environment variable name.
+    Postconditions:
+        - Returns False only for an explicit "false"/"0"/"no"
+          (case-insensitive, whitespace-tolerant); unset or any other value
+          means enabled. Never raises.
+    """
+    return (os.environ.get(env_name) or "").strip().lower() not in ("false", "0", "no")
+
+
 def thinking_enabled_by_default() -> bool:
     """Global thinking default: enabled unless LLM_ENABLE_THINKING is falsy.
 
@@ -77,11 +91,7 @@ def thinking_enabled_by_default() -> bool:
         - Returns False only for explicit "false"/"0"/"no" (case-insensitive);
           unset or any other value means enabled.
     """
-    return (os.environ.get(ENV_LLM_ENABLE_THINKING) or "").strip().lower() not in (
-        "false",
-        "0",
-        "no",
-    )
+    return env_flag_enabled(ENV_LLM_ENABLE_THINKING)
 
 
 def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | str":
@@ -120,6 +130,35 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
             levels[-1],
         )
     return levels[-1]
+
+
+def downgrade_think(model: str, think: "bool | str") -> "bool | str | None":
+    """Next-lower thinking setting for ``model``, or None when no proof of change exists.
+
+    Used by the proof-of-change retry for semantically exhausted calls: the
+    retry payload must provably differ from the original, and reducing the
+    thinking level is the chosen change agent.
+
+    Preconditions:
+        - ``think`` is a resolved wire value (bool or level string, never None).
+    Postconditions:
+        - ``True`` -> ``False``; ``False`` -> ``None`` (already off — nothing
+          left to change).
+        - A level string registered in ``KNOWN_MODEL_THINKING_LEVELS[model]``
+          -> the previous (lower) level, or ``None`` when already the lowest.
+        - A level string not registered for the model -> ``False`` (disabling
+          reasoning is the only provable change available).
+        - Pure function: no env reads, never raises.
+    """
+    if think is True:
+        return False
+    if think is False:
+        return None
+    levels = KNOWN_MODEL_THINKING_LEVELS.get(model) or ()
+    if think in levels:
+        idx = levels.index(think)
+        return levels[idx - 1] if idx > 0 else None
+    return False
 
 
 # ---------------------------------------------------------------------------

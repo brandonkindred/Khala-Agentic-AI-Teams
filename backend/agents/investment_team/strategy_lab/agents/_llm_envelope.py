@@ -57,6 +57,7 @@ from llm_service.interface import (
     LLMPermanentError,
     LLMRateLimitError,
     LLMSchemaValidationError,
+    LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
 
@@ -272,6 +273,13 @@ def classify_strands_exception(exc: BaseException) -> bool:
     # 1. Known permanent / parse / schema failures — re-calling with the same
     #    prompt cannot help.
     if isinstance(exc, (LLMPermanentError, LLMJsonParseError, LLMSchemaValidationError)):
+        return False
+    # 1b. Semantic exhaustion — the client already proved that this payload
+    #     yields no content even after a reduced-thinking retry. It subclasses
+    #     LLMTemporaryError for caller compatibility, but macro-retrying the
+    #     identical prompt would re-burn the full thinking budget per attempt
+    #     with no proof of change, so the envelope treats it as fatal.
+    if isinstance(exc, LLMSemanticExhaustionError):
         return False
     # 2. Rate limit — retry with backoff, except a hard weekly cap.
     if isinstance(exc, LLMRateLimitError):
