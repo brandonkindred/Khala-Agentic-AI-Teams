@@ -164,6 +164,30 @@ def test_enforce_postcondition_allows_and_blocks() -> None:
     assert "output must not contain leak" in exc.value.reason
 
 
+def test_enforce_postcondition_fails_closed_on_non_mapping_output() -> None:
+    """A None/str/list output is coerced to {} inside the evaluator, so a
+    path-requiring enforced rule blocks — the coercion lives here so EVERY
+    caller (the invoke gate or a direct one) gets identical fail-closed
+    semantics."""
+    require_ok = Rule(
+        id="r-req",
+        agent_id="a",
+        text="output.ok must exist",
+        mode=RuleMode.ENFORCED,
+        status=RuleStatus.ACTIVE,
+        predicate={"phase": "postcondition", "check": {"op": "exists", "path": "output.ok"}},
+        source=RuleSource.OPERATOR,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    assert context.enforce_postcondition({"ok": 1}, [require_ok]) is None
+    for output in (None, "plain string", ["list"], 42):
+        with pytest.raises(PostconditionViolation):
+            context.enforce_postcondition(output, [require_ok])
+    # Without enforced postcondition rules, a non-mapping output still passes.
+    assert context.enforce_postcondition(None, []) is None
+
+
 def test_clamp01_bounds() -> None:
     assert context._clamp01(-3.0) == 0.0
     assert context._clamp01(42.0) == 1.0

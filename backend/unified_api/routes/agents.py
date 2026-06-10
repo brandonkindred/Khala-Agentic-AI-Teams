@@ -237,10 +237,28 @@ async def invoke_agent(
         if outcome.kind is GateOutcomeKind.BLOCKED:
             # The gate already persisted the block event + blocked ledger envelope.
             return JSONResponse(status_code=outcome.status_code or 422, content=outcome.content)
+        if outcome.kind is not GateOutcomeKind.PROCEED:
+            # Fail loudly on a kind this route does not know: silently falling
+            # through would post the raw body ungated and unledgered — a gate
+            # bypass, the worst possible default for a new failure mode.
+            logger.error("cognition: unmapped gate outcome %r for %s", outcome.kind, agent_id)
+            raise HTTPException(
+                status_code=500,
+                detail=f"Unhandled cognition gate outcome: {outcome.kind}",
+            )
         prepared = outcome.prepared
         if prepared is not None:
             post_body = prepared.envelope
 
+    # Once the gate has claimed a run (`prepared.claim_token`), every exit from
+    # this point follows one of exactly three contracts — a new early return
+    # must pick one deliberately:
+    #   1. finalize_invoke(...)   — a parseable upstream response (any status):
+    #      gates + persistence + ledger completion.
+    #   2. abandon_invoke(...)    — the agent provably produced nothing usable
+    #      (e.g. the over-cap response below): release so retries re-execute.
+    #   3. hold the lease         — the agent may still be executing (transport
+    #      errors/timeouts): the lease is the concurrent double-run guard.
     # Outer transport timeout on the proxy → sandbox hop. The inner
     # per-agent execution timeout (enforced via asyncio.wait_for inside the
     # shim) is strictly shorter, so the shim always gets to surface a 504
@@ -252,7 +270,16 @@ async def invoke_agent(
     target = f"{handle.url}/_agents/{agent_id}/invoke"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
-            upstream = await client.post(target, json=post_body)
+            if prepared is not None and prepared.envelope_bytes is not None:
+                # Reuse the bytes the gate already serialized for the payload-cap
+                # check instead of re-serializing the (potentially ~MiB) envelope.
+                upstream = await client.post(
+                    target,
+                    content=prepared.envelope_bytes,
+                    headers={"Content-Type": "application/json"},
+                )
+            else:
+                upstream = await client.post(target, json=post_body)
     except httpx.HTTPError as exc:
         # The cognition claim (if any) is deliberately LEFT leased: a transport
         # error does not prove the agent isn't still executing in the sandbox,
@@ -321,8 +348,11 @@ async def invoke_agent(
             )
             return JSONResponse(status_code=fin.status_code, content=fin.content)
 
-    if isinstance(content, dict):
-        content.setdefault("sandbox", {"agent_id": agent_id, "url": handle.url})
+    # Add the per-invoke sandbox block on a COPY: finalize stored `content` in
+    # the ledger by reference, so mutating it here would leak the sandbox block
+    # into the replay envelope (a replay must not masquerade as a fresh boot).
+    if isinstance(content, dict) and "sandbox" not in content:
+        content = {**content, "sandbox": {"agent_id": agent_id, "url": handle.url}}
 
     # Best-effort run persistence. Never block the invoke on storage failure.
     _persist_run(

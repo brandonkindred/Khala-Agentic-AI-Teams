@@ -151,18 +151,25 @@ def enforce_precondition(agent_id: str, input_body: Any, rules: list[Rule]) -> N
         raise PreconditionBlocked(reason or "blocked by enforced precondition")
 
 
-def enforce_postcondition(output: Mapping[str, Any], rules: list[Rule]) -> None:
+def enforce_postcondition(output: Any, rules: list[Rule]) -> None:
     """Enforced postcondition gate — raises on block.
 
     Preconditions:
-        * ``output`` is the agent's raw result mapping (the evaluator wraps it
-          as ``{"output": output}`` internally — pass it unwrapped); ``rules``
-          are the agent's candidate rules.
+        * ``output`` is the agent's raw result — pass it unwrapped, **any
+          type**. A non-mapping output (``None``, a string, a list) is
+          evaluated against an empty mapping, so path predicates fail closed:
+          an agent carrying enforced postcondition rules implies an object
+          output, and a missing one must block, never silently skip the gate.
+          The coercion lives here so every caller — gate or direct — gets the
+          same fail-closed semantics. ``rules`` are the agent's candidate
+          rules.
     Postconditions:
         * Returns ``None`` when every active enforced postcondition rule holds.
         * Raises :class:`PostconditionViolation` carrying the first failing
           rule's reason otherwise. A malformed enforced predicate fails closed.
     """
+    if not isinstance(output, Mapping):
+        output = {}
     allowed, reason = evaluate_postcondition(output, rules)
     if not allowed:
         raise PostconditionViolation(reason or "blocked by enforced postcondition")
@@ -241,6 +248,18 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
     * ``agent_id`` / ``source_run_id`` are pinned to the caller's authoritative
       values (a writeback cannot forge another agent's id or scribble into a
       different run's idempotency key).
+
+    ``source_run_id`` format note: the invoke gate passes an **attempt-scoped**
+    composite here — ``{ledger_key}#{attempt_token}`` (see
+    ``agent_cognition.invoke_gate.PreparedInvoke.event_run_id``) — because a
+    ledger key can legitimately execute more than once (expired-lease reclaim)
+    and a retry's new events must not dedup against a prior attempt's rows.
+    Consequently an event's ``source_run_id`` does **not** equal the
+    ``agent_cognition_runs`` key; correlating events to a ledger row means
+    matching on the prefix before the *last* ``#`` (a caller-supplied
+    Idempotency-Key may itself contain ``#``; the attempt token never does —
+    it is a UUID). Direct callers should follow the same convention or accept
+    that re-executions of their key will dedup.
 
     ``writeback.tool_calls`` is **not** separately persisted: the tool broker
     already emits per-call ``tool_call`` / ``outcome`` events into

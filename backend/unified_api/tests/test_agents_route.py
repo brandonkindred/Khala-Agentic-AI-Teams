@@ -198,7 +198,7 @@ def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, json=None):
+        async def post(self, url, json=None, content=None, headers=None):
             return _Resp()
 
     monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
@@ -427,8 +427,10 @@ def _install_capturing_upstream(
         async def __aexit__(self, *a):
             return False
 
-        async def post(self, url, json=None):
-            captured["json"] = json
+        async def post(self, url, json=None, content=None, headers=None):
+            import json as _json2
+
+            captured["json"] = json if json is not None else _json2.loads(content)
             captured["posts"] += 1
             return _Resp()
 
@@ -764,3 +766,24 @@ def test_invoke_storage_outage_degrades_unless_side_effecting(
 
     resp = cog_client.post("/api/agents/blogging.sideeffect/invoke", json={"q": 1}, headers={"Idempotency-Key": "k1"})
     assert resp.status_code == 503  # run-once not guaranteeable → fail closed
+
+
+def test_invoke_unmapped_gate_outcome_fails_loudly(
+    cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A gate outcome kind this route does not know must 500, never silently
+    proceed as an ungated, unledgered invoke (that would be a gate bypass)."""
+    import unified_api.routes.agents as agents_route_mod
+    from agent_cognition.invoke_gate import GateOutcome
+
+    async def _future_outcome(*a, **k):
+        return GateOutcome(kind="future_kind", reason="not yet mapped")  # type: ignore[arg-type]
+
+    monkeypatch.setattr(agents_route_mod, "prepare_invoke", _future_outcome)
+    captured: dict = {}
+    _install_capturing_upstream(monkeypatch, captured)
+
+    resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1})
+    assert resp.status_code == 500
+    assert "Unhandled cognition gate outcome" in resp.json()["detail"]
+    assert captured["posts"] == 0  # never reached the sandbox ungated
