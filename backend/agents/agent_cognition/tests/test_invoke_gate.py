@@ -28,10 +28,8 @@ from agent_cognition.models import (
     MemoryEvent,
     Rule,
     RuleMode,
-    RuleSource,
-    RuleStatus,
 )
-from agent_cognition.testing import FakeRunLedger
+from agent_cognition.testing import FakeRunLedger, make_rule
 from agent_cognition.tools.envelope import try_unwrap_request
 
 _NOW = datetime(2026, 6, 1, 12, 0, tzinfo=timezone.utc)
@@ -43,17 +41,7 @@ def _run(coro):
 
 
 def _rule(predicate: dict, *, mode: RuleMode = RuleMode.ENFORCED) -> Rule:
-    return Rule(
-        id=f"r-{uuid4()}",
-        agent_id=_AGENT,
-        text="gate rule",
-        mode=mode,
-        status=RuleStatus.ACTIVE,
-        predicate=predicate,
-        source=RuleSource.OPERATOR,
-        created_at=_NOW,
-        updated_at=_NOW,
-    )
+    return make_rule(predicate, agent_id=_AGENT, mode=mode, text="gate rule")
 
 
 def _pre_rule_blocking_everything() -> Rule:

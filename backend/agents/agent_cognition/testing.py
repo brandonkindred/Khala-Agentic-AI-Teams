@@ -9,9 +9,48 @@ drifting on claim/complete semantics.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
+from uuid import uuid4
 
 from agent_cognition.context import ClaimResult, ClaimState
+from agent_cognition.models import Rule, RuleMode, RuleSource, RuleStatus
+
+_RULE_TS = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+def make_rule(
+    predicate: dict[str, Any],
+    *,
+    agent_id: str,
+    mode: RuleMode = RuleMode.ENFORCED,
+    rule_id: str | None = None,
+    text: str = "test rule",
+) -> Rule:
+    """Build an active test ``Rule`` around a predicate (shared by the suites).
+
+    One builder for the gate unit tests and the unified API route tests, so the
+    fixture shape (active status, operator source, fixed timestamps) cannot
+    drift between them.
+
+    Preconditions:
+        * ``agent_id`` is non-empty; ``predicate`` is a predicate-DSL dict.
+    Postconditions:
+        * Returns an ``ACTIVE`` rule with the given mode and a stable id
+          (``rule_id`` or a fresh UUID-suffixed one).
+    """
+    assert agent_id, "make_rule: agent_id must be non-empty"
+    return Rule(
+        id=rule_id or f"r-{uuid4()}",
+        agent_id=agent_id,
+        text=text,
+        mode=mode,
+        status=RuleStatus.ACTIVE,
+        predicate=predicate,
+        source=RuleSource.OPERATOR,
+        created_at=_RULE_TS,
+        updated_at=_RULE_TS,
+    )
 
 
 class FakeRunLedger:

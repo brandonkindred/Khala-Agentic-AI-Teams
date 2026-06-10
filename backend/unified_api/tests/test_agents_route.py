@@ -237,11 +237,6 @@ def _install_upstream(
     monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)
 
 
-def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
-    """Mock the sandbox acquire + httpx upstream so the proxy sees ``body_bytes``."""
-    _install_upstream(monkeypatch, response_bytes=body_bytes)
-
-
 def test_invoke_proxy_cap_accounts_for_output_writeback_and_overhead(
     client: TestClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -258,14 +253,14 @@ def test_invoke_proxy_cap_accounts_for_output_writeback_and_overhead(
     # earlier output-only cap would have falsely 502'd this).
     ok_body = b'{"output":"' + b"x" * 1400 + b'"}'
     assert 1000 < len(ok_body) < cap
-    _patch_upstream(monkeypatch, body_bytes=ok_body)
+    _install_upstream(monkeypatch, response_bytes=ok_body)
     resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
     assert resp.status_code == 200
 
     # Past the full budget: still rejected with a 502 preview.
     big_body = b'{"output":"' + b"x" * (cap + 100) + b'"}'
     assert len(big_body) > cap
-    _patch_upstream(monkeypatch, body_bytes=big_body)
+    _install_upstream(monkeypatch, response_bytes=big_body)
     resp = client.post("/api/agents/blogging.planner/invoke", json={"q": 1})
     assert resp.status_code == 502
     assert "exceeds" in resp.json()["error"]
@@ -402,33 +397,9 @@ def gate_seams(monkeypatch: pytest.MonkeyPatch):
 
 
 def _enforced_rule(predicate):
-    from datetime import datetime, timezone
+    from agent_cognition.testing import make_rule
 
-    from agent_cognition.models import Rule, RuleMode, RuleSource, RuleStatus
-
-    now = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    return Rule(
-        id="r-gate",
-        agent_id="blogging.cog",
-        text="enforced gate",
-        mode=RuleMode.ENFORCED,
-        status=RuleStatus.ACTIVE,
-        predicate=predicate,
-        source=RuleSource.OPERATOR,
-        created_at=now,
-        updated_at=now,
-    )
-
-
-def _install_capturing_upstream(
-    monkeypatch: pytest.MonkeyPatch,
-    captured: dict,
-    *,
-    response_json: dict | None = None,
-    persist_calls: list | None = None,
-) -> None:
-    """Mock acquire + httpx, recording posted bodies (``captured``) and counting posts."""
-    _install_upstream(monkeypatch, captured=captured, response_json=response_json, persist_calls=persist_calls)
+    return make_rule(predicate, agent_id="blogging.cog", rule_id="r-gate", text="enforced gate")
 
 
 def _install_warming_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,7 +425,7 @@ def test_invoke_wraps_body_with_cognition_envelope(
     from agent_cognition.tools.envelope import ENVELOPE_MARKER, try_unwrap_request
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
 
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1})
     assert resp.status_code == 200
@@ -475,7 +446,7 @@ def test_invoke_non_cognition_agent_bypasses_gate(cog_client: TestClient, monkey
 
     monkeypatch.setattr(agents_route_mod, "prepare_invoke", _fail_gate)
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
 
     resp = cog_client.post("/api/agents/blogging.plain/invoke", json={"q": 1})
     assert resp.status_code == 200
@@ -487,7 +458,7 @@ def test_invoke_retry_same_key_and_body_replays_without_reinvoking(
 ) -> None:
     captured: dict = {}
     persists: list = []
-    _install_capturing_upstream(monkeypatch, captured, persist_calls=persists)
+    _install_upstream(monkeypatch, captured=captured, persist_calls=persists)
 
     headers = {"Idempotency-Key": "k1"}
     first = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
@@ -510,7 +481,7 @@ def test_invoke_same_key_different_body_is_409(
     cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     headers = {"Idempotency-Key": "k1"}
     assert cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers).status_code == 200
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 2}, headers=headers)
@@ -524,7 +495,7 @@ def test_invoke_concurrent_retry_while_leased_is_409(
     from agent_cognition.invoke_gate import derive_source_run_id
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     srid, request_hash = derive_source_run_id({"q": 1}, "k1")
     gate_seams.ledger.rows[("blogging.cog", srid)] = {
         "status": "in_progress",
@@ -544,7 +515,7 @@ def test_invoke_expired_lease_retry_reexecutes(
     from agent_cognition.invoke_gate import derive_source_run_id
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     srid, request_hash = derive_source_run_id({"q": 1}, "k1")
     gate_seams.ledger.rows[("blogging.cog", srid)] = {
         "status": "in_progress",
@@ -562,7 +533,7 @@ def test_invoke_requires_idempotency_key_rejects_keyless_400(
     cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     resp = cog_client.post("/api/agents/blogging.sideeffect/invoke", json={"q": 1})
     assert resp.status_code == 400
     assert "Idempotency-Key" in resp.json()["detail"]
@@ -582,7 +553,7 @@ def test_invoke_blocked_by_enforced_precondition_and_retry_replays(
     from agent_cognition.models import CognitionContext, EventKind
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     rule = _enforced_rule({"phase": "precondition", "check": {"op": "==", "path": "input.q", "value": 999}})
     gate_seams.context = CognitionContext(rules=[rule], memory_digest="")
 
@@ -617,9 +588,9 @@ def test_invoke_postcondition_violation_drops_output_keeps_audit(
 
     captured: dict = {}
     persists: list = []
-    _install_capturing_upstream(
+    _install_upstream(
         monkeypatch,
-        captured,
+        captured=captured,
         response_json={
             "output": {"ok": False, "secret_result": "MUST-NOT-PERSIST"},
             "memory_events": [{"agent": "authored"}],
@@ -664,9 +635,9 @@ def test_invoke_success_persists_writeback_and_completes_ledger(
         "source_run_id": "k1",
         "source_seq": 0,
     }
-    _install_capturing_upstream(
+    _install_upstream(
         monkeypatch,
-        captured,
+        captured=captured,
         response_json={"output": {"ok": True}, "memory_events": [event, {"junk": 1}], "tool_audit": []},
     )
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers={"Idempotency-Key": "k1"})
@@ -685,7 +656,7 @@ def test_invoke_envelope_recap_413_when_cognition_overflows_cap(
     from agent_cognition.models import CognitionContext
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     monkeypatch.setenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", "1024")
     gate_seams.context = CognitionContext(rules=[], memory_digest="D" * 900)
 
@@ -724,7 +695,7 @@ def test_invoke_oversized_response_releases_claim_for_immediate_retry(
     big = {"output": "x" * (cap + 100)}
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured, response_json=big)
+    _install_upstream(monkeypatch, captured=captured, response_json=big)
     headers = {"Idempotency-Key": "k1"}
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
     assert resp.status_code == 502
@@ -747,7 +718,7 @@ def test_invoke_storage_outage_degrades_unless_side_effecting(
     monkeypatch.setattr(gate_mod, "claim_run", _boom)
 
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1})
     assert resp.status_code == 200  # plain cognition agent degrades to unledgered
 
@@ -768,7 +739,7 @@ def test_invoke_unmapped_gate_outcome_fails_loudly(
 
     monkeypatch.setattr(agents_route_mod, "prepare_invoke", _future_outcome)
     captured: dict = {}
-    _install_capturing_upstream(monkeypatch, captured)
+    _install_upstream(monkeypatch, captured=captured)
 
     resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1})
     assert resp.status_code == 500

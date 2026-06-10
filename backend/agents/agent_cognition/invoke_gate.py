@@ -174,6 +174,18 @@ GATE_ERROR_HTTP_STATUS: dict[GateOutcomeKind, int] = {
 }
 
 
+def _event_scoped_run_id(source_run_id: str, attempt_token: str) -> str:
+    """The attempt-scoped run id memory events persist under (single source).
+
+    One definition of the ``{source_run_id}#{attempt_token}`` format, used by
+    both :meth:`PreparedInvoke.event_run_id` and ``prepare_invoke``'s
+    pre-``PreparedInvoke`` block path, so the formula cannot drift between the
+    two (see the module docstring and ``context.persist_writeback`` for the
+    format contract).
+    """
+    return f"{source_run_id}#{attempt_token}"
+
+
 @dataclass(frozen=True)
 class PreparedInvoke:
     """Everything :func:`finalize_invoke` needs to close out a prepared run.
@@ -212,7 +224,7 @@ class PreparedInvoke:
         re-executed attempt writes into a disjoint keyspace instead of being
         silently dropped against the previous attempt's rows.
         """
-        return f"{self.source_run_id}#{self.attempt_token}"
+        return _event_scoped_run_id(self.source_run_id, self.attempt_token)
 
 
 @dataclass(frozen=True)
@@ -368,7 +380,7 @@ async def prepare_invoke(
             claim_token = claim.claim_token
 
     attempt_token = claim_token or str(uuid4())
-    event_run_id = f"{source_run_id}#{attempt_token}"
+    event_run_id = _event_scoped_run_id(source_run_id, attempt_token)
 
     # Lazy catch-up + context load — both best-effort; a cognition subsystem
     # hiccup must never break the invoke (matching the proxy's prior posture).
