@@ -77,7 +77,10 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
 
     Preconditions:
         - ``attempts_used >= 1``; ``payload_fingerprint`` is a stable digest of
-          the last request payload sent.
+          the last request payload sent. The keyword defaults exist only so
+          exception-reconstruction protocols (pickle rebuilds via
+          ``cls(*self.args)`` then restores ``__dict__``) can round-trip the
+          receipt; the client always supplies every field.
     Postconditions / Invariants:
         - ``failure_class`` is always ``"semantic_exhaustion"``.
         - ``retry_thinking_level`` is the reduced thinking value used on the
@@ -96,11 +99,11 @@ class LLMSemanticExhaustionError(LLMTemporaryError):
         self,
         message: str,
         *,
-        attempts_used: int,
-        original_thinking_level: "bool | str | None",
-        retry_thinking_level: "bool | str | None",
-        content_bytes_seen: bool,
-        payload_fingerprint: str,
+        attempts_used: int = 0,
+        original_thinking_level: "bool | str | None" = None,
+        retry_thinking_level: "bool | str | None" = None,
+        content_bytes_seen: bool = False,
+        payload_fingerprint: str = "",
         finish_reason: str = "",
         cause: Optional[Exception] = None,
     ):

@@ -845,6 +845,35 @@ class OllamaLLMClient(LLMClient):
         max_total_attempts = max_retries + rate_limit_max_retries + 2
         rl_log_body: Optional[str] = None
         rl_log_headers: Any = None
+        attempt = 0
+
+        def _retry_transient_step(detail: str, kind: str = "temporary error") -> bool:
+            """Consume one transient-schedule attempt: log, sleep, count.
+
+            Single owner of the transient backoff mechanics for every handler
+            in this loop, so the schedule cannot drift between failure kinds.
+
+            Preconditions: called only from a failure branch of the request loop.
+            Postconditions: True → one attempt was consumed (slept on the
+                exponential schedule; caller must ``continue``); False → the
+                transient budget is exhausted and nothing changed (caller raises).
+            """
+            nonlocal transient_attempt
+            if transient_attempt >= max_retries:
+                return False
+            wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
+            logger.warning(
+                "LLM %s (attempt %d/%d): %s. Retrying in %.1fs",
+                kind,
+                attempt + 1,
+                max_total_attempts,
+                detail,
+                wait,
+            )
+            time.sleep(wait)
+            transient_attempt += 1
+            return True
+
         while True:
             attempt = transient_attempt + rate_limit_attempt + semantic_attempt
             try:
@@ -1063,12 +1092,9 @@ class OllamaLLMClient(LLMClient):
                                     f"LLM server error {status} after {attempt + 1} attempt(s): {response.text[:200]}.{hint}",
                                     status_code=status,
                                 )
-                                if transient_attempt < max_retries:
-                                    wait = _exponential_retry_delay(
-                                        transient_attempt, initial_backoff, backoff_max
-                                    )
-                                    time.sleep(wait)
-                                    transient_attempt += 1
+                                if _retry_transient_step(
+                                    f"server error {status}", kind="server error"
+                                ):
                                     continue
                                 self._log_llm_server_error(
                                     status,
@@ -1148,7 +1174,6 @@ class OllamaLLMClient(LLMClient):
                     )
                 raise e
             except _EmptyResponseSignal as sig:
-                any_content_bytes = any_content_bytes or sig.content_len > 0
                 if not _thinking_downgrade_enabled():
                     # Kill switch off: legacy behavior — empty responses retry
                     # verbatim on the transient schedule, then fail as a plain
@@ -1161,14 +1186,12 @@ class OllamaLLMClient(LLMClient):
                     last_error = LLMTemporaryError(
                         "Empty response from LLM; treating as transient for retry",
                     )
-                    if transient_attempt < max_retries:
-                        wait = _exponential_retry_delay(
-                            transient_attempt, initial_backoff, backoff_max
-                        )
-                        time.sleep(wait)
-                        transient_attempt += 1
+                    if _retry_transient_step(str(last_error)):
                         continue
                     raise last_error
+                # Receipt state — only consumed by the semantic-exhaustion
+                # receipt below, so only tracked on the downgrade path.
+                any_content_bytes = any_content_bytes or sig.content_len > 0
                 new_think = (
                     None
                     if (semantic_attempt or active_think is None)
@@ -1219,17 +1242,7 @@ class OllamaLLMClient(LLMClient):
                 )
             except LLMTemporaryError as e:
                 last_error = e
-                if transient_attempt < max_retries:
-                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
-                    logger.warning(
-                        "LLM temporary error (attempt %d/%d): %s. Retrying in %.1fs",
-                        attempt + 1,
-                        max_total_attempts,
-                        e,
-                        wait,
-                    )
-                    time.sleep(wait)
-                    transient_attempt += 1
+                if _retry_transient_step(str(e)):
                     continue
                 raise last_error
             except httpx.HTTPStatusError as e:
@@ -1300,17 +1313,7 @@ class OllamaLLMClient(LLMClient):
                     f"LLM connection/transport error ({type(e).__name__}): {e}.{hint}",
                     cause=e,
                 )
-                if transient_attempt < max_retries:
-                    wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
-                    logger.warning(
-                        "LLM transport error (attempt %d/%d): %s. Retrying in %.1fs",
-                        attempt + 1,
-                        max_total_attempts,
-                        type(e).__name__,
-                        wait,
-                    )
-                    time.sleep(wait)
-                    transient_attempt += 1
+                if _retry_transient_step(type(e).__name__, kind="transport error"):
                     continue
                 timeout_hint = ""
                 if isinstance(e, httpx.ReadTimeout):

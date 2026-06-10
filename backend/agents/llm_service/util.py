@@ -17,6 +17,7 @@ from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
+    LLMSemanticExhaustionError,
     LLMTemporaryError,
     LLMUnreachableAfterRetriesError,
 )
@@ -71,14 +72,24 @@ def call_llm_with_retries(
 ) -> Any:
     """
     Call fn() up to max_attempts times with exponential backoff on connection/temporary errors.
-    On permanent/rate-limit errors, re-raises immediately. After exhausting retries, raises
-    LLMUnreachableAfterRetriesError so the caller can return a structured result (e.g. llm_unreachable=True).
+    On permanent/rate-limit errors, re-raises immediately. Semantic exhaustion
+    (LLMSemanticExhaustionError) also re-raises immediately: the client already proved that
+    payload yields no content even after its reduced-thinking retry, so macro-retrying the
+    identical call would re-burn the thinking budget with no proof of change — and would
+    replace the structured receipt with a generic unreachable error. After exhausting retries,
+    raises LLMUnreachableAfterRetriesError so the caller can return a structured result
+    (e.g. llm_unreachable=True).
     """
     last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
             return fn()
-        except (LLMPermanentError, LLMRateLimitError, LLMUnreachableAfterRetriesError):
+        except (
+            LLMPermanentError,
+            LLMRateLimitError,
+            LLMSemanticExhaustionError,
+            LLMUnreachableAfterRetriesError,
+        ):
             raise
         except (
             LLMTemporaryError,
