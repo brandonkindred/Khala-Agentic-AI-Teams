@@ -37,19 +37,19 @@ backend/
     job_matching_team/       # Scans open roles vs a job-seeker profile; ranks best-to-apply
     llm_service/             # Centralized LLM client (Ollama, Claude)
     agent_registry/          # Agent Console catalog: loads per-agent YAML manifests, serves /api/agents
-    agent_console/           # Agent Console Phase 3: Postgres-backed saved inputs, run history, diff, pruner
-    product_delivery/        # Persistent Product Delivery Loop (#243), in-process module mounted by
-                             # unified_api at /api/product-delivery. Phase 1 (#369): backlog tables
+    agent_console/           # Agent Console data layer: Postgres-backed saved inputs, run history, diff, pruner
+    product_delivery/        # Persistent Product Delivery Loop, in-process module mounted by
+                             # unified_api at /api/product-delivery. Backlog tables
                              # (products → initiatives → epics → stories → tasks + acceptance criteria
-                             # + feedback_items), ProductOwnerAgent (WSJF/RICE). Phase 2 (#396): sprints
-                             # + releases tables, sprint_planner_agent, _load_requirements_from_sprint
-                             # in the SE orchestrator. Phase 3 (#371): release_manager_agent ships sprint
-                             # completion → plan/releases/<version>.md + product_delivery_releases row,
-                             # auto-promotes Integration-phase failures into sprint-tagged
-                             # feedback_items (queryable via GET /feedback; operator triage feeds the
-                             # next groom — POST /groom does not consume feedback automatically);
-                             # POST/GET /releases routes; SE Integration-phase hook (legacy SE path
-                             # only — default use_coding_team=True path currently skips the hook).
+                             # + feedback_items), ProductOwnerAgent (WSJF/RICE); sprints + releases
+                             # tables, sprint_planner_agent, _load_requirements_from_sprint in the SE
+                             # orchestrator; release_manager_agent ships sprint completion →
+                             # plan/releases/<version>.md + product_delivery_releases row, auto-promotes
+                             # Integration-phase failures into sprint-tagged feedback_items (queryable
+                             # via GET /feedback; operator triage feeds the next groom — POST /groom
+                             # does not consume feedback automatically); POST/GET /releases routes;
+                             # SE Integration-phase hook (legacy SE path only — default
+                             # use_coding_team=True path currently skips the hook).
     shared_agent_invoke/     # Invoke shim mounted inside the sandbox image; exposes POST /_agents/{id}/invoke
     integrations/            # Shared integration contracts (Google login, Medium, etc.)
     artifact_registry/       # Shared artifact persistence
@@ -224,7 +224,7 @@ Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
 
 ### Project Rules
 
-- **Never reference GitHub issues in code, comments, or docs.** Do not mention issue numbers (e.g. `#243`, `#369`, `Issue #531`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
+- **Never reference GitHub issues in code, comments, or docs.** Do not mention issue numbers (e.g. `#NNN`, `Issue #NNN`), issue URLs, or "see issue X" anywhere in source code, comments, docstrings, commit messages, changelogs, or documentation. Describe the change on its own terms — what it does and why — without pointing at an external tracker. This rule applies to *new* writing; existing references in this file and historical docs are grandfathered until the surrounding section is rewritten.
 - **Always use `Closes #N` notation in pull requests.** Every PR must reference the associated GitHub issue in its body using GitHub's auto-close keywords (`Closes #N`, `Fixes #N`, or `Resolves #N`) so merging the PR automatically closes the linked issue. This is the *only* place issue numbers belong — PR bodies — and it is required, not optional. If a change has no associated issue, open one first.
 - **Design by Contract (DbC) is mandatory for all code and comments.** Every function, method, and module must make its contract explicit:
   - **Preconditions** — what callers must guarantee about inputs (types, ranges, invariants, required state). Enforce with `assert` or explicit validation that raises on violation at boundaries.
