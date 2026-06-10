@@ -162,14 +162,38 @@ def test_invoke_oversized_body_returns_413_without_acquiring_sandbox(
     assert resp.status_code == 413
 
 
-def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
-    """Mock the sandbox acquire + httpx upstream so the proxy sees ``body_bytes``."""
+def _install_upstream(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    captured: dict | None = None,
+    response_json: dict | None = None,
+    response_bytes: bytes | None = None,
+    persist_calls: list | None = None,
+    post_error: Exception | None = None,
+) -> None:
+    """The single WARM-sandbox + httpx transport fake for invoke-route tests.
+
+    One fake transport contract for every test: ``captured`` records each
+    posted body (decoding ``content=`` bytes) and counts posts; the response
+    body is ``response_bytes`` verbatim or ``response_json`` (default
+    ``{"output": {"ok": true}}``); ``persist_calls`` records ``_persist_run``
+    kwargs; ``post_error`` makes the post raise (the transport-failure path)
+    after counting the attempt.
+    """
+    import json as _json
     import types
 
     import unified_api.routes.agents as agents_route_mod
     from agent_provisioning_team.sandbox import SandboxStatus
 
     handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
+    body_bytes = (
+        response_bytes
+        if response_bytes is not None
+        else _json.dumps(response_json if response_json is not None else {"output": {"ok": True}}).encode()
+    )
+    if captured is not None:
+        captured.setdefault("posts", 0)
 
     async def _acquire(agent_id: str):
         return handle
@@ -178,14 +202,11 @@ def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
         return None
 
     class _Resp:
-        def __init__(self) -> None:
-            self.content = body_bytes
-            self.status_code = 200
-            self.text = body_bytes.decode("utf-8", "replace")
+        content = body_bytes
+        status_code = 200
+        text = body_bytes.decode("utf-8", "replace")
 
         def json(self):
-            import json as _json
-
             return _json.loads(self.content)
 
     class _FakeClient:
@@ -199,12 +220,26 @@ def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
             return False
 
         async def post(self, url, json=None, content=None, headers=None):
+            if captured is not None:
+                captured["json"] = json if json is not None else _json.loads(content)
+                captured["posts"] += 1
+            if post_error is not None:
+                raise post_error
             return _Resp()
+
+    def _record_persist(**kwargs):
+        if persist_calls is not None:
+            persist_calls.append(kwargs)
 
     monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
     monkeypatch.setattr(agents_route_mod, "note_activity", _note_activity)
-    monkeypatch.setattr(agents_route_mod, "_persist_run", lambda **k: None)
+    monkeypatch.setattr(agents_route_mod, "_persist_run", _record_persist)
     monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)
+
+
+def _patch_upstream(monkeypatch: pytest.MonkeyPatch, *, body_bytes: bytes):
+    """Mock the sandbox acquire + httpx upstream so the proxy sees ``body_bytes``."""
+    _install_upstream(monkeypatch, response_bytes=body_bytes)
 
 
 def test_invoke_proxy_cap_accounts_for_output_writeback_and_overhead(
@@ -393,55 +428,7 @@ def _install_capturing_upstream(
     persist_calls: list | None = None,
 ) -> None:
     """Mock acquire + httpx, recording posted bodies (``captured``) and counting posts."""
-    import json as _json
-    import types
-
-    import unified_api.routes.agents as agents_route_mod
-    from agent_provisioning_team.sandbox import SandboxStatus
-
-    handle = types.SimpleNamespace(status=SandboxStatus.WARM, url="http://sandbox.local", error=None, boot_ms=1)
-    body = response_json if response_json is not None else {"output": {"ok": True}}
-    captured.setdefault("posts", 0)
-
-    async def _acquire(agent_id: str):
-        return handle
-
-    async def _note_activity(agent_id: str):
-        return None
-
-    class _Resp:
-        content = _json.dumps(body).encode()
-        status_code = 200
-        text = _json.dumps(body)
-
-        def json(self):
-            return body
-
-    class _FakeClient:
-        def __init__(self, *a, **k) -> None:
-            pass
-
-        async def __aenter__(self):
-            return self
-
-        async def __aexit__(self, *a):
-            return False
-
-        async def post(self, url, json=None, content=None, headers=None):
-            import json as _json2
-
-            captured["json"] = json if json is not None else _json2.loads(content)
-            captured["posts"] += 1
-            return _Resp()
-
-    def _record_persist(**kwargs):
-        if persist_calls is not None:
-            persist_calls.append(kwargs)
-
-    monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
-    monkeypatch.setattr(agents_route_mod, "note_activity", _note_activity)
-    monkeypatch.setattr(agents_route_mod, "_persist_run", _record_persist)
-    monkeypatch.setattr(agents_route_mod.httpx, "AsyncClient", _FakeClient)
+    _install_upstream(monkeypatch, captured=captured, response_json=response_json, persist_calls=persist_calls)
 
 
 def _install_warming_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -787,3 +774,37 @@ def test_invoke_unmapped_gate_outcome_fails_loudly(
     assert resp.status_code == 500
     assert "Unhandled cognition gate outcome" in resp.json()["detail"]
     assert captured["posts"] == 0  # never reached the sandbox ungated
+
+
+def test_invoke_transport_error_holds_lease_for_double_run_protection(
+    cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The third documented post-claim exit: a transport error (httpx) returns
+    502 and deliberately HOLDS the lease — the agent may still be executing in
+    the sandbox, and the lease is the guard against a concurrent double-run. A
+    same-key retry inside the lease window must therefore 409, and only an
+    expired lease re-executes."""
+    import httpx as _httpx
+
+    captured: dict = {}
+    _install_upstream(monkeypatch, captured=captured, post_error=_httpx.ConnectError("boom"))
+
+    headers = {"Idempotency-Key": "k1"}
+    resp = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
+    assert resp.status_code == 502
+    assert "Sandbox invoke failed" in resp.json()["detail"]
+
+    # The claim is still leased — NOT abandoned, NOT completed.
+    row = gate_seams.ledger.rows[("blogging.cog", "k1")]
+    assert row["status"] == "in_progress" and row["lease_valid"]
+
+    # Retry inside the lease window: 409 (the double-run guard), no re-post.
+    retry = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
+    assert retry.status_code == 409
+    assert captured["posts"] == 1
+
+    # Only lease expiry re-executes.
+    row["lease_valid"] = False
+    again = cog_client.post("/api/agents/blogging.cog/invoke", json={"q": 1}, headers=headers)
+    assert again.status_code == 502  # re-executed (and failed the same way)
+    assert captured["posts"] == 2

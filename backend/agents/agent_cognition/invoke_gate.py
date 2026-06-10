@@ -112,12 +112,24 @@ __all__ = [
     "GateOutcomeKind",
     "PreparedInvoke",
     "FinalizeOutcome",
+    "UnmappedGateOutcomeError",
     "derive_source_run_id",
     "prepare_invoke",
     "finalize_invoke",
+    "outcome_as_finalized",
     "abandon_invoke",
     "invoke_in_process",
 ]
+
+
+class UnmappedGateOutcomeError(RuntimeError):
+    """A :class:`GateOutcomeKind` reached the response mapper without a mapping.
+
+    Raised by :func:`outcome_as_finalized` so a future kind added to the enum
+    without transport handling fails loudly and identically on every transport
+    — never as a silent ungated proceed, and never as a bare ``KeyError``.
+    """
+
 
 # Salience for gate-authored events: a rule block is a notable episode the
 # reflection engine should weigh; a tool-call audit row is routine.
@@ -511,31 +523,31 @@ async def finalize_invoke(
 
     # Event persistence and ledger completion touch different tables in
     # separate transactions, so the two best-effort writes run concurrently.
-    persisted = 0
+    # Named unpacking (not positional indexing) ties each result to its write.
     events = _writeback_events(inner, prepared.agent_id)
-    writes = []
-    if events:
-        writes.append(
-            asyncio.to_thread(
-                _persist_events_best_effort, prepared.agent_id, prepared.event_run_id, events
-            )
+    persist_write = (
+        asyncio.to_thread(
+            _persist_events_best_effort, prepared.agent_id, prepared.event_run_id, events
         )
-    if prepared.claim_token is not None:
-        writes.append(
-            asyncio.to_thread(
-                _complete_best_effort,
-                prepared.agent_id,
-                prepared.source_run_id,
-                prepared.claim_token,
-                status="completed",
-                response={"status_code": upstream_status, "content": content},
-            )
+        if events
+        else asyncio.sleep(0)  # placeholder; resolves to None → 0 below
+    )
+    complete_write = (
+        asyncio.to_thread(
+            _complete_best_effort,
+            prepared.agent_id,
+            prepared.source_run_id,
+            prepared.claim_token,
+            status="completed",
+            response={"status_code": upstream_status, "content": content},
         )
-    if writes:
-        results = await asyncio.gather(*writes)
-        if events:
-            persisted = results[0]
-    return FinalizeOutcome(status_code=upstream_status, content=content, persisted_events=persisted)
+        if prepared.claim_token is not None
+        else asyncio.sleep(0)
+    )
+    persisted, _ = await asyncio.gather(persist_write, complete_write)
+    return FinalizeOutcome(
+        status_code=upstream_status, content=content, persisted_events=persisted or 0
+    )
 
 
 async def invoke_in_process(
@@ -572,7 +584,7 @@ async def invoke_in_process(
         idempotency_key=idempotency_key,
     )
     if outcome.kind is not GateOutcomeKind.PROCEED:
-        return _outcome_as_finalized(outcome)
+        return outcome_as_finalized(outcome)
     prepared = outcome.prepared
     assert prepared is not None, "invoke_in_process: PROCEED outcome must carry prepared"
 
@@ -889,10 +901,29 @@ def _gate_event(
     )
 
 
-def _outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
-    """Map a non-``PROCEED`` gate outcome onto the proxy's HTTP status contract."""
+def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
+    """Map a non-``PROCEED`` gate outcome onto the HTTP status/body contract.
+
+    The **single** outcome→response mapping shared by every transport (the
+    unified API route and :func:`invoke_in_process`), so the two can never
+    drift and the exhaustiveness guard lives in exactly one place.
+
+    Preconditions:
+        * ``outcome.kind is not PROCEED`` (a PROCEED has no response to map).
+    Postconditions:
+        * ``REPLAY`` → the stored terminal envelope verbatim; ``BLOCKED`` →
+          the 422 block envelope with ``blocked``/``block_phase``/
+          ``block_reason`` set; every reason-carrying error kind → its
+          ``GATE_ERROR_HTTP_STATUS`` status with a ``{"detail": reason}`` body.
+        * Raises :class:`UnmappedGateOutcomeError` (naming the kind) for a
+          kind with no mapping — failing loudly here is the guard against a
+          future ``GateOutcomeKind`` silently bypassing the gate.
+    """
+    assert outcome.kind is not GateOutcomeKind.PROCEED, (
+        "outcome_as_finalized: PROCEED has no response"
+    )
     if outcome.kind is GateOutcomeKind.REPLAY:
-        assert outcome.status_code is not None, "_outcome_as_finalized: replay lacks status"
+        assert outcome.status_code is not None, "outcome_as_finalized: replay lacks status"
         return FinalizeOutcome(status_code=outcome.status_code, content=outcome.content)
     if outcome.kind is GateOutcomeKind.BLOCKED:
         return FinalizeOutcome(
@@ -902,9 +933,10 @@ def _outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
             block_phase="precondition",
             block_reason=outcome.reason,
         )
-    return FinalizeOutcome(
-        status_code=GATE_ERROR_HTTP_STATUS[outcome.kind], content={"detail": outcome.reason}
-    )
+    status = GATE_ERROR_HTTP_STATUS.get(outcome.kind)
+    if status is None:
+        raise UnmappedGateOutcomeError(f"Unhandled cognition gate outcome: {outcome.kind}")
+    return FinalizeOutcome(status_code=status, content={"detail": outcome.reason})
 
 
 def _json_default(obj: Any) -> Any:

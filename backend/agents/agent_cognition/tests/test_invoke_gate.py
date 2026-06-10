@@ -656,9 +656,9 @@ def test_outcome_as_finalized_uses_shared_status_map(seams: SimpleNamespace) -> 
     """The in-process status mapping IS the exported map the HTTP route uses —
     a drift between the two transports is structurally impossible."""
     for kind, status in gate.GATE_ERROR_HTTP_STATUS.items():
-        fin = gate._outcome_as_finalized(gate.GateOutcome(kind=kind, reason="x"))
+        fin = gate.outcome_as_finalized(gate.GateOutcome(kind=kind, reason="x"))
         assert fin.status_code == status
-    blocked = gate._outcome_as_finalized(
+    blocked = gate.outcome_as_finalized(
         gate.GateOutcome(kind=gate.GateOutcomeKind.BLOCKED, status_code=422, reason="r")
     )
     assert blocked.blocked and blocked.block_phase == "precondition" and blocked.block_reason == "r"

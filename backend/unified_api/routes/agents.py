@@ -29,10 +29,11 @@ from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
 from agent_cognition.invoke_gate import (
-    GATE_ERROR_HTTP_STATUS,
     GateOutcomeKind,
+    UnmappedGateOutcomeError,
     abandon_invoke,
     finalize_invoke,
+    outcome_as_finalized,
     prepare_invoke,
 )
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
@@ -224,28 +225,20 @@ async def invoke_agent(
             idempotency_key=request.headers.get("Idempotency-Key"),
             max_envelope_bytes=max_payload_bytes(),
         )
-        if outcome.kind in GATE_ERROR_HTTP_STATUS:
-            raise HTTPException(status_code=GATE_ERROR_HTTP_STATUS[outcome.kind], detail=outcome.reason)
-        if outcome.kind is GateOutcomeKind.REPLAY:
-            # Terminal row replayed verbatim (covers blocked runs too) — the
-            # sandbox is not invoked and no duplicate console run row is written.
-            return JSONResponse(
-                status_code=outcome.status_code or 200,
-                content=outcome.content,
-                headers={"X-Khala-Replayed": "true"},
-            )
-        if outcome.kind is GateOutcomeKind.BLOCKED:
-            # The gate already persisted the block event + blocked ledger envelope.
-            return JSONResponse(status_code=outcome.status_code or 422, content=outcome.content)
         if outcome.kind is not GateOutcomeKind.PROCEED:
-            # Fail loudly on a kind this route does not know: silently falling
-            # through would post the raw body ungated and unledgered — a gate
-            # bypass, the worst possible default for a new failure mode.
-            logger.error("cognition: unmapped gate outcome %r for %s", outcome.kind, agent_id)
-            raise HTTPException(
-                status_code=500,
-                detail=f"Unhandled cognition gate outcome: {outcome.kind}",
-            )
+            # Every non-PROCEED outcome maps to a response through the gate's
+            # single shared mapper — replay verbatim (covers blocked runs; no
+            # sandbox post, no duplicate console run row), rule blocks, and the
+            # reason-carrying errors. An unmapped future kind raises here
+            # rather than silently proceeding ungated — a gate bypass would be
+            # the worst possible default for a new failure mode.
+            try:
+                fin = outcome_as_finalized(outcome)
+            except UnmappedGateOutcomeError as exc:
+                logger.error("cognition: %s for %s", exc, agent_id)
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            headers = {"X-Khala-Replayed": "true"} if outcome.kind is GateOutcomeKind.REPLAY else None
+            return JSONResponse(status_code=fin.status_code, content=fin.content, headers=headers)
         prepared = outcome.prepared
         if prepared is not None:
             post_body = prepared.envelope
