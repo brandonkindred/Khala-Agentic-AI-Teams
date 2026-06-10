@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import random
@@ -16,6 +17,7 @@ from .interface import (
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
+    LLMSemanticExhaustionError,
     LLMTemporaryError,
     LLMUnreachableAfterRetriesError,
 )
@@ -45,6 +47,22 @@ _DEFAULT_EXPECTED_KEYS = frozenset(
 logger = logging.getLogger(__name__)
 
 
+def sha256_fingerprint(text: str, *, length: int = 16) -> str:
+    """Short, stable sha256 hex digest of ``text`` for log/receipt correlation.
+
+    Single home for the truncated-digest pattern so all fingerprints across
+    the LLM service share one algorithm and can be cross-referenced.
+
+    Preconditions:
+        - ``text`` is a str; ``1 <= length <= 64``.
+    Postconditions:
+        - Returns the first ``length`` hex chars of sha256(utf-8 of ``text``);
+          deterministic, never raises.
+    """
+    assert 1 <= length <= 64, f"length must be in 1..64, got {length}"
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
+
+
 def call_llm_with_retries(
     fn: Callable[[], Any],
     *,
@@ -70,7 +88,12 @@ def call_llm_with_retries(
     for attempt in range(max_attempts):
         try:
             return fn()
-        except (LLMPermanentError, LLMRateLimitError, LLMUnreachableAfterRetriesError):
+        except (
+            LLMPermanentError,
+            LLMRateLimitError,
+            LLMSemanticExhaustionError,
+            LLMUnreachableAfterRetriesError,
+        ):
             raise
         except (
             LLMTemporaryError,

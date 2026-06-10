@@ -34,6 +34,7 @@ from llm_service.interface import (
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
+    LLMSemanticExhaustionError,
     LLMTemporaryError,
 )
 
@@ -216,6 +217,20 @@ def test_backoff_delay_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     "exc,expected",
     [
         (LLMTemporaryError("5xx"), True),
+        (
+            # Subclasses LLMTemporaryError, but the client already proved the
+            # payload yields no content even after a reduced-thinking retry —
+            # macro-retrying it would re-burn the thinking budget per attempt.
+            LLMSemanticExhaustionError(
+                "no content",
+                attempts_used=2,
+                original_thinking_level="max",
+                retry_thinking_level="high",
+                content_bytes_seen=False,
+                payload_fingerprint="abc123",
+            ),
+            False,
+        ),
         (LLMPermanentError("4xx"), False),
         (LLMJsonParseError("bad"), False),
         (httpx.ConnectError("c"), True),
