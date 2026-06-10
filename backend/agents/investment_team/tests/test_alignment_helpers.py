@@ -6,9 +6,9 @@ from __future__ import annotations
 
 import pytest
 
+from investment_team.strategy_lab.agents._parse_helpers import extract_json_object as _extract_json
 from investment_team.strategy_lab.agents.alignment import (
     _coerce_report,
-    _extract_json,
     _parse_legitimate,
 )
 
@@ -154,6 +154,11 @@ def test_extract_json_raises_when_no_object() -> None:
 def test_extract_json_raises_on_malformed_json() -> None:
     with pytest.raises(ValueError):
         _extract_json('{"missing_closing_quote: 1}')
+
+
+def test_extract_json_brace_inside_string_value() -> None:
+    data = _extract_json('{"rationale": "exit fires when close > {threshold}", "aligned": false}')
+    assert data == {"rationale": "exit fires when close > {threshold}", "aligned": False}
 
 
 # ---------------------------------------------------------------------------
