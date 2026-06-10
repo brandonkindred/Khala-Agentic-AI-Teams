@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -26,7 +25,7 @@ from ...models import BacktestExecutionDiagnostics, CoverageReport, StrategySpec
 from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
-from ._parse_helpers import StrategySpecParseError, validate_structured_rules
+from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
 from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from .model_factory import get_strands_model
 
@@ -209,7 +208,7 @@ class ZeroTradeRepairAgent:
                 phase="zero_trade_repair",
                 logger=logger,
             )
-            parsed = _extract_json(raw)
+            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.exception("Zero-trade repair agent failed to produce parseable JSON")
             return ZeroTradeRepairReport(
@@ -328,30 +327,3 @@ def _optional_str(value: Any) -> Optional[str]:
         return None
     stripped = value.strip()
     return stripped or None
-
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from LLM output, handling markdown fences."""
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in LLM response")
-
-    depth = 0
-    end = start
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON from LLM response: {e}") from e
