@@ -401,6 +401,10 @@ def test_run_workflow_returns_structured_result_on_semantic_exhaustion(monkeypat
         code_review_agent=MagicMock(),
         build_verifier=lambda **k: (True, "ok"),
     )
+    from software_engineering_team.shared.job_store import LLM_SEMANTIC_EXHAUSTION
+
     assert result.success is False
     assert result.llm_unreachable is True
-    assert "semantic exhaustion" in result.failure_reason
+    # Exact sentinel: the orchestrator propagates failure_reason into task
+    # state and matches it against the shared constants when aggregating.
+    assert result.failure_reason == LLM_SEMANTIC_EXHAUSTION

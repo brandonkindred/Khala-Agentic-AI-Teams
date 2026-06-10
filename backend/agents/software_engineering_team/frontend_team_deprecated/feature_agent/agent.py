@@ -17,7 +17,10 @@ from llm_service import (
     call_llm_with_retries,
 )
 from software_engineering_team.shared.frontend_framework import resolve_frontend_framework
-from software_engineering_team.shared.job_store import LLM_UNREACHABLE_AFTER_RETRIES
+from software_engineering_team.shared.job_store import (
+    LLM_SEMANTIC_EXHAUSTION,
+    LLM_UNREACHABLE_AFTER_RETRIES,
+)
 from software_engineering_team.shared.models import SystemArchitecture, Task, TaskUpdate
 from software_engineering_team.shared.prompt_utils import (
     build_problem_solving_header,
@@ -1631,12 +1634,15 @@ class FrontendExpertAgent:
             # reduced-thinking retry — call_llm_with_retries re-raises it
             # without conversion). Either way the job should pause with a
             # structured result instead of crashing the workflow caller.
+            # failure_reason uses the shared sentinel constants so the
+            # orchestrator's exact-match failure aggregation recognizes both;
+            # the receipt details are already in the client's ERROR log.
             checkout_branch(repo_path, DEVELOPMENT_BRANCH)
             return FrontendWorkflowResult(
                 task_id=task_id,
                 success=False,
                 failure_reason=(
-                    f"LLM semantic exhaustion: {e}"
+                    LLM_SEMANTIC_EXHAUSTION
                     if isinstance(e, LLMSemanticExhaustionError)
                     else LLM_UNREACHABLE_AFTER_RETRIES
                 ),
