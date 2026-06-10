@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import json
 import logging
-import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from strands import Agent
 
 from ...models import BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._parse_helpers import extract_json_object
 from .alignment import TradeAlignmentReport
 from .model_factory import get_strands_model
 
@@ -132,7 +131,7 @@ class AnalysisAgent:
                 phase="analysis_draft",
                 logger=logger,
             )
-            draft_parsed = _extract_json(draft_raw)
+            draft_parsed = extract_json_object(draft_raw)
             draft_narrative = draft_parsed.get("draft_narrative", "")
         except Exception:
             logger.exception("Draft analysis failed")
@@ -181,7 +180,7 @@ class AnalysisAgent:
                 phase="analysis_review",
                 logger=logger,
             )
-            review_parsed = _extract_json(review_raw)
+            review_parsed = extract_json_object(review_raw)
             revised = review_parsed.get("revised_narrative", "")
             if revised:
                 return _ensure_misalignment_disclaimer(revised, alignment_report)
@@ -392,24 +391,3 @@ def _fallback_narrative(
     if not prefix:
         return summary
     return f"{prefix}\n{summary}"
-
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from LLM output."""
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in LLM response")
-    depth = 0
-    end = start
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-    return json.loads(text[start:end])
