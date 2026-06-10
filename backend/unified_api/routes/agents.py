@@ -237,7 +237,7 @@ async def invoke_agent(
             except UnmappedGateOutcomeError as exc:
                 logger.error("cognition: %s for %s", exc, agent_id)
                 raise HTTPException(status_code=500, detail=str(exc)) from exc
-            headers = {"X-Khala-Replayed": "true"} if outcome.kind is GateOutcomeKind.REPLAY else None
+            headers = {"X-Khala-Replayed": "true"} if fin.replayed else None
             return JSONResponse(status_code=fin.status_code, content=fin.content, headers=headers)
         prepared = outcome.prepared
         if prepared is not None:

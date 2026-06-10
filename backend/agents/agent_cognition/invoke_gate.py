@@ -225,7 +225,12 @@ class GateOutcome:
           terminal envelope.
         * ``kind is BLOCKED``  → ``status_code`` + ``content`` carry the 4xx
           envelope (also stored in the ledger when the run was claimed) and
-          ``reason`` carries the failing rule's reason.
+          ``reason`` carries the failing rule's reason. A BLOCKED outcome is
+          **always precondition-sourced**: :func:`prepare_invoke` is the only
+          producer of BLOCKED outcomes, and postcondition blocks surface
+          directly as a :class:`FinalizeOutcome` from :func:`finalize_invoke`
+          — :func:`outcome_as_finalized` relies on this invariant when it
+          labels the phase.
         * every other kind     → ``reason`` carries a human-readable cause and
           ``GATE_ERROR_HTTP_STATUS[kind]`` is its HTTP status.
     """
@@ -247,6 +252,10 @@ class FinalizeOutcome:
           output was **not** persisted, and ``block_phase`` / ``block_reason``
           carry the structured cause (read these instead of parsing
           ``content``, whose shape is the stored HTTP body).
+        * ``replayed`` is ``True`` exactly when the response was served from
+          the run ledger without re-invoking the agent — transports use this
+          (not the gate outcome's kind) to mark replays, e.g. the proxy's
+          ``X-Khala-Replayed`` header.
         * otherwise ``status_code``/``content`` echo the upstream response.
     """
 
@@ -256,6 +265,7 @@ class FinalizeOutcome:
     persisted_events: int = 0
     block_phase: str | None = None
     block_reason: str | None = None
+    replayed: bool = False
 
 
 def derive_source_run_id(body: Any, idempotency_key: str | None = None) -> tuple[str, str]:
@@ -573,6 +583,11 @@ async def invoke_in_process(
         * An exception from ``runner`` propagates unchanged; the claimed ledger
           row is left to its lease, so a retry after expiry re-executes (the
           run is documented at-least-once on a crash, same as the proxy path).
+        * :class:`UnmappedGateOutcomeError` also propagates uncaught (a
+          deliberate asymmetry with the HTTP route, which translates it into a
+          named 500): an in-process integration must fail fast on a gate state
+          it does not handle, not degrade silently. Callers should let it
+          crash or handle it explicitly.
     """
     assert agent_id, "invoke_in_process: agent_id must be non-empty"
     assert callable(runner), "invoke_in_process: runner must be callable"
@@ -911,10 +926,16 @@ def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
     Preconditions:
         * ``outcome.kind is not PROCEED`` (a PROCEED has no response to map).
     Postconditions:
-        * ``REPLAY`` → the stored terminal envelope verbatim; ``BLOCKED`` →
-          the 422 block envelope with ``blocked``/``block_phase``/
-          ``block_reason`` set; every reason-carrying error kind → its
-          ``GATE_ERROR_HTTP_STATUS`` status with a ``{"detail": reason}`` body.
+        * ``REPLAY`` → the stored terminal envelope verbatim, with
+          ``replayed=True`` so transports can mark it; ``BLOCKED`` → the 422
+          block envelope with ``blocked``/``block_phase``/``block_reason``
+          set. ``block_phase`` is always ``"precondition"`` here by the
+          :class:`GateOutcome` invariant — :func:`prepare_invoke` is the sole
+          producer of BLOCKED outcomes; postcondition blocks never pass
+          through this mapper (they return directly from
+          :func:`finalize_invoke` with their own phase). Every
+          reason-carrying error kind → its ``GATE_ERROR_HTTP_STATUS`` status
+          with a ``{"detail": reason}`` body.
         * Raises :class:`UnmappedGateOutcomeError` (naming the kind) for a
           kind with no mapping — failing loudly here is the guard against a
           future ``GateOutcomeKind`` silently bypassing the gate.
@@ -924,7 +945,9 @@ def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
     )
     if outcome.kind is GateOutcomeKind.REPLAY:
         assert outcome.status_code is not None, "outcome_as_finalized: replay lacks status"
-        return FinalizeOutcome(status_code=outcome.status_code, content=outcome.content)
+        return FinalizeOutcome(
+            status_code=outcome.status_code, content=outcome.content, replayed=True
+        )
     if outcome.kind is GateOutcomeKind.BLOCKED:
         return FinalizeOutcome(
             status_code=422,

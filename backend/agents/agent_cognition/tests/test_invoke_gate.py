@@ -658,10 +658,20 @@ def test_outcome_as_finalized_uses_shared_status_map(seams: SimpleNamespace) -> 
     for kind, status in gate.GATE_ERROR_HTTP_STATUS.items():
         fin = gate.outcome_as_finalized(gate.GateOutcome(kind=kind, reason="x"))
         assert fin.status_code == status
+        assert not fin.replayed
     blocked = gate.outcome_as_finalized(
         gate.GateOutcome(kind=gate.GateOutcomeKind.BLOCKED, status_code=422, reason="r")
     )
     assert blocked.blocked and blocked.block_phase == "precondition" and blocked.block_reason == "r"
+    # Replays carry the structured flag — transports mark replays from it, not
+    # from the gate outcome's kind.
+    replay = gate.outcome_as_finalized(
+        gate.GateOutcome(kind=gate.GateOutcomeKind.REPLAY, status_code=200, content={"output": 1})
+    )
+    assert replay.replayed and replay.status_code == 200
+    # An unmapped future kind raises the typed exhaustiveness error.
+    with pytest.raises(gate.UnmappedGateOutcomeError, match="future_kind"):
+        gate.outcome_as_finalized(gate.GateOutcome(kind="future_kind"))  # type: ignore[arg-type]
 
 
 def test_abandon_invoke_paths(seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
