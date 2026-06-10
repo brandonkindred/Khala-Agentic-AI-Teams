@@ -17,7 +17,7 @@ import { HealthIndicatorComponent } from '../health-indicator/health-indicator.c
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import { PendingQuestionsComponent } from '../pending-questions/pending-questions.component';
 import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
-import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
 @Component({
@@ -221,6 +221,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.restoreSub?.unsubscribe();
     this.restoreSub = this.api.listJobs().subscribe({
       next: (jobs) => {
+        // listJobs() already filters to active jobs server-side; the terminal check is
+        // a defensive belt — the backend's non-terminal status set and this client's
+        // terminal list are maintained independently, and adopting a finished job would
+        // pin a dead panel on screen if they ever drift.
         const candidates = jobs.filter(
           (j) =>
             !isCodingTeamTerminalStatus(j.status) &&
