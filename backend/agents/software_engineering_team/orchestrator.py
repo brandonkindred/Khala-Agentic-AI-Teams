@@ -94,6 +94,23 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _llm_pause_error(failed: Dict[str, str]) -> str:
+    """Job-level error message for an LLM-condition pause, derived from the failed map.
+
+    Preconditions:
+        - ``failed`` maps task ids to failure-reason strings; the caller has
+          already determined that at least one value matched an LLM pause
+          sentinel (the ``llm_connectivity_failed`` aggregation).
+    Postconditions:
+        - Returns ``LLM_SEMANTIC_EXHAUSTION`` when any failed task carries it —
+          its remediation (simplify or split the prompt) must not be masked by
+          the connectivity guidance — otherwise ``LLM_UNREACHABLE_AFTER_RETRIES``.
+    """
+    if any(v == LLM_SEMANTIC_EXHAUSTION for v in failed.values()):
+        return LLM_SEMANTIC_EXHAUSTION
+    return LLM_UNREACHABLE_AFTER_RETRIES
+
+
 BANNER_WIDTH = 72
 # Exceptions that the repair agent can attempt to fix (code errors in agent framework)
 REPAIRABLE_EXCEPTIONS = (
@@ -3650,7 +3667,7 @@ def run_orchestrator(
                 update_job(
                     job_id,
                     status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                    error=LLM_UNREACHABLE_AFTER_RETRIES,
+                    error=_llm_pause_error(failed),
                     progress=100,
                     current_task=None,
                 )
@@ -3990,7 +4007,7 @@ def run_failed_tasks(job_id: str) -> None:
                 job_id,
                 failed_tasks=failed_details,
                 status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                error=LLM_UNREACHABLE_AFTER_RETRIES,
+                error=_llm_pause_error(failed_retry),
             )
         elif llm_limit_exceeded:
             update_job(
