@@ -31,7 +31,9 @@ all built.
   **rules engine** — store + predicate DSL + enforcement (`rules/store.py`,
   `rules/predicate.py`, `rules/enforcement.py`); the **reflection engine**
   (`rules/reflection.py`); the **tools layer** (`tools/`); the **invoke-context facade**
-  (`invoke_context.py`) + invoke-proxy injection (`unified_api/routes/agents.py`); the
+  (`invoke_context.py`) + the **invoke gate** (`invoke_gate.py`, the full
+  inject-on-invoke / writeback-on-return lifecycle consumed by
+  `unified_api/routes/agents.py` — see below); the
   **scheduler** (`scheduler.py`, the live rollup→reflect→prune driver); the
   **knowledge-graph layer** (`graph/`, see below) over `shared_neo4j`; and the **operator
   approval API** (`unified_api/routes/cognition.py`).
@@ -144,3 +146,44 @@ The invoke shim (`shared_agent_invoke`) consumes these lazily — it unwraps the
 opens the cognition side channel, drives a returned `ToolLoopPlan`, and returns the trusted
 `tool_audit` on its response envelope — without a hard dependency on this package (an image
 without cognition simply runs the agent unwrapped).
+
+## Invoke gate (`invoke_gate.py`)
+
+The reusable lifecycle every cognition-enabled invoke runs through, shared by the unified
+API proxy (`POST /api/agents/{id}/invoke`) and by in-process callers via
+`invoke_in_process(agent_id, body, runner)` (no HTTP hop, identical contract). It is pure
+orchestration over the `context.py` facade: `prepare_invoke` returns a typed `GateOutcome`
+the caller maps to its transport, `finalize_invoke` closes the run out.
+
+**Idempotency.** Each request derives a stable `source_run_id`: the caller's
+`Idempotency-Key` header when supplied, else the SHA-256 of the body's canonical JSON —
+so byte-identical keyless retries still dedup. The run is claimed in the leased
+`agent_cognition_runs` ledger:
+
+| Ledger state on claim | Result |
+|---|---|
+| first sight | claimed; executes; `completed`/`blocked` stored on return |
+| terminal (`completed` **or** `blocked`), same body hash | **replays the stored envelope** without re-invoking (the proxy adds `X-Khala-Replayed: true`); a retried rule block replays the same 4xx |
+| any row, different body hash | `409` — one key, one body |
+| `in_progress`, valid lease | `409` — still in flight |
+| `in_progress`, expired lease | reclaimed in place (hash retained) and re-executed |
+
+A manifest with `cognition.requires_idempotency_key: true` (side-effecting agent) rejects a
+keyless invoke `400` — without a key the call is at-least-once, not run-once. When the
+ledger itself is unreachable, such an agent fails closed `503`; any other cognition agent
+degrades to an unledgered invoke with a warning (a cognition outage never breaks the
+invoke). Upstream failures (shim 4xx/5xx) are **not** stored as terminal — only the trusted
+tool audit is persisted and the lease is left to expire, so a retry re-executes.
+
+**Gates and persistence ordering.** Pre-flight: lazy rollup catch-up → context load →
+enforced **precondition** (a block persists an `error` memory event, stores the 422
+envelope as `blocked`, and returns it) → marker-envelope wrap → the *full* envelope is
+re-checked against `AGENT_INVOKE_MAX_PAYLOAD_BYTES` (413 — the side channel shares the
+payload budget). On return the enforced **postcondition** runs *before* any persistence: a
+violation drops the model output and the agent-authored memory everywhere (response,
+console run history, episodic store) while persisting the shim's trusted `tool_audit` plus
+a blocked-run event, and stores the 422 as `blocked`. A pass persists the envelope's
+`memory_events` (validated defensively — one malformed event is dropped with a warning,
+never failing the call) and completes the ledger row with `{status_code, content}` for
+replay. The stored envelope never carries the per-invoke `sandbox` block, so a replay
+cannot masquerade as a fresh boot.
