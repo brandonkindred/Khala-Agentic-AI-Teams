@@ -15,6 +15,17 @@ from llm_service import LLMClient
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
 
+# Absolute ceilings for code-review map calls, independent of model context.
+# Large-context models (1M tokens) make the context-derived sizes useless as a
+# bound: a single review prompt can carry ~200K tokens of code and the model
+# burns its whole completion budget on reasoning before emitting any findings.
+# ~80K chars is ~23K tokens of code per map call, leaving completion-budget
+# headroom for reasoning plus the JSON findings payload.
+CODE_REVIEW_ABS_CHUNK_CHARS = 80_000
+CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000
+CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000
+CODE_REVIEW_EXISTING_ABS_CHARS = 8_000
+
 
 def compute_max_chunk_chars(
     context_tokens: int,
@@ -75,6 +86,19 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
     )
 
 
+def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
+    """Max chars of code per map call in the code-review coordinator.
+
+    Preconditions:
+        - ``llm`` implements ``get_max_context_tokens()``.
+
+    Postconditions:
+        - Returns ``min(compute_code_review_chunk_chars(llm), CODE_REVIEW_ABS_CHUNK_CHARS)``,
+          so the result is bounded by the absolute ceiling regardless of model context.
+    """
+    return min(compute_code_review_chunk_chars(llm), CODE_REVIEW_ABS_CHUNK_CHARS)
+
+
 def compute_spec_chunk_chars(llm: LLMClient) -> int:
     """
     Max chars per spec chunk (SpecChunkAnalyzer). Reserves ~4K for
@@ -100,18 +124,23 @@ def _scale_with_context(llm: LLMClient, base_at_16k: int, max_chars: int = 700_0
 
 
 def compute_code_review_spec_excerpt_chars(llm: LLMClient) -> int:
-    """Max chars for spec excerpt in code review (scales with model context)."""
-    return _scale_with_context(llm, 8_000)
+    """Max chars for spec excerpt in code review.
+
+    Scales with model context but absolutely capped: this excerpt repeats in
+    every map call of the review coordinator, so an uncapped 1M-context scale
+    (~488K chars) would dominate each chunk prompt.
+    """
+    return _scale_with_context(llm, 8_000, max_chars=CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS)
 
 
 def compute_code_review_arch_overview_chars(llm: LLMClient) -> int:
-    """Max chars for architecture overview in code review (scales with model context)."""
-    return _scale_with_context(llm, 2_000)
+    """Max chars for architecture overview in code review (scaled, absolutely capped)."""
+    return _scale_with_context(llm, 2_000, max_chars=CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS)
 
 
 def compute_code_review_existing_codebase_chars(llm: LLMClient) -> int:
-    """Max chars for existing codebase excerpt in code review (scales with model context)."""
-    return _scale_with_context(llm, 4_000)
+    """Max chars for existing codebase excerpt in code review (scaled, absolutely capped)."""
+    return _scale_with_context(llm, 4_000, max_chars=CODE_REVIEW_EXISTING_ABS_CHARS)
 
 
 def compute_existing_code_chars(llm: LLMClient) -> int:
@@ -233,5 +262,10 @@ def compute_requirement_mapping_chars(llm: LLMClient) -> int:
 
 
 def compute_code_review_total_chars(llm: LLMClient) -> int:
-    """Max total code chars for code review (fits within 256K context when available)."""
+    """Max total code chars for code review (fits within 256K context when available).
+
+    Legacy: only pre-map-reduce callers (deprecated frontend team) still truncate
+    review input with this. The review coordinator bounds its own per-call prompts
+    via ``compute_code_review_map_chunk_chars`` and never truncates input.
+    """
     return _scale_with_context(llm, 150_000)

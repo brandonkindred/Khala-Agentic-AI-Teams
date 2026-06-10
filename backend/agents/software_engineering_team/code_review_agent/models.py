@@ -24,6 +24,104 @@ def coerce_line(value: Any) -> Optional[int]:
     return line if line > 0 else None
 
 
+class FileSegment(BaseModel):
+    """A contiguous slice of one file under review.
+
+    Invariants:
+        - ``start_line`` is 1-based and within the original file.
+        - A file's segments, ordered by ``part_index``, partition its content
+          exactly: concatenating their ``content`` reproduces the file.
+        - ``pre_numbered`` segments carry original line numbers as ``N: `` prefixes
+          (the coding team's PR-diff hunks), so they need no re-anchoring.
+    """
+
+    path: str = Field(default="", description="Original file path ('' for headerless code)")
+    content: str = Field(description="The segment's slice of the file content")
+    start_line: int = Field(
+        default=1,
+        description="1-based line number of the segment's first line in the original file",
+    )
+    total_lines: int = Field(default=1, description="Total line count of the original file")
+    part_index: int = Field(
+        default=1, description="1-based index of this segment among the file's segments"
+    )
+    part_count: int = Field(default=1, description="How many segments the file was split into")
+    pre_numbered: bool = Field(
+        default=False,
+        description="True when content lines carry original line-number prefixes (e.g. '123: code')",
+    )
+
+    @property
+    def line_count(self) -> int:
+        """Number of lines in this segment's content."""
+        return len(self.content.splitlines()) or 1
+
+    @property
+    def end_line(self) -> int:
+        """1-based line number of the segment's last line in the original file."""
+        return self.start_line + self.line_count - 1
+
+    @property
+    def is_partial(self) -> bool:
+        """True when the segment covers only part of its file."""
+        return self.start_line > 1 or self.end_line < self.total_lines
+
+    @property
+    def line_offset(self) -> int:
+        """Offset to add to a snippet-relative line number to recover the original line.
+
+        Postconditions:
+            - Returns 0 for ``pre_numbered`` segments (their cited numbers are
+              already original lines), else ``start_line - 1``.
+        """
+        return 0 if self.pre_numbered else self.start_line - 1
+
+
+class ReviewChunk(BaseModel):
+    """One map-call unit: a group of file segments reviewed in a single LLM call.
+
+    Invariants:
+        - No two segments share the same ``path`` (so ``offset_by_path`` is unambiguous).
+    """
+
+    segments: List[FileSegment] = Field(default_factory=list)
+
+    @property
+    def content(self) -> str:
+        """Rendered ``### path ###`` blocks for the chunk prompt.
+
+        Postconditions:
+            - Headerless segments (``path == ''``) render as bare content.
+        """
+        parts = []
+        for seg in self.segments:
+            parts.append(f"### {seg.path} ###\n{seg.content}" if seg.path else seg.content)
+        return "\n\n".join(parts)
+
+    @property
+    def paths_label(self) -> str:
+        """Human-readable label of the chunk's files, marking partial segments.
+
+        Postconditions:
+            - Partial segments render as ``path (lines A-B of N)``; whole files as ``path``.
+        """
+        labels = []
+        for seg in self.segments:
+            name = seg.path or "(unknown)"
+            if seg.is_partial:
+                labels.append(
+                    f"{name} (lines {seg.start_line}-{seg.end_line} of {seg.total_lines})"
+                )
+            else:
+                labels.append(name)
+        return ", ".join(labels)
+
+    @property
+    def offset_by_path(self) -> Dict[str, int]:
+        """Map of segment path to its ``line_offset`` for issue re-anchoring."""
+        return {seg.path: seg.line_offset for seg in self.segments}
+
+
 class ChunkReviewInput(BaseModel):
     """Input for reviewing one chunk of code (used by ChunkReviewAgent)."""
 
@@ -33,6 +131,10 @@ class ChunkReviewInput(BaseModel):
     file_path_or_label: str = Field(
         default="",
         description="File path(s) in this chunk for issue reporting",
+    )
+    segment_note: str = Field(
+        default="",
+        description="Reviewer guidance for split or pre-numbered segments (prepended to the prompt)",
     )
     task_description: str = Field(default="", description="Task the coding agent was working on")
     task_requirements: str = Field(default="", description="Detailed task requirements")
@@ -57,6 +159,14 @@ class ChunkReviewOutput(BaseModel):
         description="Issues found (each with severity, category, file_path, description, suggestion)",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
+    spec_compliance_notes: str = Field(
+        default="",
+        description="Notes on how well the chunk meets the spec and acceptance criteria",
+    )
+    suggested_commit_message: str = Field(
+        default="",
+        description="Optional commit message suggestion from the reviewer",
+    )
 
 
 class CodeReviewIssue(BaseModel):
@@ -97,7 +207,14 @@ class CodeReviewInput(BaseModel):
     """Input for the Code Review agent."""
 
     code: str = Field(
-        description="The code to review (all files on the branch, concatenated with file headers)",
+        default="",
+        description="Legacy input: code to review, concatenated with ### path ### file headers. "
+        "Ignored when ``files`` is provided.",
+    )
+    files: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Preferred input: mapping of file path to file content. "
+        "When set, ``code`` is ignored and no header parsing happens.",
     )
     spec_content: str = Field(
         default="",

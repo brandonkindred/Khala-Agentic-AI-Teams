@@ -11,8 +11,8 @@ from strands import Agent
 from llm_service import LLMClient, compact_text, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
-    compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
+    compute_code_review_map_chunk_chars,
     compute_code_review_spec_excerpt_chars,
 )
 
@@ -31,24 +31,46 @@ class ChunkReviewAgent:
         self.llm = llm
 
     def run(self, input_data: ChunkReviewInput) -> ChunkReviewOutput:
-        """Review one chunk and return approved, issues, summary."""
+        """Review one chunk and return approved, issues, summary.
+
+        Postconditions:
+            - ``spec_compliance_notes``/``suggested_commit_message`` from the
+              LLM are passed through so single-chunk reviews keep full output
+              fidelity.
+        """
         result = _run_chunk_review(self.llm, input_data)
         return ChunkReviewOutput(
             approved=result["approved"],
             issues=result["issues"],
             summary=result["summary"],
+            spec_compliance_notes=result["spec_compliance_notes"],
+            suggested_commit_message=result["suggested_commit_message"],
         )
 
 
 def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     """
-    Review one chunk of code. Returns dict with approved, issues, summary.
+    Review one chunk of code. Returns dict with approved, issues, summary,
+    spec_compliance_notes, and suggested_commit_message.
+
+    Preconditions:
+        - ``input_data.code_chunk`` is already bounded by the coordinator
+          (≤ ``compute_code_review_map_chunk_chars``); it is reviewed verbatim,
+          never compacted or truncated here.
     """
-    max_chunk_chars = compute_code_review_chunk_chars(llm)
+    max_chunk_chars = compute_code_review_map_chunk_chars(llm)
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
     max_existing = compute_code_review_existing_codebase_chars(llm)
-    code_chunk = compact_text(input_data.code_chunk, max_chunk_chars, llm, "code chunk")
+    code_chunk = input_data.code_chunk
+    if len(code_chunk) > max_chunk_chars:
+        # Coordinator invariant violation (e.g. a single line longer than the
+        # cap): log it but never mutate the code under review.
+        logger.warning(
+            "ChunkReview: code chunk is %s chars, above the %s-char map budget — reviewing as-is",
+            len(code_chunk),
+            max_chunk_chars,
+        )
     spec_excerpt = compact_text(input_data.spec_excerpt, max_spec, llm, "specification excerpt")
     architecture_overview = compact_text(
         input_data.architecture_overview, max_arch, llm, "architecture overview"
@@ -57,8 +79,10 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         input_data.existing_codebase_excerpt or "", max_existing, llm, "existing codebase excerpt"
     )
 
-    context_parts = [
-        CHUNK_REVIEW_NOTE,
+    context_parts = [CHUNK_REVIEW_NOTE]
+    if input_data.segment_note:
+        context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
+    context_parts += [
         f"**Files in this chunk:** {input_data.file_path_or_label}",
         "**Language:** python" if "def " in code_chunk[:500] else "**Language:** typescript",
         f"**Task description:** {input_data.task_description}",
@@ -136,6 +160,8 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
         "approved": bool(data.get("approved", False)),
         "issues": issues,
         "summary": str(data.get("summary", "")),
+        "spec_compliance_notes": str(data.get("spec_compliance_notes", "") or ""),
+        "suggested_commit_message": str(data.get("suggested_commit_message", "") or ""),
     }
 
 

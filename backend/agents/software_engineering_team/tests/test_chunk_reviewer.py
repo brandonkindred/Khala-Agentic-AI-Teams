@@ -111,6 +111,80 @@ def test_chunk_review_agent_carries_file_path_from_issue() -> None:
     assert "One issue" in result.summary
 
 
+class _RecorderClient(DummyLLMClient):
+    """Delegates to Dummy but records every prompt."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prompts: list = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.prompts.append(prompt)
+        return super().complete_json(prompt, **kwargs)
+
+
+def test_segment_note_is_prepended_to_prompt() -> None:
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    note = "app/main.py is shown only from original line 501 to 1000 (of 2400 total)."
+    agent.run(_chunk_input(segment_note=note))
+    assert len(client.prompts) == 1
+    prompt = client.prompts[0]
+    assert "**Segment notes:**" in prompt
+    assert note in prompt
+    assert prompt.index(note) < prompt.index("Code to review")
+
+
+def test_no_segment_note_means_no_segment_section() -> None:
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input())
+    assert "**Segment notes:**" not in client.prompts[0]
+
+
+def test_code_chunk_is_never_compacted() -> None:
+    """The coordinator bounds the chunk; the reviewer must send it verbatim.
+    A chunk above the map budget is logged but not truncated, so a sentinel at
+    the very end must survive into the prompt."""
+    from software_engineering_team.shared.context_sizing import (
+        compute_code_review_map_chunk_chars,
+    )
+
+    client = _RecorderClient()
+    budget = compute_code_review_map_chunk_chars(client)
+    sentinel = "UNIQUE_TAIL_SENTINEL_42"
+    chunk = ("x = 1\n" * ((budget // 6) + 200)) + sentinel
+    assert len(chunk) > budget
+
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input(code_chunk=chunk))
+    assert sentinel in client.prompts[0]
+
+
+def test_new_output_fields_are_parsed_through() -> None:
+    agent = ChunkReviewAgent(
+        llm=_StubClient(
+            {
+                "approved": True,
+                "issues": [],
+                "summary": "ok",
+                "spec_compliance_notes": "Chunk meets the spec.",
+                "suggested_commit_message": "refactor: tidy main",
+            }
+        )
+    )
+    result = agent.run(_chunk_input())
+    assert result.spec_compliance_notes == "Chunk meets the spec."
+    assert result.suggested_commit_message == "refactor: tidy main"
+
+
+def test_missing_new_output_fields_default_to_empty() -> None:
+    agent = ChunkReviewAgent(llm=_StubClient({"approved": True, "issues": [], "summary": "ok"}))
+    result = agent.run(_chunk_input())
+    assert result.spec_compliance_notes == ""
+    assert result.suggested_commit_message == ""
+
+
 def test_chunk_review_agent_falls_back_file_path_to_label_when_issue_omits_it() -> None:
     """If the LLM leaves an issue's file_path blank, we fill it from the
     chunk's ``file_path_or_label``."""
