@@ -247,15 +247,20 @@ class FinalizeOutcome:
     """Result of :func:`finalize_invoke` (and :func:`invoke_in_process`).
 
     Invariants:
-        * ``blocked`` is ``True`` exactly when an enforced rule blocked —
-          ``status_code``/``content`` then carry the 4xx envelope, the model
-          output was **not** persisted, and ``block_phase`` / ``block_reason``
-          carry the structured cause (read these instead of parsing
-          ``content``, whose shape is the stored HTTP body).
+        * ``blocked`` is ``True`` exactly when an enforced rule blocked **this
+          attempt** — ``status_code``/``content`` then carry the 4xx envelope,
+          the model output was **not** persisted, and ``block_phase`` /
+          ``block_reason`` carry the structured cause (read these instead of
+          parsing ``content``, whose shape is the stored HTTP body).
         * ``replayed`` is ``True`` exactly when the response was served from
           the run ledger without re-invoking the agent — transports use this
           (not the gate outcome's kind) to mark replays, e.g. the proxy's
-          ``X-Khala-Replayed`` header.
+          ``X-Khala-Replayed`` header. A replay is a **verbatim** re-serve of
+          the stored envelope, so a replay of a previously *blocked* run
+          reports ``replayed=True`` with ``blocked=False`` and no
+          ``block_phase``/``block_reason`` — the structured block fields
+          describe this attempt's gating, which did not run. Callers handling
+          replays must branch on ``status_code``/``content``, not ``blocked``.
         * otherwise ``status_code``/``content`` echo the upstream response.
     """
 
@@ -927,7 +932,11 @@ def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
         * ``outcome.kind is not PROCEED`` (a PROCEED has no response to map).
     Postconditions:
         * ``REPLAY`` → the stored terminal envelope verbatim, with
-          ``replayed=True`` so transports can mark it; ``BLOCKED`` → the 422
+          ``replayed=True`` so transports can mark it. Verbatim means a replay
+          of a previously *blocked* run carries the stored 4xx in
+          ``status_code``/``content`` but ``blocked=False`` — the structured
+          block fields describe the current attempt's gating, which a replay
+          skips (see :class:`FinalizeOutcome`). ``BLOCKED`` → the 422
           block envelope with ``blocked``/``block_phase``/``block_reason``
           set. ``block_phase`` is always ``"precondition"`` here by the
           :class:`GateOutcome` invariant — :func:`prepare_invoke` is the sole
