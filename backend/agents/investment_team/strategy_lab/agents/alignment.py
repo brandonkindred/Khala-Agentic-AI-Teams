@@ -26,10 +26,8 @@ entry-point has been removed; its job is now split across the gate
 
 from __future__ import annotations
 
-import json
 import logging
 import os
-import re
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional
 
@@ -39,6 +37,7 @@ from strands import Agent
 from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
+from ._parse_helpers import extract_json_object
 from ._response_schemas import ALIGNMENT_FIX_SCHEMA
 from .model_factory import get_strands_model
 
@@ -314,7 +313,7 @@ class TradeAlignmentAgent:
                 phase="alignment_near_miss",
                 logger=logger,
             )
-            parsed = _extract_json(raw)
+            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Near-miss adjudicator failed to produce parseable JSON: %s",
@@ -396,7 +395,7 @@ class TradeAlignmentAgent:
                 max_attempts=_alignment_max_attempts(),
                 logger=logger,
             )
-            parsed = _extract_json(raw)
+            parsed = extract_json_object(raw)
         except Exception as exc:
             logger.debug(
                 "Alignment fix proposer failed to produce parseable JSON: %s",
@@ -556,30 +555,3 @@ def _parse_legitimate(raw: Any) -> bool:
         if normalised == "false":
             return False
     return False
-
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """Extract a JSON object from LLM output, handling markdown fences."""
-    fence_match = re.search(r"```(?:json)?\s*\n?(.*?)\n?```", text, re.DOTALL)
-    if fence_match:
-        text = fence_match.group(1)
-
-    start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found in LLM response")
-
-    depth = 0
-    end = start
-    for i in range(start, len(text)):
-        if text[i] == "{":
-            depth += 1
-        elif text[i] == "}":
-            depth -= 1
-            if depth == 0:
-                end = i + 1
-                break
-
-    try:
-        return json.loads(text[start:end])
-    except json.JSONDecodeError as e:
-        raise ValueError(f"Failed to parse JSON from LLM response: {e}") from e

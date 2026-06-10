@@ -13,6 +13,7 @@ from typing import List
 import pytest
 
 from investment_team.models import BacktestResult, StrategySpec
+from investment_team.strategy_lab.agents._parse_helpers import extract_json_object as _extract_json
 from investment_team.strategy_lab.agents.alignment import (
     AlignmentIssue,
     TradeAlignmentReport,
@@ -20,7 +21,6 @@ from investment_team.strategy_lab.agents.alignment import (
 from investment_team.strategy_lab.agents.analysis import (
     _MISALIGNED_DISCLAIMER,
     _ensure_misalignment_disclaimer,
-    _extract_json,
     _fallback_narrative,
     _format_alignment_status_section,
     _format_simulated_trades_summary,
@@ -305,3 +305,11 @@ def test_extract_json_handles_fence_and_braces() -> None:
 def test_extract_json_no_object_raises() -> None:
     with pytest.raises(ValueError):
         _extract_json("plain text")
+
+
+def test_extract_json_brace_inside_string_value() -> None:
+    text = '{"draft_narrative": "returns beat the {benchmark} index", "confidence": 0.8}'
+    assert _extract_json(text) == {
+        "draft_narrative": "returns beat the {benchmark} index",
+        "confidence": 0.8,
+    }

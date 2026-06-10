@@ -325,7 +325,7 @@ def _install_failing_draft_recorder(monkeypatch, *, mode: str) -> _Recorder:
     response. Mirrors the production failure modes Codex flagged:
 
     * ``raise``  — draft LLM call raises
-    * ``junk``   — draft returns non-JSON text (``_extract_json`` raises)
+    * ``junk``   — draft returns non-JSON text (``extract_json_object`` raises)
     * ``empty``  — draft returns valid JSON with an empty ``draft_narrative``
     """
 
