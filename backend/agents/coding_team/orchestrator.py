@@ -37,6 +37,31 @@ logger = logging.getLogger(__name__)
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
 
+# Job-level progress band for the coding phase. Nothing on the default SE path writes the
+# job's `progress` field before the coding team runs, so the UI bar sat frozen (or
+# indeterminate) for the entire coding/review phase. The coding team owns the band
+# [BASE, BASE+SPAN]; terminal completion sets 100.
+_CODING_PROGRESS_BASE = 10
+_CODING_PROGRESS_SPAN = 85
+
+
+def _coding_progress(tasks: List[Dict[str, Any]]) -> int:
+    """Map the terminal-task share onto the coding band of the job progress bar.
+
+    Preconditions:
+        - ``tasks`` are snapshot dicts whose ``status`` is a TaskStatus value string.
+    Postconditions:
+        - Returns an int in [_CODING_PROGRESS_BASE, _CODING_PROGRESS_BASE + _CODING_PROGRESS_SPAN];
+          an empty graph yields the base (no division by zero). Monotone in the number of
+          terminal (merged/failed) tasks, so the UI bar only ever advances during the phase.
+    """
+    total = len(tasks)
+    if total == 0:
+        return _CODING_PROGRESS_BASE
+    done = sum(1 for t in tasks if t.get("status") in ("merged", "failed"))
+    return _CODING_PROGRESS_BASE + int(_CODING_PROGRESS_SPAN * done / total)
+
+
 # Cap on the Tech-Lead clarify→answer→re-plan loop. Each round is one pause for the user plus one
 # re-plan; bounding it stops a model that keeps asking from looping forever. On exhaustion the
 # orchestrator fails closed rather than building tasks around an undecided question.
@@ -505,6 +530,7 @@ def run_coding_team_orchestrator(
             agent_task_map=snap["agent_task_map"],
             phase=phase,
             status_text=status_text,
+            progress=_coding_progress(snap["tasks"]),
         )
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
@@ -605,7 +631,7 @@ def run_coding_team_orchestrator(
 
     phase = "coding"
     status_text = "Assigning and implementing tasks"
-    _update(phase=phase, status_text=status_text, status="running")
+    _update(phase=phase, status_text=status_text, status="running", progress=_CODING_PROGRESS_BASE)
 
     # Run the swarm: coordinator (Tech Lead) + workers (Senior SWEs)
     swarm = CodingTeamSwarm(
@@ -651,6 +677,7 @@ def run_coding_team_orchestrator(
         status="completed_with_failures" if failed_count else "completed",
         phase="completed",
         status_text=f"Completed: {merged_count} merged, {failed_count} failed",
+        progress=100,
     )
 
 

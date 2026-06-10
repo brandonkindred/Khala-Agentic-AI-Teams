@@ -1272,3 +1272,75 @@ def test_tech_lead_review_no_callback_unchanged(monkeypatch):
     tl = tl_mod.TechLeadAgent(model=object())
     out = tl.run_code_review("t", "d", [], "evidence")
     assert out == {"approved": True, "error": False, "reason": "ok", "requested_changes": []}
+
+
+# ----------------------------------------------------- job-level progress (coding band)
+
+
+def test_coding_progress_maps_terminal_share_onto_band():
+    """Empty graph → base; progress advances monotonically with merged/failed tasks; never
+    exceeds base+span (terminal completion sets 100 separately)."""
+    assert orch_mod._coding_progress([]) == orch_mod._CODING_PROGRESS_BASE
+
+    def tasks(merged: int, failed: int, open_: int):
+        return (
+            [{"status": "merged"}] * merged
+            + [{"status": "failed"}] * failed
+            + [{"status": "to_do"}] * open_
+        )
+
+    assert orch_mod._coding_progress(tasks(0, 0, 4)) == orch_mod._CODING_PROGRESS_BASE
+    half = orch_mod._coding_progress(tasks(1, 1, 2))
+    assert half == orch_mod._CODING_PROGRESS_BASE + int(orch_mod._CODING_PROGRESS_SPAN * 2 / 4)
+    full = orch_mod._coding_progress(tasks(3, 1, 0))
+    assert full == orch_mod._CODING_PROGRESS_BASE + orch_mod._CODING_PROGRESS_SPAN
+    assert orch_mod._CODING_PROGRESS_BASE <= half <= full <= 100
+
+
+def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeypatch):
+    """The job-level progress bar must advance during the coding phase: base at coding
+    start, per-snapshot updates from the task graph, and 100 on terminal completion."""
+    updates: List[Dict[str, Any]] = []
+
+    class _PlanningTechLead:
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class _MergingSwarm:
+        aborted = False
+
+        def __init__(self, **kw):
+            self.graph = kw["graph"]
+
+        def run(self, **kw):
+            # Simulate one task reaching a terminal state mid-run; persist_fn must
+            # carry the recomputed progress.
+            self.graph.update_task("t1", status=TaskStatus.MERGED)
+            kw["persist_fn"]()
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
+
+    run_coding_team_orchestrator(
+        job_id="j-progress",
+        plan_input=CodingTeamPlanInput(
+            plan="p", specification="s", architecture="a", repo_path=str(tmp_path)
+        ),
+        repo_path=str(tmp_path),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        get_llm=lambda key: None,
+    )
+
+    progresses = [kw["progress"] for kw in updates if "progress" in kw]
+    assert progresses, "orchestrator must write job-level progress"
+    assert progresses[0] == orch_mod._CODING_PROGRESS_BASE
+    # 1 of 2 tasks terminal mid-run
+    expected_mid = orch_mod._CODING_PROGRESS_BASE + int(orch_mod._CODING_PROGRESS_SPAN / 2)
+    assert expected_mid in progresses
+    assert progresses[-1] == 100
+    assert progresses == sorted(progresses), "progress must be monotone non-decreasing"
