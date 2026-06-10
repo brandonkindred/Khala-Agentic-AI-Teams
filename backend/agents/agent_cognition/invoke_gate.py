@@ -369,7 +369,7 @@ async def prepare_invoke(
         else:
             if claim.state is ClaimState.REPLAY:
                 return _replay_outcome(agent_id, source_run_id, claim.response)
-            if claim.state is ClaimState.CONFLICT:
+            elif claim.state is ClaimState.CONFLICT:
                 return GateOutcome(
                     kind=GateOutcomeKind.CONFLICT,
                     reason=(
@@ -377,7 +377,13 @@ async def prepare_invoke(
                         "bound to a different request body, or the run is still in flight."
                     ),
                 )
-            claim_token = claim.claim_token
+            elif claim.state is ClaimState.CLAIMED:
+                claim_token = claim.claim_token
+            else:
+                # Exhaustiveness guard: a future ClaimState falling through here
+                # would silently proceed with claim_token=None — an unledgered
+                # run that bypasses run-once. Fail loudly instead.
+                raise RuntimeError(f"Unhandled claim state: {claim.state!r}")
 
     attempt_token = claim_token or str(uuid4())
     event_run_id = _event_scoped_run_id(source_run_id, attempt_token)
@@ -571,9 +577,25 @@ async def finalize_invoke(
         if prepared.claim_token is not None
         else asyncio.sleep(0)
     )
-    persisted, _ = await asyncio.gather(persist_write, complete_write)
+    # return_exceptions keeps both writes running to completion even if one
+    # raises — the wrapped helpers catch internally, so this is defence in
+    # depth against a future helper change abandoning its sibling write.
+    persisted, completed = await asyncio.gather(
+        persist_write, complete_write, return_exceptions=True
+    )
+    for label, result in (("event persistence", persisted), ("ledger completion", completed)):
+        if isinstance(result, BaseException):
+            logger.warning(
+                "cognition: %s raised for %s/%s",
+                label,
+                prepared.agent_id,
+                prepared.source_run_id,
+                exc_info=result,
+            )
     return FinalizeOutcome(
-        status_code=upstream_status, content=content, persisted_events=persisted or 0
+        status_code=upstream_status,
+        content=content,
+        persisted_events=persisted if isinstance(persisted, int) else 0,
     )
 
 

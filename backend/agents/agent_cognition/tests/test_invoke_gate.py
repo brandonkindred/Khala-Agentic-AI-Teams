@@ -710,3 +710,39 @@ def test_prepare_asserts_agent_id_and_cap() -> None:
 def test_in_process_asserts_runner_callable() -> None:
     with pytest.raises(AssertionError):
         _run(gate.invoke_in_process(_AGENT, {"q": 1}, runner=None))  # type: ignore[arg-type]
+
+
+def test_prepare_unhandled_claim_state_fails_loudly(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A ClaimState the gate does not know must raise, never silently proceed
+    with claim_token=None — that would be an unledgered run bypassing run-once."""
+    monkeypatch.setattr(
+        gate, "claim_run", lambda *a, **k: SimpleNamespace(state="weird", claim_token=None)
+    )
+    with pytest.raises(RuntimeError, match="Unhandled claim state"):
+        _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+
+
+def test_finalize_one_write_raising_does_not_abandon_the_other(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Defence in depth on the gathered writes: if the persist helper ever
+    raises (its internal catch removed by a future change), the sibling ledger
+    completion still runs and the response is not masked."""
+    prepared = _prepared(seams, idempotency_key="k1")
+
+    def _boom(*a, **k):
+        raise RuntimeError("escaped the helper")
+
+    monkeypatch.setattr(gate, "_persist_events_best_effort", _boom)
+    fin = _run(
+        gate.finalize_invoke(
+            prepared,
+            200,
+            {"output": {"ok": True}, "memory_events": [_event(0).model_dump(mode="json")]},
+        )
+    )
+    assert fin.status_code == 200 and not fin.blocked
+    assert fin.persisted_events == 0
+    assert seams.ledger.rows[(_AGENT, "k1")]["status"] == "completed"  # sibling completed
