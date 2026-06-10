@@ -10,7 +10,12 @@ from llm_service.clients.ollama import (
     OllamaLLMClient,
     _parse_retry_after_seconds,
 )
-from llm_service.interface import LLMPermanentError, LLMRateLimitError, LLMTemporaryError
+from llm_service.interface import (
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMSemanticExhaustionError,
+    LLMTemporaryError,
+)
 
 
 def test_ollama_get_max_context_tokens_known_model(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -161,6 +166,37 @@ _OK_SSE = [
     'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
     "data: [DONE]",
 ]
+
+# SSE lines for a reasoning-only 200 response: thinking deltas but zero content.
+_REASONING_ONLY_SSE = [
+    'data: {"choices":[{"delta":{"reasoning":"hmm..."},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+    "data: [DONE]",
+]
+
+# SSE lines for an empty 200 response that hit the generation cap with no content.
+_LENGTH_EMPTY_SSE = [
+    'data: {"choices":[{"delta":{"reasoning":"hmm..."},"finish_reason":null}]}',
+    'data: {"choices":[{"delta":{},"finish_reason":"length"}]}',
+    "data: [DONE]",
+]
+
+
+def _capturing_multi_client(stream_cms: list[MagicMock]) -> tuple[MagicMock, list[dict]]:
+    """Like ``_multi_attempt_client`` but also captures each attempt's request payload."""
+    mock_client = _multi_attempt_client(stream_cms)
+    captured: list[dict] = []
+    original_stream = mock_client.__enter__.return_value.stream
+
+    def capturing_stream(
+        method: str, url: str, json: dict | None = None, headers: dict | None = None
+    ):
+        if json is not None:
+            captured.append(json)
+        return original_stream(method, url, json=json, headers=headers)
+
+    mock_client.__enter__.return_value.stream = capturing_stream
+    return mock_client, captured
 
 
 def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -474,10 +510,10 @@ def test_ollama_httpstatuserror_429_exhaustion_raises(monkeypatch: pytest.Monkey
     assert exc_info.value.status_code == 429
 
 
-def test_ollama_empty_content_retries_on_transient_schedule(
+def test_ollama_empty_content_downgrades_boolean_think(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An empty 200 body raises LLMTemporaryError and retries on the fast schedule."""
+    """An empty 200 triggers ONE immediate proof-of-change retry: think True -> False, no backoff sleep."""
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
     monkeypatch.setenv("LLM_MAX_RETRIES", "1")
     monkeypatch.setenv("LLM_BACKOFF_BASE", "2")
@@ -485,12 +521,16 @@ def test_ollama_empty_content_retries_on_transient_schedule(
     empty_sse = ['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}', "data: [DONE]"]
     cms = [_stream_cm(200, sse_lines=empty_sse), _stream_cm(200, sse_lines=_OK_SSE)]
     with patch("httpx.Client") as mock_client_cls:
-        mock_client_cls.return_value = _multi_attempt_client(cms)
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("hello", temperature=0)
     assert result == {"ok": 1}
-    assert len(waits) == 1
-    assert 2.0 <= waits[0] <= 4.0
+    assert waits == []  # the changed payload is the proof of change — no backoff
+    assert captured[0]["think"] is True
+    assert "reasoning_effort" not in captured[0]
+    assert captured[1]["think"] is False
+    assert captured[1]["reasoning_effort"] == "none"
 
 
 def test_ollama_httpstatuserror_5xx_retries_on_transient_schedule(
@@ -724,8 +764,9 @@ def test_on_reasoning_hook_exception_does_not_break_call(monkeypatch: pytest.Mon
 def test_reasoning_only_logs_info_not_warning(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    """A reasoning-only (no content) stream is an expected thinking case — logged at
-    INFO, never WARNING."""
+    """The reasoning-only (no content) detection line is an expected thinking case —
+    logged at INFO, never WARNING. (The separate proof-of-change downgrade retry
+    legitimately logs at WARNING; only the detection line is asserted here.)"""
     import logging
 
     monkeypatch.setenv("LLM_PROVIDER", "ollama")
@@ -735,20 +776,23 @@ def test_reasoning_only_logs_info_not_warning(
         'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
         "data: [DONE]",
     ]
-    mock_client, _ = _make_streaming_mock(200, sse)
+    cms = [
+        _stream_cm(200, sse_lines=sse),
+        _stream_cm(200, sse_lines=list(sse)),
+    ]
     with (
         patch("httpx.Client") as mock_client_cls,
         caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"),
     ):
-        mock_client_cls.return_value = mock_client
+        mock_client_cls.return_value = _multi_attempt_client(cms)
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
-        # Empty content still surfaces downstream (transient), but the reasoning-only
-        # line itself must be INFO, not WARNING.
-        with pytest.raises(LLMTemporaryError):
+        # Empty content still fails the call (semantic exhaustion after the one
+        # downgrade retry), but the reasoning-only line itself must be INFO.
+        with pytest.raises(LLMSemanticExhaustionError):
             client.complete_json("q", temperature=0)
     records = [(r.levelname, r.getMessage()) for r in caplog.records]
     assert any(lvl == "INFO" and "reasoning only" in msg for lvl, msg in records)
-    assert not any(lvl == "WARNING" and "reasoning" in msg.lower() for lvl, msg in records)
+    assert not any(lvl == "WARNING" and "reasoning only" in msg for lvl, msg in records)
 
 
 def test_extract_json_json_repair_unescaped_quotes_in_strings() -> None:
@@ -1013,3 +1057,239 @@ def test_parser_accumulates_ollama_reasoning_delta_field(monkeypatch: pytest.Mon
         client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
         result = client.complete_json("run status", temperature=0)
     assert result["__reasoning_content__"] == "ollama-style thinking"
+
+
+# ---------------------------------------------------------------------------
+# Semantic exhaustion: proof-of-change thinking-downgrade retry
+# ---------------------------------------------------------------------------
+
+
+def test_reasoning_only_downgrades_one_thinking_level(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reasoning-only response on a registered-levels model retries once, one level down, no sleep."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    waits = _patch_no_sleep(monkeypatch)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_OK_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+    assert captured[0]["think"] == "max"
+    assert captured[0]["reasoning_effort"] == "max"
+    assert captured[1]["think"] == "high"
+    assert captured[1]["reasoning_effort"] == "high"
+    assert waits == []
+
+
+def test_second_empty_after_downgrade_fails_hard_with_receipt(
+    monkeypatch: pytest.MonkeyPatch, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    """A second reasoning-only response after the downgrade raises the receipt error —
+    the transient budget is never consumed, and the receipt is logged at ERROR."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_MAX_RETRIES", raising=False)  # default 10 must NOT be spent
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    waits = _patch_no_sleep(monkeypatch)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+    ]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.ERROR, logger="llm_service.clients.ollama"),
+    ):
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", temperature=0)
+    err = exc_info.value
+    assert isinstance(err, LLMTemporaryError)  # outer pause/degrade handlers still work
+    assert err.failure_class == "semantic_exhaustion"
+    assert err.attempts_used == 2
+    assert err.original_thinking_level == "max"
+    assert err.retry_thinking_level == "high"
+    assert err.content_bytes_seen is False
+    assert err.finish_reason == "stop"
+    assert len(err.payload_fingerprint) == 16
+    assert all(c in "0123456789abcdef" for c in err.payload_fingerprint)
+    assert len(captured) == 2  # exactly two HTTP attempts despite the default transient budget
+    assert waits == []
+    assert any("semantic_exhaustion" in r.getMessage() for r in caplog.records)
+
+
+def test_downgrade_retry_logged_at_warning(
+    monkeypatch: pytest.MonkeyPatch, caplog: "pytest.LogCaptureFixture"
+) -> None:
+    """The proof-of-change retry logs the old -> new thinking level at WARNING."""
+    import logging
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_OK_SSE)),
+    ]
+    with (
+        patch("httpx.Client") as mock_client_cls,
+        caplog.at_level(logging.WARNING, logger="llm_service.clients.ollama"),
+    ):
+        mock_client_cls.return_value = _multi_attempt_client(cms)
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        client.complete_json("q", temperature=0)
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("proof-of-change retry" in m and "'max'" in m and "'high'" in m for m in warnings)
+
+
+def test_think_false_empty_fails_fast_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """think=False leaves no proof of change — the first empty response fails hard."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    cms = [
+        _stream_cm(
+            200,
+            sse_lines=['data: {"choices":[{"delta":{},"finish_reason":"stop"}]}', "data: [DONE]"],
+        )
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", temperature=0, think=False)
+    assert len(captured) == 1
+    assert exc_info.value.attempts_used == 1
+    assert exc_info.value.original_thinking_level is False
+    assert exc_info.value.retry_thinking_level is None
+
+
+def test_lowest_level_empty_fails_fast_without_retry(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lowest registered thinking level leaves no level below it — fail hard on the first empty."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    cms = [_stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE))]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", temperature=0, think="low")
+    assert len(captured) == 1
+    assert exc_info.value.retry_thinking_level is None
+
+
+def test_transient_5xx_before_downgrade_keeps_schedule_and_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 500 before any empty response retries the identical payload on the backoff schedule."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("LLM_BACKOFF_BASE", "2")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    waits = _patch_no_sleep(monkeypatch)
+    cms = [
+        _stream_cm(500, body_text="boom"),
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(200, sse_lines=list(_OK_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+    assert captured[0]["reasoning_effort"] == "max"
+    assert captured[1]["reasoning_effort"] == "max"  # 5xx retry: identical payload
+    assert captured[2]["reasoning_effort"] == "high"  # downgrade after the empty
+    assert len(waits) == 1  # only the 5xx slept
+    assert 2.0 <= waits[0] <= 4.0
+
+
+def test_transient_5xx_after_downgrade_retries_downgraded_payload(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 500 after the downgrade re-sends the DOWNGRADED payload on the transient schedule."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("LLM_BACKOFF_BASE", "2")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    waits = _patch_no_sleep(monkeypatch)
+    cms = [
+        _stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)),
+        _stream_cm(500, body_text="boom"),
+        _stream_cm(200, sse_lines=list(_OK_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        result = client.complete_json("q", temperature=0)
+    assert result == {"ok": 1}
+    assert captured[0]["reasoning_effort"] == "max"
+    assert captured[1]["reasoning_effort"] == "high"
+    assert captured[2]["reasoning_effort"] == "high"
+    assert len(waits) == 1
+
+
+def test_kill_switch_restores_legacy_transient_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LLM_THINKING_DOWNGRADE_RETRY=false restores the legacy behavior: identical
+    payloads retried on the transient schedule, plain LLMTemporaryError at the end."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_THINKING_DOWNGRADE_RETRY", "false")
+    monkeypatch.setenv("LLM_MAX_RETRIES", "2")
+    monkeypatch.setenv("LLM_BACKOFF_BASE", "2")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    waits = _patch_no_sleep(monkeypatch)
+    cms = [_stream_cm(200, sse_lines=list(_REASONING_ONLY_SSE)) for _ in range(3)]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMTemporaryError) as exc_info:
+            client.complete_json("q", temperature=0)
+    assert not isinstance(exc_info.value, LLMSemanticExhaustionError)
+    assert len(captured) == 3
+    assert all(p["reasoning_effort"] == "max" for p in captured)
+    assert len(waits) == 2  # legacy exponential backoff between attempts
+
+
+def test_length_empty_is_semantic_exhaustion_with_finish_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """finish_reason=length with zero content takes the semantic path and the receipt records it."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.delenv("LLM_THINKING_LEVEL", raising=False)
+    cms = [
+        _stream_cm(200, sse_lines=list(_LENGTH_EMPTY_SSE)),
+        _stream_cm(200, sse_lines=list(_LENGTH_EMPTY_SSE)),
+    ]
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client, captured = _capturing_multi_client(cms)
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(
+            model="deepseek-v4-pro:cloud", base_url="http://localhost:9999", timeout=5
+        )
+        with pytest.raises(LLMSemanticExhaustionError) as exc_info:
+            client.complete_json("q", temperature=0)
+    assert exc_info.value.finish_reason == "length"
+    assert len(captured) == 2
+    assert captured[1]["reasoning_effort"] == "high"

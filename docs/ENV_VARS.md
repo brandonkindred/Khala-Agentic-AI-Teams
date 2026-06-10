@@ -35,7 +35,9 @@ permanently. Negative floors to `0` (retry on next call).
 
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
-`10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row).
+`10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
+nor empty 200 responses, which get a single proof-of-change thinking-downgrade retry instead (see
+`LLM_THINKING_DOWNGRADE_RETRY`).
 
 ### LLM_ENABLE_THINKING
 Global thinking default for all LLM calls that don't specify `think` explicitly (default enabled;
@@ -47,6 +49,21 @@ models get boolean `think: true`. Explicit per-call `think=False` always wins.
 Overrides the thinking level chosen for models with registered levels (e.g. `medium`). Values that
 aren't a registered level for the model fall back to the max level with a warning; ignored for
 models that only support boolean think.
+
+### LLM_THINKING_DOWNGRADE_RETRY
+Proof-of-change retry for semantically exhausted calls (default on; `false`/`0`/`no` disables). A
+**semantically exhausted** call is an HTTP 200 with zero assistant content — typically a thinking
+model that produced only reasoning. Re-sending the identical payload rarely helps, so instead of
+spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **once, immediately**
+with reduced thinking: one level down for models registered in `KNOWN_MODEL_THINKING_LEVELS`
+(e.g. `max` → `high`), `think=False` for boolean/unregistered thinking. If the downgraded attempt
+is also empty — or thinking is already off / at the lowest level, leaving no provable change — the
+call fails hard with `LLMSemanticExhaustionError`, whose receipt carries `failure_class`,
+`attempts_used`, the original and retry thinking levels, whether any content bytes were ever seen,
+the `finish_reason`, and a fingerprint of the last payload (also logged at ERROR; the downgrade
+itself is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
+independent schedules before and after the downgrade. Disabling the toggle restores the legacy
+behavior (empty 200s retried verbatim on the transient schedule).
 
 ---
 

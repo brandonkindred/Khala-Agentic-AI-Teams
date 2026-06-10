@@ -247,6 +247,7 @@ One-line index below. The full reference — defaults, backoff math, fallback se
 | `LLM_MAX_RETRIES` / `LLM_BACKOFF_BASE` / `LLM_BACKOFF_MAX` | Transient (5xx/conn/timeout) retry schedule for the central Ollama client (defaults `10`/`2`s/`120`s; 429s use `LLM_RATE_LIMIT_*`). [details](docs/ENV_VARS.md#llm-client-and-thinking) |
 | `LLM_ENABLE_THINKING` | Global thinking default for calls that don't set `think` (default on; registered models think at their max level). [details](docs/ENV_VARS.md#llm-client-and-thinking) |
 | `LLM_THINKING_LEVEL` | Overrides the thinking level for models with registered levels (e.g. `medium`); invalid → max with a warning. [details](docs/ENV_VARS.md#llm-client-and-thinking) |
+| `LLM_THINKING_DOWNGRADE_RETRY` | Empty 200 responses get one immediate proof-of-change retry at reduced thinking, then fail hard with a `semantic_exhaustion` receipt (default on; falsy restores legacy transient retries). [details](docs/ENV_VARS.md#llm-client-and-thinking) |
 | `LLM_RATE_LIMIT_MAX_RETRIES` / `LLM_RATE_LIMIT_BACKOFF_INITIAL` / `LLM_RATE_LIMIT_BACKOFF_MAX` | Slow backoff schedule for HTTP 429 rate limits (defaults `5` retries, `300`s→`3600`s), independent of the transient schedule. [details](docs/ENV_VARS.md#llm-rate-limits) |
 | `LLM_RATE_LIMIT_HONOR_RETRY_AFTER` | When on (default), honor an integer-seconds `Retry-After` on a 429 additively — never below the configured floor. [details](docs/ENV_VARS.md#llm-rate-limits) |
 | `TEMPORAL_ADDRESS` | Enables Temporal mode when set |

@@ -37,6 +37,7 @@ ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
 ENV_LLM_THINKING_LEVEL = "LLM_THINKING_LEVEL"
+ENV_LLM_THINKING_DOWNGRADE_RETRY = "LLM_THINKING_DOWNGRADE_RETRY"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
 
 # Default cap for max_tokens (many APIs limit output to 32K even when context is 256K)
@@ -120,6 +121,35 @@ def resolve_think_for_model(model: str, think: "bool | str | None") -> "bool | s
             levels[-1],
         )
     return levels[-1]
+
+
+def downgrade_think(model: str, think: "bool | str") -> "bool | str | None":
+    """Next-lower thinking setting for ``model``, or None when no proof of change exists.
+
+    Used by the proof-of-change retry for semantically exhausted calls: the
+    retry payload must provably differ from the original, and reducing the
+    thinking level is the chosen change agent.
+
+    Preconditions:
+        - ``think`` is a resolved wire value (bool or level string, never None).
+    Postconditions:
+        - ``True`` -> ``False``; ``False`` -> ``None`` (already off — nothing
+          left to change).
+        - A level string registered in ``KNOWN_MODEL_THINKING_LEVELS[model]``
+          -> the previous (lower) level, or ``None`` when already the lowest.
+        - A level string not registered for the model -> ``False`` (disabling
+          reasoning is the only provable change available).
+        - Pure function: no env reads, never raises.
+    """
+    if think is True:
+        return False
+    if think is False:
+        return None
+    levels = KNOWN_MODEL_THINKING_LEVELS.get(model) or ()
+    if think in levels:
+        idx = levels.index(think)
+        return levels[idx - 1] if idx > 0 else None
+    return False
 
 
 # ---------------------------------------------------------------------------
