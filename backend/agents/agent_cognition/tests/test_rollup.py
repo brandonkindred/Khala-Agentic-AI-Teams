@@ -971,3 +971,41 @@ def test_flag_writers_ignore_unrelated_and_fresh_evidence() -> None:
     assert store.flag_rules_needing_review(agent, "sid", 3) == 0
     assert _proposal_stale(agent) is False
     assert _rule_needs_review(agent) is False
+
+
+# ---------------------------------------------------------------------------
+# Per-pass period budget (pure — store and worker monkeypatched)
+# ---------------------------------------------------------------------------
+def test_ensure_rollups_max_periods_caps_and_flags_truncation(monkeypatch) -> None:
+    """A ``max_periods`` budget stops the pass after N periods (oldest-first,
+    so repeated budgeted passes are resumable) and flags ``truncated``."""
+    processed: list[tuple[Scale, datetime]] = []
+    day_periods = [
+        (_dt(2026, 6, d, 0).replace(hour=0), _dt(2026, 6, d + 1, 0).replace(hour=0))
+        for d in (1, 2, 3)
+    ]
+
+    monkeypatch.setattr(rollup, "get_client", lambda role: CannedLLM())
+    monkeypatch.setattr(
+        rollup,
+        "_periods_to_process",
+        lambda agent_id, scale, now: day_periods if scale is Scale.DAY else [],
+    )
+    monkeypatch.setattr(
+        rollup,
+        "_rollup_one_period",
+        lambda agent_id, scale, start, end, *, llm, report: processed.append((scale, start)),
+    )
+
+    report = rollup.ensure_rollups_current("a", _dt(2026, 6, 10), max_periods=2)
+    assert report.truncated
+    assert len(processed) == 2  # budget respected, oldest two first
+    assert [start for _, start in processed] == [p[0] for p in day_periods[:2]]
+
+    processed.clear()
+    report = rollup.ensure_rollups_current("a", _dt(2026, 6, 10), max_periods=10)
+    assert not report.truncated  # generous budget processes everything
+    assert len(processed) == 3
+
+    with pytest.raises(AssertionError):
+        rollup.ensure_rollups_current("a", _dt(2026, 6, 10), max_periods=0)
