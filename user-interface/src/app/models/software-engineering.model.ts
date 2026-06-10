@@ -49,6 +49,20 @@ export interface TaskStateEntry {
   story_id?: string;
 }
 
+/** Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps). */
+export interface CurrentActivityEntry {
+  /** Sub-agent reporting the activity: code_review or tech_lead_review. */
+  agent?: string;
+  /** Current step: preparing, reviewing, waiting_retry, parsing, finalizing, or done. */
+  step?: string;
+  /** Human-readable detail (e.g. 'chunk 2/5: src/app.py' or 'attempt 2/3'). */
+  detail?: string;
+  /** 0.0-1.0 progress through the sub-agent's own process. */
+  fraction?: number;
+  task_id?: string;
+  task_title?: string;
+}
+
 /** Per-team progress when multiple teams run in parallel. */
 export interface TeamProgressEntry {
   current_phase?: string;
@@ -181,6 +195,14 @@ export interface JobStatusResponse {
   analysis_completed_phases?: string[];
   /** Planning hierarchy with initiatives, epics, stories for work breakdown tree display. */
   planning_hierarchy?: PlanningHierarchy;
+  /** Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps). */
+  current_activity?: CurrentActivityEntry;
+  /** ISO timestamp of the last real orchestrator update (heartbeats excluded). */
+  last_activity_at?: string;
+  /** ISO timestamp of the last job update. */
+  updated_at?: string;
+  /** ISO timestamp of the last heartbeat (liveness of the worker process). */
+  last_heartbeat_at?: string;
 }
 
 /** Response from POST /run-team/{job_id}/retry-failed. */

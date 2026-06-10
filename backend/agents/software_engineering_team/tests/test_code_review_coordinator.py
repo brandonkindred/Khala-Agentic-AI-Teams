@@ -278,3 +278,43 @@ def test_code_review_agent_uses_coordinator_when_code_exceeds_limit() -> None:
 
     assert isinstance(result, CodeReviewOutput)
     assert result.approved is True
+
+
+# ---------------------------------------------------------------------------
+# Progress callback reporting
+# ---------------------------------------------------------------------------
+
+
+def test_coordinator_reports_per_chunk_progress() -> None:
+    """With 2 chunks the coordinator must report 'chunk 1/2' and 'chunk 2/2'
+    with fractions strictly inside (0.10, 0.90], then finalizing and done at 1.0."""
+    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    code = big_file_1 + "\n\n" + big_file_2
+
+    calls: list = []
+
+    def _cb(step: str, detail: str, fraction: float) -> None:
+        calls.append((step, detail, fraction))
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        progress_callback=_cb,
+    )
+    assert isinstance(result, CodeReviewOutput)
+
+    steps = [c[0] for c in calls]
+    assert steps[0] == "preparing"
+    assert "finalizing" in steps
+    assert steps[-1] == "done"
+
+    chunk_starts = [c for c in calls if c[0] == "reviewing" and "done" not in c[1]]
+    assert any("chunk 1/2" in c[1] for c in chunk_starts)
+    assert any("chunk 2/2" in c[1] for c in chunk_starts)
+
+    reviewing_fractions = [c[2] for c in calls if c[0] == "reviewing"]
+    assert all(0.10 <= f <= 0.90 for f in reviewing_fractions), reviewing_fractions
+    fractions = [c[2] for c in calls]
+    assert fractions == sorted(fractions), "fractions must be non-decreasing"
+    assert fractions[-1] == 1.0

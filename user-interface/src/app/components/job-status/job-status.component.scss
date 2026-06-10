@@ -33,3 +33,30 @@
     flex-shrink: 0;
   }
 }
+
+.status-text {
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  font-size: 0.875rem;
+}
+
+.last-activity {
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  font-size: 0.8125rem;
+}
+
+.stalled-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  margin-top: 0.75rem;
+  background-color: #fff3e0;
+  color: #e65100;
+  border-radius: 4px;
+  border: 1px solid #ffcc80;
+
+  mat-icon {
+    color: #ff9800;
+    flex-shrink: 0;
+  }
+}

@@ -81,6 +81,24 @@
                 <mat-icon class="spinning">sync</mat-icon>
                 <span>{{ status.status_text || (status.phase === 'task_graph' ? 'Building task graph' : (status.phase === 'coding' ? 'Coding in progress' : 'Execution')) }}</span>
               </div>
+
+              <!-- Sub-agent activity (e.g. code review sub-steps) with its own progress bar -->
+              @if (status.current_activity) {
+                <div class="current-activity-section">
+                  @if (status.current_activity.detail) {
+                    <div class="current-activity-detail">
+                      <mat-icon>rate_review</mat-icon>
+                      <span>{{ activityAgentLabel() }}: {{ status.current_activity.detail }}</span>
+                    </div>
+                  }
+                  @if (activityFraction() !== null) {
+                    <div class="current-activity-progress">
+                      <mat-progress-bar mode="determinate" [value]="activityFraction()! * 100"></mat-progress-bar>
+                      <span class="current-activity-pct">{{ (activityFraction()! * 100).toFixed(0) }}%</span>
+                    </div>
+                  }
+                </div>
+              }
             </div>
           </div>
         </div>
@@ -215,6 +233,20 @@
         <div class="status-text-section">
           <mat-icon class="spinning">sync</mat-icon>
           <span class="status-text">{{ status.status_text }}</span>
+        </div>
+      }
+
+      <!-- Last activity + stall warning -->
+      @if (lastActivityLabel() && (status.status === 'running' || status.status === 'pending')) {
+        <div class="last-activity-section">
+          <mat-icon>schedule</mat-icon>
+          <span class="last-activity-label">Last activity: {{ lastActivityLabel() }}</span>
+        </div>
+      }
+      @if (isStalled()) {
+        <div class="stalled-warning">
+          <mat-icon>warning</mat-icon>
+          <span>No agent activity for {{ lastActivityLabel() }} — the job may be stalled.</span>
         </div>
       }
 

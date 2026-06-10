@@ -12,6 +12,7 @@ import logging
 import math
 import os
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
@@ -53,6 +54,24 @@ _ENV_THINKING_FLUSH_INTERVAL_S = "AGENT_THINKING_FLUSH_INTERVAL_S"
 _DEFAULT_THINKING_FLUSH_INTERVAL_S = 2.0
 # Keep only the most recent tail of reasoning so the field (and DB write) stays bounded.
 _THINKING_MAX_CHARS = 8000
+
+
+def _safe_activity_update(update_fn: Callable[..., None], **kw: Any) -> None:
+    """Best-effort job update for live progress reporting.
+
+    A transient job-store error must never abort a running review — status
+    reporting is observability, not control flow.
+
+    Preconditions:
+        - ``update_fn`` accepts arbitrary keyword fields to persist on the job.
+    Postconditions:
+        - ``update_fn(**kw)`` was attempted exactly once; any exception it raised
+          was logged at warning level and swallowed.
+    """
+    try:
+        update_fn(**kw)
+    except Exception as e:  # noqa: BLE001 — observability must not break execution
+        logger.warning("progress update failed (ignored): %s", e)
 
 
 def _thinking_flush_interval_s() -> float:
@@ -445,8 +464,22 @@ def run_coding_team_orchestrator(
     update_job_fn / get_job_fn: if provided (e.g. from software_engineering_team), used for phase/status and cancel check.
     """
     path = Path(repo_path).resolve()
-    _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
+    _raw_update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
+
+    def _update(**kw: Any) -> None:
+        """Persist job fields, stamping last_activity_at on every real orchestrator update.
+
+        The 120s heartbeat thread keeps last_heartbeat_at/updated_at fresh even when the
+        orchestrator thread is hung, so those timestamps cannot signal a stall; this field
+        advances only on genuine orchestrator activity and is what the UI's stall warning reads.
+
+        Preconditions: ``kw`` values are JSON-serializable.
+        Postconditions: the job record carries a UTC ISO ``last_activity_at``; an explicit
+            ``last_activity_at`` in ``kw`` is preserved (setdefault semantics).
+        """
+        kw.setdefault("last_activity_at", datetime.now(timezone.utc).isoformat())
+        _raw_update(**kw)
 
     # Capture agents' streamed reasoning ("thinking") so the UI can show what is
     # happening. Tokens land in an in-memory buffer (cheap, off the DB path); a
@@ -878,16 +911,40 @@ class CodingTeamSwarm:
             update_fn(status_text=f"Linting: {task.title}")
             run_linting(self.path, task.id, llm_getter=self.llm_getter)
 
-            # Code review
-            update_fn(status_text=f"Code review: {task.title}")
-            review = run_code_review(
-                code=result.get("changes_summary", ""),
-                spec_content="",
-                task_description=task.description or task.title,
-                language="python" if agent_type == "backend" else "typescript",
-                acceptance_criteria=task.acceptance_criteria or [],
-                llm_getter=self.llm_getter,
-            )
+            # Code review — bridge the agent's sub-step reports into the job record so
+            # the UI shows live review progress instead of a frozen "Code review: ..." line.
+            def _cr_progress(step: str, detail: str, fraction: float) -> None:
+                pct = int(fraction * 100)
+                _safe_activity_update(
+                    update_fn,
+                    status_text=f"Code review ({pct}%): {task.title}"
+                    + (f" — {detail}" if detail else ""),
+                    current_activity={
+                        "agent": "code_review",
+                        "step": step,
+                        "detail": detail,
+                        "fraction": fraction,
+                        "task_id": task.id,
+                        "task_title": task.title,
+                    },
+                )
+
+            _cr_progress("preparing", "starting code review", 0.0)
+            try:
+                review = run_code_review(
+                    code=result.get("changes_summary", ""),
+                    spec_content="",
+                    task_description=task.description or task.title,
+                    language="python" if agent_type == "backend" else "typescript",
+                    acceptance_criteria=task.acceptance_criteria or [],
+                    llm_getter=self.llm_getter,
+                    progress_callback=_cr_progress,
+                )
+            finally:
+                # Clear on every exit path so a stale sub-progress bar never lingers
+                # into the next gate — a frozen bar masquerading as progress is the
+                # exact failure mode this reporting exists to fix.
+                _safe_activity_update(update_fn, current_activity=None)
             if not review.approved:
                 logger.info(
                     "[%s] Code review rejected task %s (%d issues); returning for revision",
@@ -936,17 +993,40 @@ class CodingTeamSwarm:
 
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
         for task in in_review:
-            update_fn(status_text=f"Tech Lead reviewing: {task.title}")
+            # Bridge the Tech Lead's attempt/retry reports into the job record so the
+            # UI shows which attempt is running (silent retries look like a hang).
+            def _tl_progress(step: str, detail: str, fraction: float, task: Task = task) -> None:
+                _safe_activity_update(
+                    update_fn,
+                    status_text=f"Tech Lead reviewing: {task.title}"
+                    + (f" — {detail}" if detail else ""),
+                    current_activity={
+                        "agent": "tech_lead_review",
+                        "step": step,
+                        "detail": detail,
+                        "fraction": fraction,
+                        "task_id": task.id,
+                        "task_title": task.title,
+                    },
+                )
+
+            _tl_progress("preparing", "collecting branch diff", 0.0)
             branch = task.feature_branch or f"feature/{task.id}"
             summary = task.changes_summary or "(no summary recorded)"
             diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
             evidence = _build_review_evidence(summary, diff)
-            review = self.tech_lead.run_code_review(
-                task_title=task.title,
-                task_description=task.description,
-                acceptance_criteria=task.acceptance_criteria,
-                changes_summary=evidence,
-            )
+            try:
+                review = self.tech_lead.run_code_review(
+                    task_title=task.title,
+                    task_description=task.description,
+                    acceptance_criteria=task.acceptance_criteria,
+                    changes_summary=evidence,
+                    progress_callback=_tl_progress,
+                )
+            finally:
+                # Clear on every exit path so a stale sub-progress bar never lingers
+                # into the next task's review.
+                _safe_activity_update(update_fn, current_activity=None)
             if review.get("error"):
                 # The review itself could not run (e.g. evidence exceeded the model context
                 # window). Do NOT route this through the revision loop — re-sending the same

@@ -46,7 +46,7 @@ def test_run_code_review_happy_path(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "code_review_agent.CodeReviewAgent",
-        lambda llm: MagicMock(run=lambda inp: _ReviewResult()),
+        lambda llm: MagicMock(run=lambda inp, progress_callback=None: _ReviewResult()),
     )
     monkeypatch.setattr(
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
@@ -77,7 +77,7 @@ def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "code_review_agent.CodeReviewAgent",
-        lambda llm: MagicMock(run=lambda inp: _ReviewResult()),
+        lambda llm: MagicMock(run=lambda inp, progress_callback=None: _ReviewResult()),
     )
     monkeypatch.setattr(
         "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
@@ -452,3 +452,49 @@ def test_run_code_review_sizes_context_with_strands_adapter() -> None:
 
     llm = get_strands_model("code_review", client=DummyLLMClient())
     assert compute_code_review_total_chars(llm) == 150_000
+
+
+def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
+    """The tool must forward progress_callback into the agent's run (and None when omitted)."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured: dict = {}
+
+    class _CapturingAgent:
+        def __init__(self, llm) -> None:
+            pass
+
+        def run(self, inp, progress_callback=None):
+            captured["progress_callback"] = progress_callback
+            return _ReviewResult()
+
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _CapturingAgent)
+    monkeypatch.setattr(
+        "software_engineering_team.shared.context_sizing.compute_code_review_total_chars",
+        lambda llm: 1000,
+    )
+
+    def _cb(step: str, detail: str, fraction: float) -> None:
+        pass
+
+    result = q.run_code_review(
+        code="x",
+        spec_content="",
+        task_description="t",
+        language="python",
+        task_requirements="reqs",
+        llm_getter=lambda k: MagicMock(),
+        progress_callback=_cb,
+    )
+    assert result.approved is True
+    assert captured["progress_callback"] is _cb
+
+    q.run_code_review(
+        code="x",
+        spec_content="",
+        task_description="t",
+        language="python",
+        task_requirements="reqs",
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert captured["progress_callback"] is None

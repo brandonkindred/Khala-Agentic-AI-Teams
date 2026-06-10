@@ -28,7 +28,14 @@ class StubTechLead:
     def __init__(self, approved: bool = True) -> None:
         self.approved = approved
 
-    def run_code_review(self, task_title, task_description, acceptance_criteria, changes_summary):
+    def run_code_review(
+        self,
+        task_title,
+        task_description,
+        acceptance_criteria,
+        changes_summary,
+        progress_callback=None,
+    ):
         return {"approved": self.approved, "reason": "ok", "requested_changes": []}
 
     def run_assignments(self, agent_ids, ready_tasks, free_agents):

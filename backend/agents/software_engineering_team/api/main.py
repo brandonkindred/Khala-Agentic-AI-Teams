@@ -293,6 +293,26 @@ class TeamProgressEntry(BaseModel):
     microtasks_total: Optional[int] = Field(None, description="Total number of microtasks.")
 
 
+class CurrentActivityEntry(BaseModel):
+    """Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps)."""
+
+    agent: Optional[str] = Field(
+        None, description="Sub-agent reporting the activity: code_review or tech_lead_review."
+    )
+    step: Optional[str] = Field(
+        None,
+        description="Current step: preparing, reviewing, waiting_retry, parsing, finalizing, or done.",
+    )
+    detail: Optional[str] = Field(
+        None, description="Human-readable detail (e.g. 'chunk 2/5: src/app.py' or 'attempt 2/3')."
+    )
+    fraction: Optional[float] = Field(
+        None, description="0.0-1.0 progress through the sub-agent's own process."
+    )
+    task_id: Optional[str] = Field(None, description="Task the sub-agent is working on.")
+    task_title: Optional[str] = Field(None, description="Title of that task.")
+
+
 class QuestionOption(BaseModel):
     """A selectable option for a pending question."""
 
@@ -392,6 +412,19 @@ class JobStatusResponse(BaseModel):
     planning_hierarchy: Optional[Dict[str, Any]] = Field(
         None,
         description="Planning hierarchy with initiatives, epics, stories for work breakdown tree display.",
+    )
+    current_activity: Optional[CurrentActivityEntry] = Field(
+        None,
+        description="Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps).",
+    )
+    last_activity_at: Optional[str] = Field(
+        None,
+        description="ISO timestamp of the last real orchestrator update (heartbeats excluded); "
+        "the UI's stall warning reads this.",
+    )
+    updated_at: Optional[str] = Field(None, description="ISO timestamp of the last job update.")
+    last_heartbeat_at: Optional[str] = Field(
+        None, description="ISO timestamp of the last heartbeat (liveness of the worker process)."
     )
 
 
@@ -894,6 +927,12 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "analysis_subprocess": data.get("analysis_subprocess"),
         "analysis_completed_phases": data.get("analysis_completed_phases") or [],
         "planning_hierarchy": data.get("planning_hierarchy"),
+        "current_activity": data.get("current_activity")
+        if isinstance(data.get("current_activity"), dict)
+        else None,
+        "last_activity_at": data.get("last_activity_at"),
+        "updated_at": data.get("updated_at"),
+        "last_heartbeat_at": data.get("last_heartbeat_at"),
     }
     return JobStatusResponse.model_validate(payload)
 

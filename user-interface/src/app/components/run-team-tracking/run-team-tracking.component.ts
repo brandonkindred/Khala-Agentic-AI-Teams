@@ -9,6 +9,7 @@ import { Subscription, switchMap, timer } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
 import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
+import { isStalled, lastActivityLabel } from '../../shared/staleness.util';
 
 /** Team display order for swim lanes. */
 const TEAM_ORDER = ['git_setup', 'devops', 'backend-code-v2', 'frontend-code-v2', 'backend', 'frontend'];
@@ -203,6 +204,35 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       case 'running': return 'status-running';
       default: return 'status-pending';
     }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Sub-agent Activity and Staleness (code review live progress, stall warning)
+  // ---------------------------------------------------------------------------
+
+  /** 0-1 fraction of the current sub-agent activity (e.g. code review), clamped; null when absent. */
+  activityFraction(): number | null {
+    const fraction = this.status?.current_activity?.fraction;
+    if (fraction === undefined || fraction === null) return null;
+    return Math.min(Math.max(fraction, 0), 1);
+  }
+
+  /** Human label for the current sub-agent, e.g. "Code review". */
+  activityAgentLabel(): string {
+    const agent = this.status?.current_activity?.agent;
+    if (agent === 'tech_lead_review') return 'Tech Lead review';
+    if (agent === 'code_review') return 'Code review';
+    return agent ? this.phaseLabel(agent) : 'Agent activity';
+  }
+
+  /** "just now" / "42s ago" / "3m ago" label for the last real orchestrator activity. */
+  lastActivityLabel(): string {
+    return lastActivityLabel(this.status);
+  }
+
+  /** True when a running job has shown no real activity for the stall threshold. */
+  isStalled(): boolean {
+    return isStalled(this.status);
   }
 
   /** Team ID -> list of tasks in execution order for that team. */

@@ -9,7 +9,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from strands import Agent
 
@@ -241,8 +241,21 @@ class TechLeadAgent:
         task_description: str,
         acceptance_criteria: List[str],
         changes_summary: str,
+        progress_callback: Optional[Callable[[str, str, float], None]] = None,
     ) -> Dict[str, Any]:
-        """Review feature branch: approved (bool), reason (str), requested_changes (list)."""
+        """Review feature branch: approved (bool), reason (str), requested_changes (list).
+
+        Preconditions:
+            - ``progress_callback`` is None or a non-raising callable accepting
+              ``(step, detail, fraction)``; steps emitted here are
+              ``reviewing | waiting_retry | done``.
+
+        Postconditions:
+            - When ``progress_callback`` is provided, each LLM attempt and each
+              backoff wait is reported, and a terminal ``done`` report at 1.0 is
+              emitted on both the success and the exhausted-retries paths.
+            - The review result is identical whether or not a callback is provided.
+        """
         user = prompts.CODE_REVIEW_USER.format(
             task_title=task_title,
             task_description=task_description,
@@ -252,7 +265,20 @@ class TechLeadAgent:
         user += "\n\nRespond with valid JSON only, no markdown fences."
         attempts = _review_retry_attempts()
 
+        def _report(step: str, detail: str, fraction: float) -> None:
+            if progress_callback is not None:
+                progress_callback(step, detail, fraction)
+
+        attempt_no = 0
+
         def _attempt_review() -> Dict[str, Any]:
+            nonlocal attempt_no
+            attempt_no += 1
+            _report(
+                "reviewing",
+                f"attempt {attempt_no}/{attempts}",
+                min(0.1 + 0.8 * (attempt_no - 1) / attempts, 0.9),
+            )
             data = _agent_call_json(self._review_agent, user)
             # A response that parses as JSON but carries no verdict (missing/null "approved") is not
             # a substantive rejection — it's an unusable review. Raise so the shared retry envelope
@@ -265,18 +291,28 @@ class TechLeadAgent:
         # Reuse the platform's jittered-exponential-backoff retry envelope rather than a bespoke
         # loop, so review retry/backoff tuning stays consistent with every other LLM caller.
         try:
-            data = call_llm_with_retries(_attempt_review, max_attempts=attempts)
+            data = call_llm_with_retries(
+                _attempt_review,
+                max_attempts=attempts,
+                on_retry=lambda n, m, wait, e: _report(
+                    "waiting_retry",
+                    f"attempt {n}/{m} failed; retrying in {wait:.0f}s",
+                    min(0.1 + 0.8 * n / m, 0.9),
+                ),
+            )
         except Exception as e:  # noqa: BLE001 — a failed review must never abort the swarm
             # Flag an infrastructure failure (error=True) distinctly from a substantive rejection so
             # the orchestrator fails the task once with a clear diagnostic rather than re-sending the
             # same failing prompt through the revision loop every round.
             logger.warning("Tech Lead code_review failed after %d attempts: %s", attempts, e)
+            _report("done", f"review failed after {attempts} attempts", 1.0)
             return {
                 "approved": False,
                 "error": True,
                 "reason": f"Review could not be completed after {attempts} attempts: {e}",
                 "requested_changes": [],
             }
+        _report("done", "review complete", 1.0)
         return {
             "approved": bool(data.get("approved")),
             "error": False,

@@ -58,4 +58,66 @@ describe('JobStatusComponent', () => {
     c.ngOnInit();
     expect(c.loading).toBe(false);
   });
+
+  it('renders status_text when present', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
+    component.status = {
+      ...component.status!,
+      status_text: 'Code review (45%): Add login — chunk 2/5: src/auth.py',
+    };
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.status-text')?.textContent).toContain('Code review (45%)');
+  });
+
+  it('shows the stalled warning for a running job with stale activity', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
+    component.status = {
+      ...component.status!,
+      status: 'running',
+      last_activity_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+    };
+    fixture.detectChanges();
+    const el: HTMLElement = fixture.nativeElement;
+    expect(el.querySelector('.stalled-warning')?.textContent).toContain('may be stalled');
+    expect(component.isStalled()).toBe(true);
+    expect(component.lastActivityLabel()).toBe('10m ago');
+  });
+
+  it('hides the stalled warning when activity is fresh', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
+    component.status = {
+      ...component.status!,
+      status: 'running',
+      last_activity_at: new Date().toISOString(),
+    };
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+  });
+
+  it('hides the stalled warning while waiting for answers and on terminal states', () => {
+    component.jobId = 'j1';
+    fixture.detectChanges();
+    const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    component.status = {
+      ...component.status!,
+      status: 'running',
+      waiting_for_answers: true,
+      last_activity_at: stale,
+    };
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+
+    component.status = {
+      ...component.status!,
+      status: 'completed',
+      waiting_for_answers: false,
+      last_activity_at: stale,
+    };
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+  });
 });

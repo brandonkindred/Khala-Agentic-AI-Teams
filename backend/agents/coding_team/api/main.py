@@ -228,6 +228,22 @@ class StatusResponse(BaseModel):
         default=False,
         description="True when the job is paused waiting for the user to answer pending questions.",
     )
+    current_activity: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Fine-grained activity of the currently running sub-agent "
+        "(agent, step, detail, fraction, task_id, task_title).",
+    )
+    last_activity_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the last real orchestrator update (heartbeats excluded).",
+    )
+    updated_at: Optional[str] = Field(
+        default=None, description="ISO timestamp of the last job update."
+    )
+    last_heartbeat_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the last heartbeat (liveness of the worker process).",
+    )
 
 
 class JobListItem(BaseModel):
@@ -369,6 +385,12 @@ def get_status(job_id: str) -> StatusResponse:
         review_summary=data.get("review_summary"),
         pending_questions=[PendingQuestion(**q) for q in data.get("pending_questions", [])],
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
+        current_activity=data.get("current_activity")
+        if isinstance(data.get("current_activity"), dict)
+        else None,
+        last_activity_at=data.get("last_activity_at"),
+        updated_at=data.get("updated_at"),
+        last_heartbeat_at=data.get("last_heartbeat_at"),
     )
 
 
@@ -918,12 +940,41 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 task_requirements=pr.body or "",
                 language=_infer_review_language(files),
             )
+
+            def _pr_progress(step: str, detail: str, fraction: float) -> None:
+                """Surface review sub-steps on the job record (best-effort).
+
+                Preconditions: invoked by the review agent per its progress contract.
+                Postconditions: a failed store write is logged and swallowed —
+                    observability must never fail the review itself.
+                """
+                try:
+                    update_job(
+                        job_id,
+                        status_text=f"Reviewing PR #{pr_number} ({int(fraction * 100)}%): "
+                        f"{detail or step}",
+                        current_activity={
+                            "agent": "code_review",
+                            "step": step,
+                            "detail": detail,
+                            "fraction": fraction,
+                        },
+                    )
+                except Exception:  # noqa: BLE001 - observability must not break the review
+                    logger.warning("PR review progress update failed (ignored)", exc_info=True)
+
             try:
-                output = CodeReviewAgent().run(review_input)
+                output = CodeReviewAgent().run(review_input, progress_callback=_pr_progress)
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
                 logger.exception("PR review agent failed: %s", e)
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
                 return
+            finally:
+                # Clear so a stale sub-progress entry never outlives the review itself.
+                try:
+                    update_job(job_id, current_activity=None)
+                except Exception:  # noqa: BLE001 - observability must not break the review
+                    logger.warning("PR review activity clear failed (ignored)", exc_info=True)
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
             body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)

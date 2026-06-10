@@ -496,3 +496,67 @@ def test_restart_200_when_failed_reuses_same_job(client: TestClient, temp_work_p
     assert job is not None
     assert job.get("status") == "running"
     assert job.get("repo_path") == str(temp_work_path)
+
+
+def test_get_job_status_exposes_activity_and_timestamps(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """GET /run-team/{job_id} round-trips current_activity, last_activity_at, and the
+    job-service timestamps so the UI can render sub-agent progress + a stall warning."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(
+        job_id,
+        current_activity={
+            "agent": "code_review",
+            "step": "reviewing",
+            "detail": "chunk 2/5: src/app.py",
+            "fraction": 0.4,
+            "task_id": "t1",
+            "task_title": "T1",
+        },
+        last_activity_at="2026-06-10T12:00:00+00:00",
+    )
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    activity = data["current_activity"]
+    assert activity["agent"] == "code_review"
+    assert activity["step"] == "reviewing"
+    assert activity["detail"] == "chunk 2/5: src/app.py"
+    assert activity["fraction"] == 0.4
+    assert data["last_activity_at"] == "2026-06-10T12:00:00+00:00"
+
+
+def test_get_job_status_activity_fields_default_to_none(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """Jobs without the new fields (older records) validate cleanly with None values."""
+    from software_engineering_team.shared.job_store import create_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["current_activity"] is None
+    assert data["last_activity_at"] is None
+
+
+def test_get_job_status_non_dict_current_activity_coerced_to_none(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """A malformed (non-dict) current_activity value must not break the status endpoint."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(job_id, current_activity="not-a-dict")
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    assert r.json()["current_activity"] is None

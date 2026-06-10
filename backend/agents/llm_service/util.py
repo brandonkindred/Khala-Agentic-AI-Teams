@@ -51,11 +51,20 @@ def call_llm_with_retries(
     max_attempts: int = 3,
     backoff_base: float = 2.0,
     backoff_max: float = 60.0,
+    on_retry: Optional[Callable[[int, int, float, Exception], None]] = None,
 ) -> Any:
     """
     Call fn() up to max_attempts times with exponential backoff on connection/temporary errors.
     On permanent/rate-limit errors, re-raises immediately. After exhausting retries, raises
     LLMUnreachableAfterRetriesError so the caller can return a structured result (e.g. llm_unreachable=True).
+
+    Preconditions:
+        - on_retry, if provided, must not raise (callers pass a safe wrapper) and accepts
+          (failed_attempt_number, max_attempts, wait_seconds, exception).
+
+    Postconditions:
+        - on_retry is invoked exactly once per retried attempt, immediately before the
+          backoff sleep; never on success and never after the final attempt.
     """
     last_error: Exception | None = None
     for attempt in range(max_attempts):
@@ -80,6 +89,8 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
+                if on_retry is not None:
+                    on_retry(attempt + 1, max_attempts, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(
@@ -103,6 +114,8 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
+                if on_retry is not None:
+                    on_retry(attempt + 1, max_attempts, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(

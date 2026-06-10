@@ -36,7 +36,14 @@ class StubTechLead:
         self.requested_changes = requested_changes if requested_changes is not None else ["fix X"]
         self.review_calls: List[str] = []
 
-    def run_code_review(self, task_title, task_description, acceptance_criteria, changes_summary):
+    def run_code_review(
+        self,
+        task_title,
+        task_description,
+        acceptance_criteria,
+        changes_summary,
+        progress_callback=None,
+    ):
         self.review_calls.append(changes_summary)
         return {
             "approved": self.approved,
@@ -171,7 +178,12 @@ def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatc
 
     class ErrTechLead(StubTechLead):
         def run_code_review(
-            self, task_title, task_description, acceptance_criteria, changes_summary
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            progress_callback=None,
         ):
             self.review_calls.append(changes_summary)
             return {
@@ -1042,3 +1054,221 @@ def test_implement_passes_full_task_description_and_repo_context(tmp_path, monke
 
     assert huge in captured["prompt"]  # full description embedded, uncut
     assert big_ctx in captured["prompt"]  # full repo context embedded, uncut
+
+
+# ----------------------------------------------------- live progress reporting (code review)
+
+
+def test_quality_gate_code_review_reports_live_progress(tmp_path, monkeypatch):
+    """The quality-gate code review must surface the agent's sub-step reports as
+    status_text + structured current_activity (rising fraction), then clear the
+    activity on completion so a stale sub-bar never lingers."""
+    import types
+
+    monkeypatch.setattr(
+        f"{QG}.run_build_verification",
+        lambda *a, **k: types.SimpleNamespace(success=True, error=""),
+    )
+    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
+
+    def _fake_review(**kwargs):
+        cb = kwargs.get("progress_callback")
+        assert cb is not None, "orchestrator must pass a progress callback"
+        cb("reviewing", "chunk 1/2: a.py", 0.3)
+        cb("reviewing", "chunk 2/2: b.py", 0.7)
+        cb("done", "approved=True, issues=0", 1.0)
+        return types.SimpleNamespace(approved=True, issues=[])
+
+    monkeypatch.setattr(f"{QG}.run_code_review", _fake_review)
+
+    updates: List[Dict[str, Any]] = []
+    swarm, graph = _make_real_swarm(tmp_path)
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: updates.append(kw))
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+    review_updates = [u for u in updates if "Code review (" in (u.get("status_text") or "")]
+    assert review_updates, f"expected code-review status updates, got {updates}"
+    assert any("chunk 1/2" in u["status_text"] for u in review_updates)
+
+    activities = [u["current_activity"] for u in updates if u.get("current_activity")]
+    assert all(a["agent"] == "code_review" for a in activities)
+    fractions = [a["fraction"] for a in activities]
+    assert fractions == sorted(fractions), "fractions must be non-decreasing"
+
+    # The final activity-bearing update must be followed by an explicit clear.
+    clears = [u for u in updates if "current_activity" in u and u["current_activity"] is None]
+    assert clears, "current_activity must be cleared after the review"
+
+
+def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeypatch):
+    """_review_and_merge bridges Tech Lead reports into the job record and clears
+    current_activity after each task's review (success and rejection alike)."""
+    _patch_git(monkeypatch)
+
+    class ReportingTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            progress_callback=None,
+        ):
+            if progress_callback is not None:
+                progress_callback("reviewing", "attempt 1/3", 0.1)
+                progress_callback("done", "review complete", 1.0)
+            return super().run_code_review(
+                task_title, task_description, acceptance_criteria, changes_summary
+            )
+
+    tech_lead = ReportingTechLead(approved=True)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    updates: List[Dict[str, Any]] = []
+    swarm._review_and_merge(lambda **kw: updates.append(kw))
+
+    tl_updates = [
+        u for u in updates if (u.get("current_activity") or {}).get("agent") == "tech_lead_review"
+    ]
+    assert tl_updates, f"expected tech-lead activity updates, got {updates}"
+    assert any("attempt 1/3" in (u.get("status_text") or "") for u in updates)
+    assert any("current_activity" in u and u["current_activity"] is None for u in updates)
+
+
+def test_safe_activity_update_swallows_store_errors():
+    """A raising update_fn must be logged and swallowed — progress reporting can
+    never abort a running review."""
+
+    def _boom(**kw):
+        raise RuntimeError("store down")
+
+    orch_mod._safe_activity_update(_boom, status_text="x")  # must not raise
+
+
+def test_orchestrator_update_stamps_last_activity_at(tmp_path, monkeypatch):
+    """Every real orchestrator update carries an ISO-8601 last_activity_at, and an
+    explicit value provided by the caller is preserved (setdefault semantics)."""
+    from datetime import datetime
+
+    updates: List[Dict[str, Any]] = []
+
+    class _PlanningTechLead:
+        def run_plan_to_task_graph(self, plan_input):
+            return {"tasks": [], "stacks": [{"name": "backend", "tools_services": []}]}
+
+    class _NoopSwarm:
+        aborted = False
+
+        def __init__(self, **kw):
+            self.graph = kw["graph"]
+
+        def run(self, **kw):
+            # Exercise the setdefault path: an explicit last_activity_at must survive.
+            kw["update_fn"](status_text="explicit", last_activity_at="2020-01-01T00:00:00+00:00")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
+
+    run_coding_team_orchestrator(
+        job_id="j-activity",
+        plan_input=CodingTeamPlanInput(
+            plan="p", specification="s", architecture="a", repo_path=str(tmp_path)
+        ),
+        repo_path=str(tmp_path),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        get_llm=lambda key: None,
+    )
+
+    assert updates, "orchestrator must have written job updates"
+    for kw in updates:
+        assert "last_activity_at" in kw, f"missing last_activity_at in {kw}"
+        datetime.fromisoformat(kw["last_activity_at"])  # ISO-8601 parseable
+
+    explicit = [kw for kw in updates if kw.get("status_text") == "explicit"]
+    assert explicit and explicit[0]["last_activity_at"] == "2020-01-01T00:00:00+00:00"
+
+    final = updates[-1]
+    assert final.get("status") == "completed"
+
+
+# ----------------------------------------------------- tech lead review progress reporting
+
+
+def test_tech_lead_review_progress_reports_attempts_and_retry_waits(monkeypatch):
+    """A flaky review reports attempt 1/N, the backoff wait, attempt 2/N, then a
+    terminal done at 1.0 — silent retries are the prime 'looks hung' source."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "2")  # → 3 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rate limited")
+        return {"approved": True, "reason": "ok", "requested_changes": []}
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    reports: List[Any] = []
+    out = tl.run_code_review(
+        "t", "d", [], "evidence", progress_callback=lambda s, d, f: reports.append((s, d, f))
+    )
+
+    assert out["approved"] is True
+    steps_details = [(s, d) for s, d, _f in reports]
+    assert steps_details[0] == ("reviewing", "attempt 1/3")
+    assert steps_details[1][0] == "waiting_retry"
+    assert "attempt 1/3 failed" in steps_details[1][1]
+    assert steps_details[2] == ("reviewing", "attempt 2/3")
+    assert reports[-1][0] == "done"
+    assert reports[-1][2] == 1.0
+
+
+def test_tech_lead_review_progress_terminal_done_on_exhausted_retries(monkeypatch):
+    """Exhausted retries still emit a terminal done at 1.0 (no perpetual mid-bar)."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    reports: List[Any] = []
+    out = tl.run_code_review(
+        "t", "d", [], "x", progress_callback=lambda s, d, f: reports.append((s, d, f))
+    )
+
+    assert out["error"] is True
+    assert reports[-1][0] == "done"
+    assert reports[-1][2] == 1.0
+    assert "failed after 2 attempts" in reports[-1][1]
+
+
+def test_tech_lead_review_no_callback_unchanged(monkeypatch):
+    """progress_callback omitted → result identical to the pre-callback behavior."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {"approved": True, "reason": "ok", "requested_changes": []},
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+    out = tl.run_code_review("t", "d", [], "evidence")
+    assert out == {"approved": True, "error": False, "reason": "ok", "requested_changes": []}

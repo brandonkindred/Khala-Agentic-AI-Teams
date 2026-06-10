@@ -256,3 +256,47 @@ def test_format_questions_comment():
     assert "`q1`" in out
     assert "`strict`" in out
     assert "/run/job-123/answers" in out
+
+
+def test_status_surfaces_current_activity_and_timestamps(monkeypatch):
+    """/status round-trips the sub-agent activity dict and the activity/heartbeat
+    timestamps the UI uses for the sub-progress bar and stall warning."""
+    monkeypatch.setattr(
+        api,
+        "get_job",
+        lambda jid: _job(
+            status="running",
+            waiting_for_answers=False,
+            pending_questions=[],
+            current_activity={
+                "agent": "tech_lead_review",
+                "step": "waiting_retry",
+                "detail": "attempt 1/3 failed; retrying in 4s",
+                "fraction": 0.37,
+            },
+            last_activity_at="2026-06-10T12:00:00+00:00",
+            updated_at="2026-06-10T12:00:01+00:00",
+            last_heartbeat_at="2026-06-10T12:00:02+00:00",
+        ),
+    )
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current_activity"]["agent"] == "tech_lead_review"
+    assert body["current_activity"]["fraction"] == 0.37
+    assert body["last_activity_at"] == "2026-06-10T12:00:00+00:00"
+    assert body["updated_at"] == "2026-06-10T12:00:01+00:00"
+    assert body["last_heartbeat_at"] == "2026-06-10T12:00:02+00:00"
+
+
+def test_status_activity_fields_default_to_none(monkeypatch):
+    """Older job records without the new fields validate cleanly with None values,
+    and a malformed (non-dict) current_activity is coerced to None."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(current_activity="garbage"))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current_activity"] is None
+    assert body["last_activity_at"] is None
+    assert body["updated_at"] is None
+    assert body["last_heartbeat_at"] is None

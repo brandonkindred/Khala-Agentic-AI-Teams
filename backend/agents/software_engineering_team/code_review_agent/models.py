@@ -1,10 +1,38 @@
 """Models for the Code Review agent."""
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import SystemArchitecture
+
+ReviewProgressCallback = Callable[[str, str, float], None]
+"""Progress callback signature: (step, detail, fraction in [0.0, 1.0]).
+
+Steps: ``preparing | reviewing | waiting_retry | parsing | finalizing | done``.
+
+Preconditions (on the callable a caller provides):
+    - Must not raise; review progress is observability, never control flow.
+    - Must accept (str, str, float) positionally.
+"""
+
+
+def notify_review_progress(
+    callback: Optional[ReviewProgressCallback], step: str, detail: str, fraction: float
+) -> None:
+    """Invoke a review progress callback, or no-op when none is provided.
+
+    Preconditions:
+        - ``callback`` is None or satisfies the ReviewProgressCallback contract
+          (non-raising; exceptions are deliberately NOT swallowed here so a
+          contract violation in the caller surfaces as a bug, not silence).
+
+    Postconditions:
+        - When ``callback`` is None, has no effect.
+        - Otherwise ``callback(step, detail, fraction)`` was invoked exactly once.
+    """
+    if callback is not None:
+        callback(step, detail, fraction)
 
 
 def coerce_line(value: Any) -> Optional[int]:

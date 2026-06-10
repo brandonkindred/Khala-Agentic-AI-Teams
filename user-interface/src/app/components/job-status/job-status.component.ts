@@ -6,6 +6,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse } from '../../models';
+import { isStalled, lastActivityLabel } from '../../shared/staleness.util';
 
 @Component({
   selector: 'app-job-status',
@@ -62,5 +63,15 @@ export class JobStatusComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.sub?.unsubscribe();
+  }
+
+  /** "just now" / "42s ago" / "3m ago" label for the last real orchestrator activity. */
+  lastActivityLabel(): string {
+    return lastActivityLabel(this.status);
+  }
+
+  /** True when a running job has shown no real activity for the stall threshold. */
+  isStalled(): boolean {
+    return isStalled(this.status);
   }
 }
