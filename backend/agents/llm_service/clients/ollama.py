@@ -842,7 +842,11 @@ class OllamaLLMClient(LLMClient):
         semantic_attempt = 0
         active_think: "bool | str | None" = resolved_think
         any_content_bytes = False
-        max_total_attempts = max_retries + rate_limit_max_retries + 2
+        # Log denominator: one slot for the first attempt plus every budget —
+        # the proof-of-change downgrade slot only exists when the feature is on.
+        max_total_attempts = (
+            max_retries + rate_limit_max_retries + (2 if _thinking_downgrade_enabled() else 1)
+        )
         rl_log_body: Optional[str] = None
         rl_log_headers: Any = None
         attempt = 0
