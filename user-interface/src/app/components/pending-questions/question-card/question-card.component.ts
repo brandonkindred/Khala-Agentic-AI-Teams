@@ -34,6 +34,8 @@ export class QuestionCardComponent {
   @Input() autoAnswerResult?: AutoAnswerResponse;
   @Input() isAutoAnswering = false;
   @Input() isAnswered = false;
+  /** When false, the AI auto-answer affordance is hidden (user-only decisions). */
+  @Input() autoAnswerEnabled = true;
 
   @Output() optionToggled = new EventEmitter<{ optionId: string; checked: boolean }>();
   @Output() otherTextChanged = new EventEmitter<string>();

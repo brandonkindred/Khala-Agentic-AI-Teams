@@ -396,7 +396,13 @@ def _run_pause_cycle(
             on_pause(structured)
         except Exception as e:  # noqa: BLE001 — surfacing the pause must never abort the job
             logger.warning("on_pause callback failed for job %s: %s", job_id, e)
-    got = hitl.wait_for_answers(job_id, get_job_fn)
+    # The heartbeat lets the answers endpoint (possibly in another worker process) tell a live,
+    # blocked wait loop apart from a dead one before it considers auto-resuming the job.
+    got = hitl.wait_for_answers(
+        job_id,
+        get_job_fn,
+        heartbeat_fn=lambda ts: update_fn(answer_wait_heartbeat_at=ts),
+    )
     if not got:
         data = get_job_fn(job_id) or {}
         if hitl.is_terminal(data):

@@ -54,7 +54,7 @@ def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")):
 def _answer_all(job: Dict[str, Any], option: str = "yes"):
     """Fake hitl.wait_for_answers: answer every surfaced question and clear the wait flag."""
 
-    def fake_wait(job_id, get_job_fn):
+    def fake_wait(job_id, get_job_fn, **kw):
         pend = job.get("pending_questions") or []
         job["submitted_answers"] = list(job.get("submitted_answers") or []) + [
             {"question_id": q["id"], "selected_option_id": option} for q in pend
@@ -160,7 +160,7 @@ def test_pause_cycle_timeout_sets_failed(monkeypatch):
 def test_pause_cycle_terminal_leaves_status(monkeypatch):
     job: Dict[str, Any] = {}
 
-    def fake_wait(job_id, gj):
+    def fake_wait(job_id, gj, **kw):
         job["status"] = "cancelled"  # job goes terminal while waiting
         return False
 

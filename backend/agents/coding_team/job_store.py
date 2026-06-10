@@ -16,6 +16,11 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 
+# Every status under which a job may still resume on its own. This is the single definition of
+# "active": a paused job (waiting_for_user) is still in flight — its checkout is owned, its issue
+# is being worked — and every liveness/admission consumer must see it.
+NON_TERMINAL_STATUSES: tuple[str, ...] = ("pending", "running", "waiting_for_user")
+
 
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     return JobServiceClient(team="coding_team")
@@ -85,8 +90,14 @@ def list_jobs(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     running_only: bool = False,
 ) -> List[Dict[str, Any]]:
-    """List coding_team jobs. If running_only, only pending or running."""
-    statuses = ["pending", "running"] if running_only else None
+    """List coding_team jobs.
+
+    Postconditions:
+        - With ``running_only`` True, returns only jobs in a NON_TERMINAL_STATUSES status —
+          including ``waiting_for_user``: a paused job still owns its checkout and issue, so
+          admission guards and list consumers must not treat it as gone.
+    """
+    statuses = list(NON_TERMINAL_STATUSES) if running_only else None
     return _client(cache_dir).list_jobs(statuses=statuses)
 
 

@@ -63,13 +63,27 @@
       <div class="github-job-panel">
         <div class="github-job-panel__header">
           <mat-icon>engineering</mat-icon>
-          <h3>Working on issue #{{ activeJob.issue_number }}</h3>
-          @if (isJobTerminal()) {
-            <button mat-button (click)="dismissJob()">
-              <mat-icon>close</mat-icon>
-              Dismiss
-            </button>
+          <h3>
+            Working on issue
+            @if (activeJob.issue_url) {
+              <a [href]="activeJob.issue_url" target="_blank" rel="noopener">#{{ activeJob.issue_number }}</a>
+            } @else {
+              #{{ activeJob.issue_number }}
+            }
+          </h3>
+          @if (jobStatus?.waiting_for_answers) {
+            <span class="github-job-status github-job-status--waiting_for_user">
+              waiting for your answers
+            </span>
           }
+          <button
+            mat-button
+            (click)="dismissJob()"
+            [matTooltip]="isJobTerminal() ? 'Dismiss this finished job' : 'Hide this panel — the run keeps going in the background'"
+          >
+            <mat-icon>close</mat-icon>
+            Dismiss
+          </button>
         </div>
 
         <div class="github-job-panel__body">
@@ -108,6 +122,18 @@
                   }
                 </div>
               </div>
+            }
+            @if (hasPendingQuestions()) {
+              <div class="github-banner github-banner--waiting" role="status">
+                <mat-icon>help_outline</mat-icon>
+                <span>The coding team is paused and needs your decisions before it can continue.</span>
+              </div>
+              <app-pending-questions
+                [jobId]="activeJob.job_id"
+                [questions]="jobStatus.pending_questions!"
+                submitEndpoint="coding-team"
+                (answersSubmitted)="onAnswersSubmitted($any($event))"
+              />
             }
             @if (jobStatus.thinking) {
               <mat-expansion-panel class="thinking-panel" [expanded]="true">
@@ -210,6 +236,15 @@
             >
               <span class="github-issue-row__number">#{{ issue.number }}</span>
               <span class="github-issue-row__title">{{ issue.title }}</span>
+              @if (isIssueInProgress(issue)) {
+                <span
+                  class="github-label-chip github-label-chip--active"
+                  matTooltip="The coding team is already working on this issue"
+                >
+                  <mat-icon>engineering</mat-icon>
+                  In progress
+                </span>
+              }
               <span class="github-issue-row__labels">
                 @for (label of issue.labels; track label) {
                   <span class="github-label-chip">{{ label }}</span>

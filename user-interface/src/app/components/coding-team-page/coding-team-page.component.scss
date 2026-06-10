@@ -81,6 +81,11 @@
     background: #fce8e6;
     color: #c5221f;
   }
+
+  &--waiting {
+    background: #fef7e0;
+    color: #b06000;
+  }
 }
 
 // Issue list
@@ -178,6 +183,22 @@
   font-size: 0.75rem;
   background: var(--mat-sys-secondary-container, #e8f0fe);
   color: var(--mat-sys-on-secondary-container, #1a73e8);
+
+  &--active {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.25rem;
+    flex-shrink: 0;
+    background: #fef7e0;
+    color: #b06000;
+    font-weight: 600;
+
+    mat-icon {
+      font-size: 1rem;
+      width: 1rem;
+      height: 1rem;
+    }
+  }
 }
 
 // Confirmation panel
@@ -342,6 +363,10 @@
   &--cancelled {
     background: #f5f5f5;
     color: #80868b;
+  }
+  &--waiting_for_user {
+    background: #fef7e0;
+    color: #b06000;
   }
 }
 

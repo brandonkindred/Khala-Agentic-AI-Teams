@@ -11,9 +11,10 @@ import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatChipsModule } from '@angular/material/chips';
-import { Observable } from 'rxjs';
+import { Observable, throwError } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { PlanningV3ApiService } from '../../services/planning-v3-api.service';
+import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import type {
   PendingQuestion,
   AnswerSubmission,
@@ -23,10 +24,26 @@ import type {
   ProductAnalysisStatusResponse,
   AutoAnswerResponse,
 } from '../../models';
+import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { QuestionCardComponent } from './question-card/question-card.component';
 
 /** Endpoint type determines which API to call for submitting answers. */
-export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis';
+export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis' | 'coding-team';
+
+/**
+ * Per-endpoint capabilities. `Record` over the full union makes adding a new
+ * endpoint a compile error until its capabilities are declared here — the
+ * single source of truth for whether AI auto-answer is offered (default-deny:
+ * an endpoint must opt IN; coding-team decisions are user-only by policy and
+ * planning-v3 exposes no auto-answer API).
+ */
+const ENDPOINT_CAPABILITIES: Record<SubmitEndpointType, { autoAnswer: boolean }> = {
+  'run-team': { autoAnswer: true },
+  'planning-v2': { autoAnswer: true },
+  'planning-v3': { autoAnswer: false },
+  'product-analysis': { autoAnswer: true },
+  'coding-team': { autoAnswer: false },
+};
 
 interface QuestionAnswer {
   questionId: string;
@@ -63,13 +80,18 @@ interface QuestionAnswer {
 export class PendingQuestionsComponent implements OnChanges {
   private readonly api = inject(SoftwareEngineeringApiService);
   private readonly planningV3Api = inject(PlanningV3ApiService);
+  private readonly codingTeamApi = inject(CodingTeamApiService);
 
   @Input() jobId: string | null = null;
   @Input() questions: PendingQuestion[] = [];
-  /** Which endpoint to call: 'run-team' (default), 'planning-v3', or 'product-analysis'. */
+  /** Which endpoint to call: 'run-team' (default), 'planning-v3', 'product-analysis', or 'coding-team'. */
   @Input() submitEndpoint: SubmitEndpointType = 'run-team';
   @Output() answersSubmitted = new EventEmitter<
-    JobStatusResponse | PlanningV2StatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse
+    | JobStatusResponse
+    | PlanningV2StatusResponse
+    | PlanningV3StatusResponse
+    | ProductAnalysisStatusResponse
+    | CodingTeamJobStatus
   >();
 
   answers = new Map<string, QuestionAnswer>();
@@ -124,6 +146,15 @@ export class PendingQuestionsComponent implements OnChanges {
     const answer = this.answers.get(questionId);
     if (answer) {
       if (event.checked) {
+        const question = this.questions.find((q) => q.id === questionId);
+        // Single-select questions render as radios: the card only emits the newly
+        // checked option, so replace the previous selection instead of accumulating.
+        if (question?.allow_multiple !== true) {
+          answer.selectedOptionIds.clear();
+          if (event.optionId !== 'other') {
+            answer.otherText = '';
+          }
+        }
         answer.selectedOptionIds.add(event.optionId);
       } else {
         answer.selectedOptionIds.delete(event.optionId);
@@ -177,12 +208,39 @@ export class PendingQuestionsComponent implements OnChanges {
       .every((q) => this.isQuestionAnswered(q));
   }
 
+  /**
+   * True when the batch as a whole is valid to submit: every required question
+   * is answered AND no touched question is half-answered (e.g. an optional
+   * question with 'other' ticked but no text — the backend rejects the entire
+   * batch over a single invalid answer, so the gate must cover optional ones too).
+   */
+  get allAnswersSubmittable(): boolean {
+    return (
+      this.allRequiredAnswered &&
+      this.questions.every((q) => {
+        const answer = this.answers.get(q.id);
+        // Untouched questions are simply omitted from the submission.
+        if (!answer || answer.selectedOptionIds.size === 0) return true;
+        return this.isQuestionAnswered(q);
+      })
+    );
+  }
+
   get answeredCount(): number {
     return this.questions.filter((q) => this.isQuestionAnswered(q)).length;
   }
 
+  /**
+   * Whether the AI auto-answer affordance is offered for this endpoint.
+   * Driven by ENDPOINT_CAPABILITIES; an unknown value (impossible under the
+   * union type, but reachable from a template typo) denies by default.
+   */
+  get autoAnswerEnabled(): boolean {
+    return ENDPOINT_CAPABILITIES[this.submitEndpoint]?.autoAnswer ?? false;
+  }
+
   autoAnswerQuestion(question: PendingQuestion): void {
-    if (!this.jobId || this.isAutoAnswering(question.id)) return;
+    if (!this.autoAnswerEnabled || !this.jobId || this.isAutoAnswering(question.id)) return;
 
     this.autoAnsweringQuestions.add(question.id);
     this.error = null;
@@ -197,19 +255,26 @@ export class PendingQuestionsComponent implements OnChanges {
       this.error = `Auto-answer failed for Q${this.questions.indexOf(question) + 1}: ${err?.error?.detail ?? err?.message ?? 'Unknown error'}`;
     };
 
-    if (this.submitEndpoint === 'planning-v3') {
-      // Planning V3 API does not expose auto-answer; skip or use a future endpoint
-      this.autoAnsweringQuestions.delete(question.id);
-    } else if (this.submitEndpoint === 'product-analysis') {
-      this.api.autoAnswerProductAnalysis(this.jobId, question.id).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    } else {
-      this.api.autoAnswerRunTeam(this.jobId, question.id).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
+    // Explicit per-endpoint dispatch — never fall through to a foreign team's
+    // auto-answer endpoint. Endpoints without an auto-answer API are already
+    // excluded by the autoAnswerEnabled guard above.
+    switch (this.submitEndpoint) {
+      case 'product-analysis':
+        this.api.autoAnswerProductAnalysis(this.jobId, question.id).subscribe({
+          next: handleSuccess,
+          error: handleError,
+        });
+        break;
+      case 'run-team':
+      case 'planning-v2':
+        this.api.autoAnswerRunTeam(this.jobId, question.id).subscribe({
+          next: handleSuccess,
+          error: handleError,
+        });
+        break;
+      default:
+        this.autoAnsweringQuestions.delete(question.id);
+        break;
     }
   }
 
@@ -246,19 +311,51 @@ export class PendingQuestionsComponent implements OnChanges {
 
   private getSubmitObservable(
     request: { answers: AnswerSubmission[] }
-  ): Observable<JobStatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse> {
-    if (this.submitEndpoint === 'planning-v3') {
-      const body = request.answers.map((a) => ({
-        question_id: a.question_id,
-        selected_option_id: a.selected_option_id ?? undefined,
-        selected_option_ids: a.selected_option_ids,
-        other_text: a.other_text ?? undefined,
-      }));
-      return this.planningV3Api.submitAnswers(this.jobId!, body);
-    } else if (this.submitEndpoint === 'product-analysis') {
-      return this.api.submitProductAnalysisAnswers(this.jobId!, request) as Observable<ProductAnalysisStatusResponse>;
-    } else {
-      return this.api.submitAnswers(this.jobId!, request);
+  ): Observable<
+    | JobStatusResponse
+    | PlanningV2StatusResponse
+    | PlanningV3StatusResponse
+    | ProductAnalysisStatusResponse
+    | CodingTeamJobStatus
+  > {
+    switch (this.submitEndpoint) {
+      case 'planning-v3': {
+        const body = request.answers.map((a) => ({
+          question_id: a.question_id,
+          selected_option_id: a.selected_option_id ?? undefined,
+          selected_option_ids: a.selected_option_ids,
+          other_text: a.other_text ?? undefined,
+        }));
+        return this.planningV3Api.submitAnswers(this.jobId!, body);
+      }
+      case 'planning-v2':
+        return this.api.submitPlanningV2Answers(this.jobId!, request);
+      case 'product-analysis':
+        return this.api.submitProductAnalysisAnswers(this.jobId!, request) as Observable<ProductAnalysisStatusResponse>;
+      case 'coding-team': {
+        // Coding-team answers are single-select: strip the multi-select field to
+        // match the backend contract exactly.
+        const body = {
+          answers: request.answers.map((a) => ({
+            question_id: a.question_id,
+            selected_option_id: a.selected_option_id,
+            other_text: a.other_text,
+          })),
+        };
+        return this.codingTeamApi.submitAnswers(this.jobId!, body);
+      }
+      case 'run-team':
+        return this.api.submitAnswers(this.jobId!, request);
+      default: {
+        // Compile-time exhaustiveness: a new SubmitEndpointType member fails to
+        // build until it gets an explicit submit route (no silent fallthrough
+        // to a foreign team's endpoint). At runtime an out-of-union value (e.g.
+        // a string-typed binding) must flow through the subscriber's error path
+        // — a synchronous throw here would strand `submitting` on true with no
+        // visible error.
+        const unhandled: never = this.submitEndpoint;
+        return throwError(() => new Error(`Unsupported submit endpoint: ${String(unhandled)}`));
+      }
     }
   }
 
@@ -267,7 +364,7 @@ export class PendingQuestionsComponent implements OnChanges {
   }
 
   submitAnswers(): void {
-    if (!this.jobId || !this.allRequiredAnswered) return;
+    if (!this.jobId || !this.allAnswersSubmittable) return;
 
     const submissions: AnswerSubmission[] = [];
     for (const q of this.questions) {
@@ -291,44 +388,15 @@ export class PendingQuestionsComponent implements OnChanges {
 
     const request = { answers: submissions };
 
-    const handleSuccess = (
-      response: JobStatusResponse | PlanningV2StatusResponse | PlanningV3StatusResponse | ProductAnalysisStatusResponse,
-    ): void => {
-      this.submitting = false;
-      this.answersSubmitted.emit(response);
-    };
-
-    const handleError = (err: { error?: { detail?: string }; message?: string }): void => {
-      this.submitting = false;
-      this.error = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
-    };
-
-    if (this.submitEndpoint === 'planning-v3') {
-      const body = request.answers.map((a) => ({
-        question_id: a.question_id,
-        selected_option_id: a.selected_option_id ?? undefined,
-        selected_option_ids: a.selected_option_ids,
-        other_text: a.other_text ?? undefined,
-      }));
-      this.planningV3Api.submitAnswers(this.jobId, body).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    } else if (this.submitEndpoint === 'planning-v2') {
-      this.api.submitPlanningV2Answers(this.jobId, request).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    } else if (this.submitEndpoint === 'product-analysis') {
-      this.api.submitProductAnalysisAnswers(this.jobId, request).subscribe({
-        next: (res) => handleSuccess(res as ProductAnalysisStatusResponse),
-        error: handleError,
-      });
-    } else {
-      this.api.submitAnswers(this.jobId, request).subscribe({
-        next: handleSuccess,
-        error: handleError,
-      });
-    }
+    this.getSubmitObservable(request).subscribe({
+      next: (response) => {
+        this.submitting = false;
+        this.answersSubmitted.emit(response);
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.submitting = false;
+        this.error = err?.error?.detail ?? err?.message ?? 'Failed to submit answers';
+      },
+    });
   }
 }

@@ -181,11 +181,44 @@ def test_answers_success_stores_and_returns_status(monkeypatch):
     )
     assert r.status_code == 200
     assert stored["answers"][0]["question_id"] == "q1"
+    # The stored answer must carry the question text so a resume after thread death can match it
+    # against re-asked questions (the HITL coverage check matches strictly by text).
+    assert stored["answers"][0]["question_text"] == "Allergen strictness default?"
 
 
-def test_answers_dead_thread_adds_resume_hint(monkeypatch):
+class _SyncThread:
+    """Stand-in for threading.Thread that runs the target inline, so spawned work is observable."""
+
+    def __init__(self, target, daemon=None):
+        self._target = target
+
+    def start(self):
+        self._target()
+
+
+def test_answers_dead_thread_auto_resumes(monkeypatch):
     calls = {}
+    started = {}
     monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        api, "run_coding_team_orchestrator", lambda *a, **k: started.update({"ran": True})
+    )
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert started.get("ran") is True
+    assert "resuming" in calls["status_text"].lower()
+
+
+def test_answers_dead_thread_adds_resume_hint_when_unresumable(monkeypatch):
+    """No repo_path/plan_input → auto-resume is impossible; fall back to the manual hint."""
+    calls = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(repo_path=None))
     monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
     monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
@@ -194,6 +227,261 @@ def test_answers_dead_thread_adds_resume_hint(monkeypatch):
     )
     assert r.status_code == 200
     assert "Resume" in calls["status_text"]
+
+
+def test_answers_dead_thread_claim_lost_counts_as_resuming(monkeypatch):
+    """A lost thread claim means someone else is starting the orchestrator — not a failure."""
+    calls = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api, "_claim_run_thread", lambda jid: False)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "resuming" in calls["status_text"].lower()
+
+
+def test_answers_dead_thread_fresh_heartbeat_skips_spawn(monkeypatch):
+    """A fresh answer-wait heartbeat means a live wait loop exists in another worker process —
+    spawning here would double-drive the job, so auto-resume must not start a thread."""
+    from datetime import datetime, timezone
+
+    calls = {}
+    job = _job(answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat())
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn a thread while a wait loop heartbeats")
+
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "resuming" in calls["status_text"].lower()
+
+
+def test_answers_dead_thread_stale_heartbeat_resumes(monkeypatch):
+    calls = {}
+    started = {}
+    job = _job(answer_wait_heartbeat_at="2020-01-01T00:00:00+00:00")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        api, "run_coding_team_orchestrator", lambda *a, **k: started.update({"ran": True})
+    )
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert started.get("ran") is True
+
+
+def test_answers_dead_thread_github_job_resumes_through_hook_path(monkeypatch):
+    """GitHub-issue jobs must resume through the hook path so publication (PR, comments) survives."""
+    calls = {}
+    hook_calls = {}
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            return {"number": number}
+
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42, "remote": "origin"}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(github_context=ctx))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(
+        api,
+        "_run_with_github_hooks",
+        lambda job_id, request, plan, issue, token: hook_calls.update(
+            {"job_id": job_id, "owner": request.owner, "issue": issue, "token": token}
+        ),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert hook_calls["job_id"] == "j1"
+    assert hook_calls["owner"] == "acme"
+    assert hook_calls["token"] == "tok-123"
+    assert "resuming" in calls["status_text"].lower()
+
+
+def test_answers_dead_thread_github_job_without_token_falls_back_to_hint(monkeypatch):
+    calls = {}
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(github_context=ctx))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not resume a GitHub job hook-less")
+
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in calls["status_text"]
+
+
+def test_resume_refuses_when_heartbeat_fresh(monkeypatch):
+    from datetime import datetime, timezone
+
+    job = _job(
+        status="waiting_for_user",
+        answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat(),
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert "already running" in r.json()["message"]
+
+
+def test_answer_wait_heartbeat_fresh_handles_garbage():
+    assert api._answer_wait_heartbeat_fresh({}) is False
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": "not-a-date"}) is False
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": ""}) is False
+    # Naive timestamps are treated as UTC rather than rejected.
+    from datetime import datetime, timezone
+
+    naive_now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": naive_now}) is True
+
+
+def test_answers_dead_thread_invalid_plan_falls_back_to_hint(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(
+        api, "get_job", lambda jid: _job(plan_input={"requirements_title": {"not": "a string"}})
+    )
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in calls["status_text"]
+
+
+def test_resumed_orchestrator_failure_marks_job_failed(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+
+    def _boom(*a, **k):
+        raise RuntimeError("orchestrator crashed")
+
+    monkeypatch.setattr(api, "run_coding_team_orchestrator", _boom)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert calls["status"] == "failed"
+    assert "orchestrator crashed" in calls["error"]
+    # The crashed thread must release its registration so a manual /resume stays possible.
+    assert api._is_run_thread_alive("j1") is False
+
+
+def test_github_resume_issue_fetch_failure_marks_job_failed(monkeypatch):
+    calls = {}
+
+    class _FailingClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            raise RuntimeError("github down")
+
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(github_context=ctx))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FailingClient)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert calls["status"] == "failed"
+    assert "github down" in calls["error"]
+
+
+def test_github_resume_spawn_failure_falls_back_to_hint(monkeypatch):
+    calls = {}
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(github_context=ctx))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+
+    def _boom(*a, **k):
+        raise RuntimeError("no threads")
+
+    monkeypatch.setattr(api.threading, "Thread", _boom)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in calls["status_text"]
+    assert "j1" not in api._starting_run_jobs
+
+
+def test_answers_dead_thread_spawn_failure_falls_back_to_hint(monkeypatch):
+    calls = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+
+    def _boom(*a, **k):
+        raise RuntimeError("no threads")
+
+    monkeypatch.setattr(api.threading, "Thread", _boom)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in calls["status_text"]
+    # The failed spawn must release the claim so a later manual /resume can succeed.
+    assert "j1" not in api._starting_run_jobs
 
 
 # --------------------------------------------------------------------------- /run/{id}/resume
