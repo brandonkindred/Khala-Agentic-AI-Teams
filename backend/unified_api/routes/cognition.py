@@ -88,7 +88,8 @@ def list_memory_events(
 
     Preconditions:
         ``agent_id`` is a required path segment (not validated for emptiness here);
-        ``1 <= top_n <= 500`` (query-enforced).
+        ``1 <= top_n <= 500`` (query-enforced); ``since`` (optional) is an ISO 8601
+        datetime string, e.g. ``2025-01-01T00:00:00Z``.
     Postconditions:
         Returns at most ``top_n`` of the agent's events, ordered by salience then
         recency when ``by_salience`` else by recency, optionally limited to events
@@ -150,6 +151,15 @@ def list_proposals(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RuleProposal]:
+    """List an agent's rule proposals, newest first.
+
+    Preconditions:
+        ``status`` (when given) is one of ``pending|approved|rejected|superseded``
+        (400 otherwise); ``1 <= limit <= 200`` and ``offset >= 0`` (query-enforced).
+    Postconditions:
+        Returns the agent's proposals, optionally filtered by ``status``, paginated.
+        503 when storage is unavailable.
+    """
     parsed = _parse_enum(status, ProposalStatus, "proposal")
     try:
         return store.list_proposals(agent_id, status=parsed, limit=limit, offset=offset)
@@ -159,6 +169,12 @@ def list_proposals(
 
 @router.get("/agents/{agent_id}/proposals/{proposal_id}", response_model=RuleProposal)
 def get_proposal(agent_id: str, proposal_id: str) -> RuleProposal:
+    """Return one proposal owned by ``agent_id``.
+
+    Postconditions:
+        Returns the proposal identified by the path params; 404 when no such
+        proposal exists for the agent; 503 when storage is unavailable.
+    """
     try:
         proposal = store.get_proposal(agent_id, proposal_id)
     except AgentCognitionStorageUnavailable as exc:
@@ -220,6 +236,15 @@ def list_rules(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[Rule]:
+    """List an agent's rules, highest-priority and newest first.
+
+    Preconditions:
+        ``status`` (when given) is one of ``active|retired`` (400 otherwise);
+        ``1 <= limit <= 500`` and ``offset >= 0`` (query-enforced).
+    Postconditions:
+        Returns the agent's rules, optionally filtered by ``status``, paginated.
+        503 when storage is unavailable.
+    """
     parsed = _parse_enum(status, RuleStatus, "rule")
     try:
         return store.list_rules(agent_id, status=parsed, limit=limit, offset=offset)

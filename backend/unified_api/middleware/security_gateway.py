@@ -30,16 +30,21 @@ SECURITY_ERROR_DETAIL = (
 # /run, and no proxy upstream).
 _EXTRA_SCANNED_PREFIXES: frozenset[str] = frozenset({"/api/cognition"})
 
+# Computed once at import: TEAM_CONFIGS is static after startup, so there is no need
+# to rebuild this set on every request through _is_team_path (called per request).
+_SCANNED_PREFIXES: frozenset[str] = (
+    frozenset(config.prefix for config in TEAM_CONFIGS.values()) | _EXTRA_SCANNED_PREFIXES
+)
 
-def _get_team_prefixes() -> set[str]:
-    """Build the set of prefixes the gateway scans: team APIs plus extra in-process routers."""
-    return {config.prefix for config in TEAM_CONFIGS.values()} | _EXTRA_SCANNED_PREFIXES
+
+def _get_team_prefixes() -> frozenset[str]:
+    """Return the prefixes the gateway scans: team APIs plus extra in-process routers."""
+    return _SCANNED_PREFIXES
 
 
 def _is_team_path(path: str) -> bool:
-    """True if path is under any team API prefix (e.g. /api/blogging/...)."""
-    prefixes = _get_team_prefixes()
-    return any(path.startswith(prefix) for prefix in prefixes)
+    """True if path is under any scanned API prefix (e.g. /api/blogging/...)."""
+    return any(path.startswith(prefix) for prefix in _SCANNED_PREFIXES)
 
 
 class SecurityGatewayMiddleware:
