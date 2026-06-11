@@ -126,6 +126,22 @@ def test_list_memory_events_ok(client, monkeypatch):
     assert seen["by_salience"] is False
 
 
+def test_list_memory_events_forwards_since(client, monkeypatch):
+    seen = {}
+
+    def _recent(agent_id, top_n, by_salience=True, *, since=None):
+        seen["since"] = since
+        return []
+
+    monkeypatch.setattr(cognition_mod.memory_store, "fetch_recent_events", _recent)
+    resp = client.get(
+        "/api/cognition/agents/a/memory/events",
+        params={"since": "2025-01-01T00:00:00Z"},
+    )
+    assert resp.status_code == 200
+    assert seen["since"] == datetime(2025, 1, 1, tzinfo=timezone.utc)
+
+
 def test_list_memory_events_storage_down_is_503(client, monkeypatch):
     def _down(*a, **k):
         raise AgentCognitionStorageUnavailable("no pg")
@@ -150,6 +166,22 @@ def test_list_memory_summaries_ok(client, monkeypatch):
     assert resp.status_code == 200
     assert resp.json()[0]["id"] == "s1"
     assert seen["scale"] == Scale.DAY
+
+
+def test_list_memory_summaries_forwards_params(client, monkeypatch):
+    seen = {}
+
+    def _summaries(agent_id, scale, limit=None, offset=0, *, exclude_stale=False):
+        seen.update(limit=limit, offset=offset, exclude_stale=exclude_stale)
+        return []
+
+    monkeypatch.setattr(cognition_mod.memory_store, "fetch_summaries", _summaries)
+    resp = client.get(
+        "/api/cognition/agents/a/memory/summaries",
+        params={"scale": "day", "limit": 10, "offset": 5, "exclude_stale": "true"},
+    )
+    assert resp.status_code == 200
+    assert seen == {"limit": 10, "offset": 5, "exclude_stale": True}
 
 
 def test_list_memory_summaries_bad_scale_is_400(client, monkeypatch):

@@ -57,7 +57,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/cognition", tags=["cognition"])
 
 
-def _parse_status(raw: str | None, enum_cls: type[Enum], label: str) -> Enum | None:
+def _parse_enum(raw: str | None, enum_cls: type[Enum], label: str) -> Enum | None:
     """Parse ``raw`` into ``enum_cls`` (``None`` passes through), 400 on a bad value."""
     if raw is None:
         return None
@@ -65,12 +65,11 @@ def _parse_status(raw: str | None, enum_cls: type[Enum], label: str) -> Enum | N
         return enum_cls(raw)
     except ValueError as exc:
         valid = ", ".join(s.value for s in enum_cls)
-        raise HTTPException(
-            status_code=400, detail=f"Invalid {label} status {raw!r}; expected one of: {valid}"
-        ) from exc
+        raise HTTPException(status_code=400, detail=f"Invalid {label} value {raw!r}; expected one of: {valid}") from exc
 
 
-def _storage_guard(exc: AgentCognitionStorageUnavailable) -> HTTPException:
+def _storage_unavailable_exception(exc: AgentCognitionStorageUnavailable) -> HTTPException:
+    """Return (do not raise) the 503 to surface for a storage outage; log it first."""
     logger.warning("cognition API: storage unavailable: %s", exc)
     return HTTPException(status_code=503, detail="Agent Cognition storage is unavailable.")
 
@@ -88,7 +87,8 @@ def list_memory_events(
     """List an agent's most relevant recent memory events.
 
     Preconditions:
-        ``agent_id`` is non-empty (path-enforced); ``1 <= top_n <= 500``.
+        ``agent_id`` is a required path segment (not validated for emptiness here);
+        ``1 <= top_n <= 500`` (query-enforced).
     Postconditions:
         Returns at most ``top_n`` of the agent's events, ordered by salience then
         recency when ``by_salience`` else by recency, optionally limited to events
@@ -97,7 +97,7 @@ def list_memory_events(
     try:
         return memory_store.fetch_recent_events(agent_id, top_n, by_salience, since=since)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
 
 
 @router.get("/agents/{agent_id}/memory/summaries/last", response_model=PeriodSummary)
@@ -106,11 +106,11 @@ def last_memory_summary(
     scale: str = Query(..., description="Rollup scale: day, week, month, year."),
 ) -> PeriodSummary:
     """Return the agent's most recent closed summary at ``scale`` (404 if none)."""
-    parsed = _parse_status(scale, Scale, "scale")
+    parsed = _parse_enum(scale, Scale, "scale")
     try:
         summary = memory_store.get_last_summary(agent_id, parsed)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
     if summary is None:
         raise HTTPException(status_code=404, detail=f"No {scale} summary for agent: {agent_id}")
     return summary
@@ -133,11 +133,11 @@ def list_memory_summaries(
         descending, ``stale`` rows dropped when ``exclude_stale``. 503 when
         storage is unavailable.
     """
-    parsed = _parse_status(scale, Scale, "scale")
+    parsed = _parse_enum(scale, Scale, "scale")
     try:
         return memory_store.fetch_summaries(agent_id, parsed, limit=limit, offset=offset, exclude_stale=exclude_stale)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -150,11 +150,11 @@ def list_proposals(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ) -> list[RuleProposal]:
-    parsed = _parse_status(status, ProposalStatus, "proposal")
+    parsed = _parse_enum(status, ProposalStatus, "proposal")
     try:
         return store.list_proposals(agent_id, status=parsed, limit=limit, offset=offset)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
 
 
 @router.get("/agents/{agent_id}/proposals/{proposal_id}", response_model=RuleProposal)
@@ -162,7 +162,7 @@ def get_proposal(agent_id: str, proposal_id: str) -> RuleProposal:
     try:
         proposal = store.get_proposal(agent_id, proposal_id)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
     if proposal is None:
         raise HTTPException(status_code=404, detail=f"Unknown proposal: {proposal_id}")
     return proposal
@@ -185,7 +185,7 @@ def approve_proposal(agent_id: str, proposal_id: str) -> Rule:
     except RuleStoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
     if rule is None:
         raise HTTPException(status_code=404, detail=f"Unknown proposal: {proposal_id}")
     return rule
@@ -204,7 +204,7 @@ def reject_proposal(agent_id: str, proposal_id: str) -> RuleProposal:
     except RuleStoreError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
     if proposal is None:
         raise HTTPException(status_code=404, detail=f"Unknown proposal: {proposal_id}")
     return proposal
@@ -220,8 +220,8 @@ def list_rules(
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> list[Rule]:
-    parsed = _parse_status(status, RuleStatus, "rule")
+    parsed = _parse_enum(status, RuleStatus, "rule")
     try:
         return store.list_rules(agent_id, status=parsed, limit=limit, offset=offset)
     except AgentCognitionStorageUnavailable as exc:
-        raise _storage_guard(exc) from exc
+        raise _storage_unavailable_exception(exc) from exc
