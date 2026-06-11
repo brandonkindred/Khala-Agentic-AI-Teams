@@ -83,7 +83,7 @@
               </div>
 
               <!-- Sub-agent activity (e.g. code review sub-steps) with its own progress bar -->
-              @if (status.current_activity) {
+              @if (status.current_activity && status.status === 'running') {
                 <div class="current-activity-section">
                   @if (status.current_activity.detail) {
                     <div class="current-activity-detail">
@@ -237,18 +237,7 @@
       }
 
       <!-- Last activity + stall warning -->
-      @if (lastActivityLabel() && (status.status === 'running' || status.status === 'pending')) {
-        <div class="last-activity-section">
-          <mat-icon>schedule</mat-icon>
-          <span class="last-activity-label">Last activity: {{ lastActivityLabel() }}</span>
-        </div>
-      }
-      @if (isStalled()) {
-        <div class="stalled-warning">
-          <mat-icon>warning</mat-icon>
-          <span>No agent activity for {{ lastActivityLabel() }} — the job may be stalled.</span>
-        </div>
-      }
+      <app-stall-warning [status]="status" />
 
       <!-- Failed tasks expansion panel -->
       @if (status.failed_tasks && status.failed_tasks.length) {

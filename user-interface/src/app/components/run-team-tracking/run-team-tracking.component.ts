@@ -9,7 +9,7 @@ import { Subscription, switchMap, timer } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
 import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
-import { isStalled, lastActivityLabel } from '../../shared/staleness.util';
+import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 /** Team display order for swim lanes. */
 const TEAM_ORDER = ['git_setup', 'devops', 'backend-code-v2', 'frontend-code-v2', 'backend', 'frontend'];
@@ -70,6 +70,7 @@ interface FlatWorkTreeNode {
     MatChipsModule,
     MatIconModule,
     MatExpansionModule,
+    StallWarningComponent,
   ],
   templateUrl: './run-team-tracking.component.html',
   styleUrl: './run-team-tracking.component.scss',
@@ -145,7 +146,14 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
+          // completed_with_failures is the coding team's partial-success terminal
+          // status — without it here the poll runs forever on such jobs.
+          if (
+            res.status === 'completed' ||
+            res.status === 'completed_with_failures' ||
+            res.status === 'failed' ||
+            res.status === 'cancelled'
+          ) {
             this.pollSub?.unsubscribe();
             this.pollSub = null;
           } else if (wasWaiting !== isWaiting || newInterval !== oldInterval) {
@@ -225,15 +233,6 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
     return agent ? this.phaseLabel(agent) : 'Agent activity';
   }
 
-  /** "just now" / "42s ago" / "3m ago" label for the last real orchestrator activity. */
-  lastActivityLabel(): string {
-    return lastActivityLabel(this.status);
-  }
-
-  /** True when a running job has shown no real activity for the stall threshold. */
-  isStalled(): boolean {
-    return isStalled(this.status);
-  }
 
   /** Team ID -> list of tasks in execution order for that team. */
   getTeamsWithTasks(): { teamId: string; label: string; tasks: TaskWithId[] }[] {

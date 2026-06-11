@@ -6,12 +6,12 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse } from '../../models';
-import { isStalled, lastActivityLabel } from '../../shared/staleness.util';
+import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 @Component({
   selector: 'app-job-status',
   standalone: true,
-  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule],
+  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule, StallWarningComponent],
   templateUrl: './job-status.component.html',
   styleUrl: './job-status.component.scss',
 })
@@ -46,7 +46,14 @@ export class JobStatusComponent implements OnInit, OnDestroy {
           this.status = res;
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
+          // completed_with_failures is the coding team's partial-success terminal
+          // status — without it here the poll runs forever on such jobs.
+          if (
+            res.status === 'completed' ||
+            res.status === 'completed_with_failures' ||
+            res.status === 'failed' ||
+            res.status === 'cancelled'
+          ) {
             this.sub?.unsubscribe();
             this.sub = null;
           } else if (wasWaiting !== isWaiting) {
@@ -65,13 +72,4 @@ export class JobStatusComponent implements OnInit, OnDestroy {
     this.sub?.unsubscribe();
   }
 
-  /** "just now" / "42s ago" / "3m ago" label for the last real orchestrator activity. */
-  lastActivityLabel(): string {
-    return lastActivityLabel(this.status);
-  }
-
-  /** True when a running job has shown no real activity for the stall threshold. */
-  isStalled(): boolean {
-    return isStalled(this.status);
-  }
 }

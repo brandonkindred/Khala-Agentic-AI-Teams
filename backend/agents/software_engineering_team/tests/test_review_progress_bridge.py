@@ -102,3 +102,40 @@ def test_run_code_review_phase_threads_detail_callback(monkeypatch, tmp_path: Pa
     )
     assert result is not None
     assert any(d.startswith("Code review 40%:") for d in details), details
+
+
+def test_bridge_passes_kwarg_to_var_keyword_run() -> None:
+    """A forward-compatible wrapper (`def run(self, inp, **kwargs)`) forwards the
+    kwarg, so the bridge must pass it — silently dropping progress for such an
+    agent was a false negative of the old name-only signature check."""
+    received: dict = {}
+
+    class KwargsAgent:
+        def run(self, inp, **kwargs):
+            received.update(kwargs)
+            if "progress_callback" in kwargs and kwargs["progress_callback"]:
+                kwargs["progress_callback"]("reviewing", "chunk 1/2", 0.5)
+            return "result"
+
+    details: list = []
+    out = call_code_review_agent(KwargsAgent(), object(), details.append)
+
+    assert out == "result"
+    assert "progress_callback" in received
+    assert details == ["Code review 50%: chunk 1/2"]
+
+
+def test_bridge_percent_uses_rounding() -> None:
+    """The bridge's percent matches the UI's toFixed(0) rounding (0.366 → 37%), not
+    int() truncation (36%) — the two rendered numbers must never disagree."""
+    received: dict = {}
+
+    class Agent:
+        def run(self, inp, progress_callback=None):
+            received["cb"] = progress_callback
+            progress_callback("reviewing", "chunk 2/5", 0.366)
+            return "r"
+
+    details: list = []
+    call_code_review_agent(Agent(), object(), details.append)
+    assert details == ["Code review 37%: chunk 2/5"]

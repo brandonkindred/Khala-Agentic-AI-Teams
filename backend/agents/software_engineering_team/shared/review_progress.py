@@ -30,15 +30,28 @@ def call_code_review_agent(
           reporting, each report is forwarded as one formatted string.
     """
     run_kwargs: Dict[str, Any] = {}
-    if detail_callback is not None:
-        try:
-            accepts_progress = (
-                "progress_callback" in inspect.signature(code_review_agent.run).parameters
-            )
-        except (TypeError, ValueError):
-            accepts_progress = False
-        if accepts_progress:
-            run_kwargs["progress_callback"] = lambda step, detail, fraction: detail_callback(
-                f"Code review {int(fraction * 100)}%: {detail or step}"
-            )
+    if detail_callback is not None and _accepts_progress_kwarg(code_review_agent.run):
+        run_kwargs["progress_callback"] = lambda step, detail, fraction: detail_callback(
+            f"Code review {round(fraction * 100)}%: {detail or step}"
+        )
     return code_review_agent.run(cr_input, **run_kwargs)
+
+
+def _accepts_progress_kwarg(run: Any) -> bool:
+    """True when ``run`` can accept a ``progress_callback`` keyword argument.
+
+    Accepts both an explicitly declared parameter and a ``**kwargs`` catch-all —
+    a forward-compatible wrapper like ``def run(self, inp, **kwargs)`` forwards
+    the kwarg and must not silently lose progress reporting.
+
+    Postconditions: returns False (never raises) for un-inspectable callables,
+    so an exotic injected fake degrades to a progress-less call instead of being
+    diverted to the LLM fallback by the call sites' broad ``except``.
+    """
+    try:
+        params = inspect.signature(run).parameters
+    except (TypeError, ValueError):
+        return False
+    if "progress_callback" in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())

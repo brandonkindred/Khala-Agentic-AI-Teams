@@ -1,5 +1,6 @@
 """Models for the Code Review agent."""
 
+import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
@@ -26,13 +27,23 @@ def notify_review_progress(
         - ``callback`` is None or satisfies the ReviewProgressCallback contract
           (non-raising; exceptions are deliberately NOT swallowed here so a
           contract violation in the caller surfaces as a bug, not silence).
+        - ``fraction`` is in [0.0, 1.0]; an out-of-range value is a reporter bug —
+          it is logged and clamped rather than raised, because progress reporting
+          is observability and must not abort a review over a bad number.
 
     Postconditions:
         - When ``callback`` is None, has no effect.
-        - Otherwise ``callback(step, detail, fraction)`` was invoked exactly once.
+        - Otherwise ``callback(step, detail, clamped_fraction)`` was invoked
+          exactly once.
     """
-    if callback is not None:
-        callback(step, detail, fraction)
+    if callback is None:
+        return
+    if not 0.0 <= fraction <= 1.0:
+        logging.getLogger(__name__).warning(
+            "review progress fraction out of range (step=%s): %r; clamping", step, fraction
+        )
+        fraction = min(max(fraction, 0.0), 1.0)
+    callback(step, detail, fraction)
 
 
 def coerce_line(value: Any) -> Optional[int]:

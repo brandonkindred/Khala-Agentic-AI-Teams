@@ -246,9 +246,10 @@ class TechLeadAgent:
         """Review feature branch: approved (bool), reason (str), requested_changes (list).
 
         Preconditions:
-            - ``progress_callback`` is None or a non-raising callable accepting
+            - ``progress_callback`` is None or a callable accepting
               ``(step, detail, fraction)``; steps emitted here are
-              ``reviewing | waiting_retry | done``.
+              ``reviewing | waiting_retry | done``. Exceptions it raises are
+              logged and swallowed — they must never count as failed attempts.
 
         Postconditions:
             - When ``progress_callback`` is provided, each LLM attempt and each
@@ -266,8 +267,16 @@ class TechLeadAgent:
         attempts = _review_retry_attempts()
 
         def _report(step: str, detail: str, fraction: float) -> None:
-            if progress_callback is not None:
+            # Guarded here, not just documented: _report fires INSIDE the retried
+            # attempt, so a raising callback would otherwise be miscounted as a
+            # failed LLM attempt and burn the whole retry budget on an
+            # observability bug without the model ever being called.
+            if progress_callback is None:
+                return
+            try:
                 progress_callback(step, detail, fraction)
+            except Exception as e:  # noqa: BLE001 — observability must not break the review
+                logger.warning("review progress callback failed (ignored): %s", e)
 
         attempt_no = 0
 
@@ -304,12 +313,15 @@ class TechLeadAgent:
             # Flag an infrastructure failure (error=True) distinctly from a substantive rejection so
             # the orchestrator fails the task once with a clear diagnostic rather than re-sending the
             # same failing prompt through the revision loop every round.
-            logger.warning("Tech Lead code_review failed after %d attempts: %s", attempts, e)
-            _report("done", f"review failed after {attempts} attempts", 1.0)
+            # attempt_no, not the configured budget: fail-fast errors (rate limit,
+            # permanent) re-raise on attempt 1 without retrying, and reporting
+            # "after 3 attempts" for a single attempt misleads the operator.
+            logger.warning("Tech Lead code_review failed after %d attempt(s): %s", attempt_no, e)
+            _report("done", f"review failed after {attempt_no} attempt(s)", 1.0)
             return {
                 "approved": False,
                 "error": True,
-                "reason": f"Review could not be completed after {attempts} attempts: {e}",
+                "reason": f"Review could not be completed after {attempt_no} attempt(s): {e}",
                 "requested_changes": [],
             }
         _report("done", "review complete", 1.0)

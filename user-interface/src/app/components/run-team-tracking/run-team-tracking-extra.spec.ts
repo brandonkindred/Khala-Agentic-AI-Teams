@@ -995,21 +995,29 @@ describe('RunTeamTrackingComponent sub-agent activity and staleness', () => {
   });
 
   it('shows last-activity label and stalled warning for a stale running job', () => {
-    const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const stale = new Date(Date.now() - 12 * 60 * 1000).toISOString();
     const el = render(activityStatus({ last_activity_at: stale }));
-    expect(component.isStalled()).toBe(true);
-    expect(component.lastActivityLabel()).toBe('10m ago');
-    expect(el.querySelector('.last-activity-section')?.textContent).toContain('Last activity:');
-    expect(el.querySelector('.stalled-warning')?.textContent).toContain('may be stalled');
+    expect(el.querySelector('.last-activity-section')?.textContent).toContain('Last activity: 12m ago');
+    expect(el.querySelector('.stalled-warning')?.textContent).toContain(
+      'No agent activity for 12m — the job may be stalled.',
+    );
   });
 
   it('hides the stalled warning when activity is fresh or job is waiting', () => {
     render(activityStatus({ last_activity_at: new Date().toISOString() }));
     expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
 
-    const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const stale = new Date(Date.now() - 12 * 60 * 1000).toISOString();
     component.status = activityStatus({ last_activity_at: stale, waiting_for_answers: true });
     fixture.detectChanges();
     expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+  });
+
+  it('hides the activity card on non-running jobs (a dead run must not render a live sub-bar)', () => {
+    // A killed/interrupted orchestrator never runs its finally clears, so a stale
+    // current_activity can survive on the record; the card must not present it
+    // as live progress.
+    const el = render(activityStatus({ status: 'interrupted' }));
+    expect(el.querySelector('.current-activity-section')).toBeNull();
   });
 });

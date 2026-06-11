@@ -77,13 +77,13 @@ describe('JobStatusComponent', () => {
     component.status = {
       ...component.status!,
       status: 'running',
-      last_activity_at: new Date(Date.now() - 10 * 60 * 1000).toISOString(),
+      last_activity_at: new Date(Date.now() - 12 * 60 * 1000).toISOString(),
     };
     fixture.detectChanges();
     const el: HTMLElement = fixture.nativeElement;
-    expect(el.querySelector('.stalled-warning')?.textContent).toContain('may be stalled');
-    expect(component.isStalled()).toBe(true);
-    expect(component.lastActivityLabel()).toBe('10m ago');
+    const banner = el.querySelector('.stalled-warning');
+    expect(banner?.textContent).toContain('No agent activity for 12m — the job may be stalled.');
+    expect(el.querySelector('.last-activity-section')?.textContent).toContain('Last activity: 12m ago');
   });
 
   it('hides the stalled warning when activity is fresh', () => {
@@ -101,7 +101,7 @@ describe('JobStatusComponent', () => {
   it('hides the stalled warning while waiting for answers and on terminal states', () => {
     component.jobId = 'j1';
     fixture.detectChanges();
-    const stale = new Date(Date.now() - 10 * 60 * 1000).toISOString();
+    const stale = new Date(Date.now() - 12 * 60 * 1000).toISOString();
     component.status = {
       ...component.status!,
       status: 'running',

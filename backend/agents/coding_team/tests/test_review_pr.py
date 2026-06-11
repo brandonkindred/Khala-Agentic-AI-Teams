@@ -404,6 +404,10 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+        # A failed job must not keep claiming mid-review progress: the failure
+        # handler resets the percentage status_text and the activity entry.
+        assert job["status_text"] is None
+        assert job["current_activity"] is None
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []

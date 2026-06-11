@@ -264,3 +264,19 @@ def test_large_code_forwards_callback_to_coordinator() -> None:
     assert any("chunk 1/" in d for d in details), f"expected per-chunk reports, got {details}"
     assert calls[-1][0] == "done"
     assert calls[-1][2] == 1.0
+
+
+def test_notify_review_progress_clamps_out_of_range_fraction(caplog):
+    """An out-of-range fraction is a reporter bug: logged and clamped, never raised
+    and never forwarded raw — progress reporting must not abort a review."""
+    import logging
+
+    from code_review_agent.models import notify_review_progress
+
+    received = []
+    with caplog.at_level(logging.WARNING):
+        notify_review_progress(lambda s, d, f: received.append((s, d, f)), "reviewing", "x", 1.8)
+        notify_review_progress(lambda s, d, f: received.append((s, d, f)), "reviewing", "y", -0.2)
+
+    assert received == [("reviewing", "x", 1.0), ("reviewing", "y", 0.0)]
+    assert sum("out of range" in r.message for r in caplog.records) == 2

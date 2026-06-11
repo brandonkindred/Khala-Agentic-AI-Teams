@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi.testclient import TestClient
 
@@ -300,3 +300,59 @@ def test_status_activity_fields_default_to_none(monkeypatch):
     assert body["last_activity_at"] is None
     assert body["updated_at"] is None
     assert body["last_heartbeat_at"] is None
+
+
+def test_resume_clears_stale_current_activity(monkeypatch):
+    """Resume wipes the dead attempt's current_activity (its finally clears never
+    ran) so the UI cannot render a frozen mid-review sub-bar through the resumed run."""
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        repo_path="/tmp/repo",
+        current_activity={"agent": "code_review", "step": "reviewing", "fraction": 0.4},
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "run_coding_team_orchestrator", lambda *a, **k: None)
+    updates: List[Dict[str, Any]] = []
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: updates.append(kw))
+
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    clears = [kw for kw in updates if kw.get("current_activity", "absent") is None]
+    assert clears, "resume must clear the stale current_activity"
+
+
+# --------------------------------------------------------------------------- /status progress + server_time
+
+
+def test_status_surfaces_progress_and_server_time(monkeypatch):
+    """/status exposes the job-level progress band and the server clock the UI
+    computes staleness against."""
+    from datetime import datetime
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(status="running", progress=47))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["progress"] == 47
+    assert body["server_time"] is not None
+    datetime.fromisoformat(body["server_time"])
+
+
+def test_status_progress_coercion_clamps_garbage(monkeypatch):
+    """Garbage progress degrades to None; out-of-range values clamp to [0, 100]."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(progress="not-a-number"))
+    assert client.get("/status/j1").json()["progress"] is None
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(progress=250))
+    assert client.get("/status/j1").json()["progress"] == 100

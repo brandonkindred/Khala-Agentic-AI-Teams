@@ -203,6 +203,8 @@ export interface JobStatusResponse {
   updated_at?: string;
   /** ISO timestamp of the last heartbeat (liveness of the worker process). */
   last_heartbeat_at?: string;
+  /** Server UTC time when the response was built; staleness math uses this, not the browser clock. */
+  server_time?: string | null;
 }
 
 /** Response from POST /run-team/{job_id}/retry-failed. */

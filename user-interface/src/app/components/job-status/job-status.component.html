@@ -32,15 +32,7 @@
       @if ((status.status === 'running' || status.status === 'pending') && !status.waiting_for_answers) {
         <mat-progress-bar mode="indeterminate"></mat-progress-bar>
       }
-      @if (lastActivityLabel() && (status.status === 'running' || status.status === 'pending')) {
-        <p class="last-activity"><strong>Last activity:</strong> {{ lastActivityLabel() }}</p>
-      }
-      @if (isStalled()) {
-        <div class="stalled-warning">
-          <mat-icon>warning</mat-icon>
-          <span>No agent activity for {{ lastActivityLabel() }} — the job may be stalled.</span>
-        </div>
-      }
+      <app-stall-warning [status]="status" />
       @if (status.error) {
         <p class="error">{{ status.error }}</p>
       }

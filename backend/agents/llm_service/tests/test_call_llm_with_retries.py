@@ -106,3 +106,25 @@ def test_default_no_hook_unchanged() -> None:
         return "ok"
 
     assert call_llm_with_retries(_fn, max_attempts=2) == "ok"
+
+
+def test_raising_on_retry_hook_is_swallowed_and_retries_continue() -> None:
+    """A raising on_retry hook is an observability bug; it must be logged and
+    swallowed, never abort the remaining retries or replace the real error."""
+    calls = {"fn": 0, "hook": 0}
+
+    def fn():
+        calls["fn"] += 1
+        if calls["fn"] < 3:
+            raise LLMTemporaryError("transient")
+        return "ok"
+
+    def bad_hook(n, m, wait, e):
+        calls["hook"] += 1
+        raise RuntimeError("hook bug")
+
+    result = call_llm_with_retries(fn, max_attempts=3, on_retry=bad_hook)
+
+    assert result == "ok"
+    assert calls["fn"] == 3, "all attempts must run despite the raising hook"
+    assert calls["hook"] == 2, "hook attempted once per retried failure"

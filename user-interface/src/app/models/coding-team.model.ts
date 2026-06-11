@@ -28,6 +28,10 @@ export interface CodingTeamJobStatus {
   updated_at?: string;
   /** ISO timestamp of the last heartbeat (liveness of the worker process). */
   last_heartbeat_at?: string;
+  /** Overall job progress (0-100) derived from terminal tasks in the graph. */
+  progress?: number | null;
+  /** Server UTC time when the response was built; staleness math uses this, not the browser clock. */
+  server_time?: string | null;
 }
 
 /** Summary of a posted PR review (from the /review-pr flow). */

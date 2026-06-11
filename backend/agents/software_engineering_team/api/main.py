@@ -17,14 +17,14 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 _team_dir = Path(__file__).resolve().parent.parent
 if str(_team_dir) not in sys.path:
@@ -425,6 +425,11 @@ class JobStatusResponse(BaseModel):
     updated_at: Optional[str] = Field(None, description="ISO timestamp of the last job update.")
     last_heartbeat_at: Optional[str] = Field(
         None, description="ISO timestamp of the last heartbeat (liveness of the worker process)."
+    )
+    server_time: Optional[str] = Field(
+        None,
+        description="Server UTC time when this response was built; clients should compute "
+        "activity staleness against this, not their own clock (skew immunity).",
     )
 
 
@@ -927,14 +932,29 @@ def get_job_status(job_id: str) -> JobStatusResponse:
         "analysis_subprocess": data.get("analysis_subprocess"),
         "analysis_completed_phases": data.get("analysis_completed_phases") or [],
         "planning_hierarchy": data.get("planning_hierarchy"),
-        "current_activity": data.get("current_activity")
-        if isinstance(data.get("current_activity"), dict)
-        else None,
+        "current_activity": _coerce_current_activity(data.get("current_activity")),
         "last_activity_at": data.get("last_activity_at"),
         "updated_at": data.get("updated_at"),
         "last_heartbeat_at": data.get("last_heartbeat_at"),
+        "server_time": datetime.now(timezone.utc).isoformat(),
     }
     return JobStatusResponse.model_validate(payload)
+
+
+def _coerce_current_activity(value: Any) -> Optional[CurrentActivityEntry]:
+    """Coerce a stored current_activity value into the response model, or None.
+
+    Postconditions: a non-dict or a dict with malformed field values (e.g. a
+    non-numeric fraction) yields None — the optional activity detail degrades,
+    it never turns the whole status endpoint into a 500.
+    """
+    if not isinstance(value, dict):
+        return None
+    try:
+        return CurrentActivityEntry.model_validate(value)
+    except ValidationError:
+        logger.warning("Malformed current_activity on job record (ignored): %r", value)
+        return None
 
 
 @app.post(
@@ -1150,11 +1170,16 @@ def resume_run_team_job(job_id: str) -> RunTeamResponse:
     # before flipping the job to `running` (Codex review on PR #396).
     _preflight_sprint_scope(sprint_id)
 
+    # current_activity is wiped because the dead attempt's finally clears never
+    # ran — without this the UI renders its frozen mid-review sub-bar through the
+    # resumed run. last_activity_at is re-stamped centrally by this very write,
+    # so the stall warning cannot false-fire off the dead attempt's timestamp.
     update_job(
         job_id,
         status=JOB_STATUS_RUNNING,
         error=None,
         agent_crash_details=None,
+        current_activity=None,
     )
 
     try:  # pragma: no cover  # integration-only: spawns Temporal workflow or orchestrator thread for resume

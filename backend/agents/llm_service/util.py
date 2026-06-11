@@ -59,13 +59,24 @@ def call_llm_with_retries(
     LLMUnreachableAfterRetriesError so the caller can return a structured result (e.g. llm_unreachable=True).
 
     Preconditions:
-        - on_retry, if provided, must not raise (callers pass a safe wrapper) and accepts
-          (failed_attempt_number, max_attempts, wait_seconds, exception).
+        - on_retry, if provided, accepts (failed_attempt_number, max_attempts,
+          wait_seconds, exception). It should not raise; if it does anyway, the
+          exception is logged and swallowed — a retry-progress hook is
+          observability and must never abort the retry loop it reports on.
 
     Postconditions:
         - on_retry is invoked exactly once per retried attempt, immediately before the
           backoff sleep; never on success and never after the final attempt.
     """
+
+    def _notify_retry(failed_attempt: int, wait: float, error: Exception) -> None:
+        if on_retry is None:
+            return
+        try:
+            on_retry(failed_attempt, max_attempts, wait, error)
+        except Exception as hook_error:  # noqa: BLE001 — hook must not abort the retry loop
+            logger.warning("on_retry hook failed (ignored): %s", hook_error)
+
     last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
@@ -89,8 +100,7 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
-                if on_retry is not None:
-                    on_retry(attempt + 1, max_attempts, wait, e)
+                _notify_retry(attempt + 1, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(
@@ -114,8 +124,7 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
-                if on_retry is not None:
-                    on_retry(attempt + 1, max_attempts, wait, e)
+                _notify_retry(attempt + 1, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(
