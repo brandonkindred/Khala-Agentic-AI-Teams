@@ -20,7 +20,9 @@ from .models import (
     CodeReviewInput,
     CodeReviewIssue,
     CodeReviewOutput,
+    ReviewProgressCallback,
     coerce_line,
+    notify_review_progress,
 )
 
 logger = logging.getLogger(__name__)
@@ -78,10 +80,24 @@ def build_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[Tuple[Li
     return chunks
 
 
-def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOutput:
+def run_coordinator(
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    progress_callback: ReviewProgressCallback | None = None,
+) -> CodeReviewOutput:
     """
     Split code into chunks, review each chunk, and merge results deterministically.
+
+    Preconditions:
+        - ``progress_callback`` is None or satisfies the ReviewProgressCallback
+          contract (non-raising, accepts ``(step, detail, fraction)``).
+
+    Postconditions:
+        - When ``progress_callback`` is provided, it is invoked with non-decreasing
+          fractions ending at 1.0 (step ``done``) on every successful return,
+          including per-chunk ``reviewing`` reports ("chunk i/N ...").
     """
+    notify_review_progress(progress_callback, "preparing", "compacting review context", 0.05)
     code = input_data.code or ""
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
@@ -105,14 +121,22 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         len(blocks),
         len(chunks),
     )
+    notify_review_progress(progress_callback, "preparing", f"split into {len(chunks)} chunks", 0.10)
 
     chunk_reviewer = ChunkReviewAgent(llm)
     all_issues: List[CodeReviewIssue] = []
     all_approved = True
     summaries: List[str] = []
+    total_chunks = max(len(chunks), 1)
 
-    for paths, chunk_content in chunks:
+    for chunk_index, (paths, chunk_content) in enumerate(chunks, start=1):
         paths_label = ", ".join(p for p in paths if p)
+        notify_review_progress(
+            progress_callback,
+            "reviewing",
+            f"chunk {chunk_index}/{total_chunks}: {paths_label[:120]}",
+            0.10 + 0.80 * (chunk_index - 1) / total_chunks,
+        )
         chunk_input = ChunkReviewInput(
             code_chunk=chunk_content,
             file_path_or_label=paths_label,
@@ -139,7 +163,16 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
                         suggestion=i.get("suggestion", ""),
                     )
                 )
+        notify_review_progress(
+            progress_callback,
+            "reviewing",
+            f"chunk {chunk_index}/{total_chunks} done ({len(all_issues)} issues so far)",
+            0.10 + 0.80 * chunk_index / total_chunks,
+        )
 
+    notify_review_progress(
+        progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
+    )
     # Dedupe issues by (file_path, line, description) — line is part of an issue's
     # identity now that it anchors inline PR comments, so the same description on two
     # different lines is two distinct findings, not a duplicate. An unanchored copy
@@ -170,6 +203,9 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     merged_summary = "\n\n".join(s for s in summaries if s.strip())
 
+    notify_review_progress(
+        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", 1.0
+    )
     return CodeReviewOutput(
         approved=approved,
         issues=deduped,

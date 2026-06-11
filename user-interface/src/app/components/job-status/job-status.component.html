@@ -22,6 +22,9 @@
       @if (status.current_task) {
         <p><strong>Current task:</strong> {{ status.current_task }}</p>
       }
+      @if (status.status_text) {
+        <p class="status-text">{{ status.status_text }}</p>
+      }
       @if (status.progress !== null) {
         <p><strong>Progress:</strong> {{ status.progress }}%</p>
         <mat-progress-bar [value]="status.progress"></mat-progress-bar>
@@ -29,6 +32,7 @@
       @if ((status.status === 'running' || status.status === 'pending') && !status.waiting_for_answers) {
         <mat-progress-bar mode="indeterminate"></mat-progress-bar>
       }
+      <app-stall-warning [status]="status" />
       @if (status.error) {
         <p class="error">{{ status.error }}</p>
       }

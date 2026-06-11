@@ -496,3 +496,102 @@ def test_restart_200_when_failed_reuses_same_job(client: TestClient, temp_work_p
     assert job is not None
     assert job.get("status") == "running"
     assert job.get("repo_path") == str(temp_work_path)
+
+
+def test_get_job_status_exposes_activity_and_timestamps(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """GET /run-team/{job_id} round-trips current_activity, last_activity_at, and the
+    job-service timestamps so the UI can render sub-agent progress + a stall warning."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(
+        job_id,
+        current_activity={
+            "agent": "code_review",
+            "step": "reviewing",
+            "detail": "chunk 2/5: src/app.py",
+            "fraction": 0.4,
+            "task_id": "t1",
+            "task_title": "T1",
+        },
+        last_activity_at="2026-06-10T12:00:00+00:00",
+    )
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    activity = data["current_activity"]
+    assert activity["agent"] == "code_review"
+    assert activity["step"] == "reviewing"
+    assert activity["detail"] == "chunk 2/5: src/app.py"
+    assert activity["fraction"] == 0.4
+    assert data["last_activity_at"] == "2026-06-10T12:00:00+00:00"
+
+
+def test_get_job_status_fresh_job_has_activity_baseline(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """A fresh job has no current_activity but DOES carry a creation-time
+    last_activity_at baseline (stamped centrally by the job service), so a job that
+    hangs while still pending is detectable by the stall warning."""
+    from software_engineering_team.shared.job_store import create_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["current_activity"] is None
+    assert data["last_activity_at"] is not None
+
+
+def test_get_job_status_includes_server_time(client: TestClient, temp_work_path: Path) -> None:
+    """server_time is the backend clock the UI computes staleness against — present
+    and ISO-parseable on every response (browser clock skew immunity)."""
+    from datetime import datetime
+
+    from software_engineering_team.shared.job_store import create_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    server_time = r.json()["server_time"]
+    assert server_time is not None
+    datetime.fromisoformat(server_time)
+
+
+def test_get_job_status_malformed_activity_value_degrades_to_none(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """A dict current_activity with a malformed field value (non-numeric fraction)
+    must degrade the optional detail to None — never 500 the whole status endpoint."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(job_id, current_activity={"agent": "code_review", "fraction": "n/a"})
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    assert r.json()["current_activity"] is None
+
+
+def test_get_job_status_non_dict_current_activity_coerced_to_none(
+    client: TestClient, temp_work_path: Path
+) -> None:
+    """A malformed (non-dict) current_activity value must not break the status endpoint."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(temp_work_path), job_type="run_team")
+    update_job(job_id, current_activity="not-a-dict")
+
+    r = client.get(f"/run-team/{job_id}")
+    assert r.status_code == 200
+    assert r.json()["current_activity"] is None

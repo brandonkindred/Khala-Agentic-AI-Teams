@@ -64,6 +64,8 @@ class FakeJobServiceClient:
             "created_at": now,
             "updated_at": now,
             "last_heartbeat_at": now,
+            # Mirror production: creation is activity (stall-detection baseline).
+            "last_activity_at": now,
             "events": [],
             **fields,
         }
@@ -92,6 +94,10 @@ class FakeJobServiceClient:
         job = self._jobs.get(job_id)
         if job is None:
             return
+        # Mirror production: every real update stamps last_activity_at unless the
+        # caller supplied a real (non-None) value; heartbeats never touch it.
+        if fields.get("last_activity_at") is None:
+            fields["last_activity_at"] = _now_iso()
         job.update(fields)
         self._stamp(job, heartbeat=heartbeat)
 
@@ -120,6 +126,7 @@ class FakeJobServiceClient:
         )
         if status is not None:
             job["status"] = status
+        job["last_activity_at"] = _now_iso()
         self._stamp(job)
 
     def heartbeat(self, job_id: str) -> None:
@@ -163,6 +170,7 @@ class FakeJobServiceClient:
             if hb_ts < cutoff:
                 job["status"] = "failed"
                 job["error"] = reason
+                job["current_activity"] = None
                 self._stamp(job, heartbeat=False)
                 failed.append(job["job_id"])
         return failed
@@ -182,6 +190,7 @@ class FakeJobServiceClient:
                 continue
             job["status"] = target_status
             job["error"] = reason
+            job["current_activity"] = None
             self._stamp(job, heartbeat=False)
             ids.append(job["job_id"])
         return ids
@@ -237,6 +246,10 @@ class FakeJobServiceClient:
                 if not isinstance(current, (int, float)):
                     current = 0
                 job[field] = current + delta
+        # Mirror production apply_patch: a patch is a real update, so it stamps
+        # last_activity_at unless merge_fields carried a real value.
+        if not (merge_fields and merge_fields.get("last_activity_at") is not None):
+            job["last_activity_at"] = _now_iso()
         self._stamp(job)
 
 

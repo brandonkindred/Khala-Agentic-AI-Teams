@@ -812,3 +812,50 @@ def test_get_projects_root_defaults_to_tempdir_khala_projects(monkeypatch):
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     root = api_main._get_projects_root()
     assert root.name == "khala_projects"
+
+
+# --------------------------------------------------------------------------- _scale_progress
+
+
+def test_scale_progress_maps_sub_agent_pct_onto_band():
+    """Sub-agents report their own 0-100; the SE job updaters rescale onto the
+    phase band so the bar is monotone across the run (no 100 → collapse handoffs)."""
+    from software_engineering_team.orchestrator import (
+        PROGRESS_BAND_CODING,
+        PROGRESS_BAND_PLANNING,
+        PROGRESS_BAND_PRODUCT_ANALYSIS,
+        _scale_progress,
+    )
+
+    assert _scale_progress(0, PROGRESS_BAND_PRODUCT_ANALYSIS) == 0
+    assert _scale_progress(100, PROGRESS_BAND_PRODUCT_ANALYSIS) == 15
+    assert _scale_progress(100, PROGRESS_BAND_PLANNING) == 30
+    assert _scale_progress(0, PROGRESS_BAND_CODING) == 30
+    assert _scale_progress(100, PROGRESS_BAND_CODING) == 95
+    # Bands tile the bar: each phase ends where the next begins, 95 < 100 leaves
+    # room for the terminal write.
+    assert _scale_progress(50, (0, 15)) == 7
+
+    # Garbage degrades to None (caller drops the field); out-of-range clamps.
+    assert _scale_progress("n/a", (0, 15)) is None
+    assert _scale_progress(None, (0, 15)) is None
+    assert _scale_progress(150, (0, 15)) == 15
+    assert _scale_progress(-10, (0, 15)) == 0
+
+
+def test_pra_and_planning_updaters_rescale_progress(monkeypatch):
+    """The job updaters intercept a sub-agent 'progress' kwarg and rescale it; other
+    kwargs pass through untouched and garbage progress is dropped, not written."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    updater = se_orch._make_planning_v3_job_updater("j1")
+    updater(progress=100, status_text="done")
+    assert written[-1]["progress"] == 30
+    assert written[-1]["status_text"] == "done"
+
+    updater(progress="garbage", status_text="odd")
+    assert "progress" not in written[-1]
+    assert written[-1]["status_text"] == "odd"

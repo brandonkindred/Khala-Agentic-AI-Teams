@@ -33,7 +33,9 @@ export class BackendCodeV2JobStatusComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.poll();
-    this.pollTimer = setInterval(() => this.poll(), 120000);
+    // 30s keeps the per-microtask phase detail (e.g. "Code review 40%: chunk 2/5")
+    // visible as it changes; 120s skipped whole review sub-steps between polls.
+    this.pollTimer = setInterval(() => this.poll(), 30000);
   }
 
   ngOnDestroy(): void {

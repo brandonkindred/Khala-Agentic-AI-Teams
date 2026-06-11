@@ -33,3 +33,9 @@
     flex-shrink: 0;
   }
 }
+
+.status-text {
+  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  font-size: 0.875rem;
+}
+

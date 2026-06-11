@@ -1,0 +1,12 @@
+@if (showLastActivity()) {
+  <div class="last-activity-section">
+    <mat-icon>schedule</mat-icon>
+    <span class="last-activity-label">Last activity: {{ lastActivityLabel() }}</span>
+  </div>
+}
+@if (isStalled()) {
+  <div class="stalled-warning">
+    <mat-icon>warning</mat-icon>
+    <span>No agent activity for {{ stalledDurationLabel() }} — the job may be stalled.</span>
+  </div>
+}
