@@ -276,8 +276,11 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
 def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
     """Return repo-relative paths changed on *head* since it diverged from *base*.
 
-    Runs ``git diff --name-only --diff-filter=d base...head``. The ``d`` filter
-    drops deletions so every returned path is a file a caller can still read.
+    Runs ``git diff --name-only --diff-filter=d -z base...head``. The ``d`` filter
+    drops deletions so every returned path is a file a caller can still read; the
+    ``-z`` flag returns NUL-delimited, unquoted paths so names with non-ASCII
+    characters, tabs, or newlines round-trip as real filesystem paths instead of
+    git's default quoted/escaped form.
 
     Preconditions:
         - base and head are git revisions (branch name, tag, or SHA); the caller
@@ -291,11 +294,11 @@ def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> 
     if not (path / ".git").exists():
         return []
     code, out = _run_git(
-        path, ["git", "diff", "--name-only", "--diff-filter=d", f"{base}...{head}"]
+        path, ["git", "diff", "--name-only", "--diff-filter=d", "-z", f"{base}...{head}"]
     )
     if code != 0:
         return []
-    return [line for line in (out or "").splitlines() if line.strip()]
+    return [entry for entry in (out or "").split("\0") if entry]
 
 
 def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) -> Tuple[bool, str]:

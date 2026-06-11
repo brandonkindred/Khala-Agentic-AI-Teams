@@ -114,16 +114,22 @@ def read_files_as_dict(
         - *paths* are repo-relative; the caller has already scoped them.
     Postconditions:
         - Returns a mapping in the iteration order of *paths*, skipping any path
-          that is filtered out by *extensions*, is missing, or cannot be read as
-          UTF-8 text (these are dropped silently so review still runs on the
-          readable remainder).
+          that is filtered out by *extensions*, escapes *repo_path* once resolved
+          (an absolute path or one containing ``..``), is missing, or cannot be
+          read as UTF-8 text (these are dropped silently so review still runs on
+          the readable remainder).
+        - Never reads a file outside *repo_path*: keys may come from untrusted
+          agent output, so containment is enforced before any read.
     """
+    repo_root = repo_path.resolve()
     result: Dict[str, str] = {}
     for rel_path in paths:
         candidate = Path(rel_path)
         if extensions is not None and candidate.suffix not in extensions:
             continue
-        full_path = repo_path / candidate
+        full_path = (repo_path / candidate).resolve()
+        if repo_root not in full_path.parents:
+            continue
         try:
             result[rel_path] = full_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):

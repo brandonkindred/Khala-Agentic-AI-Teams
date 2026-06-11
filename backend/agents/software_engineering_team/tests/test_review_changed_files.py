@@ -70,6 +70,25 @@ def test_list_changed_files_bad_revision_returns_empty(tmp_path: Path) -> None:
     assert list_changed_files(tmp_path, "no-such-branch", "HEAD") == []
 
 
+def test_list_changed_files_handles_non_ascii_filename(tmp_path: Path) -> None:
+    """``-z`` returns the raw path, so a non-ASCII name is not git-quoted and
+    round-trips as a real filesystem path."""
+    _init_repo(tmp_path)
+    (tmp_path / "café.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "café.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change")
+
+    changed = list_changed_files(tmp_path, "development", "HEAD")
+
+    assert changed == ["café.py"]  # not '"caf\\303\\251.py"'
+    assert read_files_as_dict(tmp_path, changed) == {"café.py": "x = 2\n"}
+
+
 # ---------------------------------------------------------------------------
 # read_files_as_dict
 # ---------------------------------------------------------------------------
@@ -102,6 +121,18 @@ def test_read_files_as_dict_skips_missing_and_undecodable(tmp_path: Path) -> Non
     result = read_files_as_dict(tmp_path, ["a.py", "missing.py", "bad.py"], extensions=[".py"])
 
     assert result == {"a.py": "A"}  # missing + undecodable skipped
+
+
+def test_read_files_as_dict_skips_paths_outside_repo(tmp_path: Path) -> None:
+    """Untrusted keys that escape the repo (``..`` or absolute) are never read."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "ok.py").write_text("inside", encoding="utf-8")
+    (tmp_path / "secret.env").write_text("SECRET=1", encoding="utf-8")  # outside repo
+
+    result = read_files_as_dict(repo, ["ok.py", "../secret.env", "/etc/hostname"])
+
+    assert result == {"ok.py": "inside"}  # traversal + absolute paths excluded
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +306,44 @@ def test_select_review_input_includes_non_source_changed_files(tmp_path: Path) -
     assert code is None
     assert "requirements.txt" in files
     assert "migrations/001_init.sql" in files
+
+
+def test_select_review_input_includes_writer_derived_paths(tmp_path: Path) -> None:
+    """The call site passes the writer's normalized output, so derived paths
+    (code -> main.py, tests -> tests/test_main.py) are reviewed even when their
+    commit didn't land."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+    from software_engineering_team.shared.repo_writer import _output_to_files_dict
+
+    _init_repo(tmp_path)
+    (tmp_path / "seed.py").write_text("s = 0\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "committed change")  # non-empty diff
+
+    # write_agent_output would materialize code/tests as main.py and
+    # tests/test_main.py; here their commit "failed" so they are only on disk.
+    (tmp_path / "main.py").write_text("def f():\n    pass\n", encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "test_main.py").write_text("def test_f():\n    pass\n", encoding="utf-8")
+
+    output = SimpleNamespace(
+        files={}, code="def f():\n    pass\n", tests="def test_f():\n    pass\n", language="python"
+    )
+    written = _output_to_files_dict(output, "")
+    assert {"main.py", "tests/test_main.py"} <= set(written)  # contract we rely on
+
+    task = SimpleNamespace(description="add feature")
+    files, code = _select_review_input(tmp_path, task, written)
+
+    assert code is None
+    assert "main.py" in files
+    assert "tests/test_main.py" in files
+    assert "seed.py" in files  # committed diff still included
 
 
 def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) -> None:

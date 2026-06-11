@@ -524,9 +524,9 @@ def _select_review_input(
     YAML/JSON, ...) are reviewed too.
 
     Preconditions:
-        - *repo_path* is the task's working tree; *written_files* is the files
-          dict the generator just produced (or None) — only its keys are used,
-          to widen the set of paths re-read from disk.
+        - *repo_path* is the task's working tree; *written_files* is the writer's
+          normalized output mapping (or None) — only its keys are used, to widen
+          the set of paths re-read from disk.
     Postconditions:
         - Returns ``(files, code)`` with exactly one of the two populated, never
           both, and never both empty — so review is never silently skipped:
@@ -1569,8 +1569,14 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
+            # Normalize via the writer's own mapping so derived paths
+            # (code -> main.py, tests -> tests/test_main.py, ...) that aren't in
+            # ``result.files`` are still reviewed when their commit didn't land.
+            from software_engineering_team.shared.repo_writer import _output_to_files_dict
+
+            written = _output_to_files_dict(result, "") if result else None
             review_files, review_code = _select_review_input(
-                repo_path, current_task, getattr(result, "files", None)
+                repo_path, current_task, written
             )
             review_result = self._run_code_review(
                 code_review_agent=code_review_agent,
