@@ -88,3 +88,23 @@ def test_adapter_empty_questions_default():
     out = adapt_planning_v3_result(result, spec_title="P")
     assert out.open_questions == []
     assert out.resolved_questions == []
+
+
+def test_llm_pause_error_prefers_semantic_exhaustion_sentinel():
+    """The job-level pause error must surface the semantic-exhaustion remediation
+    (simplify/split the prompt) whenever any failed task carries it — the
+    connectivity guidance would send the operator into a resume loop."""
+    from software_engineering_team.orchestrator import _llm_pause_error
+    from software_engineering_team.shared.job_store import (
+        LLM_SEMANTIC_EXHAUSTION,
+        LLM_UNREACHABLE_AFTER_RETRIES,
+    )
+
+    assert _llm_pause_error({"t1": LLM_UNREACHABLE_AFTER_RETRIES}) == LLM_UNREACHABLE_AFTER_RETRIES
+    assert _llm_pause_error({"t1": LLM_SEMANTIC_EXHAUSTION}) == LLM_SEMANTIC_EXHAUSTION
+    assert (
+        _llm_pause_error({"t1": LLM_UNREACHABLE_AFTER_RETRIES, "t2": LLM_SEMANTIC_EXHAUSTION})
+        == LLM_SEMANTIC_EXHAUSTION
+    )
+    # Defensive: unrelated reasons fall back to the connectivity sentinel.
+    assert _llm_pause_error({"t1": "build failed"}) == LLM_UNREACHABLE_AFTER_RETRIES

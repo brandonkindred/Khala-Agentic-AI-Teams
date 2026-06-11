@@ -35,7 +35,9 @@ permanently. Negative floors to `0` (retry on next call).
 
 ### LLM_MAX_RETRIES / LLM_BACKOFF_BASE / LLM_BACKOFF_MAX
 **Transient** (5xx / connection / timeout) retry schedule for the central Ollama client — defaults
-`10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row).
+`10` / `2`s / `120`s. These no longer govern HTTP 429 rate limits (see the `LLM_RATE_LIMIT_*` row),
+nor empty 200 responses, which get a single proof-of-change thinking-downgrade retry instead (see
+`LLM_THINKING_DOWNGRADE_RETRY`).
 
 ### LLM_ENABLE_THINKING
 Global thinking default for all LLM calls that don't specify `think` explicitly (default enabled;
@@ -47,6 +49,22 @@ models get boolean `think: true`. Explicit per-call `think=False` always wins.
 Overrides the thinking level chosen for models with registered levels (e.g. `medium`). Values that
 aren't a registered level for the model fall back to the max level with a warning; ignored for
 models that only support boolean think.
+
+### LLM_THINKING_DOWNGRADE_RETRY
+Proof-of-change retry for semantically exhausted calls (default on; `false`/`0`/`no` disables). A
+**semantically exhausted** call is an HTTP 200 with zero assistant content — typically a thinking
+model that produced only reasoning. Re-sending the identical payload rarely helps, so instead of
+spending the transient `LLM_MAX_RETRIES` schedule on it, the client retries **once, immediately**
+with reduced thinking: one level down for models registered in `KNOWN_MODEL_THINKING_LEVELS`
+(e.g. `max` → `high`), `think=False` for boolean/unregistered thinking. If the downgraded attempt
+is also empty — or thinking is already off / at the lowest level, leaving no provable change — the
+call fails hard with `LLMSemanticExhaustionError`, whose receipt carries `failure_class`,
+`attempts_used`, the original and retry thinking levels, whether any raw (necessarily
+whitespace-only) content bytes were ever seen,
+the `finish_reason`, and a fingerprint of the last payload (also logged at ERROR; the downgrade
+itself is logged at WARNING). Transient 5xx/connection/timeout faults and 429s keep their own
+independent schedules before and after the downgrade. Disabling the toggle restores the legacy
+behavior (empty 200s retried verbatim on the transient schedule).
 
 ---
 
@@ -200,6 +218,14 @@ suggestions beyond the cap are ignored (default `5`).
 Character budget passed to `compact_text` for the rendered summaries + active-rules block before the
 reflection LLM call (default `8000`). The reflection LLM uses the shared `cognition` model key, so
 `LLM_MODEL_cognition` overrides its model.
+
+### AGENT_COGNITION_INVOKE_ROLLUP_BUDGET
+Max rollup periods the invoke gate's lazy catch-up (`agent_cognition/invoke_gate.py`) may process
+inline per cognition invoke (default `8`, floor `1`; garbage falls back to the default). Each
+processed period costs one LLM summarization call, so the budget keeps a cold-start backlog (up to
+`AGENT_COGNITION_ROLLUP_MAX_LOOKBACK_DAYS` of unsummarized periods) from running hundreds of
+sequential LLM calls on the invoke hot path. The pass is oldest-first and idempotent: repeated
+budgeted invokes — and the unbudgeted central scheduler — drain the remainder.
 
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.

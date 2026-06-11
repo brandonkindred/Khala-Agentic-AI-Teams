@@ -63,6 +63,7 @@ from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_FAILED,
     JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
     JOB_STATUS_RUNNING,
+    LLM_SEMANTIC_EXHAUSTION,
     LLM_UNREACHABLE_AFTER_RETRIES,
     add_pending_questions,
     get_job,
@@ -196,6 +197,23 @@ def _make_planning_v3_job_updater(job_id: str) -> Callable[..., None]:
             pass
 
     return _updater
+
+
+def _llm_pause_error(failed: Dict[str, str]) -> str:
+    """Job-level error message for an LLM-condition pause, derived from the failed map.
+
+    Preconditions:
+        - ``failed`` maps task ids to failure-reason strings; the caller has
+          already determined that at least one value matched an LLM pause
+          sentinel (the ``llm_connectivity_failed`` aggregation).
+    Postconditions:
+        - Returns ``LLM_SEMANTIC_EXHAUSTION`` when any failed task carries it —
+          its remediation (simplify or split the prompt) must not be masked by
+          the connectivity guidance — otherwise ``LLM_UNREACHABLE_AFTER_RETRIES``.
+    """
+    if any(v == LLM_SEMANTIC_EXHAUSTION for v in failed.values()):
+        return LLM_SEMANTIC_EXHAUSTION
+    return LLM_UNREACHABLE_AFTER_RETRIES
 
 
 BANNER_WIDTH = 72
@@ -2163,17 +2181,28 @@ def _run_backend_frontend_workers(
                     workflow_result.success,
                 )
                 if getattr(workflow_result, "llm_unreachable", False):
+                    # Propagate the workflow's sentinel reason (connectivity vs
+                    # semantic exhaustion) instead of clobbering it, so the
+                    # operator sees the actual terminal condition on the task.
+                    pause_reason = (
+                        getattr(workflow_result, "failure_reason", None)
+                        or LLM_UNREACHABLE_AFTER_RETRIES
+                    )
                     update_task_state(
                         job_id,
                         task_id,
                         status="failed",
                         finished_at=_iso_now(),
-                        error=LLM_UNREACHABLE_AFTER_RETRIES,
+                        error=pause_reason,
                     )
                     with state_lock:
                         llm_connectivity_failed[0] = True
-                        failed[task_id] = LLM_UNREACHABLE_AFTER_RETRIES
-                    logger.warning("Frontend reported LLM unreachable; pausing job %s", job_id)
+                        failed[task_id] = pause_reason
+                    logger.warning(
+                        "Frontend reported terminal LLM condition (%s); pausing job %s",
+                        pause_reason,
+                        job_id,
+                    )
                     break
             except (LLMError, httpx.HTTPError) as e:
                 err_msg = (
@@ -3407,7 +3436,8 @@ def run_orchestrator(
 
             llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
             llm_connectivity_failed = any(
-                v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed.values()
+                v in (LLM_UNREACHABLE_AFTER_RETRIES, LLM_SEMANTIC_EXHAUSTION)
+                for v in failed.values()
             )
             remaining_in_queues = (
                 len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
@@ -3712,7 +3742,7 @@ def run_orchestrator(
                 update_job(
                     job_id,
                     status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                    error=LLM_UNREACHABLE_AFTER_RETRIES,
+                    error=_llm_pause_error(failed),
                     progress=100,
                     current_task=None,
                 )
@@ -3989,7 +4019,8 @@ def run_failed_tasks(job_id: str) -> None:
 
         llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed_retry.values())
         llm_connectivity_failed = any(
-            v == LLM_UNREACHABLE_AFTER_RETRIES for v in failed_retry.values()
+            v in (LLM_UNREACHABLE_AFTER_RETRIES, LLM_SEMANTIC_EXHAUSTION)
+            for v in failed_retry.values()
         )
 
         # Final summary with task breakdown
@@ -4059,7 +4090,7 @@ def run_failed_tasks(job_id: str) -> None:
                 job_id,
                 failed_tasks=failed_details,
                 status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                error=LLM_UNREACHABLE_AFTER_RETRIES,
+                error=_llm_pause_error(failed_retry),
             )
         elif llm_limit_exceeded:
             update_job(
