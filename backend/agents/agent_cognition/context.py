@@ -88,6 +88,7 @@ __all__ = [
     "claim_run",
     "complete_run",
     "replay_run",
+    "abandon_run",
 ]
 
 
@@ -150,18 +151,25 @@ def enforce_precondition(agent_id: str, input_body: Any, rules: list[Rule]) -> N
         raise PreconditionBlocked(reason or "blocked by enforced precondition")
 
 
-def enforce_postcondition(output: Mapping[str, Any], rules: list[Rule]) -> None:
+def enforce_postcondition(output: Any, rules: list[Rule]) -> None:
     """Enforced postcondition gate — raises on block.
 
     Preconditions:
-        * ``output`` is the agent's raw result mapping (the evaluator wraps it
-          as ``{"output": output}`` internally — pass it unwrapped); ``rules``
-          are the agent's candidate rules.
+        * ``output`` is the agent's raw result — pass it unwrapped, **any
+          type**. A non-mapping output (``None``, a string, a list) is
+          evaluated against an empty mapping, so path predicates fail closed:
+          an agent carrying enforced postcondition rules implies an object
+          output, and a missing one must block, never silently skip the gate.
+          The coercion lives here so every caller — gate or direct — gets the
+          same fail-closed semantics. ``rules`` are the agent's candidate
+          rules.
     Postconditions:
         * Returns ``None`` when every active enforced postcondition rule holds.
         * Raises :class:`PostconditionViolation` carrying the first failing
           rule's reason otherwise. A malformed enforced predicate fails closed.
     """
+    if not isinstance(output, Mapping):
+        output = {}
     allowed, reason = evaluate_postcondition(output, rules)
     if not allowed:
         raise PostconditionViolation(reason or "blocked by enforced postcondition")
@@ -171,7 +179,9 @@ def enforce_postcondition(output: Mapping[str, Any], rules: list[Rule]) -> None:
 # Context assembly / rollups — thin facades over the substrate (lazy imports
 # keep the LLM/graph deps off the facade's module-import path).
 # ---------------------------------------------------------------------------
-def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
+def ensure_rollups_current(
+    agent_id: str, now: datetime, *, max_periods: int | None = None
+) -> RollupReport:
     """Lazy rollup catch-up for the invoke path (facade entry).
 
     Thin wrapper over :func:`agent_cognition.memory.rollup.ensure_rollups_current`
@@ -179,15 +189,16 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
     directly.
 
     Preconditions:
-        * ``agent_id`` is non-empty; ``now`` is timezone-aware (the engine
-          asserts the latter).
+        * ``agent_id`` is non-empty; ``now`` is timezone-aware and
+          ``max_periods`` is positive when given (the engine asserts both).
     Postconditions:
-        * Returns the engine's ``RollupReport`` unchanged.
+        * Returns the engine's ``RollupReport`` unchanged (``truncated`` set
+          when a ``max_periods`` budget stopped the pass early).
     """
     assert agent_id, "ensure_rollups_current: agent_id must be non-empty"
     from agent_cognition.memory.rollup import ensure_rollups_current as _engine
 
-    return _engine(agent_id, now)
+    return _engine(agent_id, now, max_periods=max_periods)
 
 
 async def load_context(agent_id: str, *, query: str = "") -> CognitionContext:
@@ -237,6 +248,18 @@ def persist_writeback(agent_id: str, source_run_id: str, writeback: CognitionWri
     * ``agent_id`` / ``source_run_id`` are pinned to the caller's authoritative
       values (a writeback cannot forge another agent's id or scribble into a
       different run's idempotency key).
+
+    ``source_run_id`` format note: the invoke gate passes an **attempt-scoped**
+    composite here — ``{ledger_key}#{attempt_token}`` (see
+    ``agent_cognition.invoke_gate.PreparedInvoke.event_run_id``) — because a
+    ledger key can legitimately execute more than once (expired-lease reclaim)
+    and a retry's new events must not dedup against a prior attempt's rows.
+    Consequently an event's ``source_run_id`` does **not** equal the
+    ``agent_cognition_runs`` key; correlating events to a ledger row means
+    matching on the prefix before the *last* ``#`` (a caller-supplied
+    Idempotency-Key may itself contain ``#``; the attempt token never does —
+    it is a UUID). Direct callers should follow the same convention or accept
+    that re-executions of their key will dedup.
 
     ``writeback.tool_calls`` is **not** separately persisted: the tool broker
     already emits per-call ``tool_call`` / ``outcome`` events into
@@ -532,6 +555,46 @@ def replay_run(agent_id: str, source_run_id: str) -> dict[str, Any] | None:
     if row is None or row["status"] not in _TERMINAL_STATUSES or row["response"] is None:
         return None
     return row["response"]
+
+
+def abandon_run(agent_id: str, source_run_id: str, *, claim_token: str) -> bool:
+    """Release a claimed run whose agent provably never produced a result.
+
+    Deletes the ``in_progress`` row **owned by ``claim_token``**, so an
+    immediate retry re-executes instead of conflicting until the lease
+    expires. This is for paths where the boundary knows there is nothing the
+    lease still protects — e.g. the wrapped envelope was rejected oversize
+    before any dispatch, or the agent's response was received but unusable.
+    It must NOT be called while the agent may still be executing (a transport
+    timeout): there the lease is exactly what prevents a concurrent
+    double-run.
+
+    Preconditions:
+        * ``agent_id`` / ``source_run_id`` / ``claim_token`` are non-empty;
+          ``claim_token`` is the token :func:`claim_run` returned ``CLAIMED``
+          for this key.
+    Postconditions:
+        * Returns ``True`` when the owned ``in_progress`` row was deleted.
+        * Returns ``False`` (no-op) when the row is terminal, was reclaimed
+          under a different token, or does not exist — a stale abandoner can
+          never delete a completed envelope or another claimer's in-flight
+          run (same fencing as :func:`complete_run`).
+    """
+    assert agent_id, "abandon_run: agent_id must be non-empty"
+    assert source_run_id, "abandon_run: source_run_id must be non-empty"
+    if not claim_token:
+        # Real raise (not ``assert``): under ``python -O`` an empty token would
+        # make the DELETE match nothing and silently report False.
+        raise ValueError("abandon_run: claim_token must be non-empty")
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """DELETE FROM agent_cognition_runs
+                WHERE agent_id = %s AND source_run_id = %s
+                      AND status = %s AND claim_token = %s
+            RETURNING source_run_id""",
+            (agent_id, source_run_id, _IN_PROGRESS, claim_token),
+        )
+        return cur.fetchone() is not None
 
 
 # ---------------------------------------------------------------------------
