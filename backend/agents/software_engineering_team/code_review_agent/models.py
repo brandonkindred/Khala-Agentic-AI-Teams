@@ -96,8 +96,11 @@ class FileSegment(BaseModel):
         - ``start_line`` is 1-based and within the original file.
         - A file's segments, in list order, partition its content exactly:
           concatenating their ``content`` reproduces the file.
-        - ``pre_numbered`` segments carry original line numbers as ``N: `` prefixes
-          (the coding team's PR-diff hunks), so they need no re-anchoring.
+        - Cited line numbers are always original-file absolute: ``pre_numbered``
+          segments already carry ``N: `` prefixes in their content (the coding
+          team's PR-diff hunks), and partial segments are *rendered* with their
+          original line numbers prefixed (``prompt_content``), so the reviewer
+          never reports snippet-relative numbers that would need re-anchoring.
     """
 
     path: str = Field(default="", description="Original file path ('' for headerless code)")
@@ -128,21 +131,32 @@ class FileSegment(BaseModel):
         return self.start_line > 1 or self.end_line < self.total_lines
 
     @property
-    def line_offset(self) -> int:
-        """Offset to add to a snippet-relative line number to recover the original line.
+    def prompt_content(self) -> str:
+        """The content as rendered into the review prompt.
+
+        Partial segments are prefixed with their original line numbers
+        (``"50: code"``) so cited lines are absolute by construction — a
+        snippet-relative citation and an absolute one are indistinguishable
+        when the segment's absolute range overlaps ``[1, line_count]``, so the
+        numbering convention removes the ambiguity instead of guessing.
 
         Postconditions:
-            - Returns 0 for ``pre_numbered`` segments (their cited numbers are
-              already original lines), else ``start_line - 1``.
+            - Whole files and ``pre_numbered`` segments (which already carry
+              prefixes) render verbatim as ``content``.
         """
-        return 0 if self.pre_numbered else self.start_line - 1
+        if self.pre_numbered or not self.is_partial:
+            return self.content
+        return "\n".join(
+            f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
+        )
 
 
 class ReviewChunk(BaseModel):
     """One map-call unit: a group of file segments reviewed in a single LLM call.
 
     Invariants:
-        - No two segments share the same ``path`` (so ``offset_by_path`` is unambiguous).
+        - No two segments share the same ``path`` (so an issue's cited path
+          resolves to exactly one segment for line validation).
     """
 
     segments: List[FileSegment] = Field(default_factory=list)
@@ -153,10 +167,13 @@ class ReviewChunk(BaseModel):
 
         Postconditions:
             - Headerless segments (``path == ''``) render as bare content.
+            - Partial segments render with original line-number prefixes
+              (see ``FileSegment.prompt_content``).
         """
         parts = []
         for seg in self.segments:
-            parts.append(f"### {seg.path} ###\n{seg.content}" if seg.path else seg.content)
+            rendered = seg.prompt_content
+            parts.append(f"### {seg.path} ###\n{rendered}" if seg.path else rendered)
         return "\n\n".join(parts)
 
     @property
@@ -176,11 +193,6 @@ class ReviewChunk(BaseModel):
             else:
                 labels.append(name)
         return ", ".join(labels)
-
-    @property
-    def offset_by_path(self) -> Dict[str, int]:
-        """Map of segment path to its ``line_offset`` for issue re-anchoring."""
-        return {seg.path: seg.line_offset for seg in self.segments}
 
 
 class ChunkReviewInput(BaseModel):

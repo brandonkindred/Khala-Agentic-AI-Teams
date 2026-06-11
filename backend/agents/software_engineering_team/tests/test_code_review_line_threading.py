@@ -159,13 +159,16 @@ def test_coordinator_threads_line() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_split_segments_reanchor_lines_to_original_file() -> None:
-    """Issues from split segments are shifted by each segment's own offset.
+def test_split_segments_cite_absolute_prefixed_lines() -> None:
+    """Split segments are rendered with original line-number prefixes, so a
+    reviewer cites absolute lines directly — no re-anchoring arithmetic.
 
     The expected lines are computed from the splitter's actual boundaries, not
-    hardcoded: every chunk reports an issue at snippet-relative line 1, which
-    must come back as that segment's ``start_line`` in the original file.
+    hardcoded: a scripted reviewer cites the first prefixed number visible in
+    each chunk, which must come back verbatim as that segment's ``start_line``.
     """
+    import re as _re
+
     from code_review_agent.coordinator import build_review_chunks, run_coordinator
 
     from software_engineering_team.shared.context_sizing import (
@@ -173,26 +176,31 @@ def test_split_segments_reanchor_lines_to_original_file() -> None:
     )
 
     content = "\n".join(f"line {i:05d}".ljust(40, "x") for i in range(1, 1_001))  # ~41K chars
-    client = _ScriptedClient(
-        [
-            {
+
+    class _CiteFirstPrefixed(DummyLLMClient):
+        """Cites the first original-line prefix found in the chunk prompt."""
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            m = _re.search(r"^(\d+): line", prompt, _re.M)
+            assert m is not None, "split segments must render prefixed lines"
+            cited = int(m.group(1))
+            return {
                 "approved": False,
                 "issues": [
                     {
                         "severity": "high",
                         "category": "logic",
                         "file_path": "big.py",
-                        "line": 1,
-                        "start_line": 1,
-                        "description": "first visible line is wrong",
+                        "line": cited,
+                        "start_line": cited,
+                        "description": f"issue at original line {cited}",
                         "suggestion": "fix it",
                     }
                 ],
                 "summary": "per-chunk issue",
             }
-        ]
-    )
 
+    client = _CiteFirstPrefixed()
     cap = compute_code_review_map_chunk_chars(client)
     chunks = build_review_chunks([("big.py", content)], cap)
     segments = [seg for chunk in chunks for seg in chunk.segments]

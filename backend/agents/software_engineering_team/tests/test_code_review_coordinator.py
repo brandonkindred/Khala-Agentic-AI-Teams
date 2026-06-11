@@ -15,9 +15,9 @@ from typing import Any, Dict, List, Optional
 import pytest
 from code_review_agent.coordinator import (
     MIN_SPLIT_SEGMENT_CHARS,
-    _anchor_line,
     _issues_from_chunk_output,
     _segment_range_label,
+    _validate_line,
     build_review_chunks,
     parse_code_into_file_blocks,
     run_coordinator,
@@ -360,7 +360,7 @@ def test_split_within_budget_returns_single_whole_segment() -> None:
     assert seg.start_line == 1
     assert seg.total_lines == 10
     assert seg.is_partial is False
-    assert seg.line_offset == 0
+    assert seg.prompt_content == content  # whole files render verbatim, no prefixes
 
 
 def test_split_reassembles_content_exactly_and_tracks_lines() -> None:
@@ -378,6 +378,12 @@ def test_split_reassembles_content_exactly_and_tracks_lines() -> None:
     # the line at each boundary really is the one the bookkeeping claims
     for seg in segments[1:]:
         assert seg.content.splitlines()[0].startswith(f"line {seg.start_line:05d}")
+    # partial segments render with absolute original line numbers prefixed,
+    # and the rendered size stays within the budget the splitter was given
+    for seg in segments:
+        first_rendered = seg.prompt_content.splitlines()[0]
+        assert first_rendered.startswith(f"{seg.start_line}: ")
+        assert len(seg.prompt_content) <= 4_000
 
 
 def test_split_never_breaks_a_line_even_when_oversized() -> None:
@@ -392,23 +398,25 @@ def test_split_never_breaks_a_line_even_when_oversized() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_split_flags_pre_numbered_segments_with_zero_offset() -> None:
+def test_split_flags_pre_numbered_segments_without_double_prefixing() -> None:
     hunk = "\n".join(f"{4000 + i}: code_{i}()".ljust(40, " ") for i in range(300))
     segments = split_block_into_segments("pr.py", hunk, max_chars=4_000, pre_numbered=True)
     assert len(segments) > 1
     assert all(s.pre_numbered for s in segments)
-    assert all(s.line_offset == 0 for s in segments)
+    # Pre-numbered content already carries its prefixes: rendered verbatim.
+    assert all(s.prompt_content == s.content for s in segments)
 
 
 def test_int_keyed_mapping_content_is_not_treated_as_pre_numbered() -> None:
     """A dict-literal file whose lines look like ``N: value`` must NOT be
-    treated as pre-numbered unless the producer declared it: re-anchoring
-    stays positional."""
+    treated as pre-numbered unless the producer declared it: its split
+    segments get real original-line prefixes in the prompt."""
     content = "STATUS = {\n" + "\n".join(f"    {i}: 'v{i}'," for i in range(1, 300)) + "\n}"
     segments = split_block_into_segments("status.py", content, max_chars=2_000)
     assert len(segments) > 1
     assert all(not s.pre_numbered for s in segments)
-    assert all(s.line_offset == s.start_line - 1 for s in segments)
+    for seg in segments:
+        assert seg.prompt_content.splitlines()[0].startswith(f"{seg.start_line}: ")
 
 
 def test_segment_range_label_uses_embedded_numbers_for_pre_numbered() -> None:
@@ -659,6 +667,40 @@ def test_transient_failure_recovers_via_same_input_retry() -> None:
     assert len(client.prompts) == 2  # initial failure + successful retry
 
 
+def test_transient_failure_in_bisected_child_recovers() -> None:
+    """A one-off transient failure in a bisected child that is too small to
+    split further gets its own same-input retry — it must not abort a review
+    that bisection was already recovering."""
+
+    class _FailCombinedAndChildOnce(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.a_failures = 0
+            self.calls = 0
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.calls += 1
+            if "### a.py ###" in prompt and "### b.py ###" in prompt:
+                raise LLMSemanticExhaustionError("no content")  # force bisection
+            if "### a.py ###" in prompt and self.a_failures == 0:
+                self.a_failures += 1
+                raise LLMSemanticExhaustionError("transient child hiccup")
+            return super().complete_json(prompt, **kwargs)
+
+    client = _FailCombinedAndChildOnce()
+    result = run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"a.py": "def a(): pass", "b.py": "def b(): pass"},
+            task_description="t",
+            language="python",
+        ),
+    )
+    assert result.approved is True
+    # combined fail + a fail + a retry success + b success
+    assert client.calls == 4
+
+
 def test_persistent_small_chunk_failure_raises_unavailable() -> None:
     """A small chunk that fails its initial call and its retry has no verdict:
     the run must raise, never render approved/rejected on unreviewed code."""
@@ -891,22 +933,27 @@ def test_malformed_severity_and_category_are_sanitized_not_crashing() -> None:
     assert issues[0].category == "general"
 
 
-def test_anchor_line_echo_detection_and_bounds() -> None:
-    """Snippet-relative numbers are shifted; echoed absolute numbers are kept;
-    numbers beyond both ranges are dropped rather than mis-anchored."""
-    seg = FileSegment(
+def test_validate_line_absolute_numbering_has_no_overlap_ambiguity() -> None:
+    """Partial segments are rendered with original line-number prefixes, so a
+    citation is absolute by construction: a segment whose absolute range
+    overlaps [1, line_count] (e.g. 100 lines starting at line 50) anchors
+    line 75 to line 75 — never shifted to 124 — and out-of-range citations
+    are dropped rather than mis-anchored."""
+    overlapping = FileSegment(
         path="big.py",
-        content="\n".join(f"l{i}" for i in range(100)),  # 100 lines
-        start_line=501,
+        content="\n".join(f"l{i}" for i in range(100)),  # 100 lines, covers 50-149
+        start_line=50,
         total_lines=900,
     )
-    assert _anchor_line(5, seg) == 505  # snippet-relative → shifted
-    assert _anchor_line(550, seg) == 550  # inside [501, 600] → echoed absolute, kept
-    assert _anchor_line(730, seg) is None  # beyond snippet and segment → dropped
-    assert _anchor_line(None, seg) is None
-    assert _anchor_line(7, None) == 7  # unknown segment → as-is
+    assert _validate_line(75, overlapping) == 75  # absolute, inside [50, 149]
+    assert _validate_line(50, overlapping) == 50
+    assert _validate_line(149, overlapping) == 149
+    assert _validate_line(5, overlapping) is None  # below the shown range → dropped
+    assert _validate_line(200, overlapping) is None  # above the shown range → dropped
+    assert _validate_line(None, overlapping) is None
+    assert _validate_line(7, None) == 7  # unknown segment → as-is
     pre = FileSegment(path="pr.py", content="4000: a\n4001: b", pre_numbered=True, total_lines=2)
-    assert _anchor_line(4001, pre) == 4001
+    assert _validate_line(4001, pre) == 4001  # pre-numbered owns its numbering
 
 
 # ---------------------------------------------------------------------------

@@ -173,8 +173,10 @@ def split_block_into_segments(
 
     Postconditions:
         - Concatenating segment contents in order reproduces ``content`` exactly.
-        - Each segment's content is ≤ ``max_chars``, except when a single line
-          alone exceeds it (line boundaries are never broken).
+        - Each segment's *rendered* size (content plus the original-line-number
+          prefixes partial segments gain in the prompt) is ≤ ``max_chars``,
+          except when a single line alone exceeds it (line boundaries are
+          never broken).
         - A within-budget block yields exactly one whole-file segment.
     """
     assert max_chars > 0, "max_chars must be positive"
@@ -189,6 +191,10 @@ def split_block_into_segments(
                 pre_numbered=pre_numbered,
             )
         ]
+    # Split pieces become partial segments, which render with "N: " prefixes
+    # (unless already pre-numbered); budget each line's rendered size so the
+    # prompt stays within max_chars after prefixing.
+    prefix_width = 0 if pre_numbered else len(str(total_lines)) + 2
     lines = content.splitlines(keepends=True)
     pieces: List[Tuple[int, str]] = []
     buf: List[str] = []
@@ -196,13 +202,14 @@ def split_block_into_segments(
     buf_start = 1
     line_no = 1
     for ln in lines:
-        if buf and buf_len + len(ln) > max_chars:
+        rendered_len = len(ln) + prefix_width
+        if buf and buf_len + rendered_len > max_chars:
             pieces.append((buf_start, "".join(buf)))
             buf = []
             buf_len = 0
             buf_start = line_no
         buf.append(ln)
-        buf_len += len(ln)
+        buf_len += rendered_len
         line_no += 1
     if buf:
         pieces.append((buf_start, "".join(buf)))
@@ -229,8 +236,8 @@ def build_review_chunks(
     Postconditions:
         - Every input block is fully covered exactly once across the returned
           chunks: no file or line range is dropped or duplicated.
-        - No chunk holds two segments of the same path (keeps ``offset_by_path``
-          unambiguous).
+        - No chunk holds two segments of the same path (so an issue's cited
+          path resolves to exactly one segment).
         - Each chunk's rendered ``content`` is ≤ ``max_chars``, except a chunk
           holding a single segment that alone exceeds the budget (a single line
           longer than the cap), which is intentionally placed alone.
@@ -242,7 +249,7 @@ def build_review_chunks(
 
     def _rendered_len(seg: FileSegment) -> int:
         header = len(f"### {seg.path} ###\n") if seg.path else 0
-        return header + len(seg.content)
+        return header + len(seg.prompt_content)
 
     def _flush() -> None:
         nonlocal current, current_len
@@ -310,8 +317,8 @@ def _segment_notes(chunk: ReviewChunk) -> str:
         elif seg.is_partial:
             notes.append(
                 f"{name} is shown only from original line {seg.start_line} to {seg.end_line} "
-                f"(of {seg.total_lines} total). Report `line` relative to the snippet "
-                "(first shown line = 1); it is re-anchored to the original file automatically."
+                f"(of {seg.total_lines} total), and every line carries its original line-number "
+                "prefix (e.g. `123: code`); set `line` to those exact prefixed numbers."
             )
     return "\n".join(notes)
 
@@ -343,38 +350,38 @@ def _clean_str(value: object, default: str) -> str:
     return text or default
 
 
-def _anchor_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:
-    """Re-anchor a snippet-relative line number to the original file.
+def _validate_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:
+    """Validate a cited original-file line number against its segment.
+
+    Cited numbers are absolute by construction: whole files are shown in full
+    (relative == absolute), and partial segments are rendered with original
+    line-number prefixes (``FileSegment.prompt_content``), so no re-anchoring
+    arithmetic — and none of its relative-vs-absolute ambiguity — exists.
 
     Postconditions:
-        - Returns None when the line cannot be anchored confidently (unknown
-          segment is anchored as-is; a number beyond both the snippet and the
-          segment's original range is discarded rather than mis-anchored).
-        - A number that already falls inside the segment's original range but
-          past the snippet length is treated as an echoed absolute line and
-          returned unchanged.
+        - Returns the line unchanged when it falls inside the segment's
+          original range (or the segment/its bounds are unknown:
+          ``pre_numbered`` content owns its own numbering).
+        - Returns None for a citation outside the segment's range, so a
+          disobeying model can never anchor feedback to the wrong source line.
     """
     if line is None:
         return None
-    if seg is None:
+    if seg is None or seg.pre_numbered:
         return line
-    if seg.pre_numbered:
-        return line
-    if line <= seg.line_count:
-        return line + seg.start_line - 1
     if seg.start_line <= line <= seg.end_line:
         return line
     return None
 
 
 def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> List[CodeReviewIssue]:
-    """Convert chunk-reviewer issue dicts into re-anchored ``CodeReviewIssue``s.
+    """Convert chunk-reviewer issue dicts into validated ``CodeReviewIssue``s.
 
     Postconditions:
         - Untrusted LLM fields are sanitized (severity restricted to the known
           set, strings coerced), so conversion never raises on malformed output.
-        - ``line``/``start_line`` refer to original file lines, or are dropped
-          when they cannot be anchored confidently.
+        - ``line``/``start_line`` are original-file absolute and within the
+          cited segment's range, or dropped (see ``_validate_line``).
     """
     seg_by_path = {seg.path: seg for seg in chunk.segments}
     issues: List[CodeReviewIssue] = []
@@ -394,8 +401,8 @@ def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> Lis
                 severity=severity,
                 category=_clean_str(item.get("category"), "general"),
                 file_path=path,
-                line=_anchor_line(coerce_line(item.get("line")), seg),
-                start_line=_anchor_line(coerce_line(item.get("start_line")), seg),
+                line=_validate_line(coerce_line(item.get("line")), seg),
+                start_line=_validate_line(coerce_line(item.get("start_line")), seg),
                 description=description,
                 suggestion=_clean_str(item.get("suggestion"), ""),
             )
@@ -531,8 +538,10 @@ def _review_chunk_with_recovery(
           ``CodeReviewUnavailableError`` naming the unreviewed ranges — the
           chunk is never silently skipped or scored.
         - Infrastructure failures raise immediately without retry or bisection.
-        - Content failures bisect up to the depth cap; a chunk too small to
-          bisect gets exactly one same-input retry at depth 0.
+        - Content failures bisect up to the depth cap; any chunk that cannot
+          bisect further — the original or a bisected child — gets exactly one
+          same-input retry before the run fails, so a one-off transient error
+          in a terminal child never aborts the review.
     """
     chunk_input = ChunkReviewInput(
         code_chunk=chunk.content,
@@ -561,7 +570,7 @@ def _review_chunk_with_recovery(
             outcome = _review_chunk_with_recovery(reviewer, halves[0], base_input, depth + 1)
             outcome.absorb(_review_chunk_with_recovery(reviewer, halves[1], base_input, depth + 1))
             return outcome
-        if depth == 0 and not retried:
+        if not retried:
             logger.warning(
                 "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
                 type(exc).__name__,
