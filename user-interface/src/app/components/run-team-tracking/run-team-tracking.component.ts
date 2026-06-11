@@ -9,6 +9,8 @@ import { Subscription, switchMap, timer } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
 import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
+import { markStatusReceived } from '../../shared/staleness.util';
+import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 /** Team display order for swim lanes. */
 const TEAM_ORDER = ['git_setup', 'devops', 'backend-code-v2', 'frontend-code-v2', 'backend', 'frontend'];
@@ -69,6 +71,7 @@ interface FlatWorkTreeNode {
     MatChipsModule,
     MatIconModule,
     MatExpansionModule,
+    StallWarningComponent,
   ],
   templateUrl: './run-team-tracking.component.html',
   styleUrl: './run-team-tracking.component.scss',
@@ -140,11 +143,21 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
               (s?.status === 'running' || s?.status === 'pending'));
           const newInterval = needFastPoll(res) ? 5000 : 15000;
           const oldInterval = needFastPoll(this.status) ? 5000 : 15000;
-          this.status = res;
+          // Receipt stamp turns the response's server_time into a clock offset,
+          // so staleness ages advance between polls instead of freezing on the
+          // last snapshot (see staleness.util.ts).
+          this.status = markStatusReceived(res);
           this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
+          // completed_with_failures is the coding team's partial-success terminal
+          // status — without it here the poll runs forever on such jobs.
+          if (
+            res.status === 'completed' ||
+            res.status === 'completed_with_failures' ||
+            res.status === 'failed' ||
+            res.status === 'cancelled'
+          ) {
             this.pollSub?.unsubscribe();
             this.pollSub = null;
           } else if (wasWaiting !== isWaiting || newInterval !== oldInterval) {
@@ -204,6 +217,26 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       default: return 'status-pending';
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Sub-agent Activity and Staleness (code review live progress, stall warning)
+  // ---------------------------------------------------------------------------
+
+  /** 0-1 fraction of the current sub-agent activity (e.g. code review), clamped; null when absent. */
+  activityFraction(): number | null {
+    const fraction = this.status?.current_activity?.fraction;
+    if (fraction === undefined || fraction === null) return null;
+    return Math.min(Math.max(fraction, 0), 1);
+  }
+
+  /** Human label for the current sub-agent, e.g. "Code review". */
+  activityAgentLabel(): string {
+    const agent = this.status?.current_activity?.agent;
+    if (agent === 'tech_lead_review') return 'Tech Lead review';
+    if (agent === 'code_review') return 'Code review';
+    return agent ? this.phaseLabel(agent) : 'Agent activity';
+  }
+
 
   /** Team ID -> list of tasks in execution order for that team. */
   getTeamsWithTasks(): { teamId: string; label: string; tasks: TaskWithId[] }[] {

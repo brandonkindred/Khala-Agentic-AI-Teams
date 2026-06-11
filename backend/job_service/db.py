@@ -118,6 +118,9 @@ def create_job(team: str, job_id: str, status: str = "pending", **fields: Any) -
     fields.pop("job_id", None)
     fields.pop("team", None)
     fields.pop("status", None)
+    # Creation is activity: gives every job (including ones that hang while still
+    # pending) a baseline for stall detection.
+    fields.setdefault("last_activity_at", now.isoformat())
 
     data_json = json.dumps(fields)
     with get_conn() as conn, conn.cursor() as cur:
@@ -195,6 +198,18 @@ def list_jobs(team: str, statuses: list[str] | None = None) -> list[dict[str, An
 
 
 def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) -> None:
+    """Merge ``fields`` into the job's data and refresh its timestamps.
+
+    Preconditions:
+        - ``fields`` values are JSON-serializable.
+    Postconditions:
+        - ``data.last_activity_at`` is stamped with the server's UTC now unless the
+          caller supplied it explicitly. Every real update — from any team, any
+          phase — therefore counts as orchestrator activity, which is what stall
+          detection reads. Pure liveness pings must use :func:`heartbeat`, which
+          deliberately does NOT touch ``last_activity_at`` (it keeps ticking even
+          when the orchestrator thread is hung, so it cannot signal a stall).
+    """
     now = _now_iso()
     # If status is being updated, update the top-level column too
     new_status = fields.pop("status", None)
@@ -204,6 +219,11 @@ def update_job(team: str, job_id: str, heartbeat: bool = True, **fields: Any) ->
     fields.pop("created_at", None)
     fields.pop("updated_at", None)
     fields.pop("last_heartbeat_at", None)
+    # Stamp unless the caller supplied a real value. An explicit None is replaced
+    # too: a job that has ever been updated must always carry a valid activity
+    # timestamp, or the UI's stall detection silently loses its signal.
+    if fields.get("last_activity_at") is None:
+        fields["last_activity_at"] = now
 
     with get_conn() as conn, conn.cursor() as cur:
         if new_status is not None:
@@ -263,7 +283,12 @@ def apply_patch(
     append_to: dict[str, list[Any]] | None = None,
     increment: dict[str, int] | None = None,
 ) -> None:
-    """Atomic read-modify-write: merge fields, merge into nested dicts, append to lists, increment counters."""
+    """Atomic read-modify-write: merge fields, merge into nested dicts, append to lists, increment counters.
+
+    Postconditions: ``data.last_activity_at`` is stamped with the server's UTC now
+    unless ``merge_fields`` supplied it explicitly (a patch is a real update — see
+    :func:`update_job`).
+    """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "SELECT data, status FROM jobs WHERE team = %s AND job_id = %s FOR UPDATE",
@@ -315,6 +340,10 @@ def apply_patch(
                 data[field] = current + delta
 
         now = _now_iso()
+        # Same contract as update_job: a real (non-None) value supplied by the
+        # caller wins; absent or None gets stamped so the field can never go invalid.
+        if not (merge_fields and merge_fields.get("last_activity_at") is not None):
+            data["last_activity_at"] = now
         cur.execute(
             """
                 UPDATE jobs
@@ -334,7 +363,11 @@ def append_event(
     details: dict[str, Any] | None = None,
     status: str | None = None,
 ) -> None:
-    """Append an event to the job's events list and optionally update status."""
+    """Append an event to the job's events list and optionally update status.
+
+    Postconditions: ``data.last_activity_at`` is stamped with the server's UTC now —
+    an event is a real update (see :func:`update_job`).
+    """
     now = _now_iso()
     event = {"timestamp": now, "action": action, "outcome": outcome, "details": details or {}}
 
@@ -344,31 +377,39 @@ def append_event(
                 """
                     UPDATE jobs
                     SET data = jsonb_set(
-                            data,
-                            '{events}',
-                            COALESCE(data->'events', '[]'::jsonb) || %s::jsonb
+                            jsonb_set(
+                                data,
+                                '{events}',
+                                COALESCE(data->'events', '[]'::jsonb) || %s::jsonb
+                            ),
+                            '{last_activity_at}',
+                            %s::jsonb
                         ),
                         status = %s,
                         updated_at = %s,
                         last_heartbeat_at = %s
                     WHERE team = %s AND job_id = %s
                     """,
-                (json.dumps([event]), status, now, now, team, job_id),
+                (json.dumps([event]), json.dumps(now), status, now, now, team, job_id),
             )
         else:
             cur.execute(
                 """
                     UPDATE jobs
                     SET data = jsonb_set(
-                            data,
-                            '{events}',
-                            COALESCE(data->'events', '[]'::jsonb) || %s::jsonb
+                            jsonb_set(
+                                data,
+                                '{events}',
+                                COALESCE(data->'events', '[]'::jsonb) || %s::jsonb
+                            ),
+                            '{last_activity_at}',
+                            %s::jsonb
                         ),
                         updated_at = %s,
                         last_heartbeat_at = %s
                     WHERE team = %s AND job_id = %s
                     """,
-                (json.dumps([event]), now, now, team, job_id),
+                (json.dumps([event]), json.dumps(now), now, now, team, job_id),
             )
 
 
@@ -415,7 +456,7 @@ def mark_stale_active_jobs_failed(
                 RETURNING job_id
                 """,
             (
-                json.dumps({"error": reason}),
+                json.dumps({"error": reason, "current_activity": None}),
                 now.isoformat(),
                 team,
                 waiting_field,
@@ -448,7 +489,7 @@ def mark_all_active_jobs_failed(team: str, reason: str) -> list[str]:
                   AND COALESCE((data->>'waiting_for_draft_feedback')::boolean, false) = false
                 RETURNING job_id
                 """,
-            (json.dumps({"error": reason}), now, team),
+            (json.dumps({"error": reason, "current_activity": None}), now, team),
         )
         return [row[0] for row in cur.fetchall()]
 
@@ -473,6 +514,6 @@ def mark_all_active_jobs_interrupted(team: str, reason: str) -> list[str]:
                   AND COALESCE((data->>'waiting_for_draft_feedback')::boolean, false) = false
                 RETURNING job_id
                 """,
-            (json.dumps({"error": reason}), now, team),
+            (json.dumps({"error": reason, "current_activity": None}), now, team),
         )
         return [row[0] for row in cur.fetchall()]

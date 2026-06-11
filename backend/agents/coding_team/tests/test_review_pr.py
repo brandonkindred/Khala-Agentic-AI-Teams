@@ -130,8 +130,18 @@ class TestGetPullRequestFiles:
                 )
             return httpx.Response(
                 200,
-                json=[{"filename": "a.py", "status": "modified", "patch": "@@ -1 +1 @@\n+a", "additions": 1, "deletions": 0}],
-                headers={"Link": '<https://api.github.com/repos/o/r/pulls/7/files?page=2>; rel="next"'},
+                json=[
+                    {
+                        "filename": "a.py",
+                        "status": "modified",
+                        "patch": "@@ -1 +1 @@\n+a",
+                        "additions": 1,
+                        "deletions": 0,
+                    }
+                ],
+                headers={
+                    "Link": '<https://api.github.com/repos/o/r/pulls/7/files?page=2>; rel="next"'
+                },
             )
 
         client = _client_with(handler)
@@ -323,7 +333,7 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
     )
 
     class _FakeAgent:
-        def run(self, _inp: Any) -> Any:
+        def run(self, _inp: Any, progress_callback: Any = None) -> Any:
             out = holder["agent_output"]
             if isinstance(out, Exception):
                 raise out
@@ -346,7 +356,12 @@ def review_app(monkeypatch: pytest.MonkeyPatch, tmp_path):
 
 
 def _review_body(**overrides: Any) -> dict[str, Any]:
-    body = {"owner": "o", "repo": "r", "repo_path": overrides.pop("repo_path", "/tmp/x"), "pr_number": 7}
+    body = {
+        "owner": "o",
+        "repo": "r",
+        "repo_path": overrides.pop("repo_path", "/tmp/x"),
+        "pr_number": 7,
+    }
     body.update(overrides)
     return body
 
@@ -363,9 +378,7 @@ class TestReviewEndpoint:
         review = gh.reviews[0]
         assert review["event"] == "REQUEST_CHANGES"
         # The in-diff line (2) is an inline comment; the out-of-diff line (999) is not.
-        assert review["comments"] == [
-            c for c in review["comments"] if c["line"] == 2
-        ]
+        assert review["comments"] == [c for c in review["comments"] if c["line"] == 2]
         assert len(review["comments"]) == 1
         # Job completed with the PR url + review summary.
         job = review_app["jobs"].get_job(data["job_id"])
@@ -391,6 +404,10 @@ class TestReviewEndpoint:
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
+        # A failed job must not keep claiming mid-review progress: the failure
+        # handler resets the percentage status_text and the activity entry.
+        assert job["status_text"] is None
+        assert job["current_activity"] is None
 
     def test_no_changed_files_completes(self, review_app) -> None:
         review_app["github"]["client"].files = []
@@ -399,7 +416,9 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
         assert review_app["github"]["client"].reviews == []
-        assert any("no changed files" in c[1].lower() for c in review_app["github"]["client"].comments)
+        assert any(
+            "no changed files" in c[1].lower() for c in review_app["github"]["client"].comments
+        )
 
     def test_review_422_retries_then_succeeds(self, review_app) -> None:
         gh = review_app["github"]["client"]
@@ -510,7 +529,9 @@ class TestReviewPersistence:
             return rows
 
         monkeypatch.setattr(api_main, "list_reviews", _fake_list)
-        resp = review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "pr_number": 7})
+        resp = review_app["client"].get(
+            "/reviews", params={"owner": "o", "repo": "r", "pr_number": 7}
+        )
         assert resp.status_code == 200
         data = resp.json()
         assert len(data) == 1
@@ -520,7 +541,15 @@ class TestReviewPersistence:
 
     def test_get_reviews_rejects_out_of_range_limit(self, review_app) -> None:
         # limit is validated at the API layer (1..2000); out-of-range -> 422.
-        assert review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 0}).status_code == 422
         assert (
-            review_app["client"].get("/reviews", params={"owner": "o", "repo": "r", "limit": 3000}).status_code == 422
+            review_app["client"]
+            .get("/reviews", params={"owner": "o", "repo": "r", "limit": 0})
+            .status_code
+            == 422
+        )
+        assert (
+            review_app["client"]
+            .get("/reviews", params={"owner": "o", "repo": "r", "limit": 3000})
+            .status_code
+            == 422
         )

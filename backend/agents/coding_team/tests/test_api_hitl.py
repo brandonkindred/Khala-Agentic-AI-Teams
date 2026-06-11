@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict
+from typing import Any, Dict, List
 
 from fastapi.testclient import TestClient
 
@@ -256,3 +256,153 @@ def test_format_questions_comment():
     assert "`q1`" in out
     assert "`strict`" in out
     assert "/run/job-123/answers" in out
+
+
+def test_status_surfaces_current_activity_and_timestamps(monkeypatch):
+    """/status round-trips the sub-agent activity dict and the activity/heartbeat
+    timestamps the UI uses for the sub-progress bar and stall warning."""
+    monkeypatch.setattr(
+        api,
+        "get_job",
+        lambda jid: _job(
+            status="running",
+            waiting_for_answers=False,
+            pending_questions=[],
+            current_activity={
+                "agent": "tech_lead_review",
+                "step": "waiting_retry",
+                "detail": "attempt 1/3 failed; retrying in 4s",
+                "fraction": 0.37,
+            },
+            last_activity_at="2026-06-10T12:00:00+00:00",
+            updated_at="2026-06-10T12:00:01+00:00",
+            last_heartbeat_at="2026-06-10T12:00:02+00:00",
+        ),
+    )
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current_activity"]["agent"] == "tech_lead_review"
+    assert body["current_activity"]["fraction"] == 0.37
+    assert body["last_activity_at"] == "2026-06-10T12:00:00+00:00"
+    assert body["updated_at"] == "2026-06-10T12:00:01+00:00"
+    assert body["last_heartbeat_at"] == "2026-06-10T12:00:02+00:00"
+
+
+def test_status_activity_fields_default_to_none(monkeypatch):
+    """Older job records without the new fields validate cleanly with None values,
+    and a malformed (non-dict) current_activity is coerced to None."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(current_activity="garbage"))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["current_activity"] is None
+    assert body["last_activity_at"] is None
+    assert body["updated_at"] is None
+    assert body["last_heartbeat_at"] is None
+
+
+def test_resume_clears_stale_current_activity(monkeypatch):
+    """Resume wipes the dead attempt's current_activity (its finally clears never
+    ran) so the UI cannot render a frozen mid-review sub-bar through the resumed run."""
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        repo_path="/tmp/repo",
+        current_activity={"agent": "code_review", "step": "reviewing", "fraction": 0.4},
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "run_coding_team_orchestrator", lambda *a, **k: None)
+    updates: List[Dict[str, Any]] = []
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: updates.append(kw))
+
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    clears = [kw for kw in updates if kw.get("current_activity", "absent") is None]
+    assert clears, "resume must clear the stale current_activity"
+
+
+# --------------------------------------------------------------------------- /status progress + server_time
+
+
+def test_status_surfaces_progress_and_server_time(monkeypatch):
+    """/status exposes the job-level progress band and the server clock the UI
+    computes staleness against."""
+    from datetime import datetime
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(status="running", progress=47))
+    r = client.get("/status/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["progress"] == 47
+    assert body["server_time"] is not None
+    datetime.fromisoformat(body["server_time"])
+
+
+def test_status_progress_coercion_clamps_garbage(monkeypatch):
+    """Garbage progress degrades to None; out-of-range values clamp to [0, 100]."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(progress="not-a-number"))
+    assert client.get("/status/j1").json()["progress"] is None
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(progress=250))
+    assert client.get("/status/j1").json()["progress"] == 100
+
+
+def test_resume_releases_claim_when_activity_clear_fails(monkeypatch):
+    """A job-service outage during resume's current_activity wipe must not leak the
+    run-thread claim: the failed /resume surfaces the error, and a later /resume
+    (service recovered) can still spawn the orchestrator instead of being told
+    'Job already running' forever."""
+    from fastapi.testclient import TestClient
+
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        repo_path="/tmp/repo",
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    started = {"n": 0}
+    monkeypatch.setattr(
+        api,
+        "run_coding_team_orchestrator",
+        lambda *a, **k: started.__setitem__("n", started["n"] + 1),
+    )
+
+    store = {"down": True}
+
+    def flaky_update(jid, **kw):
+        if store["down"]:
+            raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api, "update_job", flaky_update)
+
+    local_client = TestClient(api.app, raise_server_exceptions=False)
+    first = local_client.post("/run/j1/resume")
+    assert first.status_code == 500
+    assert started["n"] == 0
+
+    store["down"] = False
+    second = local_client.post("/run/j1/resume")
+    assert second.status_code == 200
+    assert second.json()["message"] == "Job resumed."
+    assert started["n"] == 1, "claim must have been released so the retry can spawn"

@@ -1,10 +1,58 @@
 """Models for the Code Review agent."""
 
-from typing import Any, Dict, List, Optional
+import logging
+from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
 from software_engineering_team.shared.models import SystemArchitecture
+
+ReviewProgressCallback = Callable[[str, str, float], None]
+"""Progress callback signature: (step, detail, fraction in [0.0, 1.0]).
+
+Steps: ``preparing | reviewing | waiting_retry | parsing | finalizing | done``.
+
+Preconditions (on the callable a caller provides):
+    - Should not raise; review progress is observability, never control flow.
+      If it raises anyway, the exception is logged and swallowed at the
+      invocation boundary (see notify_review_progress) — it can never change
+      a review's result.
+    - Must accept (str, str, float) positionally.
+"""
+
+
+def notify_review_progress(
+    callback: Optional[ReviewProgressCallback], step: str, detail: str, fraction: float
+) -> None:
+    """Invoke a review progress callback, or no-op when none is provided.
+
+    A misbehaving callback is a reporter bug, but every consequence stays on the
+    observability side: an out-of-range fraction is logged and clamped, and a
+    raising callback is logged and swallowed. Letting either propagate would
+    abort a healthy review (the call sites' broad ``except`` then silently
+    diverts to the lower-fidelity LLM fallback) — a status-store hiccup must
+    never change what the reviewer concluded. This mirrors the Tech Lead
+    ``_report`` and ``call_llm_with_retries`` ``on_retry`` guards.
+
+    Postconditions:
+        - When ``callback`` is None, has no effect.
+        - Otherwise ``callback(step, detail, clamped_fraction)`` was attempted
+          exactly once; any exception it raised was logged at warning level and
+          swallowed. Never raises.
+    """
+    if callback is None:
+        return
+    if not 0.0 <= fraction <= 1.0:
+        logging.getLogger(__name__).warning(
+            "review progress fraction out of range (step=%s): %r; clamping", step, fraction
+        )
+        fraction = min(max(fraction, 0.0), 1.0)
+    try:
+        callback(step, detail, fraction)
+    except Exception as e:  # noqa: BLE001 — observability must not break the review
+        logging.getLogger(__name__).warning(
+            "review progress callback failed (ignored; step=%s): %s", step, e
+        )
 
 
 def coerce_line(value: Any) -> Optional[int]:

@@ -910,3 +910,114 @@ describe('RunTeamTrackingComponent (extra coverage)', () => {
     expect(component.workItemStatusIcon('pending')).toBe('radio_button_unchecked');
   });
 });
+
+describe('RunTeamTrackingComponent sub-agent activity and staleness', () => {
+  let api: { getJobStatus: ReturnType<typeof vi.fn> };
+  let fixture: ComponentFixture<RunTeamTrackingComponent>;
+  let component: RunTeamTrackingComponent;
+
+  const activityStatus = (overrides: Partial<JobStatusResponse> = {}): JobStatusResponse => ({
+    job_id: 'job-1',
+    status: 'running',
+    phase: 'coding',
+    task_results: [],
+    task_ids: [],
+    failed_tasks: [],
+    status_text: 'Code review (40%): Add login — chunk 2/5',
+    current_activity: {
+      agent: 'code_review',
+      step: 'reviewing',
+      detail: 'chunk 2/5: src/auth.py',
+      fraction: 0.4,
+      task_id: 't1',
+      task_title: 'Add login',
+    },
+    ...overrides,
+  });
+
+  beforeEach(() => {
+    api = { getJobStatus: vi.fn() };
+    TestBed.configureTestingModule({
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: api }],
+    });
+    fixture = TestBed.createComponent(RunTeamTrackingComponent);
+    component = fixture.componentInstance;
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('activityFraction returns the clamped sub-agent fraction', () => {
+    component.status = activityStatus();
+    expect(component.activityFraction()).toBe(0.4);
+
+    component.status = activityStatus({
+      current_activity: { agent: 'code_review', fraction: 1.7 },
+    });
+    expect(component.activityFraction()).toBe(1);
+
+    component.status = activityStatus({
+      current_activity: { agent: 'code_review', fraction: -0.2 },
+    });
+    expect(component.activityFraction()).toBe(0);
+
+    component.status = activityStatus({ current_activity: undefined });
+    expect(component.activityFraction()).toBeNull();
+  });
+
+  it('activityAgentLabel names the reporting sub-agent', () => {
+    component.status = activityStatus();
+    expect(component.activityAgentLabel()).toBe('Code review');
+    component.status = activityStatus({
+      current_activity: { agent: 'tech_lead_review', fraction: 0.1 },
+    });
+    expect(component.activityAgentLabel()).toBe('Tech Lead review');
+  });
+
+  /** Render with a directly-assigned status (the poll timer never fires in sync tests). */
+  const render = (status: JobStatusResponse): HTMLElement => {
+    api.getJobStatus.mockReturnValue(of(status));
+    component.jobId = 'job-1';
+    component.status = status;
+    fixture.detectChanges();
+    return fixture.nativeElement as HTMLElement;
+  };
+
+  it('renders the determinate sub-progress bar and detail in the coding-team card', () => {
+    const el = render(activityStatus());
+    const detail = el.querySelector('.current-activity-detail');
+    expect(detail?.textContent).toContain('Code review: chunk 2/5: src/auth.py');
+    const pct = el.querySelector('.current-activity-pct');
+    expect(pct?.textContent).toContain('40%');
+    const bar = el.querySelector('.current-activity-progress mat-progress-bar');
+    expect(bar).toBeTruthy();
+  });
+
+  it('shows last-activity label and stalled warning for a stale running job', () => {
+    const stale = new Date(Date.now() - 12 * 60 * 1000).toISOString();
+    const el = render(activityStatus({ last_activity_at: stale }));
+    expect(el.querySelector('.last-activity-section')?.textContent).toContain('Last activity: 12m ago');
+    expect(el.querySelector('.stalled-warning')?.textContent).toContain(
+      'No agent activity for 12m — the job may be stalled.',
+    );
+  });
+
+  it('hides the stalled warning when activity is fresh or job is waiting', () => {
+    render(activityStatus({ last_activity_at: new Date().toISOString() }));
+    expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+
+    const stale = new Date(Date.now() - 12 * 60 * 1000).toISOString();
+    component.status = activityStatus({ last_activity_at: stale, waiting_for_answers: true });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.querySelector('.stalled-warning')).toBeNull();
+  });
+
+  it('hides the activity card on non-running jobs (a dead run must not render a live sub-bar)', () => {
+    // A killed/interrupted orchestrator never runs its finally clears, so a stale
+    // current_activity can survive on the record; the card must not present it
+    // as live progress.
+    const el = render(activityStatus({ status: 'interrupted' }));
+    expect(el.querySelector('.current-activity-section')).toBeNull();
+  });
+});

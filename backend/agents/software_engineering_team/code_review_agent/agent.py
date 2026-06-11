@@ -14,7 +14,14 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .coordinator import run_coordinator
-from .models import CodeReviewInput, CodeReviewIssue, CodeReviewOutput, coerce_line
+from .models import (
+    CodeReviewInput,
+    CodeReviewIssue,
+    CodeReviewOutput,
+    ReviewProgressCallback,
+    coerce_line,
+    notify_review_progress,
+)
 from .prompts import CODE_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -30,6 +37,7 @@ class CodeReviewAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -37,8 +45,24 @@ class CodeReviewAgent:
         # Keep LLMClient for context_sizing utilities
         self.llm = llm_client if llm_client is not None else get_client("code_review")
 
-    def run(self, input_data: CodeReviewInput) -> CodeReviewOutput:
-        """Review code and return approval or issues."""
+    def run(
+        self,
+        input_data: CodeReviewInput,
+        progress_callback: ReviewProgressCallback | None = None,
+    ) -> CodeReviewOutput:
+        """Review code and return approval or issues.
+
+        Preconditions:
+            - ``progress_callback`` is None or satisfies the ReviewProgressCallback
+              contract (non-raising, accepts ``(step, detail, fraction)``).
+
+        Postconditions:
+            - When ``progress_callback`` is provided, it is invoked with
+              non-decreasing fractions ending at 1.0 (step ``done``) on every
+              successful return, and never after this method returns.
+            - The review result is identical whether or not a callback is provided.
+        """
+        notify_review_progress(progress_callback, "preparing", "preparing review context", 0.05)
         code = input_data.code or ""
         single_call_limit = compute_code_review_chunk_chars(self.llm)
         if len(code) > single_call_limit:
@@ -60,7 +84,7 @@ class CodeReviewAgent:
                     architecture=input_data.architecture,
                     existing_codebase=input_data.existing_codebase,
                 )
-            return run_coordinator(self.llm, input_data)
+            return run_coordinator(self.llm, input_data, progress_callback=progress_callback)
         max_total = compute_code_review_total_chars(self.llm)
         code = compact_text(code, max_total, self.llm, "code for review")
 
@@ -131,9 +155,16 @@ class CodeReviewAgent:
         )
 
         prompt = "\n".join(context_parts)
+        notify_review_progress(
+            progress_callback,
+            "reviewing",
+            f"reviewing {len(code)} chars of {input_data.language}",
+            0.15,
+        )
         agent = Agent(model=self._model, system_prompt=CODE_REVIEW_PROMPT)
         result = agent(prompt)
         raw = str(result).strip()
+        notify_review_progress(progress_callback, "parsing", "parsing findings", 0.85)
         data = json.loads(raw)
 
         # Parse issues
@@ -153,6 +184,7 @@ class CodeReviewAgent:
                 )
 
         # Determine approval based on issue severity
+        notify_review_progress(progress_callback, "finalizing", "applying approval rules", 0.95)
         critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
         raw_approved = bool(data.get("approved", False))
         approved = raw_approved and len(critical_or_high) == 0
@@ -201,6 +233,9 @@ class CodeReviewAgent:
             len(critical_or_high),
         )
 
+        notify_review_progress(
+            progress_callback, "done", f"approved={approved}, issues={len(issues)}", 1.0
+        )
         return CodeReviewOutput(
             approved=approved,
             issues=issues,
