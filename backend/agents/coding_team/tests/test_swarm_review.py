@@ -12,6 +12,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
+import pytest
+
 from coding_team import orchestrator as orch_mod
 from coding_team.models import CodingTeamPlanInput, StackSpec, Task, TaskStatus
 from coding_team.orchestrator import CodingTeamSwarm, run_coding_team_orchestrator
@@ -36,7 +38,14 @@ class StubTechLead:
         self.requested_changes = requested_changes if requested_changes is not None else ["fix X"]
         self.review_calls: List[str] = []
 
-    def run_code_review(self, task_title, task_description, acceptance_criteria, changes_summary):
+    def run_code_review(
+        self,
+        task_title,
+        task_description,
+        acceptance_criteria,
+        changes_summary,
+        progress_callback=None,
+    ):
         self.review_calls.append(changes_summary)
         return {
             "approved": self.approved,
@@ -171,7 +180,12 @@ def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatc
 
     class ErrTechLead(StubTechLead):
         def run_code_review(
-            self, task_title, task_description, acceptance_criteria, changes_summary
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            progress_callback=None,
         ):
             self.review_calls.append(changes_summary)
             return {
@@ -1042,3 +1056,373 @@ def test_implement_passes_full_task_description_and_repo_context(tmp_path, monke
 
     assert huge in captured["prompt"]  # full description embedded, uncut
     assert big_ctx in captured["prompt"]  # full repo context embedded, uncut
+
+
+# ----------------------------------------------------- live progress reporting (code review)
+
+
+def test_quality_gate_code_review_reports_live_progress(tmp_path, monkeypatch):
+    """The quality-gate code review must surface the agent's sub-step reports as
+    status_text + structured current_activity (rising fraction), then clear the
+    activity on completion so a stale sub-bar never lingers."""
+    import types
+
+    monkeypatch.setattr(
+        f"{QG}.run_build_verification",
+        lambda *a, **k: types.SimpleNamespace(success=True, error=""),
+    )
+    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
+
+    def _fake_review(**kwargs):
+        cb = kwargs.get("progress_callback")
+        assert cb is not None, "orchestrator must pass a progress callback"
+        cb("reviewing", "chunk 1/2: a.py", 0.3)
+        cb("reviewing", "chunk 2/2: b.py", 0.7)
+        cb("done", "approved=True, issues=0", 1.0)
+        return types.SimpleNamespace(approved=True, issues=[])
+
+    monkeypatch.setattr(f"{QG}.run_code_review", _fake_review)
+
+    updates: List[Dict[str, Any]] = []
+    swarm, graph = _make_real_swarm(tmp_path)
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: updates.append(kw))
+
+    assert graph.get_task("t1").status == TaskStatus.IN_REVIEW
+
+    review_updates = [u for u in updates if "Code review (" in (u.get("status_text") or "")]
+    assert review_updates, f"expected code-review status updates, got {updates}"
+    assert any("chunk 1/2" in u["status_text"] for u in review_updates)
+
+    activities = [u["current_activity"] for u in updates if u.get("current_activity")]
+    assert all(a["agent"] == "code_review" for a in activities)
+    fractions = [a["fraction"] for a in activities]
+    assert fractions == sorted(fractions), "fractions must be non-decreasing"
+
+    # The final activity-bearing update must be followed by an explicit clear.
+    clears = [u for u in updates if "current_activity" in u and u["current_activity"] is None]
+    assert clears, "current_activity must be cleared after the review"
+
+
+def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeypatch):
+    """_review_and_merge bridges Tech Lead reports into the job record and clears
+    current_activity after each task's review (success and rejection alike)."""
+    _patch_git(monkeypatch)
+
+    class ReportingTechLead(StubTechLead):
+        def run_code_review(
+            self,
+            task_title,
+            task_description,
+            acceptance_criteria,
+            changes_summary,
+            progress_callback=None,
+        ):
+            if progress_callback is not None:
+                progress_callback("reviewing", "attempt 1/3", 0.1)
+                progress_callback("done", "review complete", 1.0)
+            return super().run_code_review(
+                task_title, task_description, acceptance_criteria, changes_summary
+            )
+
+    tech_lead = ReportingTechLead(approved=True)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.set_task_in_review("t1")
+
+    updates: List[Dict[str, Any]] = []
+    swarm._review_and_merge(lambda **kw: updates.append(kw))
+
+    tl_updates = [
+        u for u in updates if (u.get("current_activity") or {}).get("agent") == "tech_lead_review"
+    ]
+    assert tl_updates, f"expected tech-lead activity updates, got {updates}"
+    assert any("attempt 1/3" in (u.get("status_text") or "") for u in updates)
+    assert any("current_activity" in u and u["current_activity"] is None for u in updates)
+
+
+def test_orchestrator_does_not_stamp_activity_and_terminal_clears(tmp_path, monkeypatch):
+    """last_activity_at is stamped centrally by the job service on every real update,
+    so the orchestrator must NOT stamp it client-side (one clock, one writer). The
+    terminal update must carry current_activity=None so a transient failure of an
+    earlier best-effort clear cannot leave a terminal job serving a stale entry."""
+    updates: List[Dict[str, Any]] = []
+
+    class _PlanningTechLead:
+        def run_plan_to_task_graph(self, plan_input):
+            return {"tasks": [], "stacks": [{"name": "backend", "tools_services": []}]}
+
+    class _NoopSwarm:
+        aborted = False
+
+        def __init__(self, **kw):
+            self.graph = kw["graph"]
+
+        def run(self, **kw):
+            kw["update_fn"](status_text="working")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
+
+    run_coding_team_orchestrator(
+        job_id="j-activity",
+        plan_input=CodingTeamPlanInput(
+            plan="p", specification="s", architecture="a", repo_path=str(tmp_path)
+        ),
+        repo_path=str(tmp_path),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        get_llm=lambda key: None,
+    )
+
+    assert updates, "orchestrator must have written job updates"
+    for kw in updates:
+        assert "last_activity_at" not in kw, f"client-side stamp leaked into {kw}"
+
+    final = updates[-1]
+    assert final.get("status") == "completed"
+    assert "current_activity" in final and final["current_activity"] is None
+
+
+# ----------------------------------------------------- tech lead review progress reporting
+
+
+def test_tech_lead_review_progress_reports_attempts_and_retry_waits(monkeypatch):
+    """A flaky review reports attempt 1/N, the backoff wait, attempt 2/N, then a
+    terminal done at 1.0 — silent retries are the prime 'looks hung' source."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "2")  # → 3 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    calls = {"n": 0}
+
+    def flaky(agent, prompt):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("rate limited")
+        return {"approved": True, "reason": "ok", "requested_changes": []}
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", flaky)
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    reports: List[Any] = []
+    out = tl.run_code_review(
+        "t", "d", [], "evidence", progress_callback=lambda s, d, f: reports.append((s, d, f))
+    )
+
+    assert out["approved"] is True
+    steps_details = [(s, d) for s, d, _f in reports]
+    assert steps_details[0] == ("reviewing", "attempt 1/3")
+    assert steps_details[1][0] == "waiting_retry"
+    assert "attempt 1/3 failed" in steps_details[1][1]
+    assert steps_details[2] == ("reviewing", "attempt 2/3")
+    assert reports[-1][0] == "done"
+    assert reports[-1][2] == 1.0
+
+
+def test_tech_lead_review_progress_terminal_done_on_exhausted_retries(monkeypatch):
+    """Exhausted retries still emit a terminal done at 1.0 (no perpetual mid-bar)."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "1")  # → 2 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr("llm_service.util.time.sleep", lambda *_a, **_k: None)
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: (_ for _ in ()).throw(RuntimeError("down")),
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    reports: List[Any] = []
+    out = tl.run_code_review(
+        "t", "d", [], "x", progress_callback=lambda s, d, f: reports.append((s, d, f))
+    )
+
+    assert out["error"] is True
+    assert reports[-1][0] == "done"
+    assert reports[-1][2] == 1.0
+    assert "failed after 2 attempt(s)" in reports[-1][1]
+    assert "after 2 attempt(s)" in out["reason"]
+
+
+def test_tech_lead_review_fail_fast_reports_actual_attempt_count(monkeypatch):
+    """A fail-fast error (rate limit) skips retries entirely; the diagnostic must say
+    1 attempt — claiming the full budget misleads the operator about what ran."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+    from llm_service.interface import LLMRateLimitError
+
+    monkeypatch.setenv("CODING_TEAM_REVIEW_RETRIES", "2")  # → budget of 3 attempts
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: (_ for _ in ()).throw(LLMRateLimitError("429")),
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    reports: List[Any] = []
+    out = tl.run_code_review(
+        "t", "d", [], "x", progress_callback=lambda s, d, f: reports.append((s, d, f))
+    )
+
+    assert out["error"] is True
+    assert "after 1 attempt(s)" in out["reason"]
+    assert "failed after 1 attempt(s)" in reports[-1][1]
+
+
+def test_tech_lead_review_raising_callback_never_burns_attempts(monkeypatch):
+    """A raising progress_callback is an observability bug, not an LLM failure: it must
+    be swallowed, never counted as a failed attempt, and the review must succeed."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    calls = {"n": 0}
+
+    def ok(agent, prompt):
+        calls["n"] += 1
+        return {"approved": True, "reason": "ok", "requested_changes": []}
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", ok)
+    tl = tl_mod.TechLeadAgent(model=object())
+
+    def _boom(s, d, f):
+        raise RuntimeError("store down")
+
+    out = tl.run_code_review("t", "d", [], "evidence", progress_callback=_boom)
+    assert out["approved"] is True and out["error"] is False
+    assert calls["n"] == 1, "exactly one LLM attempt; callback errors must not retry"
+
+
+def test_tech_lead_review_no_callback_unchanged(monkeypatch):
+    """progress_callback omitted → result identical to the pre-callback behavior."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {"approved": True, "reason": "ok", "requested_changes": []},
+    )
+    tl = tl_mod.TechLeadAgent(model=object())
+    out = tl.run_code_review("t", "d", [], "evidence")
+    assert out == {"approved": True, "error": False, "reason": "ok", "requested_changes": []}
+
+
+# ----------------------------------------------------- job-level progress (coding band)
+
+
+def test_coding_progress_maps_terminal_share_onto_band():
+    """Empty graph → base; progress is monotone in terminal tasks, bounded by the band,
+    and respects a caller-supplied (base, span) slice (terminal 100 is written separately)."""
+
+    def tasks(merged: int, failed: int, open_: int):
+        return (
+            [{"status": "merged"}] * merged
+            + [{"status": "failed"}] * failed
+            + [{"status": "to_do"}] * open_
+        )
+
+    for base, span in [(0, 95), (30, 65)]:
+        assert orch_mod._coding_progress([], base, span) == base
+        assert orch_mod._coding_progress(tasks(0, 0, 4), base, span) == base
+        half = orch_mod._coding_progress(tasks(1, 1, 2), base, span)
+        full = orch_mod._coding_progress(tasks(3, 1, 0), base, span)
+        assert base <= half <= full == base + span <= 100
+
+    # An impossible band is a caller bug, not something to render.
+    with pytest.raises(AssertionError):
+        orch_mod._coding_progress([], 50, 60)
+
+
+def test_orchestrator_writes_job_progress_through_coding_phase(tmp_path, monkeypatch):
+    """The job-level progress bar must advance during the coding phase: base at coding
+    start, per-snapshot updates from the task graph, and 100 on terminal completion."""
+    updates: List[Dict[str, Any]] = []
+
+    class _PlanningTechLead:
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+            }
+
+    class _MergingSwarm:
+        aborted = False
+
+        def __init__(self, **kw):
+            self.graph = kw["graph"]
+
+        def run(self, **kw):
+            # Simulate one task reaching a terminal state mid-run; persist_fn must
+            # carry the recomputed progress.
+            self.graph.update_task("t1", status=TaskStatus.MERGED)
+            kw["persist_fn"]()
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: _PlanningTechLead())
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _MergingSwarm)
+
+    run_coding_team_orchestrator(
+        job_id="j-progress",
+        plan_input=CodingTeamPlanInput(
+            plan="p", specification="s", architecture="a", repo_path=str(tmp_path)
+        ),
+        repo_path=str(tmp_path),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        get_llm=lambda key: None,
+    )
+
+    progresses = [kw["progress"] for kw in updates if "progress" in kw]
+    assert progresses, "orchestrator must write job-level progress"
+    assert progresses[0] == orch_mod._DEFAULT_PROGRESS_BASE
+    # 1 of 2 tasks terminal mid-run
+    expected_mid = orch_mod._DEFAULT_PROGRESS_BASE + int(orch_mod._DEFAULT_PROGRESS_SPAN / 2)
+    assert expected_mid in progresses
+    assert progresses[-1] == 100
+    assert progresses == sorted(progresses), "progress must be monotone non-decreasing"
+
+
+def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
+    """Resuming from a snapshot with terminal tasks must not regress the bar: the
+    restored persist publishes the band value for the already-merged share, and no
+    later write may go below it (the old unconditional base write went 52 → 10)."""
+    updates: List[Dict[str, Any]] = []
+
+    snapshot = [
+        {"id": "t1", "title": "T1", "status": "merged", "dependencies": []},
+        {"id": "t2", "title": "T2", "status": "to_do", "dependencies": []},
+    ]
+
+    class _NoopSwarm:
+        aborted = False
+
+        def __init__(self, **kw):
+            self.graph = kw["graph"]
+
+        def run(self, **kw):
+            kw["persist_fn"]()
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", lambda *a, **k: object())
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", lambda **kw: StubWorker(kw["agent_id"]))
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", _NoopSwarm)
+
+    run_coding_team_orchestrator(
+        job_id="j-resume-progress",
+        plan_input=CodingTeamPlanInput(
+            plan="p", specification="s", architecture="a", repo_path=str(tmp_path)
+        ),
+        repo_path=str(tmp_path),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {"task_graph_snapshot": snapshot, "agent_task_map": {}},
+        get_llm=lambda key: None,
+    )
+
+    progresses = [kw["progress"] for kw in updates if "progress" in kw]
+    restored = orch_mod._DEFAULT_PROGRESS_BASE + int(orch_mod._DEFAULT_PROGRESS_SPAN / 2)
+    assert progresses[0] == restored, "restored persist must reflect merged tasks"
+    assert progresses == sorted(progresses), "no write may regress the bar on resume"
+    assert progresses[-1] == 100

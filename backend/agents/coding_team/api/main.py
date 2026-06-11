@@ -24,6 +24,7 @@ if str(_agents_root) not in sys.path:
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -228,6 +229,31 @@ class StatusResponse(BaseModel):
         default=False,
         description="True when the job is paused waiting for the user to answer pending questions.",
     )
+    current_activity: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="Fine-grained activity of the currently running sub-agent "
+        "(agent, step, detail, fraction, task_id, task_title).",
+    )
+    last_activity_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the last real orchestrator update (heartbeats excluded).",
+    )
+    updated_at: Optional[str] = Field(
+        default=None, description="ISO timestamp of the last job update."
+    )
+    last_heartbeat_at: Optional[str] = Field(
+        default=None,
+        description="ISO timestamp of the last heartbeat (liveness of the worker process).",
+    )
+    progress: Optional[int] = Field(
+        default=None,
+        description="Overall job progress (0-100) derived from terminal tasks in the graph.",
+    )
+    server_time: Optional[str] = Field(
+        default=None,
+        description="Server UTC time when this response was built; clients should compute "
+        "activity staleness against this, not their own clock (skew immunity).",
+    )
 
 
 class JobListItem(BaseModel):
@@ -339,7 +365,9 @@ def post_run(request: RunRequest) -> RunResponse:
                 )
             except Exception as e:
                 logger.exception("Coding team orchestrator failed: %s", e)
-                update_job(job_id, status="failed", error=str(e))
+                # current_activity=None: a crash skips the in-flow clears, and a
+                # failed job must not keep serving a frozen mid-review sub-bar.
+                update_job(job_id, status="failed", error=str(e), current_activity=None)
             finally:
                 _clear_run_thread(job_id)
 
@@ -369,7 +397,27 @@ def get_status(job_id: str) -> StatusResponse:
         review_summary=data.get("review_summary"),
         pending_questions=[PendingQuestion(**q) for q in data.get("pending_questions", [])],
         waiting_for_answers=bool(data.get("waiting_for_answers", False)),
+        current_activity=data.get("current_activity")
+        if isinstance(data.get("current_activity"), dict)
+        else None,
+        last_activity_at=data.get("last_activity_at"),
+        updated_at=data.get("updated_at"),
+        last_heartbeat_at=data.get("last_heartbeat_at"),
+        progress=_coerce_progress(data.get("progress")),
+        server_time=datetime.now(timezone.utc).isoformat(),
     )
+
+
+def _coerce_progress(value: Any) -> Optional[int]:
+    """Coerce a stored progress value to an int in [0, 100], or None.
+
+    Postconditions: garbage (non-numeric) yields None; numeric values are
+    clamped so a corrupt record can never render an out-of-range bar.
+    """
+    try:
+        return min(max(int(value), 0), 100)
+    except (TypeError, ValueError):
+        return None
 
 
 def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> List[Dict[str, Any]]:
@@ -506,11 +554,18 @@ def resume_job(job_id: str) -> RunResponse:
             )
         except Exception as e:
             logger.exception("Coding team orchestrator resume failed: %s", e)
-            update_job(job_id, status="failed", error=str(e))
+            update_job(job_id, status="failed", error=str(e), current_activity=None)
         finally:
             _clear_run_thread(job_id)
 
     try:
+        # The dead attempt may have left a mid-review current_activity behind (its
+        # finally clears never ran); wipe it so the UI does not render a frozen
+        # sub-bar through the resumed run's early phases. This sits INSIDE the
+        # claim-releasing try: it is the first job-service write after the claim,
+        # and a raise here (store outage) that escaped without releasing would
+        # wedge the job — every later /resume would see the claim and no-op.
+        update_job(job_id, current_activity=None)
         threading.Thread(target=run, daemon=True).start()
     except Exception:
         # The thread never started, so run()'s finally will never release the claim — release it
@@ -901,12 +956,26 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 task_requirements=pr.body or "",
                 language=_infer_review_language(files),
             )
+
+            # Same bridge as the orchestrator's review sites: shared schema,
+            # coalescing, swallow-on-failure, and clear-on-exit in one place.
+            # last_activity_at is stamped centrally by the job service on every
+            # real update, so these writes count as activity for stall detection.
+            pr_bridge = ActivityBridge(
+                lambda **kw: update_job(job_id, **kw),
+                agent="code_review",
+                label=f"Reviewing PR #{pr_number}",
+            )
+
             try:
-                output = CodeReviewAgent().run(review_input)
+                output = CodeReviewAgent().run(review_input, progress_callback=pr_bridge)
             except Exception as e:  # noqa: BLE001 - any reviewer failure fails the job cleanly
                 logger.exception("PR review agent failed: %s", e)
                 _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {e}")
                 return
+            finally:
+                # Clear so a stale sub-progress entry never outlives the review itself.
+                pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
             body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)
@@ -947,7 +1016,9 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
         logger.exception("PR review hook failed: %s", review_exc)
         try:
             with GitHubClient(token=token) as client:
-                _record_failure(client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}")
+                _record_failure(
+                    client, owner, repo, pr_number, job_id, f"code review failed: {review_exc}"
+                )
         except Exception:  # noqa: BLE001 - the status update below is the last resort
             # Safety net: ``_record_failure`` above may already have marked the
             # job/review failed, but if it raised (e.g. the GitHub client itself
@@ -1058,7 +1129,9 @@ def _record_failure(
     consistent ``status="failed"`` instead of stale ``status="completed"``.
     """
     safe = scrub_token_from_text(error)
-    update_job(job_id, status="failed", error=safe)
+    # status_text/current_activity are reset so a failed job cannot keep claiming
+    # mid-review progress (e.g. a frozen "Reviewing PR #7 (85%)" line) forever.
+    update_job(job_id, status="failed", error=safe, status_text=None, current_activity=None)
     # No-op for non-review jobs (no matching code_review_runs row); persists the
     # failure for review jobs so the Code Review page shows the failed outcome.
     update_review(job_id, status="failed", error=safe, completed=True)

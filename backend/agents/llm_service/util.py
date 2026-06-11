@@ -69,17 +69,32 @@ def call_llm_with_retries(
     max_attempts: int = 3,
     backoff_base: float = 2.0,
     backoff_max: float = 60.0,
+    on_retry: Optional[Callable[[int, int, float, Exception], None]] = None,
 ) -> Any:
     """
     Call fn() up to max_attempts times with exponential backoff on connection/temporary errors.
-    On permanent/rate-limit errors, re-raises immediately. Semantic exhaustion
-    (LLMSemanticExhaustionError) also re-raises immediately: the client already proved that
-    payload yields no content even after its reduced-thinking retry, so macro-retrying the
-    identical call would re-burn the thinking budget with no proof of change — and would
-    replace the structured receipt with a generic unreachable error. After exhausting retries,
-    raises LLMUnreachableAfterRetriesError so the caller can return a structured result
-    (e.g. llm_unreachable=True).
+    On permanent/rate-limit errors, re-raises immediately. After exhausting retries, raises
+    LLMUnreachableAfterRetriesError so the caller can return a structured result (e.g. llm_unreachable=True).
+
+    Preconditions:
+        - on_retry, if provided, accepts (failed_attempt_number, max_attempts,
+          wait_seconds, exception). It should not raise; if it does anyway, the
+          exception is logged and swallowed — a retry-progress hook is
+          observability and must never abort the retry loop it reports on.
+
+    Postconditions:
+        - on_retry is invoked exactly once per retried attempt, immediately before the
+          backoff sleep; never on success and never after the final attempt.
     """
+
+    def _notify_retry(failed_attempt: int, wait: float, error: Exception) -> None:
+        if on_retry is None:
+            return
+        try:
+            on_retry(failed_attempt, max_attempts, wait, error)
+        except Exception as hook_error:  # noqa: BLE001 — hook must not abort the retry loop
+            logger.warning("on_retry hook failed (ignored): %s", hook_error)
+
     last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
@@ -108,6 +123,7 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
+                _notify_retry(attempt + 1, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(
@@ -131,6 +147,7 @@ def call_llm_with_retries(
                     e,
                     wait,
                 )
+                _notify_retry(attempt + 1, wait, e)
                 time.sleep(wait)
             else:
                 logger.error(

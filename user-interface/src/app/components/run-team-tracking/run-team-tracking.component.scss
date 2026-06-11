@@ -281,6 +281,45 @@ mat-progress-bar {
   color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
 }
 
+// Sub-agent activity (e.g. code review sub-steps) inside the coding team card
+.current-activity-section {
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  border-radius: 8px;
+
+  .current-activity-detail {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+    margin-bottom: 6px;
+
+    mat-icon {
+      font-size: 16px;
+      width: 16px;
+      height: 16px;
+      color: var(--mat-sys-primary, #2196f3);
+      flex-shrink: 0;
+    }
+  }
+
+  .current-activity-progress {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+
+    .current-activity-pct {
+      font-size: 12px;
+      font-weight: 500;
+      min-width: 36px;
+      text-align: right;
+      color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+    }
+  }
+}
+
 // Failed tasks panel
 .failed-tasks-panel {
   margin: 16px 0;

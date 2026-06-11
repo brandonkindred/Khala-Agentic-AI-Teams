@@ -352,11 +352,13 @@ def parse_spec_activity(
         # Run PRA
         from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 
-        def _pra_updater(**kwargs: Any) -> None:
-            analysis_phase = kwargs.pop("current_phase", None)
-            if analysis_phase:
-                kwargs["analysis_subprocess"] = analysis_phase
-            update_job(job_id, phase="product_analysis", **kwargs)
+        from software_engineering_team.orchestrator import _make_pra_job_updater
+
+        # Shared with the thread path: rewrites current_phase into the analysis_*
+        # fields AND rescales the agent's own 0-100 progress onto the product-analysis
+        # band — without it the Temporal bar sprints to 100 during PRA and collapses
+        # at the next phase handoff.
+        _pra_updater = _make_pra_job_updater(job_id)
 
         pra_agent = ProductRequirementsAnalysisAgent(get_client("product_analysis"))
         pra_result = pra_agent.run_workflow(
@@ -422,11 +424,11 @@ def plan_project_activity(
 
         agents = _get_agents()
 
-        def _planning_updater(**kwargs: Any) -> None:
-            planning_phase = kwargs.pop("current_phase", None)
-            if planning_phase:
-                kwargs["planning_subprocess"] = planning_phase
-            update_job(job_id, **kwargs)
+        from software_engineering_team.orchestrator import _make_planning_v3_job_updater
+
+        # Shared with the thread path: rescales Planning V3's own 0-100 progress onto
+        # the planning band so the Temporal bar stays monotone into the coding phase.
+        _planning_updater = _make_planning_v3_job_updater(job_id)
 
         def _run_architecture(spec_content, prd_content, rp, client_context):
             from architecture_expert.models import ArchitectureInput
@@ -486,10 +488,11 @@ def plan_project_activity(
 
         _check_cancellation(job_id)
 
+        # to_dict, not model_dump: the adapter result is a dataclass, and the old
+        # hasattr(model_dump) probe silently serialized {} — the coding activity
+        # could then never reconstruct it and every Temporal run died at handoff.
         return PlanResult(
-            adapter_result_dict=adapter_result.model_dump()
-            if hasattr(adapter_result, "model_dump")
-            else {},
+            adapter_result_dict=adapter_result.to_dict(),
             spec_content_for_planning=spec_content_for_planning,
             requirements_title=adapter_result.requirements.title,
         ).model_dump()
@@ -559,7 +562,7 @@ def execute_coding_team_activity(
         # Reconstruct adapter_result from dict
         from planning_v3_adapter import PlanningV2AdapterResult
 
-        adapter_result = PlanningV2AdapterResult.model_validate(plan_data.adapter_result_dict)
+        adapter_result = PlanningV2AdapterResult.from_dict(plan_data.adapter_result_dict)
 
         existing_code = _truncate_for_context(_read_repo_code(path), 8000)
         if existing_code == "# No code files found":
@@ -570,7 +573,7 @@ def execute_coding_team_activity(
         )
 
         from coding_team.orchestrator import run_coding_team_orchestrator
-        from llm_service import get_client
+        from software_engineering_team.orchestrator import PROGRESS_BAND_CODING
         from software_engineering_team.shared.job_store import get_job
 
         # Single liveness mechanism: a background beater emits `activity.heartbeat()` on a fixed
@@ -585,13 +588,23 @@ def execute_coding_team_activity(
             copy_context=True,
             join_timeout=5.0,
         ):
+            base, span = PROGRESS_BAND_CODING
+            # Mirrors the thread path (software_engineering_team/orchestrator.py):
+            # get_llm deliberately NOT passed — the coding team's default getter wraps
+            # the LLM clients in strands models with reasoning-stream capture, whose
+            # periodic flush is the only thing refreshing job activity DURING a
+            # multi-minute LLM call. Passing the raw get_client both made every long
+            # call look stalled AND handed TechLeadAgent a non-strands object that
+            # Agent(model=...) cannot construct from. The band keeps the SE job's
+            # progress bar monotone across the planning → coding handoff.
             run_coding_team_orchestrator(
                 job_id,
                 str(path),
                 plan_input,
                 update_job_fn=_coding_update_callback(job_id),
                 get_job_fn=lambda jid: get_job(jid),
-                get_llm=get_client,
+                progress_base=base,
+                progress_span=span,
             )
         # run_coding_team_orchestrator owns its terminal status on every exit path (the heartbeat
         # callback forwards its status writes to update_job), so do not re-write COMPLETED here — it

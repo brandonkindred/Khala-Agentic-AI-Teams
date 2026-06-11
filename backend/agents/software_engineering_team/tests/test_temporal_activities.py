@@ -285,3 +285,129 @@ def test_coding_heartbeat_interval_env(monkeypatch) -> None:
     assert activities._coding_heartbeat_interval_s() == 30.0
     monkeypatch.delenv("CODING_TEAM_HEARTBEAT_INTERVAL_S", raising=False)
     assert activities._coding_heartbeat_interval_s() == 30.0
+
+
+def test_execute_coding_team_activity_passes_band_and_default_llm_getter(
+    monkeypatch, tmp_path, patched_job_store
+) -> None:
+    """The Temporal coding activity must mirror the thread path's call contract:
+    pass the coding progress band (or the bar collapses to the standalone 0-95
+    defaults at the planning handoff) and NOT pass a raw get_llm (the coding
+    team's default getter builds strands models with reasoning-stream capture;
+    a raw client both looks stalled during long calls and cannot construct
+    strands Agent objects)."""
+    from software_engineering_team.orchestrator import PROGRESS_BAND_CODING
+    from software_engineering_team.shared import job_store as js
+    from software_engineering_team.temporal import activities
+
+    js.create_job("ec-band", repo_path=str(tmp_path))
+
+    captured: Dict[str, Any] = {}
+
+    def fake_orchestrator(job_id, repo_path, plan_input, **kwargs):
+        captured.update(kwargs, job_id=job_id)
+
+    import coding_team.orchestrator as coding_orch
+
+    monkeypatch.setattr(coding_orch, "run_coding_team_orchestrator", fake_orchestrator)
+
+    from planning_v3_adapter import PlanningV2AdapterResult
+
+    from software_engineering_team.shared.models import ProductRequirements
+
+    adapter_dict = PlanningV2AdapterResult(
+        requirements=ProductRequirements(
+            title="T",
+            description="d",
+            acceptance_criteria=[],
+            constraints=[],
+            priority="medium",
+            metadata={},
+        ),
+        project_overview={},
+        open_questions=[],
+        assumptions=[],
+    ).to_dict()
+    activities.execute_coding_team_activity(
+        "ec-band",
+        str(tmp_path),
+        {"adapter_result_dict": adapter_dict, "spec_content_for_planning": "s"},
+    )
+
+    base, span = PROGRESS_BAND_CODING
+    assert captured["job_id"] == "ec-band"
+    assert captured["progress_base"] == base
+    assert captured["progress_span"] == span
+    assert "get_llm" not in captured, (
+        "raw get_llm must not be injected: it bypasses the reasoning-stream getter "
+        "and hands TechLeadAgent a non-strands client"
+    )
+
+
+def test_temporal_pra_and_planning_updaters_are_the_shared_band_factories(monkeypatch) -> None:
+    """The Temporal activities must use the same updater factories as the thread
+    path so sub-agent 0-100 progress is rescaled onto the phase bands — a raw
+    pass-through updater lets the bar sprint to 100 during planning and collapse
+    at the coding handoff."""
+    import software_engineering_team.orchestrator as se_orch
+
+    written: list = []
+    monkeypatch.setattr(se_orch, "update_job", lambda job_id, **kw: written.append(kw))
+
+    # The factories are what the activities now bind; assert their band behavior
+    # end-to-end through the same entry points the activities import.
+    pra = se_orch._make_pra_job_updater("j-t")
+    pra(progress=100)
+    assert (
+        written[-1]["progress"]
+        == se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[0] + (se_orch.PROGRESS_BAND_PRODUCT_ANALYSIS[1])
+    )
+
+    planning = se_orch._make_planning_v3_job_updater("j-t")
+    planning(progress=100)
+    base, span = se_orch.PROGRESS_BAND_PLANNING
+    assert written[-1]["progress"] == base + span
+
+
+def test_adapter_result_round_trips_through_dict() -> None:
+    """The Temporal planning→coding handoff serializes the adapter dataclass with
+    to_dict/from_dict. The old hasattr(model_dump) probe silently produced {} for
+    the dataclass, so the coding activity could never reconstruct it — this pins
+    a lossless round trip including the nested Pydantic models."""
+    import json
+
+    from planning_v3_adapter import PlanningV2AdapterResult
+
+    from software_engineering_team.shared.models import ProductRequirements
+
+    original = PlanningV2AdapterResult(
+        requirements=ProductRequirements(
+            title="Build it",
+            description="desc",
+            acceptance_criteria=["works"],
+            constraints=["python"],
+            priority="high",
+            metadata={"k": "v"},
+        ),
+        project_overview={"goals": "g"},
+        open_questions=["q1"],
+        assumptions=["a1"],
+        final_spec_content="spec",
+        architecture_overview="arch",
+        shared_planning_doc_path="/plan/doc.md",
+        resolved_questions=[{"id": "q1", "answer": "yes"}],
+    )
+
+    payload = original.to_dict()
+    json.dumps(payload)  # must be JSON-safe for the Temporal payload converter
+
+    rebuilt = PlanningV2AdapterResult.from_dict(payload)
+    assert rebuilt.requirements == original.requirements
+    assert rebuilt.project_overview == original.project_overview
+    assert rebuilt.open_questions == original.open_questions
+    assert rebuilt.assumptions == original.assumptions
+    assert rebuilt.hierarchy is None
+    assert rebuilt.final_spec_content == "spec"
+    assert rebuilt.architecture_overview == "arch"
+    assert rebuilt.shared_planning_doc_path == "/plan/doc.md"
+    assert rebuilt.resolved_questions == original.resolved_questions

@@ -1077,3 +1077,57 @@ def test_large_synthetic_input_is_fully_covered_with_bounded_prompts() -> None:
         assert any(f"### {path} ###" in p for p in client.prompts)
     # Every prompt is bounded: chunk cap plus the fixed instruction overhead.
     assert all(len(p) <= cap + 2_000 for p in client.prompts)
+
+
+# ---------------------------------------------------------------------------
+# Progress callback reporting
+# ---------------------------------------------------------------------------
+
+
+def test_coordinator_reports_per_chunk_progress() -> None:
+    """With 2 chunks the coordinator reports one 'chunk i/2 reviewed' per
+    completion (fractions inside (0.10, 0.90], non-decreasing even with
+    parallel workers), then finalizing and done at 1.0."""
+    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    code = big_file_1 + "\n\n" + big_file_2
+
+    calls: list = []
+
+    def _cb(step: str, detail: str, fraction: float) -> None:
+        calls.append((step, detail, fraction))
+
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(code=code, task_description="Add feature", language="python"),
+        progress_callback=_cb,
+    )
+    assert isinstance(result, CodeReviewOutput)
+
+    steps = [c[0] for c in calls]
+    assert steps[0] == "preparing"
+    assert "finalizing" in steps
+    assert steps[-1] == "done"
+
+    reviewing = [c for c in calls if c[0] == "reviewing"]
+    assert any("chunk 1/2 reviewed" in c[1] for c in reviewing)
+    assert any("chunk 2/2 reviewed" in c[1] for c in reviewing)
+    assert all(0.10 < c[2] <= 0.90 for c in reviewing), reviewing
+
+    fractions = [c[2] for c in calls]
+    assert fractions == sorted(fractions), "fractions must be non-decreasing"
+    assert fractions[-1] == 1.0
+    assert "approved=" in calls[-1][1]
+
+
+def test_empty_input_still_reports_done() -> None:
+    """The done/1.0 postcondition holds on the empty-input short-circuit too."""
+    calls: list = []
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(code="", task_description="t"),
+        progress_callback=lambda s, d, f: calls.append((s, d, f)),
+    )
+    assert result.approved is True
+    assert calls[-1][0] == "done"
+    assert calls[-1][2] == 1.0

@@ -137,3 +137,78 @@ def test_fake_heartbeat_succeeds_for_existing_job(
     fake_job_client.heartbeat("present")
     after = fake_job_client.get_job("present")["last_heartbeat_at"]
     assert after >= before
+
+
+# ---------------------------------------------------------------------------
+# Activity stamping — mirrors job_service/db.py central last_activity_at
+# ---------------------------------------------------------------------------
+
+
+def test_fake_create_job_stamps_activity_baseline(fake_job_client: FakeJobServiceClient) -> None:
+    """Creation is activity: every new job carries a last_activity_at baseline so a
+    job that hangs while still pending is detectable by the stall warning."""
+    fake_job_client.create_job("j", status="pending")
+    assert fake_job_client.get_job("j")["last_activity_at"] is not None
+
+
+def test_fake_update_job_stamps_activity(fake_job_client: FakeJobServiceClient) -> None:
+    """Every real update stamps last_activity_at centrally (production stamps in
+    ``db.update_job``); an explicit None from a caller is replaced — the field must
+    never go invalid once the job exists."""
+    fake_job_client.create_job("j", status="running")
+    fake_job_client.update_job("j", last_activity_at=None, status_text="x")
+    stamped = fake_job_client.get_job("j")["last_activity_at"]
+    assert stamped is not None
+
+    # An explicit real value provided by the caller wins.
+    fake_job_client.update_job("j", last_activity_at="2020-01-01T00:00:00+00:00")
+    assert fake_job_client.get_job("j")["last_activity_at"] == "2020-01-01T00:00:00+00:00"
+
+
+def test_fake_heartbeat_never_stamps_activity(fake_job_client: FakeJobServiceClient) -> None:
+    """The liveness heartbeat keeps ticking even when the orchestrator thread is hung,
+    so it must NOT count as activity — that is the entire signal the stall warning
+    reads (production heartbeat touches only last_heartbeat_at/updated_at)."""
+    fake_job_client.create_job("j", status="running")
+    fake_job_client.update_job("j", last_activity_at="2020-01-01T00:00:00+00:00")
+    fake_job_client.heartbeat("j")
+    assert fake_job_client.get_job("j")["last_activity_at"] == "2020-01-01T00:00:00+00:00"
+
+
+def test_fake_append_event_and_atomic_update_stamp_activity(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """Events and atomic patches are real updates (production stamps in
+    ``db.append_event`` / ``db.apply_patch``)."""
+    fake_job_client.create_job("j", status="running")
+    fake_job_client.update_job("j", last_activity_at="2020-01-01T00:00:00+00:00")
+
+    fake_job_client.append_event("j", action="merge", outcome="ok")
+    after_event = fake_job_client.get_job("j")["last_activity_at"]
+    assert after_event != "2020-01-01T00:00:00+00:00"
+
+    fake_job_client.update_job("j", last_activity_at="2020-01-01T00:00:00+00:00")
+    fake_job_client.atomic_update("j", merge_fields={"phase": "coding"})
+    after_patch = fake_job_client.get_job("j")["last_activity_at"]
+    assert after_patch != "2020-01-01T00:00:00+00:00"
+
+
+def test_fake_bulk_terminal_markers_clear_current_activity(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """Bulk failure/interrupt markers run when no orchestrator finally-clear can —
+    they must wipe current_activity so a dead job never serves a frozen sub-bar
+    (production merges ``current_activity: None`` in ``db.mark_*``)."""
+    fake_job_client.create_job("j1", status="running", current_activity={"step": "reviewing", "fraction": 0.4})
+    fake_job_client.create_job("j2", status="running", current_activity={"step": "reviewing", "fraction": 0.7})
+
+    fake_job_client.mark_all_active_jobs_interrupted("shutdown")
+    assert fake_job_client.get_job("j1")["current_activity"] is None
+
+    # Reactivate j2 with a fresh activity entry so the stale sweep's clear is
+    # actually exercised (the interrupt marker above already cleared it once).
+    fake_job_client.update_job("j2", status="running", current_activity={"step": "reviewing", "fraction": 0.7})
+    fake_job_client.mark_stale_active_jobs_failed(stale_after_seconds=-1, reason="stale")
+    j2 = fake_job_client.get_job("j2")
+    assert j2["status"] == "failed"
+    assert j2["current_activity"] is None

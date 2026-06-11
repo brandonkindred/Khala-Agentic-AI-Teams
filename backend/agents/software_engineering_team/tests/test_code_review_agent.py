@@ -276,3 +276,101 @@ def test_reconcile_rejects_when_critical_issue_present() -> None:
     assert result.approved is False
     assert len(result.issues) == 1
     assert result.issues[0].severity == "critical"
+
+
+# ---------------------------------------------------------------------------
+# Progress callback reporting
+# ---------------------------------------------------------------------------
+
+
+def _recording_callback(calls: list) -> Any:
+    """Build a ReviewProgressCallback that appends (step, detail, fraction) tuples."""
+
+    def _cb(step: str, detail: str, fraction: float) -> None:
+        calls.append((step, detail, fraction))
+
+    return _cb
+
+
+def test_run_reports_progress_steps_in_order() -> None:
+    """Every review routes through the coordinator, which emits preparing →
+    reviewing (per chunk) → finalizing → done with non-decreasing fractions
+    ending at 1.0."""
+    calls: list = []
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    result = agent.run(_input(), progress_callback=_recording_callback(calls))
+    assert result.approved is True
+    steps = [c[0] for c in calls]
+    assert steps[0] == "preparing"
+    assert "reviewing" in steps
+    assert "finalizing" in steps
+    assert steps[-1] == "done"
+    fractions = [c[2] for c in calls]
+    assert fractions == sorted(fractions), "fractions must be non-decreasing"
+    assert fractions[-1] == 1.0
+    assert "approved=True" in calls[-1][1]
+
+
+def test_no_callback_behaves_identically() -> None:
+    """progress_callback=None (the default) must not change the review result."""
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    with_cb_calls: list = []
+    result_no_cb = agent.run(_input())
+    result_with_cb = agent.run(_input(), progress_callback=_recording_callback(with_cb_calls))
+    assert result_no_cb.approved == result_with_cb.approved
+    assert result_no_cb.issues == result_with_cb.issues
+    assert with_cb_calls, "callback must have been invoked when provided"
+
+
+def test_large_code_forwards_callback_to_coordinator() -> None:
+    """Oversized code routes to the coordinator, which must keep reporting —
+    including per-chunk 'chunk i/N' details."""
+    big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
+    big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
+    code = big_file_1 + "\n\n" + big_file_2
+
+    calls: list = []
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    result = agent.run(_input(code=code), progress_callback=_recording_callback(calls))
+    assert isinstance(result, CodeReviewOutput)
+    details = [c[1] for c in calls]
+    assert any("chunk 1/" in d for d in details), f"expected per-chunk reports, got {details}"
+    assert calls[-1][0] == "done"
+    assert calls[-1][2] == 1.0
+
+
+def test_notify_review_progress_clamps_out_of_range_fraction(caplog):
+    """An out-of-range fraction is a reporter bug: logged and clamped, never raised
+    and never forwarded raw — progress reporting must not abort a review."""
+    import logging
+
+    from code_review_agent.models import notify_review_progress
+
+    received = []
+    with caplog.at_level(logging.WARNING):
+        notify_review_progress(lambda s, d, f: received.append((s, d, f)), "reviewing", "x", 1.8)
+        notify_review_progress(lambda s, d, f: received.append((s, d, f)), "reviewing", "y", -0.2)
+
+    assert received == [("reviewing", "x", 1.0), ("reviewing", "y", 0.0)]
+    assert sum("out of range" in r.message for r in caplog.records) == 2
+
+
+def test_raising_callback_is_swallowed_and_never_changes_the_review(caplog):
+    """A raising progress callback (e.g. a status-store outage behind the legacy
+    v2 detail_callback bridge) is an observability bug: it must be logged and
+    swallowed at the invocation boundary, never abort the review — the call
+    sites' broad except would otherwise divert a healthy reviewer to the
+    lower-fidelity LLM fallback."""
+    import logging
+
+    def _boom(step: str, detail: str, fraction: float) -> None:
+        raise RuntimeError("store down")
+
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    baseline = agent.run(_input())
+    with caplog.at_level(logging.WARNING):
+        result = agent.run(_input(), progress_callback=_boom)
+
+    assert result.approved == baseline.approved
+    assert result.issues == baseline.issues
+    assert any("callback failed (ignored" in r.message for r in caplog.records)

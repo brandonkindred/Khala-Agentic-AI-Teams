@@ -16,6 +16,7 @@ from strands import Agent
 
 from llm_service import LLMClient
 from software_engineering_team.shared.models import Task
+from software_engineering_team.shared.review_progress import call_code_review_agent
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
 
 from ..models import (
@@ -170,7 +171,7 @@ def run_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = code_review_agent.run(cr_input)
+            cr_result = call_code_review_agent(code_review_agent, cr_input, None)
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(
@@ -393,7 +394,7 @@ def run_microtask_review(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = code_review_agent.run(cr_input)
+            cr_result = call_code_review_agent(code_review_agent, cr_input, detail_callback)
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(
@@ -631,7 +632,7 @@ def run_code_review_phase(
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language=language,
             )
-            cr_result = code_review_agent.run(cr_input)
+            cr_result = call_code_review_agent(code_review_agent, cr_input, detail_callback)
             for item in getattr(cr_result, "issues", []):
                 issues.append(
                     ReviewIssue(

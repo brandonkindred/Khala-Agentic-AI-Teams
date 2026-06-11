@@ -99,8 +99,18 @@ def run_code_review(
     architecture: Any = None,
     existing_codebase: Optional[str] = None,
     llm_getter: Callable[[str], Any] = _default_llm_getter,
+    progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> CodeReviewResult:
-    """Run the code review agent and return structured results."""
+    """Run the code review agent and return structured results.
+
+    Preconditions:
+        - ``progress_callback`` is None or a non-raising callable accepting
+          ``(step, detail, fraction)`` (see code_review_agent.models.ReviewProgressCallback).
+
+    Postconditions:
+        - ``progress_callback`` is forwarded to the agent so review sub-steps
+          (context prep, per-chunk review, parsing, approval) are reported live.
+    """
     try:
         from code_review_agent import CodeReviewAgent
         from code_review_agent.models import CodeReviewInput
@@ -120,7 +130,7 @@ def run_code_review(
             architecture=architecture,
             existing_codebase=existing_codebase,
         )
-        result = agent.run(review_input)
+        result = agent.run(review_input, progress_callback=progress_callback)
         issues = []
         for i in result.issues or []:
             issues.append(i.model_dump() if hasattr(i, "model_dump") else vars(i))

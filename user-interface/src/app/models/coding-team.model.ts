@@ -1,3 +1,5 @@
+import { CurrentActivityEntry } from './software-engineering.model';
+
 export interface CodingTeamJobStatus {
   job_id: string;
   status: string;
@@ -18,6 +20,18 @@ export interface CodingTeamJobStatus {
   /** Set by the PR-review flow with the posted-review stats. */
   review_summary?: CodeReviewSummary;
   task_graph_snapshot?: TaskSnapshot[];
+  /** Fine-grained activity of the currently running sub-agent (e.g. code review sub-steps). */
+  current_activity?: CurrentActivityEntry;
+  /** ISO timestamp of the last real orchestrator update (heartbeats excluded). */
+  last_activity_at?: string;
+  /** ISO timestamp of the last job update. */
+  updated_at?: string;
+  /** ISO timestamp of the last heartbeat (liveness of the worker process). */
+  last_heartbeat_at?: string;
+  /** Overall job progress (0-100) derived from terminal tasks in the graph. */
+  progress?: number | null;
+  /** Server UTC time when the response was built; staleness math uses this, not the browser clock. */
+  server_time?: string | null;
 }
 
 /** Summary of a posted PR review (from the /review-pr flow). */

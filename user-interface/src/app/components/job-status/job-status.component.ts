@@ -6,11 +6,13 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse } from '../../models';
+import { markStatusReceived } from '../../shared/staleness.util';
+import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 @Component({
   selector: 'app-job-status',
   standalone: true,
-  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule],
+  imports: [MatCardModule, MatProgressBarModule, MatExpansionModule, MatIconModule, StallWarningComponent],
   templateUrl: './job-status.component.html',
   styleUrl: './job-status.component.scss',
 })
@@ -42,10 +44,20 @@ export class JobStatusComponent implements OnInit, OnDestroy {
         next: (res) => {
           const wasWaiting = this.status?.waiting_for_answers;
           const isWaiting = res.waiting_for_answers;
-          this.status = res;
+          // Receipt stamp turns the response's server_time into a clock offset,
+          // so staleness ages advance between polls instead of freezing on the
+          // last snapshot (see staleness.util.ts).
+          this.status = markStatusReceived(res);
           this.statusChange.emit(res);
           this.loading = false;
-          if (res.status === 'completed' || res.status === 'failed' || res.status === 'cancelled') {
+          // completed_with_failures is the coding team's partial-success terminal
+          // status — without it here the poll runs forever on such jobs.
+          if (
+            res.status === 'completed' ||
+            res.status === 'completed_with_failures' ||
+            res.status === 'failed' ||
+            res.status === 'cancelled'
+          ) {
             this.sub?.unsubscribe();
             this.sub = null;
           } else if (wasWaiting !== isWaiting) {
@@ -63,4 +75,5 @@ export class JobStatusComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     this.sub?.unsubscribe();
   }
+
 }

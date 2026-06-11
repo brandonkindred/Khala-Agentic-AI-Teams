@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 from coding_team import hitl
+from coding_team.activity import ActivityBridge
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -35,6 +36,34 @@ logger = logging.getLogger(__name__)
 
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
+
+# Default job-level progress band for the coding phase. The caller owns the band
+# allocation: the parent pipeline (software_engineering_team) maps its earlier phases
+# onto lower sub-ranges and passes the coding team its slice via the
+# ``progress_base``/``progress_span`` parameters; a standalone coding-team job uses
+# the full bar. Terminal completion always writes 100.
+_DEFAULT_PROGRESS_BASE = 0
+_DEFAULT_PROGRESS_SPAN = 95
+
+
+def _coding_progress(tasks: List[Dict[str, Any]], base: int, span: int) -> int:
+    """Map the terminal-task share onto the job progress band [base, base + span].
+
+    Preconditions:
+        - ``tasks`` are snapshot dicts whose ``status`` is a TaskStatus value string.
+        - ``0 <= base``, ``0 <= span``, ``base + span <= 100``.
+    Postconditions:
+        - Returns an int in [base, base + span]; an empty graph yields the base (no
+          division by zero). Monotone in the number of terminal (merged/failed)
+          tasks, so within the coding phase the bar only ever advances.
+    """
+    assert 0 <= base and 0 <= span and base + span <= 100, (base, span)
+    total = len(tasks)
+    if total == 0:
+        return base
+    done = sum(1 for t in tasks if t.get("status") in ("merged", "failed"))
+    return base + int(span * done / total)
+
 
 # Cap on the Tech-Lead clarify→answer→re-plan loop. Each round is one pause for the user plus one
 # re-plan; bounding it stops a model that keeps asking from looping forever. On exhaustion the
@@ -438,12 +467,22 @@ def run_coding_team_orchestrator(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
     get_llm: Optional[Callable[[str], Any]] = None,
     on_pause: Optional[Callable[[List[Dict[str, Any]]], None]] = None,
+    progress_base: int = _DEFAULT_PROGRESS_BASE,
+    progress_span: int = _DEFAULT_PROGRESS_SPAN,
 ) -> None:
     """
     Run the coding_team pipeline: plan → Task Graph → groom/assign → implement → review → merge.
     Uses in-process job store (coding_team/job_store) for task graph persistence.
     update_job_fn / get_job_fn: if provided (e.g. from software_engineering_team), used for phase/status and cancel check.
+    progress_base / progress_span: the slice of the job progress bar this run owns
+    (see _coding_progress); a parent pipeline passes its coding-phase band, standalone
+    jobs use the full bar.
+
+    ``last_activity_at`` (read by the UI's stall warning) is stamped centrally by the
+    job service on every real update — see job_service/db.py — so plain ``_update``
+    writes count as activity while the 120s liveness heartbeat does not.
     """
+    assert 0 <= progress_base and 0 <= progress_span and progress_base + progress_span <= 100
     path = Path(repo_path).resolve()
     _update = update_job_fn or (lambda **kw: update_job(job_id, cache_dir=cache_dir, **kw))
     _get_job = get_job_fn or (lambda jid: get_job(jid, cache_dir=cache_dir))
@@ -472,6 +511,7 @@ def run_coding_team_orchestrator(
             agent_task_map=snap["agent_task_map"],
             phase=phase,
             status_text=status_text,
+            progress=_coding_progress(snap["tasks"], progress_base, progress_span),
         )
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
@@ -572,6 +612,9 @@ def run_coding_team_orchestrator(
 
     phase = "coding"
     status_text = "Assigning and implementing tasks"
+    # No progress write here: _persist_graph above already published the band value
+    # derived from the graph, which on a resume reflects previously merged tasks —
+    # an unconditional base write would regress the bar (e.g. 52 → 10 → 52).
     _update(phase=phase, status_text=status_text, status="running")
 
     # Run the swarm: coordinator (Tech Lead) + workers (Senior SWEs)
@@ -614,10 +657,15 @@ def run_coding_team_orchestrator(
     failed_count = graph.count_with_status(TaskStatus.FAILED)
     # A job with failed tasks must not be presented as a clean success — surface a distinct
     # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
+    # current_activity=None travels in the terminal write itself so a transient
+    # failure of an earlier best-effort clear cannot leave a terminal job serving
+    # a stale mid-review activity entry.
     _update(
         status="completed_with_failures" if failed_count else "completed",
         phase="completed",
         status_text=f"Completed: {merged_count} merged, {failed_count} failed",
+        progress=100,
+        current_activity=None,
     )
 
 
@@ -878,16 +926,31 @@ class CodingTeamSwarm:
             update_fn(status_text=f"Linting: {task.title}")
             run_linting(self.path, task.id, llm_getter=self.llm_getter)
 
-            # Code review
-            update_fn(status_text=f"Code review: {task.title}")
-            review = run_code_review(
-                code=result.get("changes_summary", ""),
-                spec_content="",
-                task_description=task.description or task.title,
-                language="python" if agent_type == "backend" else "typescript",
-                acceptance_criteria=task.acceptance_criteria or [],
-                llm_getter=self.llm_getter,
+            # Code review — bridge the agent's sub-step reports into the job record so
+            # the UI shows live review progress instead of a frozen "Code review: ..." line.
+            cr_bridge = ActivityBridge(
+                update_fn,
+                agent="code_review",
+                label="Code review",
+                task_id=task.id,
+                task_title=task.title,
             )
+            try:
+                cr_bridge("preparing", "starting code review", 0.0)
+                review = run_code_review(
+                    code=result.get("changes_summary", ""),
+                    spec_content="",
+                    task_description=task.description or task.title,
+                    language="python" if agent_type == "backend" else "typescript",
+                    acceptance_criteria=task.acceptance_criteria or [],
+                    llm_getter=self.llm_getter,
+                    progress_callback=cr_bridge,
+                )
+            finally:
+                # Clear on every exit path so a stale sub-progress bar never lingers
+                # into the next gate — a frozen bar masquerading as progress is the
+                # exact failure mode this reporting exists to fix.
+                cr_bridge.clear()
             if not review.approved:
                 logger.info(
                     "[%s] Code review rejected task %s (%d issues); returning for revision",
@@ -936,17 +999,35 @@ class CodingTeamSwarm:
 
         in_review = [t for t in self.graph.get_tasks() if t.status == TaskStatus.IN_REVIEW]
         for task in in_review:
-            update_fn(status_text=f"Tech Lead reviewing: {task.title}")
+            # Bridge the Tech Lead's attempt/retry reports into the job record so the
+            # UI shows which attempt is running (silent retries look like a hang).
+            tl_bridge = ActivityBridge(
+                update_fn,
+                agent="tech_lead_review",
+                label="Tech Lead reviewing",
+                task_id=task.id,
+                task_title=task.title,
+            )
             branch = task.feature_branch or f"feature/{task.id}"
             summary = task.changes_summary or "(no summary recorded)"
-            diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
-            evidence = _build_review_evidence(summary, diff)
-            review = self.tech_lead.run_code_review(
-                task_title=task.title,
-                task_description=task.description,
-                acceptance_criteria=task.acceptance_criteria,
-                changes_summary=evidence,
-            )
+            # Everything that can raise — including the diff/evidence prep — sits
+            # inside the try so the finally clear runs on every exit path; an
+            # activity entry written before the try would survive an exception.
+            try:
+                tl_bridge("preparing", "collecting branch diff", 0.0)
+                diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+                evidence = _build_review_evidence(summary, diff)
+                review = self.tech_lead.run_code_review(
+                    task_title=task.title,
+                    task_description=task.description,
+                    acceptance_criteria=task.acceptance_criteria,
+                    changes_summary=evidence,
+                    progress_callback=tl_bridge,
+                )
+            finally:
+                # Clear on every exit path so a stale sub-progress bar never lingers
+                # into the next task's review.
+                tl_bridge.clear()
             if review.get("error"):
                 # The review itself could not run (e.g. evidence exceeded the model context
                 # window). Do NOT route this through the revision loop — re-sending the same

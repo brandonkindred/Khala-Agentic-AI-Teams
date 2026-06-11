@@ -13,7 +13,7 @@ import logging
 from llm_service import get_client
 
 from .coordinator import run_coordinator
-from .models import CodeReviewInput, CodeReviewOutput
+from .models import CodeReviewInput, CodeReviewOutput, ReviewProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -35,15 +35,26 @@ class CodeReviewAgent:
         # client is used for context sizing and shared-context compaction.
         self.llm = llm_client if llm_client is not None else get_client("code_review")
 
-    def run(self, input_data: CodeReviewInput) -> CodeReviewOutput:
+    def run(
+        self,
+        input_data: CodeReviewInput,
+        progress_callback: ReviewProgressCallback | None = None,
+    ) -> CodeReviewOutput:
         """Review code and return approval or issues.
 
         Preconditions:
             - ``input_data`` carries the code under review via ``files`` or ``code``.
+            - ``progress_callback`` is None or satisfies the
+              ``ReviewProgressCallback`` contract (non-raising, accepts
+              ``(step, detail, fraction)``).
 
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
               line; ``approved is False`` implies at least one critical/high issue.
+            - When ``progress_callback`` is provided, it is invoked with
+              non-decreasing fractions ending at 1.0 (step ``done``) on every
+              successful return; the review result is identical whether or not
+              a callback is provided.
 
         Raises:
             CodeReviewUnavailableError: when the review could not be completed
@@ -65,4 +76,4 @@ class CodeReviewAgent:
             input_data.architecture is not None,
             len(input_data.acceptance_criteria),
         )
-        return run_coordinator(self.llm, input_data)
+        return run_coordinator(self.llm, input_data, progress_callback=progress_callback)

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -45,7 +46,9 @@ from .models import (
     CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
+    ReviewProgressCallback,
     coerce_line,
+    notify_review_progress,
 )
 
 logger = logging.getLogger(__name__)
@@ -661,6 +664,7 @@ def _map_chunks(
     chunk_reviewer: ChunkReviewAgent,
     chunks: List[ReviewChunk],
     base_input: Dict,
+    progress_callback: Optional[ReviewProgressCallback] = None,
 ) -> List[_ChunkOutcome]:
     """Review all chunks, fanning out independent map calls.
 
@@ -678,16 +682,34 @@ def _map_chunks(
           chunks are cancelled, and the exception propagates immediately;
           already-running reviews are left to finish in the background rather
           than blocking the failure behind in-flight model calls.
+        - When ``progress_callback`` is provided, one ``reviewing`` report is
+          emitted per completed chunk ("chunk i/N reviewed", i = completion
+          order) with fractions in (0.10, 0.90]; the counter update and the
+          callback run under one lock, so fractions stay non-decreasing even
+          with parallel workers.
     """
-    workers = min(_map_parallelism(), len(chunks))
+    total = len(chunks)
+    progress_lock = threading.Lock()
+    completed_count = [0]
+
+    def _run_one(chunk: ReviewChunk) -> _ChunkOutcome:
+        outcome = _review_chunk_with_recovery(chunk_reviewer, chunk, base_input)
+        with progress_lock:
+            completed_count[0] += 1
+            notify_review_progress(
+                progress_callback,
+                "reviewing",
+                f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label[:120]}",
+                0.10 + 0.80 * completed_count[0] / total,
+            )
+        return outcome
+
+    workers = min(_map_parallelism(), total)
     if workers <= 1:
-        return [_review_chunk_with_recovery(chunk_reviewer, c, base_input) for c in chunks]
+        return [_run_one(c) for c in chunks]
     executor = ThreadPoolExecutor(max_workers=workers)
     try:
-        futures = [
-            executor.submit(_review_chunk_with_recovery, chunk_reviewer, c, base_input)
-            for c in chunks
-        ]
+        futures = [executor.submit(_run_one, c) for c in chunks]
         # Wake on the first failure instead of joining futures in submission
         # order, so a fast failure is never hidden behind a slow earlier chunk.
         wait(futures, return_when=FIRST_EXCEPTION)
@@ -702,12 +724,19 @@ def _map_chunks(
     return results
 
 
-def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOutput:
+def run_coordinator(
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    progress_callback: Optional[ReviewProgressCallback] = None,
+) -> CodeReviewOutput:
     """Map-reduce review entry point: bounded chunks in, merged verdict out.
 
     Preconditions:
         - ``llm`` implements ``LLMClient`` (context sizing + chunk review calls).
         - ``input_data`` carries the code under review via ``files`` or ``code``.
+        - ``progress_callback`` is None or satisfies the
+          ``ReviewProgressCallback`` contract (non-raising, accepts
+          ``(step, detail, fraction)``).
 
     Postconditions:
         - Every input file/line range is either reviewed or named: empty files
@@ -717,11 +746,15 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         - ``approved is False`` implies at least one critical/high issue.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
+        - When ``progress_callback`` is provided, it is invoked with
+          non-decreasing fractions ending at 1.0 (step ``done``) on every
+          successful return, including per-chunk ``reviewing`` reports.
 
     Raises:
         CodeReviewUnavailableError: when the review model is unavailable or a
             chunk remains unreviewable after retry and bisection.
     """
+    notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
     blocks, skipped_empty = _blocks_from_input(input_data)
     skipped_issues = [
         CodeReviewIssue(
@@ -734,6 +767,7 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         for path in skipped_empty
     ]
     if not blocks:
+        notify_review_progress(progress_callback, "done", "no code to review", 1.0)
         return CodeReviewOutput(
             approved=True,
             issues=skipped_issues,
@@ -768,6 +802,7 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         len(blocks),
         len(chunks),
     )
+    notify_review_progress(progress_callback, "preparing", f"split into {len(chunks)} chunks", 0.10)
 
     base_input = {
         "language": input_data.language or "",
@@ -781,9 +816,12 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
-    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input):
+    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, progress_callback):
         outcome.absorb(per_chunk)
 
+    notify_review_progress(
+        progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
+    )
     deduped = _dedupe_issues([*outcome.issues, *skipped_issues])
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     merged_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
@@ -806,6 +844,9 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         len(outcome.approved_flags),
     )
 
+    notify_review_progress(
+        progress_callback, "done", f"approved={approved}, issues={len(deduped)}", 1.0
+    )
     return CodeReviewOutput(
         approved=approved,
         issues=deduped,

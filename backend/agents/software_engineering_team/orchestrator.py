@@ -94,6 +94,111 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+# The SE job owns the allocation of its progress bar across phases. Sub-agents
+# (PRA, Planning V3, coding team) each report their OWN 0-100 progress; the job
+# updaters rescale those onto the phase's band so the bar is monotone across the
+# whole run instead of repeatedly sprinting to 100 and collapsing at each handoff.
+PROGRESS_BAND_PRODUCT_ANALYSIS = (0, 15)
+PROGRESS_BAND_PLANNING = (15, 15)
+PROGRESS_BAND_CODING = (30, 65)
+
+
+def _scale_progress(pct: Any, band: "tuple[int, int]") -> Optional[int]:
+    """Map a sub-agent's 0-100 progress onto the SE job's [base, base+span] band.
+
+    Preconditions:
+        - ``band`` is (base, span) with 0 <= base, 0 <= span, base + span <= 100.
+    Postconditions:
+        - Returns an int in [base, base+span]; non-numeric input yields None
+          (callers drop the field rather than writing garbage); out-of-range
+          input is clamped to the band.
+    """
+    base, span = band
+    assert 0 <= base and 0 <= span and base + span <= 100, band
+    try:
+        value = float(pct)
+    except (TypeError, ValueError):
+        return None
+    value = min(max(value, 0.0), 100.0)
+    return base + int(span * value / 100.0)
+
+
+PRA_PHASE_ORDER = ["spec_review", "communicate", "spec_update", "spec_cleanup"]
+PLANNING_V3_PHASE_ORDER = [
+    "intake",
+    "discovery",
+    "requirements",
+    "synthesis",
+    "document_production",
+    "sub_agent_provisioning",
+]
+
+
+def _make_pra_job_updater(job_id: str) -> Callable[..., None]:
+    """Build the job updater handed to the PRA agent.
+
+    Postconditions: the returned updater rewrites ``current_phase`` into
+    ``analysis_subprocess``/``analysis_completed_phases``, rescales the agent's own
+    0-100 ``progress`` onto PROGRESS_BAND_PRODUCT_ANALYSIS (garbage progress is
+    dropped, never written), and swallows store errors (observability only).
+    """
+
+    def _updater(**kwargs: Any) -> None:
+        try:
+            analysis_phase = kwargs.pop("current_phase", None)
+            if analysis_phase:
+                kwargs["analysis_subprocess"] = analysis_phase
+                completed_phases = []
+                for p in PRA_PHASE_ORDER:
+                    if p == analysis_phase:
+                        break
+                    completed_phases.append(p)
+                kwargs["analysis_completed_phases"] = completed_phases
+            # The PRA agent reports its own 0-100 progress; rescale onto this
+            # phase's band so the job bar cannot hit 100 before coding starts.
+            if "progress" in kwargs:
+                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PRODUCT_ANALYSIS)
+                if scaled is not None:
+                    kwargs["progress"] = scaled
+            update_job(job_id, phase="product_analysis", **kwargs)
+        except Exception:
+            pass
+
+    return _updater
+
+
+def _make_planning_v3_job_updater(job_id: str) -> Callable[..., None]:
+    """Build the job updater handed to the Planning V3 workflow.
+
+    Postconditions: mirrors :func:`_make_pra_job_updater` for the planning phase —
+    ``current_phase`` becomes ``planning_subprocess``/``planning_completed_phases``
+    and ``progress`` is rescaled onto PROGRESS_BAND_PLANNING.
+    """
+
+    def _updater(**kwargs: Any) -> None:
+        try:
+            planning_phase = kwargs.pop("current_phase", None)
+            if planning_phase:
+                kwargs["planning_subprocess"] = planning_phase
+                completed_phases = []
+                for p in PLANNING_V3_PHASE_ORDER:
+                    if p == planning_phase:
+                        break
+                    completed_phases.append(p)
+                kwargs["planning_completed_phases"] = completed_phases
+            # Planning V3 reports its own 0-100 progress; rescale onto this
+            # phase's band so the job bar stays monotone into the coding phase.
+            if "progress" in kwargs:
+                scaled = _scale_progress(kwargs.pop("progress"), PROGRESS_BAND_PLANNING)
+                if scaled is not None:
+                    kwargs["progress"] = scaled
+            update_job(job_id, **kwargs)
+        except Exception:
+            pass
+
+    return _updater
+
+
 def _llm_pause_error(failed: Dict[str, str]) -> str:
     """Job-level error message for an LLM-condition pause, derived from the failed map.
 
@@ -2710,22 +2815,7 @@ def run_orchestrator(
             # Validates spec, asks user questions, produces validated_spec.md
             from product_requirements_analysis_agent import ProductRequirementsAnalysisAgent
 
-            PRA_PHASE_ORDER = ["spec_review", "communicate", "spec_update", "spec_cleanup"]
-
-            def _pra_job_updater(**kwargs: Any) -> None:
-                try:
-                    analysis_phase = kwargs.pop("current_phase", None)
-                    if analysis_phase:
-                        kwargs["analysis_subprocess"] = analysis_phase
-                        completed_phases = []
-                        for p in PRA_PHASE_ORDER:
-                            if p == analysis_phase:
-                                break
-                            completed_phases.append(p)
-                        kwargs["analysis_completed_phases"] = completed_phases
-                    update_job(job_id, phase="product_analysis", **kwargs)
-                except Exception:
-                    pass
+            _pra_job_updater = _make_pra_job_updater(job_id)
 
             update_job(
                 job_id,
@@ -2778,29 +2868,7 @@ def run_orchestrator(
 
         from planning_v3_team.orchestrator import run_workflow as run_planning_v3_workflow
 
-        PLANNING_V3_PHASE_ORDER = [
-            "intake",
-            "discovery",
-            "requirements",
-            "synthesis",
-            "document_production",
-            "sub_agent_provisioning",
-        ]
-
-        def _planning_v3_job_updater(**kwargs: Any) -> None:
-            try:
-                planning_phase = kwargs.pop("current_phase", None)
-                if planning_phase:
-                    kwargs["planning_subprocess"] = planning_phase
-                    completed_phases = []
-                    for p in PLANNING_V3_PHASE_ORDER:
-                        if p == planning_phase:
-                            break
-                        completed_phases.append(p)
-                    kwargs["planning_completed_phases"] = completed_phases
-                update_job(job_id, **kwargs)
-            except Exception:
-                pass
+        _planning_v3_job_updater = _make_planning_v3_job_updater(job_id)
 
         def _run_architecture_for_planning_v3(  # pragma: no cover  # integration-only: runs ArchitectureExpert LLM
             spec_content: str,
@@ -2943,13 +3011,20 @@ def run_orchestrator(
             )
             from coding_team.orchestrator import run_coding_team_orchestrator
 
+            base, span = PROGRESS_BAND_CODING
+            # get_llm deliberately NOT passed: the coding team's default getter wraps
+            # the LLM clients with reasoning-stream capture, whose periodic flush is
+            # the only thing that refreshes job activity DURING a multi-minute LLM
+            # call — passing the raw get_client here made every long implement call
+            # look like a stall to the UI's activity-based warning.
             run_coding_team_orchestrator(
                 job_id,
                 str(path),
                 plan_input,
                 update_job_fn=lambda **kw: update_job(job_id, **kw),
                 get_job_fn=lambda jid: get_job(jid),
-                get_llm=get_client,
+                progress_base=base,
+                progress_span=span,
             )
             # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
             # completed_with_failures / failed / cancelled), so there is nothing to finalize here —
@@ -3746,7 +3821,15 @@ def run_failed_tasks(job_id: str) -> None:
     backend_dir = path / "backend"
     frontend_dir = path / "frontend"
     try:  # pragma: no cover  # integration-only: re-runs failed tasks through full per-task pipeline (LLM + git + subprocess)
-        update_job(job_id, status=JOB_STATUS_RUNNING, failed_tasks=[], error=None)
+        # current_activity from the failed run is stale by definition here; clear it
+        # so the retry does not render the old run's frozen sub-bar.
+        update_job(
+            job_id,
+            status=JOB_STATUS_RUNNING,
+            failed_tasks=[],
+            error=None,
+            current_activity=None,
+        )
 
         agents = _get_agents()
 
