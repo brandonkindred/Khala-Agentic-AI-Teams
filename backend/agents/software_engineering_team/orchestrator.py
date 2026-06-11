@@ -841,17 +841,21 @@ def _run_code_review(
     language: str,
     architecture,
     existing_codebase: str | None = None,
+    files: Dict[str, str] | None = None,
 ):
     """
     Run the code review agent on the given code.
+
+    When *files* (a ``{path: content}`` mapping of the task's changed files) is
+    provided it takes precedence over *code_to_review*; the agent ignores the
+    legacy concatenated string and bounds its own per-call prompts.
     Returns the CodeReviewOutput.
     """
     from code_review_agent.models import CodeReviewInput
 
     # No pre-truncation: the coordinator bounds its own per-call prompts, and
     # its full-coverage guarantee only holds when it sees all the code.
-    review_input = CodeReviewInput(  # pragma: no cover  # integration-only
-        code=code_to_review,
+    input_kwargs: Dict[str, Any] = dict(  # pragma: no cover  # integration-only
         spec_content=spec_content,
         task_description=task.description,
         task_requirements=_task_requirements(task),
@@ -860,7 +864,13 @@ def _run_code_review(
         architecture=architecture,
         existing_codebase=existing_codebase,
     )
-    return agents["code_review"].run(review_input)  # pragma: no cover  # integration-only
+    if files is not None:  # pragma: no cover  # integration-only
+        input_kwargs["files"] = files
+    else:  # pragma: no cover  # integration-only
+        input_kwargs["code"] = code_to_review
+    return agents["code_review"].run(  # pragma: no cover  # integration-only
+        CodeReviewInput(**input_kwargs)
+    )
 
 
 def _code_review_issues_to_dicts(issues: Any) -> List[Dict[str, Any]]:

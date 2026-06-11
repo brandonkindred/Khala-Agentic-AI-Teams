@@ -273,6 +273,31 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
     return out or ""
 
 
+def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
+    """Return repo-relative paths changed on *head* since it diverged from *base*.
+
+    Runs ``git diff --name-only --diff-filter=d base...head``. The ``d`` filter
+    drops deletions so every returned path is a file a caller can still read.
+
+    Preconditions:
+        - base and head are git revisions (branch name, tag, or SHA); the caller
+          wants the set of files the work on *head* added or modified.
+    Postconditions:
+        - Returns the changed paths in git's reporting order. Returns ``[]`` when
+          the path is not a git repository, the diff command fails, or nothing
+          changed — so callers can fall back without distinguishing the cases.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return []
+    code, out = _run_git(
+        path, ["git", "diff", "--name-only", "--diff-filter=d", f"{base}...{head}"]
+    )
+    if code != 0:
+        return []
+    return [line for line in (out or "").splitlines() if line.strip()]
+
+
 def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) -> Tuple[bool, str]:
     """
     Checkout target_branch and merge source_branch into it.

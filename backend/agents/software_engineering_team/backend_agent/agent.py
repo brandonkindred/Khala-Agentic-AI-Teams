@@ -22,6 +22,7 @@ from software_engineering_team.shared.prompt_utils import (
 )
 from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
+    read_files_as_dict,
     read_repo_code,
     truncate_for_context,
 )
@@ -503,6 +504,52 @@ def _read_repo_meta_files(repo_path: Path) -> str:
             except (OSError, UnicodeDecodeError) as e:
                 logger.debug("Could not read %s: %s", f, e)
     return "\n\n".join(parts) if parts else ""
+
+
+def _select_review_input(
+    repo_path: Path,
+    current_task: Any,
+    written_files: Dict[str, str] | None,
+) -> Tuple[Dict[str, str] | None, str | None]:
+    """Choose the code-review input: the task's changed files, untruncated.
+
+    The workflow commits every fix-loop iteration, so ``git diff development...HEAD``
+    is a reliable record of what this task touched. Reviewing only those files
+    (instead of the whole repo) keeps the coordinator's per-call prompts small
+    while still covering everything the task changed.
+
+    Preconditions:
+        - *repo_path* is the task's working tree; *written_files* is the files
+          dict the generator just wrote (or None).
+    Postconditions:
+        - Returns ``(files, code)`` with exactly one of the two populated, never
+          both, and never both empty — so review is never silently skipped:
+            1. the changed files vs the development branch as a dict, else
+            2. the task's just-written files dict, else
+            3. the legacy whole-repo concatenation as a ``code`` string (logged).
+        - For repo-setup tasks the changed-files dict is read without an
+          extension filter so meta files (Dockerfile, requirements.txt, ...) are
+          included.
+    """
+    from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, list_changed_files
+
+    is_setup = _is_repo_setup_task(current_task)
+    changed = list_changed_files(repo_path, DEVELOPMENT_BRANCH)
+    extensions = None if is_setup else BACKEND_EXTENSIONS
+    files = read_files_as_dict(repo_path, changed, extensions=extensions)
+    if files:
+        return files, None
+    if written_files:
+        return dict(written_files), None
+    logger.warning(
+        "Code review: empty diff and no written files; falling back to whole-repo review input"
+    )
+    code = _read_repo_code(repo_path)
+    if is_setup:
+        meta = _read_repo_meta_files(repo_path)
+        if meta:
+            code = code + "\n\n" + meta
+    return None, code
 
 
 def _is_repo_setup_task(task: Any) -> bool:
@@ -1518,14 +1565,13 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
-            code_on_branch = _read_repo_code(repo_path)
-            if _is_repo_setup_task(current_task):
-                meta = _read_repo_meta_files(repo_path)
-                if meta:
-                    code_on_branch = code_on_branch + "\n\n" + meta
+            review_files, review_code = _select_review_input(
+                repo_path, current_task, getattr(result, "files", None)
+            )
             review_result = self._run_code_review(
                 code_review_agent=code_review_agent,
-                code=code_on_branch,
+                files=review_files,
+                code=review_code,
                 spec_content=spec_content,
                 task=current_task,
                 architecture=architecture,
@@ -2447,7 +2493,8 @@ class BackendExpertAgent:
     def _run_code_review(
         *,
         code_review_agent: Any,
-        code: str,
+        files: Dict[str, str] | None = None,
+        code: str | None = None,
         spec_content: str,
         task: Task,
         architecture: Optional[SystemArchitecture],
@@ -2457,9 +2504,11 @@ class BackendExpertAgent:
         Invoke the code review agent.
         Preconditions:
             - ``code_review_agent`` is initialised.
-            - ``code`` contains the files on the feature branch, untruncated:
-              the coordinator bounds its own per-call prompts and its coverage
-              guarantee only holds when it sees the full input.
+            - Exactly one of ``files`` (the task's changed files as a
+              ``{path: content}`` dict) or ``code`` (a path-headered blob) is
+              provided, untruncated: the coordinator bounds its own per-call
+              prompts and its coverage guarantee only holds when it sees the
+              full input.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:
@@ -2467,18 +2516,23 @@ class BackendExpertAgent:
         """
         from code_review_agent.models import CodeReviewInput
 
-        return code_review_agent.run(
-            CodeReviewInput(
-                code=code,
-                spec_content=spec_content,
-                task_description=task.description,
-                task_requirements=_task_requirements(task),
-                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
-                language="python",
-                architecture=architecture,
-                existing_codebase=existing_code,
-            )
-        )
+        # ``CodeReviewInput`` ignores ``code`` when ``files`` is set and rejects
+        # an input that carries neither; pass each only when present so the
+        # legacy ``code`` string still counts as explicitly provided.
+        input_kwargs: Dict[str, Any] = {
+            "spec_content": spec_content,
+            "task_description": task.description,
+            "task_requirements": _task_requirements(task),
+            "acceptance_criteria": getattr(task, "acceptance_criteria", []) or [],
+            "language": "python",
+            "architecture": architecture,
+            "existing_codebase": existing_code,
+        }
+        if files is not None:
+            input_kwargs["files"] = files
+        if code is not None:
+            input_kwargs["code"] = code
+        return code_review_agent.run(CodeReviewInput(**input_kwargs))
 
     @staticmethod
     def _run_security_review(

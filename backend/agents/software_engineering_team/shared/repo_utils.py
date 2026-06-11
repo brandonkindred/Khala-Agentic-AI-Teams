@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, Iterable, List, Optional
 
 # Directories excluded from repo scans (build artifacts, VCS, dependency caches)
 REPO_EXCLUDE_DIRS: frozenset[str] = frozenset(
@@ -90,6 +90,45 @@ def read_repo_code(
             except (OSError, UnicodeDecodeError):
                 pass
     return "\n\n".join(parts) if parts else "# No code files found"
+
+
+def read_files_as_dict(
+    repo_path: Path,
+    paths: Iterable[str],
+    extensions: Optional[List[str]] = None,
+) -> Dict[str, str]:
+    """Read *paths* under *repo_path* into a ``{path: content}`` mapping.
+
+    Parameters
+    ----------
+    repo_path:
+        Root the paths are resolved against.
+    paths:
+        Repo-relative paths to read (e.g. the output of ``list_changed_files``).
+    extensions:
+        When given, only paths whose suffix is in this list are included.
+        ``None`` means no extension filter (so files without a code suffix,
+        such as ``Dockerfile`` or ``requirements.txt``, pass through).
+
+    Preconditions:
+        - *paths* are repo-relative; the caller has already scoped them.
+    Postconditions:
+        - Returns a mapping in the iteration order of *paths*, skipping any path
+          that is filtered out by *extensions*, is missing, or cannot be read as
+          UTF-8 text (these are dropped silently so review still runs on the
+          readable remainder).
+    """
+    result: Dict[str, str] = {}
+    for rel_path in paths:
+        candidate = Path(rel_path)
+        if extensions is not None and candidate.suffix not in extensions:
+            continue
+        full_path = repo_path / candidate
+        try:
+            result[rel_path] = full_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+    return result
 
 
 def truncate_for_context(
