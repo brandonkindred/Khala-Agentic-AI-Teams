@@ -280,3 +280,24 @@ def test_notify_review_progress_clamps_out_of_range_fraction(caplog):
 
     assert received == [("reviewing", "x", 1.0), ("reviewing", "y", 0.0)]
     assert sum("out of range" in r.message for r in caplog.records) == 2
+
+
+def test_raising_callback_is_swallowed_and_never_changes_the_review(caplog):
+    """A raising progress callback (e.g. a status-store outage behind the legacy
+    v2 detail_callback bridge) is an observability bug: it must be logged and
+    swallowed at the invocation boundary, never abort the review — the call
+    sites' broad except would otherwise divert a healthy reviewer to the
+    lower-fidelity LLM fallback."""
+    import logging
+
+    def _boom(step: str, detail: str, fraction: float) -> None:
+        raise RuntimeError("store down")
+
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    baseline = agent.run(_input())
+    with caplog.at_level(logging.WARNING):
+        result = agent.run(_input(), progress_callback=_boom)
+
+    assert result.approved == baseline.approved
+    assert result.issues == baseline.issues
+    assert any("callback failed (ignored" in r.message for r in caplog.records)
