@@ -198,6 +198,8 @@ Core vars only. The complete reference — every var, defaults, backoff math, fa
 | `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`) |
 | `GITHUB_TOKEN` | Token for the coding team's `run-from-github` flow (Issues/PRs/Contents read-write + Metadata read) |
 
+**Agent Cognition:** operability/tuning env lives in `backend/agents/agent_cognition/README.md` (§"Configuration & operability") — the scheduler tick (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`), event retention (manifest `cognition.memory.retention_days_events`), digest budget (`AGENT_COGNITION_DIGEST_EVENT_TOP_N`), per-key model (`LLM_MODEL_cognition`), writeback cap (`AGENT_COGNITION_WRITEBACK_MAX_BYTES`), and ledger TTL (`AGENT_COGNITION_RUN_TTL_S`). Seed rule packs declared in an agent's `cognition.rule_packs` manifest field install lazily and idempotently on the agent's first cognition-gated invoke.
+
 **Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`. See `backend/agents/blogging/README.md`.
 
 **Google browser login (shared):** `GET/PUT/DELETE /api/integrations/google-browser-login` stores one Fernet-encrypted Google credential (Postgres only — never SQLite) for any Playwright integration that signs in with Google. Reuse `unified_api/google_browser_login_credentials.py` for new "Sign in with Google" integrations. Medium uses this flow; details in `backend/agents/blogging/README.md`.

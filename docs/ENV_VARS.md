@@ -257,6 +257,18 @@ processed period costs one LLM summarization call, so the budget keeps a cold-st
 sequential LLM calls on the invoke hot path. The pass is oldest-first and idempotent: repeated
 budgeted invokes — and the unbudgeted central scheduler — drain the remainder.
 
+### AGENT_COGNITION_ROLLUP_INPUT_CHARS
+Character budget passed to `compact_text` for the events/lower-scale-summaries block before each
+rollup LLM summarization call (`agent_cognition/memory/rollup.py`, default `12000`; garbage or a
+non-positive value falls back to the default). Caps how much memory text one summarization period
+feeds the model.
+
+### AGENT_COGNITION_DIGEST_EVENT_TOP_N
+Number of most-recent in-progress memory events folded into an agent's memory digest at invoke time
+(`agent_cognition/memory/retrieval.py`, default `20`; garbage or a non-positive value falls back to
+the default). The summary half of the digest is bounded separately by the caller-supplied
+`token_budget` (trimmed via `compact_text`).
+
 ### NEO4J_BOLT_URL
 Bolt URL of the Neo4j server backing the Graphiti knowledge-graph layer over Agent Cognition (e.g.
 `bolt://neo4j:7687`). This is the layer's **enablement gate** (`shared_neo4j.is_neo4j_enabled()`): a
@@ -305,6 +317,18 @@ ledger. A *terminal* (`completed`/`blocked`) run row is retained this long so a 
 stored envelope without re-invoking; once `completed_at` is older than the TTL the scheduler's
 `gc_terminal_runs` pass reclaims it. `in_progress` rows are **never** GC'd here — an expired lease is
 reclaimed lazily by `claim_run`, preserving its `request_hash` for retry policing.
+
+### AGENT_COGNITION_RUN_LEASE_S
+Lease duration (seconds, default `120`, floored to `30`) a `claim_run` holds on an `in_progress`
+`agent_cognition_runs` row (`agent_cognition/context.py`). A still-leased row makes a concurrent
+retry conflict; once the lease expires the row is reclaimed in place (its `request_hash` retained) and
+re-executed. Distinct from `AGENT_COGNITION_RUN_TTL_S`, which bounds *terminal* rows for replay.
+
+### AGENT_COGNITION_WRITEBACK_MAX_BYTES
+Byte cap on the cognition `cognition_writeback` half of an invoke envelope
+(`agents/shared_agent_invoke/limits.py`, default `1048576` = 1 MiB). The user `output` field has its
+own bound (`AGENT_INVOKE_MAX_OUTPUT_BYTES`), so control/memory data never competes with user output;
+an over-cap writeback is truncated and flagged rather than dropping the response.
 
 ### AGENT_COGNITION_GRAPH_SEARCH_TOP_K
 Max related facts retrieved per knowledge-graph search in `build_graph_context` (default `10`),

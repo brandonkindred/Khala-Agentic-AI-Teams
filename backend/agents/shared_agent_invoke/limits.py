@@ -47,8 +47,19 @@ def max_writeback_bytes() -> int:
     The per-field ``output`` cap (:func:`max_output_bytes`) must not be shared
     with the audit, or a near-cap ``output`` could starve the audit (or vice
     versa). Defaults to 1 MiB; override via ``AGENT_COGNITION_WRITEBACK_MAX_BYTES``.
+
+    Parses defensively: an unset, unparseable, or non-positive override falls
+    back to the default, so a malformed setting can never raise on the invoke
+    response path or shrink the cap to a value that drops every audit entry.
     """
-    return int(os.getenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", str(DEFAULT_MAX_WRITEBACK_BYTES)))
+    raw = os.getenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES")
+    if raw is None:
+        return DEFAULT_MAX_WRITEBACK_BYTES
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_WRITEBACK_BYTES
+    return value if value > 0 else DEFAULT_MAX_WRITEBACK_BYTES
 
 
 def default_exec_timeout_s() -> float:
