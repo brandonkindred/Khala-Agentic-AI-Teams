@@ -56,22 +56,31 @@ class SynthesisResult(BaseModel):
 def build_findings_digest(
     issues: List[CodeReviewIssue],
     chunk_summaries: List[str],
+    chunk_spec_notes: Optional[List[str]] = None,
 ) -> str:
     """Render findings as plain text for the synthesis prompt — never any code.
 
     Issues are ordered ``critical → high → medium → low → info`` (then unknown
     severities) purely so the digest reads blocking-first; this is presentation
-    order, not truncation. Every issue and every summary is rendered in full —
-    there are no length caps of any kind.
+    order, not truncation. Every issue, summary, and per-pass spec note is
+    rendered in full — there are no length caps of any kind.
+
+    The per-pass spec-compliance notes are included because the synthesized
+    ``spec_compliance_notes`` *replaces* the concatenated per-pass notes
+    downstream; without them in the digest the synthesizer would have to
+    reconstruct acceptance-criteria observations from findings alone and could
+    drop or contradict concrete evidence a reviewer already recorded.
 
     Preconditions:
         - ``issues`` is a list of ``CodeReviewIssue`` (may be empty).
         - ``chunk_summaries`` is a list of strings (may be empty); each is one
           per-pass summary.
+        - ``chunk_spec_notes`` is None or a list of strings (may be empty); each
+          is one per-pass spec-compliance note.
 
     Postconditions:
-        - The returned text contains every issue and every non-empty summary in
-          full, with no source code.
+        - The returned text contains every issue, every non-empty summary, and
+          every non-empty spec note in full, with no source code.
         - Ordering within the issue section is stable for equal severities
           (input order preserved).
     """
@@ -106,6 +115,16 @@ def build_findings_digest(
     else:
         lines.append("(no per-pass summaries were produced)")
 
+    lines.append("")
+    lines.append("## Per-pass spec-compliance notes")
+    non_empty_notes = [n for n in (chunk_spec_notes or []) if n.strip()]
+    if non_empty_notes:
+        for idx, note in enumerate(non_empty_notes, start=1):
+            lines.append(f"### Pass {idx}")
+            lines.append(note)
+    else:
+        lines.append("(no per-pass spec-compliance notes were produced)")
+
     return "\n".join(lines)
 
 
@@ -116,6 +135,7 @@ def synthesize_review_findings(
     approved: bool,
     issues: List[CodeReviewIssue],
     chunk_summaries: List[str],
+    chunk_spec_notes: Optional[List[str]] = None,
 ) -> Optional[SynthesisResult]:
     """Run exactly one LLM pass to merge per-pass findings into one narrative.
 
@@ -130,6 +150,9 @@ def synthesize_review_findings(
           ``Model`` interface, in which case it is used as the model directly).
         - ``approved`` is the deterministic verdict already decided by the
           coordinator; it is passed for context only and is never recomputed.
+        - ``chunk_spec_notes`` is None or the per-pass spec-compliance notes;
+          they are fed into the digest so the synthesized notes consolidate the
+          reviewers' actual evidence rather than reconstructing it.
 
     Postconditions:
         - Returns a ``SynthesisResult`` with two non-empty strings on success.
@@ -139,7 +162,7 @@ def synthesize_review_findings(
         - Never raises, and never mutates ``issues`` or the verdict.
     """
     try:
-        digest = build_findings_digest(issues, chunk_summaries)
+        digest = build_findings_digest(issues, chunk_summaries, chunk_spec_notes)
         framing = _build_framing(input_data, approved)
         prompt = f"{framing}\n\n{digest}"
 

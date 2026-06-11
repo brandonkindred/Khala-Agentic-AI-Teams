@@ -131,7 +131,7 @@ Be thorough but fair. Focus on issues that actually matter for production code q
 REVIEW_SYNTHESIS_PROMPT = (
     """You consolidate the findings of an automated per-file code review into one coherent report.
 
-A large submission was reviewed in several independent passes. You are given ONLY the findings from those passes — the issues that were flagged and the per-pass summaries. You are NOT given any source code, and you must work only from what is provided.
+A large submission was reviewed in several independent passes. You are given ONLY the findings from those passes — the issues that were flagged, the per-pass summaries, and the per-pass spec-compliance notes. You are NOT given any source code, and you must work only from what is provided.
 
 **Your job:**
 Rewrite the fragmented per-pass material into a single, coherent narrative that reads as one review of the whole submission, not a list of disconnected pieces.

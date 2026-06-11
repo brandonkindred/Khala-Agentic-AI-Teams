@@ -125,6 +125,22 @@ def test_digest_handles_no_issues_and_no_summaries() -> None:
     digest = build_findings_digest([], [])
     assert "no issues" in digest.lower()
     assert "no per-pass summaries" in digest.lower()
+    assert "no per-pass spec-compliance notes" in digest.lower()
+
+
+def test_digest_includes_per_pass_spec_notes_in_full() -> None:
+    """Per-pass spec notes are rendered (the synthesized notes replace the
+    concatenated ones, so the evidence must reach the digest)."""
+    long_note = "N" * 4_000
+    digest = build_findings_digest([], ["summary"], [long_note, "  ", "second note"])
+    assert "Per-pass spec-compliance notes" in digest
+    assert long_note in digest  # full, untruncated
+    assert "second note" in digest
+    # Blank notes are skipped, so only two passes are rendered in that section.
+    section = digest.split("## Per-pass spec-compliance notes", 1)[1]
+    assert "### Pass 1" in section
+    assert "### Pass 2" in section
+    assert "### Pass 3" not in section
 
 
 # ---------------------------------------------------------------------------
@@ -151,6 +167,35 @@ class _PayloadClient(DummyLLMClient):
 class _RaisingClient(DummyLLMClient):
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
         raise RuntimeError("synthesis model boom")
+
+
+class _RecordingClient(DummyLLMClient):
+    """Captures the synthesis prompt, then returns a fixed payload."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        super().__init__()
+        self._payload = payload
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.prompts.append(prompt)
+        return self._payload
+
+
+def test_synthesize_forwards_per_pass_spec_notes_into_prompt() -> None:
+    client = _RecordingClient({"summary": "merged", "spec_compliance_notes": "merged notes"})
+    result = synthesize_review_findings(
+        client,
+        input_data=_input(),
+        approved=True,
+        issues=[],
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["AC1 satisfied via endpoint X", "AC2 partially met"],
+    )
+    assert isinstance(result, SynthesisResult)
+    assert len(client.prompts) == 1
+    assert "AC1 satisfied via endpoint X" in client.prompts[0]
+    assert "AC2 partially met" in client.prompts[0]
 
 
 def test_synthesize_success_returns_result() -> None:

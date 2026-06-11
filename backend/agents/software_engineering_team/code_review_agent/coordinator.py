@@ -709,6 +709,7 @@ def _merge_narrative(
             approved=approved,
             issues=issues,
             chunk_summaries=outcome.summaries,
+            chunk_spec_notes=outcome.spec_notes,
         )
         if synthesized is not None:
             return synthesized.summary, synthesized.spec_compliance_notes
