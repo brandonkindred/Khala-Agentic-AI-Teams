@@ -9,10 +9,16 @@
  * surface. Jobs predating `last_activity_at` get no label and no warning
  * (an honest "don't know" beats false reassurance).
  *
- * Ages are computed against the backend's `server_time` (sent with every
- * status response) when available, so the math is immune to browser clock
- * skew in both directions; `Date.now()` is only a fallback for older
- * responses.
+ * Clock-skew handling: every status response carries `server_time`, and pollers
+ * stamp the browser receipt time via `markStatusReceived`. The pair yields a
+ * clock OFFSET (server minus browser at receipt), so ages are computed against
+ * `Date.now() + offset` — immune to skew in both directions AND continuously
+ * advancing. Anchoring directly on the response's `server_time` snapshot is
+ * deliberately avoided: a snapshot freezes the age between polls and freezes it
+ * forever once polling stops on an error, silently suppressing the stall
+ * warning exactly when the backend dies. Without a receipt stamp the math
+ * degrades to the raw browser clock — still advancing; the worst case is a
+ * spurious warning under extreme skew, never a warning that cannot fire.
  */
 
 /** Minimal status shape these helpers read; both SE and coding-team statuses satisfy it. */
@@ -21,6 +27,18 @@ export interface ActivityTimestamps {
   waiting_for_answers?: boolean;
   last_activity_at?: string | null;
   server_time?: string | null;
+  /** Browser Date.now() when this status was received — client-side only, set via markStatusReceived. */
+  client_received_at_ms?: number;
+}
+
+/**
+ * Stamp the browser receipt time onto a freshly received status. Pollers call
+ * this in their response handler; it is what turns `server_time` into a usable
+ * clock offset (see the module header).
+ */
+export function markStatusReceived<T extends ActivityTimestamps>(status: T, now: number = Date.now()): T {
+  status.client_received_at_ms = now;
+  return status;
 }
 
 /**
@@ -34,12 +52,18 @@ export const STALL_THRESHOLD_MS = 600_000;
 /** Statuses eligible for the stall warning: active states where silence means trouble. */
 const STALL_ELIGIBLE_STATUSES = new Set(['running', 'pending']);
 
-/** The reference "now" for age math: the backend clock when available (skew immunity). */
+/**
+ * The reference "now" for age math: the browser clock corrected by the
+ * server-minus-browser offset captured at receipt (skew immunity), or the raw
+ * browser clock when no offset can be derived. Always advances in real time —
+ * never a frozen server snapshot (see the module header for why).
+ */
 function referenceNowMs(status: ActivityTimestamps | null | undefined, fallbackNow: number): number {
   const serverTime = status?.server_time;
-  if (serverTime) {
-    const parsed = Date.parse(serverTime);
-    if (!Number.isNaN(parsed)) return parsed;
+  const receivedAt = status?.client_received_at_ms;
+  if (serverTime && typeof receivedAt === 'number' && Number.isFinite(receivedAt)) {
+    const serverMs = Date.parse(serverTime);
+    if (!Number.isNaN(serverMs)) return fallbackNow + (serverMs - receivedAt);
   }
   return fallbackNow;
 }

@@ -9,6 +9,7 @@ import { Subscription, switchMap, timer } from 'rxjs';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
 import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
+import { markStatusReceived } from '../../shared/staleness.util';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 /** Team display order for swim lanes. */
@@ -142,7 +143,10 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
               (s?.status === 'running' || s?.status === 'pending'));
           const newInterval = needFastPoll(res) ? 5000 : 15000;
           const oldInterval = needFastPoll(this.status) ? 5000 : 15000;
-          this.status = res;
+          // Receipt stamp turns the response's server_time into a clock offset,
+          // so staleness ages advance between polls instead of freezing on the
+          // last snapshot (see staleness.util.ts).
+          this.status = markStatusReceived(res);
           this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;

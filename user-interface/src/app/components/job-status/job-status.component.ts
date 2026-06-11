@@ -6,6 +6,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse } from '../../models';
+import { markStatusReceived } from '../../shared/staleness.util';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 @Component({
@@ -43,7 +44,10 @@ export class JobStatusComponent implements OnInit, OnDestroy {
         next: (res) => {
           const wasWaiting = this.status?.waiting_for_answers;
           const isWaiting = res.waiting_for_answers;
-          this.status = res;
+          // Receipt stamp turns the response's server_time into a clock offset,
+          // so staleness ages advance between polls instead of freezing on the
+          // last snapshot (see staleness.util.ts).
+          this.status = markStatusReceived(res);
           this.statusChange.emit(res);
           this.loading = false;
           // completed_with_failures is the coding team's partial-success terminal

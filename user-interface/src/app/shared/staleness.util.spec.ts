@@ -3,6 +3,7 @@ import {
   lastActivityAgoMs,
   lastActivityDurationLabel,
   lastActivityLabel,
+  markStatusReceived,
   STALL_THRESHOLD_MS,
 } from './staleness.util';
 
@@ -32,16 +33,39 @@ describe('staleness.util', () => {
       expect(lastActivityAgoMs({ last_activity_at: 'not-a-date' }, NOW)).toBeNull();
     });
 
-    it('computes the age against server_time when present (browser clock skew immunity)', () => {
-      // Browser clock 30 minutes ahead of the backend: with server_time the age
-      // is the true 60s; without it the job would look stalled on every poll.
+    it('corrects for clock skew via the offset from server_time + receipt stamp', () => {
+      // Browser clock 30 minutes ahead of the backend: the offset captured at
+      // receipt cancels the skew, so the age is the true 60s; without correction
+      // the job would look stalled on every poll.
       const browserNow = NOW + 30 * 60_000;
-      const status = { last_activity_at: at(60), server_time: new Date(NOW).toISOString() };
+      const status = markStatusReceived(
+        { last_activity_at: at(60), server_time: new Date(NOW).toISOString() },
+        browserNow,
+      );
       expect(lastActivityAgoMs(status, browserNow)).toBe(60_000);
     });
 
-    it('falls back to the browser clock when server_time is absent or unparsable', () => {
-      expect(lastActivityAgoMs({ last_activity_at: at(42), server_time: 'garbage' }, NOW)).toBe(42_000);
+    it('keeps ages advancing between polls and after polling stops (no frozen snapshot)', () => {
+      // The age must come from an advancing clock, not the last response's
+      // server_time snapshot — a snapshot freezes the age when polling dies on
+      // an API error, suppressing the stall warning exactly when the backend is
+      // in trouble.
+      const status = markStatusReceived(
+        { status: 'running', last_activity_at: at(30), server_time: new Date(NOW).toISOString() },
+        NOW,
+      );
+      expect(lastActivityAgoMs(status, NOW)).toBe(30_000);
+      const muchLater = NOW + STALL_THRESHOLD_MS + 60_000;
+      expect(lastActivityAgoMs(status, muchLater)).toBe(STALL_THRESHOLD_MS + 90_000);
+      expect(isStalled(status, muchLater)).toBe(true);
+    });
+
+    it('falls back to the advancing browser clock without a usable offset', () => {
+      // Missing receipt stamp, absent or garbage server_time: degrade to the raw
+      // browser clock (still advancing) — the worst case is skew-induced noise,
+      // never an age that cannot grow.
+      expect(lastActivityAgoMs({ last_activity_at: at(42), server_time: new Date(NOW).toISOString() }, NOW)).toBe(42_000);
+      expect(lastActivityAgoMs({ last_activity_at: at(42), server_time: 'garbage', client_received_at_ms: NOW }, NOW)).toBe(42_000);
       expect(lastActivityAgoMs({ last_activity_at: at(42), server_time: null }, NOW)).toBe(42_000);
     });
 
@@ -116,11 +140,14 @@ describe('staleness.util', () => {
 
     it('never fooled by a browser clock ahead of the backend', () => {
       const browserNow = NOW + STALL_THRESHOLD_MS + 120_000;
-      const status = {
-        status: 'running',
-        last_activity_at: fresh,
-        server_time: new Date(NOW).toISOString(),
-      };
+      const status = markStatusReceived(
+        {
+          status: 'running',
+          last_activity_at: fresh,
+          server_time: new Date(NOW).toISOString(),
+        },
+        browserNow,
+      );
       expect(isStalled(status, browserNow)).toBe(false);
     });
   });

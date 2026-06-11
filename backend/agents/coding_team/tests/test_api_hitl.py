@@ -356,3 +356,53 @@ def test_status_progress_coercion_clamps_garbage(monkeypatch):
 
     monkeypatch.setattr(api, "get_job", lambda jid: _job(progress=250))
     assert client.get("/status/j1").json()["progress"] == 100
+
+
+def test_resume_releases_claim_when_activity_clear_fails(monkeypatch):
+    """A job-service outage during resume's current_activity wipe must not leak the
+    run-thread claim: the failed /resume surfaces the error, and a later /resume
+    (service recovered) can still spawn the orchestrator instead of being told
+    'Job already running' forever."""
+    from fastapi.testclient import TestClient
+
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        repo_path="/tmp/repo",
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    started = {"n": 0}
+    monkeypatch.setattr(
+        api,
+        "run_coding_team_orchestrator",
+        lambda *a, **k: started.__setitem__("n", started["n"] + 1),
+    )
+
+    store = {"down": True}
+
+    def flaky_update(jid, **kw):
+        if store["down"]:
+            raise RuntimeError("job service unreachable")
+
+    monkeypatch.setattr(api, "update_job", flaky_update)
+
+    local_client = TestClient(api.app, raise_server_exceptions=False)
+    first = local_client.post("/run/j1/resume")
+    assert first.status_code == 500
+    assert started["n"] == 0
+
+    store["down"] = False
+    second = local_client.post("/run/j1/resume")
+    assert second.status_code == 200
+    assert second.json()["message"] == "Job resumed."
+    assert started["n"] == 1, "claim must have been released so the retry can spawn"

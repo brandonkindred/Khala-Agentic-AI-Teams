@@ -541,11 +541,6 @@ def resume_job(job_id: str) -> RunResponse:
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
 
-    # The dead attempt may have left a mid-review current_activity behind (its
-    # finally clears never ran); wipe it so the UI does not render a frozen
-    # sub-bar through the resumed run's early phases.
-    update_job(job_id, current_activity=None)
-
     def run() -> None:
         _register_run_thread(job_id)
         try:
@@ -564,6 +559,13 @@ def resume_job(job_id: str) -> RunResponse:
             _clear_run_thread(job_id)
 
     try:
+        # The dead attempt may have left a mid-review current_activity behind (its
+        # finally clears never ran); wipe it so the UI does not render a frozen
+        # sub-bar through the resumed run's early phases. This sits INSIDE the
+        # claim-releasing try: it is the first job-service write after the claim,
+        # and a raise here (store outage) that escaped without releasing would
+        # wedge the job — every later /resume would see the claim and no-op.
+        update_job(job_id, current_activity=None)
         threading.Thread(target=run, daemon=True).start()
     except Exception:
         # The thread never started, so run()'s finally will never release the claim — release it
