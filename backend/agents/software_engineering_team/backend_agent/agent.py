@@ -531,7 +531,11 @@ def _select_review_input(
     (requirements.txt, migrations, YAML/JSON, ...) are reviewed too.
 
     Deleted paths have no content to review, so they are surfaced as a single
-    note entry (:data:`_DELETED_FILES_NOTE_KEY`) listing the removals.
+    note entry (:data:`_DELETED_FILES_NOTE_KEY`) listing the removals. Only the
+    paths are listed: re-reading the removed contents or computing reverse
+    dependencies is intentionally out of scope — this stage exists to avoid
+    dumping historical/whole-repo content into review, and the surviving changed
+    files plus the bounded ``existing_codebase`` excerpt provide caller context.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the writer's
