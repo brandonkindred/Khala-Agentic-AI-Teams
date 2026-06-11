@@ -24,9 +24,16 @@ SECURITY_ERROR_DETAIL = (
 )
 
 
+# In-process operator routers that are not teams in TEAM_CONFIGS but must still be
+# content-scanned by the gateway. Kept here, not in TEAM_CONFIGS, so cognition does
+# not leak into team discovery / counts / proxy registration (it has no agents, no
+# /run, and no proxy upstream).
+_EXTRA_SCANNED_PREFIXES: frozenset[str] = frozenset({"/api/cognition"})
+
+
 def _get_team_prefixes() -> set[str]:
-    """Build set of team API prefixes from TEAM_CONFIGS."""
-    return {config.prefix for config in TEAM_CONFIGS.values()}
+    """Build the set of prefixes the gateway scans: team APIs plus extra in-process routers."""
+    return {config.prefix for config in TEAM_CONFIGS.values()} | _EXTRA_SCANNED_PREFIXES
 
 
 def _is_team_path(path: str) -> bool:

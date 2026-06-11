@@ -14,8 +14,20 @@ from fastapi.testclient import TestClient
 
 # Import app after path is set; some team mounts may fail in test env
 from unified_api.main import app
+from unified_api.middleware.security_gateway import _get_team_prefixes, _is_team_path
 
 client = TestClient(app)
+
+
+def test_cognition_prefix_is_scanned():
+    """The /api/cognition operator router is matched by the gateway, not bypassed.
+
+    Cognition is not a TEAM_CONFIGS team, so it would slip past the gateway unless
+    explicitly added to the scanned-prefix set. This proves the prefix is intercepted.
+    """
+    assert "/api/cognition" in _get_team_prefixes()
+    assert _is_team_path("/api/cognition/agents/a/proposals") is True
+    assert _is_team_path("/api/cognition/agents/a/memory/events") is True
 
 
 def test_middleware_403_on_malicious_body():

@@ -265,23 +265,23 @@ flowchart TB
 - **Goal:** Review/inspect endpoints.
 - **Files:** `unified_api/routes/cognition.py` — `GET …/memory`, `GET …/rules`,
   `GET …/rule-proposals?status=pending`, `POST …/approve`, `POST …/reject`; author via
-  `resolve_author` (provenance only). Mount under a dedicated **`/api/cognition/...`** prefix
-  and add it to the security gateway's matched-prefix set (`_get_team_prefixes()` /
-  `_is_team_path()` cover only `TEAM_CONFIGS` today, so these routes are not gated otherwise).
-  **All** routes — the `GET` reads *and* `approve`/`reject` — enforce an **operator-authorization
-  check** (`COGNITION_OPERATOR_TOKEN` now, operator role when platform auth lands), since memory,
-  rules, and proposal evidence are private agent state; `resolve_author` must never be the
-  access-control decision and can return `anonymous`.
+  `resolve_author` (provenance only — server-derived "who decided", never caller-supplied,
+  can return `anonymous`). Mount under a dedicated **`/api/cognition/...`** prefix and add it to
+  the security gateway's matched-prefix set (`_get_team_prefixes()` / `_is_team_path()` cover only
+  `TEAM_CONFIGS` today, so these routes are content-scanned otherwise only by adding the prefix).
+  **No request-level authentication is applied** while the platform is single-user: system-wide
+  user profiles + auth land later (a "operator role" gate) when the system is productionized, so
+  the accepted interim posture is open access to the cognition surface guarded only by the security
+  content gateway. The security gateway is content scanning, not auth, and `resolve_author` is
+  provenance, not access control — neither establishes caller identity.
 - **Depends:** 2, 5
 - **✅ Acceptance:** list/approve/reject flows; author tagging; 404s for unknown ids/proposals;
-  **gateway test proving the cognition prefix is intercepted** (not bypassed); **every route
-  (reads + mutations) without a valid operator credential is rejected 401/403** (private state
-  isn't readable and the HITL gate can't be defeated by an unauthenticated caller).
+  **gateway test proving the cognition prefix is intercepted** (not bypassed).
 
 ### Step 13 — Seed rule packs + config/env
 - **Goal:** Sensible day-one guardrails + operability.
 - **Files:** ship `default_guardrails` seed pack; document env (`AGENT_COGNITION_TICK_S`,
-  event retention, digest token budget, `LLM_MODEL_cognition`, `COGNITION_OPERATOR_TOKEN`,
+  event retention, digest token budget, `LLM_MODEL_cognition`,
   `AGENT_COGNITION_WRITEBACK_MAX_BYTES`, ledger idempotency TTL) in `CLAUDE.md` + package README.
 - **Depends:** 5
 - **✅ Acceptance:** seed pack installs on first provision of an agent; env defaults documented.
