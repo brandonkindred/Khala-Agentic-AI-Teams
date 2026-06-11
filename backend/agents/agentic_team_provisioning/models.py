@@ -224,12 +224,15 @@ class GeneratedAgentInvokeInput(BaseModel):
     is the schema the generated manifest's ``inputs`` points at.
 
     Binding caveat (tracked follow-up): the persona fields below (``role``,
-    ``skills``, ``capabilities``, ``tools``, ``expertise``) are currently supplied
-    by the caller and are **not yet bound to the agent's persisted roster
-    definition** — the dispatch contract hands the entrypoint only this body, never
-    the resolved manifest/id, so it cannot look up the immutable stored persona.
-    Until binding lands (alongside the cross-process invoke work), a generated
-    manifest selects which agent is *advertised*, not an enforced persona/toolset.
+    ``skills``, ``capabilities``, ``expertise``) are currently supplied by the
+    caller and are **not yet bound to the agent's persisted roster definition** —
+    the dispatch contract hands the entrypoint only this body, never the resolved
+    manifest/id, so it cannot look up the immutable stored persona. ``tools`` is
+    **inert at runtime**: the generated manifest declares ``cognition.tools = []``
+    and tool brokering isn't wired for generated agents, so the runtime grants no
+    tools regardless of this field (a caller cannot escalate to ``python`` /
+    ``http_request``). Until binding lands, a generated manifest selects which
+    agent is *advertised*, not an enforced persona.
     """
 
     agent_name: str = Field(..., description="Roster agent name (stable within the team)")
@@ -239,7 +242,9 @@ class GeneratedAgentInvokeInput(BaseModel):
     )
     skills: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
-    tools: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(
+        default_factory=list, description="Inert at runtime — no tools are granted (see class doc)"
+    )
     expertise: list[str] = Field(default_factory=list)
     agent_id: Optional[str] = Field(
         default=None, description="Stable cognition agent id; defaults to the agent name"

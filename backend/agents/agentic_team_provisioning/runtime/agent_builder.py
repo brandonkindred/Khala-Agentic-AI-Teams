@@ -266,10 +266,13 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
 
     Binding caveat (tracked follow-up): the dispatch contract hands this function
     only the request body, never the resolved manifest/agent id, so it cannot look
-    up the agent's immutable persisted roster definition. The persona fields are
-    therefore taken from the (caller-controlled) body — a generated manifest
-    selects which agent is advertised, not an enforced persona. Binding the
-    manifest to its stored definition lands with the cross-process invoke work.
+    up the agent's immutable persisted roster definition. The persona *text* fields
+    are therefore taken from the (caller-controlled) body — a generated manifest
+    selects which agent is advertised, not an enforced persona. **Tools are not
+    taken from the body**: the manifest declares ``cognition.tools = []`` and tool
+    brokering isn't wired yet, so the runtime grants no tools (a caller can't
+    escalate to ``python`` / ``http_request``). Binding the manifest to its stored
+    definition lands with the cross-process invoke work.
 
     Preconditions:
         * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
@@ -294,7 +297,13 @@ def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
         data.get("role", ""),
         data.get("skills", []),
         data.get("capabilities", []),
-        data.get("tools", []),
+        # Runtime tools are NOT taken from the (caller-controlled) body: the
+        # generated manifest declares ``cognition.tools = []`` and tool brokering
+        # isn't wired for generated agents yet, so granting a body-supplied tool
+        # (e.g. ``python``/``http_request``) would hand out an unaudited
+        # code-exec/network capability that bypasses the brokered tool loop. Keep
+        # it empty until roster-bound tool brokering lands (the deferred work).
+        [],
         data.get("expertise", []),
         message,
         agent_id=data.get("agent_id"),

@@ -200,6 +200,16 @@ async def test_invoke_generated_agent_renders_cognition(fake_strands):
 
 
 @pytest.mark.asyncio
+async def test_invoke_generated_agent_ignores_body_tools(fake_strands):
+    # A caller-supplied recognized tool must NOT reach the agent — the generated
+    # manifest declares no tools, so the runtime grants none (no python/http escalation).
+    await agent_builder.invoke_generated_agent(
+        {"agent_name": "A", "message": "hi", "tools": ["python", "http_request"]}
+    )
+    assert fake_strands.last_tools == []
+
+
+@pytest.mark.asyncio
 async def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
     # Regression: the manifest entrypoint must be invokable as ``fn(body)`` by the
     # sandbox dispatch shim. It's an async coroutine fn, so the shim awaits it; run
