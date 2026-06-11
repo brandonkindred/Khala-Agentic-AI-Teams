@@ -85,6 +85,32 @@ def test_parse_code_preserves_preamble_before_first_header() -> None:
     assert blocks[1][0] == "app/main.py"
 
 
+def test_parse_code_ignores_header_like_source_lines() -> None:
+    """Header-like fragments inside source — markdown headings without the
+    trailing marker, '###' starting a comment, mid-line strings — are content,
+    not file headers, and a header can never span multiple source lines."""
+    code = (
+        'md = """\n'
+        "### Title\n"
+        "Body text\n"
+        '"""\n'
+        "\n"
+        "### app/x.py ###\n"
+        'banner = "### not a header ###"\n'
+        "## ### also not ###\n"
+        "code = 1"
+    )
+    blocks = parse_code_into_file_blocks(code)
+    assert [b[0] for b in blocks] == ["", "app/x.py"]
+    # The markdown body survives intact in the headerless preamble block.
+    assert "### Title" in blocks[0][1]
+    assert "Body text" in blocks[0][1]
+    # Mid-line and non-line-start "###" sequences stay in the file's content.
+    assert 'banner = "### not a header ###"' in blocks[1][1]
+    assert "## ### also not ###" in blocks[1][1]
+    assert "code = 1" in blocks[1][1]
+
+
 # ---------------------------------------------------------------------------
 # CodeReviewInput boundary validation
 # ---------------------------------------------------------------------------
