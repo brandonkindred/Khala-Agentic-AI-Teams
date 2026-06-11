@@ -54,6 +54,11 @@ _GENERIC_OPTION_LABELS: frozenset = frozenset({
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
+# Public alias: the cadence at which the answer-wait lease (heartbeat) is renewed. Callers that
+# must keep the lease fresh outside the wait loop (e.g. during a slow on_pause callback) reuse
+# this so the renewal cadence and the wait-loop cadence stay in lockstep, well under the answer
+# endpoint's staleness window.
+ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
 _TERMINAL_STATUSES = frozenset({"failed", "cancelled", "completed", "completed_with_failures"})

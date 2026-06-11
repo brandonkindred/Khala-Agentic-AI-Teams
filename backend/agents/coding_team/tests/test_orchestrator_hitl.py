@@ -149,6 +149,43 @@ def test_pause_publish_writes_heartbeat_atomically_with_flag(monkeypatch):
     assert "T" in pause_update["answer_wait_heartbeat_at"]  # ISO-8601
 
 
+def test_pause_renews_lease_during_slow_on_pause(monkeypatch):
+    """A slow on_pause (e.g. a GitHub comment with retries exceeding the 30s staleness window) must
+    not let the lease go stale: a background renewer heartbeats while the callback runs."""
+    import threading as _threading
+
+    # Shrink the renewal cadence so the test is fast and deterministic.
+    monkeypatch.setattr(orch_mod.hitl, "ANSWER_WAIT_POLL_INTERVAL_S", 0.01)
+    heartbeats: List[str] = []
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+
+    def update_fn(**kw):
+        job.update(kw)
+        if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
+            heartbeats.append(kw["answer_wait_heartbeat_at"])
+
+    started = _threading.Event()
+
+    def slow_on_pause(_qs):
+        started.set()
+        # Hold the callback long enough for several renewal ticks (cadence 0.01s).
+        _threading.Event().wait(0.08)
+
+    _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=lambda j: job,
+        update_fn=update_fn,
+        on_pause=slow_on_pause,
+    )
+    assert started.is_set()
+    # The lease was renewed at least once *during* the slow callback (separate from the atomic
+    # initial heartbeat that rides the pause-publish update).
+    assert len(heartbeats) >= 1
+
+
 def test_pause_cycle_on_pause_error_is_swallowed(monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))

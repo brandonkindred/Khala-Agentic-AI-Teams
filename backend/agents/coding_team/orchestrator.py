@@ -399,10 +399,35 @@ def _run_pause_cycle(
         answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
     )
     if on_pause is not None:
+        # on_pause can post a GitHub comment whose client uses ~30s timeouts with retries, which
+        # can exceed the answer endpoint's heartbeat-staleness window. Periodic wait-loop heartbeats
+        # don't start until on_pause returns, so without renewal the single initial heartbeat could
+        # go stale mid-callback and let another worker conclude the orchestrator died and spawn a
+        # second run. Keep renewing the lease in the background for the callback's full duration.
+        _renew_stop = threading.Event()
+
+        def _renew_lease() -> None:
+            while not _renew_stop.wait(hitl.ANSWER_WAIT_POLL_INTERVAL_S):
+                try:
+                    update_fn(answer_wait_heartbeat_at=hitl.heartbeat_timestamp())
+                except Exception:  # noqa: BLE001 — renewal must never abort the pause
+                    logger.debug(
+                        "answer-wait lease renewal during on_pause failed for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+
+        _renew_thread = threading.Thread(
+            target=_renew_lease, name=f"pause-lease-{job_id}", daemon=True
+        )
+        _renew_thread.start()
         try:
             on_pause(structured)
         except Exception as e:  # noqa: BLE001 — surfacing the pause must never abort the job
             logger.warning("on_pause callback failed for job %s: %s", job_id, e)
+        finally:
+            _renew_stop.set()
+            _renew_thread.join(timeout=5.0)
     # The heartbeat lets the answers endpoint (possibly in another worker process) tell a live,
     # blocked wait loop apart from a dead one before it considers auto-resuming the job.
     got = hitl.wait_for_answers(
