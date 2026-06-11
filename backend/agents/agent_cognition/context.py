@@ -634,7 +634,9 @@ def gc_terminal_runs(now: datetime, ttl: timedelta) -> int:
         * Replay availability is preserved for every terminal run still inside
           its TTL window, and for **all** ``in_progress`` runs regardless of age.
     """
-    assert now.tzinfo is not None, "gc_terminal_runs: now must be tz-aware"
+    assert now.tzinfo is not None and now.utcoffset() == timedelta(0), (
+        "gc_terminal_runs: now must be UTC"
+    )
     assert ttl > timedelta(0), "gc_terminal_runs: ttl must be positive"
     cutoff = now - ttl
     with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:

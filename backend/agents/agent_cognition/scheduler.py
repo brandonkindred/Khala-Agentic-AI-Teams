@@ -100,14 +100,23 @@ async def run_cognition_scheduler(*, interval_s: int | None = None) -> None:
 
 
 async def _run_once() -> None:
-    """Run the per-agent pipeline for every agent with memory, then GC the ledger."""
-    agent_ids = await asyncio.to_thread(watermark_store.list_agent_ids_with_events)
-    for agent_id in agent_ids:
-        try:
-            await _run_one_agent(agent_id)
-        except Exception:
-            logger.exception("cognition scheduler: agent %s failed; continuing", agent_id)
-    await _gc_terminal_runs()
+    """Run the per-agent pipeline for every agent with memory, then GC the ledger.
+
+    The ledger GC runs in a ``finally`` so it is decoupled from agent discovery:
+    if ``list_agent_ids_with_events`` raises (its query/table briefly broken
+    while the run ledger is fine), expired terminal rows are still reclaimed
+    rather than skipped until discovery recovers. The discovery failure then
+    propagates to the loop, which logs and retries next cycle.
+    """
+    try:
+        agent_ids = await asyncio.to_thread(watermark_store.list_agent_ids_with_events)
+        for agent_id in agent_ids:
+            try:
+                await _run_one_agent(agent_id)
+            except Exception:
+                logger.exception("cognition scheduler: agent %s failed; continuing", agent_id)
+    finally:
+        await _gc_terminal_runs()
 
 
 async def _gc_terminal_runs() -> None:

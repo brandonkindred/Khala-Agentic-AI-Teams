@@ -77,6 +77,25 @@ def test_run_once_iterates_then_gcs_the_ledger(monkeypatch):
     assert gc_calls["n"] == 1
 
 
+def test_run_once_gcs_even_when_agent_discovery_fails(monkeypatch):
+    # Discovery is decoupled from the ledger GC: a broken watermark query must
+    # not starve the GC. The discovery error still propagates to the loop.
+    def _broken_discovery():
+        raise RuntimeError("watermark table broken")
+
+    gc_calls = {"n": 0}
+    monkeypatch.setattr(scheduler.watermark_store, "list_agent_ids_with_events", _broken_discovery)
+    monkeypatch.setattr(
+        scheduler.context,
+        "gc_terminal_runs",
+        lambda now, ttl: gc_calls.update(n=gc_calls["n"] + 1) or 0,
+    )
+    monkeypatch.setattr(scheduler.context, "run_idempotency_ttl", lambda: timedelta(days=7))
+    with pytest.raises(RuntimeError, match="watermark table broken"):
+        asyncio.run(scheduler._run_once())
+    assert gc_calls["n"] == 1  # GC ran despite discovery failing
+
+
 def test_gc_terminal_runs_failure_is_isolated(monkeypatch):
     def _boom(now, ttl):
         raise RuntimeError("db down")

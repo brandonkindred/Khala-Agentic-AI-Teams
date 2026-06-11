@@ -751,6 +751,10 @@ def test_gc_terminal_runs_precondition_asserts() -> None:
     with pytest.raises(AssertionError):
         context.gc_terminal_runs(datetime(2026, 6, 1, 12, 0), timedelta(hours=1))  # naive now
     with pytest.raises(AssertionError):
+        # tz-aware but NOT UTC — the cutoff contract requires UTC.
+        non_utc = datetime(2026, 6, 1, 12, 0, tzinfo=timezone(timedelta(hours=5)))
+        context.gc_terminal_runs(non_utc, timedelta(hours=1))
+    with pytest.raises(AssertionError):
         context.gc_terminal_runs(datetime.now(timezone.utc), timedelta(0))  # non-positive ttl
 
 
