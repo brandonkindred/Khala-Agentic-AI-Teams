@@ -58,7 +58,10 @@ from agentic_team_provisioning.models import (
 )
 from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agentic_team_provisioning.runtime.agent_builder import (
-    call_agent_with_cognition as _call_test_agent_with_cognition,
+    build_agent as _build_test_agent,
+)
+from agentic_team_provisioning.runtime.agent_builder import (
+    call_agent as _call_test_agent,
 )
 from agentic_team_provisioning.runtime.agent_builder import (
     generate_starter_prompts,
@@ -812,25 +815,20 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     context_parts.append(f"User: {req.content}")
     full_context = "\n\n".join(context_parts)
 
-    # Build and invoke the agent through the cognition-aware wrapper so any
-    # advisory rules + memory digest on the side channel steer this invoke. The
-    # writeback is discarded here: the local test-chat path has no idempotency
-    # ledger to persist it against (that lives on the gated invoke proxy). The
-    # cognition agent id matches the generated manifest id so episodic memory is
-    # namespaced consistently with the registered agent.
-    from agentic_team_provisioning.manifest_generation import manifest_agent_id
-
-    cognition_agent_id = manifest_agent_id(team_id, agent_name)
-    response_text, _writeback = _call_test_agent_with_cognition(
+    # Build and invoke the agent. This local test-chat path has no cognition
+    # injector (no proxy / open side channel) and no idempotency ledger, so it
+    # uses the plain runtime rather than the cognition-aware wrapper — advisory
+    # rules + memory digest are rendered on the gated sandbox invoke path, where
+    # the shim opens the channel.
+    agent_instance = _build_test_agent(
         agent_def.agent_name,
         agent_def.role,
         agent_def.skills,
         agent_def.capabilities,
         agent_def.tools,
         agent_def.expertise,
-        full_context,
-        agent_id=cognition_agent_id,
     )
+    response_text = _call_test_agent(agent_instance, full_context)
 
     # Store assistant message
     asst_msg_id = str(uuid.uuid4())

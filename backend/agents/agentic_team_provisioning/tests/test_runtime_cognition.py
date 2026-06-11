@@ -19,12 +19,14 @@ class _FakeResult:
 
 
 class _FakeStrandsAgent:
-    """Records the system prompt it was built with; echoes a fixed reply."""
+    """Records the system prompt + tools it was built with; echoes a fixed reply."""
 
     last_system_prompt: str | None = None
+    last_tools: object = None
 
     def __init__(self, **kwargs) -> None:
         type(self).last_system_prompt = kwargs.get("system_prompt")
+        type(self).last_tools = kwargs.get("tools")
 
     def __call__(self, message: str) -> _FakeResult:
         return _FakeResult("ok")
@@ -33,6 +35,7 @@ class _FakeStrandsAgent:
 @pytest.fixture
 def fake_strands(monkeypatch: pytest.MonkeyPatch):
     _FakeStrandsAgent.last_system_prompt = None
+    _FakeStrandsAgent.last_tools = None
     monkeypatch.setattr(agent_builder, "StrandsAgent", _FakeStrandsAgent)
     return _FakeStrandsAgent
 
@@ -137,6 +140,23 @@ def test_resolve_tools_falls_back_to_common_when_none_resolve():
     assert resolved == agent_builder._COMMON_TOOLS
 
 
+def test_resolve_tools_no_fallback_returns_empty():
+    # The cognition/generated path disables the fallback so an agent never gets
+    # _COMMON_TOOLS (network / code-exec) it didn't declare.
+    assert agent_builder.resolve_tools([], allow_common_tools_fallback=False) == []
+    assert agent_builder.resolve_tools(["nope"], allow_common_tools_fallback=False) == []
+    # A recognized tool still resolves regardless of the fallback flag.
+    assert agent_builder.resolve_tools(["http_request"], allow_common_tools_fallback=False) == [
+        agent_builder.TOOL_REGISTRY["http_request"]
+    ]
+
+
+def test_cognition_path_grants_no_common_tools(fake_strands):
+    # call_agent_with_cognition must not hand the agent the _COMMON_TOOLS fallback.
+    agent_builder.call_agent_with_cognition("A", "r", [], [], [], [], "hi")
+    assert fake_strands.last_tools == []
+
+
 def test_call_agent_str_fallback():
     class _PlainAgent:
         def __call__(self, message: str) -> str:
@@ -157,36 +177,39 @@ def test_generate_starter_prompts_fallback_when_empty():
     assert any("Introduce yourself" in p for p in prompts)
 
 
-def test_invoke_generated_agent_returns_output(fake_strands):
-    result = agent_builder.invoke_generated_agent(
+@pytest.mark.asyncio
+async def test_invoke_generated_agent_returns_output(fake_strands):
+    result = await agent_builder.invoke_generated_agent(
         {"agent_name": "A", "role": "r", "message": "hello"}
     )
     assert result == {"output": "ok"}
 
 
-def test_invoke_generated_agent_tolerates_sparse_body(fake_strands):
+@pytest.mark.asyncio
+async def test_invoke_generated_agent_tolerates_sparse_body(fake_strands):
     # A malformed/sparse body must NOT raise (the dispatch boundary contract).
-    assert agent_builder.invoke_generated_agent({}) == {"output": "ok"}
-    assert agent_builder.invoke_generated_agent(None) == {"output": "ok"}
+    assert await agent_builder.invoke_generated_agent({}) == {"output": "ok"}
+    assert await agent_builder.invoke_generated_agent(None) == {"output": "ok"}
 
 
-def test_invoke_generated_agent_renders_cognition(fake_strands):
+@pytest.mark.asyncio
+async def test_invoke_generated_agent_renders_cognition(fake_strands):
     with runtime_channel({"rules": [_ADVISORY]}):
-        agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
+        await agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
     assert "Never reveal secrets." in fake_strands.last_system_prompt
 
 
-def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
-    # Regression: the manifest entrypoint must be callable as ``fn(body)`` by the
-    # sandbox dispatch shim (a plain single-body callable), not a 6-arg factory.
-    from shared_agent_invoke.dispatch import _materialise, _resolve_entrypoint
+@pytest.mark.asyncio
+async def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
+    # Regression: the manifest entrypoint must be invokable as ``fn(body)`` by the
+    # sandbox dispatch shim. It's an async coroutine fn, so the shim awaits it; run
+    # it through the real dispatch path to prove that contract end-to-end.
+    from shared_agent_invoke.dispatch import invoke_entrypoint
 
-    target = _resolve_entrypoint(
-        "agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
+    result = await invoke_entrypoint(
+        "agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent",
+        {"agent_name": "A", "message": "hi"},
     )
-    assert target is agent_builder.invoke_generated_agent
-    callable_obj = _materialise(target)
-    result = callable_obj({"agent_name": "A", "message": "hi"})
     # No channel open → plain output, no writeback envelope.
     assert result == {"output": "ok"}
 
@@ -213,13 +236,14 @@ def test_shape_invoke_result_degrades_when_envelope_absent(monkeypatch: pytest.M
     assert agent_builder._shape_invoke_result("hi", {"events": [1]}) == {"output": "hi"}
 
 
-def test_invoke_generated_agent_writeback_reaches_shim(fake_strands):
+@pytest.mark.asyncio
+async def test_invoke_generated_agent_writeback_reaches_shim(fake_strands):
     # End-to-end: with a channel open, invoke_generated_agent returns a wrapped
     # writeback whose events the shim lifts into its driven result (→ memory_events).
     from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
 
     with runtime_channel({"rules": [_ADVISORY]}):
-        result = agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
+        result = await agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
 
     driven = maybe_drive_tool_loop(result, agent_id="A", source_run_id="r", cognition=None)
     assert driven["output"] == {"output": "ok"}

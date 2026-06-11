@@ -43,14 +43,22 @@ _INPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeInput"
 _OUTPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
 
 
+def _hash8(s: str) -> str:
+    """Short stable hex digest used to keep derived ids injective."""
+    return hashlib.sha1(s.encode()).hexdigest()[:8]
+
+
 def team_id_prefix(team_id: str) -> str:
     """Manifest-id prefix shared by every generated agent of one team.
 
-    Postconditions: returns ``"agentic_team_provisioning.<team-slug>."`` — the
-    common prefix of every id :func:`manifest_agent_id` produces for ``team_id``,
-    used to find this team's generated entries in the registry.
+    Postconditions: returns ``"agentic_team_provisioning.<team-slug>-<hash>."`` —
+    the common prefix of every id :func:`manifest_agent_id` produces for
+    ``team_id``, used to find this team's generated entries in the registry. The
+    ``<hash>`` of the *full* ``team_id`` keeps the prefix injective, so two teams
+    whose ids share a normalized 12-char slug never collide (stale cleanup keyed
+    on this prefix can't touch another team's manifests).
     """
-    return f"{_TEAM_KEY}.{_slug(team_id, 12)}."
+    return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_hash8(team_id)}."
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
@@ -60,13 +68,14 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
         * ``team_id`` and ``agent_name`` are non-empty.
     Postconditions:
         * Deterministic for a given ``(team_id, agent_name)`` pair, and **never**
-          collides for distinct pairs: a short hash of the *original* strings
-          disambiguates names that share a normalized slug (e.g. ``"QA Agent"``
-          and ``"qa-agent"``, or names agreeing on their first 40 slug chars).
-          Always starts with :func:`team_id_prefix`.
+          collides for distinct pairs: the team-injective :func:`team_id_prefix`
+          plus a short hash of the original strings disambiguates names that share
+          a normalized slug (e.g. ``"QA Agent"`` and ``"qa-agent"``, or names
+          agreeing on their first 40 slug chars). Always starts with
+          :func:`team_id_prefix`.
     """
-    digest = hashlib.sha1(f"{team_id}\x00{agent_name}".encode()).hexdigest()[:8]
-    return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{digest}"
+    pair_hash = _hash8(f"{team_id}\x00{agent_name}")
+    return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
 
 
 def default_cognition_block() -> CognitionSpec:

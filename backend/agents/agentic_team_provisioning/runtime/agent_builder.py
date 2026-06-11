@@ -9,6 +9,7 @@ The strands SDK is a hard dependency. The system will fail fast if it is not ins
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -58,8 +59,16 @@ def build_system_prompt(
     return "\n".join(parts)
 
 
-def resolve_tools(tool_names: list[str]) -> list[Any]:
-    """Map tool name strings from the roster to actual tool objects."""
+def resolve_tools(tool_names: list[str], *, allow_common_tools_fallback: bool = True) -> list[Any]:
+    """Map tool name strings from the roster to actual tool objects.
+
+    Postconditions: returns the resolved tool objects. When nothing resolves, the
+    interactive-testing convenience fallback (``_COMMON_TOOLS``) is returned only
+    if ``allow_common_tools_fallback`` is true. The cognition/generated-agent path
+    passes ``False`` so an agent whose manifest declares an empty
+    ``cognition.tools`` never silently receives network / code-execution tools the
+    cognition gate neither resolves nor audits.
+    """
     resolved = []
     for name in tool_names:
         normalized = name.lower().replace(" ", "_").replace("-", "_")
@@ -67,7 +76,9 @@ def resolve_tools(tool_names: list[str]) -> list[Any]:
             resolved.append(TOOL_REGISTRY[normalized])
         else:
             logger.debug("Unrecognized tool %r — will mention in system prompt", name)
-    return resolved or _COMMON_TOOLS
+    if resolved:
+        return resolved
+    return _COMMON_TOOLS if allow_common_tools_fallback else []
 
 
 def build_agent(
@@ -79,6 +90,7 @@ def build_agent(
     expertise: list[str],
     *,
     system_prompt_override: str | None = None,
+    allow_common_tools_fallback: bool = True,
 ) -> StrandsAgent:
     """Compile roster agent metadata into a live strands.Agent.
 
@@ -88,14 +100,15 @@ def build_agent(
         * Returns a ``strands.Agent`` whose system prompt is
           ``system_prompt_override`` when provided (the cognition-aware path
           folds advisory rules in here), else the prompt from
-          :func:`build_system_prompt`.
+          :func:`build_system_prompt`. ``allow_common_tools_fallback`` is forwarded
+          to :func:`resolve_tools`.
     """
     system_prompt = (
         system_prompt_override
         if system_prompt_override is not None
         else build_system_prompt(agent_name, role, skills, capabilities, tools, expertise)
     )
-    resolved = resolve_tools(tools)
+    resolved = resolve_tools(tools, allow_common_tools_fallback=allow_common_tools_fallback)
     model = os.environ.get("AGENTIC_TEAM_TEST_MODEL", "us.anthropic.claude-sonnet-4-20250514")
 
     return StrandsAgent(
@@ -225,6 +238,9 @@ def call_agent_with_cognition(
         tools,
         expertise,
         system_prompt_override=prompt,
+        # No silent code-exec/network fallback on the cognition path: an agent only
+        # gets tools it (and the cognition gate) declare, never _COMMON_TOOLS.
+        allow_common_tools_fallback=False,
     )
     text = call_agent(agent_instance, message)
     # Only emit a writeback when operating under the cognition envelope (a channel
@@ -233,19 +249,26 @@ def call_agent_with_cognition(
     return text, writeback
 
 
-def invoke_generated_agent(body: Any) -> dict[str, Any]:
+async def invoke_generated_agent(body: Any) -> dict[str, Any]:
     """Sandbox entrypoint for a generated agentic-team agent.
 
     A single shared callable serves every generated manifest, so the roster
     metadata travels in the request ``body`` (see
     ``models.GeneratedAgentInvokeInput``) — the dispatch shim calls this as
-    ``invoke_generated_agent(body)``.
+    ``invoke_generated_agent(body)`` and awaits the coroutine.
+
+    **Async on purpose:** the invoke shim runs entrypoints inline on its event
+    loop, and the underlying Strands model call is blocking. Running it directly
+    would stall the loop and prevent the shim's ``asyncio.wait_for`` timeout from
+    firing, so the blocking work is offloaded to a worker thread here (the same
+    treatment the shim already gives the tool loop). ``asyncio.to_thread`` copies
+    the current context, so the cognition side channel still reaches the worker.
 
     Binding caveat (tracked follow-up): the dispatch contract hands this function
     only the request body, never the resolved manifest/agent id, so it cannot look
-    up the agent's immutable persisted roster definition. The persona/tool fields
-    are therefore taken from the (caller-controlled) body — a generated manifest
-    selects which agent is advertised, not an enforced persona/toolset. Binding the
+    up the agent's immutable persisted roster definition. The persona fields are
+    therefore taken from the (caller-controlled) body — a generated manifest
+    selects which agent is advertised, not an enforced persona. Binding the
     manifest to its stored definition lands with the cross-process invoke work.
 
     Preconditions:
@@ -255,8 +278,14 @@ def invoke_generated_agent(body: Any) -> dict[str, Any]:
     Postconditions:
         * Reconstructs the roster agent, runs it through the cognition-aware
           wrapper (advisory rules + memory digest from the open side channel steer
-          the invoke), and returns ``{"output": <response text>}``.
+          the invoke) off the event loop, and returns ``{"output": <response
+          text>}`` (or a marker-wrapped writeback envelope when a channel is open).
     """
+    return await asyncio.to_thread(_invoke_generated_agent_sync, body)
+
+
+def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
+    """Blocking core of :func:`invoke_generated_agent` (runs in a worker thread)."""
     data = dict(body) if isinstance(body, dict) else {}
     agent_name = data.get("agent_name") or data.get("name") or "agent"
     message = data.get("message") or data.get("input") or data.get("prompt") or ""

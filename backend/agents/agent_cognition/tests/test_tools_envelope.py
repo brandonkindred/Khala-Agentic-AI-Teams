@@ -129,13 +129,27 @@ def test_unwrap_writeback_none_for_unmarked() -> None:
     assert try_unwrap_writeback([1, 2]) is None
 
 
-def test_unwrap_writeback_tolerates_malformed_writeback_half() -> None:
-    # A usable output is never lost just because the writeback half is misshapen.
-    unwrapped = try_unwrap_writeback({WRITEBACK_MARKER: 1, "output": "keep", "writeback": "bad"})
+def test_unwrap_writeback_rejects_malformed_envelopes() -> None:
+    # Strict: a marked-but-malformed mapping is NOT consumed as an envelope (so an
+    # unrelated agent's ordinary output is never silently replaced by its 'output').
+    assert try_unwrap_writeback({WRITEBACK_MARKER: 1, "output": "keep", "writeback": "bad"}) is None
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: 1, "writeback": {"events": []}}) is None
+    )  # no output
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: "x", "output": 1, "writeback": {}}) is None
+    )  # marker value
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: 1, "output": 1, "writeback": {}, "extra": 2})
+        is None
+    )  # stray key
+
+
+def test_unwrap_writeback_events_tolerant_within_valid_envelope() -> None:
+    # A well-formed envelope whose events aren't a list degrades to [] (no crash).
+    unwrapped = try_unwrap_writeback(
+        {WRITEBACK_MARKER: 1, "output": "x", "writeback": {"events": "nope"}}
+    )
     assert unwrapped is not None
-    assert unwrapped.output == "keep"
+    assert unwrapped.output == "x"
     assert unwrapped.events == []
-    # Missing writeback key + non-list events also degrade to [].
-    u2 = try_unwrap_writeback({WRITEBACK_MARKER: 1, "writeback": {"events": "x"}})
-    assert u2.output is None
-    assert u2.events == []

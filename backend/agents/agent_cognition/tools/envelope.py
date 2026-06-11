@@ -180,20 +180,25 @@ def try_unwrap_writeback(result: Any) -> UnwrappedWriteback | None:
     """Unwrap ``result`` iff it is a well-formed cognition-writeback envelope.
 
     Postconditions:
-        * ``None`` when ``result`` is not a mapping or lacks the marker — the
-          caller treats it as a plain entrypoint result (no events to lift).
-        * An :class:`UnwrappedWriteback` when the marker is present: ``output`` is
-          the inner output (``None`` if absent) and ``events`` come from the
-          ``writeback`` mapping (an empty list when absent or malformed). Any
-          ``tool_calls`` in the writeback are **ignored** — the trusted tool audit
-          is shim-owned (see :class:`UnwrappedWriteback`). Tolerant by design: a
-          usable output is never lost because the writeback half is misshapen.
+        * ``None`` unless ``result`` is a mapping carrying the marker with value
+          ``1`` and **exactly** the keys ``{marker, "output", "writeback"}`` with
+          an object ``writeback``. This strictness (mirroring the request
+          envelope) means an unrelated agent that happens to return the marker key
+          as ordinary data is passed through untouched, never silently replaced by
+          ``result.get("output")``.
+        * Otherwise an :class:`UnwrappedWriteback`: ``output`` is the inner output
+          and ``events`` come from the ``writeback`` mapping (an empty list when
+          absent or not a list). Any ``tool_calls`` in the writeback are
+          **ignored** — the trusted tool audit is shim-owned (see
+          :class:`UnwrappedWriteback`).
     """
-    if not isinstance(result, Mapping) or WRITEBACK_MARKER not in result:
+    if not isinstance(result, Mapping) or result.get(WRITEBACK_MARKER) != 1:
+        return None
+    if set(result) != _ALLOWED_WRITEBACK_KEYS:
         return None
     writeback = result.get("writeback")
     if not isinstance(writeback, Mapping):
-        writeback = {}
+        return None
     events = writeback.get("events")
     return UnwrappedWriteback(
         output=result.get("output"),

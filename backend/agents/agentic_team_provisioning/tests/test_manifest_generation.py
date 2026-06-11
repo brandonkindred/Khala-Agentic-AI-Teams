@@ -179,6 +179,31 @@ def test_register_team_manifests_scopes_removal_to_team_and_generated(
     assert reg.get("blogging.planner") is other
 
 
+def test_team_prefix_is_injective_for_shared_slug():
+    from agentic_team_provisioning.manifest_generation import team_id_prefix
+
+    # Two team ids that share their first 12 normalized chars must not share a
+    # cleanup prefix (the full team id is hashed into it).
+    a = "team-aaaaaaaaaa-1"
+    b = "team-aaaaaaaaaa-2"
+    assert team_id_prefix(a) != team_id_prefix(b)
+
+
+def test_register_team_manifests_isolates_teams_with_shared_slug(monkeypatch: pytest.MonkeyPatch):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    team_a = "team-aaaaaaaaaa-1"
+    team_b = "team-aaaaaaaaaa-2"
+    a_manifests = register_team_manifests(team_a, [AgenticTeamAgent(agent_name="A", role="r")])
+    # Registering team B (same 12-char slug) must not unregister team A's manifest.
+    register_team_manifests(team_b, [AgenticTeamAgent(agent_name="B", role="r")])
+    assert reg.get(a_manifests[0].id) is not None
+
+
 def test_register_team_manifests_is_best_effort(monkeypatch: pytest.MonkeyPatch):
     import agent_registry
 
