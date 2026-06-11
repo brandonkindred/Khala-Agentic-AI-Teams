@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
@@ -14,9 +15,19 @@ from coding_team.api import main as api
 client = TestClient(api.app)
 
 
+@pytest.fixture(autouse=True)
+def _default_resume_claim(monkeypatch):
+    """By default let the cross-worker resume claim succeed: these tests use monkeypatched job
+    records that don't exist in the in-process job service, so the real claim would always lose.
+    Tests that exercise the claim itself override these."""
+    monkeypatch.setattr(api, "claim_resume", lambda jid: True)
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: None)
+
+
 def _set_encryption_key(monkeypatch) -> None:
     """Configure a Fernet key so token_crypto encrypt/decrypt round-trips in-test."""
     monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
+
 
 _PENDING = [
     {
@@ -466,7 +477,9 @@ def test_auto_resume_github_job_uses_persisted_token_without_env(monkeypatch):
 
     _set_encryption_key(monkeypatch)
     ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
-    job = _job(github_context=ctx, github_token_encrypted=token_crypto.encrypt_token("persisted-pat"))
+    job = _job(
+        github_context=ctx, github_token_encrypted=token_crypto.encrypt_token("persisted-pat")
+    )
     monkeypatch.setattr(api, "get_job", lambda jid: job)
     monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
@@ -553,6 +566,51 @@ def test_auto_resume_refuses_non_paused_job():
     """Defensive invariant: _try_auto_resume only restarts a paused (waiting_for_user) job."""
     assert api._try_auto_resume("j1", _job(status="running", waiting_for_answers=False)) is False
     assert api._try_auto_resume("j1", _job(status="pending", waiting_for_answers=False)) is False
+
+
+def test_auto_resume_skips_spawn_when_another_worker_holds_claim(monkeypatch):
+    """Cross-worker safety: if the shared-store claim is already held (another worker is resuming),
+    this worker must NOT spawn a second orchestrator on the same checkout."""
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn while another worker holds the resume claim")
+
+    monkeypatch.setattr(api, "claim_resume", lambda jid: False)  # another worker won
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    result = api._try_auto_resume("j1", _job(plan_input={"requirements_title": "T"}))
+    assert result is True  # someone is resuming; not a failure
+
+
+def test_resume_409ish_noop_when_another_worker_holds_claim(monkeypatch):
+    """/resume on a paused job whose cross-worker claim another worker already holds is a no-op."""
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn while another worker holds the resume claim")
+
+    job = _job(status="waiting_for_user", plan_input={"requirements_title": "T"})
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "claim_resume", lambda jid: False)
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert "already running" in r.json()["message"]
+
+
+def test_auto_resume_releases_claim_on_spawn_failure(monkeypatch):
+    """A failed spawn after winning the shared claim must release it so a retry can win."""
+    released = {}
+    monkeypatch.setattr(api, "claim_resume", lambda jid: True)
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: released.setdefault("yes", True))
+    monkeypatch.setattr(api, "_claim_run_thread", lambda jid: True)
+
+    def _boom(*a, **k):
+        raise RuntimeError("no threads")
+
+    monkeypatch.setattr(api.threading, "Thread", _boom)
+    result = api._try_auto_resume("j1", _job(plan_input={"requirements_title": "T"}))
+    assert result is False
+    assert released.get("yes") is True
 
 
 class _ImmediateTimer:

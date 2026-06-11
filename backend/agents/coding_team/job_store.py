@@ -166,3 +166,34 @@ def get_submitted_answers(
     """Return the answers submitted for this job (empty when none/unknown)."""
     data = _client(cache_dir).get_job(job_id)
     return list(data.get("submitted_answers") or []) if data else []
+
+
+# ---------------------------------------------------------------------------
+# Cross-worker resume ownership
+#
+# The process-local run-thread registry cannot stop two *different worker processes* from each
+# spawning an orchestrator for the same paused job. These helpers claim ownership in the SHARED job
+# store via the job service's atomic, row-locked increment: the unique caller whose increment takes
+# ``resume_claim`` from 0 to 1 wins; concurrent callers (in any process) get 2, 3, … and lose. The
+# counter is reset to 0 each time the job re-enters the paused state (the orchestrator's
+# pause-publish), so every fresh pause is independently claimable, and released on a failed spawn.
+# ---------------------------------------------------------------------------
+
+_RESUME_CLAIM_FIELD = "resume_claim"
+
+
+def claim_resume(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> bool:
+    """Atomically claim cross-worker ownership of a resume.
+
+    Postconditions:
+        - Returns True iff this caller's atomic increment took ``resume_claim`` from 0 to 1 (i.e.
+          it is the sole owner of the resume); False when another worker already claimed it or the
+          job is gone. Never raises beyond the underlying transport.
+    """
+    job = _client(cache_dir).apply_and_get(job_id, increment={_RESUME_CLAIM_FIELD: 1})
+    return bool(job) and job.get(_RESUME_CLAIM_FIELD) == 1
+
+
+def release_resume_claim(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> None:
+    """Reset the resume claim so a failed spawn (or abandoned attempt) doesn't wedge future resumes."""
+    _client(cache_dir).update_job(job_id, heartbeat=False, **{_RESUME_CLAIM_FIELD: 0})

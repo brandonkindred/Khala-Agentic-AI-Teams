@@ -397,6 +397,9 @@ def _run_pause_cycle(
         waiting_for_answers=True,
         pending_questions=structured,
         answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
+        # Reset the cross-worker resume claim so THIS pause is independently claimable: the first
+        # answer-driven resume increments it 0→1 and wins, concurrent ones in other workers lose.
+        resume_claim=0,
     )
     if on_pause is not None:
         # on_pause can post a GitHub comment whose client uses ~30s timeouts with retries, which

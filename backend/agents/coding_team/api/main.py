@@ -44,9 +44,11 @@ from coding_team.github_source import (  # noqa: E402
 from coding_team.github_source.client import _is_safe_ref  # noqa: E402
 from coding_team.job_store import (  # noqa: E402
     DEFAULT_CACHE_DIR,
+    claim_resume,
     create_job,
     get_job,
     list_jobs,
+    release_resume_claim,
     update_job,
 )
 from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
@@ -731,8 +733,18 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         # the explicit-resume hint rather than silently completing without a PR.
         logger.warning("Auto-resume for GitHub job %s skipped: no GitHub token available.", job_id)
         return False
+    # Cross-worker claim FIRST: the process-local _claim_run_thread cannot stop a different worker
+    # process from also spawning. The shared-store claim is the authoritative gate; only the worker
+    # that wins it proceeds to the local claim and spawn.
+    if not claim_resume(job_id):
+        logger.info(
+            "Auto-resume for job %s skipped: another worker holds the resume claim.", job_id
+        )
+        return True
     if not _claim_run_thread(job_id):
-        # Another caller (or the original thread, racing registration) is starting it.
+        # The cross-worker claim is ours but this process is already spawning (a racing thread):
+        # release the shared claim so the in-flight spawn (or a later retry) isn't blocked.
+        release_resume_claim(job_id)
         return True
     try:
         if is_github_job:
@@ -741,6 +753,7 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
             _start_orchestrator_thread(job_id, repo_path, plan)
     except Exception:
         logger.exception("Auto-resume for job %s failed to start the orchestrator thread.", job_id)
+        release_resume_claim(job_id)
         return False
     return True
 
@@ -862,17 +875,28 @@ def resume_job(job_id: str) -> RunResponse:
             ),
         )
 
-    # Atomically claim the right to start the thread so two concurrent /resume calls (or one racing
-    # an as-yet-unregistered original thread) cannot both spawn an orchestrator for this job.
+    # Cross-worker claim FIRST (shared store), then the process-local claim: together they stop two
+    # concurrent resume requests — in the same OR different worker processes — from both spawning an
+    # orchestrator for this job.
+    if not claim_resume(job_id):
+        return RunResponse(
+            job_id=job_id, status=data.get("status", "running"), message="Job already running."
+        )
     if not _claim_run_thread(job_id):
+        release_resume_claim(job_id)
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
 
-    if is_github_job:
-        _start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
-    else:
-        _start_orchestrator_thread(job_id, repo_path, plan)
+    try:
+        if is_github_job:
+            _start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
+        else:
+            _start_orchestrator_thread(job_id, repo_path, plan)
+    except Exception:
+        # A failed spawn must release the shared claim so a later /resume can win.
+        release_resume_claim(job_id)
+        raise
     return RunResponse(job_id=job_id, status="running", message="Job resumed.")
 
 
