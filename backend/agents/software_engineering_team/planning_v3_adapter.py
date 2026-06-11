@@ -31,6 +31,50 @@ class PlanningV2AdapterResult:
     shared_planning_doc_path: Optional[str] = field(default=None)
     resolved_questions: List[Dict[str, Any]] = field(default_factory=list)
 
+    def to_dict(self) -> Dict[str, Any]:
+        """JSON-safe payload for cross-process handoff (e.g. Temporal activity results).
+
+        This is a dataclass, not a Pydantic model — generic ``model_dump`` probing
+        silently yields nothing for it, which is how the Temporal planning→coding
+        handoff shipped serializing ``{}``.
+
+        Postconditions: round-trips through :meth:`from_dict` losslessly; nested
+        Pydantic models are dumped to plain dicts.
+        """
+        return {
+            "requirements": self.requirements.model_dump(),
+            "project_overview": self.project_overview,
+            "open_questions": list(self.open_questions),
+            "assumptions": list(self.assumptions),
+            "hierarchy": self.hierarchy.model_dump() if self.hierarchy else None,
+            "final_spec_content": self.final_spec_content,
+            "architecture_overview": self.architecture_overview,
+            "shared_planning_doc_path": self.shared_planning_doc_path,
+            "resolved_questions": list(self.resolved_questions),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "PlanningV2AdapterResult":
+        """Rebuild from a :meth:`to_dict` payload.
+
+        Preconditions: ``data`` carries a valid ``requirements`` mapping (the one
+        field with no usable default — its absence is a handoff bug, not a state
+        to paper over).
+        """
+        return cls(
+            requirements=ProductRequirements.model_validate(data["requirements"]),
+            project_overview=data.get("project_overview") or {},
+            open_questions=list(data.get("open_questions") or []),
+            assumptions=list(data.get("assumptions") or []),
+            hierarchy=PlanningHierarchy.model_validate(data["hierarchy"])
+            if data.get("hierarchy")
+            else None,
+            final_spec_content=data.get("final_spec_content"),
+            architecture_overview=data.get("architecture_overview"),
+            shared_planning_doc_path=data.get("shared_planning_doc_path"),
+            resolved_questions=list(data.get("resolved_questions") or []),
+        )
+
 
 __all__ = ["adapt_planning_v3_result", "PlanningV2AdapterResult"]
 
