@@ -672,21 +672,6 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 # ---------------------------------------------------------------------------
 
 
-def _env_int(name: str, default: int) -> int:
-    """Read a positive int env var, falling back to ``default`` on absent/garbage/non-positive."""
-    try:
-        val = int(os.environ.get(name, "") or default)
-    except ValueError:
-        return default
-    return val if val > 0 else default
-
-
-# Cap how many changed files are sent to the reviewer, bounding the prompt size
-# on a very large PR. Reviewable files past the cap are reported as skipped (see
-# _build_review_code) so a partial review is never presented as a full one.
-PR_REVIEW_MAX_FILES = _env_int("PR_REVIEW_MAX_FILES", 50)
-
-
 def _infer_review_language(files: List[Any]) -> str:
     """Pick the dominant language label for the reviewer from the changed filenames.
 
@@ -704,7 +689,6 @@ class ReviewCode(NamedTuple):
 
     code: str
     files_reviewed: int
-    files_skipped: int
 
 
 def _build_review_code(files: List[Any]) -> ReviewCode:
@@ -716,31 +700,26 @@ def _build_review_code(files: List[Any]) -> ReviewCode:
     in a ``### path ###`` block so the reviewer's coordinator can chunk large PRs.
     Built entirely from the already-fetched ``files`` payload (no extra requests).
 
+    Every reviewable changed file is included — there is no cap on file count.
+    The reviewer's coordinator bounds its own per-call prompts, so a large PR is
+    chunked rather than truncated.
+
     Postconditions:
-        - Returns ``ReviewCode(code, files_reviewed, files_skipped)``. ``files_skipped``
-          counts only files with reviewable rendered content that were left out beyond
-          ``PR_REVIEW_MAX_FILES`` — so the caller can honestly disclose a partial review.
-          Binary/removed files and files whose diff renders empty are not reviewable and
-          are never counted as skipped.
+        - Returns ``ReviewCode(code, files_reviewed)`` covering every changed
+          file with reviewable rendered content. Binary/removed files and files
+          whose diff renders empty are not reviewable and are simply absent.
     """
     blocks: List[str] = []
     reviewed = 0
-    skipped = 0
     for f in files:
         if not f.patch or f.status == "removed":
             continue
         rendered = render_annotated_hunks(f.patch)
         if not rendered:
             continue
-        # Only files that actually have content to review count toward the cap and
-        # the skipped disclosure — checked after rendering so an empty render is not
-        # miscounted as a skipped file.
-        if reviewed >= PR_REVIEW_MAX_FILES:
-            skipped += 1
-            continue
         blocks.append(f"### {f.filename} ###\n{rendered}")
         reviewed += 1
-    return ReviewCode("\n\n".join(blocks), reviewed, skipped)
+    return ReviewCode("\n\n".join(blocks), reviewed)
 
 
 # Optional dependency: author tagging for persisted review history. Imported once
@@ -883,7 +862,7 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 return
 
             valid_by_path = {f.filename: parse_valid_lines(f.patch) for f in files}
-            code, files_reviewed, files_skipped = _build_review_code(files)
+            code, files_reviewed = _build_review_code(files)
             if not code:
                 _safe_comment(
                     client, owner, repo, pr_number, "Code review: no reviewable file content."
@@ -931,13 +910,6 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
             body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)
-            if files_skipped:
-                # Disclose a partial review so a capped run is never presented as complete.
-                body += (
-                    f"\n\n_Note: this review covered the first {files_reviewed} changed file(s); "
-                    f"{files_skipped} further changed file(s) exceeded the per-review cap "
-                    f"(`PR_REVIEW_MAX_FILES`) and were not inspected._"
-                )
             event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
 
             _submit_review(client, owner, repo, pr_number, pr.head_sha, body, event, comments)
@@ -948,12 +920,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 "body_findings": len(leftovers),
                 "event": event,
                 "files_reviewed": files_reviewed,
-                "files_skipped": files_skipped,
             }
             status_text = (
                 f"Review posted: {len(output.issues)} finding(s), "
                 f"{len(comments)} inline, event={event}"
-                + (f"; {files_skipped} file(s) skipped (cap)" if files_skipped else "")
             )
             update_job(
                 job_id,

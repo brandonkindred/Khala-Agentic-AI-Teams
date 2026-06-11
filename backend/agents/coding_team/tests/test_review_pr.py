@@ -420,22 +420,25 @@ class TestReviewEndpoint:
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "failed"
 
-    def test_partial_review_discloses_skipped_files(self, review_app, monkeypatch) -> None:
+    def test_all_changed_files_are_reviewed_without_cap(self, review_app) -> None:
         gh = review_app["github"]["client"]
+        # Many changed files: every reviewable one must be reviewed — there is
+        # no per-PR file cap. The coordinator chunks large input rather than
+        # dropping files.
         gh.files = [
-            PullRequestFile("a.py", "modified", "@@ -1,2 +1,3 @@\n c\n+x\n d", 1, 0, None),
-            PullRequestFile("b.py", "modified", "@@ -1,2 +1,3 @@\n c\n+y\n d", 1, 0, None),
+            PullRequestFile(
+                f"mod_{i}.py", "modified", f"@@ -1,2 +1,3 @@\n c\n+x{i}\n d", 1, 0, None
+            )
+            for i in range(120)
         ]
-        # Cap at one file so the second reviewable file is skipped.
-        monkeypatch.setattr(review_app["api"], "PR_REVIEW_MAX_FILES", 1)
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert job["review_summary"]["files_reviewed"] == 1
-        assert job["review_summary"]["files_skipped"] == 1
-        # The posted review body discloses the partial coverage.
-        assert "were not inspected" in gh.reviews[-1]["body"]
+        assert job["review_summary"]["files_reviewed"] == 120
+        assert "files_skipped" not in job["review_summary"]
+        # No partial-coverage disclosure is appended when nothing was skipped.
+        assert "were not inspected" not in gh.reviews[-1]["body"]
 
 
 class TestReviewPersistence:
