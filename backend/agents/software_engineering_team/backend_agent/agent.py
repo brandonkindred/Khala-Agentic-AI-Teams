@@ -567,7 +567,12 @@ def _select_review_input(
                 paths.append(p)
     files = read_files_as_dict(repo_path, paths, extensions=None)
 
-    deleted = list_deleted_files(repo_path, DEVELOPMENT_BRANCH)
+    # A path can be committed-deleted yet restored as an uncommitted worktree
+    # file in a later failed-commit iteration; it is then real content above,
+    # so only note paths actually absent from the worktree.
+    deleted = [
+        p for p in list_deleted_files(repo_path, DEVELOPMENT_BRANCH) if not (repo_path / p).exists()
+    ]
     if deleted:
         listing = "\n".join(f"- {p}" for p in deleted)
         files[_DELETED_FILES_NOTE_KEY] = (

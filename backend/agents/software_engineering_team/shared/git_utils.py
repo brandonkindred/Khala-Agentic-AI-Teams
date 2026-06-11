@@ -71,6 +71,9 @@ def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, s
     Postconditions:
         - The spawned git process observes a complete author/committer
           identity (see git_identity_env).
+        - Output is decoded with ``surrogateescape`` so a path containing bytes
+          invalid in the locale encoding round-trips instead of raising and
+          collapsing the whole command's output.
     """
     try:
         result = subprocess.run(
@@ -78,6 +81,7 @@ def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, s
             cwd=repo_path,
             capture_output=True,
             text=True,
+            errors="surrogateescape",
             timeout=timeout,
             env=git_identity_env(),
         )
@@ -323,25 +327,27 @@ def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> 
 
 
 def list_uncommitted_files(repo_path: str | Path) -> List[str]:
-    """Return non-deleted paths changed in the worktree/index versus ``HEAD``.
+    """Return non-deleted *tracked* paths changed in the worktree/index vs ``HEAD``.
 
-    Unions tracked changes (staged + unstaged, deletions excluded) with
-    untracked-but-not-ignored files, so a path an iteration wrote without a
-    landed commit — including one synthesized during writing (for example a
-    ``.gitignore`` updated from agent ``gitignore_entries``) — is still visible
-    to callers, even though it is absent from a committed ``base...head`` diff.
+    Covers staged + unstaged modifications to tracked files (deletions excluded),
+    so a path an iteration modified without a landed commit — for example a
+    ``.gitignore`` updated from agent ``gitignore_entries`` — is visible even
+    though it is absent from a committed ``base...head`` diff.
+
+    Untracked files are deliberately **not** included: ``git ls-files --others``
+    would pull in every non-ignored leftover (build/test artifacts, logs,
+    snapshots, databases), which are not task changes. Callers add task-owned
+    new files explicitly via the writer's normalized output instead.
 
     Postconditions:
         - Returns repo-relative paths. Returns ``[]`` when not a git repository
-          or the git commands fail.
+          or the git command fails.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return []
     return _changed_paths(
-        path,
-        ["git", "diff", "--name-only", "--diff-filter=d", "-z", "HEAD"],
-        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+        path, ["git", "diff", "--name-only", "--diff-filter=d", "-z", "HEAD"]
     )
 
 

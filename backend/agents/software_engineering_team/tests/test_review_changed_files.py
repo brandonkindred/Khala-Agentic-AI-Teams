@@ -98,8 +98,8 @@ def test_list_changed_files_handles_non_ascii_filename(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_list_uncommitted_files_tracked_modified_and_untracked(tmp_path: Path) -> None:
-    """Modified tracked files and untracked files are returned; deletions excluded."""
+def test_list_uncommitted_files_tracked_only(tmp_path: Path) -> None:
+    """Tracked modifications are returned; untracked leftovers and deletions are not."""
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("y = 1\n", encoding="utf-8")
@@ -107,13 +107,13 @@ def test_list_uncommitted_files_tracked_modified_and_untracked(tmp_path: Path) -
     _git(tmp_path, "commit", "-m", "base")
 
     (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")  # modified (unstaged)
-    (tmp_path / "new.py").write_text("n = 1\n", encoding="utf-8")  # untracked
+    (tmp_path / "artifact.log").write_text("noise\n", encoding="utf-8")  # untracked leftover
     (tmp_path / "b.py").unlink()  # deleted
 
     changed = list_uncommitted_files(tmp_path)
 
     assert "a.py" in changed
-    assert "new.py" in changed
+    assert "artifact.log" not in changed  # untracked leftover excluded
     assert "b.py" not in changed  # deletion excluded
 
 
@@ -170,13 +170,16 @@ def test_read_files_as_dict_no_extension_filter_includes_all(tmp_path: Path) -> 
     assert result == {"Dockerfile": "FROM python", "requirements.txt": "fastapi"}
 
 
-def test_read_files_as_dict_skips_missing_and_undecodable(tmp_path: Path) -> None:
+def test_read_files_as_dict_skips_missing_preserves_legacy_text(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("A", encoding="utf-8")
-    (tmp_path / "bad.py").write_bytes(b"\xff\xfe\x00\x80")  # invalid UTF-8
+    (tmp_path / "legacy.py").write_bytes("café = 1\n".encode("latin-1"))  # non-UTF-8 text
 
-    result = read_files_as_dict(tmp_path, ["a.py", "missing.py", "bad.py"], extensions=[".py"])
+    result = read_files_as_dict(tmp_path, ["a.py", "missing.py", "legacy.py"], extensions=[".py"])
 
-    assert result == {"a.py": "A"}  # missing + undecodable skipped
+    assert result["a.py"] == "A"
+    assert "missing.py" not in result  # missing still skipped
+    assert "legacy.py" in result  # legacy-encoded text preserved, not dropped
+    assert "= 1" in result["legacy.py"]  # readable remainder survives replacement decode
 
 
 def test_read_files_as_dict_skips_paths_outside_repo(tmp_path: Path) -> None:
@@ -403,8 +406,8 @@ def test_select_review_input_includes_writer_derived_paths(tmp_path: Path) -> No
 
 
 def test_select_review_input_includes_uncommitted_worktree_files(tmp_path: Path) -> None:
-    """Uncommitted tracked changes and untracked files (e.g. a synthesized
-    .gitignore) are reviewed, not just committed-diff / output-key paths."""
+    """Uncommitted *tracked* changes and writer-owned untracked files are
+    reviewed; unrelated untracked leftovers are not."""
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -419,15 +422,49 @@ def test_select_review_input_includes_uncommitted_worktree_files(tmp_path: Path)
     _git(tmp_path, "commit", "-m", "committed change")  # non-empty committed diff
     # A failed-commit iteration left these uncommitted on disk:
     (tmp_path / ".gitignore").write_text("*.log\n*.tmp\n", encoding="utf-8")  # modified tracked
-    (tmp_path / "untracked.py").write_text("u = 1\n", encoding="utf-8")  # untracked
+    (tmp_path / "untracked.py").write_text("u = 1\n", encoding="utf-8")  # writer-owned untracked
+    (tmp_path / "stray.log").write_text("noise\n", encoding="utf-8")  # unrelated leftover
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code = _select_review_input(
+        tmp_path, task, written_files={"untracked.py": "u = 1\n"}
+    )
 
     assert code is None
     assert "a.py" in files  # committed diff
     assert ".gitignore" in files  # uncommitted tracked change
-    assert "untracked.py" in files  # untracked file
+    assert "untracked.py" in files  # writer-owned untracked file
+    assert "stray.log" not in files  # unrelated leftover excluded
+
+
+def test_select_review_input_omits_restored_deletion_from_note(tmp_path: Path) -> None:
+    """A committed deletion later restored as an uncommitted worktree file is
+    reviewed as content, not reported as deleted."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETED_FILES_NOTE_KEY,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete gone")  # committed deletion
+    # A later failed-commit iteration restored gone.py (untracked on disk).
+    (tmp_path / "gone.py").write_text("g = 2\n", encoding="utf-8")
+
+    task = SimpleNamespace(description="restore gone")
+    files, code = _select_review_input(tmp_path, task, written_files={"gone.py": "g = 2\n"})
+
+    assert code is None
+    assert files["gone.py"] == "g = 2\n"  # reviewed as restored content
+    assert _DELETED_FILES_NOTE_KEY not in files  # not reported as deleted
 
 
 def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:

@@ -115,9 +115,10 @@ def read_files_as_dict(
     Postconditions:
         - Returns a mapping in the iteration order of *paths*, skipping any path
           that is filtered out by *extensions*, escapes *repo_path* once resolved
-          (an absolute path or one containing ``..``), is missing, or cannot be
-          read as UTF-8 text (these are dropped silently so review still runs on
-          the readable remainder).
+          (an absolute path or one containing ``..``), or is missing/unreadable.
+        - Decodes as UTF-8 with ``errors="replace"`` (matching ``read_repo_code``)
+          so a changed file with a legacy/non-UTF-8 text encoding is reviewed
+          rather than silently dropped; bytes that do not decode become U+FFFD.
         - Never reads a file outside *repo_path*: keys may come from untrusted
           agent output, so containment is enforced before any read.
     """
@@ -131,8 +132,8 @@ def read_files_as_dict(
         if repo_root not in full_path.parents:
             continue
         try:
-            result[rel_path] = full_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+            result[rel_path] = full_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
             continue
     return result
 
