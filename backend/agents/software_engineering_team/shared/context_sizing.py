@@ -10,6 +10,8 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
+import os
+
 from llm_service import LLMClient
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
@@ -21,10 +23,33 @@ CHARS_PER_TOKEN = 3.5
 # burns its whole completion budget on reasoning before emitting any findings.
 # ~80K chars is ~23K tokens of code per map call, leaving completion-budget
 # headroom for reasoning plus the JSON findings payload.
-CODE_REVIEW_ABS_CHUNK_CHARS = 80_000
-CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000
-CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000
-CODE_REVIEW_EXISTING_ABS_CHARS = 8_000
+# Each default is env-overridable (see docs/ENV_VARS.md); the env var named
+# next to each constant is parsed defensively and clamped to the given floor.
+CODE_REVIEW_ABS_CHUNK_CHARS = 80_000  # CODE_REVIEW_MAP_CHUNK_CHARS, floor 10_000
+CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000  # CODE_REVIEW_SPEC_EXCERPT_CHARS, floor 1_000
+CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000  # CODE_REVIEW_ARCH_OVERVIEW_CHARS, floor 500
+CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
+
+
+def env_int(name: str, default: int, floor: int) -> int:
+    """Read an int tuning knob from the environment, defensively.
+
+    Preconditions:
+        - ``default`` >= ``floor``.
+
+    Postconditions:
+        - Returns ``default`` when the var is unset or unparseable; otherwise
+          the parsed value clamped to at least ``floor`` (never raises).
+    """
+    assert default >= floor, "default must respect the floor"
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw.strip())
+    except (TypeError, ValueError):
+        return default
+    return max(floor, value)
 
 
 def compute_max_chunk_chars(
@@ -71,6 +96,12 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
     """
     Max chars per code review chunk. Reserves for CODE_REVIEW_PROMPT (~2K),
     task (~1K), and the scaled spec/arch/existing excerpts that are in every chunk.
+
+    Postconditions:
+        - The context-derived size is bounded by the absolute map-call ceiling
+          (``CODE_REVIEW_MAP_CHUNK_CHARS`` env override, default
+          ``CODE_REVIEW_ABS_CHUNK_CHARS``), so no caller can ever build an
+          unbounded review prompt regardless of model context.
     """
     ctx = llm.get_max_context_tokens()
     spec_chars = compute_code_review_spec_excerpt_chars(llm)
@@ -78,25 +109,23 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
     existing_chars = compute_code_review_existing_codebase_chars(llm)
     excerpt_tokens = int((spec_chars + arch_chars + existing_chars) / CHARS_PER_TOKEN)
     reserved_prompt = 3000 + excerpt_tokens  # prompt + task + spec/arch/existing excerpts
-    return compute_max_chunk_chars(
+    derived = compute_max_chunk_chars(
         ctx,
         reserved_prompt_tokens=reserved_prompt,
         reserved_response_tokens=4096,
         min_chars=12000,
     )
+    cap = env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    return min(derived, cap)
 
 
 def compute_code_review_map_chunk_chars(llm: LLMClient) -> int:
     """Max chars of code per map call in the code-review coordinator.
 
-    Preconditions:
-        - ``llm`` implements ``get_max_context_tokens()``.
-
-    Postconditions:
-        - Returns ``min(compute_code_review_chunk_chars(llm), CODE_REVIEW_ABS_CHUNK_CHARS)``,
-          so the result is bounded by the absolute ceiling regardless of model context.
+    Alias of ``compute_code_review_chunk_chars`` (the absolute cap now lives
+    there, so the capped and "raw" sizes can never diverge again).
     """
-    return min(compute_code_review_chunk_chars(llm), CODE_REVIEW_ABS_CHUNK_CHARS)
+    return compute_code_review_chunk_chars(llm)
 
 
 def compute_spec_chunk_chars(llm: LLMClient) -> int:
@@ -130,17 +159,20 @@ def compute_code_review_spec_excerpt_chars(llm: LLMClient) -> int:
     every map call of the review coordinator, so an uncapped 1M-context scale
     (~488K chars) would dominate each chunk prompt.
     """
-    return _scale_with_context(llm, 8_000, max_chars=CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS)
+    cap = env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
+    return _scale_with_context(llm, 8_000, max_chars=cap)
 
 
 def compute_code_review_arch_overview_chars(llm: LLMClient) -> int:
     """Max chars for architecture overview in code review (scaled, absolutely capped)."""
-    return _scale_with_context(llm, 2_000, max_chars=CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS)
+    cap = env_int("CODE_REVIEW_ARCH_OVERVIEW_CHARS", CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS, 500)
+    return _scale_with_context(llm, 2_000, max_chars=cap)
 
 
 def compute_code_review_existing_codebase_chars(llm: LLMClient) -> int:
     """Max chars for existing codebase excerpt in code review (scaled, absolutely capped)."""
-    return _scale_with_context(llm, 4_000, max_chars=CODE_REVIEW_EXISTING_ABS_CHARS)
+    cap = env_int("CODE_REVIEW_EXISTING_CHARS", CODE_REVIEW_EXISTING_ABS_CHARS, 500)
+    return _scale_with_context(llm, 4_000, max_chars=cap)
 
 
 def compute_existing_code_chars(llm: LLMClient) -> int:
@@ -264,8 +296,9 @@ def compute_requirement_mapping_chars(llm: LLMClient) -> int:
 def compute_code_review_total_chars(llm: LLMClient) -> int:
     """Max total code chars for code review (fits within 256K context when available).
 
-    Legacy: only pre-map-reduce callers (deprecated frontend team) still truncate
-    review input with this. The review coordinator bounds its own per-call prompts
-    via ``compute_code_review_map_chunk_chars`` and never truncates input.
+    Legacy: only the deprecated frontend team's single-call review path still
+    truncates input with this. Live callers must pass code to ``CodeReviewAgent``
+    untruncated — the coordinator bounds every per-call prompt itself and its
+    coverage guarantee only holds when it sees the full input.
     """
     return _scale_with_context(llm, 150_000)

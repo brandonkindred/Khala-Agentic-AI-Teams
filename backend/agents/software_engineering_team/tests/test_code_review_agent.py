@@ -236,6 +236,23 @@ def test_agent_accepts_files_dict_input() -> None:
     assert result.approved is True
 
 
+def test_run_raises_unavailable_when_review_cannot_complete() -> None:
+    """Contract: a review that cannot be completed raises — callers must treat
+    it as a failed run, never as feedback for the coding agent."""
+    import pytest
+    from code_review_agent.models import CodeReviewUnavailableError
+
+    from llm_service import LLMRateLimitError
+
+    class _AlwaysRateLimited(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise LLMRateLimitError("429")
+
+    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited())
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
+
+
 def test_reconcile_rejects_when_critical_issue_present() -> None:
     """LLM returns a critical issue with approved=True → override to False."""
     agent = CodeReviewAgent(

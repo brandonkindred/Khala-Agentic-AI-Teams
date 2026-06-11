@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import logging
 
-from llm_service import get_client, get_strands_model
+from llm_service import get_client
 
 from .coordinator import run_coordinator
 from .models import CodeReviewInput, CodeReviewOutput
@@ -31,13 +31,8 @@ class CodeReviewAgent:
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("code_review")
-        # Keep LLMClient for context_sizing utilities
+        # The chunk reviewer resolves its own strands model per call; this
+        # client is used for context sizing and shared-context compaction.
         self.llm = llm_client if llm_client is not None else get_client("code_review")
 
     def run(self, input_data: CodeReviewInput) -> CodeReviewOutput:
@@ -47,10 +42,14 @@ class CodeReviewAgent:
             - ``input_data`` carries the code under review via ``files`` or ``code``.
 
         Postconditions:
-            - Returns the coordinator's merged verdict; ``approved is False``
-              implies at least one critical/high issue.
-            - Never raises on per-chunk LLM failures (the coordinator degrades
-              or fails closed instead).
+            - Returns the coordinator's merged verdict covering every submitted
+              line; ``approved is False`` implies at least one critical/high issue.
+
+        Raises:
+            CodeReviewUnavailableError: when the review could not be completed
+                (model unavailable, or a chunk stayed unreviewable after retry
+                and bisection). Callers must treat this as a failed review run
+                — never as review feedback for the coding agent.
         """
         code_size = (
             sum(len(c) for c in input_data.files.values())

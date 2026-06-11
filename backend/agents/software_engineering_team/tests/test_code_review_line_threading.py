@@ -92,10 +92,9 @@ def test_single_call_threads_line() -> None:
             }
         ]
     )
+    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
     agent = CodeReviewAgent(llm_client=client)
-    result = agent.run(
-        CodeReviewInput(code="### app/main.py ###\ndef f(): pass", language="python")
-    )
+    result = agent.run(CodeReviewInput(code=code, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 42
 
@@ -130,7 +129,7 @@ def test_single_call_bad_line_becomes_none() -> None:
 
 
 def test_coordinator_threads_line() -> None:
-    big = "### app/main.py ###\n" + ("x" * 25_000)
+    big = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
     client = _ScriptedClient(
         [
             {
@@ -208,8 +207,9 @@ def test_split_segments_reanchor_lines_to_original_file() -> None:
 
 
 def test_pre_numbered_split_segment_keeps_cited_line() -> None:
-    """PR-diff hunks carry original line numbers as prefixes; a split must not
-    shift the cited numbers (offset 0)."""
+    """PR-diff hunks carry original line numbers as prefixes (declared by the
+    producer via ``pre_numbered=True``); a split must not shift the cited
+    numbers (offset 0)."""
     from code_review_agent.coordinator import run_coordinator
 
     hunk = "\n".join(f"{4000 + i}: code_{i}()".ljust(45, " ") for i in range(1_000))  # ~46K
@@ -233,7 +233,8 @@ def test_pre_numbered_split_segment_keeps_cited_line() -> None:
     )
 
     result = run_coordinator(
-        client, CodeReviewInput(files={"src/feature.py": hunk}, language="python")
+        client,
+        CodeReviewInput(files={"src/feature.py": hunk}, pre_numbered=True, language="python"),
     )
 
     # Same issue reported per chunk → deduped to one; the cited pre-numbered
@@ -244,8 +245,8 @@ def test_pre_numbered_split_segment_keeps_cited_line() -> None:
 
 def test_blank_issue_path_resolves_to_sole_segment_and_strips_lines_suffix() -> None:
     """An issue with a blank path in a single-segment chunk resolves to that
-    segment's path even when the chunk label carries a ``(lines A-B of N)``
-    suffix (which the chunk reviewer uses as the path fallback)."""
+    segment's path (the coordinator owns this fallback; the chunk reviewer
+    passes blank paths through untouched)."""
     from code_review_agent.coordinator import run_coordinator
 
     content = "\n".join(f"line {i:05d}".ljust(40, "x") for i in range(1, 1_001))
@@ -257,8 +258,8 @@ def test_blank_issue_path_resolves_to_sole_segment_and_strips_lines_suffix() -> 
                     {
                         "severity": "high",
                         "category": "logic",
-                        # No file_path: the chunk reviewer falls back to the
-                        # chunk label, e.g. "big.py (lines 1-451 of 1000)".
+                        # No file_path: the coordinator resolves it to the
+                        # chunk's sole segment path.
                         "line": 2,
                         "description": "second visible line is wrong",
                         "suggestion": "fix",

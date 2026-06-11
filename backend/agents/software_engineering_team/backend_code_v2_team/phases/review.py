@@ -157,16 +157,14 @@ def run_review(
             logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
 
     # 3. Code review agent (external) or LLM fallback
-    code_text = "\n\n".join(
-        f"--- {p} ---\n{c}" for p, c in execution_result.files.items()
-    )
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
     if code_review_agent is not None:
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
-                code=code_text_12k,
+                files=execution_result.files,
                 task_description=task.description or "",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -192,6 +190,11 @@ def run_review(
             issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
     else:
         issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
+
+    # QA/security agents still take a single capped code string (their own
+    # input contract); only the code review agent receives untruncated files.
+    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in execution_result.files.items())
+    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
 
     # 4. QA agent
     if qa_agent is not None:
@@ -375,17 +378,16 @@ def run_microtask_review(
                 "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
             )
 
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
-
     if code_review_agent is not None:
         if detail_callback:
             detail_callback("Running code review...")
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
-                code=code_text_12k,
+                files=files,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -414,6 +416,11 @@ def run_microtask_review(
         if detail_callback:
             detail_callback("Running code review...")
         issues.extend(_run_llm_review(llm=llm, task=task, files=files))
+
+    # QA agent still takes a single capped code string (its own input
+    # contract); only the code review agent receives untruncated files.
+    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
+    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
 
     if qa_agent is not None:
         if detail_callback:
@@ -609,17 +616,16 @@ def run_code_review_phase(
                 "[%s] Linting tool agent failed for microtask %s: %s", task_id, microtask_id, exc
             )
 
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
-
     if code_review_agent is not None:
         if detail_callback:
             detail_callback("Running code review...")
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
-                code=code_text_12k,
+                files=files,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],

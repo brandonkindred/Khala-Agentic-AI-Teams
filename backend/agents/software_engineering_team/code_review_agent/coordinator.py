@@ -1,27 +1,39 @@
 """Code Review Coordinator: map-reduce review with bounded per-call prompts.
 
 Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
-``ReviewChunk``s → per-chunk LLM review with bisect-and-degrade failure
-handling → line re-anchoring → deterministic merge (dedupe, severity gate,
-safety nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars``
+``ReviewChunk``s → per-chunk LLM review (parallel, with retry/bisect recovery)
+→ line re-anchoring → deterministic merge (dedupe, severity gate, safety
+nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars``
 of code regardless of input size, and no input file is ever silently dropped:
-a chunk whose review keeps failing degrades to a non-blocking info finding
-that names the un-reviewed line range.
+empty files are named by info findings, and a chunk that cannot be reviewed
+after recovery fails the whole run loudly with
+``CodeReviewUnavailableError`` — the review never renders a verdict on code
+it did not see.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from llm_service import LLMClient, compact_text
+from llm_service import (
+    LLMClient,
+    LLMJsonParseError,
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMSchemaValidationError,
+    LLMUnreachableAfterRetriesError,
+    compact_text,
+)
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
     compute_code_review_spec_excerpt_chars,
+    env_int,
 )
 
 from .chunk_reviewer import ChunkReviewAgent
@@ -30,6 +42,7 @@ from .models import (
     CodeReviewInput,
     CodeReviewIssue,
     CodeReviewOutput,
+    CodeReviewUnavailableError,
     FileSegment,
     ReviewChunk,
     coerce_line,
@@ -40,25 +53,46 @@ logger = logging.getLogger(__name__)
 # Pattern: ### path/to/file ### at start of a block (content may contain \n\n)
 _FILE_HEADER_PATTERN = re.compile(r"###\s+(.+?)\s+###\s*\n", re.DOTALL)
 
-# Lines like "123: code" — the coding team's pre-numbered PR-diff hunks.
-_PRENUMBERED_RE = re.compile(r"^\s*\d+: ")
+# First capture: the original line number embedded in a pre-numbered line.
+_PRENUMBERED_LINE_RE = re.compile(r"^\s*(\d+):")
 
 # Suffix that ``ReviewChunk.paths_label`` appends to partial segments; stripped
 # when the model echoes it back inside an issue's file_path.
 _LINES_SUFFIX_RE = re.compile(r"\s*\(lines \d+-\d+ of \d+\)\s*$")
 
-# A failing chunk is bisected and retried; below this content size or past this
-# recursion depth it degrades to a non-blocking info finding instead.
-MIN_SPLIT_SEGMENT_CHARS = 8_000
-MAX_CHUNK_BISECT_DEPTH = 3
+# A failing chunk is bisected and retried; below this content size it gets one
+# same-input retry instead, and past the depth cap the run fails loudly.
+# Both knobs are env-overridable (see docs/ENV_VARS.md).
+MIN_SPLIT_SEGMENT_CHARS = 8_000  # CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS, floor 1_000
+MAX_CHUNK_BISECT_DEPTH = 3  # CODE_REVIEW_MAX_BISECT_DEPTH, floor 0
+DEFAULT_MAP_PARALLELISM = 4  # CODE_REVIEW_MAP_PARALLELISM, floor 1
 
 _BLOCK_JOINER_CHARS = 2  # "\n\n" between rendered blocks in a chunk
+
+_VALID_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
+
+
+def _min_split_segment_chars() -> int:
+    return env_int("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", MIN_SPLIT_SEGMENT_CHARS, 1_000)
+
+
+def _max_bisect_depth() -> int:
+    return env_int("CODE_REVIEW_MAX_BISECT_DEPTH", MAX_CHUNK_BISECT_DEPTH, 0)
+
+
+def _map_parallelism() -> int:
+    return env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
 
 
 def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
     """
     Parse concatenated code into (path, content) blocks using ### path ### pattern.
     Returns list of (file_path, content) tuples.
+
+    Postconditions:
+        - Every non-blank character of ``code`` is covered by some block:
+          content before the first header (or all of it, when no header
+          exists) becomes a ``('', content)`` block rather than being dropped.
     """
     blocks: List[Tuple[str, str]] = []
     matches = list(_FILE_HEADER_PATTERN.finditer(code))
@@ -66,6 +100,9 @@ def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
         if code.strip():
             blocks.append(("", code.strip()))
         return blocks
+    preamble = code[: matches[0].start()]
+    if preamble.strip():
+        blocks.append(("", preamble.strip()))
     for i, m in enumerate(matches):
         path = m.group(1).strip()
         start = m.end()
@@ -75,97 +112,57 @@ def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
     return blocks
 
 
-def build_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[Tuple[List[str], str]]:
-    """
-    Group file blocks into chunks so each chunk is ≤ max_chars.
-    Returns list of (list_of_paths, combined_content).
-
-    Legacy: kept for back-compat; the coordinator now uses ``build_review_chunks``,
-    which also splits single blocks that exceed the budget.
-    """
-    chunks: List[Tuple[List[str], str]] = []
-    current_paths: List[str] = []
-    current_parts: List[str] = []
-    current_len = 0
-
-    for path, content in blocks:
-        block_text = f"### {path} ###\n{content}" if path else content
-        block_len = len(block_text)
-        if current_len + block_len > max_chars and current_parts:
-            combined = "\n\n".join(current_parts)
-            chunks.append((list(current_paths), combined))
-            current_paths = []
-            current_parts = []
-            current_len = 0
-        current_paths.append(path or "(unknown)")
-        current_parts.append(block_text)
-        current_len += block_len
-
-    if current_parts:
-        combined = "\n\n".join(current_parts)
-        chunks.append((list(current_paths), combined))
-    return chunks
-
-
-def _blocks_from_input(input_data: CodeReviewInput) -> List[Tuple[str, str]]:
+def _blocks_from_input(input_data: CodeReviewInput) -> Tuple[List[Tuple[str, str]], List[str]]:
     """Resolve the review input into ordered (path, content) blocks.
 
     Preconditions:
-        - ``input_data`` is a valid ``CodeReviewInput``.
+        - ``input_data`` is a valid ``CodeReviewInput`` (its validator already
+          guarantees a code source is present).
 
     Postconditions:
         - When ``files`` is set: one block per file with non-blank content,
           insertion order preserved, no header parsing of ``code``.
-        - Otherwise blocks come from ``parse_code_into_file_blocks(code)``;
-          headerless code yields one ``('', code)`` block.
-        - No returned block has blank content.
+        - Otherwise blocks come from ``parse_code_into_file_blocks(code)``.
+        - No returned block has blank content; the second element names every
+          non-blank path whose content was blank, so the caller can report the
+          skip instead of silently dropping the file.
     """
+    skipped: List[str] = []
     if input_data.files is not None:
-        return [
-            (path, content)
-            for path, content in input_data.files.items()
-            if content and content.strip()
-        ]
-    blocks = parse_code_into_file_blocks(input_data.code or "")
-    return [(path, content) for path, content in blocks if content.strip()]
+        blocks = []
+        for path, content in input_data.files.items():
+            if content and content.strip():
+                blocks.append((path, content))
+            else:
+                skipped.append(path)
+        return blocks, skipped
+    blocks = []
+    for path, content in parse_code_into_file_blocks(input_data.code or ""):
+        if content.strip():
+            blocks.append((path, content))
+        elif path:
+            skipped.append(path)
+    return blocks, skipped
 
 
-def _is_pre_numbered(content: str) -> bool:
-    """Detect pre-line-numbered content (the coding team's PR-diff hunks).
-
-    Postconditions:
-        - Returns True when at least 3 of the first 5 non-empty lines (or all
-          of them, when fewer than 3 exist) match ``^\\s*\\d+: ``.
-    """
-    checked = 0
-    hits = 0
-    for line in content.splitlines():
-        if not line.strip():
-            continue
-        checked += 1
-        if _PRENUMBERED_RE.match(line):
-            hits += 1
-        if checked == 5:
-            break
-    return checked > 0 and hits >= min(3, checked)
-
-
-def split_block_into_segments(path: str, content: str, max_chars: int) -> List[FileSegment]:
+def split_block_into_segments(
+    path: str, content: str, max_chars: int, pre_numbered: bool = False
+) -> List[FileSegment]:
     """Split one file block into line-boundary segments of at most ``max_chars``.
 
     Preconditions:
         - ``max_chars`` > 0.
+        - ``pre_numbered`` is True only when the caller declared (via
+          ``CodeReviewInput.pre_numbered``) that lines carry ``N: `` prefixes;
+          it is never inferred from content.
 
     Postconditions:
         - Concatenating segment contents in order reproduces ``content`` exactly.
         - Each segment's content is ≤ ``max_chars``, except when a single line
           alone exceeds it (line boundaries are never broken).
         - A within-budget block yields exactly one whole-file segment.
-        - ``start_line``/``part_index``/``part_count`` are mutually consistent
-          and ``pre_numbered`` is flagged uniformly across the file's segments.
     """
     assert max_chars > 0, "max_chars must be positive"
-    pre_numbered = _is_pre_numbered(content)
     total_lines = len(content.splitlines()) or 1
     if len(content) <= max_chars:
         return [
@@ -174,8 +171,6 @@ def split_block_into_segments(path: str, content: str, max_chars: int) -> List[F
                 content=content,
                 start_line=1,
                 total_lines=total_lines,
-                part_index=1,
-                part_count=1,
                 pre_numbered=pre_numbered,
             )
         ]
@@ -196,22 +191,21 @@ def split_block_into_segments(path: str, content: str, max_chars: int) -> List[F
         line_no += 1
     if buf:
         pieces.append((buf_start, "".join(buf)))
-    part_count = len(pieces)
     return [
         FileSegment(
             path=path,
             content=text,
             start_line=start,
             total_lines=total_lines,
-            part_index=i + 1,
-            part_count=part_count,
             pre_numbered=pre_numbered,
         )
-        for i, (start, text) in enumerate(pieces)
+        for start, text in pieces
     ]
 
 
-def build_review_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[ReviewChunk]:
+def build_review_chunks(
+    blocks: List[Tuple[str, str]], max_chars: int, pre_numbered: bool = False
+) -> List[ReviewChunk]:
     """Group file blocks into review chunks whose rendered content is ≤ ``max_chars``.
 
     Preconditions:
@@ -245,7 +239,7 @@ def build_review_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[R
     for path, content in blocks:
         header_len = len(f"### {path} ###\n") if path else 0
         seg_budget = max(1, max_chars - header_len)
-        for seg in split_block_into_segments(path, content, seg_budget):
+        for seg in split_block_into_segments(path, content, seg_budget, pre_numbered):
             seg_len = _rendered_len(seg)
             if seg_len > max_chars:
                 _flush()
@@ -260,6 +254,26 @@ def build_review_chunks(blocks: List[Tuple[str, str]], max_chars: int) -> List[R
             current_len += joiner + seg_len
     _flush()
     return chunks
+
+
+def _segment_range_label(seg: FileSegment) -> str:
+    """Describe the original-file line range a segment covers.
+
+    Postconditions:
+        - Pre-numbered segments report the first/last embedded ``N:`` prefixes
+          (their positional indices are meaningless); plain segments report
+          ``start_line``–``end_line`` of ``total_lines``.
+    """
+    name = seg.path or "(headerless code)"
+    if seg.pre_numbered:
+        numbers = [
+            int(m.group(1))
+            for line in seg.content.splitlines()
+            if (m := _PRENUMBERED_LINE_RE.match(line)) is not None
+        ]
+        if numbers:
+            return f"{name} (original lines {numbers[0]}-{numbers[-1]})"
+    return f"{name} (lines {seg.start_line}-{seg.end_line} of {seg.total_lines})"
 
 
 def _segment_notes(chunk: ReviewChunk) -> str:
@@ -293,7 +307,8 @@ def _normalize_issue_path(raw_path: str, chunk: ReviewChunk) -> str:
     Postconditions:
         - An echoed ``" (lines A-B of N)"`` suffix is stripped.
         - A blank path resolves to the chunk's sole segment path when the chunk
-          has exactly one segment; otherwise it stays blank.
+          has exactly one segment; otherwise it stays blank (a blank path is
+          never replaced with a fabricated multi-file label).
     """
     path = _LINES_SUFFIX_RE.sub("", (raw_path or "").strip())
     if not path and len(chunk.segments) == 1:
@@ -301,33 +316,73 @@ def _normalize_issue_path(raw_path: str, chunk: ReviewChunk) -> str:
     return path
 
 
+def _clean_str(value: object, default: str) -> str:
+    """Coerce an untrusted LLM field to a non-empty stripped string.
+
+    Postconditions:
+        - Returns ``default`` for None/blank values; never raises.
+    """
+    if value is None:
+        return default
+    text = str(value).strip()
+    return text or default
+
+
+def _anchor_line(line: Optional[int], seg: Optional[FileSegment]) -> Optional[int]:
+    """Re-anchor a snippet-relative line number to the original file.
+
+    Postconditions:
+        - Returns None when the line cannot be anchored confidently (unknown
+          segment is anchored as-is; a number beyond both the snippet and the
+          segment's original range is discarded rather than mis-anchored).
+        - A number that already falls inside the segment's original range but
+          past the snippet length is treated as an echoed absolute line and
+          returned unchanged.
+    """
+    if line is None:
+        return None
+    if seg is None:
+        return line
+    if seg.pre_numbered:
+        return line
+    if line <= seg.line_count:
+        return line + seg.start_line - 1
+    if seg.start_line <= line <= seg.end_line:
+        return line
+    return None
+
+
 def _issues_from_chunk_output(chunk: ReviewChunk, raw_issues: List[dict]) -> List[CodeReviewIssue]:
     """Convert chunk-reviewer issue dicts into re-anchored ``CodeReviewIssue``s.
 
     Postconditions:
-        - ``line``/``start_line`` are shifted by the owning segment's
-          ``line_offset`` (0 for pre-numbered segments), so they refer to
-          original file lines.
-        - Issues whose path is unknown to the chunk keep their numbers as-is.
+        - Untrusted LLM fields are sanitized (severity restricted to the known
+          set, strings coerced), so conversion never raises on malformed output.
+        - ``line``/``start_line`` refer to original file lines, or are dropped
+          when they cannot be anchored confidently.
     """
-    offsets = chunk.offset_by_path
+    seg_by_path = {seg.path: seg for seg in chunk.segments}
     issues: List[CodeReviewIssue] = []
     for item in raw_issues:
         if not isinstance(item, dict):
             continue
-        path = _normalize_issue_path(item.get("file_path", ""), chunk)
-        offset = offsets.get(path, 0)
-        line = coerce_line(item.get("line"))
-        start_line = coerce_line(item.get("start_line"))
+        description = _clean_str(item.get("description"), "")
+        if not description:
+            continue
+        path = _normalize_issue_path(_clean_str(item.get("file_path"), ""), chunk)
+        seg = seg_by_path.get(path)
+        severity = _clean_str(item.get("severity"), "high").lower()
+        if severity not in _VALID_SEVERITIES:
+            severity = "high"
         issues.append(
             CodeReviewIssue(
-                severity=item.get("severity", "high"),
-                category=item.get("category", "general"),
-                file_path=path or chunk.paths_label,
-                line=line + offset if line is not None else None,
-                start_line=start_line + offset if start_line is not None else None,
-                description=item.get("description", ""),
-                suggestion=item.get("suggestion", ""),
+                severity=severity,
+                category=_clean_str(item.get("category"), "general"),
+                file_path=path,
+                line=_anchor_line(coerce_line(item.get("line")), seg),
+                start_line=_anchor_line(coerce_line(item.get("start_line")), seg),
+                description=description,
+                suggestion=_clean_str(item.get("suggestion"), ""),
             )
         )
     return issues
@@ -338,8 +393,9 @@ class _ChunkOutcome:
     """Accumulated result of reviewing one chunk (possibly via bisection).
 
     Invariants:
-        - ``approved_flags`` holds one entry per *successful* LLM sub-review;
-          degraded segments contribute info findings but no flag.
+        - ``approved_flags`` holds one entry per successful LLM sub-review;
+          a chunk that cannot be reviewed raises instead of producing an
+          outcome, so every outcome reflects reviewed code only.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
@@ -348,15 +404,13 @@ class _ChunkOutcome:
     commit_messages: List[str] = field(default_factory=list)
     approved_flags: List[bool] = field(default_factory=list)
 
-    def merge(self, other: "_ChunkOutcome") -> "_ChunkOutcome":
-        """Concatenate two outcomes in order. Postcondition: no entry is lost."""
-        return _ChunkOutcome(
-            issues=self.issues + other.issues,
-            summaries=self.summaries + other.summaries,
-            spec_notes=self.spec_notes + other.spec_notes,
-            commit_messages=self.commit_messages + other.commit_messages,
-            approved_flags=self.approved_flags + other.approved_flags,
-        )
+    def absorb(self, other: "_ChunkOutcome") -> None:
+        """Append ``other``'s entries in order. Postcondition: no entry is lost."""
+        self.issues.extend(other.issues)
+        self.summaries.extend(other.summaries)
+        self.spec_notes.extend(other.spec_notes)
+        self.commit_messages.extend(other.commit_messages)
+        self.approved_flags.extend(other.approved_flags)
 
 
 def _bisect_segment(seg: FileSegment) -> Optional[Tuple[FileSegment, FileSegment]]:
@@ -368,7 +422,7 @@ def _bisect_segment(seg: FileSegment) -> Optional[Tuple[FileSegment, FileSegment
         - Otherwise the two halves' contents concatenate to the original and
           ``start_line`` arithmetic stays consistent.
     """
-    if len(seg.content) < 2 * MIN_SPLIT_SEGMENT_CHARS:
+    if len(seg.content) < 2 * _min_split_segment_chars():
         return None
     lines = seg.content.splitlines(keepends=True)
     if len(lines) < 2:
@@ -411,60 +465,76 @@ def _bisect_chunk(chunk: ReviewChunk) -> Optional[Tuple[ReviewChunk, ReviewChunk
     return None
 
 
-def _degraded_outcome(chunk: ReviewChunk) -> _ChunkOutcome:
-    """Terminal-failure fallback: one non-blocking info finding per segment.
+def _is_infra_failure(exc: BaseException) -> bool:
+    """Classify a chunk-review failure as infrastructure vs content-related.
+
+    Infrastructure failures (rate limit, unreachable endpoint, auth/config
+    errors) cannot be fixed by reviewing a smaller chunk, so retrying or
+    bisecting them only multiplies doomed LLM calls. Content-related failures
+    (JSON parse, schema validation, semantic exhaustion, anything else) may
+    succeed on a smaller or repeated input.
 
     Postconditions:
-        - Every segment of the chunk is named with its un-reviewed line range.
-        - No ``approved_flags`` entry is added, so degraded segments never
-          influence the approval gate.
+        - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
+          client error) up to a bounded depth; never raises.
     """
-    issues = [
-        CodeReviewIssue(
-            severity="info",
-            category="general",
-            file_path=seg.path or "(unknown)",
-            description=(
-                f"Automated review failed for this file (lines {seg.start_line}-{seg.end_line} "
-                f"of {seg.total_lines}): the review model returned no usable output after "
-                "bisect retries. These lines were NOT reviewed."
-            ),
-            suggestion="Re-run the review or inspect these lines manually.",
-        )
-        for seg in chunk.segments
-    ]
-    return _ChunkOutcome(issues=issues)
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 10:
+        seen.add(id(current))
+        if isinstance(current, (LLMJsonParseError, LLMSchemaValidationError)):
+            return False
+        if isinstance(
+            current,
+            (LLMRateLimitError, LLMUnreachableAfterRetriesError, LLMPermanentError),
+        ):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
-def _review_chunk_with_degradation(
+def _chunk_ranges(chunk: ReviewChunk) -> List[str]:
+    """Name every original-file line range the chunk covers."""
+    return [_segment_range_label(seg) for seg in chunk.segments]
+
+
+def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
     base_input: Dict,
     depth: int = 0,
+    retried: bool = False,
 ) -> _ChunkOutcome:
-    """Review one chunk, bisecting on failure and degrading when exhausted.
+    """Review one chunk, recovering from content failures by retry or bisection.
 
     Preconditions:
         - ``base_input`` holds the shared ``ChunkReviewInput`` fields
           (task/spec/architecture context), not per-chunk fields.
 
     Postconditions:
-        - Never raises: any LLM/parse failure either recovers via bisection
-          (≤ ``MAX_CHUNK_BISECT_DEPTH``) or degrades to info findings.
-        - Successful sub-reviews contribute re-anchored issues and one
-          ``approved_flags`` entry each.
+        - Returns an outcome covering every line of the chunk, or raises
+          ``CodeReviewUnavailableError`` naming the unreviewed ranges — the
+          chunk is never silently skipped or scored.
+        - Infrastructure failures raise immediately without retry or bisection.
+        - Content failures bisect up to the depth cap; a chunk too small to
+          bisect gets exactly one same-input retry at depth 0.
     """
+    chunk_input = ChunkReviewInput(
+        code_chunk=chunk.content,
+        file_path_or_label=chunk.paths_label,
+        segment_note=_segment_notes(chunk),
+        **base_input,
+    )
     try:
-        output = reviewer.run(
-            ChunkReviewInput(
-                code_chunk=chunk.content,
-                file_path_or_label=chunk.paths_label,
-                segment_note=_segment_notes(chunk),
-                **base_input,
-            )
-        )
+        output = reviewer.run(chunk_input)
     except Exception as exc:
-        halves = _bisect_chunk(chunk) if depth < MAX_CHUNK_BISECT_DEPTH else None
+        if _is_infra_failure(exc):
+            raise CodeReviewUnavailableError(
+                f"Review model unavailable ({type(exc).__name__}: {exc}); "
+                "no verdict was produced for this submission.",
+                unreviewed=_chunk_ranges(chunk),
+            ) from exc
+        halves = _bisect_chunk(chunk) if depth < _max_bisect_depth() else None
         if halves is not None:
             logger.warning(
                 "CodeReviewCoordinator: chunk review failed at depth %s (%s: %s) — bisecting [%s]",
@@ -473,18 +543,21 @@ def _review_chunk_with_degradation(
                 exc,
                 chunk.paths_label,
             )
-            left = _review_chunk_with_degradation(reviewer, halves[0], base_input, depth + 1)
-            right = _review_chunk_with_degradation(reviewer, halves[1], base_input, depth + 1)
-            return left.merge(right)
-        logger.error(
-            "CodeReviewCoordinator: chunk review failed terminally at depth %s (%s: %s) — "
-            "degrading to info findings [%s]",
-            depth,
-            type(exc).__name__,
-            exc,
-            chunk.paths_label,
-        )
-        return _degraded_outcome(chunk)
+            outcome = _review_chunk_with_recovery(reviewer, halves[0], base_input, depth + 1)
+            outcome.absorb(_review_chunk_with_recovery(reviewer, halves[1], base_input, depth + 1))
+            return outcome
+        if depth == 0 and not retried:
+            logger.warning(
+                "CodeReviewCoordinator: chunk review failed (%s: %s) — retrying once [%s]",
+                type(exc).__name__,
+                exc,
+                chunk.paths_label,
+            )
+            return _review_chunk_with_recovery(reviewer, chunk, base_input, depth, retried=True)
+        raise CodeReviewUnavailableError(
+            f"Chunk review failed after recovery attempts ({type(exc).__name__}: {exc}).",
+            unreviewed=_chunk_ranges(chunk),
+        ) from exc
     return _ChunkOutcome(
         issues=_issues_from_chunk_output(chunk, output.issues),
         summaries=[output.summary],
@@ -572,6 +645,36 @@ def _reconcile_approval(
     return approved, issues
 
 
+def _map_chunks(
+    chunk_reviewer: ChunkReviewAgent,
+    chunks: List[ReviewChunk],
+    base_input: Dict,
+) -> List[_ChunkOutcome]:
+    """Review all chunks, fanning out independent map calls.
+
+    Postconditions:
+        - Returns one outcome per chunk in input order, or raises
+          ``CodeReviewUnavailableError`` (further pending chunks are cancelled;
+          the run has no verdict).
+    """
+    workers = min(_map_parallelism(), len(chunks))
+    if workers <= 1:
+        return [_review_chunk_with_recovery(chunk_reviewer, c, base_input) for c in chunks]
+    executor = ThreadPoolExecutor(max_workers=workers)
+    try:
+        futures = [
+            executor.submit(_review_chunk_with_recovery, chunk_reviewer, c, base_input)
+            for c in chunks
+        ]
+        try:
+            return [f.result() for f in futures]
+        except BaseException:
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+    finally:
+        executor.shutdown(wait=True)
+
+
 def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOutput:
     """Map-reduce review entry point: bounded chunks in, merged verdict out.
 
@@ -580,19 +683,33 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
         - ``input_data`` carries the code under review via ``files`` or ``code``.
 
     Postconditions:
-        - Never raises on per-chunk LLM failures; every input file/line range is
-          either reviewed or named by a non-blocking info finding.
+        - Every input file/line range is either reviewed or named: empty files
+          get info findings, and any chunk that cannot be reviewed after
+          recovery raises ``CodeReviewUnavailableError`` (no verdict is ever
+          rendered on partially reviewed code).
         - ``approved is False`` implies at least one critical/high issue.
-        - When at least one chunk exists and every chunk fails, the result is
-          ``approved=False`` with one synthesized high issue (fail closed).
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
+
+    Raises:
+        CodeReviewUnavailableError: when the review model is unavailable or a
+            chunk remains unreviewable after retry and bisection.
     """
-    blocks = _blocks_from_input(input_data)
+    blocks, skipped_empty = _blocks_from_input(input_data)
+    skipped_issues = [
+        CodeReviewIssue(
+            severity="info",
+            category="general",
+            file_path=path,
+            description="File content is empty or whitespace-only; nothing to review.",
+            suggestion="Confirm the file is intentionally empty.",
+        )
+        for path in skipped_empty
+    ]
     if not blocks:
         return CodeReviewOutput(
             approved=True,
-            issues=[],
+            issues=skipped_issues,
             summary="No code to review.",
             spec_compliance_notes="",
             suggested_commit_message="",
@@ -601,17 +718,24 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
     max_existing = compute_code_review_existing_codebase_chars(llm)
-    spec_content = compact_text(input_data.spec_content or "", max_spec, llm, "specification")
+    # Hard caps after compaction: compact_text returns the original text when
+    # its LLM call fails, so the slice is what actually guarantees the chunk
+    # reviewer's bounded-prompt precondition.
+    spec_content = compact_text(input_data.spec_content or "", max_spec, llm, "specification")[
+        :max_spec
+    ]
     arch_overview = ""
     if input_data.architecture:
         arch_overview = compact_text(
             input_data.architecture.overview or "", max_arch, llm, "architecture overview"
-        )
+        )[:max_arch]
     existing_codebase = compact_text(
         input_data.existing_codebase or "", max_existing, llm, "existing codebase"
-    )
+    )[:max_existing]
 
-    chunks = build_review_chunks(blocks, compute_code_review_map_chunk_chars(llm))
+    chunks = build_review_chunks(
+        blocks, compute_code_review_map_chunk_chars(llm), input_data.pre_numbered
+    )
     logger.info(
         "CodeReviewCoordinator: %s blocks -> %s chunks",
         len(blocks),
@@ -619,6 +743,7 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
     )
 
     base_input = {
+        "language": input_data.language or "",
         "task_description": input_data.task_description or "",
         "task_requirements": input_data.task_requirements or "",
         "acceptance_criteria": input_data.acceptance_criteria or [],
@@ -629,41 +754,27 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     chunk_reviewer = ChunkReviewAgent(llm)
     outcome = _ChunkOutcome()
-    for chunk in chunks:
-        outcome = outcome.merge(_review_chunk_with_degradation(chunk_reviewer, chunk, base_input))
+    for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input):
+        outcome.absorb(per_chunk)
 
-    all_issues = list(outcome.issues)
-    successes = len(outcome.approved_flags)
-    if successes == 0:
-        logger.error("CodeReviewCoordinator: all %s chunks failed — failing closed", len(chunks))
-        all_issues.append(
-            CodeReviewIssue(
-                severity="high",
-                category="general",
-                file_path="",
-                description=(
-                    "Automated code review could not run: every review chunk failed, so none "
-                    "of the submitted code was reviewed."
-                ),
-                suggestion="Re-run the review; if it keeps failing, check review model health "
-                "and the size of the submitted change.",
-            )
-        )
-
-    deduped = _dedupe_issues(all_issues)
-    all_llm_approved = successes > 0 and all(outcome.approved_flags)
+    deduped = _dedupe_issues([*outcome.issues, *skipped_issues])
+    all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     merged_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
     approved, deduped = _reconcile_approval(all_llm_approved, deduped, merged_summary)
 
-    spec_notes = outcome.spec_notes[0] if successes == 1 else ""
-    commit_message = outcome.commit_messages[0] if successes == 1 else ""
+    spec_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
+    # A commit message synthesized from a fraction of the change is misleading,
+    # so it is only forwarded when the whole submission fit one chunk.
+    commit_message = ""
+    if len(chunks) == 1:
+        commit_message = next((m for m in outcome.commit_messages if m.strip()), "")
 
     logger.info(
-        "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (successful=%s)",
+        "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (sub-reviews=%s)",
         approved,
         len(deduped),
         len(chunks),
-        successes,
+        len(outcome.approved_flags),
     )
 
     return CodeReviewOutput(

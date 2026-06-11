@@ -2,9 +2,26 @@
 
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from software_engineering_team.shared.models import SystemArchitecture
+
+
+class CodeReviewUnavailableError(RuntimeError):
+    """Raised when the review could not be completed, so no verdict exists.
+
+    Distinguishes "the reviewer infrastructure failed" from "the code was
+    rejected": callers must treat this as a failed review run (retry, mark the
+    job failed), never as review feedback for the coding agent.
+
+    Invariants:
+        - ``unreviewed`` names the file/line ranges that received no review
+          (empty when the failure happened before any chunk was attempted).
+    """
+
+    def __init__(self, message: str, unreviewed: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.unreviewed: List[str] = list(unreviewed or [])
 
 
 def coerce_line(value: Any) -> Optional[int]:
@@ -29,8 +46,8 @@ class FileSegment(BaseModel):
 
     Invariants:
         - ``start_line`` is 1-based and within the original file.
-        - A file's segments, ordered by ``part_index``, partition its content
-          exactly: concatenating their ``content`` reproduces the file.
+        - A file's segments, in list order, partition its content exactly:
+          concatenating their ``content`` reproduces the file.
         - ``pre_numbered`` segments carry original line numbers as ``N: `` prefixes
           (the coding team's PR-diff hunks), so they need no re-anchoring.
     """
@@ -42,10 +59,6 @@ class FileSegment(BaseModel):
         description="1-based line number of the segment's first line in the original file",
     )
     total_lines: int = Field(default=1, description="Total line count of the original file")
-    part_index: int = Field(
-        default=1, description="1-based index of this segment among the file's segments"
-    )
-    part_count: int = Field(default=1, description="How many segments the file was split into")
     pre_numbered: bool = Field(
         default=False,
         description="True when content lines carry original line-number prefixes (e.g. '123: code')",
@@ -136,6 +149,10 @@ class ChunkReviewInput(BaseModel):
         default="",
         description="Reviewer guidance for split or pre-numbered segments (prepended to the prompt)",
     )
+    language: str = Field(
+        default="",
+        description="Primary language of the code under review ('' lets the reviewer guess)",
+    )
     task_description: str = Field(default="", description="Task the coding agent was working on")
     task_requirements: str = Field(default="", description="Detailed task requirements")
     acceptance_criteria: List[str] = Field(
@@ -204,7 +221,14 @@ class CodeReviewIssue(BaseModel):
 
 
 class CodeReviewInput(BaseModel):
-    """Input for the Code Review agent."""
+    """Input for the Code Review agent.
+
+    Preconditions (enforced at construction):
+        - The code under review is provided either via ``files`` (non-empty
+          mapping) or via an explicitly passed ``code`` string. Constructing
+          the input with neither, or with ``files={}``, raises ``ValueError``
+          so a caller bug never silently becomes an approved empty review.
+    """
 
     code: str = Field(
         default="",
@@ -215,6 +239,12 @@ class CodeReviewInput(BaseModel):
         default=None,
         description="Preferred input: mapping of file path to file content. "
         "When set, ``code`` is ignored and no header parsing happens.",
+    )
+    pre_numbered: bool = Field(
+        default=False,
+        description="True when every content line already carries its original line number "
+        "as an 'N: ' prefix (the coding team's PR-diff hunks); issue lines are then "
+        "reported verbatim instead of re-anchored.",
     )
     spec_content: str = Field(
         default="",
@@ -241,6 +271,23 @@ class CodeReviewInput(BaseModel):
         default=None,
         description="Existing code in the repo before the agent's changes",
     )
+
+    @model_validator(mode="after")
+    def _require_code_or_files(self) -> "CodeReviewInput":
+        """Reject inputs that carry no code source at all.
+
+        ``files={}`` and a fully-defaulted ``code`` are caller bugs (e.g. a glob
+        miss or a dropped kwarg), not empty reviews; per DbC they must raise here
+        rather than fail open downstream. An explicitly passed empty ``code``
+        string remains valid (the review then reports nothing to review).
+        """
+        if self.files is not None:
+            if not self.files:
+                raise ValueError("CodeReviewInput.files must be a non-empty mapping when provided")
+            return self
+        if "code" not in self.model_fields_set:
+            raise ValueError("CodeReviewInput requires either 'files' or an explicit 'code' value")
+        return self
 
 
 class CodeReviewOutput(BaseModel):

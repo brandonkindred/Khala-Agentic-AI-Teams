@@ -914,6 +914,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             review_input = CodeReviewInput(
                 code=code,
+                # _build_review_code renders every line with its original
+                # line-number prefix; declaring it here (instead of letting the
+                # reviewer sniff the format) keeps issue lines verbatim.
+                pre_numbered=True,
                 task_description=f"Review pull request #{pr_number}: {pr.title}",
                 task_requirements=pr.body or "",
                 language=_infer_review_language(files),
