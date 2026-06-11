@@ -182,6 +182,16 @@ SCHEMA: TeamSchema = TeamSchema(
         # Idempotent ALTER back-fills clusters provisioned before the column.
         """ALTER TABLE agent_cognition_runs
             ADD COLUMN IF NOT EXISTS claim_token TEXT""",
+        # Backs the central scheduler's terminal-run GC predicate
+        # (``status = ANY(terminal) AND completed_at < cutoff``). Composite
+        # ``(status, completed_at)`` rather than a partial index on
+        # ``completed_at``: the GC filters status via a parameterized
+        # ``= ANY(...)``, which the planner cannot prove implies a partial
+        # index's ``WHERE status IN (...)`` predicate, so it would fall back to
+        # a full scan over the (potentially millions of) retained terminal rows
+        # each tick. The composite btree is always usable for this predicate.
+        """CREATE INDEX IF NOT EXISTS idx_agent_cognition_runs_status_completed
+            ON agent_cognition_runs(status, completed_at)""",
         # -----------------------------------------------------------------
         # Knowledge-graph ingestion watermarks — one row per agent tracking how
         # far the graph sync worker has consumed this agent's memory into the
