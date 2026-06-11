@@ -14,6 +14,7 @@ discovery paths.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
@@ -40,6 +41,32 @@ _ENTRYPOINT = "agentic_team_provisioning.runtime.agent_builder:invoke_generated_
 # lazily by the registry, never imported at load time).
 _INPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeInput"
 _OUTPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
+
+
+def team_id_prefix(team_id: str) -> str:
+    """Manifest-id prefix shared by every generated agent of one team.
+
+    Postconditions: returns ``"agentic_team_provisioning.<team-slug>."`` — the
+    common prefix of every id :func:`manifest_agent_id` produces for ``team_id``,
+    used to find this team's generated entries in the registry.
+    """
+    return f"{_TEAM_KEY}.{_slug(team_id, 12)}."
+
+
+def manifest_agent_id(team_id: str, agent_name: str) -> str:
+    """Stable, collision-free manifest id for a generated agent.
+
+    Preconditions:
+        * ``team_id`` and ``agent_name`` are non-empty.
+    Postconditions:
+        * Deterministic for a given ``(team_id, agent_name)`` pair, and **never**
+          collides for distinct pairs: a short hash of the *original* strings
+          disambiguates names that share a normalized slug (e.g. ``"QA Agent"``
+          and ``"qa-agent"``, or names agreeing on their first 40 slug chars).
+          Always starts with :func:`team_id_prefix`.
+    """
+    digest = hashlib.sha1(f"{team_id}\x00{agent_name}".encode()).hexdigest()[:8]
+    return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{digest}"
 
 
 def default_cognition_block() -> CognitionSpec:
@@ -72,12 +99,12 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
           equals :func:`default_cognition_block` (``rule_packs ==
           ["default_guardrails"]``), ``team == "agentic_team_provisioning"``,
           ``source.entrypoint`` points at the roster-agent factory, and ``id`` is
-          stable for a given ``(team_id, agent.agent_name)`` pair.
+          the stable, collision-free :func:`manifest_agent_id`.
     """
     assert team_id, "build_agent_manifest: team_id must be non-empty"
     assert agent.agent_name, "build_agent_manifest: agent.agent_name must be non-empty"
 
-    manifest_id = f"{_TEAM_KEY}.{_slug(team_id, 12)}.{_slug(agent.agent_name, 40)}"
+    manifest_id = manifest_agent_id(team_id, agent.agent_name)
     summary = agent.role or f"Generated agent {agent.agent_name}"
 
     manifest = AgentManifest(
@@ -108,26 +135,42 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     resolvable by the Agent Console catalog and the ``/api/agents/{id}/invoke``
     route (cognition injection + seed-pack install then happen on first invoke).
 
-    Scope: this is the registry of *this process*. In the default single Unified
-    FastAPI app the Agent Console / invoke route share the process, so this is
-    sufficient. In a multi-service deployment (``AGENTIC_TEAM_PROVISIONING_SERVICE_URL``
-    set) the unified-API and sandbox processes load their own disk registries and
-    won't see these entries; cross-process registration (shared persistence /
+    Scope: this is the registry of *this process*. It makes generated agents
+    resolvable to consumers that share this process. Other processes load their
+    own registries from disk and won't see these entries — the Agent Console /
+    invoke route when the team runs behind ``AGENTIC_TEAM_PROVISIONING_SERVICE_URL``,
+    and every per-invoke sandbox (its shim re-resolves the manifest from its own
+    in-container disk registry). Cross-process visibility (shared persistence /
     sync) is a tracked follow-up beyond this generator-wiring change.
 
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:
-        * Returns one validated manifest per roster agent, each already registered
-          (``get_registry().get(m.id)`` returns it). Registration is in-memory and
-          idempotent — re-registering an id overwrites the prior entry. Best-effort:
-          a registry failure is logged, never raised, so generation still succeeds.
+        * Returns one validated manifest per roster agent, each registered
+          (``get_registry().get(m.id)`` returns it). Acts as a full replace for the
+          team: previously-registered generated manifests for ``team_id`` that are
+          absent from this roster are unregistered, so removed/renamed agents stop
+          appearing in the catalog. In-memory and idempotent. Best-effort — a
+          registry failure is logged, never raised, so generation still succeeds.
     """
     manifests = [build_agent_manifest(team_id, a) for a in agents]
+    new_ids = {m.id for m in manifests}
     try:
         from agent_registry import get_registry
 
         registry = get_registry()
+        # Drop stale entries from a prior roster (removed/renamed agents) before
+        # registering the replacement set. Scope strictly to this team's generated
+        # ids (prefix + the "generated" tag) so a hand-authored disk manifest is
+        # never touched.
+        prefix = team_id_prefix(team_id)
+        stale = [
+            m.id
+            for m in registry.all()
+            if m.id.startswith(prefix) and "generated" in m.tags and m.id not in new_ids
+        ]
+        for agent_id in stale:
+            registry.unregister(agent_id)
         for manifest in manifests:
             registry.register(manifest)
     except Exception:

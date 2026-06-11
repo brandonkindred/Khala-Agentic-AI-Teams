@@ -141,6 +141,20 @@ class AgentRegistry:
         if source_path is not None:
             self._source_paths[manifest.id] = source_path
 
+    def unregister(self, agent_id: str) -> bool:
+        """Remove a (dynamically registered) manifest from the live registry.
+
+        Used by generators that replace a team's roster to drop entries for
+        removed/renamed agents.
+
+        Postconditions:
+            * ``get(agent_id)`` returns ``None`` afterwards. Returns ``True`` when
+              an entry was present and removed, ``False`` when the id was unknown
+              (a no-op).
+        """
+        self._source_paths.pop(agent_id, None)
+        return self._by_id.pop(agent_id, None) is not None
+
     def search(
         self,
         *,

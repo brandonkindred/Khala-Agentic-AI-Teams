@@ -98,6 +98,18 @@ def test_register_tracks_source_path(tmp_path: Path) -> None:
     assert reg._source_paths["gen.b"] == tmp_path / "b.yaml"
 
 
+def test_unregister_removes_and_reports(tmp_path: Path) -> None:
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("gen.c", "C"), source_path=tmp_path / "c.yaml")
+
+    assert reg.unregister("gen.c") is True
+    assert reg.get("gen.c") is None
+    assert "gen.c" not in reg._source_paths
+    # Removing an unknown id is a no-op that reports False.
+    assert reg.unregister("gen.c") is False
+    assert reg.unregister("never.registered") is False
+
+
 def test_loader_skips_invalid_manifest_shape(tmp_path: Path) -> None:
     # Missing required fields (id, team, name, summary, source).
     _write_manifest(

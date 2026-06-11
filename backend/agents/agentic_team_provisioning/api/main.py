@@ -12,7 +12,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from agentic_team_provisioning.agent_env_provisioning import _slug, schedule_provision_step_agents
+from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
@@ -815,8 +815,12 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     # Build and invoke the agent through the cognition-aware wrapper so any
     # advisory rules + memory digest on the side channel steer this invoke. The
     # writeback is discarded here: the local test-chat path has no idempotency
-    # ledger to persist it against (that lives on the gated invoke proxy).
-    cognition_agent_id = f"agentic_team_provisioning.{_slug(team_id, 12)}.{_slug(agent_name, 40)}"
+    # ledger to persist it against (that lives on the gated invoke proxy). The
+    # cognition agent id matches the generated manifest id so episodic memory is
+    # namespaced consistently with the registered agent.
+    from agentic_team_provisioning.manifest_generation import manifest_agent_id
+
+    cognition_agent_id = manifest_agent_id(team_id, agent_name)
     response_text, _writeback = _call_test_agent_with_cognition(
         agent_def.agent_name,
         agent_def.role,

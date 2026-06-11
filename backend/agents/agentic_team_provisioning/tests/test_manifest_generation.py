@@ -8,6 +8,7 @@ from agent_registry.models import AgentManifest, CognitionSpec
 from agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     default_cognition_block,
+    manifest_agent_id,
     register_team_manifests,
 )
 from agentic_team_provisioning.models import AgenticTeamAgent
@@ -74,6 +75,19 @@ def test_build_agent_manifest_id_stable_and_unique():
     assert id_a1.startswith("agentic_team_provisioning.")
 
 
+def test_manifest_id_is_collision_free_for_normalized_name_clashes():
+    # Distinct roster names that normalize to the same slug must not collide.
+    id_1 = build_agent_manifest("t", AgenticTeamAgent(agent_name="QA Agent", role="r")).id
+    id_2 = build_agent_manifest("t", AgenticTeamAgent(agent_name="qa-agent", role="r")).id
+    assert id_1 != id_2
+    # The id helper is the single source of truth used by the builder.
+    assert id_1 == manifest_agent_id("t", "QA Agent")
+    # Same long prefix beyond 40 chars also stays distinct.
+    long_a = "X" * 50 + "alpha"
+    long_b = "X" * 50 + "beta"
+    assert manifest_agent_id("t", long_a) != manifest_agent_id("t", long_b)
+
+
 def test_manifest_schema_refs_resolve_to_real_models():
     # The manifest's inputs/outputs schema_refs must point at importable Pydantic
     # models so the registry can resolve them lazily.
@@ -115,6 +129,54 @@ def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.Monk
     for m in manifests:
         assert reg.get(m.id) is m
         assert reg.get(m.id).cognition.rule_packs == ["default_guardrails"]
+
+
+def test_register_team_manifests_replaces_stale_roster(monkeypatch: pytest.MonkeyPatch):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    first = register_team_manifests(
+        "team-1",
+        [AgenticTeamAgent(agent_name="A", role="r"), AgenticTeamAgent(agent_name="B", role="r")],
+    )
+    stale_id = next(m.id for m in first if m.name == "B")
+
+    # New roster drops B and renames to C → B's manifest must be unregistered.
+    register_team_manifests(
+        "team-1",
+        [AgenticTeamAgent(agent_name="A", role="r"), AgenticTeamAgent(agent_name="C", role="r")],
+    )
+    assert reg.get(stale_id) is None
+    names = {m.name for m in reg.all()}
+    assert names == {"A", "C"}
+
+
+def test_register_team_manifests_scopes_removal_to_team_and_generated(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+    from agent_registry.models import AgentManifest, SourceInfo
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    # A hand-authored manifest for another team is never touched by team-1's replace.
+    other = AgentManifest(
+        id="blogging.planner",
+        team="blogging",
+        name="Planner",
+        summary="s",
+        source=SourceInfo(entrypoint="m:f"),
+    )
+    reg.register(other)
+
+    register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+    register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+    assert reg.get("blogging.planner") is other
 
 
 def test_register_team_manifests_is_best_effort(monkeypatch: pytest.MonkeyPatch):
