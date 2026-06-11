@@ -104,6 +104,18 @@ def test_runs_composite_primary_key_present() -> None:
     assert "PRIMARY KEY (agent_id, source_run_id)" in runs_ddl
 
 
+def test_runs_terminal_gc_index_present() -> None:
+    # The central scheduler's terminal-run GC filters
+    # ``status = ANY(terminal) AND completed_at < cutoff``; a composite
+    # (status, completed_at) index must back it so the hourly pass doesn't
+    # full-scan the retained ledger.
+    joined = "".join(SCHEMA.statements)
+    assert (
+        "idx_agent_cognition_runs_status_completed" in joined
+        and "agent_cognition_runs(status, completed_at)" in joined
+    )
+
+
 def test_summaries_have_version_and_stale_columns() -> None:
     summaries_ddl = next(
         s for s in SCHEMA.statements if "CREATE TABLE IF NOT EXISTS agent_cognition_summaries" in s

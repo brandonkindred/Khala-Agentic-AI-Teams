@@ -184,6 +184,14 @@ the response is unusable: nothing to gate, persist, or replay). Transport errors
 the agent may still be executing, and the lease is the guard against a concurrent
 double-run; a same-key retry inside that window gets `409` by design.
 
+**Ledger hygiene.** Terminal (`completed`/`blocked`) ledger rows are kept only so a retry
+inside the idempotency TTL (`AGENT_COGNITION_RUN_TTL_S`, default 7 days) can replay their
+stored envelope. The central scheduler runs one platform-wide `gc_terminal_runs` pass per
+tick that deletes terminal rows whose `completed_at` is older than the TTL. It **never**
+touches `in_progress` rows — even one with an expired lease is left for `claim_run` to
+reclaim lazily, so the `request_hash` survives for retry policing (GCing it would let a
+post-expiry retry with a *different* body run instead of conflicting).
+
 **Attempt-scoped memory keys.** Episodic-event idempotency is keyed
 `(agent_id, run_id, source_seq)`, but a ledger key can legitimately execute more than once
 (expired-lease reclaim). The gate therefore persists events under
