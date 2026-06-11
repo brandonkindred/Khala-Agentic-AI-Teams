@@ -116,7 +116,10 @@ class RollupReport(BaseModel):
     parent's stale flag, permanently losing the late event upward);
     ``skipped_open`` counts still-open (not-yet-closed) periods deliberately
     left alone; ``evidence_flagged`` counts proposals + rules flagged for
-    review because a cited summary's version was superseded.
+    review because a cited summary's version was superseded; ``truncated``
+    is set when a caller-supplied ``max_periods`` budget stopped the pass
+    before every due period was processed (the remainder is picked up by the
+    next pass — oldest-first ordering makes partial passes resumable).
     """
 
     agent_id: str
@@ -125,12 +128,15 @@ class RollupReport(BaseModel):
     deferred: dict[str, int] = Field(default_factory=dict)
     skipped_open: int = 0
     evidence_flagged: int = 0
+    truncated: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
-def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
+def ensure_rollups_current(
+    agent_id: str, now: datetime, *, max_periods: int | None = None
+) -> RollupReport:
     """Bring every closed calendar period current for ``agent_id``.
 
     Processes each scale in ``day -> week -> month -> year`` order and, within
@@ -143,12 +149,22 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
           any calendar key is computed, so period boundaries are always
           UTC-midnight-aligned regardless of the caller's zone — a naive
           ``now`` is a caller bug and is rejected.
+        * ``max_periods``, when given, is positive: the maximum number of due
+          periods this pass may process (each processed period costs one LLM
+          summarization call). Latency-sensitive callers — the invoke gate's
+          lazy catch-up — pass a small budget so a cold-start backlog can't
+          run hundreds of sequential LLM calls inline; the unbudgeted
+          scheduler passes ``None``.
     Postconditions:
         * For each scale, every closed period (``period_end <= now``) inside
           the lookback window that has no summary, or a ``stale`` summary, is
           summarized exactly once via an idempotent ``upsert_summary`` — no
           duplicate rows (unique key) and no spurious version bumps on a
           clean re-run. Periods whose ``period_end > now`` are left untouched.
+        * When ``max_periods`` stops the pass early, ``report.truncated`` is
+          set and the unprocessed remainder is untouched; oldest-first
+          ordering makes repeated budgeted passes converge to the unbudgeted
+          result.
         * Returns a :class:`RollupReport` counting the work done.
     Invariants:
         * Each period captures its own ``snapshot`` (read-time) immediately
@@ -162,6 +178,9 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
     """
     assert agent_id, "ensure_rollups_current: agent_id must be non-empty"
     assert now.tzinfo is not None, "ensure_rollups_current: now must be tz-aware"
+    assert max_periods is None or max_periods > 0, (
+        "ensure_rollups_current: max_periods must be positive when given"
+    )
     # Normalize to UTC so ``_midnight``/period keys are UTC-aligned even if the
     # caller passed an aware non-UTC zone (local midnight would otherwise key
     # summaries at 04:00/05:00 UTC, which later UTC callers would never match).
@@ -169,12 +188,16 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
 
     llm = get_client("cognition")
     report = RollupReport(agent_id=agent_id)
+    processed = 0
 
     for scale in _SCALE_ORDER:
         _, current_end = _period_bounds(scale, now)
         if current_end > now:
             report.skipped_open += 1
         for period_start, period_end in _periods_to_process(agent_id, scale, now):
+            if max_periods is not None and processed >= max_periods:
+                report.truncated = True
+                return report
             _rollup_one_period(
                 agent_id,
                 scale,
@@ -183,6 +206,7 @@ def ensure_rollups_current(agent_id: str, now: datetime) -> RollupReport:
                 llm=llm,
                 report=report,
             )
+            processed += 1
     return report
 
 

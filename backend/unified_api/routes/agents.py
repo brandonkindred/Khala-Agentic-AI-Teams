@@ -28,6 +28,14 @@ import httpx
 from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse
 
+from agent_cognition.invoke_gate import (
+    GateOutcomeKind,
+    UnmappedGateOutcomeError,
+    abandon_invoke,
+    finalize_invoke,
+    outcome_as_finalized,
+    prepare_invoke,
+)
 from agent_cognition.tools.envelope import ENVELOPE_MARKER
 from agent_console import (
     AgentConsoleStorageUnavailable,
@@ -132,33 +140,6 @@ def get_sample(agent_id: str, name: str) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-async def _maybe_build_cognition(agent_id: str, manifest: Any, body: Any) -> Any:
-    """Build the platform cognition context for an invoke, or ``None``.
-
-    Returns ``None`` (a normal uninjected invoke) when the agent has no cognition
-    manifest block, Postgres is unconfigured, or context assembly fails — building
-    the side channel must never break the invoke. Otherwise returns the
-    ``CognitionContext`` (active rules + memory digest + knowledge-graph context).
-    """
-    if getattr(manifest, "cognition", None) is None:
-        return None
-    try:
-        from shared_postgres import is_postgres_enabled
-
-        if not is_postgres_enabled():
-            return None
-        from agent_cognition.invoke_context import build_cognition_context, extract_query_text
-
-        return await build_cognition_context(agent_id, query=extract_query_text(body))
-    except Exception:
-        logger.warning(
-            "cognition: context build failed for %s; proceeding without injection",
-            agent_id,
-            exc_info=True,
-        )
-        return None
-
-
 @router.post("/{agent_id}/invoke")
 async def invoke_agent(
     agent_id: str,
@@ -195,20 +176,6 @@ async def invoke_agent(
             detail=f"Request body must not contain the reserved key {ENVELOPE_MARKER!r}.",
         )
 
-    # Build the platform cognition side channel (active rules + memory digest +
-    # knowledge-graph context) and gate enforced preconditions before spending a
-    # sandbox round-trip. No-op for agents without a cognition manifest block.
-    cognition_ctx = await _maybe_build_cognition(agent_id, manifest, body)
-    if cognition_ctx is not None:
-        from agent_cognition.rules.enforcement import evaluate_precondition
-
-        allowed, reason = evaluate_precondition({"input": body, "agent_id": agent_id}, cognition_ctx.rules)
-        if not allowed:
-            raise HTTPException(
-                status_code=422,
-                detail={"message": "Blocked by cognition precondition", "reason": reason},
-            )
-
     try:
         handle = await acquire(agent_id)
     except DockerUnavailableError as exc:
@@ -241,24 +208,77 @@ async def invoke_agent(
             },
         )
 
+    # Pre-flight the cognition lifecycle only once the sandbox is WARM: the
+    # idempotency claim (replay / 409), lazy rollup catch-up, context load, the
+    # enforced precondition gate, the envelope wrap, and the full-envelope payload
+    # re-cap all live in the gate. It must NOT run before the warming 202 above —
+    # claiming a leased run and then telling the caller "retry shortly" would make
+    # every warm-up poll conflict with its own claim until the lease expired.
+    # No-op for agents without a cognition block.
+    prepared = None
+    post_body: Any = body
+    if manifest.cognition is not None:
+        outcome = await prepare_invoke(
+            agent_id,
+            body,
+            requires_idempotency_key=manifest.cognition.requires_idempotency_key,
+            idempotency_key=request.headers.get("Idempotency-Key"),
+            max_envelope_bytes=max_payload_bytes(),
+        )
+        if outcome.kind is not GateOutcomeKind.PROCEED:
+            # Every non-PROCEED outcome maps to a response through the gate's
+            # single shared mapper — replay verbatim (covers blocked runs; no
+            # sandbox post, no duplicate console run row), rule blocks, and the
+            # reason-carrying errors. An unmapped future kind raises here
+            # rather than silently proceeding ungated — a gate bypass would be
+            # the worst possible default for a new failure mode.
+            try:
+                fin = outcome_as_finalized(outcome)
+            except UnmappedGateOutcomeError as exc:
+                logger.error("cognition: %s for %s", exc, agent_id)
+                raise HTTPException(status_code=500, detail=str(exc)) from exc
+            headers = {"X-Khala-Replayed": "true"} if fin.replayed else None
+            return JSONResponse(status_code=fin.status_code, content=fin.content, headers=headers)
+        prepared = outcome.prepared
+        if prepared is not None:
+            post_body = prepared.envelope
+
+    # Once the gate has claimed a run (`prepared.claim_token`), every exit from
+    # this point follows one of exactly three contracts — a new early return
+    # must pick one deliberately:
+    #   1. finalize_invoke(...)   — a parseable upstream response (any status):
+    #      gates + persistence + ledger completion.
+    #   2. abandon_invoke(...)    — the agent provably produced nothing usable
+    #      (e.g. the over-cap response below): release so retries re-execute.
+    #   3. hold the lease         — the agent may still be executing (transport
+    #      errors/timeouts): the lease is the concurrent double-run guard.
     # Outer transport timeout on the proxy → sandbox hop. The inner
     # per-agent execution timeout (enforced via asyncio.wait_for inside the
     # shim) is strictly shorter, so the shim always gets to surface a 504
     # envelope before this fires.
     timeout_s = TEAM_CONFIGS.get(manifest.team).timeout_seconds if manifest.team in TEAM_CONFIGS else 120.0
-    # Wrap the body with the cognition envelope when injecting; the original
-    # `body` is preserved for run persistence below (we store what the caller sent).
-    post_body = body
-    if cognition_ctx is not None:
-        from agent_cognition.tools.envelope import wrap_request
-
-        post_body = wrap_request(body, cognition_ctx.model_dump(mode="json"))
-
+    # `post_body` is the gate's marker-wrapped envelope for cognition agents and
+    # the caller body otherwise; the original `body` is preserved for run
+    # persistence below (we store what the caller sent).
     target = f"{handle.url}/_agents/{agent_id}/invoke"
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(timeout_s)) as client:
-            upstream = await client.post(target, json=post_body)
+            if prepared is not None and prepared.envelope_bytes is not None:
+                # Reuse the bytes the gate already serialized for the payload-cap
+                # check instead of re-serializing the (potentially ~MiB) envelope.
+                upstream = await client.post(
+                    target,
+                    content=prepared.envelope_bytes,
+                    headers={"Content-Type": "application/json"},
+                )
+            else:
+                upstream = await client.post(target, json=post_body)
     except httpx.HTTPError as exc:
+        # The cognition claim (if any) is deliberately LEFT leased: a transport
+        # error does not prove the agent isn't still executing in the sandbox,
+        # and the lease is exactly what prevents a concurrent double-run. A
+        # same-key retry inside the lease window gets 409 by design; after
+        # expiry it re-executes.
         logger.exception("invoke proxy failed %s", target)
         raise HTTPException(status_code=502, detail=f"Sandbox invoke failed: {exc}") from exc
 
@@ -276,6 +296,11 @@ async def invoke_agent(
     cap = max_output_bytes() + max_writeback_bytes() + RESPONSE_ENVELOPE_OVERHEAD_BYTES
     if raw_len > cap:
         logger.warning("upstream response for %s exceeded %d bytes (got %d)", agent_id, cap, raw_len)
+        # The agent ran to completion but its response is unusable — there is
+        # nothing to gate, persist, or replay. Release the claim so an
+        # immediate retry re-executes instead of 409-ing until lease expiry.
+        if prepared is not None:
+            await abandon_invoke(prepared)
         return JSONResponse(
             status_code=502,
             content={
@@ -292,8 +317,35 @@ async def invoke_agent(
         content = upstream.json()
     except ValueError:
         content = {"raw": upstream.text}
-    if isinstance(content, dict):
-        content.setdefault("sandbox", {"agent_id": agent_id, "url": handle.url})
+
+    # Close out the cognition lifecycle BEFORE any persistence: the enforced
+    # postcondition gate runs first, so a violated model output is never stored.
+    # The gate persists the writeback / trusted tool audit and the ledger
+    # envelope — which therefore never carries the per-invoke `sandbox` block
+    # (a replay must not masquerade as a fresh boot).
+    if prepared is not None:
+        fin = await finalize_invoke(prepared, upstream.status_code, content)
+        if fin.blocked:
+            # The model output is dropped (console row keeps only the error for
+            # audit); the gate already recorded the trusted tool audit + the
+            # blocked ledger envelope so a retried violation replays this 4xx.
+            _persist_run(
+                agent_id=agent_id,
+                team=manifest.team,
+                saved_input_id=saved_input_id,
+                request_body=body,
+                upstream_status=fin.status_code,
+                envelope={"detail": {"error": f"Blocked by cognition {fin.block_phase}: {fin.block_reason}"}},
+                sandbox_url=handle.url,
+                boot_ms=handle.boot_ms,
+            )
+            return JSONResponse(status_code=fin.status_code, content=fin.content)
+
+    # Add the per-invoke sandbox block on a COPY: finalize stored `content` in
+    # the ledger by reference, so mutating it here would leak the sandbox block
+    # into the replay envelope (a replay must not masquerade as a fresh boot).
+    if isinstance(content, dict) and "sandbox" not in content:
+        content = {**content, "sandbox": {"agent_id": agent_id, "url": handle.url}}
 
     # Best-effort run persistence. Never block the invoke on storage failure.
     _persist_run(
@@ -306,20 +358,6 @@ async def invoke_agent(
         sandbox_url=handle.url,
         boot_ms=handle.boot_ms,
     )
-
-    # Gate enforced postconditions on the agent's output. A violation drops the
-    # output with a 422 (the run is still persisted above for audit).
-    if cognition_ctx is not None and isinstance(content, dict):
-        from agent_cognition.rules.enforcement import evaluate_postcondition
-
-        output = content.get("output", content)
-        if isinstance(output, dict):
-            allowed, reason = evaluate_postcondition(output, cognition_ctx.rules)
-            if not allowed:
-                raise HTTPException(
-                    status_code=422,
-                    detail={"message": "Blocked by cognition postcondition", "reason": reason},
-                )
 
     return JSONResponse(status_code=upstream.status_code, content=content)
 

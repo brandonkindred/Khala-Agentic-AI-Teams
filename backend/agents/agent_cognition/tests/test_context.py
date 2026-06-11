@@ -164,6 +164,30 @@ def test_enforce_postcondition_allows_and_blocks() -> None:
     assert "output must not contain leak" in exc.value.reason
 
 
+def test_enforce_postcondition_fails_closed_on_non_mapping_output() -> None:
+    """A None/str/list output is coerced to {} inside the evaluator, so a
+    path-requiring enforced rule blocks — the coercion lives here so EVERY
+    caller (the invoke gate or a direct one) gets identical fail-closed
+    semantics."""
+    require_ok = Rule(
+        id="r-req",
+        agent_id="a",
+        text="output.ok must exist",
+        mode=RuleMode.ENFORCED,
+        status=RuleStatus.ACTIVE,
+        predicate={"phase": "postcondition", "check": {"op": "exists", "path": "output.ok"}},
+        source=RuleSource.OPERATOR,
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+    assert context.enforce_postcondition({"ok": 1}, [require_ok]) is None
+    for output in (None, "plain string", ["list"], 42):
+        with pytest.raises(PostconditionViolation):
+            context.enforce_postcondition(output, [require_ok])
+    # Without enforced postcondition rules, a non-mapping output still passes.
+    assert context.enforce_postcondition(None, []) is None
+
+
 def test_clamp01_bounds() -> None:
     assert context._clamp01(-3.0) == 0.0
     assert context._clamp01(42.0) == 1.0
@@ -314,15 +338,19 @@ def test_ensure_rollups_current_delegates(monkeypatch) -> None:
     sentinel = object()
     seen: dict = {}
 
-    def _fake(agent_id: str, now: datetime):
+    def _fake(agent_id: str, now: datetime, *, max_periods=None):
         seen["agent_id"] = agent_id
         seen["now"] = now
+        seen["max_periods"] = max_periods
         return sentinel
 
     monkeypatch.setattr("agent_cognition.memory.rollup.ensure_rollups_current", _fake)
     out = context.ensure_rollups_current("a", _NOW)
     assert out is sentinel
-    assert seen == {"agent_id": "a", "now": _NOW}
+    assert seen == {"agent_id": "a", "now": _NOW, "max_periods": None}
+    out = context.ensure_rollups_current("a", _NOW, max_periods=4)
+    assert out is sentinel
+    assert seen["max_periods"] == 4  # budget passes through the facade unchanged
     with pytest.raises(AssertionError):
         context.ensure_rollups_current("", _NOW)
 
@@ -653,3 +681,43 @@ def test_persist_writeback_round_trip_and_idempotent() -> None:
     # the honest inserted-count is 0.
     assert context.persist_writeback("a", "run-7", wb) == 0
     assert len(store.fetch_events_for_period("a", _DAY[0], _DAY[1])) == 2
+
+
+# ---------------------------------------------------------------------------
+# abandon_run
+# ---------------------------------------------------------------------------
+def test_abandon_run_precondition_asserts() -> None:
+    with pytest.raises(AssertionError):
+        context.abandon_run("", "run-1", claim_token="t")
+    with pytest.raises(AssertionError):
+        context.abandon_run("a", "", claim_token="t")
+    # Empty token is a real raise (not an assert) so ``python -O`` can't turn a
+    # lost claim into a silent False.
+    with pytest.raises(ValueError, match="claim_token"):
+        context.abandon_run("a", "run-1", claim_token="")
+
+
+@_PG
+def test_abandon_run_releases_only_the_owned_in_progress_row() -> None:
+    claimed = context.claim_run("a", "run-ab", "H1", _LEASE)
+    assert claimed.state is ClaimState.CLAIMED
+
+    # A stale/wrong token cannot release someone else's claim.
+    assert context.abandon_run("a", "run-ab", claim_token="not-the-token") is False
+    assert _read_run("a", "run-ab")["status"] == "in_progress"
+
+    # The owner releases it; an immediate re-claim is first sight (re-executes).
+    assert context.abandon_run("a", "run-ab", claim_token=claimed.claim_token) is True
+    assert _read_run("a", "run-ab") is None
+    again = context.claim_run("a", "run-ab", "H1", _LEASE)
+    assert again.state is ClaimState.CLAIMED
+
+    # A terminal row is never abandoned — the stored envelope must survive.
+    context.complete_run(
+        "a", "run-ab", status="completed", response={"ok": 1}, claim_token=again.claim_token
+    )
+    assert context.abandon_run("a", "run-ab", claim_token=again.claim_token) is False
+    assert _read_run("a", "run-ab")["status"] == "completed"
+
+    # A missing row is a no-op False, not an error.
+    assert context.abandon_run("a", "never-claimed", claim_token="t") is False

@@ -102,7 +102,11 @@ class MemoryEvent(BaseModel):
     """One append-only episodic memory event.
 
     Invariant: ``(agent_id, source_run_id, source_seq)`` is unique — the
-    idempotency key that lets a duplicated writeback be a no-op.
+    idempotency key that lets a duplicated writeback be a no-op. Events
+    written through the invoke gate carry an **attempt-scoped**
+    ``source_run_id`` (``{ledger_key}#{attempt_token}``, the attempt token a
+    UUID), not the bare ledger key — see
+    ``agent_cognition.context.persist_writeback`` for the format contract.
     """
 
     id: str
