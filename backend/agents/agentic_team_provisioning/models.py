@@ -216,6 +216,32 @@ class GeneratedManifestsResponse(BaseModel):
     manifests: list[AgentManifest] = Field(default_factory=list)
 
 
+class GeneratedAgentInvokeInput(BaseModel):
+    """Request body for invoking a generated agentic-team agent.
+
+    A single shared sandbox entrypoint serves every generated agent, so the
+    roster metadata travels in the request body alongside the user message. This
+    is the schema the generated manifest's ``inputs`` points at.
+    """
+
+    agent_name: str = Field(..., description="Roster agent name (stable within the team)")
+    message: str = Field(..., description="The user/upstream task payload for this invoke")
+    role: str = Field(default="")
+    skills: list[str] = Field(default_factory=list)
+    capabilities: list[str] = Field(default_factory=list)
+    tools: list[str] = Field(default_factory=list)
+    expertise: list[str] = Field(default_factory=list)
+    agent_id: Optional[str] = Field(
+        default=None, description="Stable cognition agent id; defaults to the agent name"
+    )
+
+
+class GeneratedAgentInvokeOutput(BaseModel):
+    """Response body from a generated agentic-team agent invoke."""
+
+    output: str
+
+
 # ---------------------------------------------------------------------------
 # Conversation models
 # ---------------------------------------------------------------------------

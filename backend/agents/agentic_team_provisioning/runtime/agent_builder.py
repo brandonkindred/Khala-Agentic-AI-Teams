@@ -233,6 +233,39 @@ def call_agent_with_cognition(
     return text, writeback
 
 
+def invoke_generated_agent(body: Any) -> dict[str, Any]:
+    """Sandbox entrypoint for a generated agentic-team agent.
+
+    A single shared callable serves every generated manifest, so the roster
+    metadata travels in the request ``body`` (see
+    ``models.GeneratedAgentInvokeInput``) — the dispatch shim calls this as
+    ``invoke_generated_agent(body)``.
+
+    Preconditions:
+        * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
+          (both default so a malformed body never raises a ``TypeError`` at the
+          dispatch boundary).
+    Postconditions:
+        * Reconstructs the roster agent, runs it through the cognition-aware
+          wrapper (advisory rules + memory digest from the open side channel steer
+          the invoke), and returns ``{"output": <response text>}``.
+    """
+    data = dict(body) if isinstance(body, dict) else {}
+    agent_name = data.get("agent_name") or data.get("name") or "agent"
+    message = data.get("message") or data.get("input") or data.get("prompt") or ""
+    text, _writeback = call_agent_with_cognition(
+        agent_name,
+        data.get("role", ""),
+        data.get("skills", []),
+        data.get("capabilities", []),
+        data.get("tools", []),
+        data.get("expertise", []),
+        message,
+        agent_id=data.get("agent_id"),
+    )
+    return {"output": text}
+
+
 def generate_starter_prompts(
     agent_name: str, role: str, skills: list[str], expertise: list[str]
 ) -> list[str]:

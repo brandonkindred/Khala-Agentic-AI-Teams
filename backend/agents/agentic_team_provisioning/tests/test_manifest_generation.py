@@ -36,8 +36,13 @@ def test_build_agent_manifest_validates_and_stamps_cognition():
     assert manifest.team == "agentic_team_provisioning"
     assert manifest.name == "Triage Agent"
     assert manifest.summary == "Classifies tickets by urgency"
-    assert manifest.source.entrypoint.endswith("agent_builder:build_agent")
+    assert manifest.source.entrypoint.endswith("agent_builder:invoke_generated_agent")
     assert manifest.source.anatomy_ref is not None
+    assert manifest.inputs is not None
+    assert (
+        manifest.inputs.schema_ref == "agentic_team_provisioning.models:GeneratedAgentInvokeInput"
+    )
+    assert manifest.outputs is not None
     assert manifest.cognition is not None
     assert manifest.cognition.rule_packs == ["default_guardrails"]
 
@@ -64,6 +69,21 @@ def test_build_agent_manifest_id_stable_and_unique():
     assert id_a1 == id_a2  # stable for the same (team_id, agent_name)
     assert id_a1 != id_b  # distinct agents → distinct ids
     assert id_a1.startswith("agentic_team_provisioning.")
+
+
+def test_manifest_schema_refs_resolve_to_real_models():
+    # The manifest's inputs/outputs schema_refs must point at importable Pydantic
+    # models so the registry can resolve them lazily.
+    import importlib
+
+    from pydantic import BaseModel
+
+    agent = AgenticTeamAgent(agent_name="A", role="r")
+    manifest = build_agent_manifest("t", agent)
+    for ref in (manifest.inputs.schema_ref, manifest.outputs.schema_ref):
+        module_path, cls_name = ref.split(":")
+        model = getattr(importlib.import_module(module_path), cls_name)
+        assert issubclass(model, BaseModel)
 
 
 def test_free_text_tools_are_not_mapped_into_cognition():

@@ -155,3 +155,35 @@ def test_generate_starter_prompts_fallback_when_empty():
     prompts = agent_builder.generate_starter_prompts("Agent X", "", [], [])
     assert len(prompts) == 3
     assert any("Introduce yourself" in p for p in prompts)
+
+
+def test_invoke_generated_agent_returns_output(fake_strands):
+    result = agent_builder.invoke_generated_agent(
+        {"agent_name": "A", "role": "r", "message": "hello"}
+    )
+    assert result == {"output": "ok"}
+
+
+def test_invoke_generated_agent_tolerates_sparse_body(fake_strands):
+    # A malformed/sparse body must NOT raise (the dispatch boundary contract).
+    assert agent_builder.invoke_generated_agent({}) == {"output": "ok"}
+    assert agent_builder.invoke_generated_agent(None) == {"output": "ok"}
+
+
+def test_invoke_generated_agent_renders_cognition(fake_strands):
+    with runtime_channel({"rules": [_ADVISORY]}):
+        agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
+    assert "Never reveal secrets." in fake_strands.last_system_prompt
+
+
+def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
+    # Regression: the manifest entrypoint must be callable as ``fn(body)`` by the
+    # sandbox dispatch shim (a plain single-body callable), not a 6-arg factory.
+    from shared_agent_invoke.dispatch import _materialise, _resolve_entrypoint
+
+    target = _resolve_entrypoint(
+        "agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
+    )
+    assert target is agent_builder.invoke_generated_agent
+    callable_obj = _materialise(target)
+    assert callable_obj({"agent_name": "A", "message": "hi"}) == {"output": "ok"}

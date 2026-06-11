@@ -14,7 +14,7 @@ discovery paths.
 
 from __future__ import annotations
 
-from agent_registry.models import AgentManifest, CognitionSpec, SourceInfo
+from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import AgenticTeamAgent
 
@@ -26,8 +26,16 @@ _TEAM_KEY = "agentic_team_provisioning"
 # Where the canonical agent-anatomy contract lives, repo-relative per SourceInfo.
 _ANATOMY_REF = "backend/agents/agent_provisioning_team/AGENT_ANATOMY.md"
 
-# The factory that compiles a roster agent into a live strands.Agent.
-_ENTRYPOINT = "agentic_team_provisioning.runtime.agent_builder:build_agent"
+# The invokable sandbox entrypoint: a single callable that accepts one request
+# body (carrying the roster metadata + message), reconstructs the agent, and runs
+# it through the cognition-aware wrapper. The dispatch shim calls it as
+# ``entrypoint(body)``, so it must take exactly the request body.
+_ENTRYPOINT = "agentic_team_provisioning.runtime.agent_builder:invoke_generated_agent"
+
+# Dotted refs to the Pydantic models describing the invoke contract (resolved
+# lazily by the registry, never imported at load time).
+_INPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeInput"
+_OUTPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
 
 
 def default_cognition_block() -> CognitionSpec:
@@ -74,6 +82,12 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
         name=agent.agent_name,
         summary=summary,
         tags=["generated", _TEAM_KEY],
+        inputs=IOSchema(
+            schema_ref=_INPUT_SCHEMA_REF,
+            description="Roster metadata + user message; a shared entrypoint serves every "
+            "generated agent.",
+        ),
+        outputs=IOSchema(schema_ref=_OUTPUT_SCHEMA_REF, description="The agent's response text."),
         cognition=default_cognition_block(),
         source=SourceInfo(entrypoint=_ENTRYPOINT, anatomy_ref=_ANATOMY_REF),
     )
