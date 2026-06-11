@@ -222,11 +222,21 @@ class GeneratedAgentInvokeInput(BaseModel):
     A single shared sandbox entrypoint serves every generated agent, so the
     roster metadata travels in the request body alongside the user message. This
     is the schema the generated manifest's ``inputs`` points at.
+
+    Binding caveat (tracked follow-up): the persona fields below (``role``,
+    ``skills``, ``capabilities``, ``tools``, ``expertise``) are currently supplied
+    by the caller and are **not yet bound to the agent's persisted roster
+    definition** — the dispatch contract hands the entrypoint only this body, never
+    the resolved manifest/id, so it cannot look up the immutable stored persona.
+    Until binding lands (alongside the cross-process invoke work), a generated
+    manifest selects which agent is *advertised*, not an enforced persona/toolset.
     """
 
     agent_name: str = Field(..., description="Roster agent name (stable within the team)")
     message: str = Field(..., description="The user/upstream task payload for this invoke")
-    role: str = Field(default="")
+    role: str = Field(
+        default="", description="Caller-supplied persona; not yet bound to the roster"
+    )
     skills: list[str] = Field(default_factory=list)
     capabilities: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)

@@ -241,6 +241,13 @@ def invoke_generated_agent(body: Any) -> dict[str, Any]:
     ``models.GeneratedAgentInvokeInput``) — the dispatch shim calls this as
     ``invoke_generated_agent(body)``.
 
+    Binding caveat (tracked follow-up): the dispatch contract hands this function
+    only the request body, never the resolved manifest/agent id, so it cannot look
+    up the agent's immutable persisted roster definition. The persona/tool fields
+    are therefore taken from the (caller-controlled) body — a generated manifest
+    selects which agent is advertised, not an enforced persona/toolset. Binding the
+    manifest to its stored definition lands with the cross-process invoke work.
+
     Preconditions:
         * ``body`` is a mapping; ``agent_name`` and ``message`` are recommended
           (both default so a malformed body never raises a ``TypeError`` at the
