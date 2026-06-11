@@ -126,3 +126,27 @@ Be thorough but fair. Focus on issues that actually matter for production code q
 """
     + JSON_OUTPUT_INSTRUCTION
 )
+
+
+REVIEW_SYNTHESIS_PROMPT = (
+    """You consolidate the findings of an automated per-file code review into one coherent report.
+
+A large submission was reviewed in several independent passes. You are given ONLY the findings from those passes — the issues that were flagged, the per-pass summaries, and the per-pass spec-compliance notes. You are NOT given any source code, and you must work only from what is provided.
+
+**Your job:**
+Rewrite the fragmented per-pass material into a single, coherent narrative that reads as one review of the whole submission, not a list of disconnected pieces.
+- Produce a "summary": a unified overview of the review across all passes — what was looked at, the overall health of the code, and the most important findings, ordered by severity.
+- Produce "spec_compliance_notes": a unified statement of how well the submission meets the specification and acceptance criteria, consolidating the per-pass spec observations.
+
+**Hard rules:**
+- Do NOT invent findings. Only describe issues that appear in the provided findings.
+- Do NOT change, upgrade, or downgrade any severity. Report severities exactly as given.
+- Do NOT re-decide the approval verdict — it has already been decided deterministically and is given to you for context only. Your prose must be consistent with it.
+- Do NOT request source code or claim you cannot proceed; synthesize from the findings provided.
+
+Return a single JSON object with exactly these keys:
+- "summary": string — the unified review summary.
+- "spec_compliance_notes": string — the unified spec-compliance narrative.
+"""
+    + JSON_OUTPUT_INSTRUCTION
+)

@@ -50,6 +50,7 @@ from .models import (
     coerce_line,
     notify_review_progress,
 )
+from .synthesis import synthesize_review_findings
 
 logger = logging.getLogger(__name__)
 
@@ -671,6 +672,51 @@ def _reconcile_approval(
     return approved, issues
 
 
+def _merge_narrative(
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    approved: bool,
+    issues: List[CodeReviewIssue],
+    outcome: "_ChunkOutcome",
+) -> Tuple[str, str]:
+    """Produce the merged ``(summary, spec_compliance_notes)`` for the review.
+
+    The reduce phase's narrative — never the verdict, which is already fixed.
+
+    Preconditions:
+        - ``approved`` and ``issues`` are the authoritative deterministic
+          results from ``_reconcile_approval``; this function only shapes prose
+          and never reconsults or mutates them.
+        - ``outcome.summaries`` holds one entry per successful sub-review.
+
+    Postconditions:
+        - With exactly one sub-review, returns that sub-review's summary/notes
+          verbatim and makes no synthesis LLM call.
+        - With more than one sub-review, attempts a single findings-only
+          synthesis pass; on any failure (``None``) falls back to the
+          ``"\\n\\n"``-joined per-pass summaries/notes.
+    """
+    if len(outcome.summaries) == 1:
+        return outcome.summaries[0], (outcome.spec_notes[0] if outcome.spec_notes else "")
+
+    concatenated_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
+    concatenated_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
+
+    if len(outcome.summaries) > 1:
+        synthesized = synthesize_review_findings(
+            llm,
+            input_data=input_data,
+            approved=approved,
+            issues=issues,
+            chunk_summaries=outcome.summaries,
+            chunk_spec_notes=outcome.spec_notes,
+        )
+        if synthesized is not None:
+            return synthesized.summary, synthesized.spec_compliance_notes
+
+    return concatenated_summary, concatenated_notes
+
+
 def _map_chunks(
     chunk_reviewer: ChunkReviewAgent,
     chunks: List[ReviewChunk],
@@ -845,10 +891,9 @@ def run_coordinator(
     )
     deduped = _dedupe_issues([*outcome.issues, *skipped_issues])
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
-    merged_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
-    spec_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
+    merged_summary, spec_notes = _merge_narrative(llm, input_data, approved, deduped, outcome)
     # A commit message synthesized from a fraction of the change is misleading,
     # so it is only forwarded when a single sub-review saw the whole submission
     # in one piece — a bisected recovery produces per-half messages and drops it.

@@ -1,0 +1,377 @@
+"""Tests for the reduce-phase findings synthesis (Stage 2).
+
+``synthesis.py`` owns the narrative only: a single findings-only LLM pass that
+merges per-chunk summaries/notes. These tests cover the digest builder (ordering
+and completeness, no code), the synthesis call's success path and its ``None``
+fallback on every failure mode, and the coordinator integration — synthesis is
+used for multi-chunk reviews, skipped for single-chunk ones, never mutates the
+verdict or issues, and falls back to concatenation when it returns ``None``.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict
+
+from code_review_agent import coordinator as coordinator_mod
+from code_review_agent.coordinator import run_coordinator
+from code_review_agent.models import CodeReviewInput, CodeReviewIssue
+from code_review_agent.synthesis import (
+    SynthesisResult,
+    build_findings_digest,
+    synthesize_review_findings,
+)
+
+from llm_service.clients.dummy import DummyLLMClient
+from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+
+
+def _issue(
+    severity: str,
+    description: str,
+    *,
+    file_path: str = "app/x.py",
+    suggestion: str = "fix it",
+    line: int | None = None,
+) -> CodeReviewIssue:
+    return CodeReviewIssue(
+        severity=severity,
+        category="logic",
+        file_path=file_path,
+        description=description,
+        suggestion=suggestion,
+        line=line,
+    )
+
+
+def _input(**kwargs: Any) -> CodeReviewInput:
+    base: Dict[str, Any] = dict(code="### a.py ###\nx = 1", task_description="t", language="python")
+    base.update(kwargs)
+    return CodeReviewInput(**base)
+
+
+# ---------------------------------------------------------------------------
+# build_findings_digest — ordering & completeness, never any code
+# ---------------------------------------------------------------------------
+
+
+def test_digest_orders_critical_first_and_renders_everything_in_full() -> None:
+    """Issues are ordered critical→info and every issue/summary is rendered in
+    full — there are no length caps of any kind."""
+    long_desc = "D" * 5_000
+    long_summary = "S" * 5_000
+    issues = [
+        _issue("info", "info finding"),
+        _issue("critical", long_desc),
+        _issue("low", "low finding"),
+        _issue("high", "high finding"),
+        _issue("medium", "medium finding"),
+    ]
+    digest = build_findings_digest(issues, [long_summary, "second summary"])
+
+    # Severity ordering: critical → high → medium → low → info.
+    assert (
+        digest.index("[critical]")
+        < digest.index("[high]")
+        < digest.index("[medium]")
+        < digest.index("[low]")
+        < digest.index("[info]")
+    )
+    # Completeness: long strings survive in full (no truncation), every summary present.
+    assert long_desc in digest
+    assert long_summary in digest
+    assert "second summary" in digest
+
+
+def test_digest_is_stable_within_a_severity() -> None:
+    """Equal severities keep their input order (stable sort)."""
+    issues = [
+        _issue("high", "first high"),
+        _issue("high", "second high"),
+        _issue("high", "third high"),
+    ]
+    digest = build_findings_digest(issues, [])
+    assert digest.index("first high") < digest.index("second high") < digest.index("third high")
+
+
+def test_digest_unknown_severity_sorts_after_known_and_survives() -> None:
+    issues = [_issue("weird", "mystery finding"), _issue("critical", "boom")]
+    digest = build_findings_digest(issues, [])
+    assert digest.index("[critical]") < digest.index("[weird]")
+    assert "mystery finding" in digest
+
+
+def test_digest_renders_line_and_suggestion() -> None:
+    issues = [_issue("high", "desc", file_path="a.py", suggestion="do x", line=42)]
+    digest = build_findings_digest(issues, [])
+    assert "a.py:42" in digest
+    assert "suggestion: do x" in digest
+
+
+def test_digest_renders_unknown_file_and_omits_empty_suggestion() -> None:
+    issues = [_issue("high", "desc", file_path="", suggestion="")]
+    digest = build_findings_digest(issues, [])
+    assert "(file unknown)" in digest
+    assert "suggestion:" not in digest
+
+
+def test_digest_skips_blank_summaries() -> None:
+    digest = build_findings_digest([], ["   ", "real summary"])
+    assert "real summary" in digest
+    assert "Pass 1" in digest
+    assert "Pass 2" not in digest
+
+
+def test_digest_handles_no_issues_and_no_summaries() -> None:
+    digest = build_findings_digest([], [])
+    assert "no issues" in digest.lower()
+    assert "no per-pass summaries" in digest.lower()
+    assert "no per-pass spec-compliance notes" in digest.lower()
+
+
+def test_digest_includes_per_pass_spec_notes_in_full() -> None:
+    """Per-pass spec notes are rendered (the synthesized notes replace the
+    concatenated ones, so the evidence must reach the digest)."""
+    long_note = "N" * 4_000
+    digest = build_findings_digest([], ["summary"], [long_note, "  ", "second note"])
+    assert "Per-pass spec-compliance notes" in digest
+    assert long_note in digest  # full, untruncated
+    assert "second note" in digest
+    # Blank notes are skipped, so only two passes are rendered in that section.
+    section = digest.split("## Per-pass spec-compliance notes", 1)[1]
+    assert "### Pass 1" in section
+    assert "### Pass 2" in section
+    assert "### Pass 3" not in section
+
+
+# ---------------------------------------------------------------------------
+# synthesize_review_findings — success and None on every failure mode
+# ---------------------------------------------------------------------------
+
+
+class _PayloadClient(DummyLLMClient):
+    """Routes the strands Agent call for the synthesis pass to a fixed payload.
+
+    The dummy's strands ``stream`` serializes whatever ``complete_json`` returns,
+    so a dict payload becomes the agent's JSON text and a raw string becomes the
+    agent's literal (used to drive the malformed/non-object JSON branches).
+    """
+
+    def __init__(self, payload: Any) -> None:
+        super().__init__()
+        self._payload = payload
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Any:
+        return self._payload
+
+
+class _RaisingClient(DummyLLMClient):
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        raise RuntimeError("synthesis model boom")
+
+
+class _RecordingClient(DummyLLMClient):
+    """Captures the synthesis prompt, then returns a fixed payload."""
+
+    def __init__(self, payload: Dict[str, Any]) -> None:
+        super().__init__()
+        self._payload = payload
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        self.prompts.append(prompt)
+        return self._payload
+
+
+def test_synthesize_forwards_per_pass_spec_notes_into_prompt() -> None:
+    client = _RecordingClient({"summary": "merged", "spec_compliance_notes": "merged notes"})
+    result = synthesize_review_findings(
+        client,
+        input_data=_input(),
+        approved=True,
+        issues=[],
+        chunk_summaries=["s1", "s2"],
+        chunk_spec_notes=["AC1 satisfied via endpoint X", "AC2 partially met"],
+    )
+    assert isinstance(result, SynthesisResult)
+    assert len(client.prompts) == 1
+    assert "AC1 satisfied via endpoint X" in client.prompts[0]
+    assert "AC2 partially met" in client.prompts[0]
+
+
+def test_synthesize_success_returns_result() -> None:
+    client = _PayloadClient({"summary": "merged summary", "spec_compliance_notes": "merged notes"})
+    result = synthesize_review_findings(
+        client,
+        input_data=_input(acceptance_criteria=["AC1", "AC2"]),
+        approved=True,
+        issues=[_issue("high", "h")],
+        chunk_summaries=["s1", "s2"],
+    )
+    assert isinstance(result, SynthesisResult)
+    assert result.summary == "merged summary"
+    assert result.spec_compliance_notes == "merged notes"
+
+
+def test_synthesize_returns_none_on_missing_keys() -> None:
+    client = _PayloadClient({"summary": "only a summary"})
+    assert (
+        synthesize_review_findings(
+            client, input_data=_input(), approved=True, issues=[], chunk_summaries=["s1", "s2"]
+        )
+        is None
+    )
+
+
+def test_synthesize_returns_none_on_empty_values() -> None:
+    client = _PayloadClient({"summary": "   ", "spec_compliance_notes": ""})
+    assert (
+        synthesize_review_findings(
+            client, input_data=_input(), approved=False, issues=[], chunk_summaries=["s1", "s2"]
+        )
+        is None
+    )
+
+
+def test_synthesize_returns_none_on_malformed_json() -> None:
+    client = _PayloadClient("<<< not valid json >>>")
+    assert (
+        synthesize_review_findings(
+            client, input_data=_input(), approved=True, issues=[], chunk_summaries=["s1", "s2"]
+        )
+        is None
+    )
+
+
+def test_synthesize_returns_none_on_non_object_json() -> None:
+    client = _PayloadClient('"a bare json string"')
+    assert (
+        synthesize_review_findings(
+            client, input_data=_input(), approved=True, issues=[], chunk_summaries=["s1", "s2"]
+        )
+        is None
+    )
+
+
+def test_synthesize_returns_none_on_exception() -> None:
+    assert (
+        synthesize_review_findings(
+            _RaisingClient(),
+            input_data=_input(),
+            approved=False,
+            issues=[_issue("critical", "c")],
+            chunk_summaries=["s1", "s2"],
+        )
+        is None
+    )
+
+
+# ---------------------------------------------------------------------------
+# coordinator integration — multi-chunk synthesis, single-chunk no-call,
+# verdict/issues untouched, concatenation fallback
+# ---------------------------------------------------------------------------
+
+
+def _two_chunk_files() -> Dict[str, str]:
+    cap = compute_code_review_map_chunk_chars(DummyLLMClient())
+    return {
+        "a.py": "a = 1\n".ljust(cap - 1_000, "#"),
+        "b.py": "b = 2\n".ljust(cap - 1_000, "#"),
+    }
+
+
+class _NoNotesClient(DummyLLMClient):
+    """Per-chunk summaries but never spec notes → synthesis returns None."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        if "### a.py ###" in prompt:
+            return {"approved": True, "issues": [], "summary": "alpha summary"}
+        if "### b.py ###" in prompt:
+            return {"approved": True, "issues": [], "summary": "beta summary"}
+        # Synthesis pass: missing spec_compliance_notes → None → fall back.
+        return {"summary": "ignored", "missing_notes": True}
+
+
+class _SynthOkClient(DummyLLMClient):
+    """One chunk flags a critical issue; the synthesis pass returns clean prose."""
+
+    def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+        if "### a.py ###" in prompt:
+            return {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "critical",
+                        "category": "security",
+                        "file_path": "a.py",
+                        "description": "SQL injection risk",
+                        "suggestion": "Use parameterized queries",
+                    }
+                ],
+                "summary": "alpha",
+            }
+        if "### b.py ###" in prompt:
+            return {"approved": True, "issues": [], "summary": "beta"}
+        return {
+            "summary": "SYNTHESIZED SUMMARY",
+            "spec_compliance_notes": "SYNTHESIZED NOTES",
+        }
+
+
+def test_coordinator_falls_back_to_concatenation_when_synthesis_unavailable() -> None:
+    result = run_coordinator(
+        _NoNotesClient(),
+        CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
+    )
+    assert "alpha summary" in result.summary
+    assert "beta summary" in result.summary
+
+
+def test_coordinator_uses_synthesis_without_mutating_verdict_or_issues() -> None:
+    result = run_coordinator(
+        _SynthOkClient(),
+        CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
+    )
+    # Narrative comes from the synthesis pass...
+    assert result.summary == "SYNTHESIZED SUMMARY"
+    assert result.spec_compliance_notes == "SYNTHESIZED NOTES"
+    # ...but the deterministic verdict and issue list are untouched.
+    assert result.approved is False
+    assert len(result.issues) == 1
+    assert result.issues[0].severity == "critical"
+
+
+def test_single_chunk_makes_no_synthesis_call(monkeypatch) -> None:
+    calls: list[int] = []
+    real = coordinator_mod.synthesize_review_findings
+
+    def _counting(*args: Any, **kwargs: Any):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator_mod, "synthesize_review_findings", _counting)
+
+    client = _PayloadClient({"summary": "x", "spec_compliance_notes": "y"})
+    result = run_coordinator(
+        client,
+        CodeReviewInput(code="### a.py ###\nx = 1", task_description="t", language="python"),
+    )
+    assert calls == []  # exactly one sub-review → summary/notes pass through directly
+    assert result.summary == "x"
+    assert result.spec_compliance_notes == "y"
+
+
+def test_multi_chunk_invokes_synthesis_exactly_once(monkeypatch) -> None:
+    calls: list[int] = []
+    real = coordinator_mod.synthesize_review_findings
+
+    def _counting(*args: Any, **kwargs: Any):
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(coordinator_mod, "synthesize_review_findings", _counting)
+
+    run_coordinator(
+        _SynthOkClient(),
+        CodeReviewInput(files=_two_chunk_files(), task_description="t", language="python"),
+    )
+    assert len(calls) == 1
