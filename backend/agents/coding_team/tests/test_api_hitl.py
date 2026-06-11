@@ -5,11 +5,18 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 
+from coding_team import token_crypto
 from coding_team.api import main as api
 
 client = TestClient(api.app)
+
+
+def _set_encryption_key(monkeypatch) -> None:
+    """Configure a Fernet key so token_crypto encrypt/decrypt round-trips in-test."""
+    monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
 
 _PENDING = [
     {
@@ -417,12 +424,13 @@ def test_resume_github_job_uses_persisted_token_without_env(monkeypatch):
         def get_issue(self, owner, repo, number):
             return {"number": number}
 
+    _set_encryption_key(monkeypatch)
     ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
     job = _job(
         status="waiting_for_user",
         plan_input={"requirements_title": "T"},
         github_context=ctx,
-        github_token="persisted-pat",
+        github_token_encrypted=token_crypto.encrypt_token("persisted-pat"),
     )
     monkeypatch.setattr(api, "get_job", lambda jid: job)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
@@ -456,8 +464,9 @@ def test_auto_resume_github_job_uses_persisted_token_without_env(monkeypatch):
         def get_issue(self, owner, repo, number):
             return {"number": number}
 
+    _set_encryption_key(monkeypatch)
     ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
-    job = _job(github_context=ctx, github_token="persisted-pat")
+    job = _job(github_context=ctx, github_token_encrypted=token_crypto.encrypt_token("persisted-pat"))
     monkeypatch.setattr(api, "get_job", lambda jid: job)
     monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
@@ -488,18 +497,23 @@ def test_resume_github_job_400_without_token(monkeypatch):
     assert "GITHUB_TOKEN" in r.json()["detail"]
 
 
-def test_persisted_github_token_never_leaks_into_responses(monkeypatch):
-    """The token persisted for resume must never be serialized into /status or /jobs."""
+def test_persisted_token_is_encrypted_not_plaintext(monkeypatch):
+    """Only opaque ciphertext is persisted — a usable PAT is never written to the job record (which
+    the generic GET /api/jobs/{team} route echoes verbatim)."""
+    _set_encryption_key(monkeypatch)
+    enc = token_crypto.encrypt_token("super-secret-pat")
+    assert enc and enc != "super-secret-pat"
+    assert token_crypto.decrypt_token(enc) == "super-secret-pat"
+
+    # And the ciphertext field is not surfaced by the coding-team response models either.
     ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
-    job = _job(github_context=ctx, github_token="super-secret-pat")
+    job = _job(github_context=ctx, github_token_encrypted=enc)
     monkeypatch.setattr(api, "get_job", lambda jid: job)
     monkeypatch.setattr(api, "list_jobs", lambda **kw: [job])
-
-    status_body = client.get("/status/j1").text
-    assert "super-secret-pat" not in status_body
-
-    jobs_body = client.get("/jobs").text
-    assert "super-secret-pat" not in jobs_body
+    assert "super-secret-pat" not in client.get("/status/j1").text
+    assert enc not in client.get("/status/j1").text
+    assert "super-secret-pat" not in client.get("/jobs").text
+    assert enc not in client.get("/jobs").text
 
 
 def test_resume_400_when_running_and_not_locally_alive(monkeypatch):

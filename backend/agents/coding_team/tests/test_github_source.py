@@ -699,9 +699,15 @@ class TestEndpointHappyPath:
         assert job["github_pr_url"] == "https://example/pr/42"
         assert job["integration_branch"] == "khala/issue-11"
 
-    def test_persists_request_token_for_resume(self, patched_app) -> None:
-        """The per-request PAT is persisted on the job record so a later resume (after the
-        orchestrator thread dies) can re-drive the GitHub publish flow without a GITHUB_TOKEN env."""
+    def test_persists_request_token_encrypted_for_resume(self, patched_app, monkeypatch) -> None:
+        """The per-request PAT is persisted ENCRYPTED on the job record so a later resume (after the
+        orchestrator thread dies) can re-drive the GitHub publish flow without a GITHUB_TOKEN env —
+        and the raw record (echoed by the generic GET /api/jobs/{team}) never holds a usable PAT."""
+        from cryptography.fernet import Fernet
+
+        from coding_team import token_crypto
+
+        monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", Fernet.generate_key().decode())
         gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(
@@ -715,9 +721,28 @@ class TestEndpointHappyPath:
         )
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
-        assert job["github_token"] == "request-pat"
-        # The token is internal to the record, never inside the client-facing github_context.
-        assert "github_token" not in (job.get("github_context") or {})
+        # Only opaque ciphertext is stored; the plaintext PAT appears nowhere in the record.
+        assert "github_token" not in job
+        assert job["github_token_encrypted"] != "request-pat"
+        assert token_crypto.decrypt_token(job["github_token_encrypted"]) == "request-pat"
+        assert "request-pat" not in json.dumps(job)
+
+    def test_no_encryption_key_skips_token_persistence(self, patched_app, monkeypatch) -> None:
+        """With no key configured, the token is simply not persisted (resume falls back to env)."""
+        from coding_team import token_crypto
+
+        monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
+        monkeypatch.setattr(token_crypto, "_load_key", lambda: None)
+        gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json={"owner": "o", "repo": "r", "repo_path": patched_app["repo_path"]},
+        )
+        assert resp.status_code == 200, resp.text
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert "github_token_encrypted" not in job
+        assert "github_token" not in job
 
     def test_specific_issue_number(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(7)], sub_map={7: []})

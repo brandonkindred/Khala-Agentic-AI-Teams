@@ -624,9 +624,20 @@ describe('CodingTeamPageComponent', () => {
     it('a stale jobs snapshot cannot wipe the chip of a just-started run', async () => {
       await setup();
       component.activeJob = { job_id: 'mine', issue_number: 9, issue_url: '', status: 'queued', message: '' };
+      component.jobStatus = { job_id: 'mine', status: 'running' };
       apiSpy.listJobs.mockReturnValue(of([]));
       component['restoreActiveJob']();
       expect(component.activeIssueNumbers.has(9)).toBe(true);
+    });
+
+    it('does not re-add the chip for a displayed job that has finished', async () => {
+      await setup();
+      // The poller dropped #9 when the job went terminal; a refresh must not resurrect it.
+      component.activeJob = { job_id: 'mine', issue_number: 9, issue_url: '', status: 'queued', message: '' };
+      component.jobStatus = { job_id: 'mine', status: 'completed' };
+      apiSpy.listJobs.mockReturnValue(of([]));
+      component['restoreActiveJob']();
+      expect(component.activeIssueNumbers.has(9)).toBe(false);
     });
 
     it('renders the Dismiss button even while the job is non-terminal', async () => {

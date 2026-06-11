@@ -236,7 +236,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
             j.github_context.repo.toLowerCase() === repo,
         );
         const issueNumbers = new Set(candidates.map((j) => j.github_context!.issue_number!));
-        if (this.activeJob) {
+        // Merge the displayed job's issue so a stale snapshot can't wipe a just-started run's
+        // chip — but ONLY while that job is still non-terminal. Once it finishes, the poller has
+        // already dropped its chip, and /jobs?active=true no longer lists it, so re-adding here
+        // would wrongly re-label a completed issue "In progress" until the panel is dismissed.
+        if (this.activeJob && !this.isJobTerminal()) {
           issueNumbers.add(this.activeJob.issue_number);
         }
         this.activeIssueNumbers = issueNumbers;

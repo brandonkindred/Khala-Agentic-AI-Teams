@@ -57,6 +57,7 @@ from coding_team.review_history_store import (  # noqa: E402
     record_review_start,
     update_review,
 )
+from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
@@ -719,9 +720,12 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     is_github_job = bool(
         ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
     )
-    # Prefer the token persisted at job creation (the per-request PAT from the credential store);
-    # fall back to GITHUB_TOKEN env for deployments that set it.
-    token = (data.get("github_token") or os.environ.get("GITHUB_TOKEN")) if is_github_job else None
+    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
+    token = (
+        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
+        if is_github_job
+        else None
+    )
     if is_github_job and not token:
         # Without a token the publish flow (PR, issue comments) cannot be resumed; fall back to
         # the explicit-resume hint rather than silently completing without a PR.
@@ -788,8 +792,8 @@ def resume_job(job_id: str) -> RunResponse:
     No-op-safe: if a thread is still running (or a wait loop heartbeats from another worker), it
     will resume on its own and this just reports status. GitHub-issue jobs are restarted through
     the full hook path so publication (PR, issue comments) is preserved; that path needs a GitHub
-    token, sourced from the one persisted on the job record at creation (falling back to the
-    ``GITHUB_TOKEN`` env).
+    token, sourced by decrypting the one persisted (as opaque ciphertext) on the job record at
+    creation (falling back to the ``GITHUB_TOKEN`` env).
 
     Authentication/authorization is enforced by the unified API security gateway in front of all
     team mounts; like every other coding-team route, this endpoint assumes that perimeter.
@@ -842,9 +846,12 @@ def resume_job(job_id: str) -> RunResponse:
     is_github_job = bool(
         ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
     )
-    # Prefer the token persisted at job creation (per-request PAT from the credential store);
-    # fall back to GITHUB_TOKEN env.
-    token = (data.get("github_token") or os.environ.get("GITHUB_TOKEN")) if is_github_job else None
+    # Prefer the token persisted (encrypted) at job creation; fall back to GITHUB_TOKEN env.
+    token = (
+        (decrypt_token(data.get("github_token_encrypted")) or os.environ.get("GITHUB_TOKEN"))
+        if is_github_job
+        else None
+    )
     if is_github_job and not token:
         raise HTTPException(
             status_code=400,
@@ -1019,16 +1026,8 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
 
     job_id = str(uuid.uuid4())
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
-    update_job(
-        job_id,
-        # Persist the resolved token so a resume after the orchestrator thread dies (server restart,
-        # different worker process) can re-drive the GitHub publish flow. In the standard
-        # deployment the token is a per-request PAT from the unified API credential store and the
-        # coding-team container has no GITHUB_TOKEN env, so without this the job could never resume.
-        # Stored as a top-level field, NOT inside github_context: github_context is echoed into the
-        # /status and /jobs responses, while this field is never serialized into any response model.
-        github_token=token,
-        github_context={
+    job_fields: Dict[str, Any] = {
+        "github_context": {
             "owner": request.owner,
             "repo": request.repo,
             "issue_number": issue.number,
@@ -1036,7 +1035,18 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             "base_branch": request.base_branch,
             "remote": request.remote,
         },
-    )
+    }
+    # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
+    # different worker process) can re-drive the GitHub publish flow. In the standard deployment the
+    # token is a per-request PAT from the credential store and the coding-team container has no
+    # GITHUB_TOKEN env, so without this the job could never resume. Only OPAQUE CIPHERTEXT is stored
+    # — never a usable PAT — because the raw job record is echoed verbatim by the generic
+    # GET /api/jobs/{team} route. When no encryption key is configured the token is not persisted
+    # and resume falls back to GITHUB_TOKEN env (or refuses); we never store plaintext.
+    encrypted = encrypt_token(token)
+    if encrypted:
+        job_fields["github_token_encrypted"] = encrypted
+    update_job(job_id, **job_fields)
 
     _start_hook_thread(job_id, request, plan, issue, token)
     return RunFromGitHubResponse(job_id=job_id, issue_number=issue.number, issue_url=issue.html_url)
