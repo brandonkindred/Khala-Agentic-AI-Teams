@@ -514,9 +514,15 @@ def _select_review_input(
     """Choose the code-review input: the task's changed files, untruncated.
 
     The workflow commits every fix-loop iteration, so ``git diff development...HEAD``
-    is a reliable record of what this task touched. Reviewing only those files
-    (instead of the whole repo) keeps the coordinator's per-call prompts small
-    while still covering everything the task changed.
+    captures what this task touched. Reviewing only those files (instead of the
+    whole repo) keeps the coordinator's per-call prompts small while still
+    covering everything the task changed.
+
+    The generator's just-written files are always overlaid on top of the
+    committed diff: when an iteration's ``write_agent_output`` commit fails (a
+    logged-and-continue path), its newly added files are not yet in the diff,
+    and the overlay both keeps them in review and supplies the freshest content
+    for files the latest pass regenerated.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the files
@@ -524,9 +530,9 @@ def _select_review_input(
     Postconditions:
         - Returns ``(files, code)`` with exactly one of the two populated, never
           both, and never both empty — so review is never silently skipped:
-            1. the changed files vs the development branch as a dict, else
-            2. the task's just-written files dict, else
-            3. the legacy whole-repo concatenation as a ``code`` string (logged).
+            1. the committed diff vs the development branch, merged with the
+               just-written files (written content wins on overlap), else
+            2. the legacy whole-repo concatenation as a ``code`` string (logged).
         - For repo-setup tasks the changed-files dict is read without an
           extension filter so meta files (Dockerfile, requirements.txt, ...) are
           included.
@@ -537,10 +543,10 @@ def _select_review_input(
     changed = list_changed_files(repo_path, DEVELOPMENT_BRANCH)
     extensions = None if is_setup else BACKEND_EXTENSIONS
     files = read_files_as_dict(repo_path, changed, extensions=extensions)
+    if written_files:
+        files = {**files, **written_files}
     if files:
         return files, None
-    if written_files:
-        return dict(written_files), None
     logger.warning(
         "Code review: empty diff and no written files; falling back to whole-repo review input"
     )

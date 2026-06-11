@@ -171,7 +171,7 @@ def test_backend_run_code_review_falls_back_to_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_select_review_input_prefers_changed_files(tmp_path: Path) -> None:
+def test_select_review_input_merges_changed_and_written(tmp_path: Path) -> None:
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -186,10 +186,41 @@ def test_select_review_input_prefers_changed_files(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-m", "work")
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files={"ignored": "z"})
+    # written_files overlays the committed diff; on overlap its content wins.
+    files, code = _select_review_input(
+        tmp_path, task, written_files={"a.py": "x = 99\n", "extra.py": "z = 0\n"}
+    )
 
     assert code is None
-    assert set(files) == {"a.py", "b.py"}  # changed files win over written_files
+    assert set(files) == {"a.py", "b.py", "extra.py"}  # diff ∪ written_files
+    assert files["a.py"] == "x = 99\n"  # written content wins over committed
+    assert files["b.py"] == "y = 3\n"  # diff-only file read from worktree
+
+
+def test_select_review_input_includes_uncommitted_new_file(tmp_path: Path) -> None:
+    """Reviewer's failed-commit scenario: a non-empty committed diff must not
+    suppress a newly added file whose commit never landed."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "committed change")  # diff is non-empty
+
+    # "new.py" was written by the latest fix but its commit failed → uncommitted.
+    task = SimpleNamespace(description="add feature")
+    files, code = _select_review_input(
+        tmp_path, task, written_files={"new.py": "n = 1\n"}
+    )
+
+    assert code is None
+    assert "a.py" in files  # committed diff still reviewed
+    assert files["new.py"] == "n = 1\n"  # uncommitted new file not dropped
 
 
 def test_select_review_input_falls_back_to_written_files(tmp_path: Path) -> None:
