@@ -8,15 +8,15 @@ from typing import List, Optional
 
 from strands import Agent
 
-from llm_service import LLMClient, compact_text, get_strands_model
+from llm_service import LLMClient, get_strands_model
 from software_engineering_team.shared.context_sizing import (
     compute_code_review_arch_overview_chars,
-    compute_code_review_chunk_chars,
     compute_code_review_existing_codebase_chars,
+    compute_code_review_map_chunk_chars,
     compute_code_review_spec_excerpt_chars,
 )
 
-from .models import ChunkReviewInput, ChunkReviewOutput, coerce_line
+from .models import ChunkReviewInput, ChunkReviewOutput
 from .prompts import CODE_REVIEW_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -25,42 +25,83 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 
 
 class ChunkReviewAgent:
-    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases."""
+    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
+
+    Invariants:
+        - Stateless apart from the injected ``llm`` handle: every ``run`` call
+          builds a fresh strands ``Agent`` (and, in production, a fresh model
+          via ``get_strands_model``), so concurrent ``run`` calls share no
+          mutable agent state. The injected ``llm`` must itself support
+          concurrent calls — the central ``llm_service`` clients do (they
+          guard shared state internally); test doubles used with the parallel
+          coordinator must do the same.
+    """
 
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm
 
     def run(self, input_data: ChunkReviewInput) -> ChunkReviewOutput:
-        """Review one chunk and return approved, issues, summary."""
+        """Review one chunk and return approved, issues, summary.
+
+        Postconditions:
+            - ``spec_compliance_notes``/``suggested_commit_message`` from the
+              LLM are passed through so single-chunk reviews keep full output
+              fidelity.
+        """
         result = _run_chunk_review(self.llm, input_data)
         return ChunkReviewOutput(
             approved=result["approved"],
             issues=result["issues"],
             summary=result["summary"],
+            spec_compliance_notes=result["spec_compliance_notes"],
+            suggested_commit_message=result["suggested_commit_message"],
         )
 
 
 def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     """
-    Review one chunk of code. Returns dict with approved, issues, summary.
+    Review one chunk of code. Returns dict with approved, issues, summary,
+    spec_compliance_notes, and suggested_commit_message.
+
+    Preconditions:
+        - ``input_data.code_chunk`` is already bounded by the coordinator
+          (≤ ``compute_code_review_map_chunk_chars``); it is reviewed verbatim,
+          never compacted or truncated here.
+
+    Postconditions:
+        - Shared context (spec/architecture/existing code) is hard-capped to
+          its budget deterministically — no LLM compaction happens here (the
+          coordinator already compacted once), so a chunk call never grows the
+          prompt or fires extra LLM calls even when upstream compaction failed.
     """
-    max_chunk_chars = compute_code_review_chunk_chars(llm)
+    max_chunk_chars = compute_code_review_map_chunk_chars(llm)
     max_spec = compute_code_review_spec_excerpt_chars(llm)
     max_arch = compute_code_review_arch_overview_chars(llm)
     max_existing = compute_code_review_existing_codebase_chars(llm)
-    code_chunk = compact_text(input_data.code_chunk, max_chunk_chars, llm, "code chunk")
-    spec_excerpt = compact_text(input_data.spec_excerpt, max_spec, llm, "specification excerpt")
-    architecture_overview = compact_text(
-        input_data.architecture_overview, max_arch, llm, "architecture overview"
-    )
-    existing_codebase_excerpt = compact_text(
-        input_data.existing_codebase_excerpt or "", max_existing, llm, "existing codebase excerpt"
-    )
+    code_chunk = input_data.code_chunk
+    if len(code_chunk) > max_chunk_chars:
+        # Coordinator invariant violation (e.g. a single line longer than the
+        # cap): log it but never mutate the code under review.
+        logger.warning(
+            "ChunkReview: code chunk is %s chars, above the %s-char map budget — reviewing as-is",
+            len(code_chunk),
+            max_chunk_chars,
+        )
+    spec_excerpt = input_data.spec_excerpt[:max_spec]
+    architecture_overview = input_data.architecture_overview[:max_arch]
+    existing_codebase_excerpt = (input_data.existing_codebase_excerpt or "")[:max_existing]
 
-    context_parts = [
-        CHUNK_REVIEW_NOTE,
+    language = input_data.language.strip().lower() if input_data.language else ""
+    if not language:
+        # Fallback guess for legacy callers that did not declare a language.
+        language = "python" if "def " in code_chunk[:500] else "typescript"
+
+    context_parts = [CHUNK_REVIEW_NOTE]
+    if input_data.segment_note:
+        context_parts.extend(["**Segment notes:**", input_data.segment_note, ""])
+    context_parts += [
         f"**Files in this chunk:** {input_data.file_path_or_label}",
-        "**Language:** python" if "def " in code_chunk[:500] else "**Language:** typescript",
+        f"**Language:** {language}",
         f"**Task description:** {input_data.task_description}",
     ]
     if input_data.task_requirements:
@@ -116,26 +157,19 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
     raw = str(result).strip()
     data = json.loads(raw)
 
-    issues = []
-    for issue_data in data.get("issues") or []:
-        if isinstance(issue_data, dict) and issue_data.get("description"):
-            fp = issue_data.get("file_path") or input_data.file_path_or_label
-            issues.append(
-                {
-                    "severity": issue_data.get("severity", "high"),
-                    "category": issue_data.get("category", "general"),
-                    "file_path": fp,
-                    "line": coerce_line(issue_data.get("line")),
-                    "start_line": coerce_line(issue_data.get("start_line")),
-                    "description": issue_data.get("description", ""),
-                    "suggestion": issue_data.get("suggestion", ""),
-                }
-            )
+    # Issue dicts are passed through raw: normalization (defaults, line
+    # coercion, path resolution) happens exactly once, in the coordinator's
+    # ``_issues_from_chunk_output``. A blank file_path is deliberately kept
+    # blank — fabricating the multi-file chunk label here would break the
+    # coordinator's per-path offset lookup.
+    issues = [item for item in (data.get("issues") or []) if isinstance(item, dict)]
 
     return {
         "approved": bool(data.get("approved", False)),
         "issues": issues,
         "summary": str(data.get("summary", "")),
+        "spec_compliance_notes": str(data.get("spec_compliance_notes", "") or ""),
+        "suggested_commit_message": str(data.get("suggested_commit_message", "") or ""),
     }
 
 

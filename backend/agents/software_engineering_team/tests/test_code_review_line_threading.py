@@ -1,8 +1,9 @@
 """Tests for the additive per-issue ``line`` field on code-review findings.
 
-Covers ``coerce_line``, the model round-trip, and that a line number provided by
-the LLM is threaded through both the single-call agent path and the coordinator
-(chunk) path. The line field powers inline PR review comments downstream.
+Covers ``coerce_line``, the model round-trip, threading of LLM-provided line
+numbers through small and multi-chunk reviews, re-anchoring of lines reported
+inside split segments, and pre-numbered PR-diff passthrough. The line field
+powers inline PR review comments downstream.
 """
 
 from __future__ import annotations
@@ -91,10 +92,9 @@ def test_single_call_threads_line() -> None:
             }
         ]
     )
+    code = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(50))
     agent = CodeReviewAgent(llm_client=client)
-    result = agent.run(
-        CodeReviewInput(code="### app/main.py ###\ndef f(): pass", language="python")
-    )
+    result = agent.run(CodeReviewInput(code=code, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 42
 
@@ -129,7 +129,7 @@ def test_single_call_bad_line_becomes_none() -> None:
 
 
 def test_coordinator_threads_line() -> None:
-    big = "### app/main.py ###\n" + ("x" * 25_000)
+    big = "### app/main.py ###\n" + "\n".join(f"x{i} = {i}" for i in range(100))
     client = _ScriptedClient(
         [
             {
@@ -152,3 +152,136 @@ def test_coordinator_threads_line() -> None:
     result = agent.run(CodeReviewInput(code=big, language="python"))
     assert len(result.issues) == 1
     assert result.issues[0].line == 13
+
+
+# ---------------------------------------------------------------------------
+# Split-segment re-anchoring
+# ---------------------------------------------------------------------------
+
+
+def test_split_segments_cite_absolute_prefixed_lines() -> None:
+    """Split segments are rendered with original line-number prefixes, so a
+    reviewer cites absolute lines directly — no re-anchoring arithmetic.
+
+    The expected lines are computed from the splitter's actual boundaries, not
+    hardcoded: a scripted reviewer cites the first prefixed number visible in
+    each chunk, which must come back verbatim as that segment's ``start_line``.
+    """
+    import re as _re
+
+    from code_review_agent.coordinator import build_review_chunks, run_coordinator
+
+    from software_engineering_team.shared.context_sizing import (
+        compute_code_review_map_chunk_chars,
+    )
+
+    content = "\n".join(f"line {i:05d}".ljust(40, "x") for i in range(1, 1_001))  # ~41K chars
+
+    class _CiteFirstPrefixed(DummyLLMClient):
+        """Cites the first original-line prefix found in the chunk prompt."""
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            m = _re.search(r"^(\d+): line", prompt, _re.M)
+            assert m is not None, "split segments must render prefixed lines"
+            cited = int(m.group(1))
+            return {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        "file_path": "big.py",
+                        "line": cited,
+                        "start_line": cited,
+                        "description": f"issue at original line {cited}",
+                        "suggestion": "fix it",
+                    }
+                ],
+                "summary": "per-chunk issue",
+            }
+
+    client = _CiteFirstPrefixed()
+    cap = compute_code_review_map_chunk_chars(client)
+    chunks = build_review_chunks([("big.py", content)], cap)
+    segments = [seg for chunk in chunks for seg in chunk.segments]
+    assert len(segments) > 1, "test premise: the file must split"
+
+    result = run_coordinator(client, CodeReviewInput(files={"big.py": content}, language="python"))
+
+    expected_lines = sorted(seg.start_line for seg in segments)
+    assert sorted(i.line for i in result.issues) == expected_lines
+    assert sorted(i.start_line for i in result.issues) == expected_lines
+    assert all(i.file_path == "big.py" for i in result.issues)
+
+
+def test_pre_numbered_split_segment_keeps_cited_line() -> None:
+    """PR-diff hunks carry original line numbers as prefixes (declared by the
+    producer via ``pre_numbered=True``); a split must not shift the cited
+    numbers (offset 0)."""
+    from code_review_agent.coordinator import run_coordinator
+
+    hunk = "\n".join(f"{4000 + i}: code_{i}()".ljust(45, " ") for i in range(1_000))  # ~46K
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        "file_path": "src/feature.py",
+                        "line": 4242,
+                        "description": "off-by-one in loop bound",
+                        "suggestion": "use <=",
+                    }
+                ],
+                "summary": "found one",
+            }
+        ]
+    )
+
+    result = run_coordinator(
+        client,
+        CodeReviewInput(files={"src/feature.py": hunk}, pre_numbered=True, language="python"),
+    )
+
+    # Same issue reported per chunk → deduped to one; the cited pre-numbered
+    # line passes through unchanged.
+    assert len(result.issues) == 1
+    assert result.issues[0].line == 4242
+
+
+def test_blank_issue_path_resolves_to_sole_segment_and_strips_lines_suffix() -> None:
+    """An issue with a blank path in a single-segment chunk resolves to that
+    segment's path (the coordinator owns this fallback; the chunk reviewer
+    passes blank paths through untouched)."""
+    from code_review_agent.coordinator import run_coordinator
+
+    content = "\n".join(f"line {i:05d}".ljust(40, "x") for i in range(1, 1_001))
+    client = _ScriptedClient(
+        [
+            {
+                "approved": False,
+                "issues": [
+                    {
+                        "severity": "high",
+                        "category": "logic",
+                        # No file_path: the coordinator resolves it to the
+                        # chunk's sole segment path.
+                        "line": 2,
+                        "description": "second visible line is wrong",
+                        "suggestion": "fix",
+                    }
+                ],
+                "summary": "per-chunk issue",
+            }
+        ]
+    )
+
+    result = run_coordinator(client, CodeReviewInput(files={"big.py": content}, language="python"))
+
+    assert result.issues, "issues must survive normalization"
+    assert all(i.file_path == "big.py" for i in result.issues)
+    # Re-anchoring still applies after the suffix strip: snippet line 2 of the
+    # first segment is original line 2.
+    assert min(i.line for i in result.issues) == 2

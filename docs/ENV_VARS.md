@@ -137,6 +137,36 @@ maps to the shared `agents_data` volume.
 
 ---
 
+## Software Engineering Code Review
+
+All code-review knobs parse defensively: unset or unparseable values fall back to
+the documented default, and parsed values are clamped to the documented floor.
+
+### CODE_REVIEW_MAP_CHUNK_CHARS
+Absolute ceiling on chars of code per review map call, independent of model
+context. Default `80000`, floor `10000`. Lower it for models that degrade on
+large prompts; raise it to cut the number of map calls per large review.
+
+### CODE_REVIEW_SPEC_EXCERPT_CHARS / CODE_REVIEW_ARCH_OVERVIEW_CHARS / CODE_REVIEW_EXISTING_CHARS
+Absolute ceilings on the spec / architecture-overview / existing-codebase
+excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
+floors `1000` / `500` / `500`.
+
+### CODE_REVIEW_MAP_PARALLELISM
+Max concurrent review map calls per review run. Default `4`, floor `1`
+(`1` reviews chunks sequentially). Results merge in chunk order regardless.
+
+### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
+A failing chunk smaller than twice this is retried once as-is instead of being
+bisected. Default `8000`, floor `1000`.
+
+### CODE_REVIEW_MAX_BISECT_DEPTH
+Max bisect-and-retry recursion depth for a failing review chunk before the run
+fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
+bisection; a chunk then gets only the single same-input retry).
+
+---
+
 ## Shared Infrastructure and Storage
 
 ### SE_WORKSPACE_DIR

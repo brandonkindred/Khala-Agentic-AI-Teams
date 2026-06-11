@@ -19,7 +19,7 @@ SCHEMA: TeamSchema = TeamSchema(
     statements=[
         # One row per review run, keyed by the review job id. ``review_summary``
         # holds the same shape written onto the job (total_issues, inline_comments,
-        # body_findings, event, files_reviewed, files_skipped).
+        # body_findings, event, files_reviewed).
         """CREATE TABLE IF NOT EXISTS code_review_runs (
             job_id          TEXT PRIMARY KEY,
             owner           TEXT NOT NULL,

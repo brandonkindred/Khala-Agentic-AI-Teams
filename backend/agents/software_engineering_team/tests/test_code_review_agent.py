@@ -1,9 +1,9 @@
 """Tests for CodeReviewAgent (Strands-migrated).
 
-Covers the small-code single-call path, the large-code coordinator path,
-the ``_reconcile_approval`` safety net (minor-only override, synthesized
-issue from summary, zero-feedback auto-approve), and the graceful
-fallback on validation errors.
+``run`` always delegates to the map-reduce coordinator. Covers small and
+large inputs through that path, the ``_reconcile_approval`` safety net
+(minor-only override, synthesized issue from summary, zero-feedback
+auto-approve), and the new-field propagation for single-chunk reviews.
 """
 
 from __future__ import annotations
@@ -72,10 +72,9 @@ def test_small_code_with_all_optional_fields_does_not_crash() -> None:
 
 
 def test_large_code_routes_through_coordinator() -> None:
-    """Code that exceeds ``compute_code_review_chunk_chars`` must be
-    compacted and dispatched to the coordinator. End-to-end with
-    DummyLLMClient, the coordinator reviews multiple chunks and merges
-    their output into one CodeReviewOutput."""
+    """Code larger than one map chunk is reviewed untruncated across multiple
+    chunks. End-to-end with DummyLLMClient, the coordinator reviews each chunk
+    and merges their output into one CodeReviewOutput."""
     big_file_1 = "### app/main.py ###\n" + ("a" * 25_000)
     big_file_2 = "### app/util.py ###\n" + ("b" * 25_000)
     code = big_file_1 + "\n\n" + big_file_2
@@ -184,6 +183,76 @@ def test_multiple_run_calls_on_same_instance_succeed() -> None:
         assert result.approved is True, f"run {i} failed: {result.summary}"
 
 
+def test_small_code_routes_through_coordinator_chunk_path() -> None:
+    """``run`` always delegates to the coordinator: even tiny inputs are
+    reviewed through the chunk-review prompt, not a separate single-call path."""
+
+    class _Recorder(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: list[str] = []
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.prompts.append(prompt)
+            return super().complete_json(prompt, **kwargs)
+
+    client = _Recorder()
+    agent = CodeReviewAgent(llm_client=client)
+    result = agent.run(_input())
+    assert result.approved is True
+    assert len(client.prompts) == 1
+    # CHUNK_REVIEW_NOTE marker proves the coordinator's map path was used.
+    assert "one chunk of the full codebase" in client.prompts[0]
+
+
+def test_single_chunk_propagates_notes_and_commit_message_through_agent() -> None:
+    agent = CodeReviewAgent(
+        llm_client=_StubClient(
+            {
+                "approved": True,
+                "issues": [],
+                "summary": "Looks good.",
+                "spec_compliance_notes": "Meets the acceptance criteria.",
+                "suggested_commit_message": "feat: add foo helper",
+            }
+        )
+    )
+    result = agent.run(_input())
+    assert result.approved is True
+    assert result.spec_compliance_notes == "Meets the acceptance criteria."
+    assert result.suggested_commit_message == "feat: add foo helper"
+
+
+def test_agent_accepts_files_dict_input() -> None:
+    agent = CodeReviewAgent(llm_client=DummyLLMClient())
+    result = agent.run(
+        CodeReviewInput(
+            files={"app/main.py": "def foo(): pass"},
+            task_description="Add foo() helper",
+            language="python",
+        )
+    )
+    assert isinstance(result, CodeReviewOutput)
+    assert result.approved is True
+
+
+def test_run_raises_unavailable_when_review_cannot_complete() -> None:
+    """Contract: a review that cannot be completed raises — callers must treat
+    it as a failed run, never as feedback for the coding agent."""
+    import pytest
+    from code_review_agent.models import CodeReviewUnavailableError
+
+    from llm_service import LLMRateLimitError
+
+    class _AlwaysRateLimited(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            raise LLMRateLimitError("429")
+
+    agent = CodeReviewAgent(llm_client=_AlwaysRateLimited())
+    with pytest.raises(CodeReviewUnavailableError):
+        agent.run(_input())
+
+
 def test_reconcile_rejects_when_critical_issue_present() -> None:
     """LLM returns a critical issue with approved=True → override to False."""
     agent = CodeReviewAgent(
@@ -223,15 +292,19 @@ def _recording_callback(calls: list) -> Any:
     return _cb
 
 
-def test_single_call_path_reports_progress_steps_in_order() -> None:
-    """Single-call path emits preparing → reviewing → parsing → finalizing → done
-    with non-decreasing fractions ending at 1.0."""
+def test_run_reports_progress_steps_in_order() -> None:
+    """Every review routes through the coordinator, which emits preparing →
+    reviewing (per chunk) → finalizing → done with non-decreasing fractions
+    ending at 1.0."""
     calls: list = []
     agent = CodeReviewAgent(llm_client=DummyLLMClient())
     result = agent.run(_input(), progress_callback=_recording_callback(calls))
     assert result.approved is True
     steps = [c[0] for c in calls]
-    assert steps == ["preparing", "reviewing", "parsing", "finalizing", "done"]
+    assert steps[0] == "preparing"
+    assert "reviewing" in steps
+    assert "finalizing" in steps
+    assert steps[-1] == "done"
     fractions = [c[2] for c in calls]
     assert fractions == sorted(fractions), "fractions must be non-decreasing"
     assert fractions[-1] == 1.0

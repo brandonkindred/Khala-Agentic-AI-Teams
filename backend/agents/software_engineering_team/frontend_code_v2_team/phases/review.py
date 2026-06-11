@@ -153,8 +153,10 @@ def run_review(
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
-                code=code_text_12k,
+                files=execution_result.files,
                 task_description=task.description or "",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
@@ -358,8 +360,10 @@ def run_microtask_review(
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
 
+            # files= keeps per-file attribution and lets the coordinator bound
+            # its own prompts — no header parsing, no upstream truncation.
             cr_input = _CRInput(
-                code=code_text_12k,
+                files=files,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
                 task_requirements=task.requirements or "",
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],

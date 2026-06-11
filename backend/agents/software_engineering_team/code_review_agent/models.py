@@ -3,7 +3,7 @@
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from software_engineering_team.shared.models import SystemArchitecture
 
@@ -55,6 +55,23 @@ def notify_review_progress(
         )
 
 
+class CodeReviewUnavailableError(RuntimeError):
+    """Raised when the review could not be completed, so no verdict exists.
+
+    Distinguishes "the reviewer infrastructure failed" from "the code was
+    rejected": callers must treat this as a failed review run (retry, mark the
+    job failed), never as review feedback for the coding agent.
+
+    Invariants:
+        - ``unreviewed`` names the file/line ranges that received no review
+          (empty when the failure happened before any chunk was attempted).
+    """
+
+    def __init__(self, message: str, unreviewed: Optional[List[str]] = None) -> None:
+        super().__init__(message)
+        self.unreviewed: List[str] = list(unreviewed or [])
+
+
 def coerce_line(value: Any) -> Optional[int]:
     """Parse an LLM-provided line number into a positive int, or None.
 
@@ -72,6 +89,112 @@ def coerce_line(value: Any) -> Optional[int]:
     return line if line > 0 else None
 
 
+class FileSegment(BaseModel):
+    """A contiguous slice of one file under review.
+
+    Invariants:
+        - ``start_line`` is 1-based and within the original file.
+        - A file's segments, in list order, partition its content exactly:
+          concatenating their ``content`` reproduces the file.
+        - Cited line numbers are always original-file absolute: ``pre_numbered``
+          segments already carry ``N: `` prefixes in their content (the coding
+          team's PR-diff hunks), and partial segments are *rendered* with their
+          original line numbers prefixed (``prompt_content``), so the reviewer
+          never reports snippet-relative numbers that would need re-anchoring.
+    """
+
+    path: str = Field(default="", description="Original file path ('' for headerless code)")
+    content: str = Field(description="The segment's slice of the file content")
+    start_line: int = Field(
+        default=1,
+        description="1-based line number of the segment's first line in the original file",
+    )
+    total_lines: int = Field(default=1, description="Total line count of the original file")
+    pre_numbered: bool = Field(
+        default=False,
+        description="True when content lines carry original line-number prefixes (e.g. '123: code')",
+    )
+
+    @property
+    def line_count(self) -> int:
+        """Number of lines in this segment's content."""
+        return len(self.content.splitlines()) or 1
+
+    @property
+    def end_line(self) -> int:
+        """1-based line number of the segment's last line in the original file."""
+        return self.start_line + self.line_count - 1
+
+    @property
+    def is_partial(self) -> bool:
+        """True when the segment covers only part of its file."""
+        return self.start_line > 1 or self.end_line < self.total_lines
+
+    @property
+    def prompt_content(self) -> str:
+        """The content as rendered into the review prompt.
+
+        Partial segments are prefixed with their original line numbers
+        (``"50: code"``) so cited lines are absolute by construction — a
+        snippet-relative citation and an absolute one are indistinguishable
+        when the segment's absolute range overlaps ``[1, line_count]``, so the
+        numbering convention removes the ambiguity instead of guessing.
+
+        Postconditions:
+            - Whole files and ``pre_numbered`` segments (which already carry
+              prefixes) render verbatim as ``content``.
+        """
+        if self.pre_numbered or not self.is_partial:
+            return self.content
+        return "\n".join(
+            f"{self.start_line + i}: {line}" for i, line in enumerate(self.content.splitlines())
+        )
+
+
+class ReviewChunk(BaseModel):
+    """One map-call unit: a group of file segments reviewed in a single LLM call.
+
+    Invariants:
+        - No two segments share the same ``path`` (so an issue's cited path
+          resolves to exactly one segment for line validation).
+    """
+
+    segments: List[FileSegment] = Field(default_factory=list)
+
+    @property
+    def content(self) -> str:
+        """Rendered ``### path ###`` blocks for the chunk prompt.
+
+        Postconditions:
+            - Headerless segments (``path == ''``) render as bare content.
+            - Partial segments render with original line-number prefixes
+              (see ``FileSegment.prompt_content``).
+        """
+        parts = []
+        for seg in self.segments:
+            rendered = seg.prompt_content
+            parts.append(f"### {seg.path} ###\n{rendered}" if seg.path else rendered)
+        return "\n\n".join(parts)
+
+    @property
+    def paths_label(self) -> str:
+        """Human-readable label of the chunk's files, marking partial segments.
+
+        Postconditions:
+            - Partial segments render as ``path (lines A-B of N)``; whole files as ``path``.
+        """
+        labels = []
+        for seg in self.segments:
+            name = seg.path or "(unknown)"
+            if seg.is_partial:
+                labels.append(
+                    f"{name} (lines {seg.start_line}-{seg.end_line} of {seg.total_lines})"
+                )
+            else:
+                labels.append(name)
+        return ", ".join(labels)
+
+
 class ChunkReviewInput(BaseModel):
     """Input for reviewing one chunk of code (used by ChunkReviewAgent)."""
 
@@ -81,6 +204,14 @@ class ChunkReviewInput(BaseModel):
     file_path_or_label: str = Field(
         default="",
         description="File path(s) in this chunk for issue reporting",
+    )
+    segment_note: str = Field(
+        default="",
+        description="Reviewer guidance for split or pre-numbered segments (prepended to the prompt)",
+    )
+    language: str = Field(
+        default="",
+        description="Primary language of the code under review ('' lets the reviewer guess)",
     )
     task_description: str = Field(default="", description="Task the coding agent was working on")
     task_requirements: str = Field(default="", description="Detailed task requirements")
@@ -105,6 +236,14 @@ class ChunkReviewOutput(BaseModel):
         description="Issues found (each with severity, category, file_path, description, suggestion)",
     )
     summary: str = Field(default="", description="Review summary for this chunk")
+    spec_compliance_notes: str = Field(
+        default="",
+        description="Notes on how well the chunk meets the spec and acceptance criteria",
+    )
+    suggested_commit_message: str = Field(
+        default="",
+        description="Optional commit message suggestion from the reviewer",
+    )
 
 
 class CodeReviewIssue(BaseModel):
@@ -142,10 +281,30 @@ class CodeReviewIssue(BaseModel):
 
 
 class CodeReviewInput(BaseModel):
-    """Input for the Code Review agent."""
+    """Input for the Code Review agent.
+
+    Preconditions (enforced at construction):
+        - The code under review is provided either via ``files`` (non-empty
+          mapping) or via an explicitly passed ``code`` string. Constructing
+          the input with neither, or with ``files={}``, raises ``ValueError``
+          so a caller bug never silently becomes an approved empty review.
+    """
 
     code: str = Field(
-        description="The code to review (all files on the branch, concatenated with file headers)",
+        default="",
+        description="Legacy input: code to review, concatenated with ### path ### file headers. "
+        "Ignored when ``files`` is provided.",
+    )
+    files: Optional[Dict[str, str]] = Field(
+        default=None,
+        description="Preferred input: mapping of file path to file content. "
+        "When set, ``code`` is ignored and no header parsing happens.",
+    )
+    pre_numbered: bool = Field(
+        default=False,
+        description="True when every content line already carries its original line number "
+        "as an 'N: ' prefix (the coding team's PR-diff hunks); issue lines are then "
+        "reported verbatim instead of re-anchored.",
     )
     spec_content: str = Field(
         default="",
@@ -172,6 +331,23 @@ class CodeReviewInput(BaseModel):
         default=None,
         description="Existing code in the repo before the agent's changes",
     )
+
+    @model_validator(mode="after")
+    def _require_code_or_files(self) -> "CodeReviewInput":
+        """Reject inputs that carry no code source at all.
+
+        ``files={}`` and a fully-defaulted ``code`` are caller bugs (e.g. a glob
+        miss or a dropped kwarg), not empty reviews; per DbC they must raise here
+        rather than fail open downstream. An explicitly passed empty ``code``
+        string remains valid (the review then reports nothing to review).
+        """
+        if self.files is not None:
+            if not self.files:
+                raise ValueError("CodeReviewInput.files must be a non-empty mapping when provided")
+            return self
+        if "code" not in self.model_fields_set:
+            raise ValueError("CodeReviewInput requires either 'files' or an explicit 'code' value")
+        return self
 
 
 class CodeReviewOutput(BaseModel):

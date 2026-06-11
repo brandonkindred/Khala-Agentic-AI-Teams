@@ -115,15 +115,13 @@ def run_code_review(
         from code_review_agent import CodeReviewAgent
         from code_review_agent.models import CodeReviewInput
 
-        from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
-
         llm = llm_getter("code_review")
         agent = CodeReviewAgent(llm)
-        max_chars = compute_code_review_total_chars(llm)
-        code_capped = code[:max_chars] if len(code) > max_chars else code
 
+        # No pre-truncation: the coordinator bounds its own per-call prompts,
+        # and its full-coverage guarantee only holds when it sees all the code.
         review_input = CodeReviewInput(
-            code=code_capped,
+            code=code,
             spec_content=spec_content,
             task_description=task_description,
             task_requirements=task_requirements or [],

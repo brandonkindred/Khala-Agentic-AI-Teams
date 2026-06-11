@@ -2457,19 +2457,19 @@ class BackendExpertAgent:
         Invoke the code review agent.
         Preconditions:
             - ``code_review_agent`` is initialised.
-            - ``code`` contains the files on the feature branch.
+            - ``code`` contains the files on the feature branch, untruncated:
+              the coordinator bounds its own per-call prompts and its coverage
+              guarantee only holds when it sees the full input.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
+        Raises:
+            CodeReviewUnavailableError: when the review could not be completed.
         """
         from code_review_agent.models import CodeReviewInput
 
-        from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
-
-        max_chars = compute_code_review_total_chars(code_review_agent.llm)
-        code_capped = _truncate_for_context(code, max_chars)
         return code_review_agent.run(
             CodeReviewInput(
-                code=code_capped,
+                code=code,
                 spec_content=spec_content,
                 task_description=task.description,
                 task_requirements=_task_requirements(task),
