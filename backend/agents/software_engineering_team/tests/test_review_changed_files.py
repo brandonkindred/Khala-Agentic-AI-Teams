@@ -11,7 +11,11 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from software_engineering_team.shared.git_utils import list_changed_files
+from software_engineering_team.shared.git_utils import (
+    list_changed_files,
+    list_deleted_files,
+    list_uncommitted_files,
+)
 from software_engineering_team.shared.repo_utils import read_files_as_dict
 
 
@@ -87,6 +91,58 @@ def test_list_changed_files_handles_non_ascii_filename(tmp_path: Path) -> None:
 
     assert changed == ["café.py"]  # not '"caf\\303\\251.py"'
     assert read_files_as_dict(tmp_path, changed) == {"café.py": "x = 2\n"}
+
+
+# ---------------------------------------------------------------------------
+# list_uncommitted_files / list_deleted_files
+# ---------------------------------------------------------------------------
+
+
+def test_list_uncommitted_files_tracked_modified_and_untracked(tmp_path: Path) -> None:
+    """Modified tracked files and untracked files are returned; deletions excluded."""
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("y = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")  # modified (unstaged)
+    (tmp_path / "new.py").write_text("n = 1\n", encoding="utf-8")  # untracked
+    (tmp_path / "b.py").unlink()  # deleted
+
+    changed = list_uncommitted_files(tmp_path)
+
+    assert "a.py" in changed
+    assert "new.py" in changed
+    assert "b.py" not in changed  # deletion excluded
+
+
+def test_list_uncommitted_files_non_repo_returns_empty(tmp_path: Path) -> None:
+    assert list_uncommitted_files(tmp_path) == []
+
+
+def test_list_deleted_files_committed_and_worktree(tmp_path: Path) -> None:
+    _init_repo(tmp_path)
+    (tmp_path / "keep.py").write_text("k = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    (tmp_path / "wt.py").write_text("w = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "gone.py").unlink()  # committed deletion
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "remove gone")
+    (tmp_path / "wt.py").unlink()  # uncommitted worktree deletion
+
+    deleted = list_deleted_files(tmp_path, "development", "HEAD")
+
+    assert set(deleted) == {"gone.py", "wt.py"}
+    assert "keep.py" not in deleted
+
+
+def test_list_deleted_files_non_repo_returns_empty(tmp_path: Path) -> None:
+    assert list_deleted_files(tmp_path, "development", "HEAD") == []
 
 
 # ---------------------------------------------------------------------------
@@ -344,6 +400,88 @@ def test_select_review_input_includes_writer_derived_paths(tmp_path: Path) -> No
     assert "main.py" in files
     assert "tests/test_main.py" in files
     assert "seed.py" in files  # committed diff still included
+
+
+def test_select_review_input_includes_uncommitted_worktree_files(tmp_path: Path) -> None:
+    """Uncommitted tracked changes and untracked files (e.g. a synthesized
+    .gitignore) are reviewed, not just committed-diff / output-key paths."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "committed change")  # non-empty committed diff
+    # A failed-commit iteration left these uncommitted on disk:
+    (tmp_path / ".gitignore").write_text("*.log\n*.tmp\n", encoding="utf-8")  # modified tracked
+    (tmp_path / "untracked.py").write_text("u = 1\n", encoding="utf-8")  # untracked
+
+    task = SimpleNamespace(description="add feature")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert "a.py" in files  # committed diff
+    assert ".gitignore" in files  # uncommitted tracked change
+    assert "untracked.py" in files  # untracked file
+
+
+def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
+    from software_engineering_team.backend_agent.agent import (
+        _DELETED_FILES_NOTE_KEY,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change + delete")
+
+    task = SimpleNamespace(description="add feature")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert "a.py" in files  # surviving change reviewed by content
+    assert _DELETED_FILES_NOTE_KEY in files
+    assert "gone.py" in files[_DELETED_FILES_NOTE_KEY]  # removal surfaced
+
+
+def test_select_review_input_deletion_only_surfaces_note(tmp_path: Path) -> None:
+    """A task whose only change is a deletion still returns the note (no
+    whole-repo fallback)."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETED_FILES_NOTE_KEY,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete only")
+
+    task = SimpleNamespace(description="remove module")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert set(files) == {_DELETED_FILES_NOTE_KEY}  # only the deletion note
+    assert "gone.py" in files[_DELETED_FILES_NOTE_KEY]
 
 
 def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) -> None:

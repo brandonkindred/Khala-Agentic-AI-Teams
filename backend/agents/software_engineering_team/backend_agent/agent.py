@@ -506,6 +506,12 @@ def _read_repo_meta_files(repo_path: Path) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+# Synthetic review-input key carrying the list of files the task deleted.
+# A content-based review only sees surviving files, so deletions are surfaced
+# as a note rather than as (absent) content.
+_DELETED_FILES_NOTE_KEY = "__DELETED_FILES__"
+
+
 def _select_review_input(
     repo_path: Path,
     current_task: Any,
@@ -513,15 +519,19 @@ def _select_review_input(
 ) -> Tuple[Dict[str, str] | None, str | None]:
     """Choose the code-review input: the task's changed files, read from disk.
 
-    The committed ``git diff development...HEAD`` lists what the task changed;
-    the generator's just-written paths are unioned in so a fix whose
-    ``write_agent_output`` commit failed (a logged-and-continue path) is still
-    reviewed. Every path's content is read from the **worktree**, never from the
-    in-memory output dict, so review reflects exactly what is on the branch:
-    paths that write validation rejected — or that a failed write never created —
-    are absent from disk and therefore correctly excluded, and no extension
-    filter is applied so non-source task changes (requirements.txt, migrations,
-    YAML/JSON, ...) are reviewed too.
+    The path set is the union of the committed ``git diff development...HEAD``,
+    the uncommitted worktree/index changes (so a fix whose ``write_agent_output``
+    commit failed — including files synthesized during writing, e.g. a
+    ``.gitignore`` from agent ``gitignore_entries`` — is still reviewed), and the
+    writer's normalized output keys. Every path's content is read from the
+    **worktree**, never from the in-memory output dict, so review reflects exactly
+    what is on the branch: paths that write validation rejected — or that a failed
+    write never created — are absent from disk and therefore correctly excluded,
+    and no extension filter is applied so non-source task changes
+    (requirements.txt, migrations, YAML/JSON, ...) are reviewed too.
+
+    Deleted paths have no content to review, so they are surfaced as a single
+    note entry (:data:`_DELETED_FILES_NOTE_KEY`) listing the removals.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the writer's
@@ -530,19 +540,42 @@ def _select_review_input(
     Postconditions:
         - Returns ``(files, code)`` with exactly one of the two populated, never
           both, and never both empty — so review is never silently skipped:
-            1. the worktree content of every committed-diff or just-written path
-               that exists on disk and decodes as text, else
+            1. the worktree content of every committed/uncommitted/just-written
+               path that exists on disk and decodes as text, plus a deletion
+               note when the task removed files, else
             2. the legacy whole-repo concatenation as a ``code`` string (logged).
         - For repo-setup tasks the whole-repo fallback also appends meta files
           (.gitignore, README, ...) so an initial commit is reviewed in full.
     """
-    from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, list_changed_files
+    from software_engineering_team.shared.git_utils import (
+        DEVELOPMENT_BRANCH,
+        list_changed_files,
+        list_deleted_files,
+        list_uncommitted_files,
+    )
 
-    paths = list(list_changed_files(repo_path, DEVELOPMENT_BRANCH))
-    if written_files:
-        seen = set(paths)
-        paths.extend(p for p in written_files if p not in seen)
+    paths: List[str] = []
+    seen: set[str] = set()
+    for source in (
+        list_changed_files(repo_path, DEVELOPMENT_BRANCH),
+        list_uncommitted_files(repo_path),
+        list(written_files or ()),
+    ):
+        for p in source:
+            if p not in seen:
+                seen.add(p)
+                paths.append(p)
     files = read_files_as_dict(repo_path, paths, extensions=None)
+
+    deleted = list_deleted_files(repo_path, DEVELOPMENT_BRANCH)
+    if deleted:
+        listing = "\n".join(f"- {p}" for p in deleted)
+        files[_DELETED_FILES_NOTE_KEY] = (
+            "The following tracked files were DELETED by this task. Verify each "
+            "removal is intentional and that nothing still depends on them:\n"
+            f"{listing}\n"
+        )
+
     if files:
         return files, None
     logger.warning(

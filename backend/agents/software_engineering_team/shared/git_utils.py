@@ -273,6 +273,30 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
     return out or ""
 
 
+def _changed_paths(path: Path, *cmds: list[str]) -> List[str]:
+    """Run each NUL-output git command and return the de-duplicated union of paths.
+
+    Each command must end in ``-z`` so paths are NUL-delimited and unquoted
+    (names with non-ASCII bytes, tabs, or newlines round-trip as real filesystem
+    paths instead of git's escaped form). A command that fails contributes
+    nothing, so callers degrade to whatever the other commands found.
+
+    Postconditions:
+        - Returns paths in first-seen order across *cmds*, with no duplicates.
+    """
+    seen: set[str] = set()
+    ordered: List[str] = []
+    for cmd in cmds:
+        code, out = _run_git(path, cmd)
+        if code != 0:
+            continue
+        for entry in (out or "").split("\0"):
+            if entry and entry not in seen:
+                seen.add(entry)
+                ordered.append(entry)
+    return ordered
+
+
 def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
     """Return repo-relative paths changed on *head* since it diverged from *base*.
 
@@ -293,12 +317,56 @@ def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> 
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return []
-    code, out = _run_git(
+    return _changed_paths(
         path, ["git", "diff", "--name-only", "--diff-filter=d", "-z", f"{base}...{head}"]
     )
-    if code != 0:
+
+
+def list_uncommitted_files(repo_path: str | Path) -> List[str]:
+    """Return non-deleted paths changed in the worktree/index versus ``HEAD``.
+
+    Unions tracked changes (staged + unstaged, deletions excluded) with
+    untracked-but-not-ignored files, so a path an iteration wrote without a
+    landed commit — including one synthesized during writing (for example a
+    ``.gitignore`` updated from agent ``gitignore_entries``) — is still visible
+    to callers, even though it is absent from a committed ``base...head`` diff.
+
+    Postconditions:
+        - Returns repo-relative paths. Returns ``[]`` when not a git repository
+          or the git commands fail.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
         return []
-    return [entry for entry in (out or "").split("\0") if entry]
+    return _changed_paths(
+        path,
+        ["git", "diff", "--name-only", "--diff-filter=d", "-z", "HEAD"],
+        ["git", "ls-files", "--others", "--exclude-standard", "-z"],
+    )
+
+
+def list_deleted_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
+    """Return paths the task deleted: committed (``base...head``) plus worktree.
+
+    Uppercase ``--diff-filter=D`` keeps only deletions. A content-based reviewer
+    sees surviving file contents but no removals, so callers surface these paths
+    separately to flag that a file (an auth module, route, migration, ...) was
+    removed.
+
+    Postconditions:
+        - Returns repo-relative paths, de-duplicated. Returns ``[]`` when not a
+          git repository or the git commands fail.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return []
+    return _changed_paths(
+        path,
+        ["git", "diff", "--name-only", "--diff-filter=D", "-z", f"{base}...{head}"],
+        ["git", "diff", "--name-only", "--diff-filter=D", "-z", "HEAD"],
+    )
+
+
 
 
 def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) -> Tuple[bool, str]:
