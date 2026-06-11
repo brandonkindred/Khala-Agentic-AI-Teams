@@ -388,6 +388,19 @@ async def prepare_invoke(
     attempt_token = claim_token or str(uuid4())
     event_run_id = _event_scoped_run_id(source_run_id, attempt_token)
 
+    # First-provision seed packs — best-effort and idempotent. Installing the
+    # agent's manifest-declared rule packs before the context load means the
+    # seed rules are active for this very first invoke's context read and
+    # precondition gate. Lazily imported so the facade-import path stays cheap.
+    try:
+        from agent_cognition.rules.provision import ensure_seed_packs_installed
+
+        await asyncio.to_thread(ensure_seed_packs_installed, agent_id)
+    except Exception:
+        logger.warning(
+            "cognition: seed-pack provisioning failed for %s; continuing", agent_id, exc_info=True
+        )
+
     # Lazy catch-up + context load — both best-effort; a cognition subsystem
     # hiccup must never break the invoke (matching the proxy's prior posture).
     # The catch-up is budgeted: a cold-start backlog must not run hundreds of

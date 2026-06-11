@@ -218,3 +218,47 @@ completes the ledger row with `{status_code, content}` for replay. The stored en
 never carries the per-invoke `sandbox` block, so a replay cannot masquerade as a fresh
 boot. Blocked outcomes carry structured `block_phase` / `block_reason` fields — callers
 read those, never parse the stored HTTP body.
+
+## Seed rule packs (`rules/seed_packs.py`, `rules/provision.py`)
+
+A *seed pack* is a named, versioned set of day-one guardrail rules an agent can install at
+provision time. `SEED_PACKS` in `rules/seed_packs.py` is the catalog; the shipped
+`default_guardrails` pack carries a single advisory rule (`no-secrets-in-output`) — richer
+content lands in a later step.
+
+An agent declares the packs it wants in its manifest (`cognition.rule_packs`, e.g.
+`[default_guardrails]`). The packs install **lazily on first provision**: the first time the
+cognition core handles an invoke for an agent, `prepare_invoke` calls
+`rules/provision.py::ensure_seed_packs_installed(agent_id)`, which reads the declared packs
+(`manifest_scope.rule_packs`) and installs each via `store.install_seed_pack`. The install is:
+
+- **idempotent** — each seed rule is keyed on a deterministic `(agent_id, pack, seed_key)` id and
+  inserted `ON CONFLICT DO NOTHING`, so re-provisioning (or a concurrent/cross-process install) adds
+  nothing;
+- **memoized per process** — a successful pass records the agent so later invokes skip the Postgres
+  round-trip (the deterministic ids keep correctness even without the memo);
+- **best-effort** — an unknown pack name is logged and skipped, a storage outage defers the install
+  to a later invoke, and nothing here ever breaks the invoke.
+
+Installing before the context load means the seeded rules are active for that very first invoke's
+context read and precondition gate.
+
+## Configuration & operability
+
+All cognition env vars parse defensively (unset/garbage → the documented default; out-of-range →
+clamped to the documented floor) and are detailed in [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md).
+Consolidated reference:
+
+| Knob | Where | Default | Purpose |
+|---|---|---|---|
+| `AGENT_COGNITION_SCHEDULER_INTERVAL_S` | `scheduler.py` | `3600` (floor `60`) | The scheduler **tick**: cadence of the per-agent `ensure_rollups_current` → `reflect` → `prune_events` pass plus one platform-wide ledger GC. (The aspirational name `AGENT_COGNITION_TICK_S` refers to this same knob.) No-op when `POSTGRES_HOST` is unset. |
+| `cognition.memory.retention_days_events` (manifest) | `manifest_scope.py` | `90` | **Event retention**: raw episodic events older than this are pruned by the scheduler's `prune_events` once the covering day summary exists and is non-stale. A per-agent manifest field, not an env var. |
+| `AGENT_COGNITION_DIGEST_EVENT_TOP_N` | `memory/retrieval.py` | `20` | In-progress event count folded into an agent's memory digest. The summary half is bounded by the caller-supplied **digest token budget** (`build_memory_digest(..., token_budget)`, trimmed via `compact_text`). |
+| `LLM_MODEL_cognition` | `llm_service` | resolved | Per-key model override for the cognition stack (rollup, reflection, graph). Resolution: `LLM_MODEL_cognition` → `LLM_MODEL` → platform fallback (`resolve_model("cognition")`). |
+| `AGENT_COGNITION_WRITEBACK_MAX_BYTES` | `shared_agent_invoke/limits.py` | `1048576` (1 MiB) | Byte cap on the `cognition_writeback` half of an invoke envelope; over-cap is truncated and flagged, never starving the user `output` (bounded separately by `AGENT_INVOKE_MAX_OUTPUT_BYTES`). |
+| `AGENT_COGNITION_RUN_TTL_S` | `context.py` | `604800` (7 days, floor `3600`) | Ledger **idempotency TTL**: how long a terminal run row is retained for replay before the scheduler GCs it. |
+| `AGENT_COGNITION_RUN_LEASE_S` | `context.py` | `120` (floor `30`) | Lease an `in_progress` run claim holds before lazy expired-lease reclaim. |
+| `AGENT_COGNITION_INVOKE_ROLLUP_BUDGET` | `invoke_gate.py` | `8` (floor `1`) | Max rollup periods the lazy catch-up processes inline per invoke. |
+| `AGENT_COGNITION_ROLLUP_INPUT_CHARS` / `…_ROLLUP_MAX_LOOKBACK_DAYS` | `memory/rollup.py` | `12000` / `400` | Rollup input char budget and cold-start backfill bound. |
+| `AGENT_COGNITION_REFLECTION_*` | `rules/reflection.py` | see [Reflection](#reflection-rule-learning) | Reflection summary limit, proposal cap, input char budget. |
+| `AGENT_COGNITION_GRAPH_*` / `NEO4J_*` / `GRAPHITI_*` | `graph/` | see [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md) | Knowledge-graph sync cadence/batch, search top-K, and Neo4j/Graphiti connection + models. |
