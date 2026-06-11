@@ -7,6 +7,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field
 
+from agent_registry.models import AgentManifest
+
 # ---------------------------------------------------------------------------
 # Enums
 # ---------------------------------------------------------------------------
@@ -201,6 +203,17 @@ class TeamSummary(BaseModel):
 
 class TeamDetailResponse(BaseModel):
     team: AgenticTeam
+
+
+class GeneratedManifestsResponse(BaseModel):
+    """Generated ``agent_registry`` manifests for a team's roster.
+
+    Each manifest carries the batteries-included cognition block stamped by
+    ``manifest_generation.build_agent_manifest``.
+    """
+
+    team_id: str
+    manifests: list[AgentManifest] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

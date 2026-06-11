@@ -12,7 +12,7 @@ from typing import List, Optional
 from fastapi import FastAPI, HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
-from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
+from agentic_team_provisioning.agent_env_provisioning import _slug, schedule_provision_step_agents
 from agentic_team_provisioning.assistant.agent import ProcessDesignerAgent
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.infrastructure import get_team_infrastructure, provision_team
@@ -29,6 +29,7 @@ from agentic_team_provisioning.models import (
     CreateTeamResponse,
     CreateTestChatSessionRequest,
     FormRecord,
+    GeneratedManifestsResponse,
     ProcessDefinition,
     ProcessOutput,
     ProcessStatus,
@@ -57,10 +58,7 @@ from agentic_team_provisioning.models import (
 )
 from agentic_team_provisioning.postgres import SCHEMA as AGENTIC_POSTGRES_SCHEMA
 from agentic_team_provisioning.runtime.agent_builder import (
-    build_agent as _build_test_agent,
-)
-from agentic_team_provisioning.runtime.agent_builder import (
-    call_agent as _call_test_agent,
+    call_agent_with_cognition as _call_test_agent_with_cognition,
 )
 from agentic_team_provisioning.runtime.agent_builder import (
     generate_starter_prompts,
@@ -206,6 +204,23 @@ def list_team_agents(team_id: str):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return team.agents
+
+
+@app.get("/teams/{team_id}/agents/manifests", response_model=GeneratedManifestsResponse)
+def list_team_agent_manifests(team_id: str):
+    """Generated agent_registry manifests (with the cognition core stamped) for the roster.
+
+    Every roster agent is rendered into a validated ``AgentManifest`` carrying the
+    batteries-included ``cognition`` block; nothing is written to the registry's
+    manifest discovery paths.
+    """
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    manifests = [build_agent_manifest(team_id, a) for a in team.agents]
+    return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 
 @app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
@@ -784,16 +799,21 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     context_parts.append(f"User: {req.content}")
     full_context = "\n\n".join(context_parts)
 
-    # Build and invoke agent
-    agent_instance = _build_test_agent(
+    # Build and invoke the agent through the cognition-aware wrapper so any
+    # advisory rules + memory digest on the side channel steer this invoke. The
+    # writeback is discarded here: the local test-chat path has no idempotency
+    # ledger to persist it against (that lives on the gated invoke proxy).
+    cognition_agent_id = f"agentic_team_provisioning.{_slug(team_id, 12)}.{_slug(agent_name, 40)}"
+    response_text, _writeback = _call_test_agent_with_cognition(
         agent_def.agent_name,
         agent_def.role,
         agent_def.skills,
         agent_def.capabilities,
         agent_def.tools,
         agent_def.expertise,
+        full_context,
+        agent_id=cognition_agent_id,
     )
-    response_text = _call_test_agent(agent_instance, full_context)
 
     # Store assistant message
     asst_msg_id = str(uuid.uuid4())
