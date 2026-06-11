@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import pytest
+
 from agent_registry.models import AgentManifest, CognitionSpec
 from agentic_team_provisioning.manifest_generation import (
     build_agent_manifest,
     default_cognition_block,
+    register_team_manifests,
 )
 from agentic_team_provisioning.models import AgenticTeamAgent
 
@@ -93,3 +96,35 @@ def test_free_text_tools_are_not_mapped_into_cognition():
     manifest = build_agent_manifest("t", agent)
     assert manifest.cognition is not None
     assert manifest.cognition.tools == []
+
+
+def test_register_team_manifests_installs_into_registry(monkeypatch: pytest.MonkeyPatch):
+    import agent_registry
+    from agent_registry.loader import AgentRegistry
+
+    reg = AgentRegistry([], {})
+    monkeypatch.setattr(agent_registry, "get_registry", lambda: reg)
+
+    agents = [
+        AgenticTeamAgent(agent_name="A", role="r1"),
+        AgenticTeamAgent(agent_name="B", role="r2"),
+    ]
+    manifests = register_team_manifests("team-1", agents)
+
+    assert len(manifests) == 2
+    for m in manifests:
+        assert reg.get(m.id) is m
+        assert reg.get(m.id).cognition.rule_packs == ["default_guardrails"]
+
+
+def test_register_team_manifests_is_best_effort(monkeypatch: pytest.MonkeyPatch):
+    import agent_registry
+
+    def _boom():
+        raise RuntimeError("registry unavailable")
+
+    monkeypatch.setattr(agent_registry, "get_registry", _boom)
+
+    # A registry failure must not break generation; manifests are still built.
+    manifests = register_team_manifests("team-1", [AgenticTeamAgent(agent_name="A", role="r")])
+    assert len(manifests) == 1

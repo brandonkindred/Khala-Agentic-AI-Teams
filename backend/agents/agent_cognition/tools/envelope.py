@@ -41,18 +41,30 @@ from typing import Any
 
 __all__ = [
     "ENVELOPE_MARKER",
+    "WRITEBACK_MARKER",
     "EnvelopeError",
     "UnwrappedRequest",
+    "UnwrappedWriteback",
     "wrap_request",
     "is_envelope",
     "try_unwrap_request",
+    "wrap_writeback",
+    "try_unwrap_writeback",
 ]
 
 # Namespaced so a collision with real user data is vanishingly unlikely; the
 # proxy rejects a caller body that already contains it (see DESIGN §10).
 ENVELOPE_MARKER = "__khala_cognition_envelope__"
 
+# Symmetric marker for the *response*: an entrypoint that produces a cognition
+# writeback (episodic events / tool calls) returns it wrapped so the shim can lift
+# the writeback into the response envelope while handing the caller the inner
+# output unchanged. Pure-LLM agents have no tool loop, so without this channel the
+# events they emit would be dropped.
+WRITEBACK_MARKER = "__khala_cognition_writeback__"
+
 _ALLOWED_KEYS = frozenset({ENVELOPE_MARKER, "input", "cognition"})
+_ALLOWED_WRITEBACK_KEYS = frozenset({WRITEBACK_MARKER, "output", "writeback"})
 
 
 class EnvelopeError(ValueError):
@@ -69,6 +81,20 @@ class UnwrappedRequest:
 
     input: Any
     cognition: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class UnwrappedWriteback:
+    """An entrypoint result split into the caller-facing output + the writeback.
+
+    ``output`` is returned to the caller verbatim (the writeback never leaks into
+    it); ``events`` / ``tool_calls`` are the episodic memory + tool-audit dumps the
+    shim folds into the response's ``memory_events`` / ``tool_audit``.
+    """
+
+    output: Any
+    events: list[Any]
+    tool_calls: list[Any]
 
 
 def wrap_request(input_body: Any, cognition: Mapping[str, Any]) -> dict[str, Any]:
@@ -126,3 +152,46 @@ def try_unwrap_request(body: Any) -> UnwrappedRequest | None:
     if extra:
         raise EnvelopeError(f"unexpected cognition envelope keys: {sorted(extra)}")
     return UnwrappedRequest(input=body["input"], cognition=dict(cognition))
+
+
+def wrap_writeback(output: Any, writeback: Mapping[str, Any]) -> dict[str, Any]:
+    """Wrap an entrypoint ``output`` together with its cognition ``writeback``.
+
+    Preconditions:
+        * ``writeback`` is a mapping (e.g. a ``CognitionWriteback.model_dump()``).
+    Postconditions:
+        * Returns ``{marker: 1, "output": output, "writeback": {...}}`` — a fresh
+          dict; ``output`` is referenced verbatim and ``writeback`` is shallow
+          copied. Neither argument is mutated. The shim unwraps it, hands
+          ``output`` back to the caller, and lifts the writeback into the
+          response envelope.
+    """
+    if not isinstance(writeback, Mapping):
+        raise EnvelopeError(f"writeback must be a mapping, got {type(writeback).__name__}")
+    return {WRITEBACK_MARKER: 1, "output": output, "writeback": dict(writeback)}
+
+
+def try_unwrap_writeback(result: Any) -> UnwrappedWriteback | None:
+    """Unwrap ``result`` iff it is a well-formed cognition-writeback envelope.
+
+    Postconditions:
+        * ``None`` when ``result`` is not a mapping or lacks the marker — the
+          caller treats it as a plain entrypoint result (no events to lift).
+        * An :class:`UnwrappedWriteback` when the marker is present: ``output`` is
+          the inner output (``None`` if absent), and ``events`` / ``tool_calls``
+          come from the ``writeback`` mapping (each an empty list when absent or
+          malformed). Tolerant by design — a usable output must never be lost just
+          because the writeback half is misshapen.
+    """
+    if not isinstance(result, Mapping) or WRITEBACK_MARKER not in result:
+        return None
+    writeback = result.get("writeback")
+    if not isinstance(writeback, Mapping):
+        writeback = {}
+    events = writeback.get("events")
+    tool_calls = writeback.get("tool_calls")
+    return UnwrappedWriteback(
+        output=result.get("output"),
+        events=list(events) if isinstance(events, list) else [],
+        tool_calls=list(tool_calls) if isinstance(tool_calls, list) else [],
+    )

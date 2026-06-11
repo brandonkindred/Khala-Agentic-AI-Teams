@@ -186,4 +186,42 @@ def test_invoke_generated_agent_is_dispatch_compatible(fake_strands):
     )
     assert target is agent_builder.invoke_generated_agent
     callable_obj = _materialise(target)
-    assert callable_obj({"agent_name": "A", "message": "hi"}) == {"output": "ok"}
+    result = callable_obj({"agent_name": "A", "message": "hi"})
+    # No channel open → plain output, no writeback envelope.
+    assert result == {"output": "ok"}
+
+
+def test_shape_invoke_result_plain_without_writeback():
+    assert agent_builder._shape_invoke_result("hi", None) == {"output": "hi"}
+    assert agent_builder._shape_invoke_result("hi", {}) == {"output": "hi"}
+
+
+def test_shape_invoke_result_wraps_writeback():
+    from agent_cognition.tools.envelope import WRITEBACK_MARKER, try_unwrap_writeback
+
+    wb = {"events": [{"id": "e1"}], "tool_calls": []}
+    wrapped = agent_builder._shape_invoke_result("hi", wb)
+    assert wrapped[WRITEBACK_MARKER] == 1
+    unwrapped = try_unwrap_writeback(wrapped)
+    assert unwrapped.output == {"output": "hi"}
+    assert unwrapped.events == [{"id": "e1"}]
+
+
+def test_shape_invoke_result_degrades_when_envelope_absent(monkeypatch: pytest.MonkeyPatch):
+    # If the cognition package can't be imported, fall back to plain output.
+    monkeypatch.setitem(__import__("sys").modules, "agent_cognition.tools.envelope", None)
+    assert agent_builder._shape_invoke_result("hi", {"events": [1]}) == {"output": "hi"}
+
+
+def test_invoke_generated_agent_writeback_reaches_shim(fake_strands):
+    # End-to-end: with a channel open, invoke_generated_agent returns a wrapped
+    # writeback whose events the shim lifts into its driven result (→ memory_events).
+    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+
+    with runtime_channel({"rules": [_ADVISORY]}):
+        result = agent_builder.invoke_generated_agent({"agent_name": "A", "message": "hi"})
+
+    driven = maybe_drive_tool_loop(result, agent_id="A", source_run_id="r", cognition=None)
+    assert driven["output"] == {"output": "ok"}
+    assert len(driven["events"]) == 1
+    assert driven["events"][0]["kind"] == "outcome"

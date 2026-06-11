@@ -14,9 +14,13 @@ discovery paths.
 
 from __future__ import annotations
 
+import logging
+
 from agent_registry.models import AgentManifest, CognitionSpec, IOSchema, SourceInfo
 from agentic_team_provisioning.agent_env_provisioning import _slug
 from agentic_team_provisioning.models import AgenticTeamAgent
+
+logger = logging.getLogger(__name__)
 
 # The registry team key for this service (matches TEAM_CONFIGS in
 # unified_api/config.py). This is the manifest ``team`` value — distinct from the
@@ -94,3 +98,31 @@ def build_agent_manifest(team_id: str, agent: AgenticTeamAgent) -> AgentManifest
     # Round-trip through a JSON-safe dump so the returned object is guaranteed
     # to be a fully validated manifest (and safe to serialize over the API).
     return AgentManifest.model_validate(manifest.model_dump(mode="json"))
+
+
+def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> list[AgentManifest]:
+    """Build and install the live registry entries for a team's roster.
+
+    Generated agents are not discovered from disk, so they are registered into the
+    process-wide :class:`~agent_registry.loader.AgentRegistry` here — making them
+    resolvable by the Agent Console catalog and the ``/api/agents/{id}/invoke``
+    route (cognition injection + seed-pack install then happen on first invoke).
+
+    Preconditions:
+        * ``team_id`` is non-empty.
+    Postconditions:
+        * Returns one validated manifest per roster agent, each already registered
+          (``get_registry().get(m.id)`` returns it). Registration is in-memory and
+          idempotent — re-registering an id overwrites the prior entry. Best-effort:
+          a registry failure is logged, never raised, so generation still succeeds.
+    """
+    manifests = [build_agent_manifest(team_id, a) for a in agents]
+    try:
+        from agent_registry import get_registry
+
+        registry = get_registry()
+        for manifest in manifests:
+            registry.register(manifest)
+    except Exception:
+        logger.warning("Could not register generated manifests for team %s", team_id, exc_info=True)
+    return manifests

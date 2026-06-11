@@ -253,7 +253,7 @@ def invoke_generated_agent(body: Any) -> dict[str, Any]:
     data = dict(body) if isinstance(body, dict) else {}
     agent_name = data.get("agent_name") or data.get("name") or "agent"
     message = data.get("message") or data.get("input") or data.get("prompt") or ""
-    text, _writeback = call_agent_with_cognition(
+    text, writeback = call_agent_with_cognition(
         agent_name,
         data.get("role", ""),
         data.get("skills", []),
@@ -263,7 +263,26 @@ def invoke_generated_agent(body: Any) -> dict[str, Any]:
         message,
         agent_id=data.get("agent_id"),
     )
-    return {"output": text}
+    return _shape_invoke_result(text, writeback)
+
+
+def _shape_invoke_result(text: str, writeback: dict[str, Any] | None) -> dict[str, Any]:
+    """Shape the entrypoint return value, lifting any writeback into the envelope.
+
+    Postconditions: returns ``{"output": text}`` when there is no writeback or the
+    cognition package is unavailable; otherwise returns a marker-wrapped envelope
+    (``agent_cognition.tools.envelope.wrap_writeback``) carrying the same output
+    plus the writeback, so the invoke shim lifts the episodic events into the
+    response's ``memory_events`` instead of dropping them.
+    """
+    output = {"output": text}
+    if not writeback:
+        return output
+    try:
+        from agent_cognition.tools.envelope import wrap_writeback
+    except Exception:
+        return output
+    return wrap_writeback(output, writeback)
 
 
 def generate_starter_prompts(

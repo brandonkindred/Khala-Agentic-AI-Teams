@@ -67,6 +67,37 @@ def test_loader_skips_malformed_yaml(tmp_path: Path) -> None:
     assert reg.all() == []
 
 
+def _manifest(agent_id: str, name: str) -> AgentManifest:
+    from agent_registry.models import SourceInfo
+
+    return AgentManifest(
+        id=agent_id,
+        team="generated_team",
+        name=name,
+        summary="s",
+        source=SourceInfo(entrypoint="m:f"),
+    )
+
+
+def test_register_installs_and_overwrites() -> None:
+    reg = AgentRegistry([], {})
+    first = _manifest("gen.a", "First")
+    reg.register(first)
+    assert reg.get("gen.a") is first
+
+    # Re-registering the same id overwrites the prior entry (idempotent install).
+    second = _manifest("gen.a", "Second")
+    reg.register(second)
+    assert reg.get("gen.a") is second
+    assert reg.get("gen.a").name == "Second"
+
+
+def test_register_tracks_source_path(tmp_path: Path) -> None:
+    reg = AgentRegistry([], {})
+    reg.register(_manifest("gen.b", "B"), source_path=tmp_path / "b.yaml")
+    assert reg._source_paths["gen.b"] == tmp_path / "b.yaml"
+
+
 def test_loader_skips_invalid_manifest_shape(tmp_path: Path) -> None:
     # Missing required fields (id, team, name, summary, source).
     _write_manifest(

@@ -122,6 +122,25 @@ class AgentRegistry:
     def get(self, agent_id: str) -> AgentManifest | None:
         return self._by_id.get(agent_id)
 
+    def register(self, manifest: AgentManifest, source_path: Path | None = None) -> None:
+        """Install a manifest into the live registry (for dynamically generated agents).
+
+        Disk discovery (:meth:`load`) is the norm; teams that *generate* agents at
+        runtime register them here so the Agent Console catalog and the invoke
+        route (``get_registry().get(id)``) resolve them without a YAML file.
+
+        Preconditions:
+            * ``manifest.id`` is non-empty.
+        Postconditions:
+            * ``get(manifest.id)`` returns ``manifest`` (re-registering the same id
+              overwrites the prior entry). Registration is in-memory only and does
+              not persist across process restarts.
+        """
+        assert manifest.id, "register: manifest.id must be non-empty"
+        self._by_id[manifest.id] = manifest
+        if source_path is not None:
+            self._source_paths[manifest.id] = source_path
+
     def search(
         self,
         *,

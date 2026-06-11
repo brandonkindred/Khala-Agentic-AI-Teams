@@ -103,12 +103,20 @@ _agent = ProcessDesignerAgent()
 _test_store = get_test_store()
 _pipeline_runner = get_pipeline_runner(_test_store)
 
-# Retroactive provisioning: ensure all existing teams have infrastructure
+# Retroactive provisioning: ensure all existing teams have infrastructure and
+# that their generated agents are registered in the live registry (rosters are
+# Postgres-backed, so this re-registers them after a process restart).
 try:
+    from agentic_team_provisioning.manifest_generation import register_team_manifests
+
     for _team_row in _store.list_teams():
-        get_team_infrastructure(_team_row["team_id"])
+        _tid = _team_row["team_id"]
+        get_team_infrastructure(_tid)
+        _team = _store.get_team(_tid)
+        if _team is not None and _team.agents:
+            register_team_manifests(_tid, _team.agents)
 except Exception as _e:
-    logger.warning("Could not retroactively provision team infrastructure: %s", _e)
+    logger.warning("Could not retroactively provision/register existing teams: %s", _e)
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
@@ -144,6 +152,11 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
         )
     if agents:
         _store.save_team_agents(team_id, agents)
+        # Install the generated agents into the live registry so the Agent Console
+        # catalog and /api/agents/{id}/invoke resolve them (best-effort).
+        from agentic_team_provisioning.manifest_generation import register_team_manifests
+
+        register_team_manifests(team_id, agents)
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
