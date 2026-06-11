@@ -788,6 +788,44 @@ def test_parallel_map_failure_cancels_and_raises() -> None:
         )
 
 
+def test_parallel_map_failure_does_not_wait_for_inflight_reviews() -> None:
+    """A fast infra failure must propagate immediately: pending chunks are
+    cancelled and in-flight reviews are left to finish in the background, so
+    the failure is never blocked behind another chunk's model timeout."""
+    release = threading.Event()
+
+    class _OneFailsOneBlocks(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.slow_finished = False
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "FAILME" in prompt:
+                raise LLMRateLimitError("429")
+            release.wait(timeout=10)
+            self.slow_finished = True
+            return super().complete_json(prompt, **kwargs)
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {
+        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
+        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+    }
+    client = _OneFailsOneBlocks()
+    try:
+        with pytest.raises(CodeReviewUnavailableError):
+            run_coordinator(
+                client,
+                CodeReviewInput(files=files, task_description="t", language="python"),
+            )
+        # The failure surfaced while the other chunk's review was still
+        # in flight — the coordinator did not block waiting for it.
+        assert client.slow_finished is False
+    finally:
+        release.set()
+
+
 def test_headerless_code_reviews_as_single_unnamed_block() -> None:
     client = _ScriptedClient([{"approved": True, "issues": [], "summary": "fine"}])
     result = run_coordinator(
@@ -932,9 +970,11 @@ def test_coordinator_multi_chunk_joins_notes_and_drops_commit_message() -> None:
     assert result.suggested_commit_message == ""
 
 
-def test_single_chunk_keeps_notes_even_after_bisected_recovery() -> None:
-    """A logically-single-chunk review that recovers via bisection still keeps
-    its spec notes (joined), instead of silently dropping them."""
+def test_single_chunk_keeps_notes_but_drops_commit_message_after_bisection() -> None:
+    """A logically-single-chunk review that recovers via bisection keeps its
+    spec notes (joined), but drops the commit message: each half's message was
+    written having seen only part of the change, so forwarding one would
+    present a partial view as covering the whole submission."""
 
     class _FailCombinedWithNotes(DummyLLMClient):
         def __init__(self) -> None:
@@ -962,8 +1002,8 @@ def test_single_chunk_keeps_notes_even_after_bisected_recovery() -> None:
         ),
     )
     assert result.spec_compliance_notes == "half notes\n\nhalf notes"
-    # One logical chunk → the first non-empty commit message is kept.
-    assert result.suggested_commit_message == "feat: half"
+    # Two sub-reviews → neither commit message saw the whole change.
+    assert result.suggested_commit_message == ""
 
 
 # ---------------------------------------------------------------------------

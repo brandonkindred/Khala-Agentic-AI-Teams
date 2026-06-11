@@ -666,8 +666,10 @@ def _map_chunks(
 
     Postconditions:
         - Returns one outcome per chunk in input order, or raises
-          ``CodeReviewUnavailableError`` (further pending chunks are cancelled;
-          the run has no verdict).
+          ``CodeReviewUnavailableError``. On failure, pending chunks are
+          cancelled and the exception propagates immediately — already-running
+          reviews are left to finish in the background rather than blocking
+          the failure behind in-flight model calls.
     """
     workers = min(_map_parallelism(), len(chunks))
     if workers <= 1:
@@ -678,13 +680,12 @@ def _map_chunks(
             executor.submit(_review_chunk_with_recovery, chunk_reviewer, c, base_input)
             for c in chunks
         ]
-        try:
-            return [f.result() for f in futures]
-        except BaseException:
-            executor.shutdown(wait=False, cancel_futures=True)
-            raise
-    finally:
-        executor.shutdown(wait=True)
+        results = [f.result() for f in futures]
+    except BaseException:
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise
+    executor.shutdown(wait=True)
+    return results
 
 
 def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOutput:
@@ -776,10 +777,12 @@ def run_coordinator(llm: LLMClient, input_data: CodeReviewInput) -> CodeReviewOu
 
     spec_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
     # A commit message synthesized from a fraction of the change is misleading,
-    # so it is only forwarded when the whole submission fit one chunk.
+    # so it is only forwarded when a single sub-review saw the whole submission
+    # in one piece — a bisected recovery produces per-half messages and drops it.
     commit_message = ""
-    if len(chunks) == 1:
-        commit_message = next((m for m in outcome.commit_messages if m.strip()), "")
+    if len(chunks) == 1 and len(outcome.commit_messages) == 1:
+        commit_message = outcome.commit_messages[0]
+        commit_message = commit_message if commit_message.strip() else ""
 
     logger.info(
         "CodeReviewCoordinator: done, approved=%s, issues=%s, chunks=%s (sub-reviews=%s)",
