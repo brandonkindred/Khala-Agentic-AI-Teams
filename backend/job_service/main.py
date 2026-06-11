@@ -156,7 +156,11 @@ def update_job(team: str, job_id: str, req: UpdateJobRequest):
 
 @app.post("/jobs/{team}/{job_id}/apply", response_model=JobResponse)
 def apply_patch(team: str, job_id: str, req: ApplyPatchRequest):
-    db_apply_patch(
+    # Return the record read back inside apply_patch's own row-locked transaction — NOT a separate
+    # db_get_job, which could observe a concurrent patch's write and break atomic read-after-write
+    # for counter increments (two racing claims could each read the other's final value and both
+    # mis-conclude they lost).
+    updated = db_apply_patch(
         team,
         job_id,
         merge_fields=req.merge_fields,
@@ -164,7 +168,7 @@ def apply_patch(team: str, job_id: str, req: ApplyPatchRequest):
         append_to=req.append_to,
         increment=req.increment,
     )
-    return JobResponse(job=db_get_job(team, job_id))
+    return JobResponse(job=updated)
 
 
 @app.post("/jobs/{team}/{job_id}/event", response_model=JobResponse)
