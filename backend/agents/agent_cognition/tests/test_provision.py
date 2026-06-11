@@ -60,10 +60,24 @@ def test_idempotent_across_processes(monkeypatch):
     assert len(store.list_rules("a")) == 1
 
 
-def test_empty_rule_packs_is_noop(monkeypatch):
+def test_empty_rule_packs_is_noop_and_not_memoized(monkeypatch):
     monkeypatch.setattr(manifest_scope, "rule_packs", lambda _id: [])
     assert provision.ensure_seed_packs_installed("a") == []
     assert store.list_rules("a") == []
+    # An empty result is indistinguishable from a transient lookup failure, so it
+    # must not be memoized — a later invoke has to retry.
+    assert "a" not in provision._PROVISIONED
+
+
+def test_recovers_after_transient_empty_lookup(monkeypatch):
+    """An empty list (e.g. registry not yet loaded) must not block a later install."""
+    packs: list[str] = []
+    monkeypatch.setattr(manifest_scope, "rule_packs", lambda _id: list(packs))
+    assert provision.ensure_seed_packs_installed("a") == []  # registry "unavailable"
+    assert store.list_rules("a") == []
+    packs.append("default_guardrails")  # registry recovers
+    assert len(provision.ensure_seed_packs_installed("a")) == 1
+    assert len(store.list_rules("a")) == 1
 
 
 def test_unknown_pack_skipped_others_install(monkeypatch):

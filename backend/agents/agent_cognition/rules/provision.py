@@ -52,9 +52,15 @@ def ensure_seed_packs_installed(agent_id: str) -> list[str]:
           installed idempotently; returns the rule ids newly inserted across all
           packs (``[]`` when every declared rule already existed). An unknown
           pack name is logged and skipped — one bad name does not block the rest.
-        * On a clean pass the agent is memoized so later invokes skip the work; a
-          storage outage (or any unexpected error) is logged, leaves the memo
-          untouched (so a later invoke retries), and still returns ``[]``.
+        * The agent is memoized (so later invokes skip the work) only after a
+          clean install of a **non-empty** pack list. An empty result is never
+          memoized — it is indistinguishable from a transient registry-lookup
+          failure (``manifest_scope.rule_packs`` returns ``[]`` for both a
+          declared-empty manifest and a failed lookup), so a later invoke re-reads
+          the registry and installs the declared packs once it recovers. The
+          re-read is a cheap in-process registry call, not a DB round-trip.
+        * A storage outage (or any unexpected error) is logged, leaves the memo
+          untouched, and still returns ``[]``.
         * Never raises — a cognition failure must not break the invoke.
     """
     assert agent_id, "ensure_seed_packs_installed: agent_id must be non-empty"
@@ -65,6 +71,12 @@ def ensure_seed_packs_installed(agent_id: str) -> list[str]:
             return []
 
     packs = manifest_scope.rule_packs(agent_id)
+    if not packs:
+        # No declared packs, or a transient registry-lookup failure that yielded
+        # an empty list — nothing to install, and memoizing would wrongly mark a
+        # failed lookup as provisioned. Return without recording; a real empty
+        # declaration just re-reads the cheap registry next invoke.
+        return []
     new_ids: list[str] = []
     try:
         for pack in packs:

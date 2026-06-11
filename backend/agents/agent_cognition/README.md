@@ -246,8 +246,8 @@ context read and precondition gate.
 ## Configuration & operability
 
 All cognition env vars parse defensively (unset/garbage → the documented default; out-of-range →
-clamped to the documented floor) and are detailed in [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md).
-Consolidated reference:
+clamped to the documented floor, or the default where no floor is given) and are detailed in
+[`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md). Consolidated reference:
 
 | Knob | Where | Default | Purpose |
 |---|---|---|---|
