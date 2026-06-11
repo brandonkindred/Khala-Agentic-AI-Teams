@@ -975,6 +975,89 @@ def test_coordinator_synthesizes_issue_on_zero_issue_reject_with_summary() -> No
     assert "Missing input validation" in result.issues[0].description
 
 
+def test_rejecting_chunk_summary_survives_other_chunks_findings() -> None:
+    """A chunk that rejects with zero issues but a meaningful summary must
+    surface that summary as a synthesized high issue even when other chunks
+    contributed findings (e.g. an info empty-file finding) — the rejection is
+    reconciled per sub-review, never masked by the merged issue list."""
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+
+    class _RejectBWithSummaryOnly(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "### b.py ###" in prompt:
+                return {
+                    "approved": False,
+                    "issues": [],
+                    "summary": "Missing error handling around DB calls in b.py.",
+                }
+            return {"approved": True, "issues": [], "summary": "a.py looks fine"}
+
+    files = {
+        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
+        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+        "empty.py": "",  # contributes the non-blocking info finding
+    }
+    result = run_coordinator(
+        _RejectBWithSummaryOnly(),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    assert result.approved is False
+    high = [i for i in result.issues if i.severity == "high"]
+    assert len(high) == 1
+    assert "Missing error handling around DB calls" in high[0].description
+    info = [i for i in result.issues if i.severity == "info"]
+    assert [i.file_path for i in info] == ["empty.py"]
+
+
+def test_no_stale_progress_reports_after_map_failure() -> None:
+    """A worker still in flight when the map phase fails must never report
+    progress afterwards — a stale 'reviewing' report would overwrite the
+    caller's recorded failure state."""
+    release = threading.Event()
+    calls: list = []
+
+    class _OneFailsOneBlocks(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.slow_finished = threading.Event()
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "FAILME" in prompt:
+                raise LLMRateLimitError("429")
+            release.wait(timeout=10)
+            result = super().complete_json(prompt, **kwargs)
+            self.slow_finished.set()
+            return result
+
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    files = {
+        "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
+        "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
+    }
+    client = _OneFailsOneBlocks()
+    try:
+        with pytest.raises(CodeReviewUnavailableError):
+            run_coordinator(
+                client,
+                CodeReviewInput(files=files, task_description="t", language="python"),
+                progress_callback=lambda s, d, f: calls.append((s, d, f)),
+            )
+        reports_at_failure = list(calls)
+    finally:
+        release.set()
+    # Let the abandoned worker finish, then confirm it reported nothing more
+    # (the brief grace period lets a buggy late notify land before asserting).
+    import time
+
+    assert client.slow_finished.wait(timeout=10), "abandoned worker must still complete"
+    time.sleep(0.1)
+    assert calls == reports_at_failure
+    assert not any("slow.py" in d for _s, d, _f in calls)
+
+
 def test_coordinator_single_chunk_propagates_notes_and_commit_message() -> None:
     client = _ScriptedClient(
         [

@@ -542,6 +542,11 @@ def _review_chunk_with_recovery(
           bisect further — the original or a bisected child — gets exactly one
           same-input retry before the run fails, so a one-off transient error
           in a terminal child never aborts the review.
+        - A sub-review that rejects with no extractable issues but a non-empty
+          summary contributes one synthesized high issue built from that
+          summary: applied here, per sub-review, because at the merged level
+          other chunks' findings would mask the empty-issues condition and the
+          minor-only auto-approve net would silently discard the rejection.
     """
     chunk_input = ChunkReviewInput(
         code_chunk=chunk.content,
@@ -582,8 +587,20 @@ def _review_chunk_with_recovery(
             f"Chunk review failed after recovery attempts ({type(exc).__name__}: {exc}).",
             unreviewed=_chunk_ranges(chunk),
         ) from exc
+    issues = _issues_from_chunk_output(chunk, output.issues)
+    if not output.approved and not issues and output.summary and output.summary.strip():
+        issues = [
+            CodeReviewIssue(
+                severity="high",
+                category="general",
+                file_path="",
+                description=f"Code review rejected: {output.summary}",
+                suggestion="Address the concerns described in the review summary. "
+                "Ensure the code meets all acceptance criteria and follows project conventions.",
+            )
+        ]
     return _ChunkOutcome(
-        issues=_issues_from_chunk_output(chunk, output.issues),
+        issues=issues,
         summaries=[output.summary],
         spec_notes=[output.spec_compliance_notes],
         commit_messages=[output.suggested_commit_message],
@@ -632,7 +649,10 @@ def _reconcile_approval(
           one critical/high finding (rejections are always actionable).
         - A reject with only minor/info issues, or with no feedback at all,
           flips to approve; a reject with zero issues but a summary gains one
-          synthesized high issue built from that summary.
+          synthesized high issue built from that summary. (A rejecting
+          sub-review's summary is already synthesized per sub-review in
+          ``_review_chunk_with_recovery`` — this merged-level net only covers
+          the case where no chunk produced any finding at all.)
     """
     critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
     approved = llm_approved and not critical_or_high
@@ -696,21 +716,27 @@ def _map_chunks(
           order) with fractions in (0.10, 0.90]; the counter update and the
           callback run under one lock, so fractions stay non-decreasing even
           with parallel workers.
+        - After a failure propagates, no further progress is ever reported:
+          abandoned in-flight workers finish in the background with their
+          callback suppressed, so stale "reviewing" reports can never
+          overwrite the caller's failure state.
     """
     total = len(chunks)
     progress_lock = threading.Lock()
     completed_count = [0]
+    abandoned = threading.Event()
 
     def _run_one(chunk: ReviewChunk) -> _ChunkOutcome:
         outcome = _review_chunk_with_recovery(chunk_reviewer, chunk, base_input)
         with progress_lock:
-            completed_count[0] += 1
-            notify_review_progress(
-                progress_callback,
-                "reviewing",
-                f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label[:120]}",
-                0.10 + 0.80 * completed_count[0] / total,
-            )
+            if not abandoned.is_set():
+                completed_count[0] += 1
+                notify_review_progress(
+                    progress_callback,
+                    "reviewing",
+                    f"chunk {completed_count[0]}/{total} reviewed: {chunk.paths_label[:120]}",
+                    0.10 + 0.80 * completed_count[0] / total,
+                )
         return outcome
 
     workers = min(_map_parallelism(), total)
@@ -727,6 +753,10 @@ def _map_chunks(
                 f.result()  # re-raises the worker's exception with its traceback
         results = [f.result() for f in futures]
     except BaseException:
+        # Setting the flag under the progress lock guarantees any in-flight
+        # report finishes before the failure propagates and none follows it.
+        with progress_lock:
+            abandoned.set()
         executor.shutdown(wait=False, cancel_futures=True)
         raise
     executor.shutdown(wait=True)
