@@ -228,12 +228,43 @@ def test_prepare_replays_blocked_row_as_4xx(seams: SimpleNamespace) -> None:
         "status": "blocked",
         "hash": gate.derive_source_run_id({"q": 1})[1],
         "token": "t",
-        "response": {"status_code": 422, "content": {"detail": {"phase": "precondition"}}},
+        "response": {
+            "status_code": 422,
+            "content": {"detail": {"phase": "precondition"}},
+            "blocked": True,
+            "block_phase": "precondition",
+            "block_reason": "blocked by rule r",
+        },
         "lease_valid": False,
     }
     out = _run(gate.prepare_invoke(_AGENT, {"q": 1}, idempotency_key="k1"))
     assert out.kind is gate.GateOutcomeKind.REPLAY
     assert out.status_code == 422
+    # The structured fields are restored from the ledger onto the outcome…
+    assert out.replay_blocked is True
+    assert out.block_phase == "precondition"
+    assert out.block_reason == "blocked by rule r"
+    # …and the finalized replay is indistinguishable from a fresh block.
+    fin = gate.outcome_as_finalized(out)
+    assert fin.replayed and fin.blocked and fin.block_phase == "precondition"
+
+
+def test_prepare_replays_legacy_blocked_row_degrades(seams: SimpleNamespace) -> None:
+    """A blocked row stored before the structured fields existed lacks the new
+    keys; replay must degrade to blocked=False rather than erroring."""
+    seams.ledger.rows[(_AGENT, "k1")] = {
+        "status": "blocked",
+        "hash": gate.derive_source_run_id({"q": 1})[1],
+        "token": "t",
+        "response": {"status_code": 422, "content": {"detail": {"phase": "precondition"}}},
+        "lease_valid": False,
+    }
+    out = _run(gate.prepare_invoke(_AGENT, {"q": 1}, idempotency_key="k1"))
+    assert out.kind is gate.GateOutcomeKind.REPLAY
+    assert out.status_code == 422  # HTTP body unchanged from today
+    assert out.replay_blocked is False and out.block_phase is None
+    fin = gate.outcome_as_finalized(out)
+    assert fin.replayed and not fin.blocked  # graceful degradation, no error
 
 
 def test_prepare_malformed_stored_envelope_degrades_to_conflict(seams: SimpleNamespace) -> None:
@@ -336,14 +367,26 @@ def test_prepare_precondition_block_is_durable(seams: SimpleNamespace) -> None:
     assert writeback.events[0].data["phase"] == "precondition"
     assert out.reason  # structured cause carried on the outcome
 
-    # …and the 4xx envelope stored as blocked, so a retry replays it verbatim.
+    # …and the 4xx envelope stored as blocked — with the structured block
+    # fields alongside the replayable body — so a retry replays it verbatim AND
+    # restores the same structured shape a fresh block reports.
     row = seams.ledger.rows[(_AGENT, "k1")]
     assert row["status"] == "blocked"
     assert row["response"]["status_code"] == 422
+    assert row["response"]["blocked"] is True
+    assert row["response"]["block_phase"] == "precondition"
+    assert row["response"]["block_reason"] == out.reason
     replay = _run(gate.prepare_invoke(_AGENT, {"q": 1}, idempotency_key="k1"))
     assert replay.kind is gate.GateOutcomeKind.REPLAY
     assert replay.status_code == 422
-    assert replay.content == out.content
+    assert replay.content == out.content  # HTTP body byte-identical to the fresh block
+    # The structured fields ride the outcome onto the finalized replay, so an
+    # in-process caller branching on fin.blocked sees the block.
+    assert replay.replay_blocked is True
+    fin = gate.outcome_as_finalized(replay)
+    assert fin.replayed and fin.blocked
+    assert fin.block_phase == "precondition"
+    assert fin.block_reason == out.reason
 
 
 def test_prepare_precondition_block_unledgered_still_records_event(
@@ -684,18 +727,35 @@ def test_outcome_as_finalized_uses_shared_status_map(seams: SimpleNamespace) -> 
         gate.GateOutcome(kind=gate.GateOutcomeKind.REPLAY, status_code=200, content={"output": 1})
     )
     assert replay.replayed and replay.status_code == 200
-    # A replay of a previously BLOCKED run is a verbatim re-serve: the stored
-    # 4xx rides in status_code/content, but the structured block fields stay
-    # unset — they describe THIS attempt's gating, which a replay skips.
+    # A replay of a previously BLOCKED run restores the structured block fields
+    # the ledger stored, so it is indistinguishable from a fresh block to a
+    # caller branching on the structured fields — the point of the change.
     replayed_block = gate.outcome_as_finalized(
+        gate.GateOutcome(
+            kind=gate.GateOutcomeKind.REPLAY,
+            status_code=422,
+            content={"detail": {"phase": "precondition", "reason": "r"}},
+            replay_blocked=True,
+            block_phase="precondition",
+            block_reason="r",
+        )
+    )
+    assert replayed_block.replayed and replayed_block.status_code == 422
+    assert replayed_block.blocked and replayed_block.block_phase == "precondition"
+    assert replayed_block.block_reason == "r"
+    # Graceful degradation: a blocked run stored BEFORE the structured fields
+    # existed replays the 4xx body but lacks the keys, so it degrades to
+    # blocked=False (documented) rather than erroring.
+    legacy_block = gate.outcome_as_finalized(
         gate.GateOutcome(
             kind=gate.GateOutcomeKind.REPLAY,
             status_code=422,
             content={"detail": {"phase": "precondition", "reason": "r"}},
         )
     )
-    assert replayed_block.replayed and replayed_block.status_code == 422
-    assert not replayed_block.blocked and replayed_block.block_phase is None
+    assert legacy_block.replayed and legacy_block.status_code == 422
+    assert not legacy_block.blocked and legacy_block.block_phase is None
+    assert legacy_block.block_reason is None
     # An unmapped future kind raises the typed exhaustiveness error.
     with pytest.raises(gate.UnmappedGateOutcomeError, match="future_kind"):
         gate.outcome_as_finalized(gate.GateOutcome(kind="future_kind"))  # type: ignore[arg-type]

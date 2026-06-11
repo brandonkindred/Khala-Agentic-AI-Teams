@@ -163,7 +163,7 @@ so byte-identical keyless retries still dedup. The run is claimed in the leased
 | Ledger state on claim | Result |
 |---|---|
 | first sight | claimed; executes; `completed`/`blocked` stored on return |
-| terminal (`completed` **or** `blocked`), same body hash | **replays the stored envelope** without re-invoking (the proxy adds `X-Khala-Replayed: true`); a retried rule block replays the same 4xx |
+| terminal (`completed` **or** `blocked`), same body hash | **replays the stored envelope** without re-invoking (the proxy adds `X-Khala-Replayed: true`); a retried rule block replays the same 4xx **and restores the structured `blocked`/`block_phase`/`block_reason` fields** (rows stored before those keys existed degrade to `blocked=False`) |
 | any row, different body hash | `409` — one key, one body |
 | `in_progress`, valid lease | `409` — still in flight |
 | `in_progress`, expired lease | reclaimed in place (hash retained) and re-executed |
@@ -214,10 +214,14 @@ when an agent carrying enforced postcondition rules returns a 2xx without an obj
 `output` — the rules evaluate against an empty mapping (missing paths block) rather than
 being silently skipped. A pass persists the envelope's `memory_events` (validated
 defensively — one malformed event is dropped with a warning, never failing the call) and
-completes the ledger row with `{status_code, content}` for replay. The stored envelope
-never carries the per-invoke `sandbox` block, so a replay cannot masquerade as a fresh
-boot. Blocked outcomes carry structured `block_phase` / `block_reason` fields — callers
-read those, never parse the stored HTTP body.
+completes the ledger row with `{status_code, content}` for replay. A `blocked` row stores
+the structured fields (`blocked`/`block_phase`/`block_reason`) alongside that body, so a
+replayed block restores the same structured shape a fresh block reports — indistinguishable
+to callers branching on `fin.blocked` — while a row stored before those keys existed
+degrades to `blocked=False` (no migration). The stored envelope never carries the per-invoke
+`sandbox` block, so a replay cannot masquerade as a fresh boot. Blocked outcomes carry
+structured `block_phase` / `block_reason` fields — callers read those, never parse the
+stored HTTP body.
 
 ## Seed rule packs (`rules/seed_packs.py`, `rules/provision.py`)
 
