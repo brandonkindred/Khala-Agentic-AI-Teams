@@ -693,6 +693,16 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     if hitl.is_terminal(data):
         logger.warning("Auto-resume for job %s skipped: job is terminal.", job_id)
         return False
+    # Only a paused job is safely resumable: a non-paused (e.g. running) job has no heartbeat to
+    # prove it dead, so it may be alive in another worker. Every current caller already passes a
+    # waiting_for_user record; this is a defensive invariant so the function stays safe if reused.
+    if data.get("status") != hitl.WAITING_STATUS:
+        logger.warning(
+            "Auto-resume for job %s skipped: not paused (status=%s).",
+            job_id,
+            data.get("status"),
+        )
+        return False
     if _answer_wait_heartbeat_fresh(data):
         _schedule_resume_recheck(job_id)
         return True
@@ -785,12 +795,14 @@ def resume_job(job_id: str) -> RunResponse:
     team mounts; like every other coding-team route, this endpoint assumes that perimeter.
 
     Preconditions:
-        - The job exists and is not terminal (a finished run must never be silently re-executed).
+        - The job exists, is not terminal, and (once liveness can't be proven) is paused in the
+          ``waiting_for_user`` state — the only state a resume is both needed and provably safe.
     Postconditions:
-        - Raises 404 (unknown job), 400 (terminal job, missing repo_path/plan, or a GitHub-issue
-          job with no usable token); returns "already running" without spawning when a live
-          thread, fresh heartbeat, or concurrent claim exists; otherwise spawns the orchestrator
-          (hook path for GitHub-issue jobs) and reports "Job resumed."
+        - Raises 404 (unknown job), 400 (terminal job, a non-paused job that can't be proven
+          alive, missing repo_path/plan, or a GitHub-issue job with no usable token); returns
+          "already running" without spawning when a live thread, fresh heartbeat, or concurrent
+          claim exists; otherwise spawns the orchestrator (hook path for GitHub-issue jobs) and
+          reports "Job resumed."
     """
     data = get_job(job_id)
     if not data:
@@ -805,6 +817,20 @@ def resume_job(job_id: str) -> RunResponse:
         # wait loop is alive in another worker — resuming here would double-drive the job.
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
+        )
+    # Past the liveness no-op, we could not PROVE the job is alive — but proof is only possible for
+    # a paused job (its wait loop heartbeats). A job in any other non-terminal state (most
+    # dangerously ``running``, actively doing code work with no heartbeat) might still be alive in
+    # another worker, and a heartbeat goes stale 30s after a pause ends. Only a paused
+    # (waiting_for_user) job is safely resumable; restarting anything else risks a second
+    # orchestrator mutating the same checkout concurrently.
+    if data.get("status") != hitl.WAITING_STATUS:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Job is {data.get('status', 'in an unknown state')}, not paused waiting for "
+                "answers; only a paused (waiting_for_user) job can be resumed."
+            ),
         )
     plan_raw = data.get("plan_input") or {}
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")

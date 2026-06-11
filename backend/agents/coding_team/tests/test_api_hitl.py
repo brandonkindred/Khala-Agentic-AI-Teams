@@ -502,9 +502,43 @@ def test_persisted_github_token_never_leaks_into_responses(monkeypatch):
     assert "super-secret-pat" not in jobs_body
 
 
+def test_resume_400_when_running_and_not_locally_alive(monkeypatch):
+    """Multi-worker safety: a genuinely running job whose thread lives in another worker has no
+    fresh heartbeat (heartbeats only happen during a pause). Resume must refuse rather than start
+    a second orchestrator on the same checkout."""
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn a second orchestrator for a running job")
+
+    job = _job(status="running", waiting_for_answers=False)  # no answer_wait_heartbeat_at → stale
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    assert "only a paused" in r.json()["detail"].lower()
+
+
+def test_resume_running_job_alive_locally_is_noop(monkeypatch):
+    """A running job whose thread IS alive in this worker is a no-op, not a 400 — the status guard
+    sits after the liveness no-op so a self-targeted resume still reports 'already running'."""
+    job = _job(status="running", waiting_for_answers=False)
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: True)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert "already running" in r.json()["message"]
+
+
 def test_auto_resume_refuses_terminal_job():
     assert api._try_auto_resume("j1", _job(status="completed")) is False
     assert api._try_auto_resume("j1", _job(status="cancelled")) is False
+
+
+def test_auto_resume_refuses_non_paused_job():
+    """Defensive invariant: _try_auto_resume only restarts a paused (waiting_for_user) job."""
+    assert api._try_auto_resume("j1", _job(status="running", waiting_for_answers=False)) is False
+    assert api._try_auto_resume("j1", _job(status="pending", waiting_for_answers=False)) is False
 
 
 class _ImmediateTimer:
