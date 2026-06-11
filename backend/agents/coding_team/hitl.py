@@ -59,6 +59,15 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 _TERMINAL_STATUSES = frozenset({"failed", "cancelled", "completed", "completed_with_failures"})
 
 
+def heartbeat_timestamp() -> str:
+    """Current UTC ISO-8601 timestamp for an answer-wait liveness heartbeat.
+
+    Postconditions:
+        - Returns a timezone-aware ISO-8601 string parseable by ``datetime.fromisoformat``.
+    """
+    return datetime.now(timezone.utc).isoformat()
+
+
 def answer_wait_timeout_s() -> float:
     """Wall-clock cap (seconds) for a single HITL pause.
 
@@ -388,7 +397,7 @@ def wait_for_answers(
             return False
         if heartbeat_fn is not None:
             try:
-                heartbeat_fn(datetime.now(timezone.utc).isoformat())
+                heartbeat_fn(heartbeat_timestamp())
             except Exception:
                 logger.debug("answer-wait heartbeat write failed for job %s", job_id, exc_info=True)
         sleep(poll_interval_s)

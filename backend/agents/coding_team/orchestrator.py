@@ -384,12 +384,19 @@ def _run_pause_cycle(
     structured = hitl.convert_to_structured_questions(questions, source=source)
     if not structured:
         return [], True
+    # Record the wait-loop lease (the first heartbeat) ATOMICALLY with the pause flag: the same
+    # update publishes ``waiting_for_answers=True`` and a fresh ``answer_wait_heartbeat_at``, so a
+    # concurrent answer that lands on another worker can never observe the pause without also
+    # observing a live heartbeat. Doing the heartbeat after on_pause (which may post a slow GitHub
+    # comment) or only on the first wait_for_answers tick would leave a window where another worker
+    # sees the flag but no heartbeat, declares the orchestrator dead, and double-drives the job.
     update_fn(
         status=hitl.WAITING_STATUS,
         phase="paused",
         status_text=f"Waiting for {len(structured)} decision(s) from the user",
         waiting_for_answers=True,
         pending_questions=structured,
+        answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
     )
     if on_pause is not None:
         try:

@@ -129,6 +129,26 @@ def test_pause_cycle_success_calls_on_pause(monkeypatch):
     assert job["waiting_for_answers"] is False
 
 
+def test_pause_publish_writes_heartbeat_atomically_with_flag(monkeypatch):
+    """The pause flag and the first heartbeat must be set in the SAME update, so a concurrent
+    answer on another worker can never see waiting_for_answers without a live heartbeat."""
+    updates: List[Dict[str, Any]] = []
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+    _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=lambda j: job,
+        update_fn=lambda **kw: (job.update(kw), updates.append(dict(kw))),
+        on_pause=lambda qs: None,
+    )
+    # The update that publishes the pause flag also carries the heartbeat timestamp.
+    pause_update = next(u for u in updates if u.get("waiting_for_answers") is True)
+    assert pause_update.get("answer_wait_heartbeat_at")
+    assert "T" in pause_update["answer_wait_heartbeat_at"]  # ISO-8601
+
+
 def test_pause_cycle_on_pause_error_is_swallowed(monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))

@@ -699,6 +699,26 @@ class TestEndpointHappyPath:
         assert job["github_pr_url"] == "https://example/pr/42"
         assert job["integration_branch"] == "khala/issue-11"
 
+    def test_persists_request_token_for_resume(self, patched_app) -> None:
+        """The per-request PAT is persisted on the job record so a later resume (after the
+        orchestrator thread dies) can re-drive the GitHub publish flow without a GITHUB_TOKEN env."""
+        gh = _FakeClient(issues=[_issue(11, title="Add feature")], sub_map={11: []})
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json={
+                "owner": "o",
+                "repo": "r",
+                "repo_path": patched_app["repo_path"],
+                "github_token": "request-pat",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["github_token"] == "request-pat"
+        # The token is internal to the record, never inside the client-facing github_context.
+        assert "github_token" not in (job.get("github_context") or {})
+
     def test_specific_issue_number(self, patched_app) -> None:
         gh = _FakeClient(issues=[_issue(7)], sub_map={7: []})
         patched_app["set_github"](gh)

@@ -709,13 +709,13 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     is_github_job = bool(
         ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
     )
-    token = os.environ.get("GITHUB_TOKEN") if is_github_job else None
+    # Prefer the token persisted at job creation (the per-request PAT from the credential store);
+    # fall back to GITHUB_TOKEN env for deployments that set it.
+    token = (data.get("github_token") or os.environ.get("GITHUB_TOKEN")) if is_github_job else None
     if is_github_job and not token:
         # Without a token the publish flow (PR, issue comments) cannot be resumed; fall back to
         # the explicit-resume hint rather than silently completing without a PR.
-        logger.warning(
-            "Auto-resume for GitHub job %s skipped: GITHUB_TOKEN not configured.", job_id
-        )
+        logger.warning("Auto-resume for GitHub job %s skipped: no GitHub token available.", job_id)
         return False
     if not _claim_run_thread(job_id):
         # Another caller (or the original thread, racing registration) is starting it.
@@ -777,8 +777,9 @@ def resume_job(job_id: str) -> RunResponse:
 
     No-op-safe: if a thread is still running (or a wait loop heartbeats from another worker), it
     will resume on its own and this just reports status. GitHub-issue jobs are restarted through
-    the full hook path so publication (PR, issue comments) is preserved; that path requires
-    ``GITHUB_TOKEN`` — per-request tokens are deliberately never persisted on job records.
+    the full hook path so publication (PR, issue comments) is preserved; that path needs a GitHub
+    token, sourced from the one persisted on the job record at creation (falling back to the
+    ``GITHUB_TOKEN`` env).
 
     Authentication/authorization is enforced by the unified API security gateway in front of all
     team mounts; like every other coding-team route, this endpoint assumes that perimeter.
@@ -787,7 +788,7 @@ def resume_job(job_id: str) -> RunResponse:
         - The job exists and is not terminal (a finished run must never be silently re-executed).
     Postconditions:
         - Raises 404 (unknown job), 400 (terminal job, missing repo_path/plan, or a GitHub-issue
-          job without GITHUB_TOKEN); returns "already running" without spawning when a live
+          job with no usable token); returns "already running" without spawning when a live
           thread, fresh heartbeat, or concurrent claim exists; otherwise spawns the orchestrator
           (hook path for GitHub-issue jobs) and reports "Job resumed."
     """
@@ -815,14 +816,16 @@ def resume_job(job_id: str) -> RunResponse:
     is_github_job = bool(
         ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
     )
-    token = os.environ.get("GITHUB_TOKEN") if is_github_job else None
+    # Prefer the token persisted at job creation (per-request PAT from the credential store);
+    # fall back to GITHUB_TOKEN env.
+    token = (data.get("github_token") or os.environ.get("GITHUB_TOKEN")) if is_github_job else None
     if is_github_job and not token:
         raise HTTPException(
             status_code=400,
             detail=(
-                "GitHub-issue job cannot resume without GITHUB_TOKEN: the publish flow "
-                "(PR, issue comments) would be lost, and per-request tokens are not persisted. "
-                "Configure GITHUB_TOKEN, or restart via POST /run-from-github with a token."
+                "GitHub-issue job cannot resume: no GitHub token is available (none persisted on "
+                "the job record and GITHUB_TOKEN unset), and the publish flow (PR, issue comments) "
+                "would be lost without one."
             ),
         )
 
@@ -992,6 +995,13 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
     create_job(job_id=job_id, repo_path=request.repo_path, plan_input=plan.model_dump())
     update_job(
         job_id,
+        # Persist the resolved token so a resume after the orchestrator thread dies (server restart,
+        # different worker process) can re-drive the GitHub publish flow. In the standard
+        # deployment the token is a per-request PAT from the unified API credential store and the
+        # coding-team container has no GITHUB_TOKEN env, so without this the job could never resume.
+        # Stored as a top-level field, NOT inside github_context: github_context is echoed into the
+        # /status and /jobs responses, while this field is never serialized into any response model.
+        github_token=token,
         github_context={
             "owner": request.owner,
             "repo": request.repo,

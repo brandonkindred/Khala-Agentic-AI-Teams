@@ -399,15 +399,107 @@ def test_resume_github_job_uses_hook_path(monkeypatch):
     assert hook_calls == {"job_id": "j1", "owner": "acme", "token": "tok-123"}
 
 
+def test_resume_github_job_uses_persisted_token_without_env(monkeypatch):
+    """The standard deployment has no GITHUB_TOKEN env: resume must use the token persisted on the
+    job record at creation, not require the env var."""
+    hook_calls = {}
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            return {"number": number}
+
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        github_context=ctx,
+        github_token="persisted-pat",
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(
+        api,
+        "_run_with_github_hooks",
+        lambda job_id, request, plan, issue, token: hook_calls.update({"token": token}),
+    )
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert hook_calls["token"] == "persisted-pat"
+
+
+def test_auto_resume_github_job_uses_persisted_token_without_env(monkeypatch):
+    """Answer-submit auto-resume of a dead GitHub job also uses the persisted token."""
+    hook_calls = {}
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            return {"number": number}
+
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    job = _job(github_context=ctx, github_token="persisted-pat")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(
+        api,
+        "_run_with_github_hooks",
+        lambda job_id, request, plan, issue, token: hook_calls.update({"token": token}),
+    )
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert hook_calls["token"] == "persisted-pat"
+
+
 def test_resume_github_job_400_without_token(monkeypatch):
     ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
-    job = _job(status="waiting_for_user", github_context=ctx)
+    job = _job(status="waiting_for_user", github_context=ctx)  # no github_token persisted
     monkeypatch.setattr(api, "get_job", lambda jid: job)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     r = client.post("/run/j1/resume")
     assert r.status_code == 400
     assert "GITHUB_TOKEN" in r.json()["detail"]
+
+
+def test_persisted_github_token_never_leaks_into_responses(monkeypatch):
+    """The token persisted for resume must never be serialized into /status or /jobs."""
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    job = _job(github_context=ctx, github_token="super-secret-pat")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "list_jobs", lambda **kw: [job])
+
+    status_body = client.get("/status/j1").text
+    assert "super-secret-pat" not in status_body
+
+    jobs_body = client.get("/jobs").text
+    assert "super-secret-pat" not in jobs_body
 
 
 def test_auto_resume_refuses_terminal_job():
