@@ -25,7 +25,17 @@ CHUNK_REVIEW_NOTE = "\n**Note:** This is one chunk of the full codebase. Review 
 
 
 class ChunkReviewAgent:
-    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases."""
+    """Reviews one chunk of code. Used by CodeReviewCoordinator for large codebases.
+
+    Invariants:
+        - Stateless apart from the injected ``llm`` handle: every ``run`` call
+          builds a fresh strands ``Agent`` (and, in production, a fresh model
+          via ``get_strands_model``), so concurrent ``run`` calls share no
+          mutable agent state. The injected ``llm`` must itself support
+          concurrent calls — the central ``llm_service`` clients do (they
+          guard shared state internally); test doubles used with the parallel
+          coordinator must do the same.
+    """
 
     def __init__(self, llm: LLMClient) -> None:
         self.llm = llm

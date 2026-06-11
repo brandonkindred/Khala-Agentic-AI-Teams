@@ -788,10 +788,13 @@ def test_parallel_map_failure_cancels_and_raises() -> None:
         )
 
 
-def test_parallel_map_failure_does_not_wait_for_inflight_reviews() -> None:
-    """A fast infra failure must propagate immediately: pending chunks are
-    cancelled and in-flight reviews are left to finish in the background, so
-    the failure is never blocked behind another chunk's model timeout."""
+@pytest.mark.parametrize("fail_first", [True, False])
+def test_parallel_map_failure_does_not_wait_for_inflight_reviews(fail_first: bool) -> None:
+    """A fast infra failure must propagate immediately regardless of where the
+    failing chunk sits in submission order: completions are observed as they
+    happen (never joined in submission order), pending chunks are cancelled,
+    and in-flight reviews are left to finish in the background — so the
+    failure is never blocked behind another chunk's model timeout."""
     release = threading.Event()
 
     class _OneFailsOneBlocks(DummyLLMClient):
@@ -808,10 +811,12 @@ def test_parallel_map_failure_does_not_wait_for_inflight_reviews() -> None:
 
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
-    files = {
+    contents = {
         "fast_fail.py": "FAILME = 1\n".ljust(cap - 2_000, "#"),
         "slow.py": "ok = 1\n".ljust(cap - 2_000, "#"),
     }
+    order = ["fast_fail.py", "slow.py"] if fail_first else ["slow.py", "fast_fail.py"]
+    files = {name: contents[name] for name in order}
     client = _OneFailsOneBlocks()
     try:
         with pytest.raises(CodeReviewUnavailableError):

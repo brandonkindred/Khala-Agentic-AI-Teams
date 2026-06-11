@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -664,12 +664,20 @@ def _map_chunks(
 ) -> List[_ChunkOutcome]:
     """Review all chunks, fanning out independent map calls.
 
+    Preconditions:
+        - ``chunk_reviewer`` is safe for concurrent ``run`` calls: the agent is
+          stateless and ``_run_chunk_review`` builds a fresh strands agent and
+          model per call, so the only object shared across workers is the
+          injected LLM client, whose central implementations guard their own
+          state (clients injected here must support concurrent calls).
+
     Postconditions:
         - Returns one outcome per chunk in input order, or raises
-          ``CodeReviewUnavailableError``. On failure, pending chunks are
-          cancelled and the exception propagates immediately — already-running
-          reviews are left to finish in the background rather than blocking
-          the failure behind in-flight model calls.
+          ``CodeReviewUnavailableError``. The first failure is observed as it
+          happens — never delayed behind an earlier, slower chunk — pending
+          chunks are cancelled, and the exception propagates immediately;
+          already-running reviews are left to finish in the background rather
+          than blocking the failure behind in-flight model calls.
     """
     workers = min(_map_parallelism(), len(chunks))
     if workers <= 1:
@@ -680,6 +688,12 @@ def _map_chunks(
             executor.submit(_review_chunk_with_recovery, chunk_reviewer, c, base_input)
             for c in chunks
         ]
+        # Wake on the first failure instead of joining futures in submission
+        # order, so a fast failure is never hidden behind a slow earlier chunk.
+        wait(futures, return_when=FIRST_EXCEPTION)
+        for f in futures:
+            if f.done() and f.exception() is not None:
+                f.result()  # re-raises the worker's exception with its traceback
         results = [f.result() for f in futures]
     except BaseException:
         executor.shutdown(wait=False, cancel_futures=True)
