@@ -1,28 +1,19 @@
-"""Code Review agent: reviews code against spec, standards, and conventions."""
+"""Code Review agent: reviews code against spec, standards, and conventions.
+
+``CodeReviewAgent.run`` always delegates to the map-reduce coordinator
+(`coordinator.run_coordinator`), which bounds every LLM call independently of
+input size, re-anchors line numbers from split segments, and applies the
+deterministic approval gate with its anti-loop safety nets.
+"""
 
 from __future__ import annotations
 
-import json
 import logging
 
-from strands import Agent
-
-from llm_service import compact_text, get_client, get_strands_model
-from software_engineering_team.shared.context_sizing import (
-    compute_code_review_chunk_chars,
-    compute_code_review_total_chars,
-)
+from llm_service import get_client
 
 from .coordinator import run_coordinator
-from .models import (
-    CodeReviewInput,
-    CodeReviewIssue,
-    CodeReviewOutput,
-    ReviewProgressCallback,
-    coerce_line,
-    notify_review_progress,
-)
-from .prompts import CODE_REVIEW_PROMPT
+from .models import CodeReviewInput, CodeReviewOutput, ReviewProgressCallback
 
 logger = logging.getLogger(__name__)
 
@@ -33,16 +24,15 @@ class CodeReviewAgent:
     against the project specification, coding standards, and conventions.
 
     Returns approval or a list of issues that must be resolved.
+
+    Invariants:
+        - Every ``run`` call goes through the map-reduce coordinator, so review
+          prompts stay bounded regardless of how much code is submitted.
     """
 
     def __init__(self, llm_client=None) -> None:
-        from strands.models.model import Model as _StrandsModel
-
-        if llm_client is not None and isinstance(llm_client, _StrandsModel):
-            self._model = llm_client
-        else:
-            self._model = get_strands_model("code_review")
-        # Keep LLMClient for context_sizing utilities
+        # The chunk reviewer resolves its own strands model per call; this
+        # client is used for context sizing and shared-context compaction.
         self.llm = llm_client if llm_client is not None else get_client("code_review")
 
     def run(
@@ -53,193 +43,37 @@ class CodeReviewAgent:
         """Review code and return approval or issues.
 
         Preconditions:
-            - ``progress_callback`` is None or satisfies the ReviewProgressCallback
-              contract (non-raising, accepts ``(step, detail, fraction)``).
+            - ``input_data`` carries the code under review via ``files`` or ``code``.
+            - ``progress_callback`` is None or satisfies the
+              ``ReviewProgressCallback`` contract (non-raising, accepts
+              ``(step, detail, fraction)``).
 
         Postconditions:
+            - Returns the coordinator's merged verdict covering every submitted
+              line; ``approved is False`` implies at least one critical/high issue.
             - When ``progress_callback`` is provided, it is invoked with
               non-decreasing fractions ending at 1.0 (step ``done``) on every
-              successful return, and never after this method returns.
-            - The review result is identical whether or not a callback is provided.
-        """
-        notify_review_progress(progress_callback, "preparing", "preparing review context", 0.05)
-        code = input_data.code or ""
-        single_call_limit = compute_code_review_chunk_chars(self.llm)
-        if len(code) > single_call_limit:
-            logger.info(
-                "CodeReview: code size %s exceeds single-call limit %s (model context), using coordinator",
-                len(code),
-                single_call_limit,
-            )
-            max_total = compute_code_review_total_chars(self.llm)
-            code = compact_text(code, max_total, self.llm, "code for review")
-            if code != input_data.code:
-                input_data = CodeReviewInput(
-                    code=code,
-                    spec_content=input_data.spec_content,
-                    task_description=input_data.task_description,
-                    task_requirements=input_data.task_requirements,
-                    acceptance_criteria=input_data.acceptance_criteria,
-                    language=input_data.language,
-                    architecture=input_data.architecture,
-                    existing_codebase=input_data.existing_codebase,
-                )
-            return run_coordinator(self.llm, input_data, progress_callback=progress_callback)
-        max_total = compute_code_review_total_chars(self.llm)
-        code = compact_text(code, max_total, self.llm, "code for review")
+              successful return; the review result is identical whether or not
+              a callback is provided.
 
+        Raises:
+            CodeReviewUnavailableError: when the review could not be completed
+                (model unavailable, or a chunk stayed unreviewable after retry
+                and bisection). Callers must treat this as a failed review run
+                — never as review feedback for the coding agent.
+        """
+        code_size = (
+            sum(len(c) for c in input_data.files.values())
+            if input_data.files is not None
+            else len(input_data.code or "")
+        )
         logger.info(
             "CodeReview: reviewing %s chars of %s code | task=%s | has_spec=%s | has_architecture=%s | acceptance_criteria=%s",
-            len(code),
+            code_size,
             input_data.language,
             input_data.task_description[:80] if input_data.task_description else "",
             bool(input_data.spec_content),
             input_data.architecture is not None,
             len(input_data.acceptance_criteria),
         )
-
-        context_parts = [
-            f"**Language:** {input_data.language}",
-            f"**Task description:** {input_data.task_description}",
-        ]
-
-        if input_data.task_requirements:
-            context_parts.extend(["", "**Task requirements:**", input_data.task_requirements])
-
-        if input_data.acceptance_criteria:
-            context_parts.extend(
-                [
-                    "",
-                    "**Acceptance criteria (code MUST meet all of these):**",
-                    *[f"- {c}" for c in input_data.acceptance_criteria],
-                ]
-            )
-
-        if input_data.spec_content:
-            context_parts.extend(
-                [
-                    "",
-                    "**Project specification (source of truth for the application):**",
-                    "---",
-                    input_data.spec_content,
-                    "---",
-                ]
-            )
-
-        if input_data.architecture:
-            context_parts.extend(
-                [
-                    "",
-                    "**Architecture:**",
-                    input_data.architecture.overview,
-                ]
-            )
-
-        if input_data.existing_codebase:
-            context_parts.extend(
-                [
-                    "",
-                    "**Existing codebase (before the agent's changes):**",
-                    input_data.existing_codebase,
-                ]
-            )
-
-        context_parts.extend(
-            [
-                "",
-                "**Code to review:**",
-                "```",
-                code,
-                "```",
-            ]
-        )
-
-        prompt = "\n".join(context_parts)
-        notify_review_progress(
-            progress_callback,
-            "reviewing",
-            f"reviewing {len(code)} chars of {input_data.language}",
-            0.15,
-        )
-        agent = Agent(model=self._model, system_prompt=CODE_REVIEW_PROMPT)
-        result = agent(prompt)
-        raw = str(result).strip()
-        notify_review_progress(progress_callback, "parsing", "parsing findings", 0.85)
-        data = json.loads(raw)
-
-        # Parse issues
-        issues = []
-        for issue_data in data.get("issues") or []:
-            if isinstance(issue_data, dict) and issue_data.get("description"):
-                issues.append(
-                    CodeReviewIssue(
-                        severity=issue_data.get("severity", "high"),
-                        category=issue_data.get("category", "general"),
-                        file_path=issue_data.get("file_path", ""),
-                        line=coerce_line(issue_data.get("line")),
-                        start_line=coerce_line(issue_data.get("start_line")),
-                        description=issue_data.get("description", ""),
-                        suggestion=issue_data.get("suggestion", ""),
-                    )
-                )
-
-        # Determine approval based on issue severity
-        notify_review_progress(progress_callback, "finalizing", "applying approval rules", 0.95)
-        critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
-        raw_approved = bool(data.get("approved", False))
-        approved = raw_approved and len(critical_or_high) == 0
-
-        # Safety net: handle rejected-with-no-actionable-issues (prevents unresolvable loops)
-        if not approved and not critical_or_high:
-            summary_text = data.get("summary", "")
-            if issues:
-                # Has only minor/nit issues -- auto-approve since nothing blocking
-                logger.info(
-                    "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/high)",
-                    len(issues),
-                )
-                approved = True
-            elif summary_text and summary_text.strip():
-                # Rejected with zero issues but has a summary -- synthesize a major issue
-                # so the coding agent has something actionable to fix
-                logger.warning(
-                    "CodeReview: LLM returned approved=False with 0 issues -- "
-                    "synthesizing issue from summary: %s",
-                    summary_text[:200],
-                )
-                synthesized = CodeReviewIssue(
-                    severity="high",
-                    category="general",
-                    file_path="",
-                    description=f"Code review rejected: {summary_text}",
-                    suggestion="Address the concerns described in the review summary. "
-                    "Ensure the code meets all acceptance criteria and follows project conventions.",
-                )
-                issues.append(synthesized)
-                critical_or_high.append(synthesized)
-            else:
-                # No issues AND no summary -- LLM gave no useful feedback, auto-approve
-                logger.warning(
-                    "CodeReview: LLM returned approved=False with no issues and no summary -- "
-                    "auto-approving (no actionable feedback to give coding agent)"
-                )
-                approved = True
-
-        logger.info(
-            "CodeReview: done, approved=%s (raw_llm=%s), issues=%s (critical/high=%s)",
-            approved,
-            raw_approved,
-            len(issues),
-            len(critical_or_high),
-        )
-
-        notify_review_progress(
-            progress_callback, "done", f"approved={approved}, issues={len(issues)}", 1.0
-        )
-        return CodeReviewOutput(
-            approved=approved,
-            issues=issues,
-            summary=data.get("summary", ""),
-            spec_compliance_notes=data.get("spec_compliance_notes", ""),
-            suggested_commit_message=data.get("suggested_commit_message", ""),
-        )
+        return run_coordinator(self.llm, input_data, progress_callback=progress_callback)

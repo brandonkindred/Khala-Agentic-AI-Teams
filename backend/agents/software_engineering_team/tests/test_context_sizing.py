@@ -12,6 +12,15 @@ from __future__ import annotations
 
 from software_engineering_team.shared.context_sizing import (
     CHARS_PER_TOKEN,
+    CODE_REVIEW_ABS_CHUNK_CHARS,
+    CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS,
+    CODE_REVIEW_EXISTING_ABS_CHARS,
+    CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS,
+    compute_code_review_arch_overview_chars,
+    compute_code_review_chunk_chars,
+    compute_code_review_existing_codebase_chars,
+    compute_code_review_map_chunk_chars,
+    compute_code_review_spec_excerpt_chars,
     compute_existing_code_chars,
     compute_max_chunk_chars,
     compute_spec_content_chars,
@@ -53,3 +62,63 @@ def test_max_fraction_is_overridable_per_call() -> None:
     full = compute_max_chunk_chars(1000000, max_fraction_of_context=1.0)
     capped = compute_max_chunk_chars(1000000)
     assert capped < full
+
+
+# ---------------------------------------------------------------------------
+# Code-review absolute caps (map-reduce review)
+# ---------------------------------------------------------------------------
+
+
+def test_map_chunk_is_absolutely_capped_at_large_context() -> None:
+    """At 1M-token context the context-derived chunk size is ~1.4M chars; the
+    cap is applied inside ``compute_code_review_chunk_chars`` itself so no
+    caller can ever obtain the unbounded size."""
+    llm = _StubLLM(1000000)
+    assert compute_code_review_chunk_chars(llm) == CODE_REVIEW_ABS_CHUNK_CHARS == 80_000
+    assert compute_code_review_map_chunk_chars(llm) == CODE_REVIEW_ABS_CHUNK_CHARS
+
+
+def test_map_chunk_uses_context_derived_size_for_small_models() -> None:
+    llm = _StubLLM(16384)
+    derived = compute_code_review_chunk_chars(llm)
+    assert derived < CODE_REVIEW_ABS_CHUNK_CHARS
+    assert compute_code_review_map_chunk_chars(llm) == derived
+
+
+def test_map_chunk_cap_is_env_overridable(monkeypatch) -> None:
+    llm = _StubLLM(1000000)
+    monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "120000")
+    assert compute_code_review_chunk_chars(llm) == 120_000
+    monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "garbage")
+    assert compute_code_review_chunk_chars(llm) == CODE_REVIEW_ABS_CHUNK_CHARS
+    monkeypatch.setenv("CODE_REVIEW_MAP_CHUNK_CHARS", "5")
+    assert compute_code_review_chunk_chars(llm) == 10_000  # clamped to the floor
+
+
+def test_env_int_defensive_parsing(monkeypatch) -> None:
+    from software_engineering_team.shared.context_sizing import env_int
+
+    monkeypatch.delenv("SOME_KNOB", raising=False)
+    assert env_int("SOME_KNOB", 7, 1) == 7
+    monkeypatch.setenv("SOME_KNOB", " 42 ")
+    assert env_int("SOME_KNOB", 7, 1) == 42
+    monkeypatch.setenv("SOME_KNOB", "nope")
+    assert env_int("SOME_KNOB", 7, 1) == 7
+    monkeypatch.setenv("SOME_KNOB", "-3")
+    assert env_int("SOME_KNOB", 7, 1) == 1
+
+
+def test_code_review_excerpts_are_absolutely_capped_at_large_context() -> None:
+    """The spec/arch/existing excerpts repeat in every map call; uncapped they
+    scale to hundreds of K chars at 1M context."""
+    llm = _StubLLM(1000000)
+    assert compute_code_review_spec_excerpt_chars(llm) == CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS
+    assert compute_code_review_arch_overview_chars(llm) == CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS
+    assert compute_code_review_existing_codebase_chars(llm) == CODE_REVIEW_EXISTING_ABS_CHARS
+
+
+def test_code_review_excerpt_floors_unchanged_for_small_models() -> None:
+    llm = _StubLLM(16384)
+    assert compute_code_review_spec_excerpt_chars(llm) == 8_000
+    assert compute_code_review_arch_overview_chars(llm) == 2_000
+    assert compute_code_review_existing_codebase_chars(llm) == 4_000

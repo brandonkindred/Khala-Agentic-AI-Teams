@@ -848,17 +848,10 @@ def _run_code_review(
     """
     from code_review_agent.models import CodeReviewInput
 
-    from software_engineering_team.shared.context_sizing import compute_code_review_total_chars
-
-    llm = agents[
-        "code_review"
-    ].llm  # pragma: no cover  # integration-only: code review uses live LLM
-    max_chars = compute_code_review_total_chars(llm)  # pragma: no cover  # integration-only
-    code_capped = _truncate_for_context(
-        code_to_review, max_chars
-    )  # pragma: no cover  # integration-only
+    # No pre-truncation: the coordinator bounds its own per-call prompts, and
+    # its full-coverage guarantee only holds when it sees all the code.
     review_input = CodeReviewInput(  # pragma: no cover  # integration-only
-        code=code_capped,
+        code=code_to_review,
         spec_content=spec_content,
         task_description=task.description,
         task_requirements=_task_requirements(task),
