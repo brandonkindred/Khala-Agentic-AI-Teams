@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -169,31 +170,77 @@ def get_submitted_answers(
 
 
 # ---------------------------------------------------------------------------
-# Cross-worker resume ownership
+# Cross-worker resume ownership (a recoverable TTL lease)
 #
 # The process-local run-thread registry cannot stop two *different worker processes* from each
-# spawning an orchestrator for the same paused job. These helpers claim ownership in the SHARED job
-# store via the job service's atomic, row-locked increment: the unique caller whose increment takes
-# ``resume_claim`` from 0 to 1 wins; concurrent callers (in any process) get 2, 3, … and lose. The
-# counter is reset to 0 each time the job re-enters the paused state (the orchestrator's
-# pause-publish), so every fresh pause is independently claimable, and released on a failed spawn.
+# spawning an orchestrator for the same paused job. ``claim_resume`` grants ownership in the SHARED
+# job store as a TTL lease, so it is both mutually exclusive AND recoverable if the winning worker
+# dies:
+#
+#   * Mutual exclusion: an atomic, row-locked ``apply`` increments a monotonic ``resume_claim_seq``
+#     and stamps ``resume_claim_at``; the caller wins iff its increment took the seq from the value
+#     it read to exactly that value + 1 (optimistic compare-and-set). Concurrent callers in any
+#     process read the same prior seq and only one increment can produce ``prior + 1``.
+#   * Recoverability: ``resume_claim_at`` is a lease timestamp, not renewed during the resumed run.
+#     A claim whose stamp is older than ``RESUME_CLAIM_TTL_S`` is treated as abandoned (its winner
+#     died before the run progressed), so a later claim reclaims it instead of wedging. A still-fresh
+#     stamp means a live worker is mid-resume → decline. The brief acquire→status=running window is
+#     far shorter than the TTL, and no claim is attempted once the job leaves ``waiting_for_user``.
 # ---------------------------------------------------------------------------
 
-_RESUME_CLAIM_FIELD = "resume_claim"
+_RESUME_CLAIM_SEQ_FIELD = "resume_claim_seq"
+_RESUME_CLAIM_AT_FIELD = "resume_claim_at"
+RESUME_CLAIM_TTL_S = 60.0
+
+
+def _claim_lease_fresh(stamp: Any, now: datetime) -> bool:
+    """True when ``stamp`` is a parseable timestamp whose age is within the lease TTL.
+
+    A future-dated or unparseable stamp is NOT fresh: it must never make a dead claim look alive
+    (clock skew / corruption would otherwise wedge the lease until that future time passes).
+    """
+    if not stamp:
+        return False
+    try:
+        ts = datetime.fromisoformat(str(stamp))
+    except ValueError:
+        return False
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age = (now - ts).total_seconds()
+    return 0 <= age < RESUME_CLAIM_TTL_S
 
 
 def claim_resume(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> bool:
-    """Atomically claim cross-worker ownership of a resume.
+    """Atomically and recoverably claim cross-worker ownership of a resume.
 
     Postconditions:
-        - Returns True iff this caller's atomic increment took ``resume_claim`` from 0 to 1 (i.e.
-          it is the sole owner of the resume); False when another worker already claimed it or the
-          job is gone. Never raises beyond the underlying transport.
+        - Returns True iff this caller acquired the lease: the prior claim was absent or expired
+          (its stamp older than ``RESUME_CLAIM_TTL_S``) AND this caller's atomic seq increment was
+          the unique one that produced ``prior_seq + 1``. Returns False when a live worker holds a
+          fresh lease, another concurrent caller won, or the job is gone. Never raises beyond the
+          underlying transport.
     """
-    job = _client(cache_dir).apply_and_get(job_id, increment={_RESUME_CLAIM_FIELD: 1})
-    return bool(job) and job.get(_RESUME_CLAIM_FIELD) == 1
+    client = _client(cache_dir)
+    job = client.get_job(job_id)
+    if not job:
+        return False
+    now = datetime.now(timezone.utc)
+    if _claim_lease_fresh(job.get(_RESUME_CLAIM_AT_FIELD), now):
+        return False  # a live worker is mid-resume
+    prior_seq = job.get(_RESUME_CLAIM_SEQ_FIELD) or 0
+    updated = client.apply_and_get(
+        job_id,
+        increment={_RESUME_CLAIM_SEQ_FIELD: 1},
+        merge_fields={_RESUME_CLAIM_AT_FIELD: now.isoformat()},
+    )
+    return bool(updated) and updated.get(_RESUME_CLAIM_SEQ_FIELD) == prior_seq + 1
 
 
 def release_resume_claim(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> None:
-    """Reset the resume claim so a failed spawn (or abandoned attempt) doesn't wedge future resumes."""
-    _client(cache_dir).update_job(job_id, heartbeat=False, **{_RESUME_CLAIM_FIELD: 0})
+    """Release the lease (clear its stamp) so a failed/abandoned spawn doesn't block the TTL window.
+
+    Leaves ``resume_claim_seq`` untouched — it is monotonic; clearing only the stamp makes the job
+    immediately re-claimable without resetting the compare-and-set version.
+    """
+    _client(cache_dir).update_job(job_id, heartbeat=False, **{_RESUME_CLAIM_AT_FIELD: None})

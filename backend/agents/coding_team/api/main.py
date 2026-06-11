@@ -520,9 +520,10 @@ def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
     Preconditions:
         - ``data`` is a job record dict (possibly empty).
     Postconditions:
-        - Returns True iff ``answer_wait_heartbeat_at`` parses as an ISO timestamp within
-          ``_ANSWER_WAIT_HEARTBEAT_STALE_S`` seconds of now. Missing/garbage values → False
-          (treat as no live loop), never raises.
+        - Returns True iff ``answer_wait_heartbeat_at`` parses as an ISO timestamp whose age is in
+          ``[0, _ANSWER_WAIT_HEARTBEAT_STALE_S)``. A future-dated stamp (clock skew or corruption)
+          is NOT fresh — it must never make a dead loop look alive and block resume until that
+          future time passes. Missing/garbage values → False, never raises.
     """
     raw = (data or {}).get("answer_wait_heartbeat_at")
     if not raw:
@@ -533,7 +534,8 @@ def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
         return False
     if beat.tzinfo is None:
         beat = beat.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - beat).total_seconds() < _ANSWER_WAIT_HEARTBEAT_STALE_S
+    age = (datetime.now(timezone.utc) - beat).total_seconds()
+    return 0 <= age < _ANSWER_WAIT_HEARTBEAT_STALE_S
 
 
 def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:

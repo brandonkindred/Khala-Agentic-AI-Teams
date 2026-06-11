@@ -761,6 +761,18 @@ def test_answer_wait_heartbeat_fresh_handles_garbage():
     assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": naive_now}) is True
 
 
+def test_answer_wait_heartbeat_future_is_not_fresh():
+    """A future-dated heartbeat (clock skew / corruption) must not block resume until that time —
+    it is treated as stale, not fresh."""
+    from datetime import datetime, timedelta, timezone
+
+    future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": future}) is False
+    # And a normal recent stamp is still fresh.
+    recent = (datetime.now(timezone.utc) - timedelta(seconds=2)).isoformat()
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": recent}) is True
+
+
 def test_answers_dead_thread_invalid_plan_falls_back_to_hint(monkeypatch):
     calls = {}
     monkeypatch.setattr(
