@@ -74,3 +74,10 @@ def test_max_writeback_bytes_default_and_override(monkeypatch: pytest.MonkeyPatc
     assert max_writeback_bytes() == DEFAULT_MAX_WRITEBACK_BYTES
     monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", "2048")
     assert max_writeback_bytes() == 2048
+
+
+@pytest.mark.parametrize("raw", ["", "junk", "0", "-1"])
+def test_max_writeback_bytes_defensive_fallback(monkeypatch: pytest.MonkeyPatch, raw: str) -> None:
+    """Unparseable or non-positive overrides fall back to the default, never raise."""
+    monkeypatch.setenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES", raw)
+    assert max_writeback_bytes() == DEFAULT_MAX_WRITEBACK_BYTES

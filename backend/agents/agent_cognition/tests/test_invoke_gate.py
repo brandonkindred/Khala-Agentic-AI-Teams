@@ -29,6 +29,7 @@ from agent_cognition.models import (
     Rule,
     RuleMode,
 )
+from agent_cognition.rules import provision
 from agent_cognition.testing import FakeRunLedger, make_rule
 from agent_cognition.tools.envelope import try_unwrap_request
 
@@ -168,6 +169,32 @@ def test_prepare_rollup_budget_env_override_and_truncation_tolerated(
     out = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
     assert seams.rollups == [(_AGENT, 3)]
     assert out.kind is gate.GateOutcomeKind.PROCEED  # a truncated pass never blocks
+
+
+def test_prepare_triggers_seed_provisioning(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The first-provision install fires once per invoke, before context load."""
+    seen: list[str] = []
+    monkeypatch.setattr(
+        provision, "ensure_seed_packs_installed", lambda agent_id: seen.append(agent_id)
+    )
+    out = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+    assert out.kind is gate.GateOutcomeKind.PROCEED
+    assert seen == [_AGENT]
+
+
+def test_prepare_tolerates_provisioning_failure(
+    seams: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A seed-pack provisioning error must never break the invoke."""
+
+    def _boom(_agent_id):
+        raise RuntimeError("provision blew up")
+
+    monkeypatch.setattr(provision, "ensure_seed_packs_installed", _boom)
+    out = _run(gate.prepare_invoke(_AGENT, {"q": 1}))
+    assert out.kind is gate.GateOutcomeKind.PROCEED  # never-break: the invoke proceeds
 
 
 def test_prepare_unledgered_attempts_get_distinct_event_run_ids(

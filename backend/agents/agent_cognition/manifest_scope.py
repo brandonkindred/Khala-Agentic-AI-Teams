@@ -99,3 +99,18 @@ def retention_days(agent_id: str) -> int:
     if cognition is not None:
         return cognition.memory.retention_days_events
     return _retention_default()
+
+
+def rule_packs(agent_id: str) -> list[str]:
+    """Seed rule-pack names the agent declares for first-provision install.
+
+    Postconditions:
+        * Returns the manifest's ``cognition.rule_packs`` list (e.g.
+          ``["default_guardrails"]``); ``[]`` when there is no manifest, no
+          cognition block, or any lookup failure — a manifest-less agent
+          provisions no seed packs. Never raises.
+    """
+    cognition = _manifest_cognition(agent_id)
+    if cognition is not None:
+        return list(cognition.rule_packs)
+    return []
