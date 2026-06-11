@@ -511,47 +511,45 @@ def _select_review_input(
     current_task: Any,
     written_files: Dict[str, str] | None,
 ) -> Tuple[Dict[str, str] | None, str | None]:
-    """Choose the code-review input: the task's changed files, untruncated.
+    """Choose the code-review input: the task's changed files, read from disk.
 
-    The workflow commits every fix-loop iteration, so ``git diff development...HEAD``
-    captures what this task touched. Reviewing only those files (instead of the
-    whole repo) keeps the coordinator's per-call prompts small while still
-    covering everything the task changed.
-
-    The generator's just-written files are always overlaid on top of the
-    committed diff: when an iteration's ``write_agent_output`` commit fails (a
-    logged-and-continue path), its newly added files are not yet in the diff,
-    and the overlay both keeps them in review and supplies the freshest content
-    for files the latest pass regenerated.
+    The committed ``git diff development...HEAD`` lists what the task changed;
+    the generator's just-written paths are unioned in so a fix whose
+    ``write_agent_output`` commit failed (a logged-and-continue path) is still
+    reviewed. Every path's content is read from the **worktree**, never from the
+    in-memory output dict, so review reflects exactly what is on the branch:
+    paths that write validation rejected — or that a failed write never created —
+    are absent from disk and therefore correctly excluded, and no extension
+    filter is applied so non-source task changes (requirements.txt, migrations,
+    YAML/JSON, ...) are reviewed too.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the files
-          dict the generator just wrote (or None).
+          dict the generator just produced (or None) — only its keys are used,
+          to widen the set of paths re-read from disk.
     Postconditions:
         - Returns ``(files, code)`` with exactly one of the two populated, never
           both, and never both empty — so review is never silently skipped:
-            1. the committed diff vs the development branch, merged with the
-               just-written files (written content wins on overlap), else
+            1. the worktree content of every committed-diff or just-written path
+               that exists on disk and decodes as text, else
             2. the legacy whole-repo concatenation as a ``code`` string (logged).
-        - For repo-setup tasks the changed-files dict is read without an
-          extension filter so meta files (Dockerfile, requirements.txt, ...) are
-          included.
+        - For repo-setup tasks the whole-repo fallback also appends meta files
+          (.gitignore, README, ...) so an initial commit is reviewed in full.
     """
     from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, list_changed_files
 
-    is_setup = _is_repo_setup_task(current_task)
-    changed = list_changed_files(repo_path, DEVELOPMENT_BRANCH)
-    extensions = None if is_setup else BACKEND_EXTENSIONS
-    files = read_files_as_dict(repo_path, changed, extensions=extensions)
+    paths = list(list_changed_files(repo_path, DEVELOPMENT_BRANCH))
     if written_files:
-        files = {**files, **written_files}
+        seen = set(paths)
+        paths.extend(p for p in written_files if p not in seen)
+    files = read_files_as_dict(repo_path, paths, extensions=None)
     if files:
         return files, None
     logger.warning(
-        "Code review: empty diff and no written files; falling back to whole-repo review input"
+        "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )
     code = _read_repo_code(repo_path)
-    if is_setup:
+    if _is_repo_setup_task(current_task):
         meta = _read_repo_meta_files(repo_path)
         if meta:
             code = code + "\n\n" + meta

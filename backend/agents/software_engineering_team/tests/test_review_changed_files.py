@@ -171,7 +171,7 @@ def test_backend_run_code_review_falls_back_to_code() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_select_review_input_merges_changed_and_written(tmp_path: Path) -> None:
+def test_select_review_input_unions_changed_and_written_from_worktree(tmp_path: Path) -> None:
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -184,22 +184,26 @@ def test_select_review_input_merges_changed_and_written(tmp_path: Path) -> None:
     (tmp_path / "b.py").write_text("y = 3\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "work")
+    # The latest pass rewrote a.py and added extra.py on disk (not yet committed).
+    (tmp_path / "a.py").write_text("x = 99\n", encoding="utf-8")
+    (tmp_path / "extra.py").write_text("z = 0\n", encoding="utf-8")
 
     task = SimpleNamespace(description="add feature")
-    # written_files overlays the committed diff; on overlap its content wins.
+    # Only the *keys* of written_files matter; content is read from the worktree.
     files, code = _select_review_input(
-        tmp_path, task, written_files={"a.py": "x = 99\n", "extra.py": "z = 0\n"}
+        tmp_path, task, written_files={"a.py": "STALE", "extra.py": "STALE"}
     )
 
     assert code is None
-    assert set(files) == {"a.py", "b.py", "extra.py"}  # diff ∪ written_files
-    assert files["a.py"] == "x = 99\n"  # written content wins over committed
+    assert set(files) == {"a.py", "b.py", "extra.py"}  # diff ∪ written paths
+    assert files["a.py"] == "x = 99\n"  # worktree content, not the stale dict value
+    assert files["extra.py"] == "z = 0\n"  # just-written path, read from disk
     assert files["b.py"] == "y = 3\n"  # diff-only file read from worktree
 
 
 def test_select_review_input_includes_uncommitted_new_file(tmp_path: Path) -> None:
     """Reviewer's failed-commit scenario: a non-empty committed diff must not
-    suppress a newly added file whose commit never landed."""
+    suppress a newly added file whose commit never landed (but was written)."""
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -211,29 +215,79 @@ def test_select_review_input_includes_uncommitted_new_file(tmp_path: Path) -> No
     (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "committed change")  # diff is non-empty
+    # write_agent_output wrote new.py to disk but its commit failed → uncommitted.
+    (tmp_path / "new.py").write_text("n = 1\n", encoding="utf-8")
 
-    # "new.py" was written by the latest fix but its commit failed → uncommitted.
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(
-        tmp_path, task, written_files={"new.py": "n = 1\n"}
-    )
+    files, code = _select_review_input(tmp_path, task, written_files={"new.py": "n = 1\n"})
 
     assert code is None
     assert "a.py" in files  # committed diff still reviewed
     assert files["new.py"] == "n = 1\n"  # uncommitted new file not dropped
 
 
-def test_select_review_input_falls_back_to_written_files(tmp_path: Path) -> None:
+def test_select_review_input_skips_unwritten_paths(tmp_path: Path) -> None:
+    """A written_files path that never landed on disk (rejected by write
+    validation or a failed write) is excluded — review reflects the branch."""
     from software_engineering_team.backend_agent.agent import _select_review_input
 
-    # Non-git dir → empty diff → written_files used.
-    written = {"app/main.py": "print('x')"}
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "work")
+
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files=written)
+    files, code = _select_review_input(
+        tmp_path, task, written_files={"valid.py": "ok", "rejected.py": "never written"}
+    )
 
     assert code is None
-    assert files == written
-    assert files is not written  # returns a copy, not the caller's dict
+    assert "a.py" in files
+    assert "rejected.py" not in files  # absent on disk → excluded
+    assert "valid.py" not in files  # also absent on disk → excluded
+
+
+def test_select_review_input_includes_non_source_changed_files(tmp_path: Path) -> None:
+    """An ordinary (non-setup) task that changed requirements.txt / a migration
+    has those reviewed — no .py/.java extension filter on the diff."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
+    (tmp_path / "migrations").mkdir()
+    (tmp_path / "migrations" / "001_init.sql").write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "deps + migration")
+
+    task = SimpleNamespace(description="add dependency")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert "requirements.txt" in files
+    assert "migrations/001_init.sql" in files
+
+
+def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) -> None:
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    # Non-git dir → empty diff → written paths read from the worktree.
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("print('x')\n", encoding="utf-8")
+    task = SimpleNamespace(description="add feature")
+    files, code = _select_review_input(tmp_path, task, written_files={"app/main.py": "ignored"})
+
+    assert code is None
+    assert files == {"app/main.py": "print('x')\n"}  # read from worktree
 
 
 def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
