@@ -108,6 +108,13 @@ def register_team_manifests(team_id: str, agents: list[AgenticTeamAgent]) -> lis
     resolvable by the Agent Console catalog and the ``/api/agents/{id}/invoke``
     route (cognition injection + seed-pack install then happen on first invoke).
 
+    Scope: this is the registry of *this process*. In the default single Unified
+    FastAPI app the Agent Console / invoke route share the process, so this is
+    sufficient. In a multi-service deployment (``AGENTIC_TEAM_PROVISIONING_SERVICE_URL``
+    set) the unified-API and sandbox processes load their own disk registries and
+    won't see these entries; cross-process registration (shared persistence /
+    sync) is a tracked follow-up beyond this generator-wiring change.
+
     Preconditions:
         * ``team_id`` is non-empty.
     Postconditions:

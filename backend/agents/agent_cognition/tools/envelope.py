@@ -88,13 +88,18 @@ class UnwrappedWriteback:
     """An entrypoint result split into the caller-facing output + the writeback.
 
     ``output`` is returned to the caller verbatim (the writeback never leaks into
-    it); ``events`` / ``tool_calls`` are the episodic memory + tool-audit dumps the
-    shim folds into the response's ``memory_events`` / ``tool_audit``.
+    it); ``events`` are the episodic memory dumps the shim folds into the
+    response's ``memory_events``.
+
+    A writeback carries **memory events only** — never tool-call records. The
+    trusted ``tool_audit`` is exclusively populated by the shim-owned brokered
+    runner; an entrypoint (a sandbox-reachable, possibly compromised harness)
+    must not be able to fabricate side-effect records, so any ``tool_calls`` in
+    the writeback mapping are deliberately ignored here.
     """
 
     output: Any
     events: list[Any]
-    tool_calls: list[Any]
 
 
 def wrap_request(input_body: Any, cognition: Mapping[str, Any]) -> dict[str, Any]:
@@ -178,10 +183,11 @@ def try_unwrap_writeback(result: Any) -> UnwrappedWriteback | None:
         * ``None`` when ``result`` is not a mapping or lacks the marker — the
           caller treats it as a plain entrypoint result (no events to lift).
         * An :class:`UnwrappedWriteback` when the marker is present: ``output`` is
-          the inner output (``None`` if absent), and ``events`` / ``tool_calls``
-          come from the ``writeback`` mapping (each an empty list when absent or
-          malformed). Tolerant by design — a usable output must never be lost just
-          because the writeback half is misshapen.
+          the inner output (``None`` if absent) and ``events`` come from the
+          ``writeback`` mapping (an empty list when absent or malformed). Any
+          ``tool_calls`` in the writeback are **ignored** — the trusted tool audit
+          is shim-owned (see :class:`UnwrappedWriteback`). Tolerant by design: a
+          usable output is never lost because the writeback half is misshapen.
     """
     if not isinstance(result, Mapping) or WRITEBACK_MARKER not in result:
         return None
@@ -189,9 +195,7 @@ def try_unwrap_writeback(result: Any) -> UnwrappedWriteback | None:
     if not isinstance(writeback, Mapping):
         writeback = {}
     events = writeback.get("events")
-    tool_calls = writeback.get("tool_calls")
     return UnwrappedWriteback(
         output=result.get("output"),
         events=list(events) if isinstance(events, list) else [],
-        tool_calls=list(tool_calls) if isinstance(tool_calls, list) else [],
     )

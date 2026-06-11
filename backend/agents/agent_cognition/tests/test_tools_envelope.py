@@ -103,7 +103,8 @@ def test_writeback_round_trips_through_unwrap() -> None:
     assert isinstance(unwrapped, UnwrappedWriteback)
     assert unwrapped.output == {"output": "hi"}
     assert unwrapped.events == [{"id": "e1"}]
-    assert unwrapped.tool_calls == [{"tool_id": "git"}]
+    # tool_calls are NOT exposed — the trusted tool audit is shim-owned.
+    assert not hasattr(unwrapped, "tool_calls")
 
 
 def test_wrap_writeback_shallow_copies_and_references_output() -> None:
@@ -134,8 +135,7 @@ def test_unwrap_writeback_tolerates_malformed_writeback_half() -> None:
     assert unwrapped is not None
     assert unwrapped.output == "keep"
     assert unwrapped.events == []
-    assert unwrapped.tool_calls == []
-    # Missing writeback key + non-list events/tool_calls also degrade to [].
+    # Missing writeback key + non-list events also degrade to [].
     u2 = try_unwrap_writeback({WRITEBACK_MARKER: 1, "writeback": {"events": "x"}})
     assert u2.output is None
     assert u2.events == []
