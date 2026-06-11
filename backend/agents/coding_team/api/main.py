@@ -24,6 +24,7 @@ if str(_agents_root) not in sys.path:
 from fastapi import FastAPI, HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
+from coding_team import hitl  # noqa: E402
 from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
@@ -622,6 +623,53 @@ def _start_github_resume_thread(
         raise
 
 
+# How long after deferring to a fresh heartbeat we re-check that the deferred-to wait loop really
+# consumed the answers. Slightly past the staleness window so a loop that died right after its
+# last heartbeat is unambiguously dead by the time the recheck runs.
+_RESUME_RECHECK_DELAY_S = _ANSWER_WAIT_HEARTBEAT_STALE_S + 5.0
+
+
+def _schedule_resume_recheck(job_id: str) -> None:
+    """Schedule a one-shot recheck for a resume that was deferred to a fresh heartbeat.
+
+    A fresh heartbeat usually means a live wait loop elsewhere will consume the stored answers —
+    but a worker that died right after its last beat leaves the job paused with no resume control
+    (the UI shows "resuming" and never retries). The recheck runs after the staleness window: if
+    the job is still paused with no live thread and a now-stale heartbeat, it resumes it for real.
+
+    Postconditions:
+        - A daemon timer is scheduled; its callback is a no-op when the job moved on (status no
+          longer waiting), a thread is alive here, or the heartbeat is fresh again (the loop
+          really is alive elsewhere). Scheduling failures are logged, never raised.
+    """
+
+    def _recheck() -> None:
+        try:
+            data = get_job(job_id) or {}
+            if data.get("status") != hitl.WAITING_STATUS:
+                return
+            if _is_run_thread_alive(job_id) or _answer_wait_heartbeat_fresh(data):
+                return
+            if _try_auto_resume(job_id, data):
+                logger.info(
+                    "Deferred resume recheck restarted the orchestrator for job %s.", job_id
+                )
+            else:
+                update_job(
+                    job_id,
+                    status_text="Answers received. Resume the job to continue processing.",
+                )
+        except Exception:
+            logger.exception("Deferred resume recheck failed for job %s.", job_id)
+
+    try:
+        t = threading.Timer(_RESUME_RECHECK_DELAY_S, _recheck)
+        t.daemon = True
+        t.start()
+    except Exception:
+        logger.exception("Could not schedule resume recheck for job %s.", job_id)
+
+
 def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
     """Best-effort restart of a dead orchestrator after answers arrived.
 
@@ -635,12 +683,18 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         - ``data`` is the job record for ``job_id`` and the caller observed the run thread
           as not alive in this process.
     Postconditions:
-        - Returns True when the run is resuming (a live wait loop heartbeated recently, a thread
-          was spawned here, or another caller holds the start claim); False when the record lacks
-          a usable ``repo_path``/``plan_input``, a GitHub-issue job has no token to resume its
-          publish flow, or the thread could not be started. Never raises.
+        - Returns True when the run is resuming (a live wait loop heartbeated recently — with a
+          deferred recheck scheduled in case that loop died right after its last beat — a thread
+          was spawned here, or another caller holds the start claim); False when the job is
+          terminal, the record lacks a usable ``repo_path``/``plan_input``, a GitHub-issue job
+          has no token to resume its publish flow, or the thread could not be started.
+          Never raises.
     """
+    if hitl.is_terminal(data):
+        logger.warning("Auto-resume for job %s skipped: job is terminal.", job_id)
+        return False
     if _answer_wait_heartbeat_fresh(data):
+        _schedule_resume_recheck(job_id)
         return True
     plan_raw = data.get("plan_input") or {}
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
@@ -685,6 +739,9 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
     thread died (e.g. a server restart), the orchestrator is restarted automatically; only when
     that is impossible (no usable plan/repo_path) are the answers merely stored with a
     status_text directing the caller to POST /run/{job_id}/resume.
+
+    Authentication/authorization is enforced by the unified API security gateway in front of all
+    team mounts; like every other coding-team route, this endpoint assumes that perimeter.
     """
     data = get_job(job_id)
     if not data:
@@ -718,14 +775,30 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
 def resume_job(job_id: str) -> RunResponse:
     """Restart a paused coding-team job's orchestrator after answers were stored but its thread died.
 
-    No-op-safe: if a thread is still running, it will resume on its own and this just reports status.
-    Only the standalone (plan_input) path is resumable here; the GitHub-issue publish flow is not
-    re-driven (its hook thread is gone), so a restarted GitHub job continues the code work but you
-    must re-trigger publication.
+    No-op-safe: if a thread is still running (or a wait loop heartbeats from another worker), it
+    will resume on its own and this just reports status. GitHub-issue jobs are restarted through
+    the full hook path so publication (PR, issue comments) is preserved; that path requires
+    ``GITHUB_TOKEN`` — per-request tokens are deliberately never persisted on job records.
+
+    Authentication/authorization is enforced by the unified API security gateway in front of all
+    team mounts; like every other coding-team route, this endpoint assumes that perimeter.
+
+    Preconditions:
+        - The job exists and is not terminal (a finished run must never be silently re-executed).
+    Postconditions:
+        - Raises 404 (unknown job), 400 (terminal job, missing repo_path/plan, or a GitHub-issue
+          job without GITHUB_TOKEN); returns "already running" without spawning when a live
+          thread, fresh heartbeat, or concurrent claim exists; otherwise spawns the orchestrator
+          (hook path for GitHub-issue jobs) and reports "Job resumed."
     """
     data = get_job(job_id)
     if not data:
         raise HTTPException(status_code=404, detail="Job not found")
+    if hitl.is_terminal(data):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Job is {data.get('status', 'terminal')} and cannot be resumed.",
+        )
     if _is_run_thread_alive(job_id) or _answer_wait_heartbeat_fresh(data):
         # The thread registry is process-local; a fresh answer-wait heartbeat means the job's
         # wait loop is alive in another worker — resuming here would double-drive the job.
@@ -738,6 +811,21 @@ def resume_job(job_id: str) -> RunResponse:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
     plan = CodingTeamPlanInput.model_validate({**plan_raw, "repo_path": repo_path})
 
+    ctx = data.get("github_context") or {}
+    is_github_job = bool(
+        ctx.get("owner") and ctx.get("repo") and ctx.get("issue_number") is not None
+    )
+    token = os.environ.get("GITHUB_TOKEN") if is_github_job else None
+    if is_github_job and not token:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "GitHub-issue job cannot resume without GITHUB_TOKEN: the publish flow "
+                "(PR, issue comments) would be lost, and per-request tokens are not persisted. "
+                "Configure GITHUB_TOKEN, or restart via POST /run-from-github with a token."
+            ),
+        )
+
     # Atomically claim the right to start the thread so two concurrent /resume calls (or one racing
     # an as-yet-unregistered original thread) cannot both spawn an orchestrator for this job.
     if not _claim_run_thread(job_id):
@@ -745,7 +833,10 @@ def resume_job(job_id: str) -> RunResponse:
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
 
-    _start_orchestrator_thread(job_id, repo_path, plan)
+    if is_github_job:
+        _start_github_resume_thread(job_id, ctx, repo_path, plan, token or "")
+    else:
+        _start_orchestrator_thread(job_id, repo_path, plan)
     return RunResponse(job_id=job_id, status="running", message="Job resumed.")
 
 

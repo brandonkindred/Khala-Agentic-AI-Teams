@@ -15,7 +15,10 @@ import { IntegrationsApiService } from '../../services/integrations-api.service'
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
-import { PendingQuestionsComponent } from '../pending-questions/pending-questions.component';
+import {
+  PendingQuestionsComponent,
+  type AnswersSubmittedStatus,
+} from '../pending-questions/pending-questions.component';
 import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobStatus } from '../../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
@@ -272,8 +275,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * revives polling after a connection loss (answering proves the connection
    * is back), so the stale "lost connection" error is cleared too.
    */
-  onAnswersSubmitted(status: CodingTeamJobStatus): void {
-    this.jobStatus = status;
+  onAnswersSubmitted(status: AnswersSubmittedStatus): void {
+    // This page always configures the panel with submitEndpoint="coding-team",
+    // so the emitted union member is always the coding-team status shape.
+    this.jobStatus = status as CodingTeamJobStatus;
     this.issueError = null;
     if (this.activeJob) {
       this.startPolling(this.activeJob.job_id);

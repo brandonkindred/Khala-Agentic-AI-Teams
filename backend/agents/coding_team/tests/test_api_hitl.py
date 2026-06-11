@@ -349,6 +349,195 @@ def test_answers_dead_thread_github_job_without_token_falls_back_to_hint(monkeyp
     assert "Resume" in calls["status_text"]
 
 
+def test_resume_400_when_terminal(monkeypatch):
+    """A finished run must never be silently re-executed."""
+    for status in ("completed", "completed_with_failures", "failed", "cancelled"):
+        monkeypatch.setattr(api, "get_job", lambda jid, s=status: _job(status=s))
+        r = client.post("/run/j1/resume")
+        assert r.status_code == 400
+        assert "cannot be resumed" in r.json()["detail"]
+
+
+def test_resume_github_job_uses_hook_path(monkeypatch):
+    """GitHub-issue jobs resume through the hook path so publication survives."""
+    hook_calls = {}
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            return {"number": number}
+
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        github_context=ctx,
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(
+        api,
+        "_run_with_github_hooks",
+        lambda job_id, request, plan, issue, token: hook_calls.update(
+            {"job_id": job_id, "owner": request.owner, "token": token}
+        ),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert r.json()["message"] == "Job resumed."
+    assert hook_calls == {"job_id": "j1", "owner": "acme", "token": "tok-123"}
+
+
+def test_resume_github_job_400_without_token(monkeypatch):
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42}
+    job = _job(status="waiting_for_user", github_context=ctx)
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    assert "GITHUB_TOKEN" in r.json()["detail"]
+
+
+def test_auto_resume_refuses_terminal_job():
+    assert api._try_auto_resume("j1", _job(status="completed")) is False
+    assert api._try_auto_resume("j1", _job(status="cancelled")) is False
+
+
+class _ImmediateTimer:
+    """Stand-in for threading.Timer that fires the callback synchronously on start()."""
+
+    def __init__(self, interval, fn):
+        self._fn = fn
+        self.daemon = False
+
+    def start(self):
+        self._fn()
+
+
+def test_fresh_heartbeat_schedules_recheck_that_resumes_a_dead_loop(monkeypatch):
+    """The orphaned-heartbeat window: a worker that died right after its last beat must still
+    get its run resumed once the staleness window passes."""
+    from datetime import datetime, timezone
+
+    started = {}
+    fresh = _job(answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat())
+    # After the (simulated) delay, the heartbeat is stale and the job still paused.
+    stale = _job(
+        waiting_for_answers=False,
+        answer_wait_heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    calls = {"n": 0}
+
+    def get_job(jid):
+        calls["n"] += 1
+        return fresh if calls["n"] == 1 else stale
+
+    monkeypatch.setattr(api, "get_job", get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api.threading, "Timer", _ImmediateTimer)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(
+        api, "run_coding_team_orchestrator", lambda *a, **k: started.update({"ran": True})
+    )
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert started.get("ran") is True
+
+
+def test_recheck_writes_hint_when_resume_impossible(monkeypatch):
+    """If the dead loop's job can't be auto-resumed at recheck time, the manual hint is restored."""
+    from datetime import datetime, timezone
+
+    writes = {}
+    fresh = _job(answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat())
+    # Stale at recheck time, and unresumable: no repo_path/plan to restart from.
+    stale = _job(
+        repo_path=None,
+        waiting_for_answers=False,
+        answer_wait_heartbeat_at="2020-01-01T00:00:00+00:00",
+    )
+    calls = {"n": 0}
+
+    def get_job(jid):
+        calls["n"] += 1
+        return fresh if calls["n"] == 1 else stale
+
+    monkeypatch.setattr(api, "get_job", get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: writes.update(kw))
+    monkeypatch.setattr(api.threading, "Timer", _ImmediateTimer)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in writes["status_text"]
+
+
+def test_recheck_noop_when_job_moved_on(monkeypatch):
+    """No spawn when the deferred-to wait loop really did consume the answers."""
+    from datetime import datetime, timezone
+
+    fresh = _job(answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat())
+    resumed = _job(status="running", waiting_for_answers=False)
+    calls = {"n": 0}
+
+    def get_job(jid):
+        calls["n"] += 1
+        return fresh if calls["n"] == 1 else resumed
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("recheck must not spawn once the job moved on")
+
+    monkeypatch.setattr(api, "get_job", get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api.threading, "Timer", _ImmediateTimer)
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+
+
+def test_recheck_noop_when_heartbeat_fresh_again(monkeypatch):
+    """A still-fresh heartbeat at recheck time means the loop is genuinely alive elsewhere."""
+    from datetime import datetime, timezone
+
+    fresh = _job(answer_wait_heartbeat_at=datetime.now(timezone.utc).isoformat())
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("recheck must not spawn while the heartbeat stays fresh")
+
+    monkeypatch.setattr(api, "get_job", lambda jid: fresh)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api.threading, "Timer", _ImmediateTimer)
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+
+
 def test_resume_refuses_when_heartbeat_fresh(monkeypatch):
     from datetime import datetime, timezone
 

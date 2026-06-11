@@ -132,7 +132,7 @@
                 [jobId]="activeJob.job_id"
                 [questions]="jobStatus.pending_questions!"
                 submitEndpoint="coding-team"
-                (answersSubmitted)="onAnswersSubmitted($any($event))"
+                (answersSubmitted)="onAnswersSubmitted($event)"
               />
             }
             @if (jobStatus.thinking) {

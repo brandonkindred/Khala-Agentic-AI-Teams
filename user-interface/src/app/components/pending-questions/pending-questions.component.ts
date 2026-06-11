@@ -31,6 +31,18 @@ import { QuestionCardComponent } from './question-card/question-card.component';
 export type SubmitEndpointType = 'run-team' | 'planning-v2' | 'planning-v3' | 'product-analysis' | 'coding-team';
 
 /**
+ * Everything `answersSubmitted` can emit — the post-submit status of whichever
+ * endpoint the component was configured with. Consumers narrow to the shape
+ * their own `submitEndpoint` produces.
+ */
+export type AnswersSubmittedStatus =
+  | JobStatusResponse
+  | PlanningV2StatusResponse
+  | PlanningV3StatusResponse
+  | ProductAnalysisStatusResponse
+  | CodingTeamJobStatus;
+
+/**
  * Per-endpoint capabilities. `Record` over the full union makes adding a new
  * endpoint a compile error until its capabilities are declared here — the
  * single source of truth for whether AI auto-answer is offered (default-deny:
@@ -86,13 +98,7 @@ export class PendingQuestionsComponent implements OnChanges {
   @Input() questions: PendingQuestion[] = [];
   /** Which endpoint to call: 'run-team' (default), 'planning-v3', 'product-analysis', or 'coding-team'. */
   @Input() submitEndpoint: SubmitEndpointType = 'run-team';
-  @Output() answersSubmitted = new EventEmitter<
-    | JobStatusResponse
-    | PlanningV2StatusResponse
-    | PlanningV3StatusResponse
-    | ProductAnalysisStatusResponse
-    | CodingTeamJobStatus
-  >();
+  @Output() answersSubmitted = new EventEmitter<AnswersSubmittedStatus>();
 
   answers = new Map<string, QuestionAnswer>();
   submitting = false;
