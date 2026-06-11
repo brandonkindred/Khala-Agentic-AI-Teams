@@ -721,3 +721,91 @@ def test_abandon_run_releases_only_the_owned_in_progress_row() -> None:
 
     # A missing row is a no-op False, not an error.
     assert context.abandon_run("a", "never-claimed", claim_token="t") is False
+
+
+# ---------------------------------------------------------------------------
+# gc_terminal_runs + run_idempotency_ttl (ledger hygiene)
+# ---------------------------------------------------------------------------
+def _backdate_completed_at(agent_id: str, source_run_id: str, age: timedelta) -> None:
+    """Push a terminal row's ``completed_at`` ``age`` into the past."""
+    from shared_postgres import get_conn
+
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "UPDATE agent_cognition_runs SET completed_at = %s "
+            "WHERE agent_id=%s AND source_run_id=%s",
+            (datetime.now(timezone.utc) - age, agent_id, source_run_id),
+        )
+
+
+def test_run_idempotency_ttl_default_floor_garbage(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_COGNITION_RUN_TTL_S", raising=False)
+    assert context.run_idempotency_ttl() == timedelta(seconds=context._DEFAULT_RUN_TTL_S)
+    monkeypatch.setenv("AGENT_COGNITION_RUN_TTL_S", "5")  # below the floor
+    assert context.run_idempotency_ttl() == timedelta(seconds=context._MIN_RUN_TTL_S)
+    monkeypatch.setenv("AGENT_COGNITION_RUN_TTL_S", "junk")
+    assert context.run_idempotency_ttl() == timedelta(seconds=context._DEFAULT_RUN_TTL_S)
+
+
+def test_gc_terminal_runs_precondition_asserts() -> None:
+    with pytest.raises(AssertionError):
+        context.gc_terminal_runs(datetime(2026, 6, 1, 12, 0), timedelta(hours=1))  # naive now
+    with pytest.raises(AssertionError):
+        context.gc_terminal_runs(datetime.now(timezone.utc), timedelta(0))  # non-positive ttl
+
+
+@_PG
+def test_gc_terminal_runs_deletes_only_expired_terminal_rows() -> None:
+    ttl = timedelta(hours=1)
+
+    # An old completed run (past TTL) — should be GC'd.
+    old = context.claim_run("a", "run-old", "H1", _LEASE)
+    context.complete_run(
+        "a", "run-old", status="completed", response={"ok": 1}, claim_token=old.claim_token
+    )
+    _backdate_completed_at("a", "run-old", timedelta(hours=2))
+
+    # An old *blocked* run (past TTL) — terminal too, also GC'd.
+    blk = context.claim_run("a", "run-blk", "H1", _LEASE)
+    context.complete_run(
+        "a", "run-blk", status="blocked", response={"e": 1}, claim_token=blk.claim_token
+    )
+    _backdate_completed_at("a", "run-blk", timedelta(hours=3))
+
+    # A fresh completed run (inside TTL) — must be kept for replay.
+    fresh = context.claim_run("a", "run-fresh", "H1", _LEASE)
+    context.complete_run(
+        "a", "run-fresh", status="completed", response={"ok": 2}, claim_token=fresh.claim_token
+    )
+
+    deleted = context.gc_terminal_runs(datetime.now(timezone.utc), ttl)
+    assert deleted == 2
+    assert _read_run("a", "run-old") is None
+    assert _read_run("a", "run-blk") is None
+    # The fresh row survives and still replays its stored envelope.
+    assert context.replay_run("a", "run-fresh") == {"ok": 2}
+
+
+@_PG
+def test_gc_terminal_runs_never_touches_in_progress_even_with_expired_lease() -> None:
+    # An in_progress row with an expired lease is NOT terminal: GC must leave it
+    # (and its request_hash) for claim_run to reclaim lazily.
+    context.claim_run("a", "run-ip", "H1", _LEASE)
+    _expire_lease("a", "run-ip")
+
+    deleted = context.gc_terminal_runs(datetime.now(timezone.utc), timedelta(seconds=1))
+    assert deleted == 0
+    row = _read_run("a", "run-ip")
+    assert row is not None
+    assert row["status"] == "in_progress"
+    assert row["request_hash"] == "H1"  # hash survives for retry policing
+
+
+@_PG
+def test_gc_terminal_runs_is_a_noop_when_nothing_is_due() -> None:
+    fresh = context.claim_run("a", "run-recent", "H1", _LEASE)
+    context.complete_run(
+        "a", "run-recent", status="completed", response={"ok": 1}, claim_token=fresh.claim_token
+    )
+    assert context.gc_terminal_runs(datetime.now(timezone.utc), timedelta(days=7)) == 0
+    assert _read_run("a", "run-recent")["status"] == "completed"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 
 import pytest
 
@@ -51,7 +52,7 @@ def test_run_one_agent_sequences_pipeline(monkeypatch):
     assert order == ["rollup:agent-1", "reflect:agent-1", "prune:agent-1:90"]
 
 
-def test_run_once_iterates_and_isolates_failures(monkeypatch):
+def test_run_once_iterates_then_gcs_the_ledger(monkeypatch):
     monkeypatch.setattr(
         scheduler.watermark_store, "list_agent_ids_with_events", lambda: ["a", "b", "c"]
     )
@@ -62,10 +63,28 @@ def test_run_once_iterates_and_isolates_failures(monkeypatch):
             raise ValueError("b is broken")
         handled.append(agent_id)
 
+    gc_calls = {"n": 0}
     monkeypatch.setattr(scheduler, "_run_one_agent", _one)
+    monkeypatch.setattr(
+        scheduler.context,
+        "gc_terminal_runs",
+        lambda now, ttl: gc_calls.update(n=gc_calls["n"] + 1) or 3,
+    )
+    monkeypatch.setattr(scheduler.context, "run_idempotency_ttl", lambda: timedelta(days=7))
     asyncio.run(scheduler._run_once())
-    # a and c still processed despite b failing.
+    # a and c still processed despite b failing; the ledger GC runs once after.
     assert handled == ["a", "c"]
+    assert gc_calls["n"] == 1
+
+
+def test_gc_terminal_runs_failure_is_isolated(monkeypatch):
+    def _boom(now, ttl):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(scheduler.context, "gc_terminal_runs", _boom)
+    monkeypatch.setattr(scheduler.context, "run_idempotency_ttl", lambda: timedelta(days=7))
+    # A GC failure is logged and swallowed, not raised.
+    asyncio.run(scheduler._gc_terminal_runs())
 
 
 # ---------------------------------------------------------------------------

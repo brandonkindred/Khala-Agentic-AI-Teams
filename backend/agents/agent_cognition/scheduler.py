@@ -15,6 +15,17 @@ worker produces the summaries the knowledge-graph sync worker ingests and the
 ``pending`` proposals the operator approval API serves — it **never** activates a
 rule (reflection only writes proposals; activation stays behind the HITL gate).
 
+After the per-agent passes, each tick also runs one platform-wide ledger GC:
+
+    gc_terminal_runs(now, ttl)               # drop *terminal* runs past the idempotency TTL
+
+The GC is platform-wide (not per agent) because the idempotency TTL is a single
+global value and the ``agent_cognition_runs`` ledger outlives an agent's raw
+events — a terminal row must still be GC'd for an agent whose events have all
+been pruned. It removes only ``completed``/``blocked`` rows past their replay
+window; ``in_progress`` rows (even with an expired lease) are left for
+``claim_run`` to reclaim, so the ``request_hash`` survives for retry policing.
+
 Gated on ``POSTGRES_HOST``; a clean no-op (returns without looping) when unset.
 Every store call runs in ``asyncio.to_thread`` so the synchronous psycopg work
 never blocks the event loop.
@@ -26,6 +37,7 @@ import asyncio
 import logging
 from datetime import datetime, timezone
 
+from agent_cognition import context
 from agent_cognition.graph import watermark_store
 from agent_cognition.memory import rollup, store
 from agent_cognition.memory.store import AgentCognitionStorageUnavailable
@@ -59,11 +71,14 @@ async def run_cognition_scheduler(*, interval_s: int | None = None) -> None:
     Postconditions:
         * Returns immediately (no loop) when Postgres is disabled.
         * Otherwise every ``interval`` seconds runs the pipeline for each agent
-          with memory. A per-agent failure is logged and the pass continues to the
-          next agent; storage outages retry next cycle; unexpected pass-level
-          errors are logged and the loop continues; ``CancelledError`` propagates.
+          with memory, then one platform-wide ledger GC. A per-agent failure is
+          logged and the pass continues to the next agent; storage outages retry
+          next cycle; unexpected pass-level errors are logged and the loop
+          continues; ``CancelledError`` propagates.
         * Never activates a rule — only ``reflect`` runs, which writes ``pending``
           proposals.
+        * GCs only *terminal* ledger rows past the idempotency TTL; an
+          ``in_progress`` row with an expired lease is left for ``claim_run``.
     """
     if not is_postgres_enabled():
         logger.info("Agent Cognition scheduler disabled (POSTGRES_HOST unset); not starting")
@@ -85,13 +100,31 @@ async def run_cognition_scheduler(*, interval_s: int | None = None) -> None:
 
 
 async def _run_once() -> None:
-    """Run the rollup → reflect → prune pipeline for every agent with memory."""
+    """Run the per-agent pipeline for every agent with memory, then GC the ledger."""
     agent_ids = await asyncio.to_thread(watermark_store.list_agent_ids_with_events)
     for agent_id in agent_ids:
         try:
             await _run_one_agent(agent_id)
         except Exception:
             logger.exception("cognition scheduler: agent %s failed; continuing", agent_id)
+    await _gc_terminal_runs()
+
+
+async def _gc_terminal_runs() -> None:
+    """Platform-wide ledger GC: drop terminal runs past the idempotency TTL.
+
+    Isolated from the per-agent loop so a GC failure never aborts a pass that
+    already did its rollup/reflect/prune work (and vice versa).
+    """
+    now = datetime.now(timezone.utc)
+    try:
+        deleted = await asyncio.to_thread(
+            context.gc_terminal_runs, now, context.run_idempotency_ttl()
+        )
+        if deleted:
+            logger.info("cognition scheduler: GC'd %d terminal ledger run(s)", deleted)
+    except Exception:
+        logger.exception("cognition scheduler: ledger GC failed; continuing")
 
 
 async def _run_one_agent(agent_id: str) -> None:

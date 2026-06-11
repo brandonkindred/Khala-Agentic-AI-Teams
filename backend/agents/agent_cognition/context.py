@@ -66,6 +66,14 @@ _TERMINAL_STATUSES = frozenset({"completed", "blocked"})
 _DEFAULT_LEASE_S = 120
 _MIN_LEASE_S = 30
 
+# How long a *terminal* (completed/blocked) ledger row is retained for replay
+# before the scheduler GCs it (the idempotency TTL). Default 7 days; floored to
+# one hour so a misconfiguration can't shrink the replay window to the point
+# where in-flight retries stop deduping. ``in_progress`` rows are never GC'd —
+# expired leases are reclaimed lazily by :func:`claim_run`.
+_DEFAULT_RUN_TTL_S = 7 * 24 * 3600
+_MIN_RUN_TTL_S = 3600
+
 # Generous cap on an event's free-text ``content`` at the writeback boundary —
 # large enough for a legitimate multi-sentence summary, bounded enough that a
 # hostile/oversized string can't bloat a row. (Distinct from the redactor's
@@ -80,6 +88,8 @@ __all__ = [
     "PostconditionViolation",
     "RunLedgerError",
     "default_run_lease",
+    "run_idempotency_ttl",
+    "gc_terminal_runs",
     "ensure_rollups_current",
     "load_context",
     "persist_writeback",
@@ -597,6 +607,47 @@ def abandon_run(agent_id: str, source_run_id: str, *, claim_token: str) -> bool:
         return cur.fetchone() is not None
 
 
+def gc_terminal_runs(now: datetime, ttl: timedelta) -> int:
+    """Delete *terminal* ledger rows whose replay window (idempotency TTL) has lapsed.
+
+    Ledger hygiene for the central scheduler: a terminal (``completed``/
+    ``blocked``) row is kept only so a retry inside the TTL can replay its
+    stored envelope without re-invoking. Once ``completed_at`` is older than
+    ``now - ttl`` that protection is no longer owed, so the row is GC'd.
+
+    ``in_progress`` rows are **never** touched — even one whose lease has
+    expired. Reclaiming an expired lease (and preserving its ``request_hash``
+    for retry policing) is :func:`claim_run`'s job, done lazily on the next
+    retry; GCing it here would drop the hash and let a post-expiry retry with a
+    *different* body run instead of conflicting. The ``status = ANY(terminal)``
+    guard enforces this structurally (an ``in_progress`` row also has a NULL
+    ``completed_at``, so it can never match the cutoff).
+
+    Preconditions:
+        * ``now`` is tz-aware UTC; ``ttl`` is a positive ``timedelta``.
+    Postconditions:
+        * Every row with ``status`` in ``{completed, blocked}`` and
+          ``completed_at < now - ttl`` is deleted; no other row is.
+        * Returns the number of rows deleted (``>= 0``). A pass with nothing due
+          is a no-op returning ``0``.
+    Invariants:
+        * Replay availability is preserved for every terminal run still inside
+          its TTL window, and for **all** ``in_progress`` runs regardless of age.
+    """
+    assert now.tzinfo is not None, "gc_terminal_runs: now must be tz-aware"
+    assert ttl > timedelta(0), "gc_terminal_runs: ttl must be positive"
+    cutoff = now - ttl
+    with _conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+        cur.execute(
+            """DELETE FROM agent_cognition_runs
+                WHERE status = ANY(%(terminal)s)
+                      AND completed_at IS NOT NULL
+                      AND completed_at < %(cutoff)s""",
+            {"terminal": list(_TERMINAL_STATUSES), "cutoff": cutoff},
+        )
+        return cur.rowcount
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -607,6 +658,19 @@ def default_run_lease() -> timedelta:
     """
     return timedelta(
         seconds=read_int_with_floor("AGENT_COGNITION_RUN_LEASE_S", _DEFAULT_LEASE_S, _MIN_LEASE_S)
+    )
+
+
+def run_idempotency_ttl() -> timedelta:
+    """The terminal-run idempotency TTL as a ``timedelta`` (env ``AGENT_COGNITION_RUN_TTL_S``).
+
+    How long :func:`gc_terminal_runs` keeps a terminal ledger row available for
+    replay before reclaiming it.
+
+    Postconditions: a positive duration of at least ``_MIN_RUN_TTL_S`` seconds.
+    """
+    return timedelta(
+        seconds=read_int_with_floor("AGENT_COGNITION_RUN_TTL_S", _DEFAULT_RUN_TTL_S, _MIN_RUN_TTL_S)
     )
 
 

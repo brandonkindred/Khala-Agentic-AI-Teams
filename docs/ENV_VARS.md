@@ -264,10 +264,17 @@ Slow-call log threshold (ms, default `1000`) for `shared_neo4j.timed_graph_op`.
 
 ### AGENT_COGNITION_SCHEDULER_INTERVAL_S
 Cadence (seconds, default `3600`, floored to `60`) of the Agent Cognition scheduler — the live driver
-that, per agent with memory, sequences `ensure_rollups_current` → `reflect` → `prune_events`. It
-produces the day/week/month/year summaries the graph ingests and the `pending` rule proposals the
-approval API serves; it **never** activates a rule (reflection only writes proposals). No-op when
-`POSTGRES_HOST` is unset.
+that, per agent with memory, sequences `ensure_rollups_current` → `reflect` → `prune_events`, then
+runs one platform-wide ledger GC (`gc_terminal_runs`). It produces the day/week/month/year summaries
+the graph ingests and the `pending` rule proposals the approval API serves; it **never** activates a
+rule (reflection only writes proposals). No-op when `POSTGRES_HOST` is unset.
+
+### AGENT_COGNITION_RUN_TTL_S
+Idempotency TTL (seconds, default `604800` = 7 days, floored to `3600`) for the `agent_cognition_runs`
+ledger. A *terminal* (`completed`/`blocked`) run row is retained this long so a retry can replay its
+stored envelope without re-invoking; once `completed_at` is older than the TTL the scheduler's
+`gc_terminal_runs` pass reclaims it. `in_progress` rows are **never** GC'd here — an expired lease is
+reclaimed lazily by `claim_run`, preserving its `request_hash` for retry policing.
 
 ### AGENT_COGNITION_GRAPH_SEARCH_TOP_K
 Max related facts retrieved per knowledge-graph search in `build_graph_context` (default `10`),
