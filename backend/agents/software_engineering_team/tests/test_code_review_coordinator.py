@@ -1011,6 +1011,34 @@ def test_rejecting_chunk_summary_survives_other_chunks_findings() -> None:
     assert [i.file_path for i in info] == ["empty.py"]
 
 
+def test_silent_rejection_never_borrows_an_approving_chunks_summary() -> None:
+    """A chunk that rejects with no issues AND no summary has no actionable
+    feedback: the documented auto-approve applies, and the approving chunk's
+    summary must never be synthesized into a phantom 'Code review rejected:
+    Looks good' issue (verdicts and summaries stay paired per chunk)."""
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+
+    class _SilentRejectB(DummyLLMClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            if "### b.py ###" in prompt:
+                return {"approved": False, "issues": [], "summary": ""}
+            return {"approved": True, "issues": [], "summary": "Looks good"}
+
+    files = {
+        "a.py": "a = 1\n".ljust(cap - 2_000, "#"),
+        "b.py": "b = 2\n".ljust(cap - 2_000, "#"),
+    }
+    result = run_coordinator(
+        _SilentRejectB(),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    assert result.approved is True
+    assert result.issues == []
+    assert "Looks good" in result.summary  # the approving summary survives as summary text
+
+
 def test_no_stale_progress_reports_after_map_failure() -> None:
     """A worker still in flight when the map phase fails must never report
     progress afterwards — a stale 'reviewing' report would overwrite the

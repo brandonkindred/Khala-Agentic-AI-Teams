@@ -637,22 +637,22 @@ def _dedupe_issues(all_issues: List[CodeReviewIssue]) -> List[CodeReviewIssue]:
 def _reconcile_approval(
     llm_approved: bool,
     issues: List[CodeReviewIssue],
-    summary: str,
 ) -> Tuple[bool, List[CodeReviewIssue]]:
     """Deterministic approval gate with the anti-loop safety nets.
 
     Preconditions:
-        - ``issues`` is the deduped merged issue list.
+        - ``issues`` is the deduped merged issue list. Any rejecting
+          sub-review's summary has already been synthesized into a high issue
+          per sub-review (``_review_chunk_with_recovery``), so issue text and
+          verdicts are correctly paired before they reach this gate.
 
     Postconditions:
         - ``approved is False`` implies the returned issues contain at least
           one critical/high finding (rejections are always actionable).
-        - A reject with only minor/info issues, or with no feedback at all,
-          flips to approve; a reject with zero issues but a summary gains one
-          synthesized high issue built from that summary. (A rejecting
-          sub-review's summary is already synthesized per sub-review in
-          ``_review_chunk_with_recovery`` — this merged-level net only covers
-          the case where no chunk produced any finding at all.)
+        - A reject with only minor/info issues, or with no actionable feedback
+          at all, flips to approve. The merged summary is never consulted here:
+          it mixes every chunk's text, so synthesizing a rejection from it
+          could attribute an approving chunk's words to a rejecting chunk.
     """
     critical_or_high = [i for i in issues if i.severity in ("critical", "high")]
     approved = llm_approved and not critical_or_high
@@ -662,30 +662,12 @@ def _reconcile_approval(
                 "CodeReview: overriding to approved=True (only %s minor/nit issues, no critical/high)",
                 len(issues),
             )
-            approved = True
-        elif summary and summary.strip():
-            logger.warning(
-                "CodeReview: LLM returned approved=False with 0 issues -- "
-                "synthesizing issue from summary: %s",
-                summary[:200],
-            )
-            issues = [
-                *issues,
-                CodeReviewIssue(
-                    severity="high",
-                    category="general",
-                    file_path="",
-                    description=f"Code review rejected: {summary}",
-                    suggestion="Address the concerns described in the review summary. "
-                    "Ensure the code meets all acceptance criteria and follows project conventions.",
-                ),
-            ]
         else:
             logger.warning(
-                "CodeReview: LLM returned approved=False with no issues and no summary -- "
-                "auto-approving (no actionable feedback to give coding agent)"
+                "CodeReview: LLM rejected with no issues and no actionable feedback -- "
+                "auto-approving (nothing to give the coding agent)"
             )
-            approved = True
+        approved = True
     return approved, issues
 
 
@@ -864,7 +846,7 @@ def run_coordinator(
     deduped = _dedupe_issues([*outcome.issues, *skipped_issues])
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     merged_summary = "\n\n".join(s for s in outcome.summaries if s.strip())
-    approved, deduped = _reconcile_approval(all_llm_approved, deduped, merged_summary)
+    approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
     spec_notes = "\n\n".join(n for n in outcome.spec_notes if n.strip())
     # A commit message synthesized from a fraction of the change is misleading,
