@@ -52,9 +52,13 @@ dedups a re-sent writeback; across attempts the keyspaces are disjoint.
 Stored-envelope shape: the ledger's purpose is to replay the exact response
 a retry would otherwise recompute, so the stored ``content`` (and a blocked
 outcome's ``content``) is deliberately the full HTTP response body —
-including the FastAPI-style ``{"detail": ...}`` framing for rule blocks.
-Transport-agnostic callers should read the structured
-``FinalizeOutcome.block_phase`` / ``block_reason`` (and
+including the FastAPI-style ``{"detail": ...}`` framing for rule blocks. A
+blocked envelope additionally stores the structured block fields
+(``blocked`` / ``block_phase`` / ``block_reason``) so a replay restores the
+same structured shape a fresh block reports rather than forcing callers to
+re-sniff ``content``; envelopes written before those keys existed degrade on
+replay to ``blocked=False`` (no migration). Transport-agnostic callers should
+read the structured ``FinalizeOutcome.block_phase`` / ``block_reason`` (and
 ``GateOutcome.reason``) fields instead of parsing ``content``.
 
 Design by Contract: every public function documents explicit Preconditions /
@@ -234,7 +238,12 @@ class GateOutcome:
     Invariants:
         * ``kind is PROCEED``  → ``prepared`` is set; all other fields unset.
         * ``kind is REPLAY``   → ``status_code`` + ``content`` carry the stored
-          terminal envelope.
+          terminal envelope. When that envelope is a *blocked* run stored with
+          the structured fields, ``replay_blocked`` is ``True`` and
+          ``block_phase`` / ``block_reason`` carry the original cause so the
+          mapper can rebuild a structurally-identical block; an envelope stored
+          before those keys existed leaves them unset (replay degrades to
+          ``blocked=False``).
         * ``kind is BLOCKED``  → ``status_code`` + ``content`` carry the 4xx
           envelope (also stored in the ledger when the run was claimed) and
           ``reason`` carries the failing rule's reason. A BLOCKED outcome is
@@ -252,6 +261,12 @@ class GateOutcome:
     status_code: int | None = None
     content: Any = None
     reason: str | None = None
+    # Set only on a REPLAY of a previously *blocked* run stored with the
+    # structured fields (added by ``_record_block``). ``replay_blocked`` is the
+    # explicit stored flag — absent on legacy rows, which then degrade.
+    replay_blocked: bool = False
+    block_phase: str | None = None
+    block_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -267,12 +282,16 @@ class FinalizeOutcome:
         * ``replayed`` is ``True`` exactly when the response was served from
           the run ledger without re-invoking the agent — transports use this
           (not the gate outcome's kind) to mark replays, e.g. the proxy's
-          ``X-Khala-Replayed`` header. A replay is a **verbatim** re-serve of
-          the stored envelope, so a replay of a previously *blocked* run
-          reports ``replayed=True`` with ``blocked=False`` and no
-          ``block_phase``/``block_reason`` — the structured block fields
-          describe this attempt's gating, which did not run. Callers handling
-          replays must branch on ``status_code``/``content``, not ``blocked``.
+          ``X-Khala-Replayed`` header. A replay re-serves the stored envelope's
+          ``status_code``/``content`` verbatim; for a replay of a previously
+          *blocked* run the gate **restores the structured block fields** from
+          the ledger too, so it reports ``replayed=True`` with ``blocked=True``
+          and the original ``block_phase``/``block_reason`` — a replayed block
+          is indistinguishable from a fresh one to callers branching on the
+          structured fields. A blocked run stored *before* those fields were
+          persisted lacks the keys and degrades to ``blocked=False`` (no
+          ``block_phase``/``block_reason``); such callers should still treat
+          the 4xx ``status_code``/``content`` as authoritative.
         * otherwise ``status_code``/``content`` echo the upstream response.
     """
 
@@ -704,14 +723,21 @@ def _replay_outcome(agent_id: str, source_run_id: str, response: Any) -> GateOut
     """Map a terminal ledger row's stored envelope to a ``REPLAY`` outcome.
 
     Postconditions: a well-formed stored envelope (``{status_code, content}``)
-    replays verbatim; a malformed/missing one degrades to ``CONFLICT`` (never a
-    forged 200) with the anomaly logged.
+    replays verbatim; a blocked envelope additionally carrying the structured
+    fields (``blocked``/``block_phase``/``block_reason``) carries them onto the
+    outcome so the mapper rebuilds the same structured shape a fresh block
+    reports — a row stored before those keys existed leaves them unset and
+    degrades to ``blocked=False``. A malformed/missing envelope degrades to
+    ``CONFLICT`` (never a forged 200) with the anomaly logged.
     """
     if isinstance(response, Mapping) and isinstance(response.get("status_code"), int):
         return GateOutcome(
             kind=GateOutcomeKind.REPLAY,
             status_code=response["status_code"],
             content=response.get("content"),
+            replay_blocked=bool(response.get("blocked")),
+            block_phase=response.get("block_phase"),
+            block_reason=response.get("block_reason"),
         )
     logger.error(
         "cognition: terminal run %s/%s has no replayable envelope; refusing replay",
@@ -777,12 +803,24 @@ def _record_block(
     )
     _persist_events_best_effort(agent_id, event_run_id, events)
     if claim_token is not None:
+        # Persist the structured block fields alongside the replayable body so a
+        # same-key retry can restore the same shape a fresh block reports
+        # (blocked/block_phase/block_reason) instead of re-sniffing ``content``.
+        # Additive keys in the ``agent_cognition_runs.response`` JSONB — no
+        # schema change; rows written before this degrade on replay (the keys
+        # are simply absent → blocked=False).
         _complete_best_effort(
             agent_id,
             source_run_id,
             claim_token,
             status="blocked",
-            response={"status_code": 422, "content": content},
+            response={
+                "status_code": 422,
+                "content": content,
+                "blocked": True,
+                "block_phase": phase,
+                "block_reason": reason,
+            },
         )
     return content
 
@@ -978,12 +1016,14 @@ def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
     Preconditions:
         * ``outcome.kind is not PROCEED`` (a PROCEED has no response to map).
     Postconditions:
-        * ``REPLAY`` → the stored terminal envelope verbatim, with
-          ``replayed=True`` so transports can mark it. Verbatim means a replay
-          of a previously *blocked* run carries the stored 4xx in
-          ``status_code``/``content`` but ``blocked=False`` — the structured
-          block fields describe the current attempt's gating, which a replay
-          skips (see :class:`FinalizeOutcome`). ``BLOCKED`` → the 422
+        * ``REPLAY`` → the stored terminal envelope's ``status_code``/``content``
+          verbatim, with ``replayed=True`` so transports can mark it. A replay
+          of a previously *blocked* run also **restores the structured block
+          fields** from the ledger (``blocked=True`` with the original
+          ``block_phase``/``block_reason``), so it is indistinguishable from a
+          fresh block to callers branching on those fields; a blocked run
+          stored before those keys existed lacks them and degrades to
+          ``blocked=False`` (see :class:`FinalizeOutcome`). ``BLOCKED`` → the 422
           block envelope with ``blocked``/``block_phase``/``block_reason``
           set. ``block_phase`` is always ``"precondition"`` here by the
           :class:`GateOutcome` invariant — :func:`prepare_invoke` is the sole
@@ -1002,7 +1042,12 @@ def outcome_as_finalized(outcome: GateOutcome) -> FinalizeOutcome:
     if outcome.kind is GateOutcomeKind.REPLAY:
         assert outcome.status_code is not None, "outcome_as_finalized: replay lacks status"
         return FinalizeOutcome(
-            status_code=outcome.status_code, content=outcome.content, replayed=True
+            status_code=outcome.status_code,
+            content=outcome.content,
+            replayed=True,
+            blocked=outcome.replay_blocked,
+            block_phase=outcome.block_phase,
+            block_reason=outcome.block_reason,
         )
     if outcome.kind is GateOutcomeKind.BLOCKED:
         return FinalizeOutcome(
