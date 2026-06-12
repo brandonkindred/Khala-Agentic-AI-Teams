@@ -14,6 +14,7 @@ import random
 import re
 import threading
 import time
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, Optional
 
 import httpx
@@ -43,6 +44,18 @@ from ..telemetry import record_llm_call
 from ..util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
+
+
+# Per-call response state (caller tag, token usage, latency). These are
+# ContextVars rather than instance attributes because the client is a
+# process-wide cached singleton shared across concurrent agents: per-thread/task
+# isolation keeps each request's telemetry self-consistent, so a concurrent call
+# can't overwrite one request's usage/latency/caller before ``_record_telemetry``
+# reads them. Reset at the start of every public call so a failed call never
+# records a previous call's token counts.
+_caller_var: ContextVar[str] = ContextVar("llm_ollama_caller", default="unknown")
+_usage_var: ContextVar[Optional[Dict[str, Any]]] = ContextVar("llm_ollama_usage", default=None)
+_latency_var: ContextVar[int] = ContextVar("llm_ollama_latency_ms", default=0)
 
 
 def _caller_tag() -> str:
@@ -331,9 +344,6 @@ class OllamaLLMClient(LLMClient):
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
         self._fallback_num_ctx: Optional[int] = None
         self._fallback_num_ctx_ts: float = 0.0
-        # Token usage from the last successful LLM call (populated by _ollama_post)
-        self._last_usage: Optional[Dict[str, Any]] = None
-        self._last_latency_ms: int = 0
 
     def _record_telemetry(
         self,
@@ -345,13 +355,14 @@ class OllamaLLMClient(LLMClient):
     ) -> None:
         """Record LLM call telemetry using data from the last _ollama_post call.
 
-        Attribution (agent_key/team/objective/request_id) is sourced from the
-        per-call contextvars bound by the public ``complete_json``/``complete``/
-        ``chat`` entrypoints, so it is correct even though the client itself is a
-        process-wide cached singleton shared across concurrent agents.
+        Attribution (agent_key/team/objective/request_id) and response state
+        (caller/usage/latency) are all sourced from per-call contextvars bound by
+        the public ``complete_json``/``complete``/``chat`` entrypoints and
+        ``_ollama_post``, so the whole record stays self-consistent even though the
+        client is a process-wide cached singleton shared across concurrent agents.
         """
-        usage = self._last_usage or {}
-        caller = getattr(self, "_current_caller", "unknown")
+        usage = _usage_var.get() or {}
+        caller = _caller_var.get()
         attr = current_attribution()
         try:
             record_llm_call(
@@ -362,7 +373,7 @@ class OllamaLLMClient(LLMClient):
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
-                latency_ms=self._last_latency_ms,
+                latency_ms=_latency_var.get(),
                 status=status,
                 error_type=error_type,
                 job_id=attr.job_id or None,
@@ -818,8 +829,9 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
 
-        Token usage from the response is stored in ``self._last_usage`` after each
-        successful call so callers can inspect prompt/completion token counts.
+        Token usage and latency from the response are stored in the per-call
+        ``_usage_var`` / ``_latency_var`` contextvars after each successful call,
+        keeping each request's telemetry self-consistent under concurrency.
 
         Retries use two INDEPENDENT budgets: transient 5xx/network faults retry on
         the fast schedule (``max_retries`` / ``initial_backoff`` / ``backoff_max``),
@@ -1031,11 +1043,12 @@ class OllamaLLMClient(LLMClient):
                                             finish_reason = fr
                                 elapsed = time.monotonic() - t0
                                 joined_content = "".join(content_parts)
-                                caller = getattr(self, "_current_caller", "unknown")
+                                caller = _caller_var.get()
 
-                                # Store usage for telemetry consumers
-                                self._last_usage = usage_data
-                                self._last_latency_ms = int(elapsed * 1000)
+                                # Store usage for telemetry consumers (per-call,
+                                # see _usage_var / _latency_var).
+                                _usage_var.set(usage_data)
+                                _latency_var.set(int(elapsed * 1000))
                                 prompt_tokens = (usage_data or {}).get("prompt_tokens", 0)
                                 completion_tokens = (usage_data or {}).get("completion_tokens", 0)
                                 total_tokens = (usage_data or {}).get("total_tokens", 0)
@@ -1385,6 +1398,10 @@ class OllamaLLMClient(LLMClient):
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._complete_json_impl(
@@ -1409,7 +1426,11 @@ class OllamaLLMClient(LLMClient):
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
-        self._current_caller = caller
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
         _attr = current_attribution()
         logger.info(
             "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1635,6 +1656,10 @@ class OllamaLLMClient(LLMClient):
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._complete_impl(
@@ -1661,7 +1686,11 @@ class OllamaLLMClient(LLMClient):
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
-        self._current_caller = caller
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
         _attr = current_attribution()
         logger.info(
             "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
@@ -1825,6 +1854,10 @@ class OllamaLLMClient(LLMClient):
         both modes. ``think=None`` (default) resolves to the platform default
         (max registered thinking level when known).
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._chat_impl(
@@ -1855,7 +1888,11 @@ class OllamaLLMClient(LLMClient):
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
-        self._current_caller = caller
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
         _attr = current_attribution()
         logger.info(
             "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",

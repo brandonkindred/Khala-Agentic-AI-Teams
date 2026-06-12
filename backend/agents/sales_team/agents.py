@@ -85,7 +85,11 @@ def _invoke(
     objective: str,
     **extra: Any,
 ):
-    """Shared call into ``complete_validated`` with the sales-team defaults."""
+    """Shared call into ``complete_validated`` with the sales-team defaults.
+
+    :param objective: Required short phrase describing the call's purpose, stamped
+        onto LLM logs/telemetry for attribution. Forwarded to ``complete_validated``.
+    """
     return complete_validated(
         client,
         prompt,

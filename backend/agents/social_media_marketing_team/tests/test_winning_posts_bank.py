@@ -190,7 +190,7 @@ def test_save_calls_llm_for_summary_when_client_provided(fake_pg):
         def __init__(self):
             self.calls = []
 
-        def complete(self, prompt: str, system_prompt: str = "", **kwargs: object) -> str:
+        def complete(self, prompt: str, system_prompt: str = "", **kwargs: Any) -> str:
             self.calls.append(prompt)
             return "  A concise summary.  "
 
@@ -317,7 +317,7 @@ def test_find_llm_rerank_reorders_when_enough_candidates(fake_pg):
         def complete(self, *a, **k):
             return "summary"
 
-        def complete_json(self, prompt: str, system_prompt: str = "", **kwargs: object):
+        def complete_json(self, prompt: str, system_prompt: str = "", **kwargs: Any):
             return [3, 2, 1]
 
     llm = _SummaryLLM()

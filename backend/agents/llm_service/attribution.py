@@ -156,14 +156,22 @@ def caller_team() -> str:
     frame — e.g. before an ``asyncio.to_thread`` hand-off, not inside the
     worker thread (whose stack holds only executor frames).
 
+    Implementation note: uses ``sys._getframe`` (CPython-specific, chosen over
+    ``inspect.stack()`` to avoid reading source context on every LLM call). On a
+    runtime without ``sys._getframe`` this returns ``""`` — attribution degrades
+    to the explicitly-bound team and ``caller_tag``, it does not error.
+
     Postconditions: returns the ``<team>`` directory name of the innermost stack
         frame physically located under ``agents/`` and not owned by
         ``llm_service``; returns ``""`` when no such frame exists.
     """
     import sys
 
+    getframe = getattr(sys, "_getframe", None)
+    if getframe is None:  # pragma: no cover - non-CPython fallback
+        return ""
     marker = "/agents/"
-    frame = sys._getframe(1)  # start at the immediate caller
+    frame = getframe(1)  # start at the immediate caller
     while frame is not None:
         path = (frame.f_code.co_filename or "").replace("\\", "/")
         idx = path.find(marker)

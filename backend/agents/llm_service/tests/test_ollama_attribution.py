@@ -3,9 +3,23 @@ shared-singleton concurrency guarantee that motivated the contextvar design."""
 
 import threading
 
+import pytest
+
 import llm_service.clients.ollama as ollama_mod
 from llm_service.attribution import bind_request_id, llm_attribution
 from llm_service.clients.ollama import OllamaLLMClient, _caller_team
+
+
+def test_empty_objective_is_rejected() -> None:
+    """DbC: the generation entrypoints reject an empty/whitespace objective up
+    front (before any network call), so attribution is never silently degraded."""
+    client = OllamaLLMClient(model="m")
+    with pytest.raises(ValueError, match="objective"):
+        client.complete_json("p", objective="")
+    with pytest.raises(ValueError, match="objective"):
+        client.complete("p", objective="   ")
+    with pytest.raises(ValueError, match="objective"):
+        client.chat([{"role": "user", "content": "x"}], objective="")
 
 
 def _call_from(path: str):
@@ -47,8 +61,11 @@ def _capture_records(monkeypatch) -> list:
 def test_record_telemetry_sources_attribution(monkeypatch) -> None:
     records = _capture_records(monkeypatch)
     client = OllamaLLMClient(model="m")
-    client._last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
-    client._last_latency_ms = 123
+    # Per-call response state lives in contextvars (not instance attributes), so a
+    # concurrent call on the shared singleton can't corrupt this record.
+    ollama_mod._usage_var.set({"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15})
+    ollama_mod._latency_var.set(123)
+    ollama_mod._caller_var.set("ranker.agent.rank")
 
     with (
         llm_attribution(team="job_matching", agent_key="ranker", objective="rank candidates"),
@@ -82,17 +99,21 @@ def test_concurrent_calls_do_not_cross_attribute(monkeypatch) -> None:
     client = OllamaLLMClient(model="m")
     barrier = threading.Barrier(2)
 
-    def worker(agent_key: str, objective: str) -> None:
+    def worker(agent_key: str, objective: str, tokens: int) -> None:
         with (
             llm_attribution(team="team", agent_key=agent_key, objective=objective),
             bind_request_id(f"rid-{agent_key}"),
         ):
+            # Per-call response state (usage/latency/caller) must also stay
+            # thread-local — the bug the contextvars fix the shared singleton had.
+            ollama_mod._usage_var.set({"total_tokens": tokens})
+            ollama_mod._caller_var.set(f"{agent_key}.run")
             barrier.wait()  # maximize interleaving while contexts are active
             with lock:
                 client._record_telemetry(status="success")
 
-    t1 = threading.Thread(target=worker, args=("agent_a", "obj_a"))
-    t2 = threading.Thread(target=worker, args=("agent_b", "obj_b"))
+    t1 = threading.Thread(target=worker, args=("agent_a", "obj_a", 11))
+    t2 = threading.Thread(target=worker, args=("agent_b", "obj_b", 22))
     t1.start()
     t2.start()
     t1.join()
@@ -100,5 +121,9 @@ def test_concurrent_calls_do_not_cross_attribute(monkeypatch) -> None:
 
     assert records["agent_a"]["objective"] == "obj_a"
     assert records["agent_a"]["request_id"] == "rid-agent_a"
+    assert records["agent_a"]["total_tokens"] == 11
+    assert records["agent_a"]["caller_tag"] == "agent_a.run"
     assert records["agent_b"]["objective"] == "obj_b"
     assert records["agent_b"]["request_id"] == "rid-agent_b"
+    assert records["agent_b"]["total_tokens"] == 22
+    assert records["agent_b"]["caller_tag"] == "agent_b.run"

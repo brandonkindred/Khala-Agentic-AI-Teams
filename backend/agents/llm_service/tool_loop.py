@@ -67,6 +67,9 @@ def complete_json_with_tool_loop(
     and should return a JSON-serializable result stored as the tool message content.
 
     Stops when the model returns a JSON object **without** ``__tool_calls__`` (final structured output).
+
+    :param objective: Required short phrase describing the call's purpose; forwarded
+        to ``llm.chat`` on every round and stamped onto LLM logs/telemetry for attribution.
     """
     messages: List[Dict[str, Any]] = [
         {"role": "system", "content": system_prompt},
