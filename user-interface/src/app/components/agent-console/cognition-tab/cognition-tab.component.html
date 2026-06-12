@@ -76,7 +76,7 @@
                     <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
                   }
                 </mat-chip-set>
-                <time class="proposal-card__time">{{ p.created_at }}</time>
+                <time class="proposal-card__time">{{ p.created_at | date: 'medium' }}</time>
               </header>
 
               <div class="proposal-card__body">
@@ -107,7 +107,7 @@
 
                 @if (p.status !== 'pending' && p.decided_by) {
                   <div class="proposal-card__decision">
-                    Decided by {{ p.decided_by }}@if (p.decided_at) { on {{ p.decided_at }} }
+                    Decided by {{ p.decided_by }}@if (p.decided_at) { on {{ p.decided_at | date: 'medium' }} }
                   </div>
                 }
               </div>
@@ -119,7 +119,7 @@
                     type="button"
                     color="warn"
                     [attr.aria-label]="'Reject ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
-                    [disabled]="actingProposalId() === p.id"
+                    [disabled]="actingProposalId() !== null"
                     (click)="reject(p)"
                   >
                     Reject
@@ -130,7 +130,7 @@
                     color="primary"
                     [attr.aria-label]="'Approve ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
                     [attr.aria-describedby]="p.stale_evidence ? 'stale-msg-' + p.id : null"
-                    [disabled]="p.stale_evidence || actingProposalId() === p.id"
+                    [disabled]="p.stale_evidence || actingProposalId() !== null"
                     [matTooltip]="'Can\'t approve while evidence is outdated.'"
                     [matTooltipDisabled]="!p.stale_evidence"
                     (click)="approve(p)"
@@ -190,7 +190,7 @@
                   <mat-chip class="is-kind is-kind-{{ e.kind }}">{{ eventKindLabel(e.kind) }}</mat-chip>
                 </mat-chip-set>
                 <span class="memory-event__relevance">{{ relevanceLabel(e.salience) }}</span>
-                <time class="memory-event__time">{{ e.occurred_at }}</time>
+                <time class="memory-event__time">{{ e.occurred_at | date: 'medium' }}</time>
               </header>
               <div class="memory-event__content" [title]="e.content">{{ e.content }}</div>
               @if (hasData(e)) {

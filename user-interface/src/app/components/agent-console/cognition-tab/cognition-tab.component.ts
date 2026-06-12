@@ -169,6 +169,9 @@ export class CognitionTabComponent implements OnInit {
 
   selectAgent(agentId: string): void {
     this.selectedAgentId.set(agentId);
+    // Reset filters so each agent starts from the default view.
+    this.proposalStatusFilter.set('pending');
+    this.ruleStatusFilter.set('active');
     this.refreshAll();
   }
 
@@ -192,6 +195,7 @@ export class CognitionTabComponent implements OnInit {
       .listProposals(agentId, filter === 'all' ? {} : { status: filter })
       .subscribe({
         next: (rows) => {
+          this.storageUnavailable.set(false);
           this.proposals.set(rows);
           this.loadingProposals.set(false);
         },
@@ -232,6 +236,7 @@ export class CognitionTabComponent implements OnInit {
   performApprove(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
     if (!agentId || p.stale_evidence) return;
+    if (this.actingProposalId()) return; // one decision in flight at a time
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
     const prev = this.proposals();
@@ -274,6 +279,7 @@ export class CognitionTabComponent implements OnInit {
   performReject(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
+    if (this.actingProposalId()) return; // one decision in flight at a time
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
     const prev = this.proposals();
@@ -350,6 +356,7 @@ export class CognitionTabComponent implements OnInit {
       .listMemoryEvents(agentId, { bySalience: this.memoryBySalience(), topN: this.memoryTopN() })
       .subscribe({
         next: (rows) => {
+          this.storageUnavailable.set(false);
           this.events.set(rows);
           this.loadingEvents.set(false);
         },
@@ -400,6 +407,7 @@ export class CognitionTabComponent implements OnInit {
     const filter = this.ruleStatusFilter();
     this.api.listRules(agentId, filter === 'all' ? {} : { status: filter }).subscribe({
       next: (rows) => {
+        this.storageUnavailable.set(false);
         // Defensive: ensure highest priority first regardless of API ordering.
         this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
         this.loadingRules.set(false);

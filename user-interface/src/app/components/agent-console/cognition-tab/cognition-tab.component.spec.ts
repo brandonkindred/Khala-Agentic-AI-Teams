@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
-import { of, throwError } from 'rxjs';
+import { NEVER, of, throwError } from 'rxjs';
 import { CognitionTabComponent } from './cognition-tab.component';
 import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
 import { CognitionApiService } from '../../../services/cognition-api.service';
@@ -20,7 +20,17 @@ const agents: AgentSummary[] = [
     has_invoke: false,
     has_sandbox: false,
   },
-  { ...{} as AgentSummary, id: 'a2', team: 't', name: 'other' },
+  {
+    id: 'a2',
+    team: 't',
+    name: 'other',
+    summary: '',
+    tags: [],
+    has_input_schema: false,
+    has_output_schema: false,
+    has_invoke: false,
+    has_sandbox: false,
+  },
 ];
 
 const addProposal: RuleProposal = {
@@ -355,6 +365,41 @@ describe('CognitionTabComponent', () => {
     f.componentInstance.scrollToRule('missing');
     el.remove();
     vi.useRealTimers();
+  });
+
+  it('ignores a second decision while one is already in flight', () => {
+    api.approveProposal = vi.fn().mockReturnValue(NEVER); // stays pending
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.performApprove(addProposal);
+    expect(f.componentInstance.actingProposalId()).toBe('p1');
+    // A concurrent reject on another proposal must be ignored.
+    f.componentInstance.performReject({ ...addProposal, id: 'p2' });
+    expect(api.rejectProposal).not.toHaveBeenCalled();
+  });
+
+  it('clears the storage-unavailable banner once a section loads again', () => {
+    const err503 = { status: 503 };
+    api.listProposals = vi.fn().mockReturnValue(throwError(() => err503));
+    api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => err503));
+    api.listRules = vi.fn().mockReturnValue(throwError(() => err503));
+    const f = build();
+    f.detectChanges();
+    expect(f.componentInstance.storageUnavailable()).toBe(true);
+    // A single section recovering (e.g. after a filter change) clears the banner.
+    api.listProposals = vi.fn().mockReturnValue(of([]));
+    f.componentInstance.loadProposals();
+    expect(f.componentInstance.storageUnavailable()).toBe(false);
+  });
+
+  it('resets filters to defaults when switching agents', () => {
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.setProposalFilter('approved');
+    f.componentInstance.setRuleFilter('retired');
+    f.componentInstance.selectAgent('a2');
+    expect(f.componentInstance.proposalStatusFilter()).toBe('pending');
+    expect(f.componentInstance.ruleStatusFilter()).toBe('active');
   });
 
   it('builds a proposal summary from the proposed or target rule text', () => {
