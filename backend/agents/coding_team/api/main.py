@@ -442,8 +442,9 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
           ``pending_questions``.
     Postconditions:
         - Raises HTTP 400 if the job is not waiting, has no pending questions, any required question
-          is unanswered, an answer references an unknown question, or an 'other' selection carries
-          no text. Otherwise returns the answers as dicts ready for ``store_submit_answers``, each
+          is unanswered, two answers target the same question, an answer references an unknown
+          question, or an 'other' selection carries no text. Otherwise returns the answers as dicts
+          ready for ``store_submit_answers``, each
           carrying the ``question_text`` of the pending question it answers (so a later resume can
           match answers to re-asked questions by text).
     """
@@ -454,7 +455,17 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
         raise HTTPException(status_code=400, detail="No pending questions to answer.")
     pending_ids = {q["id"] for q in pending}
     required_ids = {q["id"] for q in pending if q.get("required", True)}
-    answered_ids = {a.question_id for a in request.answers}
+    # Reject duplicate answers for the same question up front: the set below collapses them, so the
+    # batch would pass validation while every conflicting entry is still persisted — letting the
+    # orchestrator proceed with contradictory decisions for one required question.
+    answered_id_list = [a.question_id for a in request.answers]
+    duplicate_ids = sorted({qid for qid in answered_id_list if answered_id_list.count(qid) > 1})
+    if duplicate_ids:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Duplicate answers for questions: {', '.join(duplicate_ids)}",
+        )
+    answered_ids = set(answered_id_list)
     missing = required_ids - answered_ids
     if missing:
         raise HTTPException(

@@ -117,6 +117,25 @@ def test_answers_400_unknown_id(monkeypatch):
     assert "Unknown question" in r.json()["detail"]
 
 
+def test_answers_400_duplicate_question_id(monkeypatch):
+    # Two answers for the same question must be rejected: otherwise the dedup set hides the conflict
+    # at validation time and both entries get persisted, letting the orchestrator act on
+    # contradictory decisions for one required question.
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    r = client.post(
+        "/run/j1/answers",
+        json={
+            "answers": [
+                {"question_id": "q1", "selected_option_id": "strict"},
+                {"question_id": "q1", "selected_option_id": "other", "other_text": "lenient"},
+            ]
+        },
+    )
+    assert r.status_code == 400
+    assert "Duplicate answers" in r.json()["detail"]
+    assert "q1" in r.json()["detail"]
+
+
 def test_answers_400_other_without_text(monkeypatch):
     monkeypatch.setattr(api, "get_job", lambda jid: _job())
     r = client.post(
