@@ -170,6 +170,17 @@ def test_read_files_as_dict_no_extension_filter_includes_all(tmp_path: Path) -> 
     assert result == {"Dockerfile": "FROM python", "requirements.txt": "fastapi"}
 
 
+def test_read_files_as_dict_skips_cyclic_symlink(tmp_path: Path) -> None:
+    """A cyclic symlink (resolve() raises RuntimeError/OSError) is skipped, not fatal."""
+    (tmp_path / "ok.py").write_text("A", encoding="utf-8")
+    loop = tmp_path / "loop"
+    loop.symlink_to(loop)  # self-referential symlink
+
+    result = read_files_as_dict(tmp_path, ["ok.py", "loop"])
+
+    assert result == {"ok.py": "A"}  # loop skipped, ok.py still read
+
+
 def test_read_files_as_dict_skips_missing_preserves_legacy_text(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("A", encoding="utf-8")
     (tmp_path / "legacy.py").write_bytes("café = 1\n".encode("latin-1"))  # non-UTF-8 text
@@ -519,6 +530,36 @@ def test_select_review_input_deletion_only_surfaces_note(tmp_path: Path) -> None
     assert code is None
     assert set(files) == {_DELETED_FILES_NOTE_KEY}  # only the deletion note
     assert "gone.py" in files[_DELETED_FILES_NOTE_KEY]
+
+
+def test_select_review_input_deletion_note_avoids_collision(tmp_path: Path) -> None:
+    """A real changed file named like the note key is not clobbered by the note."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETED_FILES_NOTE_KEY,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("real content\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("real content v2\n", encoding="utf-8")
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change note-named file + delete")
+
+    task = SimpleNamespace(description="x")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert files[_DELETED_FILES_NOTE_KEY] == "real content v2\n"  # real file intact
+    note_keys = [
+        k for k, v in files.items() if k != _DELETED_FILES_NOTE_KEY and "gone.py" in v
+    ]
+    assert note_keys  # deletion note lives under a non-colliding key
 
 
 def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) -> None:

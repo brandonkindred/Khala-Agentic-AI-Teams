@@ -579,7 +579,11 @@ def _select_review_input(
     ]
     if deleted:
         listing = "\n".join(f"- {p}" for p in deleted)
-        files[_DELETED_FILES_NOTE_KEY] = (
+        # Never clobber a real changed file that happens to share the note key.
+        note_key = _DELETED_FILES_NOTE_KEY
+        while note_key in files:
+            note_key += "_"
+        files[note_key] = (
             "The following tracked files were DELETED by this task. Verify each "
             "removal is intentional and that nothing still depends on them:\n"
             f"{listing}\n"

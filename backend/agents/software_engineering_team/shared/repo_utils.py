@@ -115,7 +115,8 @@ def read_files_as_dict(
     Postconditions:
         - Returns a mapping in the iteration order of *paths*, skipping any path
           that is filtered out by *extensions*, escapes *repo_path* once resolved
-          (an absolute path or one containing ``..``), or is missing/unreadable.
+          (an absolute path or one containing ``..``), is unresolvable (e.g. a
+          cyclic symlink), or is missing/unreadable.
         - Decodes as UTF-8 with ``errors="replace"`` (matching ``read_repo_code``)
           so a changed file with a legacy/non-UTF-8 text encoding is reviewed
           rather than silently dropped; bytes that do not decode become U+FFFD.
@@ -128,12 +129,14 @@ def read_files_as_dict(
         candidate = Path(rel_path)
         if extensions is not None and candidate.suffix not in extensions:
             continue
-        full_path = (repo_path / candidate).resolve()
-        if repo_root not in full_path.parents:
-            continue
         try:
+            # ``resolve()`` may raise RuntimeError/OSError on a symlink loop, so
+            # guard it alongside the read rather than only catching read errors.
+            full_path = (repo_path / candidate).resolve()
+            if repo_root not in full_path.parents:
+                continue
             result[rel_path] = full_path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        except (OSError, RuntimeError, ValueError):
             continue
     return result
 
