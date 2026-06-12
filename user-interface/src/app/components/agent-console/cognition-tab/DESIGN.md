@@ -101,9 +101,11 @@ Per-proposal card:
   - `amend rule` → shows **"Replaces:"** &lt;old rule text&gt; then **"With:"**
     &lt;new rule text&gt; — never a bare `target_rule_id`.
 - **Status** — `pending` / `approved` / `rejected` / `superseded` chip.
-- **Evidence** — phrased as **"Evidence: N observations · &lt;period&gt;"**
-  (never "refs"/"rollup"). When `stale_evidence` is true, an **`⚠ evidence
-  outdated`** chip appears and **Approve is disabled**; the body reads
+- **Evidence** — phrased as **"Evidence: N observations"** (the count of
+  `(summary_id, version)` refs; never "refs"/"rollup"). A `· <period>` suffix is
+  shown only when the backend supplies one — the proposal payload does not carry
+  a period today, so it is omitted. When `stale_evidence` is true, an **`⚠
+  evidence outdated`** chip appears and **Approve is disabled**; the body reads
   **"Evidence is out of date. Approval is paused until the agent re-checks
   it."** (the backend returns `409`).
 - **Decision provenance** — once decided, show `decided_by` + `decided_at`
@@ -266,7 +268,7 @@ Every section renders one of: **loading** (`app-loading-spinner`), **empty**
 | `Rule.priority` (e.g. `90`) | `priority 90` |
 | `Rule.mode` `enforced` / `advisory` | `enforced` / `advisory` (+ tooltip) |
 | `Rule.rationale` | `why: …` |
-| evidence refs / rollup id | `Evidence: N observations · week of <date>` |
+| evidence refs / rollup id | `Evidence: N observations` (period suffix only when the backend supplies it) |
 
 ## 9. Visual language
 

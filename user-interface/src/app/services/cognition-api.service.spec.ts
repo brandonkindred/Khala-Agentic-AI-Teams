@@ -3,6 +3,7 @@ import {
   HttpClientTestingModule,
   HttpTestingController,
 } from '@angular/common/http/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { CognitionApiService } from './cognition-api.service';
 import { environment } from '../../environments/environment';
 import type { MemoryEvent, Rule, RuleProposal } from '../models/cognition.model';
@@ -44,7 +45,7 @@ describe('CognitionApiService', () => {
   });
 
   it('lists proposals with no params when query is empty', () => {
-    service.listProposals('a1').subscribe();
+    service.listProposals('a1').subscribe((r) => expect(r).toEqual([]));
     const req = httpMock.expectOne(`${base}/proposals`);
     expect(req.request.method).toBe('GET');
     req.flush([]);
@@ -55,16 +56,18 @@ describe('CognitionApiService', () => {
     service.approveProposal('a1', 'p1').subscribe((r) => expect(r).toEqual(rule));
     const req = httpMock.expectOne(`${base}/proposals/p1/approve`);
     expect(req.request.method).toBe('POST');
-    expect(req.request.body).toBeNull();
+    expect(req.request.body).toEqual({});
     req.flush(rule);
   });
 
-  it('surfaces a 409 when approving stale-evidence proposals', () => {
+  it('surfaces a 409 with detail when approving stale-evidence proposals', () => {
     let captured: unknown;
     service.approveProposal('a1', 'p1').subscribe({ error: (e) => (captured = e) });
     const req = httpMock.expectOne(`${base}/proposals/p1/approve`);
     req.flush({ detail: 'stale evidence' }, { status: 409, statusText: 'Conflict' });
-    expect((captured as { status: number }).status).toBe(409);
+    const err = captured as HttpErrorResponse;
+    expect(err.status).toBe(409);
+    expect(err.error?.detail).toBe('stale evidence');
   });
 
   it('rejects a proposal via POST', () => {
@@ -76,11 +79,16 @@ describe('CognitionApiService', () => {
   });
 
   it('encodes agent and proposal ids in the path', () => {
-    service.approveProposal('team/agent', 'p 1').subscribe();
+    const rule = { id: 'r1' } as Rule;
+    service.approveProposal('team/agent', 'p 1').subscribe((r) => expect(r).toEqual(rule));
     const req = httpMock.expectOne(
       `${environment.agentCognitionApiUrl}/agents/team%2Fagent/proposals/p%201/approve`,
     );
-    req.flush({} as Rule);
+    req.flush(rule);
+  });
+
+  it('throws when called with an empty agent id', () => {
+    expect(() => service.listProposals('')).toThrow(/agentId/);
   });
 
   // Memory --------------------------------------------------------------------
@@ -117,11 +125,13 @@ describe('CognitionApiService', () => {
     req.flush([]);
   });
 
-  it('surfaces a 503 when storage is unavailable', () => {
+  it('surfaces a 503 with detail when storage is unavailable', () => {
     let captured: unknown;
     service.listRules('a1').subscribe({ error: (e) => (captured = e) });
     const req = httpMock.expectOne(`${base}/rules`);
     req.flush({ detail: 'unavailable' }, { status: 503, statusText: 'Service Unavailable' });
-    expect((captured as { status: number }).status).toBe(503);
+    const err = captured as HttpErrorResponse;
+    expect(err.status).toBe(503);
+    expect(err.error?.detail).toBe('unavailable');
   });
 });

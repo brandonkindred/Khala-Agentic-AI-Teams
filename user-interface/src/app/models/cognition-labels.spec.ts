@@ -54,8 +54,8 @@ describe('cognition-labels', () => {
 
   it('describes both rule modes for tooltips', () => {
     const expected: Record<RuleMode, string> = {
-      enforced: 'Enforced: blocks the agent',
-      advisory: 'Advisory: guidance only',
+      enforced: 'enforced: blocks the agent',
+      advisory: 'advisory: guidance only',
     };
     for (const [mode, label] of Object.entries(expected)) {
       expect(ruleModeTooltip(mode as RuleMode)).toBe(label);

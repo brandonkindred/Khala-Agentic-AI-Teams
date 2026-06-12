@@ -27,7 +27,17 @@ export class CognitionApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.agentCognitionApiUrl;
 
+  /**
+   * Build the per-agent base URL.
+   *
+   * Precondition: `agentId` is a non-empty string. Callers must scope every
+   * request to a selected agent; an empty id is a caller bug, so we fail loudly
+   * rather than issue a request against `…/agents//…`.
+   */
   private agentBase(agentId: string): string {
+    if (!agentId) {
+      throw new Error('CognitionApiService: agentId must be a non-empty string.');
+    }
     return `${this.baseUrl}/agents/${encodeURIComponent(agentId)}`;
   }
 
@@ -47,7 +57,7 @@ export class CognitionApiService {
   approveProposal(agentId: string, proposalId: string): Observable<Rule> {
     return this.http.post<Rule>(
       `${this.agentBase(agentId)}/proposals/${encodeURIComponent(proposalId)}/approve`,
-      null,
+      {},
     );
   }
 
@@ -55,7 +65,7 @@ export class CognitionApiService {
   rejectProposal(agentId: string, proposalId: string): Observable<RuleProposal> {
     return this.http.post<RuleProposal>(
       `${this.agentBase(agentId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
-      null,
+      {},
     );
   }
 

@@ -12,7 +12,6 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatDialog, MatDialogModule } from '@angular/material/dialog';
 import { MatFormFieldModule } from '@angular/material/form-field';
 import { MatIconModule } from '@angular/material/icon';
-import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
@@ -21,6 +20,9 @@ import {
   ConfirmDialogComponent,
   ConfirmDialogData,
 } from '../../../shared/confirm-dialog/confirm-dialog.component';
+import { LoadingSpinnerComponent } from '../../../shared/loading-spinner/loading-spinner.component';
+import { EmptyStateComponent } from '../../../shared/empty-state/empty-state.component';
+import { ErrorMessageComponent } from '../../../shared/error-message/error-message.component';
 import {
   EVIDENCE_OUTDATED,
   eventKindLabel,
@@ -44,6 +46,9 @@ import type {
 type ProposalFilter = ProposalStatus | 'all';
 type RuleFilter = RuleStatus | 'all';
 
+/** Panel-wide message shown when cognition storage returns 503. */
+const STORAGE_UNAVAILABLE_MESSAGE = 'Cognition data is temporarily unavailable. Try again shortly.';
+
 /**
  * Cognition tab — operator surface for an agent's learned cognition.
  *
@@ -62,9 +67,11 @@ type RuleFilter = RuleStatus | 'all';
     MatDialogModule,
     MatFormFieldModule,
     MatIconModule,
-    MatProgressSpinnerModule,
     MatSelectModule,
     MatTooltipModule,
+    LoadingSpinnerComponent,
+    EmptyStateComponent,
+    ErrorMessageComponent,
   ],
   templateUrl: './cognition-tab.component.html',
   styleUrl: './cognition-tab.component.scss',
@@ -75,11 +82,15 @@ export class CognitionTabComponent implements OnInit {
   private readonly api = inject(CognitionApiService);
   private readonly dialog = inject(MatDialog);
 
+  readonly STORAGE_UNAVAILABLE_MESSAGE = STORAGE_UNAVAILABLE_MESSAGE;
+
   // Agent picker --------------------------------------------------------------
   readonly agents = signal<AgentSummary[]>([]);
   readonly selectedAgentId = signal<string | null>(null);
   readonly loadingAgents = signal<boolean>(false);
   readonly agentsError = signal<string | null>(null);
+  /** Set when any section returns 503 — surfaces a single panel-wide banner. */
+  readonly storageUnavailable = signal<boolean>(false);
 
   // Proposals -----------------------------------------------------------------
   readonly proposals = signal<RuleProposal[]>([]);
@@ -95,6 +106,8 @@ export class CognitionTabComponent implements OnInit {
   readonly memoryTopN = signal<number>(50);
   readonly loadingEvents = signal<boolean>(false);
   readonly memoryError = signal<string | null>(null);
+  /** Memory event ids whose `data` payload is expanded. */
+  readonly expandedEventIds = signal<Set<string>>(new Set());
 
   // Rules ---------------------------------------------------------------------
   readonly rules = signal<Rule[]>([]);
@@ -161,6 +174,7 @@ export class CognitionTabComponent implements OnInit {
 
   refreshAll(): void {
     if (!this.selectedAgentId()) return;
+    this.storageUnavailable.set(false);
     this.loadProposals();
     this.loadMemory();
     this.loadRules();
@@ -183,7 +197,7 @@ export class CognitionTabComponent implements OnInit {
         },
         error: (err) => {
           this.proposals.set([]);
-          this.proposalsError.set(this.extractError(err, 'Failed to load proposals.'));
+          this.applyError(err, this.proposalsError, 'Failed to load proposals.');
           this.loadingProposals.set(false);
         },
       });
@@ -210,7 +224,11 @@ export class CognitionTabComponent implements OnInit {
       });
   }
 
-  /** Public for tests. Optimistic remove + rollback; refetch rules on success. */
+  /**
+   * Public for tests. Optimistic remove + rollback; on success refetch rules so
+   * the activated rule appears, and keep the now-approved card visible when the
+   * current filter still includes it (`all`/`approved`).
+   */
   performApprove(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
     if (!agentId || p.stale_evidence) return;
@@ -222,10 +240,12 @@ export class CognitionTabComponent implements OnInit {
       next: () => {
         this.actingProposalId.set(null);
         this.loadRules();
+        const updated: RuleProposal = { ...p, status: 'approved' };
+        this.reconcileDecided(prev, updated);
       },
       error: (err) => {
         this.proposals.set(prev);
-        this.proposalsError.set(this.extractError(err, 'Failed to approve proposal.'));
+        this.applyError(err, this.proposalsError, 'Failed to approve proposal.');
         this.actingProposalId.set(null);
       },
     });
@@ -246,7 +266,11 @@ export class CognitionTabComponent implements OnInit {
       });
   }
 
-  /** Public for tests. Optimistic remove + rollback on error. */
+  /**
+   * Public for tests. Optimistic remove + rollback; on success keep the
+   * now-rejected card (from the server response) visible when the current
+   * filter still includes it (`all`/`rejected`).
+   */
   performReject(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
@@ -255,15 +279,28 @@ export class CognitionTabComponent implements OnInit {
     const prev = this.proposals();
     this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.rejectProposal(agentId, p.id).subscribe({
-      next: () => {
+      next: (updated) => {
         this.actingProposalId.set(null);
+        this.reconcileDecided(prev, updated);
       },
       error: (err) => {
         this.proposals.set(prev);
-        this.proposalsError.set(this.extractError(err, 'Failed to reject proposal.'));
+        this.applyError(err, this.proposalsError, 'Failed to reject proposal.');
         this.actingProposalId.set(null);
       },
     });
+  }
+
+  /**
+   * After a decision, a proposal moves out of `pending`. If the active filter
+   * still includes its new status (`all` or the matching status) re-show the
+   * updated card in place; otherwise it stays removed.
+   */
+  private reconcileDecided(prevList: RuleProposal[], updated: RuleProposal): void {
+    const filter = this.proposalStatusFilter();
+    if (filter === 'all' || filter === updated.status) {
+      this.proposals.set(prevList.map((x) => (x.id === updated.id ? updated : x)));
+    }
   }
 
   // Proposal display helpers --------------------------------------------------
@@ -280,11 +317,26 @@ export class CognitionTabComponent implements OnInit {
     return p.proposed_rule?.mode ?? 'advisory';
   }
 
+  /** Short human summary of a proposal, for aria-labels. */
+  proposalSummary(p: RuleProposal): string {
+    return this.proposedRuleText(p) || this.targetRuleText(p.target_rule_id);
+  }
+
   /** Resolve a target rule's text from the loaded rules; fall back to its id. */
   targetRuleText(id: string | null | undefined): string {
     if (!id) return '';
     const rule = this.rules().find((r) => r.id === id);
     return rule ? rule.text : id;
+  }
+
+  /** Scroll the Rules section to a target rule and briefly highlight it. */
+  scrollToRule(id: string | null | undefined): void {
+    if (!id) return;
+    const el = document.getElementById('rule-' + id);
+    if (!el) return;
+    el.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    el.classList.add('is-highlighted');
+    setTimeout(() => el.classList.remove('is-highlighted'), 1500);
   }
 
   // Memory --------------------------------------------------------------------
@@ -303,7 +355,7 @@ export class CognitionTabComponent implements OnInit {
         },
         error: (err) => {
           this.events.set([]);
-          this.memoryError.set(this.extractError(err, 'Failed to load memory.'));
+          this.applyError(err, this.memoryError, 'Failed to load memory.');
           this.loadingEvents.set(false);
         },
       });
@@ -319,6 +371,25 @@ export class CognitionTabComponent implements OnInit {
     this.loadMemory();
   }
 
+  toggleEventData(id: string): void {
+    const next = new Set(this.expandedEventIds());
+    if (next.has(id)) next.delete(id);
+    else next.add(id);
+    this.expandedEventIds.set(next);
+  }
+
+  isEventExpanded(id: string): boolean {
+    return this.expandedEventIds().has(id);
+  }
+
+  hasData(e: MemoryEvent): boolean {
+    return !!e.data && Object.keys(e.data).length > 0;
+  }
+
+  formatData(e: MemoryEvent): string {
+    return JSON.stringify(e.data, null, 2);
+  }
+
   // Rules ---------------------------------------------------------------------
 
   loadRules(): void {
@@ -329,12 +400,13 @@ export class CognitionTabComponent implements OnInit {
     const filter = this.ruleStatusFilter();
     this.api.listRules(agentId, filter === 'all' ? {} : { status: filter }).subscribe({
       next: (rows) => {
-        this.rules.set(rows);
+        // Defensive: ensure highest priority first regardless of API ordering.
+        this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
         this.loadingRules.set(false);
       },
       error: (err) => {
         this.rules.set([]);
-        this.rulesError.set(this.extractError(err, 'Failed to load rules.'));
+        this.applyError(err, this.rulesError, 'Failed to load rules.');
         this.loadingRules.set(false);
       },
     });
@@ -346,6 +418,20 @@ export class CognitionTabComponent implements OnInit {
   }
 
   // ---------------------------------------------------------------------------
+
+  /** 503 → panel-wide banner; any other error → the given section's message. */
+  private applyError(
+    err: unknown,
+    target: { set(v: string | null): void },
+    fallback: string,
+  ): void {
+    if ((err as { status?: number })?.status === 503) {
+      this.storageUnavailable.set(true);
+      target.set(null);
+      return;
+    }
+    target.set(this.extractError(err, fallback));
+  }
 
   private extractError(err: unknown, fallback: string): string {
     const e = err as { error?: { detail?: string }; message?: string } | undefined;

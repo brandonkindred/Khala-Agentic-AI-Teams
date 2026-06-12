@@ -174,12 +174,34 @@ describe('CognitionTabComponent', () => {
     expect(dialog.open).not.toHaveBeenCalled();
   });
 
+  it('keeps an approved card visible (as approved) under the all filter', () => {
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.setProposalFilter('all');
+    f.componentInstance.performApprove(addProposal);
+    const card = f.componentInstance.proposals().find((p) => p.id === 'p1');
+    expect(card?.status).toBe('approved');
+  });
+
   it('rejects: optimistically removes the card', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.performReject(addProposal);
     expect(api.rejectProposal).toHaveBeenCalledWith('a1', 'p1');
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')).toBeUndefined();
+  });
+
+  it('keeps a rejected card visible (from the response) under the all filter', () => {
+    api.rejectProposal = vi
+      .fn()
+      .mockReturnValue(of({ ...addProposal, status: 'rejected', decided_by: 'op', decided_at: 't' }));
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.setProposalFilter('all');
+    f.componentInstance.performReject(addProposal);
+    const card = f.componentInstance.proposals().find((p) => p.id === 'p1');
+    expect(card?.status).toBe('rejected');
+    expect(card?.decided_by).toBe('op');
   });
 
   it('rolls back a reject when the API fails', () => {
@@ -277,5 +299,71 @@ describe('CognitionTabComponent', () => {
       'Memory',
       'Rules',
     ]);
+  });
+
+  it('sorts rules by priority, highest first', () => {
+    api.listRules = vi.fn().mockReturnValue(
+      of([
+        { ...rules[0], id: 'low', priority: 10 },
+        { ...rules[0], id: 'high', priority: 90 },
+        { ...rules[0], id: 'mid', priority: 50 },
+      ]),
+    );
+    const f = build();
+    f.detectChanges();
+    expect(f.componentInstance.rules().map((r) => r.id)).toEqual(['high', 'mid', 'low']);
+  });
+
+  it('surfaces a 503 as a single panel-wide banner and clears section errors', () => {
+    const err503 = { status: 503, error: { detail: 'down' } };
+    api.listProposals = vi.fn().mockReturnValue(throwError(() => err503));
+    api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => err503));
+    api.listRules = vi.fn().mockReturnValue(throwError(() => err503));
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.storageUnavailable()).toBe(true);
+    expect(c.proposalsError()).toBeNull();
+    expect(c.memoryError()).toBeNull();
+    expect(c.rulesError()).toBeNull();
+    expect((f.nativeElement as HTMLElement).querySelectorAll('.cognition-section').length).toBe(0);
+  });
+
+  it('toggles a memory event data panel', () => {
+    const f = build();
+    const c = f.componentInstance;
+    expect(c.hasData({ ...events[0], data: { k: 1 } })).toBe(true);
+    expect(c.hasData(events[0])).toBe(false);
+    c.toggleEventData('e1');
+    expect(c.isEventExpanded('e1')).toBe(true);
+    expect(c.formatData({ ...events[0], data: { k: 1 } })).toContain('"k": 1');
+    c.toggleEventData('e1');
+    expect(c.isEventExpanded('e1')).toBe(false);
+  });
+
+  it('scrolls to and highlights a target rule, then clears the highlight', () => {
+    vi.useFakeTimers();
+    const el = document.createElement('li');
+    el.id = 'rule-r9';
+    document.body.appendChild(el);
+    const f = build();
+    f.componentInstance.scrollToRule('r9');
+    expect(el.classList.contains('is-highlighted')).toBe(true);
+    vi.advanceTimersByTime(1500);
+    expect(el.classList.contains('is-highlighted')).toBe(false);
+    f.componentInstance.scrollToRule(null);
+    f.componentInstance.scrollToRule('missing');
+    el.remove();
+    vi.useRealTimers();
+  });
+
+  it('builds a proposal summary from the proposed or target rule text', () => {
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.proposalSummary(addProposal)).toBe('Run make lint-fix');
+    expect(c.proposalSummary({ ...staleProposal, proposed_rule: null })).toBe(
+      'Cap writeback at 8 KB',
+    );
   });
 });

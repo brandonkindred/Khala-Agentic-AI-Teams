@@ -42,8 +42,8 @@ const RULE_SOURCE_LABELS: Record<RuleSource, string> = {
 };
 
 const RULE_MODE_TOOLTIPS: Record<RuleMode, string> = {
-  enforced: 'Enforced: blocks the agent',
-  advisory: 'Advisory: guidance only',
+  enforced: 'enforced: blocks the agent',
+  advisory: 'advisory: guidance only',
 };
 
 /** `tool_call` → `tool call`; never the raw snake_case enum. */

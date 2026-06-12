@@ -58,7 +58,7 @@ export interface Rule {
   text: string;
   mode: RuleMode;
   status: RuleStatus;
-  predicate: Record<string, unknown>;
+  predicate?: Record<string, unknown> | null;
   rationale?: string | null;
   source: RuleSource;
   evidence: unknown[];
