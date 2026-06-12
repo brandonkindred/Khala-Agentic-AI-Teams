@@ -43,9 +43,18 @@ _INPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeInput"
 _OUTPUT_SCHEMA_REF = "agentic_team_provisioning.models:GeneratedAgentInvokeOutput"
 
 
-def _hash8(s: str) -> str:
-    """Short stable hex digest used to keep derived ids injective."""
-    return hashlib.sha1(s.encode()).hexdigest()[:8]
+# Hex length of the id-disambiguating digest. 16 hex chars = 64 bits: accidental
+# collisions stay negligible far past any realistic team/agent count, and an
+# attacker who controls agent names can't cheaply force a within-team clash (an
+# 8-hex/32-bit digest was birthday-collidable at ~65k, hence too weak for the
+# multi-tenant cleanup prefix). Keep it well short of the full digest so ids stay
+# readable in URLs / the catalog.
+_HASH_HEX_LEN = 16
+
+
+def _id_hash(s: str) -> str:
+    """Stable, collision-resistant hex digest used to keep derived ids injective."""
+    return hashlib.sha256(s.encode()).hexdigest()[:_HASH_HEX_LEN]
 
 
 def team_id_prefix(team_id: str) -> str:
@@ -58,7 +67,7 @@ def team_id_prefix(team_id: str) -> str:
     whose ids share a normalized 12-char slug never collide (stale cleanup keyed
     on this prefix can't touch another team's manifests).
     """
-    return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_hash8(team_id)}."
+    return f"{_TEAM_KEY}.{_slug(team_id, 12)}-{_id_hash(team_id)}."
 
 
 def manifest_agent_id(team_id: str, agent_name: str) -> str:
@@ -74,7 +83,7 @@ def manifest_agent_id(team_id: str, agent_name: str) -> str:
           agreeing on their first 40 slug chars). Always starts with
           :func:`team_id_prefix`.
     """
-    pair_hash = _hash8(f"{team_id}\x00{agent_name}")
+    pair_hash = _id_hash(f"{team_id}\x00{agent_name}")
     return f"{team_id_prefix(team_id)}{_slug(agent_name, 40)}-{pair_hash}"
 
 

@@ -120,10 +120,15 @@ def build_agent(
 
 
 def call_agent(agent_instance: StrandsAgent, message: str) -> str:
-    """Invoke a strands.Agent and extract the text response."""
+    """Invoke a strands.Agent and extract the text response.
+
+    ``str(AgentResult)`` is the SDK operation that concatenates the textual
+    content blocks from the result's message. ``result.message`` is the *raw*
+    structured mapping (``{"role": ..., "content": [...]}``), so stringifying it
+    would yield a dict repr rather than the model's reply — always go through
+    ``str(result)``.
+    """
     result = agent_instance(message)
-    if hasattr(result, "message"):
-        return str(result.message).strip()
     return str(result).strip()
 
 
@@ -288,15 +293,22 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
 
 
 def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
-    """Blocking core of :func:`invoke_generated_agent` (runs in a worker thread)."""
-    data = dict(body) if isinstance(body, dict) else {}
-    agent_name = data.get("agent_name") or data.get("name") or "agent"
-    message = data.get("message") or data.get("input") or data.get("prompt") or ""
+    """Blocking core of :func:`invoke_generated_agent` (runs in a worker thread).
+
+    Validates ``body`` against the declared invoke schema before touching the
+    model: the sandbox dispatch does not enforce the manifest's Pydantic input
+    schema, so a malformed body (e.g. ``skills`` as an int, a non-string
+    ``message``) would otherwise raise deep inside prompt construction. A
+    ``ValidationError`` here surfaces as a clean request error at the boundary.
+    """
+    from agentic_team_provisioning.models import GeneratedAgentInvokeInput
+
+    spec = GeneratedAgentInvokeInput.model_validate(body if isinstance(body, dict) else {})
     text, writeback = call_agent_with_cognition(
-        agent_name,
-        data.get("role", ""),
-        data.get("skills", []),
-        data.get("capabilities", []),
+        spec.agent_name,
+        spec.role,
+        spec.skills,
+        spec.capabilities,
         # Runtime tools are NOT taken from the (caller-controlled) body: the
         # generated manifest declares ``cognition.tools = []`` and tool brokering
         # isn't wired for generated agents yet, so granting a body-supplied tool
@@ -304,9 +316,9 @@ def _invoke_generated_agent_sync(body: Any) -> dict[str, Any]:
         # code-exec/network capability that bypasses the brokered tool loop. Keep
         # it empty until roster-bound tool brokering lands (the deferred work).
         [],
-        data.get("expertise", []),
-        message,
-        agent_id=data.get("agent_id"),
+        spec.expertise,
+        spec.message,
+        agent_id=spec.agent_id,
     )
     return _shape_invoke_result(text, writeback)
 

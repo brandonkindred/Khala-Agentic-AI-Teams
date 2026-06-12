@@ -14,8 +14,15 @@ from agentic_team_provisioning.runtime import agent_builder
 
 
 class _FakeResult:
+    """Mimics a strands AgentResult: ``.message`` is a structured dict and the
+    text is only obtainable via ``str(result)`` (the SDK's content-join)."""
+
     def __init__(self, text: str) -> None:
-        self.message = text
+        self.message = {"role": "assistant", "content": [{"text": text}]}
+        self._text = text
+
+    def __str__(self) -> str:
+        return self._text
 
 
 class _FakeStrandsAgent:
@@ -165,6 +172,22 @@ def test_call_agent_str_fallback():
     assert agent_builder.call_agent(_PlainAgent(), "hi") == "plain text"
 
 
+def test_call_agent_extracts_text_not_message_dict():
+    # Regression: a real AgentResult's `.message` is a structured dict; the text
+    # must come from str(result), not str(result.message) (which is a dict repr).
+    class _Result:
+        message = {"role": "assistant", "content": [{"text": "the answer"}]}
+
+        def __str__(self) -> str:
+            return "the answer"
+
+    class _Agent:
+        def __call__(self, message: str):
+            return _Result()
+
+    assert agent_builder.call_agent(_Agent(), "hi") == "the answer"
+
+
 def test_generate_starter_prompts_from_metadata():
     prompts = agent_builder.generate_starter_prompts("Agent X", "router", ["routing"], ["ops"])
     assert len(prompts) == 3
@@ -186,10 +209,20 @@ async def test_invoke_generated_agent_returns_output(fake_strands):
 
 
 @pytest.mark.asyncio
-async def test_invoke_generated_agent_tolerates_sparse_body(fake_strands):
-    # A malformed/sparse body must NOT raise (the dispatch boundary contract).
-    assert await agent_builder.invoke_generated_agent({}) == {"output": "ok"}
-    assert await agent_builder.invoke_generated_agent(None) == {"output": "ok"}
+async def test_invoke_generated_agent_validates_body(fake_strands):
+    from pydantic import ValidationError
+
+    # Missing required fields (agent_name / message) → request-validation error,
+    # surfaced as a clean ValidationError rather than a deep prompt-build crash.
+    with pytest.raises(ValidationError):
+        await agent_builder.invoke_generated_agent({})
+    with pytest.raises(ValidationError):
+        await agent_builder.invoke_generated_agent(None)
+    # Wrong field types are rejected too (skills must be a list of strings).
+    with pytest.raises(ValidationError):
+        await agent_builder.invoke_generated_agent(
+            {"agent_name": "A", "message": "hi", "skills": 1}
+        )
 
 
 @pytest.mark.asyncio

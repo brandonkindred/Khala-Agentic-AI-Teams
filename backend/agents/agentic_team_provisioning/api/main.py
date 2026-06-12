@@ -108,18 +108,26 @@ _pipeline_runner = get_pipeline_runner(_test_store)
 
 # Retroactive provisioning: ensure all existing teams have infrastructure and
 # that their generated agents are registered in the live registry (rosters are
-# Postgres-backed, so this re-registers them after a process restart).
+# Postgres-backed, so this re-registers them after a process restart). Each team
+# is isolated in its own try/except so one team's infrastructure failure can't
+# skip registration for every team after it.
 try:
     from agentic_team_provisioning.manifest_generation import register_team_manifests
 
-    for _team_row in _store.list_teams():
-        _tid = _team_row["team_id"]
+    _existing_teams = _store.list_teams()
+except Exception as _e:
+    logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
+    _existing_teams = []
+
+for _team_row in _existing_teams:
+    _tid = _team_row["team_id"]
+    try:
         get_team_infrastructure(_tid)
         _team = _store.get_team(_tid)
         if _team is not None and _team.agents:
             register_team_manifests(_tid, _team.agents)
-except Exception as _e:
-    logger.warning("Could not retroactively provision/register existing teams: %s", _e)
+    except Exception as _e:
+        logger.warning("Could not retroactively provision/register team %s: %s", _tid, _e)
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
