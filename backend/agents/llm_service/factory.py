@@ -45,6 +45,9 @@ class _AttributingClient:
         self._inner = inner
         self._agent_key = agent_key
 
+    def __repr__(self) -> str:
+        return f"_AttributingClient(agent_key={self._agent_key!r}, inner={self._inner!r})"
+
     def complete_json(self, *args: Any, **kwargs: Any) -> Any:
         with llm_attribution(agent_key=self._agent_key):
             return self._inner.complete_json(*args, **kwargs)

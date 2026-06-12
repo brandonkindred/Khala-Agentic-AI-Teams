@@ -360,6 +360,10 @@ class OllamaLLMClient(LLMClient):
         the public ``complete_json``/``complete``/``chat`` entrypoints and
         ``_ollama_post``, so the whole record stays self-consistent even though the
         client is a process-wide cached singleton shared across concurrent agents.
+
+        Invariant: this is only ever called from within one of those entrypoints'
+        bound request scope (so the contextvars reflect *this* call). It is not a
+        standalone public API — do not call it outside that scope.
         """
         usage = _usage_var.get() or {}
         caller = _caller_var.get()

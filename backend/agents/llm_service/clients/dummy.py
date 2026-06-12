@@ -280,6 +280,11 @@ class DummyLLMClient(LLMClient, Model):
         think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # ``objective`` keeps a default here (unlike the required LLMClient
+        # contract) on purpose: the dummy records no telemetry, and forcing every
+        # test stub call to pass an objective adds churn with no attribution value.
+        # Production enforcement lives in the real OllamaLLMClient (required, and
+        # rejects empty strings).
         # Pattern-match against the user prompt only. Callers (including
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the

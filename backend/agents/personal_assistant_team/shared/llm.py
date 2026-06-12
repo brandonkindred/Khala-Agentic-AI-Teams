@@ -116,7 +116,12 @@ class LLMClient(_BaseLLMClient):
         objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
-        """Robust JSON extraction with continuation and decomposition fallbacks."""
+        """Robust JSON extraction with continuation and decomposition fallbacks.
+
+        :param objective: Short phrase describing the call's purpose for LLM
+            log/telemetry attribution. If empty, inherits from the current
+            ``llm_attribution`` context; if none is set, a generic fallback is used.
+        """
         raw_responses: List[str] = []
         attempts_made = 0
         continuation_attempts = 0
@@ -204,6 +209,12 @@ class LLMClient(_BaseLLMClient):
         system_prompt: Optional[str] = None,
         objective: str = "",
     ) -> str:
+        """Return raw text from the model.
+
+        :param objective: Short phrase describing the call's purpose for LLM
+            log/telemetry attribution. If empty, inherits from the current
+            ``llm_attribution`` context; if none is set, a generic fallback is used.
+        """
         return self._ollama_complete(
             prompt,
             temperature=temperature,
