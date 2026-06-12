@@ -218,6 +218,14 @@ def get_auto_answer_for_job(
         for i, opt in enumerate(question_data.get("options", []))
     ]
 
+    if not options:
+        # Auto-answer requires at least one option to select from; questions without options
+        # must be answered by the user via free-text (the "other" field).
+        logger.warning(
+            "Question %s in job %s has no options; cannot auto-answer", question_id, job_id
+        )
+        return None
+
     question = OpenQuestion(
         id=question_data.get("id", question_id),
         question_text=question_data.get("question_text", ""),
