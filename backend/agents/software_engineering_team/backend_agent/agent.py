@@ -548,6 +548,24 @@ def _format_deletion_note(deleted: List[str]) -> str:
     )
 
 
+def _whole_repo_review_input(
+    repo_path: Path, current_task: Any
+) -> Tuple[Dict[str, str] | None, str | None, str | None]:
+    """Complete, fail-safe review input: the whole repo as a ``code`` string.
+
+    Used when no task-scoped change set is available (empty diff) or cannot be
+    trusted (baseline diff unavailable). For repo-setup tasks the meta files
+    (.gitignore, README, ...) are appended so an initial commit is reviewed in
+    full.
+    """
+    code = _read_repo_code(repo_path)
+    if _is_repo_setup_task(current_task):
+        meta = _read_repo_meta_files(repo_path)
+        if meta:
+            code = code + "\n\n" + meta
+    return None, code, None
+
+
 def _select_review_input(
     repo_path: Path,
     current_task: Any,
@@ -605,52 +623,46 @@ def _select_review_input(
         changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
     except BaselineDiffUnavailable as exc:
         # Fail closed: if the net base→worktree diff can't be computed (missing
-        # base ref, shallow clone, timeout), review the whole repo rather than a
-        # partial change set the gate could approve without seeing the changes.
+        # base ref, shallow/ambiguous history, timeout), review the whole repo
+        # rather than a partial set the gate could approve without seeing it.
         logger.warning("Code review: baseline diff unavailable (%s); reviewing whole repo", exc)
-        changed, deleted_all = None, []
+        return _whole_repo_review_input(repo_path, current_task)
 
-    if changed is not None:
-        paths: List[str] = []
-        seen: set[str] = set()
-        for source in (changed, list(written_files or ())):
-            for p in source:
-                # Never forward a likely secret (.env, key, credential) to the
-                # external review model now that the extension filter is off.
-                if p not in seen and not is_sensitive_path(p):
-                    seen.add(p)
-                    paths.append(p)
-        files = read_files_as_dict(repo_path, paths, extensions=None)
+    paths: List[str] = []
+    seen: set[str] = set()
+    for source in (changed, list(written_files or ())):
+        for p in source:
+            # Never forward a likely secret (.env, key, credential) to the
+            # external review model now that the extension filter is off.
+            if p not in seen and not is_sensitive_path(p):
+                seen.add(p)
+                paths.append(p)
+    files = read_files_as_dict(repo_path, paths, extensions=None)
 
-        # A deleted path can be restored in the worktree (a file, or even a
-        # dangling symlink) in a later failed-commit iteration; it is then real
-        # content above, so only note paths truly absent from disk. ``lexists``
-        # (exists-or-symlink) keeps a restored dangling symlink out of the note.
-        deleted = [
-            p
-            for p in deleted_all
-            if not ((repo_path / p).exists() or (repo_path / p).is_symlink())
-        ]
-        note = _format_deletion_note(deleted) if deleted else None
+    # A deleted path can be restored in the worktree (a file, or a dangling
+    # symlink) in a later failed-commit iteration; treat it as present then
+    # (exists-or-symlink == lexists). A deleted secret is also dropped so its
+    # path name is not surfaced to the review model.
+    deleted: List[str] = []
+    for p in deleted_all:
+        full = repo_path / p
+        if not (full.exists() or full.is_symlink()) and not is_sensitive_path(p):
+            deleted.append(p)
+    note = _format_deletion_note(deleted) if deleted else None
 
-        if files:
-            return files, None, note
-        if note:
-            # Deletion-only change: no surviving content to review. Hand the
-            # removal list to the dedicated context channel (an empty ``code`` is
-            # a valid "nothing to review as source" input) rather than reviewing
-            # the prose note as a pathless source block.
-            return None, "", note
+    if files:
+        return files, None, note
+    if note:
+        # Deletion-only change: no surviving content to review. Hand the removal
+        # list to the dedicated context channel (an empty ``code`` is a valid
+        # "nothing to review as source" input) rather than reviewing the prose
+        # note as a pathless source block.
+        return None, "", note
 
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )
-    code = _read_repo_code(repo_path)
-    if _is_repo_setup_task(current_task):
-        meta = _read_repo_meta_files(repo_path)
-        if meta:
-            code = code + "\n\n" + meta
-    return None, code, None
+    return _whole_repo_review_input(repo_path, current_task)
 
 
 def _is_repo_setup_task(task: Any) -> bool:

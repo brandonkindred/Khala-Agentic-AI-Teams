@@ -103,6 +103,7 @@ _SENSITIVE_NAMES: frozenset[str] = frozenset(
         ".netrc",
         ".pgpass",
         ".htpasswd",
+        ".envrc",
         "id_rsa",
         "id_dsa",
         "id_ecdsa",
@@ -120,16 +121,20 @@ MAX_REVIEW_FILE_BYTES = 1_000_000
 
 
 def is_sensitive_path(path: str) -> bool:
-    """True when *path* names a likely secret (``.env*``, key, credential, ...).
+    """True when *path* names a likely secret (``.env``/``.env.*``, key, ...).
 
     Best-effort denylist used to keep secrets out of the content forwarded to the
-    external code-review model. Over-inclusion (e.g. ``.env.example``) is
-    acceptable — losing review of a template is preferable to leaking a key.
+    external code-review model. The ``.env`` match is anchored (``.env`` exactly
+    or an ``.env.<env>`` variant) so a regular source file like ``.environment.py``
+    is *not* excluded, while ``.envrc`` (which commonly holds ``export SECRET=``)
+    is covered explicitly. Over-inclusion (e.g. ``.env.example``) is acceptable —
+    losing review of a template is preferable to leaking a key.
     """
-    name = Path(path).name
-    if name in _SENSITIVE_NAMES or name.startswith(".env"):
+    candidate = Path(path)
+    name = candidate.name
+    if name in _SENSITIVE_NAMES or name == ".env" or name.startswith(".env."):
         return True
-    return Path(path).suffix in _SENSITIVE_SUFFIXES
+    return candidate.suffix in _SENSITIVE_SUFFIXES
 
 
 def strip_surrogates(text: str) -> str:

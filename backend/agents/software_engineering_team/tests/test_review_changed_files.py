@@ -97,6 +97,30 @@ def test_list_changed_and_deleted_bad_revision_raises(tmp_path: Path) -> None:
         list_changed_and_deleted(tmp_path, "no-such-branch", "HEAD")
 
 
+def test_list_changed_and_deleted_ambiguous_merge_base_raises(tmp_path: Path, monkeypatch) -> None:
+    """Multiple merge bases (criss-cross history) fail closed rather than diffing
+    against an arbitrary one."""
+    import pytest
+
+    from software_engineering_team.shared import git_utils
+    from software_engineering_team.shared.git_utils import BaselineDiffUnavailable
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+
+    def fake_run_git(path, cmd, timeout=30):
+        if cmd[:2] == ["git", "merge-base"]:
+            return 0, "1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n"
+        return 0, ""
+
+    monkeypatch.setattr(git_utils, "_run_git", fake_run_git)
+
+    with pytest.raises(BaselineDiffUnavailable):
+        list_changed_and_deleted(tmp_path, "development", "HEAD")
+
+
 def test_list_changed_and_deleted_net_add_then_delete_excluded(tmp_path: Path) -> None:
     """A path added in a feature commit and then deleted in the worktree has no
     net change vs base, so it appears in neither list."""
@@ -695,6 +719,32 @@ def test_select_review_input_excludes_sensitive_files(tmp_path: Path) -> None:
     assert ".env" not in files  # secret excluded from the review payload
 
 
+def test_select_review_input_excludes_deleted_secret_from_note(tmp_path: Path) -> None:
+    """A deleted secret's path is not surfaced in the deletion note."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=base\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / ".env").unlink()  # deleted secret
+    (tmp_path / "gone.py").unlink()  # ordinary deletion
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete env + gone")
+
+    task = SimpleNamespace(description="x")
+    _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert note is not None
+    assert "gone.py" in note  # ordinary deletion surfaced
+    assert ".env" not in note  # secret path name not surfaced
+
+
 def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
     """When the baseline diff can't be computed, review the whole repo (closed)."""
     from software_engineering_team.backend_agent.agent import _select_review_input
@@ -715,18 +765,23 @@ def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
 
 def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
     """A huge deletion list is capped in the note (count preserved)."""
-    from software_engineering_team.backend_agent.agent import _select_review_input
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_MAX_PATHS,
+        _select_review_input,
+    )
 
+    cap = _DELETION_NOTE_MAX_PATHS
+    total = cap + 70
     _init_repo(tmp_path)
     (tmp_path / "keep.py").write_text("k = 1\n", encoding="utf-8")
-    for i in range(120):
+    for i in range(total):
         (tmp_path / f"gone{i}.py").write_text("g\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
     _git(tmp_path, "branch", "-M", "development")
     _git(tmp_path, "checkout", "-b", "feature/x")
     (tmp_path / "keep.py").write_text("k = 2\n", encoding="utf-8")
-    for i in range(120):
+    for i in range(total):
         (tmp_path / f"gone{i}.py").unlink()
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "mass delete")
@@ -735,9 +790,9 @@ def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
     _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert note is not None
-    assert "120 total" in note  # full count preserved
-    assert "and 70 more" in note  # 120 - 50 cap
-    assert note.count("- gone") <= 50  # at most the cap listed
+    assert f"{total} total" in note  # full count preserved
+    assert f"and {total - cap} more" in note  # overflow beyond the cap
+    assert note.count("- gone") <= cap  # at most the cap listed
 
 
 def test_select_review_input_restored_dangling_symlink_not_deleted(tmp_path: Path) -> None:
@@ -827,10 +882,16 @@ def test_strip_surrogates_literal_backslash_no_collision() -> None:
 def test_is_sensitive_path() -> None:
     from software_engineering_team.shared.repo_utils import is_sensitive_path
 
+    # Secrets — excluded
     assert is_sensitive_path(".env")
     assert is_sensitive_path("config/.env.production")
+    assert is_sensitive_path(".envrc")  # direnv often holds `export SECRET=`
     assert is_sensitive_path("deploy/server.pem")
     assert is_sensitive_path("secrets/id_rsa")
+    # Ordinary source — NOT excluded (anchored .env match, no `.env` prefix over-match)
+    assert not is_sensitive_path(".environment.py")
+    assert not is_sensitive_path("env.py")
+    assert not is_sensitive_path("environment.py")
     assert not is_sensitive_path("app/main.py")
     assert not is_sensitive_path("requirements.txt")
 
