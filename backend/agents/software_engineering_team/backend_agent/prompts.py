@@ -95,13 +95,13 @@ PROJECT STRUCTURE & FILE ORGANIZATION
    **How to derive a file/module name (FOLLOW THIS ALGORITHM):**
    a. Read the task description and identify the core NOUN (e.g., "user", "task", "auth", "order")
    b. DISCARD all verbs and filler words: implement, create, build, add, setup, configure, make, define, develop, write, design, establish, the, that, with, using, which, for, and, a, an, endpoint, service, module
-   c. Convert the remaining 1-3 word noun phrase to the appropriate case (snake_case for Python, PascalCase for Java)
-   d. If the result is longer than 25 characters, shorten it
+   c. Convert the remaining concise noun phrase to the appropriate case (snake_case for Python, PascalCase for Java)
+   d. If the result is longer than ~30 characters, shorten it
 
    **Examples:** "Create user registration endpoint" -> `app/routers/users.py` | "Build the authentication service with JWT" -> `app/services/auth.py` | "Define data models for orders" -> `app/models/order.py`
 
    **HARD RULES:**
-   - Names must be short and descriptive (1-3 words max)
+   - File/module names must be a short, concise noun phrase, never sentence-like: keep each path segment under ~30 characters and avoid 4+ hyphenated or 5+ underscored words, which path validation rejects. (This length guidance is for file/folder/module names only -- function, variable, and class names inside the code are NOT word-capped; keep them concise but as descriptive as the purpose requires, never sacrificing clarity for brevity.)
    - NEVER use the task description as a file name -- extract the noun only
    - NEVER start a name with a verb (implement_, create_, build_, add_, setup_, etc.)
    - NEVER include filler words (_the_, _that_, _with_, _using_, _which_, _for_)
