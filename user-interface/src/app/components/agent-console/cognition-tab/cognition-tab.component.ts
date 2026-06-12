@@ -56,6 +56,14 @@ interface Settable<T> {
 const STORAGE_UNAVAILABLE_MESSAGE = 'Cognition data is temporarily unavailable. Try again shortly.';
 
 /**
+ * Page sizes requested per section. Set to the backend maxima so a single
+ * fetch covers all but the largest agents; a load-more control is a follow-up
+ * for agents that exceed these caps.
+ */
+const PROPOSAL_PAGE_LIMIT = 200;
+const RULE_PAGE_LIMIT = 500;
+
+/**
  * Cognition tab — operator surface for an agent's learned cognition.
  *
  * Sections, in page order: **Rule proposals** (the HITL approve/reject gate),
@@ -218,8 +226,9 @@ export class CognitionTabComponent implements OnInit {
     this.proposalsError.set(null);
     const reqId = ++this.proposalsReqId;
     const filter = this.proposalStatusFilter();
+    const query = filter === 'all' ? {} : { status: filter };
     this.api
-      .listProposals(agentId, filter === 'all' ? {} : { status: filter })
+      .listProposals(agentId, { ...query, limit: PROPOSAL_PAGE_LIMIT })
       .subscribe({
         next: (rows) => {
           if (reqId !== this.proposalsReqId) return;
@@ -265,24 +274,32 @@ export class CognitionTabComponent implements OnInit {
    * the proposals list was reloaded mid-flight (filter/agent change).
    */
   performApprove(p: RuleProposal): void {
-    const agentId = this.selectedAgentId();
+    // Bind the decision to the proposal's own agent, not the (possibly changed)
+    // selected agent, so switching agents mid-confirm can't misroute it.
+    const agentId = p.agent_id;
     if (!agentId || p.stale_evidence || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
+    const onCurrentAgent = agentId === this.selectedAgentId();
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
-    this.proposals.set(prev.filter((x) => x.id !== p.id));
+    if (onCurrentAgent) this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.approveProposal(agentId, p.id).subscribe({
       next: () => {
         this.actingProposalId.set(null);
+        if (agentId !== this.selectedAgentId()) return; // agent changed — leave its view alone
         this.loadRules();
-        if (reqId !== this.proposalsReqId) return;
+        if (reqId !== this.proposalsReqId) {
+          this.loadProposals(); // a concurrent load won; re-sync so the card isn't stale
+          return;
+        }
         this.reconcileDecided(prev, { ...p, status: 'approved' });
       },
       error: (err) => {
-        if (reqId === this.proposalsReqId) this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
         this.actingProposalId.set(null);
+        if (agentId !== this.selectedAgentId()) return; // don't surface a stale agent's error
+        if (reqId === this.proposalsReqId && onCurrentAgent) this.proposals.set(prev);
+        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
       },
     });
   }
@@ -311,23 +328,29 @@ export class CognitionTabComponent implements OnInit {
    * reloaded mid-flight.
    */
   performReject(p: RuleProposal): void {
-    const agentId = this.selectedAgentId();
+    const agentId = p.agent_id;
     if (!agentId || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
+    const onCurrentAgent = agentId === this.selectedAgentId();
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
-    this.proposals.set(prev.filter((x) => x.id !== p.id));
+    if (onCurrentAgent) this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.rejectProposal(agentId, p.id).subscribe({
       next: (updated) => {
         this.actingProposalId.set(null);
-        if (reqId !== this.proposalsReqId) return;
+        if (agentId !== this.selectedAgentId()) return;
+        if (reqId !== this.proposalsReqId) {
+          this.loadProposals();
+          return;
+        }
         this.reconcileDecided(prev, updated);
       },
       error: (err) => {
-        if (reqId === this.proposalsReqId) this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
         this.actingProposalId.set(null);
+        if (agentId !== this.selectedAgentId()) return;
+        if (reqId === this.proposalsReqId && onCurrentAgent) this.proposals.set(prev);
+        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
       },
     });
   }
@@ -366,11 +389,19 @@ export class CognitionTabComponent implements OnInit {
     return this.proposedRuleText(p) || this.targetRuleText(p.target_rule_id);
   }
 
-  /** Resolve a target rule's text from the loaded rules; fall back to its id. */
+  /** Resolve a target rule from the loaded rules, or `undefined` if not present. */
+  targetRule(id: string | null | undefined): Rule | undefined {
+    if (!id) return undefined;
+    return this.rules().find((r) => r.id === id);
+  }
+
+  /**
+   * Text of a target rule when it is loaded; empty otherwise. Never returns the
+   * raw id, which would leak an internal identifier (e.g. for a retired target
+   * absent from the active-rules view).
+   */
   targetRuleText(id: string | null | undefined): string {
-    if (!id) return '';
-    const rule = this.rules().find((r) => r.id === id);
-    return rule ? rule.text : id;
+    return this.targetRule(id)?.text ?? '';
   }
 
   /** Scroll the Rules section to a target rule and briefly highlight it. */
@@ -457,7 +488,8 @@ export class CognitionTabComponent implements OnInit {
     this.rulesError.set(null);
     const reqId = ++this.rulesReqId;
     const filter = this.ruleStatusFilter();
-    this.api.listRules(agentId, filter === 'all' ? {} : { status: filter }).subscribe({
+    const query = filter === 'all' ? {} : { status: filter };
+    this.api.listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT }).subscribe({
       next: (rows) => {
         if (reqId !== this.rulesReqId) return;
         this.rulesUnavailable.set(false);

@@ -131,9 +131,9 @@ describe('CognitionTabComponent', () => {
     const c = f.componentInstance;
     expect(c.agents()).toEqual(agents);
     expect(c.selectedAgentId()).toBe('a1');
-    expect(api.listProposals).toHaveBeenCalledWith('a1', { status: 'pending' });
+    expect(api.listProposals).toHaveBeenCalledWith('a1', { status: 'pending', limit: 200 });
     expect(api.listMemoryEvents).toHaveBeenCalledWith('a1', { bySalience: true, topN: 50 });
-    expect(api.listRules).toHaveBeenCalledWith('a1', { status: 'active' });
+    expect(api.listRules).toHaveBeenCalledWith('a1', { status: 'active', limit: 500 });
     expect(c.proposals().length).toBe(2);
   });
 
@@ -149,9 +149,9 @@ describe('CognitionTabComponent', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setProposalFilter('all');
-    expect(api.listProposals).toHaveBeenLastCalledWith('a1', {});
+    expect(api.listProposals).toHaveBeenLastCalledWith('a1', { limit: 200 });
     f.componentInstance.setProposalFilter('rejected');
-    expect(api.listProposals).toHaveBeenLastCalledWith('a1', { status: 'rejected' });
+    expect(api.listProposals).toHaveBeenLastCalledWith('a1', { status: 'rejected', limit: 200 });
   });
 
   it('approves: optimistically removes the card and refetches rules', () => {
@@ -262,17 +262,20 @@ describe('CognitionTabComponent', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setRuleFilter('all');
-    expect(api.listRules).toHaveBeenLastCalledWith('a1', {});
+    expect(api.listRules).toHaveBeenLastCalledWith('a1', { limit: 500 });
     f.componentInstance.setRuleFilter('retired');
-    expect(api.listRules).toHaveBeenLastCalledWith('a1', { status: 'retired' });
+    expect(api.listRules).toHaveBeenLastCalledWith('a1', { status: 'retired', limit: 500 });
   });
 
-  it('resolves target rule text from loaded rules, else falls back to the id', () => {
+  it('resolves a target rule from loaded rules, empty/undefined when unknown', () => {
     const f = build();
     f.detectChanges();
     const c = f.componentInstance;
+    expect(c.targetRule('r9')?.id).toBe('r9');
     expect(c.targetRuleText('r9')).toBe('Cap writeback at 8 KB');
-    expect(c.targetRuleText('unknown')).toBe('unknown');
+    // Never leaks a raw id for an unknown/retired target.
+    expect(c.targetRule('unknown')).toBeUndefined();
+    expect(c.targetRuleText('unknown')).toBe('');
     expect(c.targetRuleText(null)).toBe('');
   });
 
@@ -383,6 +386,22 @@ describe('CognitionTabComponent', () => {
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')?.status).toBe('pending');
   });
 
+  it('re-syncs proposals when a reload finishes mid-reject', () => {
+    const rejectSubject = new Subject<RuleProposal>();
+    api.rejectProposal = vi.fn().mockReturnValue(rejectSubject);
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.setProposalFilter('all');
+    f.componentInstance.performReject(addProposal); // captures reqId, optimistic remove
+    api.listProposals.mockClear();
+    f.componentInstance.loadProposals(); // concurrent reload bumps the request id
+    rejectSubject.next({ ...addProposal, status: 'rejected' });
+    rejectSubject.complete();
+    // The success path re-fetches (manual reload + the mid-flight re-sync) rather
+    // than reconciling stale state.
+    expect(api.listProposals).toHaveBeenCalledTimes(2);
+  });
+
   it('ignores a second decision while one is already in flight', () => {
     api.approveProposal = vi.fn().mockReturnValue(NEVER); // stays pending
     const f = build();
@@ -408,7 +427,7 @@ describe('CognitionTabComponent', () => {
     expect(f.componentInstance.storageUnavailable()).toBe(false);
   });
 
-  it('resets filters to defaults when switching agents', () => {
+  it('resets filters and reloads every section when switching agents', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setProposalFilter('approved');
@@ -416,6 +435,20 @@ describe('CognitionTabComponent', () => {
     f.componentInstance.selectAgent('a2');
     expect(f.componentInstance.proposalStatusFilter()).toBe('pending');
     expect(f.componentInstance.ruleStatusFilter()).toBe('active');
+    expect(api.listProposals).toHaveBeenLastCalledWith('a2', { status: 'pending', limit: 200 });
+    expect(api.listMemoryEvents).toHaveBeenLastCalledWith('a2', { bySalience: true, topN: 50 });
+    expect(api.listRules).toHaveBeenLastCalledWith('a2', { status: 'active', limit: 500 });
+  });
+
+  it("routes a decision to the proposal's own agent after switching agents", () => {
+    const f = build();
+    f.detectChanges();
+    // Operator opened the dialog for p1 (agent a1), then switched to a2.
+    f.componentInstance.selectAgent('a2');
+    f.componentInstance.performApprove(addProposal); // addProposal.agent_id === 'a1'
+    expect(api.approveProposal).toHaveBeenCalledWith('a1', 'p1');
+    // a2's proposal view is left untouched.
+    expect(f.componentInstance.proposals()).toEqual([addProposal, staleProposal]);
   });
 
   it('builds a proposal summary from the proposed or target rule text', () => {

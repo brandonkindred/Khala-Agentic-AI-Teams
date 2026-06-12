@@ -27,13 +27,19 @@
     align-items: center;
     gap: 12px;
   }
+}
 
-  &__error {
-    color: var(--kh-error, #f87171);
-    background: rgba(248, 113, 113, 0.08);
-    padding: 8px 12px;
-    border-radius: 6px;
-  }
+// Visually hide content while keeping it available to screen readers.
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
 }
 
 .cognition-section {
@@ -68,29 +74,12 @@
 
     // Compact the Material form field inside the section header by hiding the
     // hint/error subscript row. `::ng-deep` is deprecated but remains the
-    // supported way to reach Material's internal nodes from a scoped component;
-    // migrate to a global theme override when the project adopts one.
+    // supported way to reach Material's internal nodes from a scoped component.
+    // TODO: migrate to a global Material theme override when the project adopts
+    // one, to drop `::ng-deep`.
     ::ng-deep .mat-mdc-form-field-subscript-wrapper {
       display: none;
     }
-  }
-
-  &__loading {
-    display: flex;
-    justify-content: center;
-    padding: 24px 0;
-  }
-
-  &__empty {
-    color: var(--kh-text-muted, #71717a);
-    padding: 12px 0;
-  }
-
-  &__error {
-    color: var(--kh-error, #f87171);
-    background: rgba(248, 113, 113, 0.08);
-    padding: 8px 12px;
-    border-radius: 6px;
   }
 }
 
@@ -205,7 +194,13 @@ mat-chip {
     color: var(--kh-text-muted, #71717a);
   }
 
+  // A native <button> styled as an inline link.
   &__link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    text-align: left;
     color: var(--kh-info, #93c5fd);
     cursor: pointer;
     text-decoration: underline;

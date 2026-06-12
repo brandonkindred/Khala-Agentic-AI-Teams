@@ -84,17 +84,21 @@
                   <div class="proposal-card__lead">New {{ proposedRuleMode(p) }} rule:</div>
                   <div class="proposal-card__text">"{{ proposedRuleText(p) }}"</div>
                 } @else if (p.action === 'amend') {
-                  <div class="proposal-card__lead">Replaces: "{{ targetRuleText(p.target_rule_id) }}"</div>
+                  @if (targetRule(p.target_rule_id); as tr) {
+                    <div class="proposal-card__lead">Replaces: "{{ tr.text }}"</div>
+                  } @else {
+                    <div class="proposal-card__lead">Replaces an existing rule:</div>
+                  }
                   <div class="proposal-card__text">With: "{{ proposedRuleText(p) }}"</div>
                 } @else {
                   <div class="proposal-card__lead">Retire rule:</div>
-                  <a
-                    class="proposal-card__link"
-                    role="button"
-                    tabindex="0"
-                    (click)="scrollToRule(p.target_rule_id)"
-                    (keydown.enter)="scrollToRule(p.target_rule_id)"
-                  >"{{ targetRuleText(p.target_rule_id) }}"</a>
+                  @if (targetRule(p.target_rule_id); as tr) {
+                    <button type="button" class="proposal-card__link" (click)="scrollToRule(tr.id)">
+                      "{{ tr.text }}"
+                    </button>
+                  } @else {
+                    <div class="proposal-card__text">an existing rule</div>
+                  }
                 }
 
                 @if (p.stale_evidence) {
@@ -129,7 +133,7 @@
                     type="button"
                     color="primary"
                     [attr.aria-label]="'Approve ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
-                    [attr.aria-describedby]="p.stale_evidence ? 'stale-msg-' + p.id : null"
+                    [attr.aria-describedby]="p.stale_evidence ? 'approve-tip-' + p.id : null"
                     [disabled]="p.stale_evidence || actingProposalId() !== null"
                     [matTooltip]="'Can\'t approve while evidence is outdated.'"
                     [matTooltipDisabled]="!p.stale_evidence"
@@ -137,6 +141,11 @@
                   >
                     Approve
                   </button>
+                  @if (p.stale_evidence) {
+                    <span [id]="'approve-tip-' + p.id" class="visually-hidden">
+                      Can't approve while evidence is outdated.
+                    </span>
+                  }
                 </footer>
               }
             </li>
@@ -250,11 +259,17 @@
             >
               <header class="rule-row__head">
                 <mat-chip-set>
-                  <mat-chip class="is-mode" tabindex="0" [matTooltip]="ruleModeTooltip(r.mode)">
+                  <mat-chip
+                    class="is-mode"
+                    tabindex="0"
+                    [matTooltip]="ruleModeTooltip(r.mode)"
+                    [attr.aria-describedby]="'mode-tip-' + r.id"
+                  >
                     {{ r.mode === 'enforced' ? '⚖' : '💬' }} {{ r.mode }}
                   </mat-chip>
                   <mat-chip class="is-status">{{ r.status }}</mat-chip>
                 </mat-chip-set>
+                <span [id]="'mode-tip-' + r.id" class="visually-hidden">{{ ruleModeTooltip(r.mode) }}</span>
                 <span class="rule-row__meta">{{ rulePriorityLabel(r.priority) }}</span>
                 <span class="rule-row__meta">{{ ruleSourceLabel(r.source) }}</span>
                 <span class="rule-row__spacer"></span>
