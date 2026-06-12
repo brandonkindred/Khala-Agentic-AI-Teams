@@ -195,6 +195,40 @@ def test_pause_renews_lease_during_slow_on_pause(monkeypatch):
     assert len(heartbeats) >= 1
 
 
+def test_pause_heartbeats_preserve_last_activity_at(monkeypatch):
+    """Answer-wait heartbeats are liveness pings, not real activity: they must pin last_activity_at
+    to its pre-pause value so a job waiting hours on the user does not look continuously active
+    (the API contract excludes heartbeats from last_activity_at)."""
+    import threading as _threading
+
+    monkeypatch.setattr(orch_mod.hitl, "ANSWER_WAIT_POLL_INTERVAL_S", 0.01)
+    pinned = "2020-01-01T00:00:00+00:00"
+    job: Dict[str, Any] = {"last_activity_at": pinned}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+
+    hb_calls: List[Dict[str, Any]] = []
+    first_beat = _threading.Event()
+
+    def update_fn(**kw):
+        job.update(kw)
+        # Capture the renewal/wait-loop heartbeats (which carry answer_wait_heartbeat_at but not the
+        # waiting_for_answers flag that rides the one-shot pause-publish update).
+        if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
+            hb_calls.append(kw)
+            first_beat.set()
+
+    def slow_on_pause(_qs):
+        assert first_beat.wait(5.0), "renewer did not heartbeat during on_pause"
+
+    _run_pause_cycle(
+        "j", ["Q?"], "src", get_job_fn=lambda j: job, update_fn=update_fn, on_pause=slow_on_pause
+    )
+
+    assert hb_calls, "expected at least one answer-wait heartbeat"
+    # Every heartbeat pins last_activity_at to the pre-pause value rather than advancing it.
+    assert all(c.get("last_activity_at") == pinned for c in hb_calls)
+
+
 def test_pause_cycle_on_pause_error_is_swallowed(monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))

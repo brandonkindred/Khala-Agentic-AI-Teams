@@ -66,7 +66,7 @@
           <h3>
             Working on issue
             @if (activeJob.issue_url) {
-              <a [href]="activeJob.issue_url" target="_blank" rel="noopener">#{{ activeJob.issue_number }}</a>
+              <a [href]="activeJob.issue_url" target="_blank" rel="noopener noreferrer">#{{ activeJob.issue_number }}</a>
             } @else {
               #{{ activeJob.issue_number }}
             }
@@ -79,7 +79,8 @@
           <button
             mat-button
             (click)="dismissJob()"
-            [matTooltip]="isJobTerminal() ? 'Dismiss this finished job' : 'Hide this panel — the run keeps going in the background'"
+            [disabled]="hasPendingQuestions()"
+            [matTooltip]="hasPendingQuestions() ? 'Answer the pending questions to continue — this run can\'t be dismissed while waiting' : isJobTerminal() ? 'Dismiss this finished job' : 'Hide this panel — the run keeps going in the background'"
           >
             <mat-icon>close</mat-icon>
             Dismiss

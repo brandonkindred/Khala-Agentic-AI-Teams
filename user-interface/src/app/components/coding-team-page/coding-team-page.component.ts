@@ -278,7 +278,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         };
         this.startPolling(mostRecent.job_id);
       },
-      error: () => undefined,
+      // Best-effort restore: the page stays usable if /jobs fails, but log it so a persistent
+      // failure is diagnosable rather than silently swallowed.
+      error: (err) => console.error('Failed to restore active coding-team job', err),
     });
   }
 
@@ -318,9 +320,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       jobId,
       (status) => {
         this.jobStatus = status;
-        // The watched job finished: its issue is no longer being worked on.
+        // The watched job finished: re-sync the whole active-job snapshot from the server rather
+        // than only dropping this job's chip, so any background jobs that also finished lose their
+        // "In progress" chips too. restoreActiveJob won't re-adopt here because activeJob is still
+        // set (the finished panel stays until the user dismisses it).
         if (this.activeJob && isCodingTeamTerminalStatus(status.status)) {
-          this.activeIssueNumbers.delete(this.activeJob.issue_number);
+          this.restoreActiveJob();
         }
       },
       () => {
@@ -348,6 +353,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * job for this repo via `restoreActiveJob`.
    */
   dismissJob(): void {
+    // A job paused on questions the user must answer cannot be dismissed: restore excludes
+    // dismissed ids and re-running the issue is rejected as a duplicate active run, so dismissing
+    // would strand the run with no way to reopen it and answer. Keep the panel until it's answered.
+    if (this.hasPendingQuestions()) {
+      return;
+    }
     if (this.activeJob) {
       // Never auto-re-adopt a job the user explicitly dismissed.
       this.dismissedJobIds.add(this.activeJob.job_id);

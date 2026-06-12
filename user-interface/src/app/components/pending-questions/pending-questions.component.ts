@@ -290,6 +290,7 @@ export class PendingQuestionsComponent implements OnChanges {
   applyAutoAnswer(questionId: string): void {
     const result = this.autoAnswerResults.get(questionId);
     if (!result || !this.jobId) return;
+    const jobId = this.jobId;
 
     // Mark as submitting (reuse autoAnsweringQuestions set for spinner)
     this.autoAnsweringQuestions.add(questionId);
@@ -303,7 +304,7 @@ export class PendingQuestionsComponent implements OnChanges {
     };
     const request = { answers: [submission] };
 
-    this.getSubmitObservable(request).subscribe({
+    this.getSubmitObservable(jobId, request).subscribe({
       next: (statusResponse) => {
         this.autoAnsweringQuestions.delete(questionId);
         this.autoAnswerResults.delete(questionId);
@@ -319,6 +320,7 @@ export class PendingQuestionsComponent implements OnChanges {
   }
 
   private getSubmitObservable(
+    jobId: string,
     request: { answers: AnswerSubmission[] }
   ): Observable<
     | JobStatusResponse
@@ -335,12 +337,12 @@ export class PendingQuestionsComponent implements OnChanges {
           selected_option_ids: a.selected_option_ids,
           other_text: a.other_text ?? undefined,
         }));
-        return this.planningV3Api.submitAnswers(this.jobId!, body);
+        return this.planningV3Api.submitAnswers(jobId, body);
       }
       case 'planning-v2':
-        return this.api.submitPlanningV2Answers(this.jobId!, request);
+        return this.api.submitPlanningV2Answers(jobId, request);
       case 'product-analysis':
-        return this.api.submitProductAnalysisAnswers(this.jobId!, request) as Observable<ProductAnalysisStatusResponse>;
+        return this.api.submitProductAnalysisAnswers(jobId, request) as Observable<ProductAnalysisStatusResponse>;
       case 'coding-team': {
         // Coding-team answers are single-select: strip the multi-select field to
         // match the backend contract exactly.
@@ -351,10 +353,10 @@ export class PendingQuestionsComponent implements OnChanges {
             other_text: a.other_text,
           })),
         };
-        return this.codingTeamApi.submitAnswers(this.jobId!, body);
+        return this.codingTeamApi.submitAnswers(jobId, body);
       }
       case 'run-team':
-        return this.api.submitAnswers(this.jobId!, request);
+        return this.api.submitAnswers(jobId, request);
       default: {
         // Compile-time exhaustiveness: a new SubmitEndpointType member fails to
         // build until it gets an explicit submit route (no silent fallthrough
@@ -374,6 +376,7 @@ export class PendingQuestionsComponent implements OnChanges {
 
   submitAnswers(): void {
     if (!this.jobId || !this.allAnswersSubmittable) return;
+    const jobId = this.jobId;
 
     const submissions: AnswerSubmission[] = [];
     for (const q of this.questions) {
@@ -397,7 +400,7 @@ export class PendingQuestionsComponent implements OnChanges {
 
     const request = { answers: submissions };
 
-    this.getSubmitObservable(request).subscribe({
+    this.getSubmitObservable(jobId, request).subscribe({
       next: (response) => {
         this.submitting = false;
         this.answersSubmitted.emit(response);

@@ -322,6 +322,63 @@ def test_answers_dead_thread_claim_store_error_falls_back_to_hint(monkeypatch):
     assert "Resume" in calls["status_text"]
 
 
+def test_answers_does_not_resume_job_cancelled_after_get(monkeypatch):
+    """TOCTOU: if the job is cancelled between the initial get_job and storing answers, the resume
+    decision must use the re-read (terminal) record — not the stale pre-cancellation one — and must
+    not spawn a new orchestrator that would overwrite the terminal status."""
+    waiting = _job()  # initial read: waiting_for_user
+    cancelled = _job(status="cancelled")
+    reads = iter([waiting, cancelled])  # 1st read waiting (endpoint), 2nd read cancelled (re-read)
+    monkeypatch.setattr(api, "get_job", lambda jid: next(reads, cancelled))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn an orchestrator for a cancelled job")
+
+    monkeypatch.setattr(api, "_start_orchestrator_thread", _no_spawn)
+    monkeypatch.setattr(api, "_start_github_resume_thread", _no_spawn)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200  # answers stored; no spawn
+
+
+def test_answers_deferred_claim_schedules_post_ttl_recheck(monkeypatch):
+    """Deferring to another worker's resume claim must schedule a recheck past the claim TTL, so a
+    winner that dies before advancing the job still gets reclaimed instead of stranding it."""
+    scheduled = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api, "_answer_wait_heartbeat_fresh", lambda d: False)
+    monkeypatch.setattr(api, "claim_resume", lambda jid: False)  # another worker holds the claim
+
+    def _record(jid, delay=None):
+        scheduled.update({"jid": jid, "delay": delay})
+
+    monkeypatch.setattr(api, "_schedule_resume_recheck", _record)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert scheduled["jid"] == "j1"
+    assert scheduled["delay"] == api.RESUME_CLAIM_TTL_S + 5.0
+
+
+def test_resume_400_when_plan_input_corrupted(monkeypatch):
+    """A non-dict plan_input is a corrupted record: resume must reject it with a controlled 400, not
+    raise AttributeError off plan_raw.get()."""
+    job = _job(status="waiting_for_user", plan_input="not-a-dict")
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 400
+    assert "corrupted plan_input" in r.json()["detail"]
+
+
 def test_resume_500_when_claim_store_errors(monkeypatch):
     """A job-store transport error during the resume claim surfaces as a controlled 500 — not a bare
     propagation, and not a misleading 'already running' (no claim was actually taken)."""
@@ -624,6 +681,14 @@ def test_persisted_token_is_encrypted_not_plaintext(monkeypatch):
     assert enc not in client.get("/status/j1").text
     assert "super-secret-pat" not in client.get("/jobs").text
     assert enc not in client.get("/jobs").text
+    # Belt-and-braces beyond the substring scan: the token fields must be structurally absent from
+    # the parsed JSON, so a differently-encoded value can't slip through either.
+    status_body = client.get("/status/j1").json()
+    assert "github_token_encrypted" not in status_body
+    assert "github_token" not in status_body
+    for row in client.get("/jobs").json():
+        assert "github_token_encrypted" not in row
+        assert "github_token" not in row
 
 
 def test_resume_400_when_running_and_not_locally_alive(monkeypatch):

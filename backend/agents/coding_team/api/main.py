@@ -44,6 +44,7 @@ from coding_team.github_source import (  # noqa: E402
 from coding_team.github_source.client import _is_safe_ref  # noqa: E402
 from coding_team.job_store import (  # noqa: E402
     DEFAULT_CACHE_DIR,
+    RESUME_CLAIM_TTL_S,
     claim_resume,
     create_job,
     get_job,
@@ -664,13 +665,15 @@ def _start_github_resume_thread(
 _RESUME_RECHECK_DELAY_S = _ANSWER_WAIT_HEARTBEAT_STALE_S + 5.0
 
 
-def _schedule_resume_recheck(job_id: str) -> None:
-    """Schedule a one-shot recheck for a resume that was deferred to a fresh heartbeat.
+def _schedule_resume_recheck(job_id: str, delay: float = _RESUME_RECHECK_DELAY_S) -> None:
+    """Schedule a one-shot recheck for a resume that was deferred to another live owner.
 
-    A fresh heartbeat usually means a live wait loop elsewhere will consume the stored answers —
-    but a worker that died right after its last beat leaves the job paused with no resume control
-    (the UI shows "resuming" and never retries). The recheck runs after the staleness window: if
-    the job is still paused with no live thread and a now-stale heartbeat, it resumes it for real.
+    Two deferral cases share this safety net: deferring to a fresh answer-wait heartbeat (a wait
+    loop elsewhere should consume the answers) and deferring to another worker's resume claim. In
+    both, the owner could die right after we deferred, leaving the job paused with no resume control
+    (the UI shows "resuming" forever). The recheck runs after ``delay``: if the job is still paused
+    with no live thread and no fresh heartbeat, it resumes it for real. Callers pass a ``delay`` past
+    whichever liveness window applies (the heartbeat staleness window, or the resume-claim TTL).
 
     Postconditions:
         - A daemon timer is scheduled; its callback is a no-op when the job moved on (status no
@@ -698,7 +701,7 @@ def _schedule_resume_recheck(job_id: str) -> None:
             logger.exception("Deferred resume recheck failed for job %s.", job_id)
 
     try:
-        t = threading.Timer(_RESUME_RECHECK_DELAY_S, _recheck)
+        t = threading.Timer(delay, _recheck)
         t.daemon = True
         t.start()
     except Exception:
@@ -742,6 +745,10 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         _schedule_resume_recheck(job_id)
         return True
     plan_raw = data.get("plan_input") or {}
+    if not isinstance(plan_raw, dict):
+        # A corrupted record could carry a non-dict plan_input; .get() on it would raise
+        # AttributeError and break the "Never raises" contract. Treat it as no usable plan.
+        plan_raw = {}
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         return False
@@ -780,6 +787,11 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         logger.info(
             "Auto-resume for job %s skipped: another worker holds the resume claim.", job_id
         )
+        # The winner could die after claiming but before advancing the job out of waiting_for_user;
+        # its lease then expires (RESUME_CLAIM_TTL_S) with nobody retrying, leaving the job paused
+        # until the next user request. Schedule a recheck past the lease TTL: if the job is still
+        # waiting with no live thread, that recheck reclaims and resumes it.
+        _schedule_resume_recheck(job_id, delay=RESUME_CLAIM_TTL_S + 5.0)
         return True
     if not _claim_run_thread(job_id):
         # The cross-worker claim is ours but this process is already spawning (a racing thread):
@@ -816,10 +828,14 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> Status
     answers = _validate_answers(data, request)
     store_submit_answers(job_id, answers)
     if not _is_run_thread_alive(job_id):
+        # Re-read the record after storing answers: the job may have been cancelled between the
+        # initial get_job and now. _try_auto_resume's terminal check must see that current state, or
+        # it could spawn a fresh orchestrator for an already-terminal job and overwrite its status.
+        current = get_job(job_id) or data
         # Write the optimistic status BEFORE spawning so the endpoint never clobbers a newer
         # status_text the freshly started orchestrator may have already written.
         update_job(job_id, status_text="Answers received; resuming the run.")
-        if _try_auto_resume(job_id, data):
+        if _try_auto_resume(job_id, current):
             logger.info(
                 "Orchestrator thread for job %s was not running; restarted it after answers.",
                 job_id,
@@ -890,6 +906,8 @@ def resume_job(job_id: str) -> RunResponse:
             ),
         )
     plan_raw = data.get("plan_input") or {}
+    if not isinstance(plan_raw, dict):
+        raise HTTPException(status_code=400, detail="Job has a corrupted plan_input and cannot be resumed.")
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")

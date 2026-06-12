@@ -401,6 +401,13 @@ def _run_pause_cycle(
         # waiting out the prior lease's TTL (the seq counter is left monotonic).
         resume_claim_at=None,
     )
+    # The answer-wait heartbeats below are liveness pings, NOT real orchestrator activity, but they
+    # route through the normal update path which stamps last_activity_at on every write. Pin it to
+    # its just-published value and pass it back on each heartbeat so a job that waits hours for a
+    # user doesn't look continuously active (the API contract is that last_activity_at excludes
+    # heartbeats, and stall/age indicators depend on it). Nothing real happens while waiting, so the
+    # value is stable for the whole pause.
+    pinned_activity_at = (get_job_fn(job_id) or {}).get("last_activity_at")
     if on_pause is not None:
         # on_pause can post a GitHub comment whose client uses ~30s timeouts with retries, which
         # can exceed the answer endpoint's heartbeat-staleness window. Periodic wait-loop heartbeats
@@ -412,7 +419,10 @@ def _run_pause_cycle(
         def _renew_lease() -> None:
             while not _renew_stop.wait(hitl.ANSWER_WAIT_POLL_INTERVAL_S):
                 try:
-                    update_fn(answer_wait_heartbeat_at=hitl.heartbeat_timestamp())
+                    update_fn(
+                        answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
+                        last_activity_at=pinned_activity_at,
+                    )
                 except Exception:  # noqa: BLE001 — renewal must never abort the pause
                     logger.debug(
                         "answer-wait lease renewal during on_pause failed for job %s",
@@ -436,7 +446,9 @@ def _run_pause_cycle(
     got = hitl.wait_for_answers(
         job_id,
         get_job_fn,
-        heartbeat_fn=lambda ts: update_fn(answer_wait_heartbeat_at=ts),
+        heartbeat_fn=lambda ts: update_fn(
+            answer_wait_heartbeat_at=ts, last_activity_at=pinned_activity_at
+        ),
     )
     if not got:
         data = get_job_fn(job_id) or {}

@@ -1,4 +1,12 @@
-import { Component, EventEmitter, Input, Output, ChangeDetectionStrategy } from '@angular/core';
+import {
+  Component,
+  EventEmitter,
+  Input,
+  Output,
+  ChangeDetectionStrategy,
+  OnChanges,
+  SimpleChanges,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCheckboxModule } from '@angular/material/checkbox';
@@ -34,7 +42,7 @@ import type { PendingQuestion, AutoAnswerResponse } from '../../../models';
  * `PendingQuestionsComponent` via the outputs below; it never mutates its inputs. OnPush — the
  * parent feeds it fresh input references on change.
  */
-export class QuestionCardComponent {
+export class QuestionCardComponent implements OnChanges {
   /** The question to render (text, options, required/multi-select flags). */
   @Input({ required: true }) question!: PendingQuestion;
   /** Zero-based position in the batch; rendered as the 1-based "Q{n}" label. */
@@ -63,6 +71,18 @@ export class QuestionCardComponent {
   otherText = '';
   wasAutoAnswered = false;
   autoAnswerConfidence = 0;
+
+  ngOnChanges(changes: SimpleChanges): void {
+    // When this card is reused for a different question (same DOM node, new question identity),
+    // clear the locally-held selection so stale checks/text can't carry over and desync from the
+    // parent's freshly-initialised answer for the new question.
+    const q = changes['question'];
+    if (q && !q.firstChange && q.previousValue?.id !== q.currentValue?.id) {
+      this.selectedOptionIds = new Set<string>();
+      this.otherText = '';
+      this.wasAutoAnswered = false;
+    }
+  }
 
   get isMultiSelect(): boolean {
     return this.question.allow_multiple === true;
