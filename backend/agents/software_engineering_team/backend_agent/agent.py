@@ -562,7 +562,10 @@ def _select_review_input(
     computing reverse dependencies is intentionally out of scope — this stage
     exists to avoid dumping historical/whole-repo content into review, and the
     surviving changed files plus the bounded ``existing_codebase`` excerpt provide
-    caller context.
+    caller context. Likewise, pure file-metadata changes (e.g. a mode/chmod-only
+    change) are not separately surfaced: this pipeline writes file *content* via
+    ``write_agent_output`` and does not change modes, so a content read is the
+    reviewable artifact.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the writer's
@@ -570,13 +573,14 @@ def _select_review_input(
           the set of paths re-read from disk.
     Postconditions:
         - Returns ``(files, code, deletion_note)``. Exactly one of ``files`` /
-          ``code`` is populated (never both, never both empty) so review is never
-          silently skipped: the worktree content of every committed/uncommitted/
+          ``code`` is populated (never both empty) so review is never silently
+          skipped: the worktree content of every committed/uncommitted/
           just-written path that exists on disk, else the legacy whole-repo
           ``code`` string (logged). ``deletion_note`` is a short text listing
-          removed files (or None), passed by the caller as review context. A
-          deletion-only change (no surviving content) returns the note as
-          ``code`` so the removal is still reviewed without a whole-repo fallback.
+          removed files (or None) that the caller folds into the task-description
+          context channel. A deletion-only change (no surviving content) returns
+          an empty ``code`` plus the note, so the removal is reviewed via context
+          rather than as a pathless prose source block.
         - For repo-setup tasks the whole-repo fallback also appends meta files
           (.gitignore, README, ...) so an initial commit is reviewed in full.
     """
@@ -604,9 +608,11 @@ def _select_review_input(
     if files:
         return files, None, note
     if note:
-        # Deletion-only change: no surviving content, so the note itself is the
-        # review input (avoids a whole-repo fallback for a pure removal).
-        return None, note, None
+        # Deletion-only change: no surviving content to review. Hand the removal
+        # list to the dedicated context channel (an empty ``code`` is a valid
+        # "nothing to review as source" input) rather than reviewing the prose
+        # note as a pathless source block.
+        return None, "", note
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )

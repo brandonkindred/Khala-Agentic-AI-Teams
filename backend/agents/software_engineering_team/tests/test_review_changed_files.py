@@ -564,9 +564,9 @@ def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
     assert note is not None and "gone.py" in note  # removal surfaced as separate note
 
 
-def test_select_review_input_deletion_only_returns_note_as_code(tmp_path: Path) -> None:
-    """A task whose only change is a deletion reviews the note itself (no
-    whole-repo fallback, no synthetic file entry)."""
+def test_select_review_input_deletion_only_uses_context_note(tmp_path: Path) -> None:
+    """A deletion-only change hands the removal to the context channel (note) with
+    an empty source, not a pathless prose block parsed as code."""
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -584,8 +584,8 @@ def test_select_review_input_deletion_only_returns_note_as_code(tmp_path: Path) 
     files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert files is None
-    assert note is None
-    assert code is not None and "gone.py" in code  # the removal is the review input
+    assert code == ""  # empty source — nothing to review as content
+    assert note is not None and "gone.py" in note  # removal in the context channel
 
 
 def test_select_review_input_note_named_file_reviewed_normally(tmp_path: Path) -> None:
@@ -670,6 +670,32 @@ def test_writer_output_keys_none() -> None:
     from software_engineering_team.backend_agent.agent import _writer_output_keys
 
     assert _writer_output_keys(None) is None
+
+
+def test_strip_surrogates_is_injective() -> None:
+    """Distinct invalid byte sequences map to distinct, encodable strings, so two
+    such filenames do not collide to one review key."""
+    from software_engineering_team.shared.repo_utils import strip_surrogates
+
+    a = strip_surrogates("a\udcff.py")
+    b = strip_surrogates("a\udcfe.py")
+
+    assert a != b  # injective: different bad bytes → different keys
+    a.encode("utf-8")  # both must be UTF-8 encodable
+    b.encode("utf-8")
+    assert strip_surrogates("plain.py") == "plain.py"  # ascii unchanged
+
+
+def test_read_files_as_dict_distinct_surrogate_paths_do_not_collide(tmp_path: Path) -> None:
+    """Two changed files differing only in invalid bytes both survive into the map."""
+    n1, n2 = "a\udcff.py", "a\udcfe.py"
+    (tmp_path / n1).write_text("X1\n", encoding="utf-8")
+    (tmp_path / n2).write_text("X2\n", encoding="utf-8")
+
+    result = read_files_as_dict(tmp_path, [n1, n2])
+
+    assert len(result) == 2  # neither overwrote the other
+    assert sorted(result.values()) == ["X1\n", "X2\n"]
 
 
 def test_format_deletion_note_sanitizes_surrogate_path() -> None:

@@ -93,15 +93,17 @@ def read_repo_code(
 
 
 def strip_surrogates(text: str) -> str:
-    """Return *text* with any lone surrogates replaced so it is UTF-8/JSON safe.
+    """Return *text* with any lone surrogates escaped so it is UTF-8/JSON safe.
 
     Paths read from git via ``surrogateescape`` (for filenames whose bytes are
     invalid in the locale encoding) carry lone surrogates that raise
     ``UnicodeEncodeError`` when later serialized to JSON or encoded to UTF-8 (for
-    example in an LLM HTTP request body). The ``"replace"`` encode handler turns
-    each unencodable char into ``?``; plain text is returned unchanged.
+    example in an LLM HTTP request body). The ``"backslashreplace"`` handler
+    rewrites each unencodable char as its ``\\uXXXX`` escape, which is *injective*
+    — distinct bad bytes map to distinct text — so two filenames differing only in
+    invalid bytes do not collide to the same dict key. Plain text is unchanged.
     """
-    return text.encode("utf-8", "replace").decode("utf-8")
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def read_files_as_dict(
