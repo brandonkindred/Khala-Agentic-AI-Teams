@@ -529,19 +529,16 @@ def _writer_output_keys(result: Any) -> Dict[str, str] | None:
     return written
 
 
-# Cap on paths listed in the deletion note. The note is appended to the task
-# description and repeated in every review chunk, so an unbounded list (e.g. a
-# generated-tree removal) could blow the model context on every chunk.
-_DELETION_NOTE_MAX_PATHS = 50
-
-
 def _format_deletion_note(deleted: List[str]) -> str:
-    """Render the removed paths as a short reviewer note, bounded in size."""
-    shown = deleted[:_DELETION_NOTE_MAX_PATHS]
-    listing = "\n".join(f"- {strip_surrogates(p)}" for p in shown)
-    overflow = len(deleted) - len(shown)
-    if overflow > 0:
-        listing += f"\n- ... and {overflow} more"
+    """Render *every* removed path as a reviewer note.
+
+    Lists all deletions, not a capped sample: the reviewer must be able to check
+    whether anything still depends on each removed path, so hiding identities
+    behind a count would leave deletions silently unreviewed (fail-open). The
+    review coordinator segments oversized inputs itself, so a long list is split
+    across review chunks rather than truncated here.
+    """
+    listing = "\n".join(f"- {strip_surrogates(p)}" for p in deleted)
     return (
         f"Files DELETED by this task ({len(deleted)} total; verify each removal is "
         "intentional and that nothing still depends on them):\n"

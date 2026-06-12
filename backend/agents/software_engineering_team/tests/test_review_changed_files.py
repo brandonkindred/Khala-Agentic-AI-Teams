@@ -218,18 +218,18 @@ def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
     assert result == {"a.py": "A"}  # binary asset skipped
 
 
-def test_read_files_as_dict_bounds_large_file_read(tmp_path: Path) -> None:
-    """A file larger than the cap is read truncated with an explicit marker."""
-    from software_engineering_team.shared.repo_utils import MAX_REVIEW_FILE_BYTES
-
-    (tmp_path / "big.py").write_text("A" * (MAX_REVIEW_FILE_BYTES + 5000), encoding="utf-8")
+def test_read_files_as_dict_passes_large_file_untruncated(tmp_path: Path) -> None:
+    """A large text file is passed whole — the coordinator segments it itself, so
+    nothing in the tail is dropped from review."""
+    big = "A" * 2_000_000 + "TAIL_MARKER\n"
+    (tmp_path / "big.py").write_text(big, encoding="utf-8")
 
     result = read_files_as_dict(tmp_path, ["big.py"])
 
     content = result["big.py"]
-    assert content.startswith("A" * 100)  # the capped prefix is present
-    assert "review-truncated" in content  # truncation made explicit, not silent
-    assert len(content) < MAX_REVIEW_FILE_BYTES + 5000  # the tail was dropped (bounded)
+    assert content == big  # full content, byte-for-byte
+    assert "TAIL_MARKER" in content  # the tail is present, not truncated
+    assert "review-truncated" not in content  # no lossy truncation marker
 
 
 def test_read_repo_files_as_dict_all_types_excludes_build_and_secrets(tmp_path: Path) -> None:
@@ -785,15 +785,12 @@ def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
     assert "main.py" in files  # complete whole-repo review (as a files dict)
 
 
-def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
-    """A huge deletion list is capped in the note (count preserved)."""
-    from software_engineering_team.backend_agent.agent import (
-        _DELETION_NOTE_MAX_PATHS,
-        _select_review_input,
-    )
+def test_select_review_input_deletion_note_lists_every_path(tmp_path: Path) -> None:
+    """Every deleted path is listed (fail-closed coverage), not hidden behind a
+    count — the reviewer must be able to inspect each removal."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
 
-    cap = _DELETION_NOTE_MAX_PATHS
-    total = cap + 70
+    total = 120
     _init_repo(tmp_path)
     (tmp_path / "keep.py").write_text("k = 1\n", encoding="utf-8")
     for i in range(total):
@@ -813,8 +810,10 @@ def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
 
     assert note is not None
     assert f"{total} total" in note  # full count preserved
-    assert f"and {total - cap} more" in note  # overflow beyond the cap
-    assert note.count("- gone") <= cap  # at most the cap listed
+    assert "more" not in note  # nothing hidden behind an "... and N more" summary
+    for i in range(total):
+        assert f"gone{i}.py" in note  # every removed path is individually listed
+    assert note.count("- gone") == total  # all listed, none collapsed
 
 
 def test_select_review_input_restored_dangling_symlink_not_deleted(tmp_path: Path) -> None:
@@ -889,16 +888,15 @@ def test_strip_surrogates_is_injective() -> None:
     assert strip_surrogates("plain.py") == "plain.py"  # ascii unchanged
 
 
-def test_strip_surrogates_literal_backslash_no_collision() -> None:
-    """A literal '\\udcff' filename does not collide with a 0xFF-byte filename."""
+def test_strip_surrogates_leaves_ordinary_backslash_paths_intact() -> None:
+    """A valid path containing a literal backslash is not rewritten — preserving
+    it matters more than the purely theoretical surrogate-vs-literal collision, so
+    the review-map key keeps matching the real on-disk file."""
     from software_engineering_team.shared.repo_utils import strip_surrogates
 
-    from_byte = strip_surrogates("a\udcff.py")  # invalid 0xFF byte
-    literal = strip_surrogates("a\\udcff.py")  # the characters backslash-u-d-c-f-f
-
-    assert from_byte != literal  # distinct, despite similar escape spelling
-    from_byte.encode("utf-8")
-    literal.encode("utf-8")
+    literal = strip_surrogates("a\\udcff.py")  # backslash-u-d-c-f-f, a real filename
+    assert literal == "a\\udcff.py"  # unchanged, single backslash
+    literal.encode("utf-8")  # still encodable
 
 
 def test_is_sensitive_path() -> None:
@@ -917,6 +915,13 @@ def test_is_sensitive_path() -> None:
     # Secret stem (stem + extension forms)
     assert is_sensitive_path("config/credentials.json")
     assert is_sensitive_path("app/secrets.py")
+    # Capitalized variants — case cannot bypass the filter (case-sensitive FS)
+    assert is_sensitive_path(".ENV")
+    assert is_sensitive_path("config/.Env.Production")
+    assert is_sensitive_path("secrets/ID_RSA")
+    assert is_sensitive_path("deploy/server.PEM")
+    assert is_sensitive_path("app/.SSH/config")
+    assert is_sensitive_path("config/Credentials.JSON")
     # Ordinary source — NOT excluded (anchored .env, no `.env` prefix over-match,
     # no stem over-match)
     assert not is_sensitive_path(".environment.py")
@@ -937,6 +942,43 @@ def test_read_files_as_dict_distinct_surrogate_paths_do_not_collide(tmp_path: Pa
 
     assert len(result) == 2  # neither overwrote the other
     assert sorted(result.values()) == ["X1\n", "X2\n"]
+
+
+def test_strip_surrogates_preserves_literal_backslash() -> None:
+    """An ordinary character — including a literal backslash in a valid POSIX
+    filename — is left untouched; only lone surrogates are escaped."""
+    from software_engineering_team.shared.repo_utils import strip_surrogates
+
+    # A real backslash in a path must round-trip unchanged so the review-map key
+    # still matches the on-disk file for downstream fix logic.
+    assert strip_surrogates("a\\b.py") == "a\\b.py"
+    assert strip_surrogates("dir/we\\ird.py") == "dir/we\\ird.py"
+    # A lone surrogate (from surrogateescape) is still escaped to stay encodable.
+    out = strip_surrogates("caf\udcff.py")
+    out.encode("utf-8")  # must not raise
+    assert "\udcff" not in out
+
+
+def test_read_repo_files_as_dict_repo_under_excluded_dir_name(tmp_path: Path) -> None:
+    """When the repo root itself sits under a dir named like an excluded one
+    (``node_modules``), files are still read — exclusion is repo-relative, so the
+    fallback does not degrade to an empty (trivially approved) review."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    repo = tmp_path / "node_modules" / "myproject"
+    repo.mkdir(parents=True)
+    (repo / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "util.py").write_text("y = 2\n", encoding="utf-8")
+    # A genuinely-nested excluded dir inside the repo is still skipped.
+    (repo / "node_modules").mkdir()
+    (repo / "node_modules" / "dep.js").write_text("z\n", encoding="utf-8")
+
+    result = read_repo_files_as_dict(repo)
+
+    assert "main.py" in result  # ancestor named node_modules does not exclude it
+    assert "pkg/util.py" in result
+    assert "node_modules/dep.js" not in result  # repo-relative exclusion still applies
 
 
 def test_format_deletion_note_sanitizes_surrogate_path() -> None:

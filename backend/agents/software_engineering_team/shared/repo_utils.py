@@ -124,10 +124,11 @@ _SENSITIVE_DIR_PARTS: frozenset[str] = frozenset(
 # stem+ext forms like ``credentials.json`` / ``secrets.py`` are caught.
 _SENSITIVE_STEMS: frozenset[str] = frozenset({"credentials", "secret", "secrets"})
 
-# Cap on bytes read per reviewed file: bounds memory (a multi-GB tracked artifact
-# is never loaded whole) and the per-file prompt size. Files larger than this are
-# read truncated to the cap with an explicit truncation marker appended.
-MAX_REVIEW_FILE_BYTES = 1_000_000
+# Bytes sniffed to classify a file as binary before any full read. A NUL byte in
+# this prefix marks the file binary (skipped), so a huge binary artifact is never
+# loaded whole. Text files are read in full — the review coordinator segments
+# oversized inputs itself, so truncating here would reintroduce lossy review.
+_BINARY_SNIFF_BYTES = 8192
 
 
 def is_sensitive_path(path: str) -> bool:
@@ -141,16 +142,20 @@ def is_sensitive_path(path: str) -> bool:
     an anchored ``.env``/``.env.<env>`` (so a regular ``.environment.py`` is not
     excluded), or a key/cert suffix. Over-inclusion (e.g. ``.env.example``) is
     acceptable — losing review of a template is preferable to leaking a key.
+
+    All comparisons are case-folded (the denylist entries are lowercase), so a
+    capitalized variant — ``.ENV``, ``ID_RSA``, ``server.PEM`` — cannot bypass
+    the filter on a case-sensitive filesystem.
     """
     candidate = Path(path)
-    if _SENSITIVE_DIR_PARTS.intersection(candidate.parts[:-1]):
+    if _SENSITIVE_DIR_PARTS.intersection(p.lower() for p in candidate.parts[:-1]):
         return True
-    name = candidate.name
+    name = candidate.name.lower()
     if name in _SENSITIVE_NAMES or name == ".env" or name.startswith(".env."):
         return True
     if candidate.stem.lower() in _SENSITIVE_STEMS:
         return True
-    return candidate.suffix in _SENSITIVE_SUFFIXES
+    return candidate.suffix.lower() in _SENSITIVE_SUFFIXES
 
 
 def strip_surrogates(text: str) -> str:
@@ -159,14 +164,14 @@ def strip_surrogates(text: str) -> str:
     Paths read from git via ``surrogateescape`` (for filenames whose bytes are
     invalid in the locale encoding) carry lone surrogates that raise
     ``UnicodeEncodeError`` when later serialized to JSON or encoded to UTF-8 (for
-    example in an LLM HTTP request body). Literal backslashes are doubled first so
-    they cannot be confused with the ``\\uXXXX`` escapes that ``backslashreplace``
-    emits for invalid bytes; the result is therefore *injective* — distinct
-    inputs (including a literal ``\\udcff`` filename vs. a 0xFF byte) map to
-    distinct text — so two changed filenames never collide to one dict key. Plain
-    ASCII text is unchanged.
+    example in an LLM HTTP request body). ``backslashreplace`` only rewrites the
+    code points that cannot be UTF-8 encoded (the lone surrogates), emitting a
+    ``\\uXXXX`` escape for each; every ordinary character — including a *literal*
+    backslash in a valid POSIX filename — is left exactly as-is, so the key still
+    matches the real on-disk path for downstream fix logic. Plain text is
+    unchanged.
     """
-    return text.replace("\\", "\\\\").encode("utf-8", "backslashreplace").decode("utf-8")
+    return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def read_files_as_dict(
@@ -198,8 +203,10 @@ def read_files_as_dict(
           and never dereferenced, so the target's unrelated content is not
           mislabeled under the link path and a link pointing outside the repo
           cannot leak content.
-        - At most :data:`MAX_REVIEW_FILE_BYTES` are read per file (bounding memory
-          for huge artifacts); larger files are truncated to that prefix.
+        - A text file is read in full and passed untruncated (the review
+          coordinator segments oversized inputs itself); only a binary *sniff*
+          prefix is bounded, so a huge binary artifact is detected and skipped
+          before any full read.
         - Text is decoded as UTF-8 with ``errors="replace"`` (matching
           ``read_repo_code``) so a legacy/non-UTF-8 text file is reviewed rather
           than dropped; binary content (a NUL byte in the read prefix) is omitted
@@ -238,24 +245,20 @@ def read_files_as_dict(
             if repo_root not in resolved.parents:
                 logger.debug("read_files_as_dict: skipping %s (resolves outside repo)", rel_path)
                 continue
-            # Read at most a bounded prefix (+1 byte to detect overflow) so a
-            # multi-GB tracked artifact cannot exhaust memory before the NUL check.
+            # Sniff a bounded prefix for a NUL so a huge binary artifact is
+            # skipped before the full read; a text file is then read in full and
+            # passed untruncated (the coordinator segments oversized inputs).
             with open(resolved, "rb") as handle:
-                data = handle.read(MAX_REVIEW_FILE_BYTES + 1)
-            truncated = len(data) > MAX_REVIEW_FILE_BYTES
-            if truncated:
-                data = data[:MAX_REVIEW_FILE_BYTES]
-            if b"\x00" in data:
+                prefix = handle.read(_BINARY_SNIFF_BYTES)
+                if b"\x00" in prefix:
+                    logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
+                    continue  # binary asset: omit rather than review as gibberish
+                rest = handle.read()
+            if b"\x00" in rest:
+                # NUL past the sniff window still flags binary content.
                 logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
-                continue  # binary asset: omit rather than review as gibberish
-            text = data.decode("utf-8", errors="replace")
-            if truncated:
-                # Make truncation explicit so the tail is not silently presented
-                # as complete (callers/coordinator otherwise claim full coverage).
-                text += (
-                    f"\n\n# [review-truncated: file exceeds {MAX_REVIEW_FILE_BYTES} "
-                    "bytes; remainder not shown]\n"
-                )
+                continue
+            text = (prefix + rest).decode("utf-8", errors="replace")
             result[strip_surrogates(rel_path)] = text
         except (OSError, RuntimeError, ValueError) as exc:
             logger.debug("read_files_as_dict: skipping %s (%s)", rel_path, exc)
@@ -280,11 +283,16 @@ def read_repo_files_as_dict(repo_path: Path) -> Dict[str, str]:
     always_exclude = REPO_EXCLUDE_DIRS | {".git"}
     paths: List[str] = []
     for f in repo_path.rglob("*"):
-        if always_exclude & set(f.parts):
-            continue
         if not f.is_file():
             continue
-        rel = str(f.relative_to(repo_path))
+        rel_parts = f.relative_to(repo_path).parts
+        # Match exclusions against repo-relative components only: if the repo
+        # itself lives under a dir named e.g. ``node_modules``, that ancestor is
+        # not part of rel_parts, so the whole repo isn't wrongly excluded (which
+        # would degrade a fallback to an empty, trivially-approved review).
+        if always_exclude.intersection(rel_parts):
+            continue
+        rel = str(Path(*rel_parts))
         if not is_sensitive_path(rel):
             paths.append(rel)
     return read_files_as_dict(repo_path, paths, extensions=None)
