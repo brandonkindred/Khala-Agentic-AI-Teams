@@ -269,6 +269,14 @@ async def invoke_generated_agent(body: Any) -> dict[str, Any]:
     treatment the shim already gives the tool loop). ``asyncio.to_thread`` copies
     the current context, so the cognition side channel still reaches the worker.
 
+    Known limitation: ``to_thread`` cancellation only stops the awaiting coroutine
+    — the worker thread (and its in-flight model request) runs to completion, the
+    same property the shim's own brokered tool loop carries. The blocking call is
+    therefore bounded only by the model client's transport timeout, not by the
+    shim's invoke deadline; a hung model can keep consuming quota / holding a
+    worker slot after the client already saw a timeout. A deadline-propagating /
+    cancellable model invocation is tracked as a follow-up.
+
     Binding caveat (tracked follow-up): the dispatch contract hands this function
     only the request body, never the resolved manifest/agent id, so it cannot look
     up the agent's immutable persisted roster definition. The persona *text* fields
