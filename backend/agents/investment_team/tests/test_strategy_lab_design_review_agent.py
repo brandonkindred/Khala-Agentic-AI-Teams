@@ -452,9 +452,9 @@ def test_ready_true_with_warning_issue_is_demoted(monkeypatch: pytest.MonkeyPatc
             "rationale": "passing with concerns",
             "issues": [
                 {
-                    "field": "sizing",
+                    "field": "exit_rules",
                     "severity": "warning",
-                    "description": "fraction looks tight",
+                    "description": "exit leg looks thin",
                 }
             ],
         }
@@ -507,7 +507,7 @@ def test_coerce_critique_critical_threshold_keeps_ready_true_with_warning() -> N
     parsed = {
         "ready": True,
         "rationale": "fine, minor note",
-        "issues": [{"field": "sizing", "severity": "warning", "description": "tight"}],
+        "issues": [{"field": "exit_rules", "severity": "warning", "description": "thin"}],
     }
 
     critique = _coerce_critique(parsed, [], demote_min_severity="critical")
@@ -556,7 +556,7 @@ def test_coerce_critique_default_threshold_demotes_warning() -> None:
     parsed = {
         "ready": True,
         "rationale": "passing with concerns",
-        "issues": [{"field": "sizing", "severity": "warning", "description": "tight"}],
+        "issues": [{"field": "exit_rules", "severity": "warning", "description": "thin"}],
     }
 
     critique = _coerce_critique(parsed, [])
@@ -619,3 +619,93 @@ def test_coerce_critique_not_ready_no_issues_still_gets_placeholder() -> None:
 
     assert critique.ready is False
     assert len(critique.open_issue_ids) == 1
+
+
+# ---------------------------------------------------------------------------
+# Deterministic-gate carve-out: the LLM reviewer may not block on sizing /
+# risk_limits (the deterministic SpecReadinessGate owns that math and has
+# already passed), and max drawdown is not a constraint at all. Such issues are
+# demoted to info, and a not-ready verdict whose ONLY blocking objections were
+# these is promoted to ready.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("field", ["sizing", "risk_limits"])
+def test_coerce_critique_demotes_owned_field_to_info(field: str) -> None:
+    """A blocking sizing/risk_limits issue is demoted to ``info`` so it can never
+    keep an otherwise-ready verdict from advancing."""
+    parsed = {
+        "ready": True,
+        "rationale": "fine",
+        "issues": [{"field": field, "severity": "critical", "description": "tight"}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is True
+    assert len(critique.issues) == 1
+    assert critique.issues[0].severity == "info"
+    # Demoted to info ⇒ not a blocking open issue.
+    assert critique.open_issue_ids == set()
+
+
+def test_coerce_critique_not_ready_only_sizing_is_promoted_to_ready() -> None:
+    """The recurring failure mode: the reviewer says not-ready solely because of
+    a sizing/drawdown objection (e.g. the deployed-size-vs-stop '0.25% per trade'
+    misread or 'max drawdown unreachable'). With those demoted, there is nothing
+    blockable left, so the verdict is promoted to ready rather than churning the
+    design loop to the round cap."""
+    parsed = {
+        "ready": False,
+        "rationale": (
+            "sizing 'risk 5% per trade' is 0.25% with the stop, and the 20% max "
+            "drawdown limit is unreachable"
+        ),
+        "issues": [
+            {
+                "field": "sizing",
+                "severity": "critical",
+                "description": "risk 5% per trade is 0.25% per trade with the 5% stop",
+            },
+            {
+                "field": "risk_limits",
+                "severity": "critical",
+                "description": "20% max drawdown limit is unreachable by design",
+            },
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is True
+    # No blocking open issues remain — both objections were on owned fields.
+    assert critique.open_issue_ids == set()
+    # An audit-trail info note records the override.
+    assert all(i.severity == "info" for i in critique.issues)
+    assert any("deterministic readiness gate owns" in i.description for i in critique.issues)
+
+
+def test_coerce_critique_not_ready_sizing_plus_real_defect_stays_not_ready() -> None:
+    """A genuine non-owned defect (thesis/signal/etc.) still blocks even when a
+    sizing objection rides alongside it — only the sizing issue is neutralised."""
+    parsed = {
+        "ready": False,
+        "rationale": "mean-reversion entry on a momentum thesis, and sizing is tight",
+        "issues": [
+            {
+                "field": "entry_rules",
+                "severity": "critical",
+                "description": "entry contradicts the momentum hypothesis",
+            },
+            {"field": "sizing", "severity": "critical", "description": "fraction tight"},
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    # The entry_rules critical still blocks; the sizing issue is demoted to info.
+    blocking = [i for i in critique.issues if i.severity in ("warning", "critical")]
+    assert len(blocking) == 1
+    assert blocking[0].field == "entry_rules"
+    assert any(i.field == "sizing" and i.severity == "info" for i in critique.issues)
