@@ -277,51 +277,70 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
     return out or ""
 
 
+class BaselineDiffUnavailable(RuntimeError):
+    """The net base→worktree diff could not be computed.
+
+    Raised when the merge base of *base* and *head* cannot be found (missing base
+    ref, shallow clone) or the diff command fails/times out, so callers must fail
+    closed — review the whole repository rather than a partial change set that
+    silently omits the committed task changes.
+    """
+
+
 def list_changed_and_deleted(
     repo_path: str | Path, base: str, head: str = "HEAD"
 ) -> Tuple[List[str], List[str]]:
     """Return ``(changed, deleted)`` repo-relative paths for the task's work.
 
-    Combines the committed ``base...head`` diff with the worktree/index diff vs
-    ``HEAD`` in two ``git diff --name-status --no-renames -z`` calls (instead of
-    four name-only calls):
+    Computes the *net* state from the ``base``/``head`` merge base to the working
+    tree in a single ``git diff --name-status --no-renames -z <merge-base>`` call
+    (preceded by ``git merge-base``). Because it is the net base→worktree diff, a
+    path added in a feature commit and then removed in the worktree is not
+    reported at all (no net change), avoiding a spurious deletion.
 
     - *changed* — added/modified non-deleted tracked paths a caller can read.
       Untracked files are not included (git diff only reports tracked changes),
       so build/test leftovers are excluded; callers add task-owned new files via
       the writer's normalized output instead.
-    - *deleted* — removed paths. ``--no-renames`` decomposes a rename into
+    - *deleted* — net-removed paths. ``--no-renames`` decomposes a rename into
       delete-old + add-new, so a renamed-away path appears here (its old import
       location) while the new path appears in *changed*.
 
     ``-z`` yields NUL-delimited, unquoted paths so names with non-ASCII bytes,
-    tabs, or newlines round-trip as real filesystem paths. A failing diff
-    contributes nothing; returns ``([], [])`` when not a git repository.
+    tabs, or newlines round-trip as real filesystem paths.
 
     Postconditions:
-        - Each list is de-duplicated, first-seen order (committed then worktree).
+        - Returns ``([], [])`` when not a git repository (caller falls back).
+        - Raises :class:`BaselineDiffUnavailable` when the merge base or diff
+          cannot be computed, so the caller fails closed instead of reviewing a
+          partial change set.
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return [], []
+    mb_code, mb_out = _run_git(path, ["git", "merge-base", base, head])
+    merge_base = (mb_out or "").strip().splitlines()[0].strip() if mb_out.strip() else ""
+    if mb_code != 0 or not merge_base:
+        raise BaselineDiffUnavailable(f"cannot compute merge base of {base}...{head}: {mb_out!r}")
+    code, out = _run_git(
+        path, ["git", "diff", "--name-status", "--no-renames", "-z", merge_base]
+    )
+    if code != 0:
+        raise BaselineDiffUnavailable(f"net diff vs {merge_base} failed: {out!r}")
     changed: List[str] = []
     deleted: List[str] = []
     seen_changed: set[str] = set()
     seen_deleted: set[str] = set()
-    for rev in (f"{base}...{head}", "HEAD"):
-        code, out = _run_git(path, ["git", "diff", "--name-status", "--no-renames", "-z", rev])
-        if code != 0:
-            continue
-        fields = [f for f in (out or "").split("\0") if f]
-        # ``--name-status -z`` emits alternating <status> and <path> fields.
-        for status, entry in zip(fields[::2], fields[1::2]):
-            if status.startswith("D"):
-                bucket, seen = deleted, seen_deleted
-            else:
-                bucket, seen = changed, seen_changed
-            if entry not in seen:
-                seen.add(entry)
-                bucket.append(entry)
+    fields = [f for f in (out or "").split("\0") if f]
+    # ``--name-status -z`` emits alternating <status> and <path> fields.
+    for status, entry in zip(fields[::2], fields[1::2]):
+        if status.startswith("D"):
+            bucket, seen = deleted, seen_deleted
+        else:
+            bucket, seen = changed, seen_changed
+        if entry not in seen:
+            seen.add(entry)
+            bucket.append(entry)
     return changed, deleted
 
 

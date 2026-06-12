@@ -92,18 +92,60 @@ def read_repo_code(
     return "\n\n".join(parts) if parts else "# No code files found"
 
 
+# Filename components and suffixes that may hold credentials/secrets. Files
+# matching these are excluded from the content sent to the external review model.
+_SENSITIVE_NAMES: frozenset[str] = frozenset(
+    {
+        "credentials",
+        "secrets",
+        ".npmrc",
+        ".pypirc",
+        ".netrc",
+        ".pgpass",
+        ".htpasswd",
+        "id_rsa",
+        "id_dsa",
+        "id_ecdsa",
+        "id_ed25519",
+    }
+)
+_SENSITIVE_SUFFIXES: frozenset[str] = frozenset(
+    {".pem", ".key", ".pfx", ".p12", ".keystore", ".jks", ".asc", ".ppk"}
+)
+
+# Cap on bytes read per reviewed file: bounds memory (a multi-GB tracked artifact
+# is never loaded whole) and the per-file prompt size. Files larger than this are
+# read truncated to the cap.
+MAX_REVIEW_FILE_BYTES = 1_000_000
+
+
+def is_sensitive_path(path: str) -> bool:
+    """True when *path* names a likely secret (``.env*``, key, credential, ...).
+
+    Best-effort denylist used to keep secrets out of the content forwarded to the
+    external code-review model. Over-inclusion (e.g. ``.env.example``) is
+    acceptable — losing review of a template is preferable to leaking a key.
+    """
+    name = Path(path).name
+    if name in _SENSITIVE_NAMES or name.startswith(".env"):
+        return True
+    return Path(path).suffix in _SENSITIVE_SUFFIXES
+
+
 def strip_surrogates(text: str) -> str:
     """Return *text* with any lone surrogates escaped so it is UTF-8/JSON safe.
 
     Paths read from git via ``surrogateescape`` (for filenames whose bytes are
     invalid in the locale encoding) carry lone surrogates that raise
     ``UnicodeEncodeError`` when later serialized to JSON or encoded to UTF-8 (for
-    example in an LLM HTTP request body). The ``"backslashreplace"`` handler
-    rewrites each unencodable char as its ``\\uXXXX`` escape, which is *injective*
-    — distinct bad bytes map to distinct text — so two filenames differing only in
-    invalid bytes do not collide to the same dict key. Plain text is unchanged.
+    example in an LLM HTTP request body). Literal backslashes are doubled first so
+    they cannot be confused with the ``\\uXXXX`` escapes that ``backslashreplace``
+    emits for invalid bytes; the result is therefore *injective* — distinct
+    inputs (including a literal ``\\udcff`` filename vs. a 0xFF byte) map to
+    distinct text — so two changed filenames never collide to one dict key. Plain
+    ASCII text is unchanged.
     """
-    return text.encode("utf-8", "backslashreplace").decode("utf-8")
+    return text.replace("\\", "\\\\").encode("utf-8", "backslashreplace").decode("utf-8")
 
 
 def read_files_as_dict(
@@ -135,10 +177,12 @@ def read_files_as_dict(
           and never dereferenced, so the target's unrelated content is not
           mislabeled under the link path and a link pointing outside the repo
           cannot leak content.
+        - At most :data:`MAX_REVIEW_FILE_BYTES` are read per file (bounding memory
+          for huge artifacts); larger files are truncated to that prefix.
         - Text is decoded as UTF-8 with ``errors="replace"`` (matching
           ``read_repo_code``) so a legacy/non-UTF-8 text file is reviewed rather
-          than dropped; binary content (a NUL byte anywhere in the file) is
-          omitted rather than decoded into gibberish.
+          than dropped; binary content (a NUL byte in the read prefix) is omitted
+          rather than decoded into gibberish.
         - Result keys (and the symlink-target marker) are run through
           :func:`strip_surrogates`, so a non-UTF-8 filename read via
           surrogateescape cannot crash downstream UTF-8/JSON serialization. The
@@ -171,7 +215,10 @@ def read_files_as_dict(
             resolved = full_path.resolve()
             if repo_root not in resolved.parents:
                 continue
-            data = resolved.read_bytes()
+            # Read at most a bounded prefix so a multi-GB tracked artifact cannot
+            # exhaust memory before the NUL check; oversized files are truncated.
+            with open(resolved, "rb") as handle:
+                data = handle.read(MAX_REVIEW_FILE_BYTES)
             if b"\x00" in data:
                 continue  # binary asset: omit rather than review as gibberish
             result[strip_surrogates(rel_path)] = data.decode("utf-8", errors="replace")

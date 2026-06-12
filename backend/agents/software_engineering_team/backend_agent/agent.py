@@ -22,6 +22,7 @@ from software_engineering_team.shared.prompt_utils import (
 )
 from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
+    is_sensitive_path,
     read_files_as_dict,
     read_repo_code,
     strip_surrogates,
@@ -527,12 +528,22 @@ def _writer_output_keys(result: Any) -> Dict[str, str] | None:
     return written
 
 
+# Cap on paths listed in the deletion note. The note is appended to the task
+# description and repeated in every review chunk, so an unbounded list (e.g. a
+# generated-tree removal) could blow the model context on every chunk.
+_DELETION_NOTE_MAX_PATHS = 50
+
+
 def _format_deletion_note(deleted: List[str]) -> str:
-    """Render the list of removed paths as a short reviewer note."""
-    listing = "\n".join(f"- {strip_surrogates(p)}" for p in deleted)
+    """Render the removed paths as a short reviewer note, bounded in size."""
+    shown = deleted[:_DELETION_NOTE_MAX_PATHS]
+    listing = "\n".join(f"- {strip_surrogates(p)}" for p in shown)
+    overflow = len(deleted) - len(shown)
+    if overflow > 0:
+        listing += f"\n- ... and {overflow} more"
     return (
-        "Files DELETED by this task (verify each removal is intentional and that "
-        "nothing still depends on them):\n"
+        f"Files DELETED by this task ({len(deleted)} total; verify each removal is "
+        "intentional and that nothing still depends on them):\n"
         f"{listing}\n"
     )
 
@@ -586,33 +597,51 @@ def _select_review_input(
     """
     from software_engineering_team.shared.git_utils import (
         DEVELOPMENT_BRANCH,
+        BaselineDiffUnavailable,
         list_changed_and_deleted,
     )
 
-    changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
-    paths: List[str] = []
-    seen: set[str] = set()
-    for source in (changed, list(written_files or ())):
-        for p in source:
-            if p not in seen:
-                seen.add(p)
-                paths.append(p)
-    files = read_files_as_dict(repo_path, paths, extensions=None)
+    try:
+        changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
+    except BaselineDiffUnavailable as exc:
+        # Fail closed: if the net base→worktree diff can't be computed (missing
+        # base ref, shallow clone, timeout), review the whole repo rather than a
+        # partial change set the gate could approve without seeing the changes.
+        logger.warning("Code review: baseline diff unavailable (%s); reviewing whole repo", exc)
+        changed, deleted_all = None, []
 
-    # A path can be committed-deleted yet restored as an uncommitted worktree
-    # file in a later failed-commit iteration; it is then real content above,
-    # so only note paths actually absent from the worktree.
-    deleted = [p for p in deleted_all if not (repo_path / p).exists()]
-    note = _format_deletion_note(deleted) if deleted else None
+    if changed is not None:
+        paths: List[str] = []
+        seen: set[str] = set()
+        for source in (changed, list(written_files or ())):
+            for p in source:
+                # Never forward a likely secret (.env, key, credential) to the
+                # external review model now that the extension filter is off.
+                if p not in seen and not is_sensitive_path(p):
+                    seen.add(p)
+                    paths.append(p)
+        files = read_files_as_dict(repo_path, paths, extensions=None)
 
-    if files:
-        return files, None, note
-    if note:
-        # Deletion-only change: no surviving content to review. Hand the removal
-        # list to the dedicated context channel (an empty ``code`` is a valid
-        # "nothing to review as source" input) rather than reviewing the prose
-        # note as a pathless source block.
-        return None, "", note
+        # A deleted path can be restored in the worktree (a file, or even a
+        # dangling symlink) in a later failed-commit iteration; it is then real
+        # content above, so only note paths truly absent from disk. ``lexists``
+        # (exists-or-symlink) keeps a restored dangling symlink out of the note.
+        deleted = [
+            p
+            for p in deleted_all
+            if not ((repo_path / p).exists() or (repo_path / p).is_symlink())
+        ]
+        note = _format_deletion_note(deleted) if deleted else None
+
+        if files:
+            return files, None, note
+        if note:
+            # Deletion-only change: no surviving content to review. Hand the
+            # removal list to the dedicated context channel (an empty ``code`` is
+            # a valid "nothing to review as source" input) rather than reviewing
+            # the prose note as a pathless source block.
+            return None, "", note
+
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )

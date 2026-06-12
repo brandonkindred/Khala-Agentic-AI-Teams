@@ -82,18 +82,39 @@ def test_list_changed_and_deleted_non_repo_returns_empty(tmp_path: Path) -> None
     assert list_changed_and_deleted(tmp_path, "development", "HEAD") == ([], [])
 
 
-def test_list_changed_and_deleted_bad_revision_degrades(tmp_path: Path) -> None:
-    """A failing committed diff still yields the worktree results, no raise."""
+def test_list_changed_and_deleted_bad_revision_raises(tmp_path: Path) -> None:
+    """A missing base ref fails closed (raises) rather than silently degrading."""
+    import pytest
+
+    from software_engineering_team.shared.git_utils import BaselineDiffUnavailable
+
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
-    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")  # uncommitted
 
-    changed, deleted = list_changed_and_deleted(tmp_path, "no-such-branch", "HEAD")
+    with pytest.raises(BaselineDiffUnavailable):
+        list_changed_and_deleted(tmp_path, "no-such-branch", "HEAD")
 
-    assert "a.py" in changed  # worktree diff still contributes
-    assert deleted == []
+
+def test_list_changed_and_deleted_net_add_then_delete_excluded(tmp_path: Path) -> None:
+    """A path added in a feature commit and then deleted in the worktree has no
+    net change vs base, so it appears in neither list."""
+    _init_repo(tmp_path)
+    (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "temp.py").write_text("t = 1\n", encoding="utf-8")  # added in commit
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "add temp")
+    (tmp_path / "temp.py").unlink()  # removed in worktree → net no change vs base
+
+    changed, deleted = list_changed_and_deleted(tmp_path, "development", "HEAD")
+
+    assert "temp.py" not in changed
+    assert "temp.py" not in deleted  # no spurious deletion for a base-absent file
 
 
 def test_list_changed_and_deleted_handles_non_ascii_filename(tmp_path: Path) -> None:
@@ -173,6 +194,17 @@ def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
     result = read_files_as_dict(tmp_path, ["a.py", "img.png"])
 
     assert result == {"a.py": "A"}  # binary asset skipped
+
+
+def test_read_files_as_dict_bounds_large_file_read(tmp_path: Path) -> None:
+    """A file larger than the cap is read truncated (memory is bounded)."""
+    from software_engineering_team.shared.repo_utils import MAX_REVIEW_FILE_BYTES
+
+    (tmp_path / "big.py").write_text("A" * (MAX_REVIEW_FILE_BYTES + 5000), encoding="utf-8")
+
+    result = read_files_as_dict(tmp_path, ["big.py"])
+
+    assert len(result["big.py"]) == MAX_REVIEW_FILE_BYTES  # truncated, not loaded whole
 
 
 def test_read_files_as_dict_skips_binary_with_late_nul(tmp_path: Path) -> None:
@@ -639,6 +671,100 @@ def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
     assert "main.py" in code
 
 
+def test_select_review_input_excludes_sensitive_files(tmp_path: Path) -> None:
+    """A changed secret (.env, key) is not forwarded to the review model."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=base\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=leaked\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change + touch env")
+
+    task = SimpleNamespace(description="x")
+    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert "a.py" in files
+    assert ".env" not in files  # secret excluded from the review payload
+
+
+def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
+    """When the baseline diff can't be computed, review the whole repo (closed)."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    # No `development` branch exists → merge-base fails → fail closed.
+
+    task = SimpleNamespace(description="x")
+    # written_files present, but the partial set must not be used on baseline failure.
+    files, code, _note = _select_review_input(tmp_path, task, written_files={"main.py": "x"})
+
+    assert files is None
+    assert code is not None and "main.py" in code  # complete whole-repo review
+
+
+def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
+    """A huge deletion list is capped in the note (count preserved)."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "keep.py").write_text("k = 1\n", encoding="utf-8")
+    for i in range(120):
+        (tmp_path / f"gone{i}.py").write_text("g\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "keep.py").write_text("k = 2\n", encoding="utf-8")
+    for i in range(120):
+        (tmp_path / f"gone{i}.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "mass delete")
+
+    task = SimpleNamespace(description="x")
+    _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert note is not None
+    assert "120 total" in note  # full count preserved
+    assert "and 70 more" in note  # 120 - 50 cap
+    assert note.count("- gone") <= 50  # at most the cap listed
+
+
+def test_select_review_input_restored_dangling_symlink_not_deleted(tmp_path: Path) -> None:
+    """A committed deletion restored as a dangling symlink is not noted deleted."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete gone")
+    # Restore gone.py as a dangling symlink (target does not exist).
+    (tmp_path / "gone.py").symlink_to("nonexistent-target")
+
+    task = SimpleNamespace(description="x")
+    files, _code, note = _select_review_input(tmp_path, task, written_files={"gone.py": "x"})
+
+    assert "gone.py" in files  # reviewed as the restored symlink marker
+    assert note is None or "gone.py" not in note  # not contradictorily noted deleted
+
+
 # ---------------------------------------------------------------------------
 # _writer_output_keys / _format_deletion_note / build_code_review_input
 # ---------------------------------------------------------------------------
@@ -684,6 +810,29 @@ def test_strip_surrogates_is_injective() -> None:
     a.encode("utf-8")  # both must be UTF-8 encodable
     b.encode("utf-8")
     assert strip_surrogates("plain.py") == "plain.py"  # ascii unchanged
+
+
+def test_strip_surrogates_literal_backslash_no_collision() -> None:
+    """A literal '\\udcff' filename does not collide with a 0xFF-byte filename."""
+    from software_engineering_team.shared.repo_utils import strip_surrogates
+
+    from_byte = strip_surrogates("a\udcff.py")  # invalid 0xFF byte
+    literal = strip_surrogates("a\\udcff.py")  # the characters backslash-u-d-c-f-f
+
+    assert from_byte != literal  # distinct, despite similar escape spelling
+    from_byte.encode("utf-8")
+    literal.encode("utf-8")
+
+
+def test_is_sensitive_path() -> None:
+    from software_engineering_team.shared.repo_utils import is_sensitive_path
+
+    assert is_sensitive_path(".env")
+    assert is_sensitive_path("config/.env.production")
+    assert is_sensitive_path("deploy/server.pem")
+    assert is_sensitive_path("secrets/id_rsa")
+    assert not is_sensitive_path("app/main.py")
+    assert not is_sensitive_path("requirements.txt")
 
 
 def test_read_files_as_dict_distinct_surrogate_paths_do_not_collide(tmp_path: Path) -> None:
