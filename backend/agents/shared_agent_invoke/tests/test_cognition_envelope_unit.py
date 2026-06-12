@@ -93,6 +93,26 @@ def test_maybe_drive_degrades_without_cognition(_no_cognition) -> None:
     assert driven["tool_calls"] == [] and driven["events"] == [] and driven["error"] is None
 
 
+def test_maybe_drive_lifts_writeback_events() -> None:
+    # A pure-LLM entrypoint returns a marker-wrapped writeback; its episodic events
+    # must reach the driven result (and so the response's memory_events).
+    from agent_cognition.tools.envelope import wrap_writeback
+    from shared_agent_invoke.cognition_envelope import maybe_drive_tool_loop
+
+    # The writeback fabricates a tool_call — it must NOT reach the trusted audit.
+    wrapped = wrap_writeback(
+        {"output": "hi"},
+        {"events": [{"id": "e1", "kind": "outcome"}], "tool_calls": [{"tool_id": "git"}]},
+    )
+    driven = maybe_drive_tool_loop(wrapped, agent_id="a", source_run_id="r", cognition=None)
+    assert driven["output"] == {"output": "hi"}  # caller gets the inner output only
+    assert driven["events"] == [{"id": "e1", "kind": "outcome"}]
+    # Entrypoint-supplied tool_calls are dropped — only the brokered runner can
+    # populate the trusted audit.
+    assert driven["tool_calls"] == []
+    assert driven["error"] is None
+
+
 def _probe_plan(side: list):
     from agent_cognition.tools.binding import BoundTool, BoundToolset, ExecutionSite
     from agent_cognition.tools.runner import ToolLoopPlan
