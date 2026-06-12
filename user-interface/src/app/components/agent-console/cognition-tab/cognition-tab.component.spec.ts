@@ -1,7 +1,7 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
-import { NEVER, of, throwError } from 'rxjs';
+import { NEVER, Subject, of, throwError } from 'rxjs';
 import { CognitionTabComponent } from './cognition-tab.component';
 import { AgentCatalogApiService } from '../../../services/agent-catalog-api.service';
 import { CognitionApiService } from '../../../services/cognition-api.service';
@@ -324,7 +324,7 @@ describe('CognitionTabComponent', () => {
     expect(f.componentInstance.rules().map((r) => r.id)).toEqual(['high', 'mid', 'low']);
   });
 
-  it('surfaces a 503 as a single panel-wide banner and clears section errors', () => {
+  it('surfaces a 503 as a single panel-wide banner only when every section is down', () => {
     const err503 = { status: 503, error: { detail: 'down' } };
     api.listProposals = vi.fn().mockReturnValue(throwError(() => err503));
     api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => err503));
@@ -333,10 +333,28 @@ describe('CognitionTabComponent', () => {
     f.detectChanges();
     const c = f.componentInstance;
     expect(c.storageUnavailable()).toBe(true);
-    expect(c.proposalsError()).toBeNull();
-    expect(c.memoryError()).toBeNull();
-    expect(c.rulesError()).toBeNull();
     expect((f.nativeElement as HTMLElement).querySelectorAll('.cognition-section').length).toBe(0);
+  });
+
+  it('does not show the panel-wide banner when only one section is 503', () => {
+    api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => ({ status: 503 })));
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.memoryUnavailable()).toBe(true);
+    expect(c.storageUnavailable()).toBe(false); // proposals + rules loaded fine
+    expect((f.nativeElement as HTMLElement).querySelectorAll('.cognition-section').length).toBe(3);
+  });
+
+  it('highlights a rule via signal when a retire link is clicked', () => {
+    vi.useFakeTimers();
+    const f = build();
+    f.componentInstance.scrollToRule('r9');
+    expect(f.componentInstance.highlightedRuleId()).toBe('r9');
+    vi.advanceTimersByTime(1500);
+    expect(f.componentInstance.highlightedRuleId()).toBeNull();
+    f.componentInstance.scrollToRule(null); // no-op branch
+    vi.useRealTimers();
   });
 
   it('toggles a memory event data panel', () => {
@@ -351,20 +369,18 @@ describe('CognitionTabComponent', () => {
     expect(c.isEventExpanded('e1')).toBe(false);
   });
 
-  it('scrolls to and highlights a target rule, then clears the highlight', () => {
-    vi.useFakeTimers();
-    const el = document.createElement('li');
-    el.id = 'rule-r9';
-    document.body.appendChild(el);
+  it('skips approve reconciliation when proposals reload mid-flight', () => {
+    const approveSubject = new Subject<typeof rules[0]>();
+    api.approveProposal = vi.fn().mockReturnValue(approveSubject);
     const f = build();
-    f.componentInstance.scrollToRule('r9');
-    expect(el.classList.contains('is-highlighted')).toBe(true);
-    vi.advanceTimersByTime(1500);
-    expect(el.classList.contains('is-highlighted')).toBe(false);
-    f.componentInstance.scrollToRule(null);
-    f.componentInstance.scrollToRule('missing');
-    el.remove();
-    vi.useRealTimers();
+    f.detectChanges();
+    f.componentInstance.setProposalFilter('all'); // list = [add, stale]
+    f.componentInstance.performApprove(addProposal); // captures reqId, optimistic remove
+    f.componentInstance.loadProposals(); // concurrent reload bumps the request id
+    approveSubject.next(rules[0]);
+    approveSubject.complete();
+    // Reconcile is skipped: the reloaded list wins, p1 is not forced to approved.
+    expect(f.componentInstance.proposals().find((p) => p.id === 'p1')?.status).toBe('pending');
   });
 
   it('ignores a second decision while one is already in flight', () => {

@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   OnInit,
+  computed,
   inject,
   signal,
 } from '@angular/core';
@@ -46,7 +47,12 @@ import type {
 type ProposalFilter = ProposalStatus | 'all';
 type RuleFilter = RuleStatus | 'all';
 
-/** Panel-wide message shown when cognition storage returns 503. */
+/** Minimal writable-signal shape used by the shared error helper. */
+interface Settable<T> {
+  set(value: T): void;
+}
+
+/** Panel-wide message shown when cognition storage is unavailable (503). */
 const STORAGE_UNAVAILABLE_MESSAGE = 'Cognition data is temporarily unavailable. Try again shortly.';
 
 /**
@@ -55,6 +61,10 @@ const STORAGE_UNAVAILABLE_MESSAGE = 'Cognition data is temporarily unavailable. 
  * Sections, in page order: **Rule proposals** (the HITL approve/reject gate),
  * **Memory** timeline, and **Rules** list. The agent picker reuses the Agent
  * Console catalogue (`/api/agents`); everything is scoped to the chosen agent.
+ *
+ * Invariants: at most one approve/reject is in flight (`actingProposalId`);
+ * each section ignores responses from superseded loads (per-section request
+ * ids); the panel-wide "unavailable" banner shows only when every section is 503.
  */
 @Component({
   selector: 'app-cognition-tab',
@@ -89,15 +99,14 @@ export class CognitionTabComponent implements OnInit {
   readonly selectedAgentId = signal<string | null>(null);
   readonly loadingAgents = signal<boolean>(false);
   readonly agentsError = signal<string | null>(null);
-  /** Set when any section returns 503 — surfaces a single panel-wide banner. */
-  readonly storageUnavailable = signal<boolean>(false);
 
   // Proposals -----------------------------------------------------------------
   readonly proposals = signal<RuleProposal[]>([]);
   readonly proposalStatusFilter = signal<ProposalFilter>('pending');
   readonly loadingProposals = signal<boolean>(false);
   readonly proposalsError = signal<string | null>(null);
-  /** Proposal id currently being approved/rejected (disables its buttons). */
+  readonly proposalsUnavailable = signal<boolean>(false);
+  /** Proposal id currently being approved/rejected (one decision at a time). */
   readonly actingProposalId = signal<string | null>(null);
 
   // Memory --------------------------------------------------------------------
@@ -106,6 +115,7 @@ export class CognitionTabComponent implements OnInit {
   readonly memoryTopN = signal<number>(50);
   readonly loadingEvents = signal<boolean>(false);
   readonly memoryError = signal<string | null>(null);
+  readonly memoryUnavailable = signal<boolean>(false);
   /** Memory event ids whose `data` payload is expanded. */
   readonly expandedEventIds = signal<Set<string>>(new Set());
 
@@ -114,6 +124,19 @@ export class CognitionTabComponent implements OnInit {
   readonly ruleStatusFilter = signal<RuleFilter>('active');
   readonly loadingRules = signal<boolean>(false);
   readonly rulesError = signal<string | null>(null);
+  readonly rulesUnavailable = signal<boolean>(false);
+  /** Rule id briefly highlighted after a retire-proposal link click. */
+  readonly highlightedRuleId = signal<string | null>(null);
+
+  /** Storage is "down" (panel-wide banner) only when every section failed with 503. */
+  readonly storageUnavailable = computed(
+    () => this.proposalsUnavailable() && this.memoryUnavailable() && this.rulesUnavailable(),
+  );
+
+  // Per-section request ids: a load ignores its response if a newer load began.
+  private proposalsReqId = 0;
+  private memoryReqId = 0;
+  private rulesReqId = 0;
 
   // Filter option lists (lowercase labels per the copy spec) ------------------
   readonly proposalFilters: readonly { value: ProposalFilter; label: string }[] = [
@@ -149,6 +172,7 @@ export class CognitionTabComponent implements OnInit {
 
   // Agent picker --------------------------------------------------------------
 
+  /** Load the agent catalogue and auto-select the first agent. */
   loadAgents(): void {
     this.loadingAgents.set(true);
     this.agentsError.set(null);
@@ -167,6 +191,7 @@ export class CognitionTabComponent implements OnInit {
     });
   }
 
+  /** Scope the panel to `agentId`, reset filters to defaults, and reload all sections. */
   selectAgent(agentId: string): void {
     this.selectedAgentId.set(agentId);
     // Reset filters so each agent starts from the default view.
@@ -175,9 +200,9 @@ export class CognitionTabComponent implements OnInit {
     this.refreshAll();
   }
 
+  /** Reload all three sections for the current agent. No-op when none selected. */
   refreshAll(): void {
     if (!this.selectedAgentId()) return;
-    this.storageUnavailable.set(false);
     this.loadProposals();
     this.loadMemory();
     this.loadRules();
@@ -185,36 +210,41 @@ export class CognitionTabComponent implements OnInit {
 
   // Proposals -----------------------------------------------------------------
 
+  /** Load proposals for the current agent + status filter. */
   loadProposals(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     this.loadingProposals.set(true);
     this.proposalsError.set(null);
+    const reqId = ++this.proposalsReqId;
     const filter = this.proposalStatusFilter();
     this.api
       .listProposals(agentId, filter === 'all' ? {} : { status: filter })
       .subscribe({
         next: (rows) => {
-          this.storageUnavailable.set(false);
+          if (reqId !== this.proposalsReqId) return;
+          this.proposalsUnavailable.set(false);
           this.proposals.set(rows);
           this.loadingProposals.set(false);
         },
         error: (err) => {
+          if (reqId !== this.proposalsReqId) return;
           this.proposals.set([]);
-          this.applyError(err, this.proposalsError, 'Failed to load proposals.');
+          this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to load proposals.');
           this.loadingProposals.set(false);
         },
       });
   }
 
+  /** Change the proposal status filter and reload. */
   setProposalFilter(filter: ProposalFilter): void {
     this.proposalStatusFilter.set(filter);
     this.loadProposals();
   }
 
-  /** Open a confirm dialog, then approve on confirm. No-op if evidence is outdated. */
+  /** Confirm, then approve. No-op if evidence is outdated or a decision is in flight. */
   approve(p: RuleProposal): void {
-    if (p.stale_evidence) return;
+    if (p.stale_evidence || this.actingProposalId()) return;
     const data: ConfirmDialogData = {
       title: 'Approve proposal',
       message: `Approve this ${proposalActionLabel(p.action)}? This updates the agent's rules.`,
@@ -231,32 +261,35 @@ export class CognitionTabComponent implements OnInit {
   /**
    * Public for tests. Optimistic remove + rollback; on success refetch rules so
    * the activated rule appears, and keep the now-approved card visible when the
-   * current filter still includes it (`all`/`approved`).
+   * current filter still includes it (`all`/`approved`). Skips reconciliation if
+   * the proposals list was reloaded mid-flight (filter/agent change).
    */
   performApprove(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
-    if (!agentId || p.stale_evidence) return;
-    if (this.actingProposalId()) return; // one decision in flight at a time
+    if (!agentId || p.stale_evidence || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
     const prev = this.proposals();
+    const reqId = this.proposalsReqId;
     this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.approveProposal(agentId, p.id).subscribe({
       next: () => {
         this.actingProposalId.set(null);
         this.loadRules();
-        const updated: RuleProposal = { ...p, status: 'approved' };
-        this.reconcileDecided(prev, updated);
+        if (reqId !== this.proposalsReqId) return;
+        this.reconcileDecided(prev, { ...p, status: 'approved' });
       },
       error: (err) => {
-        this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, 'Failed to approve proposal.');
+        if (reqId === this.proposalsReqId) this.proposals.set(prev);
+        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
         this.actingProposalId.set(null);
       },
     });
   }
 
+  /** Confirm, then reject. No-op if a decision is in flight. */
   reject(p: RuleProposal): void {
+    if (this.actingProposalId()) return;
     const data: ConfirmDialogData = {
       title: 'Reject proposal',
       message: `Reject this ${proposalActionLabel(p.action)}? The agent's rules are unchanged.`,
@@ -274,31 +307,33 @@ export class CognitionTabComponent implements OnInit {
   /**
    * Public for tests. Optimistic remove + rollback; on success keep the
    * now-rejected card (from the server response) visible when the current
-   * filter still includes it (`all`/`rejected`).
+   * filter still includes it. Skips reconciliation if the proposals list was
+   * reloaded mid-flight.
    */
   performReject(p: RuleProposal): void {
     const agentId = this.selectedAgentId();
-    if (!agentId) return;
-    if (this.actingProposalId()) return; // one decision in flight at a time
+    if (!agentId || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
     const prev = this.proposals();
+    const reqId = this.proposalsReqId;
     this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.rejectProposal(agentId, p.id).subscribe({
       next: (updated) => {
         this.actingProposalId.set(null);
+        if (reqId !== this.proposalsReqId) return;
         this.reconcileDecided(prev, updated);
       },
       error: (err) => {
-        this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, 'Failed to reject proposal.');
+        if (reqId === this.proposalsReqId) this.proposals.set(prev);
+        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
         this.actingProposalId.set(null);
       },
     });
   }
 
   /**
-   * After a decision, a proposal moves out of `pending`. If the active filter
+   * After a decision a proposal moves out of `pending`. If the active filter
    * still includes its new status (`all` or the matching status) re-show the
    * updated card in place; otherwise it stays removed.
    */
@@ -311,14 +346,17 @@ export class CognitionTabComponent implements OnInit {
 
   // Proposal display helpers --------------------------------------------------
 
+  /** Count of evidence refs backing a proposal. */
   evidenceCount(p: RuleProposal): number {
     return p.evidence?.length ?? 0;
   }
 
+  /** Text of a proposal's proposed rule (`''` when absent). */
   proposedRuleText(p: RuleProposal): string {
     return p.proposed_rule?.text ?? '';
   }
 
+  /** Mode of a proposal's proposed rule (defaults to `advisory`). */
   proposedRuleMode(p: RuleProposal): RuleMode {
     return p.proposed_rule?.mode ?? 'advisory';
   }
@@ -338,46 +376,55 @@ export class CognitionTabComponent implements OnInit {
   /** Scroll the Rules section to a target rule and briefly highlight it. */
   scrollToRule(id: string | null | undefined): void {
     if (!id) return;
-    const el = document.getElementById('rule-' + id);
-    if (!el) return;
-    el.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
-    el.classList.add('is-highlighted');
-    setTimeout(() => el.classList.remove('is-highlighted'), 1500);
+    this.highlightedRuleId.set(id);
+    // Direct DOM read for scroll-into-view only; the highlight itself is a
+    // signal-bound class. Guarded for jsdom (no scrollIntoView in tests).
+    document.getElementById('rule-' + id)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    setTimeout(() => {
+      if (this.highlightedRuleId() === id) this.highlightedRuleId.set(null);
+    }, 1500);
   }
 
   // Memory --------------------------------------------------------------------
 
+  /** Load memory events for the current agent + order/count controls. */
   loadMemory(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     this.loadingEvents.set(true);
     this.memoryError.set(null);
+    const reqId = ++this.memoryReqId;
     this.api
       .listMemoryEvents(agentId, { bySalience: this.memoryBySalience(), topN: this.memoryTopN() })
       .subscribe({
         next: (rows) => {
-          this.storageUnavailable.set(false);
+          if (reqId !== this.memoryReqId) return;
+          this.memoryUnavailable.set(false);
           this.events.set(rows);
           this.loadingEvents.set(false);
         },
         error: (err) => {
+          if (reqId !== this.memoryReqId) return;
           this.events.set([]);
-          this.applyError(err, this.memoryError, 'Failed to load memory.');
+          this.applyError(err, this.memoryError, this.memoryUnavailable, 'Failed to load memory.');
           this.loadingEvents.set(false);
         },
       });
   }
 
+  /** Toggle relevance vs recency ordering and reload memory. */
   setMemoryOrder(bySalience: boolean): void {
     this.memoryBySalience.set(bySalience);
     this.loadMemory();
   }
 
+  /** Change the `top_n` count and reload memory. */
   setMemoryTopN(topN: number): void {
     this.memoryTopN.set(topN);
     this.loadMemory();
   }
 
+  /** Expand/collapse a memory event's `data` payload. */
   toggleEventData(id: string): void {
     const next = new Set(this.expandedEventIds());
     if (next.has(id)) next.delete(id);
@@ -385,41 +432,49 @@ export class CognitionTabComponent implements OnInit {
     this.expandedEventIds.set(next);
   }
 
+  /** Whether a memory event's `data` panel is expanded. */
   isEventExpanded(id: string): boolean {
     return this.expandedEventIds().has(id);
   }
 
+  /** Whether a memory event carries a non-empty `data` payload. */
   hasData(e: MemoryEvent): boolean {
     return !!e.data && Object.keys(e.data).length > 0;
   }
 
+  /** Pretty-printed JSON of a memory event's `data`. */
   formatData(e: MemoryEvent): string {
     return JSON.stringify(e.data, null, 2);
   }
 
   // Rules ---------------------------------------------------------------------
 
+  /** Load rules for the current agent + status filter, highest priority first. */
   loadRules(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     this.loadingRules.set(true);
     this.rulesError.set(null);
+    const reqId = ++this.rulesReqId;
     const filter = this.ruleStatusFilter();
     this.api.listRules(agentId, filter === 'all' ? {} : { status: filter }).subscribe({
       next: (rows) => {
-        this.storageUnavailable.set(false);
+        if (reqId !== this.rulesReqId) return;
+        this.rulesUnavailable.set(false);
         // Defensive: ensure highest priority first regardless of API ordering.
         this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
         this.loadingRules.set(false);
       },
       error: (err) => {
+        if (reqId !== this.rulesReqId) return;
         this.rules.set([]);
-        this.applyError(err, this.rulesError, 'Failed to load rules.');
+        this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load rules.');
         this.loadingRules.set(false);
       },
     });
   }
 
+  /** Change the rule status filter and reload. */
   setRuleFilter(filter: RuleFilter): void {
     this.ruleStatusFilter.set(filter);
     this.loadRules();
@@ -427,18 +482,24 @@ export class CognitionTabComponent implements OnInit {
 
   // ---------------------------------------------------------------------------
 
-  /** 503 → panel-wide banner; any other error → the given section's message. */
+  /**
+   * Route a load error: `503` marks the section unavailable (and contributes to
+   * the panel-wide banner once every section is down); any other error sets the
+   * section's message.
+   */
   private applyError(
     err: unknown,
-    target: { set(v: string | null): void },
+    errSig: Settable<string | null>,
+    unavailSig: Settable<boolean>,
     fallback: string,
   ): void {
     if ((err as { status?: number })?.status === 503) {
-      this.storageUnavailable.set(true);
-      target.set(null);
+      unavailSig.set(true);
+      errSig.set(STORAGE_UNAVAILABLE_MESSAGE);
       return;
     }
-    target.set(this.extractError(err, fallback));
+    unavailSig.set(false);
+    errSig.set(this.extractError(err, fallback));
   }
 
   private extractError(err: unknown, fallback: string): string {

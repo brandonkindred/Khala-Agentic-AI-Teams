@@ -72,7 +72,7 @@ export interface Rule {
 export interface ProposedRule {
   text: string;
   mode: RuleMode;
-  predicate?: Record<string, unknown>;
+  predicate?: Record<string, unknown> | null;
   rationale?: string | null;
   priority?: number;
 }

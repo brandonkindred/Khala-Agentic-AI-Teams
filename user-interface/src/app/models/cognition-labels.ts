@@ -51,8 +51,9 @@ export function eventKindLabel(kind: EventKind): string {
   return EVENT_KIND_LABELS[kind] ?? kind;
 }
 
-/** Memory `salience` surfaced as `relevance 0.82`. */
+/** Memory `salience` surfaced as `relevance 0.82`; non-finite → `relevance N/A`. */
 export function relevanceLabel(salience: number): string {
+  if (!Number.isFinite(salience)) return 'relevance N/A';
   return `relevance ${salience.toFixed(2)}`;
 }
 
@@ -71,9 +72,9 @@ export function ruleSourceLabel(source: RuleSource): string {
   return RULE_SOURCE_LABELS[source] ?? source;
 }
 
-/** Spelled out, not `prio`: `priority 90`. */
+/** Spelled out, not `prio`, and rounded to an integer: `priority 90`. */
 export function rulePriorityLabel(priority: number): string {
-  return `priority ${priority}`;
+  return `priority ${Math.round(priority)}`;
 }
 
 /** Tooltip text distinguishing enforced vs advisory rules. */

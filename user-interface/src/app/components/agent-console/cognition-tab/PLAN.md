@@ -89,7 +89,7 @@ Errors propagate; the component maps `err.error.detail` (§4, §7).
 Standalone, `ChangeDetectionStrategy.OnPush`, signal-based state. Reuses shared
 `app-loading-spinner` / `app-empty-state` / `app-error-message`.
 
-**Agent picker (§3):** inject `AgentRegistryApiService` (the existing
+**Agent picker (§3):** inject `AgentCatalogApiService` (the existing
 catalogue), load agents on init, auto-select the first; `agentId` is a signal.
 Changing it (or `⟳`) clears section state and refetches **proposals + memory +
 rules**.
@@ -138,7 +138,7 @@ Try again shortly."
   the `409` (evidence outdated / not pending) and `503` paths; `verify()` in
   `afterEach`.
 - **`cognition-tab.component.spec.ts`** — mock `CognitionApiService` +
-  `AgentRegistryApiService` with `vi.fn().mockReturnValue(of(...))`: auto-select
+  `AgentCatalogApiService` with `vi.fn().mockReturnValue(of(...))`: auto-select
   first agent; proposals render first; approve round-trip (optimistic + Rules
   refetch); reject; disabled Approve when `stale_evidence`; filter changes
   refetch; error rendering; empty states.

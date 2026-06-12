@@ -78,7 +78,7 @@ describe('CognitionApiService', () => {
     req.flush(updated);
   });
 
-  it('encodes agent and proposal ids in the path', () => {
+  it('encodes agent and proposal ids in the approve path', () => {
     const rule = { id: 'r1' } as Rule;
     service.approveProposal('team/agent', 'p 1').subscribe((r) => expect(r).toEqual(rule));
     const req = httpMock.expectOne(
@@ -87,42 +87,77 @@ describe('CognitionApiService', () => {
     req.flush(rule);
   });
 
+  it('encodes agent and proposal ids in the reject path', () => {
+    const updated = { id: 'p1' } as RuleProposal;
+    service.rejectProposal('team/agent', 'p 1').subscribe((r) => expect(r).toEqual(updated));
+    const req = httpMock.expectOne(
+      `${environment.agentCognitionApiUrl}/agents/team%2Fagent/proposals/p%201/reject`,
+    );
+    req.flush(updated);
+  });
+
   it('throws when called with an empty agent id', () => {
     expect(() => service.listProposals('')).toThrow(/agentId/);
+    expect(() => service.approveProposal('', 'p1')).toThrow(/agentId/);
+    expect(() => service.rejectProposal('', 'p1')).toThrow(/agentId/);
+    expect(() => service.listMemoryEvents('')).toThrow(/agentId/);
+    expect(() => service.listSummaries('', 'day')).toThrow(/agentId/);
+    expect(() => service.listRules('')).toThrow(/agentId/);
+  });
+
+  it('throws when called with an empty proposal id', () => {
+    expect(() => service.approveProposal('a1', '')).toThrow(/proposalId/);
+    expect(() => service.rejectProposal('a1', '')).toThrow(/proposalId/);
   });
 
   // Memory --------------------------------------------------------------------
 
-  it('lists memory events with order + count params', () => {
-    const stub: MemoryEvent[] = [];
-    service.listMemoryEvents('a1', { bySalience: false, topN: 25 }).subscribe();
-    const req = httpMock.expectOne(`${base}/memory/events?top_n=25&by_salience=false`);
+  it('lists memory events with order + count params (order-independent)', () => {
+    const stub: MemoryEvent[] = [{ id: 'e1' } as MemoryEvent];
+    service.listMemoryEvents('a1', { bySalience: false, topN: 25 }).subscribe((r) => expect(r).toEqual(stub));
+    const req = httpMock.expectOne(
+      (r) =>
+        r.url === `${base}/memory/events` &&
+        r.params.get('top_n') === '25' &&
+        r.params.get('by_salience') === 'false',
+    );
     expect(req.request.method).toBe('GET');
     req.flush(stub);
   });
 
   it('lists memory events with a since filter', () => {
-    service.listMemoryEvents('a1', { since: '2026-06-01T00:00:00Z' }).subscribe();
-    const req = httpMock.expectOne(`${base}/memory/events?since=2026-06-01T00:00:00Z`);
+    service.listMemoryEvents('a1', { since: '2026-06-01T00:00:00Z' }).subscribe((r) => expect(r).toEqual([]));
+    const req = httpMock.expectOne(
+      (r) => r.url === `${base}/memory/events` && r.params.get('since') === '2026-06-01T00:00:00Z',
+    );
     req.flush([]);
   });
 
   it('lists summaries for a scale', () => {
-    service.listSummaries('a1', 'week', { limit: 10, offset: 0, excludeStale: true }).subscribe();
+    const stub = [{ id: 's1' }];
+    service
+      .listSummaries('a1', 'week', { limit: 10, offset: 0, excludeStale: true })
+      .subscribe((r) => expect(r).toEqual(stub));
     const req = httpMock.expectOne(
-      `${base}/memory/summaries?scale=week&limit=10&offset=0&exclude_stale=true`,
+      (r) =>
+        r.url === `${base}/memory/summaries` &&
+        r.params.get('scale') === 'week' &&
+        r.params.get('limit') === '10' &&
+        r.params.get('offset') === '0' &&
+        r.params.get('exclude_stale') === 'true',
     );
     expect(req.request.method).toBe('GET');
-    req.flush([]);
+    req.flush(stub);
   });
 
   // Rules ---------------------------------------------------------------------
 
   it('lists rules with a status filter', () => {
-    service.listRules('a1', { status: 'active' }).subscribe();
+    const stub: Rule[] = [{ id: 'r1' } as Rule];
+    service.listRules('a1', { status: 'active' }).subscribe((r) => expect(r).toEqual(stub));
     const req = httpMock.expectOne(`${base}/rules?status=active`);
     expect(req.request.method).toBe('GET');
-    req.flush([]);
+    req.flush(stub);
   });
 
   it('surfaces a 503 with detail when storage is unavailable', () => {

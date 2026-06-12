@@ -69,6 +69,16 @@ describe('cognition-labels', () => {
     expect(rulePriorityLabel(0)).toBe('priority 0');
   });
 
+  it('guards relevance against non-finite values', () => {
+    expect(relevanceLabel(Number.NaN)).toBe('relevance N/A');
+    expect(relevanceLabel(Number.POSITIVE_INFINITY)).toBe('relevance N/A');
+  });
+
+  it('rounds priority to an integer', () => {
+    expect(rulePriorityLabel(90.6)).toBe('priority 91');
+    expect(rulePriorityLabel(10.2)).toBe('priority 10');
+  });
+
   it('labels memory order from the by_salience flag', () => {
     expect(memoryOrderLabel(true)).toBe('Most relevant');
     expect(memoryOrderLabel(false)).toBe('Most recent');

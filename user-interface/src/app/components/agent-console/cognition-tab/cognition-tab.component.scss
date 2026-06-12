@@ -66,7 +66,10 @@
   &__filter {
     min-width: 140px;
 
-    // Compact the Material form field inside the section header.
+    // Compact the Material form field inside the section header by hiding the
+    // hint/error subscript row. `::ng-deep` is deprecated but remains the
+    // supported way to reach Material's internal nodes from a scoped component;
+    // migrate to a global theme override when the project adopts one.
     ::ng-deep .mat-mdc-form-field-subscript-wrapper {
       display: none;
     }
@@ -128,16 +131,35 @@ mat-chip {
     --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
   }
 
-  &.is-kind-error {
-    --mdc-chip-label-text-color: var(--kh-error, #f87171);
+  // Event-kind colours, one per EventKind (DESIGN.md §5/§9).
+  &.is-kind-observation {
+    --mdc-chip-label-text-color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &.is-kind-action {
+    --mdc-chip-label-text-color: var(--kh-info, #93c5fd);
+  }
+
+  &.is-kind-tool_call {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
   }
 
   &.is-kind-outcome {
     --mdc-chip-label-text-color: var(--kh-success, #4ade80);
   }
 
-  &.is-kind-action {
-    --mdc-chip-label-text-color: var(--kh-info, #93c5fd);
+  &.is-kind-error {
+    --mdc-chip-label-text-color: var(--kh-error, #f87171);
+  }
+
+  &.is-kind-feedback {
+    --mdc-chip-label-text-color: var(--kh-accent-subtle, #fcd34d);
+  }
+
+  // Decorative status dot — presentational only (not announced by SRs).
+  &.is-dot::before {
+    content: '●';
+    margin-right: 4px;
   }
 }
 

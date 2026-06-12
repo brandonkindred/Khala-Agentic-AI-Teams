@@ -71,7 +71,7 @@
               <header class="proposal-card__head">
                 <mat-chip-set>
                   <mat-chip class="is-action">{{ proposalActionLabel(p.action) }}</mat-chip>
-                  <mat-chip class="is-status">● {{ p.status }}</mat-chip>
+                  <mat-chip class="is-status is-dot">{{ p.status }}</mat-chip>
                   @if (p.stale_evidence) {
                     <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
                   }
@@ -242,7 +242,12 @@
       } @else {
         <ul class="cognition-list">
           @for (r of rules(); track r.id) {
-            <li class="rule-row" [id]="'rule-' + r.id" [class.is-retired]="r.status === 'retired'">
+            <li
+              class="rule-row"
+              [id]="'rule-' + r.id"
+              [class.is-retired]="r.status === 'retired'"
+              [class.is-highlighted]="highlightedRuleId() === r.id"
+            >
               <header class="rule-row__head">
                 <mat-chip-set>
                   <mat-chip class="is-mode" tabindex="0" [matTooltip]="ruleModeTooltip(r.mode)">

@@ -26,7 +26,7 @@ graph TD
     CT --> MT[Memory Timeline section]
     CT --> RL[Rules List section]
 
-    AP -.reuses.-> ARS[AgentRegistryApiService<br/>/api/agents]
+    AP -.reuses.-> ARS[AgentCatalogApiService<br/>/api/agents]
     PR --> CAS[CognitionApiService]
     MT --> CAS
     RL --> CAS
@@ -46,7 +46,7 @@ endpoints are keyed by `agent_id`, so nothing renders until an agent is chosen.
 ## 3. Agent picker (reuses the existing catalogue)
 
 The picker is **not** a new endpoint. It reuses the Agent Console catalogue
-(`AgentRegistryApiService` → `GET /api/agents`) to list selectable agents, then
+(`AgentCatalogApiService` → `GET /api/agents`) to list selectable agents, then
 scopes every cognition request to the chosen `agent_id`.
 
 ```

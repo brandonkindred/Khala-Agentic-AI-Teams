@@ -21,6 +21,9 @@ import type {
  * (`/api/cognition`). Every endpoint is scoped to an `agent_id`. Errors are
  * not handled here; subscribers surface `err?.error?.detail` at the component
  * layer (existing project convention — see `AgentRunnerApiService`).
+ *
+ * Preconditions (all methods): `agentId` — and, where applicable, `proposalId`
+ * — are non-empty strings. Violations throw rather than issue a malformed URL.
  */
 @Injectable({ providedIn: 'root' })
 export class CognitionApiService {
@@ -41,46 +44,83 @@ export class CognitionApiService {
     return `${this.baseUrl}/agents/${encodeURIComponent(agentId)}`;
   }
 
+  private requireProposalId(proposalId: string): string {
+    if (!proposalId) {
+      throw new Error('CognitionApiService: proposalId must be a non-empty string.');
+    }
+    return encodeURIComponent(proposalId);
+  }
+
   // -------------------------------------------------------------------------
   // Proposals (the HITL gate)
   // -------------------------------------------------------------------------
 
+  /**
+   * List an agent's rule proposals, newest first.
+   *
+   * @param agentId Non-empty agent id.
+   * @param query Optional `status` filter and `limit`/`offset` paging.
+   * @returns Observable of the matching proposals.
+   */
   listProposals(agentId: string, query: ProposalsQuery = {}): Observable<RuleProposal[]> {
     let params = new HttpParams();
-    if (query.status) params = params.set('status', query.status);
+    if (query.status != null) params = params.set('status', query.status);
     if (query.limit != null) params = params.set('limit', String(query.limit));
     if (query.offset != null) params = params.set('offset', String(query.offset));
     return this.http.get<RuleProposal[]>(`${this.agentBase(agentId)}/proposals`, { params });
   }
 
-  /** Approve a pending proposal; returns the activated rule. */
+  /**
+   * Approve a pending proposal.
+   *
+   * @param agentId Non-empty agent id.
+   * @param proposalId Non-empty proposal id.
+   * @returns Observable of the activated `Rule`.
+   */
   approveProposal(agentId: string, proposalId: string): Observable<Rule> {
-    return this.http.post<Rule>(
-      `${this.agentBase(agentId)}/proposals/${encodeURIComponent(proposalId)}/approve`,
-      {},
-    );
+    const base = this.agentBase(agentId);
+    return this.http.post<Rule>(`${base}/proposals/${this.requireProposalId(proposalId)}/approve`, {});
   }
 
-  /** Reject a pending proposal; returns the updated proposal. */
+  /**
+   * Reject a pending proposal.
+   *
+   * @param agentId Non-empty agent id.
+   * @param proposalId Non-empty proposal id.
+   * @returns Observable of the updated `RuleProposal` (status `rejected`).
+   */
   rejectProposal(agentId: string, proposalId: string): Observable<RuleProposal> {
-    return this.http.post<RuleProposal>(
-      `${this.agentBase(agentId)}/proposals/${encodeURIComponent(proposalId)}/reject`,
-      {},
-    );
+    const base = this.agentBase(agentId);
+    return this.http.post<RuleProposal>(`${base}/proposals/${this.requireProposalId(proposalId)}/reject`, {});
   }
 
   // -------------------------------------------------------------------------
   // Memory
   // -------------------------------------------------------------------------
 
+  /**
+   * List an agent's memory events.
+   *
+   * @param agentId Non-empty agent id.
+   * @param query Optional `topN`, `bySalience` ordering, and `since` cutoff.
+   * @returns Observable of the matching events.
+   */
   listMemoryEvents(agentId: string, query: MemoryEventsQuery = {}): Observable<MemoryEvent[]> {
     let params = new HttpParams();
     if (query.topN != null) params = params.set('top_n', String(query.topN));
     if (query.bySalience != null) params = params.set('by_salience', String(query.bySalience));
-    if (query.since) params = params.set('since', query.since);
+    if (query.since != null) params = params.set('since', query.since);
     return this.http.get<MemoryEvent[]>(`${this.agentBase(agentId)}/memory/events`, { params });
   }
 
+  /**
+   * List an agent's period summaries at a scale.
+   *
+   * @param agentId Non-empty agent id.
+   * @param scale One of `day|week|month|year`.
+   * @param query Optional `limit`/`offset` paging and `excludeStale`.
+   * @returns Observable of the matching summaries.
+   */
   listSummaries(
     agentId: string,
     scale: Scale,
@@ -97,9 +137,16 @@ export class CognitionApiService {
   // Rules
   // -------------------------------------------------------------------------
 
+  /**
+   * List an agent's rules, highest priority first.
+   *
+   * @param agentId Non-empty agent id.
+   * @param query Optional `status` filter and `limit`/`offset` paging.
+   * @returns Observable of the matching rules.
+   */
   listRules(agentId: string, query: RulesQuery = {}): Observable<Rule[]> {
     let params = new HttpParams();
-    if (query.status) params = params.set('status', query.status);
+    if (query.status != null) params = params.set('status', query.status);
     if (query.limit != null) params = params.set('limit', String(query.limit));
     if (query.offset != null) params = params.set('offset', String(query.offset));
     return this.http.get<Rule[]>(`${this.agentBase(agentId)}/rules`, { params });
