@@ -377,6 +377,38 @@ class TestSignalExitDrift:
         assert not any(r.rule_id and "signal_exit" in r.rule_id for r in results)
         assert any(r.rule_id and r.rule_id.startswith("entry") for r in results)
 
+    def test_signal_exit_skipped_even_with_side_specific_stop(self):
+        """A SignalExitRule is engine-owned for BOTH sides, so its fixture is
+        skipped whenever the strategy has an entered side — even alongside a
+        side-specific stop that covers only one side. Confirms the all-sides
+        coverage gate cannot wrongly retain a signal-exit fixture, because
+        the signal rule itself covers every side."""
+        code = textwrap.dedent("""\
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+                    # No manual exit: the engine owns the signal exit.
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=Predicate(lhs="bar.close", op=">", rhs=50.0), side="long")],
+            exit_rules=[
+                SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=110.0)),
+                StopLossRule(pct=0.05, basis="trailing_high"),
+            ],
+        )
+        results = gate.check(code, spec)
+        criticals = [r for r in results if not r.passed and r.severity == "critical"]
+        assert criticals == [], criticals
+        assert not any(r.rule_id and "signal_exit" in r.rule_id for r in results)
+
 
 class TestEnumSideHandling:
     def test_strategy_using_orderside_enum(self):

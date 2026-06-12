@@ -119,6 +119,8 @@ def _collect_required_indicators(spec: Any) -> set[str]:
     authors no exit branch), so requiring the code to read an exit-only
     indicator would contradict the engine-owned-exits contract.
     """
+    if spec is None:
+        return set()
     refs: set[str] = set()
     for rule in getattr(spec, "entry_rules", []) or []:
         if isinstance(rule, EntryRule):
@@ -385,6 +387,43 @@ def _submit_order_closes_position(call: ast.Call) -> bool:
         ):
             return True
     return False
+
+
+# ``side=`` token (lowercased) → the position side a *closing* order
+# retires. A close submits the side OPPOSITE the open position, so a
+# SHORT/sell order closes a long and a LONG/buy order closes a short.
+_CLOSE_SIDE_OF_ORDER_SIDE: dict[str, str] = {
+    "short": "long",
+    "sell": "long",
+    "long": "short",
+    "buy": "short",
+}
+
+
+def _submit_order_close_side(call: ast.Call) -> Optional[str]:
+    """Return the position side a closing ``submit_order`` retires.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
+    Post: returns ``"long"`` / ``"short"`` when the ``side=`` value is a
+    string literal (``"SHORT"`` / ``"sell"`` / ...) or an
+    ``OrderSide.<NAME>`` attribute that maps to a known order side;
+    ``None`` when ``side`` is absent, a non-literal expression that cannot
+    be resolved statically, or an unrecognised token. The mapping inverts
+    the order side because a close submits the side opposite the position.
+    """
+    for kw in call.keywords:
+        if kw.arg != "side":
+            continue
+        v = kw.value
+        token: Optional[str] = None
+        if isinstance(v, ast.Constant) and isinstance(v.value, str):
+            token = v.value.lower()
+        elif isinstance(v, ast.Attribute):
+            token = v.attr.lower()
+        if token is None:
+            return None
+        return _CLOSE_SIDE_OF_ORDER_SIDE.get(token)
+    return None
 
 
 def _node_references_ctx_equity(node: ast.AST) -> bool:
@@ -837,6 +876,8 @@ class CodeConformanceGate(GateResultsMixin):
         :meth:`_check_no_duplicate_engine_exit`.
         """
         spec = cctx.spec
+        if spec is None:
+            return ()
         signal_exits = [
             r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
         ]
@@ -862,24 +903,31 @@ class CodeConformanceGate(GateResultsMixin):
         (the backtest mode passes the spec's exit rules to the engine
         unconditionally). A strategy-submitted close fills ahead of the
         engine's close and overwrites the ``engine_exit:<kind>``
-        attribution the trade-alignment gate depends on — so when the
-        engine fully covers the entered sides, a manual close is a critical
-        conformance violation.
+        attribution the trade-alignment gate depends on, so a manual close
+        of an engine-owned side is a critical conformance violation.
+
+        Coverage is judged per-side: a close is forbidden only when the
+        position side it retires is covered by some ``spec.exit_rules``
+        entry (via :func:`_engine_exits_cover_sides`). A close whose
+        ``side=`` cannot be resolved statically is checked against every
+        entered side — if any is engine-owned the close may duplicate that
+        exit. Every ``on_bar``-reachable ``submit_order`` is inspected
+        (if/elif/else bodies, post-guard top-level statements, and reachable
+        helpers), not just the if-branch coverage view.
 
         Pre: ``cctx`` is a built context; ``cctx.spec`` is a
         ``StrategySpec`` or ``None``.
-        Post: returns ``()`` for the compiled path
-        (``requires_custom_code`` false — it submits no orders), for a spec
-        with no exit rules, for a spec whose exit rules do not cover every
-        entered side (a manual close may then be legitimate), or when no
-        ``on_bar``-reachable ``submit_order`` closes a position. Otherwise
-        returns a single critical naming the count of manual closes to
-        remove.
+        Post: returns ``()`` when ``spec`` is ``None``, for the compiled
+        path (``requires_custom_code`` false — it submits no orders), for a
+        spec with no exit rules, or when no reachable closing
+        ``submit_order`` retires an engine-owned side. Otherwise returns a
+        single critical naming the count of manual closes to remove.
         Invariant: never fires on the compiled path; only forbids closes
-        the engine demonstrably owns (coverage-gated via
-        :func:`_engine_exits_cover_sides`).
+        the engine demonstrably owns for the side they retire.
         """
         spec = cctx.spec
+        if spec is None:
+            return ()
         if not getattr(spec, "requires_custom_code", False):
             return ()
         exit_rules = getattr(spec, "exit_rules", None) or []
@@ -888,20 +936,23 @@ class CodeConformanceGate(GateResultsMixin):
         # Entered sides come from the spec (the authoritative, validated
         # source) rather than the AST: a dynamic ``side=`` expression would
         # leave an AST-derived side set empty and silently disable the check.
-        sides = {
+        entered_sides = {
             r.side for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, EntryRule)
         }
-        if not sides or not _engine_exits_cover_sides(spec, sides):
-            return ()
 
-        seen: set[int] = set()
         n_closes = 0
-        for _if_node, calls in cctx.submit_branches:
-            for call in calls:
-                if id(call) in seen:
+        for method in _iter_strategy_methods(cctx.cls):
+            if method.name not in cctx.reachable:
+                continue
+            for node in _iter_method_body_nodes(method):
+                if not _is_submit_order_call(node) or not _submit_order_closes_position(node):
                     continue
-                if _submit_order_closes_position(call):
-                    seen.add(id(call))
+                # A close whose side resolves statically is judged on that
+                # one side; an unresolvable side is judged against every
+                # entered side (forbid if any is engine-owned).
+                closed_side = _submit_order_close_side(node)
+                sides_to_check = {closed_side} if closed_side else entered_sides
+                if any(_engine_exits_cover_sides(spec, {s}) for s in sides_to_check):
                     n_closes += 1
         if n_closes == 0:
             return ()
@@ -909,12 +960,13 @@ class CodeConformanceGate(GateResultsMixin):
             self._critical(
                 f"Custom-code strategy submits {n_closes} manual "
                 "position-closing order(s) (ctx.submit_order(..., "
-                "qty=position.qty)), but the engine already enforces every "
-                "spec.exit_rules entry (stop_loss / take_profit / signal_exit) "
-                "and stamps engine_exit:<kind> attribution. A manual close "
-                "fills first and overwrites that attribution, breaking exit "
-                "alignment. Remove the close branch(es) and let the engine own "
-                "spec.exit_rules — author entry logic only."
+                "qty=position.qty)) for a side the engine already owns. The "
+                "engine enforces every spec.exit_rules entry (stop_loss / "
+                "take_profit / signal_exit) and stamps engine_exit:<kind> "
+                "attribution; a manual close fills first and overwrites it, "
+                "breaking exit alignment. Remove the close(s) for "
+                "engine-owned sides and let the engine own spec.exit_rules — "
+                "author entry logic only."
             ),
         )
 
