@@ -110,7 +110,18 @@ def _is_external_cancellation(exc: BaseException) -> bool:
 
 
 def planning_llm_client(base: LLMClient) -> LLMClient:
-    """Use BLOG_PLANNING_MODEL for planning when set (Ollama clients only)."""
+    """Return the LLM client to use for blog planning.
+
+    When ``BLOG_PLANNING_MODEL`` is set and ``base`` is Ollama-backed, returns a
+    client pinned to that model; otherwise returns ``base`` unchanged. The
+    per-model override preserves ``base``'s agent attribution (re-applies the
+    original ``agent_key`` via :func:`attributed_client`) so planning requests
+    are still attributed to the originating agent.
+
+    :param base: The default client the blog pipeline would otherwise use.
+    :returns: ``base``, or an attribution-preserving override pinned to
+        ``BLOG_PLANNING_MODEL``.
+    """
     model = planning_model_override()
     if not model:
         return base
@@ -123,11 +134,19 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
 
 
 def plan_critic_llm_client(base: LLMClient) -> LLMClient:
-    """Use BLOG_PLAN_CRITIC_MODEL for the plan critic when set (Ollama clients only).
+    """Return the LLM client to use for the plan critic.
+
+    When ``BLOG_PLAN_CRITIC_MODEL`` is set and ``base`` is Ollama-backed, returns
+    a client pinned to that model; otherwise returns ``base`` unchanged. The
+    override preserves ``base``'s agent attribution (see :func:`planning_llm_client`).
 
     Per the architectural tenet, the critic runs on the same model as the writer
     by default. This hook exists so per-role model diversification can be flipped
     on later without further code changes.
+
+    :param base: The default client the blog pipeline would otherwise use.
+    :returns: ``base``, or an attribution-preserving override pinned to
+        ``BLOG_PLAN_CRITIC_MODEL``.
     """
     model = plan_critic_model_override()
     if not model:
