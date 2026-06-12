@@ -40,13 +40,28 @@ def test_convert_dict_preserves_id_and_options():
     assert out[0]["options"] == [{"id": "a", "label": "A", "is_default": False}]
 
 
-def test_normalize_options_renames_reserved_other_id():
+def test_normalize_options_drops_reserved_other_id():
     out = hitl.convert_to_structured_questions(
         [{"question_text": "Q?", "options": [{"id": "other", "label": "Another team"}]}]
     )
-    # "other" is reserved for free-text; it must be renamed to avoid collision.
-    assert out[0]["options"][0]["id"] == "other_opt"
-    assert out[0]["options"][0]["label"] == "Another team"
+    # "other" is reserved for free-text; the option is dropped entirely rather than renamed
+    # to a fixed string that could collide with a legitimate "other_opt" option.
+    assert out[0]["options"] == []
+
+
+def test_normalize_open_questions_drops_options_fewer_than_two():
+    out = hitl.normalize_open_questions(
+        [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}]}]
+    )
+    # Single option after normalization → fall back to free-text (no "options" key).
+    assert "options" not in out[0]
+
+
+def test_normalize_open_questions_keeps_two_or_more_options():
+    out = hitl.normalize_open_questions(
+        [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}]
+    )
+    assert len(out[0]["options"]) == 2
 
 
 def test_convert_dict_alt_text_keys_and_empty_dropped():
@@ -61,7 +76,11 @@ def test_normalize_open_questions_strings_and_dicts():
     out = hitl.normalize_open_questions(
         [
             "plain?",
-            {"question_text": "rich?", "context": "ctx", "options": [{"id": "a", "label": "A"}]},
+            {
+                "question_text": "rich?",
+                "context": "ctx",
+                "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}],
+            },
             {"x": 1},
             "",
         ]

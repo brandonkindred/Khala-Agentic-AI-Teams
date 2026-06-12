@@ -69,9 +69,10 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
             if opt_id == "other":
                 # "other" is the reserved synthetic free-text option added by the UI/API;
                 # using it as a structured option id would cause the answer handler to treat
-                # any selection of this option as a free-text response.
-                logger.warning("Option id 'other' is reserved; renaming to 'other_opt'")
-                opt_id = "other_opt"
+                # any selection of this option as a free-text response. Drop it — the prompt
+                # already prohibits it, so this is a defensive guard against a non-compliant LLM.
+                logger.warning("Option id 'other' is reserved and will be dropped")
+                continue
             options.append(
                 {
                     "id": opt_id,
@@ -152,8 +153,17 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
-            if opts:
+            # Fewer than 2 options after normalization indicates a non-compliant LLM
+            # response (e.g. single option, or "other" dropped). Fall back to free-text.
+            if len(opts) >= 2:
                 entry["options"] = opts
+            elif opts:
+                logger.warning(
+                    "Question '%s' has only %d option(s) after normalization; "
+                    "falling back to free-text (options discarded)",
+                    text[:60],
+                    len(opts),
+                )
         out.append(entry)
     return out
 
