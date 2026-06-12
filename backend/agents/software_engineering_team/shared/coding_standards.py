@@ -97,7 +97,8 @@ CODING_STANDARDS = """
 
    **General rules (ALL languages):**
    - Names describe WHAT the thing IS or DOES – never derived from a task description
-   - Names must be 1-3 words maximum (e.g. `user-list`, `auth_service`, `TaskController`)
+   - Names must be concise yet fully descriptive: use the fewest words that make the purpose unmistakable, and no more. There is NO fixed word limit — readability comes first, so never drop a word a reader needs to understand the name (e.g. `user-list`, `auth_service`, `TaskController`, `list_changed_and_deleted`)
+   - Exception for files, folders, and modules: because these become filesystem path segments, keep each segment short — a concise noun phrase under ~30 characters that never reads like a sentence (avoid 4+ hyphen-separated or 5+ underscore-separated words; path validation rejects those). This length/word guidance applies ONLY to path segments — function, method, variable, and class names are NOT word-capped
    - BANNED words in file/folder/class names: `implement`, `create`, `build`, `setup`, `configure`, `add`, `make`, `define`, `develop`, `write`, `design`, `establish`, `the`, `that`, `with`, `using`, `which`, `for`, `and`, `a`, `an`
    - To derive a name: extract the core NOUN from the requirement, discard all verbs and filler words
    - Example: task "Implement the UserForm component using reactive forms" → name is `user-form`, NOT `implement-the-userform-component-using`
@@ -177,7 +178,8 @@ REVIEW_STANDARDS = """
 
 5. **Naming Conventions** -- Names must follow professional standards:
    - Names describe WHAT the thing IS or DOES -- never derived from task descriptions
-   - Names must be 1-3 words maximum
+   - Names must be concise yet fully descriptive: the fewest words that make the purpose unmistakable, and no more. There is NO fixed word limit -- do not flag a name solely for its word count; readability comes first
+   - File, folder, and module names are the exception: because they become filesystem path segments, they should stay short (a concise noun phrase under ~30 chars) and never read like a sentence. This applies only to path segments, not to function/variable/class names
    - Python: snake_case for modules/functions, PascalCase for classes
    - TypeScript: kebab-case for files/folders, PascalCase for components/classes, camelCase for variables
    - Java: PascalCase for classes, camelCase for methods/variables
