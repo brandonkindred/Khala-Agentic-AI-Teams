@@ -11,6 +11,8 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from software_engineering_team.shared.git_utils import list_changed_and_deleted
 from software_engineering_team.shared.repo_utils import read_files_as_dict
 
@@ -84,8 +86,6 @@ def test_list_changed_and_deleted_non_repo_returns_empty(tmp_path: Path) -> None
 
 def test_list_changed_and_deleted_bad_revision_raises(tmp_path: Path) -> None:
     """A missing base ref fails closed (raises) rather than silently degrading."""
-    import pytest
-
     from software_engineering_team.shared.git_utils import BaselineDiffUnavailable
 
     _init_repo(tmp_path)
@@ -100,8 +100,6 @@ def test_list_changed_and_deleted_bad_revision_raises(tmp_path: Path) -> None:
 def test_list_changed_and_deleted_ambiguous_merge_base_raises(tmp_path: Path, monkeypatch) -> None:
     """Multiple merge bases (criss-cross history) fail closed rather than diffing
     against an arbitrary one."""
-    import pytest
-
     from software_engineering_team.shared import git_utils
     from software_engineering_team.shared.git_utils import BaselineDiffUnavailable
 
