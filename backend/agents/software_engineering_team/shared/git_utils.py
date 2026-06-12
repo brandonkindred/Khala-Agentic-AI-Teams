@@ -277,106 +277,52 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
     return out or ""
 
 
-def _changed_paths(path: Path, *cmds: list[str]) -> List[str]:
-    """Run each NUL-output git command and return the de-duplicated union of paths.
+def list_changed_and_deleted(
+    repo_path: str | Path, base: str, head: str = "HEAD"
+) -> Tuple[List[str], List[str]]:
+    """Return ``(changed, deleted)`` repo-relative paths for the task's work.
 
-    Each command must end in ``-z`` so paths are NUL-delimited and unquoted
-    (names with non-ASCII bytes, tabs, or newlines round-trip as real filesystem
-    paths instead of git's escaped form). A command that fails contributes
-    nothing, so callers degrade to whatever the other commands found.
+    Combines the committed ``base...head`` diff with the worktree/index diff vs
+    ``HEAD`` in two ``git diff --name-status --no-renames -z`` calls (instead of
+    four name-only calls):
+
+    - *changed* — added/modified non-deleted tracked paths a caller can read.
+      Untracked files are not included (git diff only reports tracked changes),
+      so build/test leftovers are excluded; callers add task-owned new files via
+      the writer's normalized output instead.
+    - *deleted* — removed paths. ``--no-renames`` decomposes a rename into
+      delete-old + add-new, so a renamed-away path appears here (its old import
+      location) while the new path appears in *changed*.
+
+    ``-z`` yields NUL-delimited, unquoted paths so names with non-ASCII bytes,
+    tabs, or newlines round-trip as real filesystem paths. A failing diff
+    contributes nothing; returns ``([], [])`` when not a git repository.
 
     Postconditions:
-        - Returns paths in first-seen order across *cmds*, with no duplicates.
+        - Each list is de-duplicated, first-seen order (committed then worktree).
     """
-    seen: set[str] = set()
-    ordered: List[str] = []
-    for cmd in cmds:
-        code, out = _run_git(path, cmd)
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return [], []
+    changed: List[str] = []
+    deleted: List[str] = []
+    seen_changed: set[str] = set()
+    seen_deleted: set[str] = set()
+    for rev in (f"{base}...{head}", "HEAD"):
+        code, out = _run_git(path, ["git", "diff", "--name-status", "--no-renames", "-z", rev])
         if code != 0:
             continue
-        for entry in (out or "").split("\0"):
-            if entry and entry not in seen:
+        fields = [f for f in (out or "").split("\0") if f]
+        # ``--name-status -z`` emits alternating <status> and <path> fields.
+        for status, entry in zip(fields[::2], fields[1::2]):
+            if status.startswith("D"):
+                bucket, seen = deleted, seen_deleted
+            else:
+                bucket, seen = changed, seen_changed
+            if entry not in seen:
                 seen.add(entry)
-                ordered.append(entry)
-    return ordered
-
-
-def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
-    """Return repo-relative paths changed on *head* since it diverged from *base*.
-
-    Runs ``git diff --name-only --diff-filter=d --no-renames -z base...head``. The
-    ``d`` filter drops deletions so every returned path is a file a caller can
-    still read; ``--no-renames`` decomposes a rename into delete-old + add-new so
-    the new path is reported here (and the old path is reported as a deletion by
-    :func:`list_deleted_files`); ``-z`` returns NUL-delimited, unquoted paths so
-    names with non-ASCII characters, tabs, or newlines round-trip as real
-    filesystem paths instead of git's default quoted/escaped form.
-
-    Preconditions:
-        - base and head are git revisions (branch name, tag, or SHA); the caller
-          wants the set of files the work on *head* added or modified.
-    Postconditions:
-        - Returns the changed paths in git's reporting order. Returns ``[]`` when
-          the path is not a git repository, the diff command fails, or nothing
-          changed — so callers can fall back without distinguishing the cases.
-    """
-    path = Path(repo_path).resolve()
-    if not (path / ".git").exists():
-        return []
-    return _changed_paths(
-        path,
-        ["git", "diff", "--name-only", "--diff-filter=d", "--no-renames", "-z", f"{base}...{head}"],
-    )
-
-
-def list_uncommitted_files(repo_path: str | Path) -> List[str]:
-    """Return non-deleted *tracked* paths changed in the worktree/index vs ``HEAD``.
-
-    Covers staged + unstaged modifications to tracked files (deletions excluded),
-    so a path an iteration modified without a landed commit — for example a
-    ``.gitignore`` updated from agent ``gitignore_entries`` — is visible even
-    though it is absent from a committed ``base...head`` diff. ``--no-renames``
-    reports a rename's new path here (its old path surfaces as a deletion).
-
-    Untracked files are deliberately **not** included: ``git ls-files --others``
-    would pull in every non-ignored leftover (build/test artifacts, logs,
-    snapshots, databases), which are not task changes. Callers add task-owned
-    new files explicitly via the writer's normalized output instead.
-
-    Postconditions:
-        - Returns repo-relative paths. Returns ``[]`` when not a git repository
-          or the git command fails.
-    """
-    path = Path(repo_path).resolve()
-    if not (path / ".git").exists():
-        return []
-    return _changed_paths(
-        path, ["git", "diff", "--name-only", "--diff-filter=d", "--no-renames", "-z", "HEAD"]
-    )
-
-
-def list_deleted_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
-    """Return paths the task deleted: committed (``base...head``) plus worktree.
-
-    Uppercase ``--diff-filter=D`` keeps only deletions, and ``--no-renames`` makes
-    a renamed-away path count as a deletion of its old location (otherwise git
-    classifies it ``R`` and the old path is reported nowhere). A content-based
-    reviewer sees surviving file contents but no removals, so callers surface
-    these paths separately to flag that a file (an auth module, route, migration,
-    a rename's old import path, ...) was removed.
-
-    Postconditions:
-        - Returns repo-relative paths, de-duplicated. Returns ``[]`` when not a
-          git repository or the git commands fail.
-    """
-    path = Path(repo_path).resolve()
-    if not (path / ".git").exists():
-        return []
-    return _changed_paths(
-        path,
-        ["git", "diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", f"{base}...{head}"],
-        ["git", "diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", "HEAD"],
-    )
+                bucket.append(entry)
+    return changed, deleted
 
 
 

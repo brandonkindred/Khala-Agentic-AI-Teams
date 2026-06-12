@@ -24,6 +24,7 @@ from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
     read_files_as_dict,
     read_repo_code,
+    strip_surrogates,
     truncate_for_context,
 )
 from software_engineering_team.shared.repo_utils import (
@@ -506,9 +507,29 @@ def _read_repo_meta_files(repo_path: Path) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
+def _writer_output_keys(result: Any) -> Dict[str, str] | None:
+    """Paths ``write_agent_output`` would materialize for *result* (or None).
+
+    Reuses the writer's own normalization and additionally includes a synthesized
+    root ``.gitignore`` when the output declares ``gitignore_entries`` (the writer
+    adds it *after* the base mapping), so a brand-new, still-untracked .gitignore
+    from a failed-commit iteration is reviewed instead of slipping through. Values
+    are placeholders — only the keys widen the set of paths re-read from the
+    worktree.
+    """
+    if result is None:
+        return None
+    from software_engineering_team.shared.repo_writer import output_to_files_dict
+
+    written = dict(output_to_files_dict(result, ""))
+    if getattr(result, "gitignore_entries", None):
+        written.setdefault(".gitignore", "")
+    return written
+
+
 def _format_deletion_note(deleted: List[str]) -> str:
     """Render the list of removed paths as a short reviewer note."""
-    listing = "\n".join(f"- {p}" for p in deleted)
+    listing = "\n".join(f"- {strip_surrogates(p)}" for p in deleted)
     return (
         "Files DELETED by this task (verify each removal is intentional and that "
         "nothing still depends on them):\n"
@@ -561,18 +582,13 @@ def _select_review_input(
     """
     from software_engineering_team.shared.git_utils import (
         DEVELOPMENT_BRANCH,
-        list_changed_files,
-        list_deleted_files,
-        list_uncommitted_files,
+        list_changed_and_deleted,
     )
 
+    changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
     paths: List[str] = []
     seen: set[str] = set()
-    for source in (
-        list_changed_files(repo_path, DEVELOPMENT_BRANCH),
-        list_uncommitted_files(repo_path),
-        list(written_files or ()),
-    ):
+    for source in (changed, list(written_files or ())):
         for p in source:
             if p not in seen:
                 seen.add(p)
@@ -582,9 +598,7 @@ def _select_review_input(
     # A path can be committed-deleted yet restored as an uncommitted worktree
     # file in a later failed-commit iteration; it is then real content above,
     # so only note paths actually absent from the worktree.
-    deleted = [
-        p for p in list_deleted_files(repo_path, DEVELOPMENT_BRANCH) if not (repo_path / p).exists()
-    ]
+    deleted = [p for p in deleted_all if not (repo_path / p).exists()]
     note = _format_deletion_note(deleted) if deleted else None
 
     if files:
@@ -1617,12 +1631,10 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
-            # Normalize via the writer's own mapping so derived paths
-            # (code -> main.py, tests -> tests/test_main.py, ...) that aren't in
-            # ``result.files`` are still reviewed when their commit didn't land.
-            from software_engineering_team.shared.repo_writer import _output_to_files_dict
-
-            written = _output_to_files_dict(result, "") if result else None
+            # Use the writer's own materialized path set (including a synthesized
+            # .gitignore) so derived/uncommitted paths are reviewed when their
+            # commit didn't land.
+            written = _writer_output_keys(result)
             review_files, review_code, deletion_note = _select_review_input(
                 repo_path, current_task, written
             )
@@ -2578,31 +2590,26 @@ class BackendExpertAgent:
         Raises:
             CodeReviewUnavailableError: when the review could not be completed.
         """
-        from code_review_agent.models import CodeReviewInput
+        from code_review_agent.models import build_code_review_input
 
         task_description = task.description or ""
         if deletion_note:
             task_description = (
                 f"{task_description}\n\n{deletion_note}" if task_description else deletion_note
             )
-
-        # ``CodeReviewInput`` ignores ``code`` when ``files`` is set and rejects
-        # an input that carries neither; pass each only when present so the
-        # legacy ``code`` string still counts as explicitly provided.
-        input_kwargs: Dict[str, Any] = {
-            "spec_content": spec_content,
-            "task_description": task_description,
-            "task_requirements": _task_requirements(task),
-            "acceptance_criteria": getattr(task, "acceptance_criteria", []) or [],
-            "language": "python",
-            "architecture": architecture,
-            "existing_codebase": existing_code,
-        }
-        if files is not None:
-            input_kwargs["files"] = files
-        if code is not None:
-            input_kwargs["code"] = code
-        return code_review_agent.run(CodeReviewInput(**input_kwargs))
+        return code_review_agent.run(
+            build_code_review_input(
+                files=files,
+                code=code,
+                spec_content=spec_content,
+                task_description=task_description,
+                task_requirements=_task_requirements(task),
+                acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
+                language="python",
+                architecture=architecture,
+                existing_codebase=existing_code,
+            )
+        )
 
     @staticmethod
     def _run_security_review(

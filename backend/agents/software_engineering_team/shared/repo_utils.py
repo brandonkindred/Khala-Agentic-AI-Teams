@@ -92,6 +92,18 @@ def read_repo_code(
     return "\n\n".join(parts) if parts else "# No code files found"
 
 
+def strip_surrogates(text: str) -> str:
+    """Return *text* with any lone surrogates replaced so it is UTF-8/JSON safe.
+
+    Paths read from git via ``surrogateescape`` (for filenames whose bytes are
+    invalid in the locale encoding) carry lone surrogates that raise
+    ``UnicodeEncodeError`` when later serialized to JSON or encoded to UTF-8 (for
+    example in an LLM HTTP request body). The ``"replace"`` encode handler turns
+    each unencodable char into ``?``; plain text is returned unchanged.
+    """
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+
 def read_files_as_dict(
     repo_path: Path,
     paths: Iterable[str],
@@ -104,7 +116,8 @@ def read_files_as_dict(
     repo_path:
         Root the paths are resolved against.
     paths:
-        Repo-relative paths to read (e.g. the output of ``list_changed_files``).
+        Repo-relative paths to read (e.g. the changed paths from
+        ``list_changed_and_deleted``).
     extensions:
         When given, only paths whose suffix is in this list are included.
         ``None`` means no extension filter (so files without a code suffix,
@@ -122,8 +135,12 @@ def read_files_as_dict(
           cannot leak content.
         - Text is decoded as UTF-8 with ``errors="replace"`` (matching
           ``read_repo_code``) so a legacy/non-UTF-8 text file is reviewed rather
-          than dropped; binary content (detected by a NUL byte) is omitted rather
-          than decoded into gibberish.
+          than dropped; binary content (a NUL byte anywhere in the file) is
+          omitted rather than decoded into gibberish.
+        - Result keys (and the symlink-target marker) are run through
+          :func:`strip_surrogates`, so a non-UTF-8 filename read via
+          surrogateescape cannot crash downstream UTF-8/JSON serialization. The
+          file content is still read from the original (surrogate-bearing) path.
         - Never reads a file outside *repo_path*: keys may come from untrusted
           agent output, so containment is enforced before any read.
     """
@@ -143,7 +160,9 @@ def read_files_as_dict(
             # A symlink is reported by its target, never dereferenced (which would
             # mislabel the target's content under the link or escape the repo).
             if full_path.is_symlink():
-                result[rel_path] = f"# symlink -> {os.readlink(full_path)}\n"
+                result[strip_surrogates(rel_path)] = strip_surrogates(
+                    f"# symlink -> {os.readlink(full_path)}\n"
+                )
                 continue
             # Non-symlink: resolve (following any intra-repo parent links) and
             # re-check containment before reading.
@@ -151,9 +170,9 @@ def read_files_as_dict(
             if repo_root not in resolved.parents:
                 continue
             data = resolved.read_bytes()
-            if b"\x00" in data[:8192]:
+            if b"\x00" in data:
                 continue  # binary asset: omit rather than review as gibberish
-            result[rel_path] = data.decode("utf-8", errors="replace")
+            result[strip_surrogates(rel_path)] = data.decode("utf-8", errors="replace")
         except (OSError, RuntimeError, ValueError):
             continue
     return result

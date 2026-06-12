@@ -1,8 +1,8 @@
 """Tests for task-changed-file review input.
 
-Covers the two new shared utilities (``list_changed_files``,
-``read_files_as_dict``) and the backend agent's switch from a whole-repo
-``code=`` blob to the task's changed files passed as ``files=``.
+Covers the shared utilities (``list_changed_and_deleted``, ``read_files_as_dict``)
+and the backend agent's switch from a whole-repo ``code=`` blob to the task's
+changed files passed as ``files=``.
 """
 
 from __future__ import annotations
@@ -11,11 +11,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
-from software_engineering_team.shared.git_utils import (
-    list_changed_files,
-    list_deleted_files,
-    list_uncommitted_files,
-)
+from software_engineering_team.shared.git_utils import list_changed_and_deleted
 from software_engineering_team.shared.repo_utils import read_files_as_dict
 
 
@@ -31,50 +27,76 @@ def _init_repo(repo: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# list_changed_files
+# list_changed_and_deleted
 # ---------------------------------------------------------------------------
 
 
-def test_list_changed_files_modified_added_deleted(tmp_path: Path) -> None:
-    """Returns added + modified paths on the branch, excludes deletions."""
+def test_list_changed_and_deleted_committed_and_worktree(tmp_path: Path) -> None:
+    """Committed + worktree adds/modifies land in `changed`; removals in `deleted`."""
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     (tmp_path / "b.py").write_text("y = 2\n", encoding="utf-8")
     (tmp_path / "keep.py").write_text("z = 3\n", encoding="utf-8")
+    (tmp_path / "wt.py").write_text("w = 1\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
     _git(tmp_path, "branch", "-M", "development")
 
     _git(tmp_path, "checkout", "-b", "feature/x")
-    (tmp_path / "a.py").write_text("x = 99\n", encoding="utf-8")  # modified
-    (tmp_path / "c.py").write_text("c = 4\n", encoding="utf-8")  # added
-    (tmp_path / "b.py").unlink()  # deleted
+    (tmp_path / "a.py").write_text("x = 99\n", encoding="utf-8")  # committed modify
+    (tmp_path / "c.py").write_text("c = 4\n", encoding="utf-8")  # committed add
+    (tmp_path / "b.py").unlink()  # committed delete
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "feature work")
+    # Uncommitted worktree changes:
+    (tmp_path / "d.py").write_text("d = 5\n", encoding="utf-8")  # untracked → not changed
+    (tmp_path / "keep.py").write_text("z = 99\n", encoding="utf-8")  # tracked modify
+    (tmp_path / "wt.py").unlink()  # worktree delete
 
-    changed = list_changed_files(tmp_path, "development", "HEAD")
+    changed, deleted = list_changed_and_deleted(tmp_path, "development", "HEAD")
 
-    assert "a.py" in changed
-    assert "c.py" in changed
-    assert "b.py" not in changed  # deletion excluded by --diff-filter=d
-    assert "keep.py" not in changed  # untouched
-
-
-def test_list_changed_files_non_repo_returns_empty(tmp_path: Path) -> None:
-    """A non-git directory yields ``[]`` so callers can fall back."""
-    assert list_changed_files(tmp_path, "development", "HEAD") == []
+    assert "a.py" in changed and "c.py" in changed  # committed add/modify
+    assert "keep.py" in changed  # uncommitted tracked modify
+    assert "d.py" not in changed  # untracked excluded
+    assert set(deleted) == {"b.py", "wt.py"}  # committed + worktree deletions
 
 
-def test_list_changed_files_bad_revision_returns_empty(tmp_path: Path) -> None:
-    """A failing git diff (unknown base) yields ``[]`` rather than raising."""
+def test_list_changed_and_deleted_decomposes_rename(tmp_path: Path) -> None:
+    """--no-renames reports the new path as changed and the old path as deleted."""
+    _init_repo(tmp_path)
+    (tmp_path / "old.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    _git(tmp_path, "mv", "old.py", "new.py")
+    _git(tmp_path, "commit", "-m", "rename")
+
+    changed, deleted = list_changed_and_deleted(tmp_path, "development", "HEAD")
+
+    assert "new.py" in changed
+    assert "old.py" in deleted
+
+
+def test_list_changed_and_deleted_non_repo_returns_empty(tmp_path: Path) -> None:
+    assert list_changed_and_deleted(tmp_path, "development", "HEAD") == ([], [])
+
+
+def test_list_changed_and_deleted_bad_revision_degrades(tmp_path: Path) -> None:
+    """A failing committed diff still yields the worktree results, no raise."""
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
-    assert list_changed_files(tmp_path, "no-such-branch", "HEAD") == []
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")  # uncommitted
+
+    changed, deleted = list_changed_and_deleted(tmp_path, "no-such-branch", "HEAD")
+
+    assert "a.py" in changed  # worktree diff still contributes
+    assert deleted == []
 
 
-def test_list_changed_files_handles_non_ascii_filename(tmp_path: Path) -> None:
+def test_list_changed_and_deleted_handles_non_ascii_filename(tmp_path: Path) -> None:
     """``-z`` returns the raw path, so a non-ASCII name is not git-quoted and
     round-trips as a real filesystem path."""
     _init_repo(tmp_path)
@@ -87,62 +109,10 @@ def test_list_changed_files_handles_non_ascii_filename(tmp_path: Path) -> None:
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "change")
 
-    changed = list_changed_files(tmp_path, "development", "HEAD")
+    changed, _deleted = list_changed_and_deleted(tmp_path, "development", "HEAD")
 
     assert changed == ["café.py"]  # not '"caf\\303\\251.py"'
     assert read_files_as_dict(tmp_path, changed) == {"café.py": "x = 2\n"}
-
-
-# ---------------------------------------------------------------------------
-# list_uncommitted_files / list_deleted_files
-# ---------------------------------------------------------------------------
-
-
-def test_list_uncommitted_files_tracked_only(tmp_path: Path) -> None:
-    """Tracked modifications are returned; untracked leftovers and deletions are not."""
-    _init_repo(tmp_path)
-    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
-    (tmp_path / "b.py").write_text("y = 1\n", encoding="utf-8")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-m", "base")
-
-    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")  # modified (unstaged)
-    (tmp_path / "artifact.log").write_text("noise\n", encoding="utf-8")  # untracked leftover
-    (tmp_path / "b.py").unlink()  # deleted
-
-    changed = list_uncommitted_files(tmp_path)
-
-    assert "a.py" in changed
-    assert "artifact.log" not in changed  # untracked leftover excluded
-    assert "b.py" not in changed  # deletion excluded
-
-
-def test_list_uncommitted_files_non_repo_returns_empty(tmp_path: Path) -> None:
-    assert list_uncommitted_files(tmp_path) == []
-
-
-def test_list_deleted_files_committed_and_worktree(tmp_path: Path) -> None:
-    _init_repo(tmp_path)
-    (tmp_path / "keep.py").write_text("k = 1\n", encoding="utf-8")
-    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
-    (tmp_path / "wt.py").write_text("w = 1\n", encoding="utf-8")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-m", "base")
-    _git(tmp_path, "branch", "-M", "development")
-    _git(tmp_path, "checkout", "-b", "feature/x")
-    (tmp_path / "gone.py").unlink()  # committed deletion
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-m", "remove gone")
-    (tmp_path / "wt.py").unlink()  # uncommitted worktree deletion
-
-    deleted = list_deleted_files(tmp_path, "development", "HEAD")
-
-    assert set(deleted) == {"gone.py", "wt.py"}
-    assert "keep.py" not in deleted
-
-
-def test_list_deleted_files_non_repo_returns_empty(tmp_path: Path) -> None:
-    assert list_deleted_files(tmp_path, "development", "HEAD") == []
 
 
 # ---------------------------------------------------------------------------
@@ -203,6 +173,29 @@ def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
     result = read_files_as_dict(tmp_path, ["a.py", "img.png"])
 
     assert result == {"a.py": "A"}  # binary asset skipped
+
+
+def test_read_files_as_dict_skips_binary_with_late_nul(tmp_path: Path) -> None:
+    """A binary whose first 8 KiB is NUL-free is still detected (whole-file scan)."""
+    (tmp_path / "big.bin").write_bytes(b"A" * 9000 + b"\x00" + b"B" * 100)
+
+    result = read_files_as_dict(tmp_path, ["big.bin"])
+
+    assert result == {}  # NUL past the first 8 KiB still flags it as binary
+
+
+def test_read_files_as_dict_sanitizes_surrogate_key(tmp_path: Path) -> None:
+    """A non-UTF-8 filename (read via surrogateescape) yields an encodable key, so
+    downstream UTF-8/JSON serialization cannot crash; content is still read."""
+    name = "caf\udcff.py"  # lone surrogate, as surrogateescape produces for 0xFF
+    (tmp_path / name).write_text("X = 1\n", encoding="utf-8")
+
+    result = read_files_as_dict(tmp_path, [name])
+
+    assert list(result.values()) == ["X = 1\n"]  # content read from disk
+    (key,) = result
+    key.encode("utf-8")  # must not raise (no lone surrogates)
+    assert "\udcff" not in key
 
 
 def test_read_files_as_dict_skips_missing_preserves_legacy_text(tmp_path: Path) -> None:
@@ -644,3 +637,64 @@ def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
     assert files is None
     assert code is not None
     assert "main.py" in code
+
+
+# ---------------------------------------------------------------------------
+# _writer_output_keys / _format_deletion_note / build_code_review_input
+# ---------------------------------------------------------------------------
+
+
+def test_writer_output_keys_includes_synthesized_gitignore() -> None:
+    """When the output declares gitignore_entries, the synthesized root
+    .gitignore (added after the base mapping) is in the reviewed key set."""
+    from software_engineering_team.backend_agent.agent import _writer_output_keys
+
+    out = SimpleNamespace(files={"app/main.py": "x = 1"}, gitignore_entries=["*.log"])
+    keys = _writer_output_keys(out)
+
+    assert "app/main.py" in keys
+    assert ".gitignore" in keys  # synthesized path widened into review
+
+
+def test_writer_output_keys_no_gitignore_without_entries() -> None:
+    from software_engineering_team.backend_agent.agent import _writer_output_keys
+
+    out = SimpleNamespace(files={"app/main.py": "x = 1"}, gitignore_entries=[])
+    keys = _writer_output_keys(out)
+
+    assert "app/main.py" in keys
+    assert ".gitignore" not in keys
+
+
+def test_writer_output_keys_none() -> None:
+    from software_engineering_team.backend_agent.agent import _writer_output_keys
+
+    assert _writer_output_keys(None) is None
+
+
+def test_format_deletion_note_sanitizes_surrogate_path() -> None:
+    """A deleted path with a lone surrogate is rendered encodable (no crash on
+    UTF-8/JSON serialization of the review payload)."""
+    from software_engineering_team.backend_agent.agent import _format_deletion_note
+
+    note = _format_deletion_note(["caf\udcff.py"])
+
+    note.encode("utf-8")  # must not raise
+    assert "caf" in note
+    assert "\udcff" not in note
+
+
+def test_build_code_review_input_prefers_files() -> None:
+    from code_review_agent.models import build_code_review_input
+
+    inp = build_code_review_input(files={"a.py": "x"}, code="ignored", task_description="t")
+    assert inp.files == {"a.py": "x"}
+    assert inp.code == "ignored"  # forwarded but the model ignores it when files is set
+
+
+def test_build_code_review_input_code_only() -> None:
+    from code_review_agent.models import build_code_review_input
+
+    inp = build_code_review_input(code="### a.py ###\nx", task_description="t")
+    assert inp.files is None
+    assert inp.code == "### a.py ###\nx"

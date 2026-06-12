@@ -117,14 +117,16 @@ def run_code_review(
     """
     try:
         from code_review_agent import CodeReviewAgent
-        from code_review_agent.models import CodeReviewInput
+        from code_review_agent.models import build_code_review_input
 
         llm = llm_getter("code_review")
         agent = CodeReviewAgent(llm)
 
         # No pre-truncation: the coordinator bounds its own per-call prompts,
         # and its full-coverage guarantee only holds when it sees all the code.
-        input_kwargs: Dict[str, Any] = dict(
+        review_input = build_code_review_input(
+            files=files,
+            code=None if files is not None else code,
             spec_content=spec_content,
             task_description=task_description,
             task_requirements=task_requirements or [],
@@ -133,11 +135,6 @@ def run_code_review(
             architecture=architecture,
             existing_codebase=existing_codebase,
         )
-        if files is not None:
-            input_kwargs["files"] = files
-        else:
-            input_kwargs["code"] = code
-        review_input = CodeReviewInput(**input_kwargs)
         result = agent.run(review_input, progress_callback=progress_callback)
         issues = []
         for i in result.issues or []:
