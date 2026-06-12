@@ -62,7 +62,7 @@ class MyStrategy(Strategy):
         # ── COMPUTE SIGNALS ───────────────────────────────
         # Read each spec indicator via ``ctx.indicator(name, **params)``.
         # Guard for ``None`` (warm-up) before comparing.
-        # <FILL IN per the spec's entry/exit rules>
+        # <FILL IN per the spec's entry rules>
 
         position = ctx.position(bar.symbol)
 
@@ -72,9 +72,12 @@ class MyStrategy(Strategy):
             pass
 
         # ── EXIT ──────────────────────────────────────────
-        else:
-            # <FILL IN exit decision per spec.exit_rules>
-            pass
+        # Exits are engine-owned: the engine enforces every
+        # spec.exit_rules entry (stop-loss, take-profit, signal-exit) and
+        # stamps engine_exit:<kind> on the close. Do NOT submit a closing
+        # order for a spec-declared exit — a manual close fills first,
+        # strips that attribution, and fails the trade-alignment gate.
+        # on_bar submits entries only.
 
     def on_fill(self, ctx, fill):
         """Optional — observe fills the engine produces."""
@@ -118,7 +121,7 @@ ctx.submit_order(
 )
 ```
 
-- **Closing a position**: submit an order with `side` *opposite* the open position's `side` and `qty == position.qty`.
+- **Exits are engine-owned**: do NOT submit a closing order (opposite `side`, `qty == position.qty`) for any stop-loss / take-profit / signal-exit declared in `spec.exit_rules`. The engine enforces those rules and stamps `engine_exit:<kind>` attribution; a manual close fills first, strips that attribution, and fails the trade-alignment gate.
 - **Sizing**: compute `qty` yourself from `ctx.equity * pct / bar.close`. The engine's risk gates can still reject an oversize entry.
 
 ## Reading indicators — use `ctx.indicator(...)`
@@ -173,13 +176,19 @@ Do NOT import: `pandas`, `numpy`, `os`, `sys`, `subprocess`, `socket`, `http`, `
 
 Do NOT use: `exec()`, `eval()`, `compile()`, `__import__()`, `open()`, `setattr()`, `delattr()`.
 
-## Forbidden exit patterns
+## Exits are engine-owned
 
-Do NOT implement bar-counting "time stop" exits. Variables like
-`bars_held`, `hold_count`, `days_held`, or any `if counter >= N:
-close_position()` pattern are forbidden. The engine will reject them.
-Exits must be based on price (stop-loss), P&L (take-profit), or signal
-reversal (signal_exit) only.
+The engine enforces every exit in `spec.exit_rules` — stop-loss,
+take-profit, and signal-exit — and stamps `engine_exit:<kind>` on the
+close. Do NOT author any position-closing order for a spec-declared
+exit: a manual close fills ahead of the engine, strips that
+attribution, and fails the trade-alignment gate. Your `on_bar` submits
+**entries only**.
+
+For the same reason, do NOT implement bar-counting "time stop" exits.
+Variables like `bars_held`, `hold_count`, `days_held`, or any
+`if counter >= N: close_position()` pattern are forbidden and rejected
+by the conformance gate.
 
 ## Code quality requirements
 

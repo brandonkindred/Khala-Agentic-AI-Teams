@@ -340,6 +340,43 @@ class TestSignalExitDrift:
         assert len(criticals) >= 1, "Should detect missing signal exit"
         assert "false negative" in criticals[0].details.lower()
 
+    def test_engine_owned_signal_exit_skipped_when_covered(self):
+        """Entries-only custom code is conformant when ``spec.exit_rules``
+        cover the entered side: the ``SignalExitRule`` is engine-owned, so
+        its fixture is skipped and the absent manual close is not a false
+        negative.
+
+        Without the engine-coverage skip this same drift (enter, never exit)
+        would raise a false-negative critical — see
+        ``test_missing_signal_exit_detected``, which uses an entry-less spec
+        so coverage does not apply.
+        """
+        code = textwrap.dedent("""\
+            class MyStrategy:
+                UNIVERSE = frozenset({"TEST"})
+                def on_bar(self, ctx, bar):
+                    if ctx.is_warmup:
+                        return
+                    if bar.symbol not in self.UNIVERSE:
+                        return
+                    position = ctx.position(bar.symbol)
+                    if position is None and bar.close > 50:
+                        ctx.submit_order(symbol=bar.symbol, side="buy", qty=1.0)
+                    # No manual exit: the engine owns the SignalExitRule.
+        """)
+        gate = PredicateConformanceGate()
+        spec = _spec(
+            entry_rules=[EntryRule(when=Predicate(lhs="bar.close", op=">", rhs=50.0), side="long")],
+            exit_rules=[SignalExitRule(when=Predicate(lhs="bar.close", op=">", rhs=110.0))],
+        )
+        results = gate.check(code, spec)
+        criticals = [r for r in results if not r.passed and r.severity == "critical"]
+        assert criticals == [], criticals
+        # The signal-exit fixture was skipped (engine-owned); only the entry
+        # fixture ran.
+        assert not any(r.rule_id and "signal_exit" in r.rule_id for r in results)
+        assert any(r.rule_id and r.rule_id.startswith("entry") for r in results)
+
 
 class TestEnumSideHandling:
     def test_strategy_using_orderside_enum(self):

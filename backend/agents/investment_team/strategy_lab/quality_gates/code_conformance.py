@@ -49,6 +49,7 @@ from ..spec_dsl import (
     SignalExitRule,
     Source,
 )
+from .code_safety import _engine_exits_cover_sides
 from .code_safety_ast import (
     _find_strategy_subclasses,
     _get_call_name,
@@ -106,14 +107,26 @@ def _indicators_in_predicate(p: Predicate) -> set[str]:
 
 
 def _collect_required_indicators(spec: Any) -> set[str]:
-    """Return the union of indicator names referenced by every rule in ``spec``."""
+    """Indicator names the generated code must read at runtime.
+
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: returns the union of indicator names the code is required to
+    compute. Entry-rule indicators are always included — entries are
+    authored inline on both the compiled and custom-code paths.
+    ``SignalExitRule`` indicators are included only for the compiled path:
+    on the custom-code path exits are engine-owned (the engine computes
+    their indicators via ``_EngineExitDispatcher`` and the strategy
+    authors no exit branch), so requiring the code to read an exit-only
+    indicator would contradict the engine-owned-exits contract.
+    """
     refs: set[str] = set()
     for rule in getattr(spec, "entry_rules", []) or []:
         if isinstance(rule, EntryRule):
             refs |= _indicators_in_predicate(rule.when)
-    for rule in getattr(spec, "exit_rules", []) or []:
-        if isinstance(rule, SignalExitRule):
-            refs |= _indicators_in_predicate(rule.when)
+    if not getattr(spec, "requires_custom_code", False):
+        for rule in getattr(spec, "exit_rules", []) or []:
+            if isinstance(rule, SignalExitRule):
+                refs |= _indicators_in_predicate(rule.when)
     return refs
 
 
@@ -618,9 +631,7 @@ class _ConformanceCtx:
 
     @cached_property
     def submit_branches(self) -> List[tuple[ast.If, List[ast.Call]]]:
-        return _find_if_branches_with_submit_order(
-            self.cls, reachable_method_names=self.reachable
-        )
+        return _find_if_branches_with_submit_order(self.cls, reachable_method_names=self.reachable)
 
 
 class CodeConformanceGate(GateResultsMixin):
@@ -677,6 +688,7 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_symbol_gate(cctx))
             results.extend(self._check_entry_coverage(cctx))
             results.extend(self._check_signal_exit_coverage(cctx))
+            results.extend(self._check_no_duplicate_engine_exit(cctx))
             results.extend(self._check_bar_counting_exit(cctx))
             results.extend(self._check_sizing_math(cctx))
             results.extend(self._check_no_extra_side_effects(tree, cctx))
@@ -807,61 +819,128 @@ class CodeConformanceGate(GateResultsMixin):
         return ()
 
     # ------------------------------------------------------------------
-    # Check 4 — signal-exit predicate coverage
+    # Check 4 — signal-exit rules are engine-owned
     # ------------------------------------------------------------------
     def _check_signal_exit_coverage(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        """Signal exits are enforced engine-side for every strategy.
+
+        Pre: ``cctx`` is a built context; ``cctx.spec`` is a
+        ``StrategySpec`` or ``None``.
+        Post: returns ``()`` when the spec declares no ``SignalExitRule``;
+        otherwise a single ``info`` result. The engine evaluates every
+        ``SignalExitRule`` via ``_EngineExitDispatcher`` (with streaming
+        history views) for both the compiled and the custom-code path, so
+        an inline ``submit_order`` exit branch is never required.
+        Invariant: emits no critical. The requirement direction is retired
+        (the engine owns the exit); the prohibition direction — forbidding
+        a manual close that duplicates an engine-owned exit — is owned by
+        :meth:`_check_no_duplicate_engine_exit`.
+        """
         spec = cctx.spec
         signal_exits = [
             r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
         ]
         if not signal_exits:
             return ()
+        return (
+            self._info(
+                f"Spec declares {len(signal_exits)} signal-exit rule(s); the "
+                "engine enforces every spec.exit_rules entry via "
+                "_EngineExitDispatcher and stamps engine_exit:<kind> "
+                "attribution — no inline submit_order exit branch is required "
+                "(the strategy authors entries only)."
+            ),
+        )
 
-        if _is_engine_managed(spec):
-            return (
-                self._info(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s); "
-                    "signal exits are engine-managed via _EngineExitDispatcher "
-                    "— no inline submit_order exit branches required."
-                ),
-            )
+    # ------------------------------------------------------------------
+    # Check 4b — no manual close duplicating an engine-owned exit
+    # ------------------------------------------------------------------
+    def _check_no_duplicate_engine_exit(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        """Forbid custom code from closing positions the engine already owns.
 
-        exit_branches = [
-            (if_node, calls)
-            for if_node, calls in cctx.submit_branches
-            if any(
-                _submit_order_closes_position(c) or _submit_order_is_kwargs_spread(c) for c in calls
-            )
-        ]
-        if not exit_branches:
-            return (
-                self._critical(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s) "
-                    "but no if/elif branch reachable from on_bar contains a "
-                    "ctx.submit_order(..., qty=position.qty) close call."
-                ),
-            )
+        The engine enforces ``spec.exit_rules`` on the custom-code path too
+        (the backtest mode passes the spec's exit rules to the engine
+        unconditionally). A strategy-submitted close fills ahead of the
+        engine's close and overwrites the ``engine_exit:<kind>``
+        attribution the trade-alignment gate depends on — so when the
+        engine fully covers the entered sides, a manual close is a critical
+        conformance violation.
 
-        if len(exit_branches) < len(signal_exits):
-            return (
-                self._critical(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s) "
-                    f"but only {len(exit_branches)} exit branch(es) were found "
-                    "reachable from on_bar."
-                ),
-            )
-        return ()
+        Pre: ``cctx`` is a built context; ``cctx.spec`` is a
+        ``StrategySpec`` or ``None``.
+        Post: returns ``()`` for the compiled path
+        (``requires_custom_code`` false — it submits no orders), for a spec
+        with no exit rules, for a spec whose exit rules do not cover every
+        entered side (a manual close may then be legitimate), or when no
+        ``on_bar``-reachable ``submit_order`` closes a position. Otherwise
+        returns a single critical naming the count of manual closes to
+        remove.
+        Invariant: never fires on the compiled path; only forbids closes
+        the engine demonstrably owns (coverage-gated via
+        :func:`_engine_exits_cover_sides`).
+        """
+        spec = cctx.spec
+        if not getattr(spec, "requires_custom_code", False):
+            return ()
+        exit_rules = getattr(spec, "exit_rules", None) or []
+        if not exit_rules:
+            return ()
+        # Entered sides come from the spec (the authoritative, validated
+        # source) rather than the AST: a dynamic ``side=`` expression would
+        # leave an AST-derived side set empty and silently disable the check.
+        sides = {
+            r.side for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, EntryRule)
+        }
+        if not sides or not _engine_exits_cover_sides(spec, sides):
+            return ()
+
+        seen: set[int] = set()
+        n_closes = 0
+        for _if_node, calls in cctx.submit_branches:
+            for call in calls:
+                if id(call) in seen:
+                    continue
+                if _submit_order_closes_position(call):
+                    seen.add(id(call))
+                    n_closes += 1
+        if n_closes == 0:
+            return ()
+        return (
+            self._critical(
+                f"Custom-code strategy submits {n_closes} manual "
+                "position-closing order(s) (ctx.submit_order(..., "
+                "qty=position.qty)), but the engine already enforces every "
+                "spec.exit_rules entry (stop_loss / take_profit / signal_exit) "
+                "and stamps engine_exit:<kind> attribution. A manual close "
+                "fills first and overwrites that attribution, breaking exit "
+                "alignment. Remove the close branch(es) and let the engine own "
+                "spec.exit_rules — author entry logic only."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Check 5 — bar-counting exit rejection
     # ------------------------------------------------------------------
 
-    _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset({
-        "bars_held", "hold_count", "days_held", "bars_in_trade",
-        "held_bars", "bar_count", "hold_period", "bars_since_entry",
-        "hold_bars", "n_bars_held", "num_bars_held", "time_in_trade",
-        "holding_period", "exit_countdown", "bar_counter",
-    })
+    _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset(
+        {
+            "bars_held",
+            "hold_count",
+            "days_held",
+            "bars_in_trade",
+            "held_bars",
+            "bar_count",
+            "hold_period",
+            "bars_since_entry",
+            "hold_bars",
+            "n_bars_held",
+            "num_bars_held",
+            "time_in_trade",
+            "holding_period",
+            "exit_countdown",
+            "bar_counter",
+        }
+    )
 
     def _check_bar_counting_exit(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
         violations: list[str] = []

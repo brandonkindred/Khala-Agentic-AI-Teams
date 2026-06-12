@@ -346,9 +346,50 @@ def test_signal_exit_coverage_passes_with_position_qty_close() -> None:
     assert not any("signal-exit" in d.lower() for d in _critical_details(results))
 
 
-def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
-    # Spec declares a signal-exit but the code only closes via stop-loss.
-    # Uses requires_custom_code=True so the gate applies.
+def test_signal_exit_engine_owned_no_branch_required_for_custom_code() -> None:
+    # Engine-owned-exits contract: custom code authors entries only; the
+    # engine enforces every SignalExitRule. Entries-only code that declares
+    # a signal exit must NOT raise any critical — and it need not read the
+    # exit-only indicator (rsi), which the engine computes itself.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[_rsi_signal_exit(), StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert crits == [], crits
+
+
+# ---------------------------------------------------------------------------
+# Check 4b: no manual close duplicating an engine-owned exit
+# ---------------------------------------------------------------------------
+
+
+def test_no_duplicate_engine_exit_fires_on_manual_close() -> None:
+    # Custom-code strategy whose engine-handled exits cover the long entry
+    # side, yet it still submits a manual qty=pos.qty close. The engine
+    # owns that exit, so the manual close is a critical.
     code = textwrap.dedent(
         """
         from contract import Strategy
@@ -367,8 +408,8 @@ def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
                 qty = max(1, int(ctx.equity * 0.02 / bar.close))
                 if pos is None and fast > slow:
                     ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
-                elif pos is not None and bar.close < pos.entry_price * 0.95:
-                    ctx.submit_order(symbol=bar.symbol, qty=1, side="SHORT")
+                elif pos is not None and r > 70:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
         """
     )
     spec = _spec(
@@ -379,7 +420,52 @@ def test_signal_exit_coverage_fails_when_no_position_qty_close() -> None:
     spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
-    assert any("signal-exit" in c.lower() for c in crits), crits
+    assert any("manual position-closing order" in c.lower() for c in crits), crits
+
+
+def test_no_duplicate_engine_exit_silent_for_compiled_path() -> None:
+    # requires_custom_code defaults to False: the compiled path submits no
+    # orders in production, so the duplicate-exit check must never fire even
+    # when the (compiled-style) fixture code contains a qty=pos.qty close.
+    results = CodeConformanceGate().check(_HAPPY_CODE, _happy_spec())
+    crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
+
+
+def test_no_duplicate_engine_exit_silent_when_exits_dont_cover_sides() -> None:
+    # Long entry but the only exit rule (trailing_low stop) covers short
+    # only, so the engine does not own the long exit — a manual close is
+    # legitimate and must not be flagged.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and fast < slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[StopLossRule(pct=0.05, basis="trailing_low")],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
 
 
 # ---------------------------------------------------------------------------
@@ -820,10 +906,11 @@ def test_entry_coverage_accepts_kwargs_spread_submit() -> None:
     assert not any("entry rule" in c.lower() for c in crits), crits
 
 
-def test_signal_exit_coverage_accepts_kwargs_spread_submit() -> None:
-    """Codex P2: ``ctx.submit_order(**close_kwargs)`` may dynamically
-    carry ``qty=position.qty`` — the gate must treat the spread as a
-    plausible close."""
+def test_duplicate_exit_check_ignores_kwargs_spread_close() -> None:
+    """The duplicate-exit check matches only the literal
+    ``ctx.submit_order(..., qty=position.qty)`` shape; a
+    ``ctx.submit_order(**close_kwargs)`` spread is deliberately not flagged
+    (conservative — avoids false positives on dynamically-built kwargs)."""
     code = textwrap.dedent(
         """
         from contract import Strategy
@@ -852,8 +939,10 @@ def test_signal_exit_coverage_accepts_kwargs_spread_submit() -> None:
         exit_rules=[_rsi_signal_exit()],
         target_symbols=["QQQ"],
     )
+    spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
     assert not any("signal-exit" in c.lower() for c in crits), crits
 
 
