@@ -278,6 +278,43 @@ def test_answers_dead_thread_adds_resume_hint_when_unresumable(monkeypatch):
     assert "Resume" in calls["status_text"]
 
 
+def test_answers_dead_thread_claim_store_error_falls_back_to_hint(monkeypatch):
+    """A job-store transport error while claiming the resume must not 500 after answers were stored:
+    _try_auto_resume honours its 'never raises' contract by swallowing the store error and returning
+    False, so the endpoint completes 200 with the manual-resume hint."""
+    calls = {}
+    monkeypatch.setattr(api, "get_job", lambda jid: _job())
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, answers: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+
+    def boom(jid):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(api, "claim_resume", boom)
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert "Resume" in calls["status_text"]
+
+
+def test_resume_500_when_claim_store_errors(monkeypatch):
+    """A job-store transport error during the resume claim surfaces as a controlled 500 — not a bare
+    propagation, and not a misleading 'already running' (no claim was actually taken)."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(status="waiting_for_user"))
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+
+    def boom(jid):
+        raise RuntimeError("store down")
+
+    monkeypatch.setattr(api, "claim_resume", boom)
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 500
+    assert "job-store error" in r.json()["detail"]
+
+
 def test_answers_dead_thread_claim_lost_counts_as_resuming(monkeypatch):
     """A lost thread claim means someone else is starting the orchestrator — not a failure."""
     calls = {}

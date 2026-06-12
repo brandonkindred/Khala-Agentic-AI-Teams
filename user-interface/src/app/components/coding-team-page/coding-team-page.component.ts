@@ -95,6 +95,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.restoreSub = null;
   }
 
+  /**
+   * Load the configured GitHub integration (enabled flag, token, owner/repo) and gate the page on
+   * it. On success, marks the page configured only when all of enabled/token/owner/repo are present
+   * and — once the owner/repo is known — kicks off the first issue load; on error, leaves the page
+   * in the unconfigured state. Sets `loadingConfig` for the duration.
+   */
   checkGitHubConfig(): void {
     this.loadingConfig = true;
     this.integrationsApi.getGitHubConfig().subscribe({
@@ -117,6 +123,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Refresh the open-issue list and the active-jobs snapshot together so they never drift. Resets
+   * the selection/pagination, re-syncs the "In progress" chips (adopting an in-flight job if none
+   * is shown) via `restoreActiveJob`, then fetches issues. Sets `issueError` on failure.
+   */
   loadIssues(): void {
     this.loadingIssues = true;
     this.issueError = null;
@@ -149,6 +160,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.pageSize = event.pageSize;
   }
 
+  /** Select an issue, surfacing the run-confirmation affordance for it. */
   selectIssue(issue: GitHubIssueItem): void {
     this.selectedIssue = issue;
   }
@@ -182,6 +194,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       : `Depends on ${this.allDepRefs(issue)} (all complete)`;
   }
 
+  /**
+   * Start a coding-team run for the selected issue. No-op when nothing is selected. On success,
+   * adopts the returned job as the active panel, marks its issue in progress, clears the selection,
+   * and begins polling its status; on error, surfaces `issueError`. Toggles `runningIssue`.
+   */
   confirmAndRun(): void {
     if (!this.selectedIssue) return;
     this.runningIssue = true;
@@ -222,12 +239,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const owner = this.githubOwner.toLowerCase();
     const repo = this.githubRepo.toLowerCase();
     this.restoreSub?.unsubscribe();
-    this.restoreSub = this.api.listJobs().subscribe({
+    this.restoreSub = this.api.listJobs(true).subscribe({
       next: (jobs) => {
-        // listJobs() already filters to active jobs server-side; the terminal check is
-        // a defensive belt — the backend's non-terminal status set and this client's
-        // terminal list are maintained independently, and adopting a finished job would
-        // pin a dead panel on screen if they ever drift.
+        // listJobs(true) requests ?active=true so terminal jobs' full records never cross the
+        // wire; the terminal check below is a defensive belt — the backend's non-terminal status
+        // set and this client's terminal list are maintained independently, and adopting a
+        // finished job would pin a dead panel on screen if they ever drift.
         const candidates = jobs.filter(
           (j) =>
             !isCodingTeamTerminalStatus(j.status) &&
@@ -324,6 +341,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return isCodingTeamTerminalStatus(this.jobStatus?.status);
   }
 
+  /**
+   * Dismiss the displayed job panel. Records the job id so it is never auto-re-adopted; drops its
+   * issue chip only when the job is terminal (a still-running job the user merely hides keeps its
+   * chip). Stops polling, clears the panel, then re-syncs chips and surfaces any other in-flight
+   * job for this repo via `restoreActiveJob`.
+   */
   dismissJob(): void {
     if (this.activeJob) {
       // Never auto-re-adopt a job the user explicitly dismissed.

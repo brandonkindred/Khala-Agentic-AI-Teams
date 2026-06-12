@@ -435,6 +435,8 @@ describe('CodingTeamPageComponent', () => {
     it('re-attaches to a non-terminal GitHub-issue job on init', async () => {
       apiSpy.listJobs.mockReturnValue(of([GH_JOB]));
       await setup();
+      // Must request active-only so terminal jobs' full records never cross the wire.
+      expect(apiSpy.listJobs).toHaveBeenCalledWith(true);
       expect(component.activeJob?.job_id).toBe('j-restore');
       expect(component.activeJob?.issue_number).toBe(2);
       expect(component.activeJob?.issue_url).toBe('https://example.com/2');

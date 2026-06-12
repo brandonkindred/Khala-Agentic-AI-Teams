@@ -464,7 +464,11 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
     # batch would pass validation while every conflicting entry is still persisted — letting the
     # orchestrator proceed with contradictory decisions for one required question.
     answered_id_list = [a.question_id for a in request.answers]
-    duplicate_ids = sorted({qid for qid in answered_id_list if answered_id_list.count(qid) > 1})
+    seen: set[str] = set()
+    dupes: set[str] = set()
+    for qid in answered_id_list:
+        (dupes if qid in seen else seen).add(qid)
+    duplicate_ids = sorted(dupes)
     if duplicate_ids:
         raise HTTPException(
             status_code=400,
@@ -759,8 +763,16 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         return False
     # Cross-worker claim FIRST: the process-local _claim_run_thread cannot stop a different worker
     # process from also spawning. The shared-store claim is the authoritative gate; only the worker
-    # that wins it proceeds to the local claim and spawn.
-    if not claim_resume(job_id):
+    # that wins it proceeds to the local claim and spawn. claim_resume() is the one job-store
+    # read-modify-write here and may raise on a transport error; this function promises "Never
+    # raises", so degrade a store failure to a False (manual-resume hint) rather than letting it
+    # escape into submit_pending_answers after the answers were already stored.
+    try:
+        claimed = claim_resume(job_id)
+    except Exception:
+        logger.exception("Auto-resume for job %s skipped: resume-claim store error.", job_id)
+        return False
+    if not claimed:
         logger.info(
             "Auto-resume for job %s skipped: another worker holds the resume claim.", job_id
         )
@@ -901,8 +913,17 @@ def resume_job(job_id: str) -> RunResponse:
 
     # Cross-worker claim FIRST (shared store), then the process-local claim: together they stop two
     # concurrent resume requests — in the same OR different worker processes — from both spawning an
-    # orchestrator for this job.
-    if not claim_resume(job_id):
+    # orchestrator for this job. A store transport error here must surface as a controlled 500: a
+    # bare propagation 500s opaquely, and swallowing it to False would falsely report "already
+    # running" when no claim was actually taken.
+    try:
+        claimed = claim_resume(job_id)
+    except Exception as e:
+        logger.exception("Resume for job %s: resume-claim store error.", job_id)
+        raise HTTPException(
+            status_code=500, detail="Failed to acquire the resume claim due to a job-store error."
+        ) from e
+    if not claimed:
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
@@ -964,6 +985,11 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
 
     Owner/repo compare case-insensitively — GitHub treats them as case-insensitive, so two
     casings of the same repository are the same repository here too.
+
+    Performance: this is an O(active-jobs) linear scan over the non-terminal set on each
+    run-from-issue request. That set is small in practice (a handful of concurrent runs), so the
+    scan is acceptable; if active-job volume ever grows materially, add an owner/repo/issue filter
+    to ``list_jobs`` (or an in-memory index) rather than scanning here.
     """
     for j in list_jobs(running_only=True):
         ctx = (j or {}).get("github_context") or {}
