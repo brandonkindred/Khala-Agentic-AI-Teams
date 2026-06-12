@@ -35,7 +35,7 @@ Focus your energy on issues that would cause production incidents, data loss, or
    - Angular: kebab-case for components (e.g., `task-list/`, `user-profile/`)
    - Vue: PascalCase or kebab-case for components
    - Python: snake_case for modules/functions, PascalCase for classes
-   - Names must be short (1-3 words), descriptive, and NOT derived from task descriptions
+   - Names must be concise yet descriptive, and NOT derived from task descriptions. There is NO fixed word limit -- judge a name by whether it clearly and accurately conveys what the thing IS or DOES, not by counting words. Do NOT flag a name solely for exceeding some word count
    - CRITICAL: Reject any component/file name that looks like a task description or sentence
 
 3. **File Structure** - Does the code follow proper project structure?
