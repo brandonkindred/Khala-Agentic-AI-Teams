@@ -180,6 +180,9 @@ export class PendingQuestionsComponent implements OnChanges {
     const answer = this.answers.get(questionId);
     if (answer) {
       answer.otherText = text;
+      // Reassign the Map so derived bindings (isQuestionAnswered → child [isAnswered],
+      // submit-gate) re-evaluate, matching onQuestionOptionToggled's reference update.
+      this.answers = new Map(this.answers);
     }
   }
 

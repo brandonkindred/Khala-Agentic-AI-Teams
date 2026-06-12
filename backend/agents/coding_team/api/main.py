@@ -570,8 +570,10 @@ def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlan
     """
 
     def run() -> None:
-        _register_run_thread(job_id)
         try:
+            # Registration is inside the try so the finally always releases the claim — even if
+            # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
+            _register_run_thread(job_id)
             run_coding_team_orchestrator(
                 job_id,
                 repo_path,
@@ -630,8 +632,10 @@ def _start_github_resume_thread(
     )
 
     def run() -> None:
-        _register_run_thread(job_id)
         try:
+            # Registration is inside the try so the finally always releases the claim — even if
+            # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
+            _register_run_thread(job_id)
             with GitHubClient(token=token) as client:
                 issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
             _run_with_github_hooks(job_id, request, plan, issue, token)

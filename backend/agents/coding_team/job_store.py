@@ -242,5 +242,16 @@ def release_resume_claim(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR)
 
     Leaves ``resume_claim_seq`` untouched — it is monotonic; clearing only the stamp makes the job
     immediately re-claimable without resetting the compare-and-set version.
+
+    Best-effort and never raises: a job-store transport error while clearing the stamp is logged and
+    swallowed, not propagated. Release is cleanup, not a result — if it fails, the lease simply
+    self-heals when its TTL expires. Crucially, callers rely on this: ``_try_auto_resume`` documents
+    "never raises", and ``resume_job`` calls this inside an ``except`` block that re-raises the
+    original error — a release failure must never mask either.
     """
-    _client(cache_dir).update_job(job_id, heartbeat=False, **{_RESUME_CLAIM_AT_FIELD: None})
+    try:
+        _client(cache_dir).update_job(job_id, heartbeat=False, **{_RESUME_CLAIM_AT_FIELD: None})
+    except Exception:
+        logger.exception(
+            "release_resume_claim failed for job %s; the lease will expire via its TTL.", job_id
+        )

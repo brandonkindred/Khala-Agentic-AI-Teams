@@ -245,6 +245,29 @@ class _SyncThread:
         self._target()
 
 
+def test_start_orchestrator_thread_clears_claim_if_registration_fails(monkeypatch):
+    """_register_run_thread sits inside the run() try: if it raises, the finally must still release
+    the run-thread claim and the job must be marked failed — otherwise the claim wedges in
+    _starting_run_jobs and no future resume in this worker can proceed."""
+    cleared: list[str] = []
+    updates: list[dict] = []
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: updates.append(kw))
+    monkeypatch.setattr(api, "_clear_run_thread", lambda jid: cleared.append(jid))
+
+    def boom(jid):
+        raise RuntimeError("registry broken")
+
+    monkeypatch.setattr(api, "_register_run_thread", boom)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    plan = api.CodingTeamPlanInput.model_validate({"repo_path": "/tmp/repo"})
+
+    # Must not raise out of the spawn helper.
+    api._start_orchestrator_thread("j1", "/tmp/repo", plan)
+
+    assert cleared == ["j1"]  # finally ran despite the registration failure
+    assert any(u.get("status") == "failed" for u in updates)
+
+
 def test_answers_dead_thread_auto_resumes(monkeypatch):
     calls = {}
     started = {}

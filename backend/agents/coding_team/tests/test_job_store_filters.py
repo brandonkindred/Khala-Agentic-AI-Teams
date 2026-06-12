@@ -102,6 +102,20 @@ def test_release_clears_stamp_so_a_later_caller_can_win(monkeypatch):
     assert job_store.claim_resume("j1") is True  # now re-claimable
 
 
+def test_release_swallows_store_transport_error(monkeypatch):
+    """Release is best-effort cleanup: a job-store transport error must be swallowed, not raised —
+    callers promise 'never raises' or call it from an except block re-raising a prior error, and the
+    lease self-heals via its TTL anyway."""
+
+    class _BoomClient:
+        def update_job(self, *a, **k):
+            raise RuntimeError("store down")
+
+    monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: _BoomClient())
+    # Must not raise.
+    assert job_store.release_resume_claim("j1") is None
+
+
 def test_concurrent_claim_only_one_wins(monkeypatch):
     """Two callers that both read the same prior seq before either writes: only the one whose
     increment yields prior+1 wins (optimistic compare-and-set)."""
