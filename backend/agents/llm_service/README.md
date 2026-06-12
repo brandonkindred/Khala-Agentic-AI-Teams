@@ -34,8 +34,11 @@ completion, retry, and error lines of a single call together.
   `complete_validated`). Pass a short phrase describing the purpose.
 - **`request_id`** is generated per call and printed as `rid=` on the request,
   completion, retry, and error log lines.
-- **`team`** (and an outer `objective`) can be set once by an orchestrator with
-  the `llm_attribution` context manager; nested calls inherit it.
+- **`team`** is auto-derived from the calling code's source path (the
+  `backend/agents/<team>/` directory that owns the frame), so it is populated for
+  every call without per-team wiring. An orchestrator may still set it explicitly
+  via `llm_attribution(team=...)` to override the derived value (e.g. to use a
+  canonical slug); an explicit value always wins.
 
 ```python
 from llm_service import llm_attribution, get_client

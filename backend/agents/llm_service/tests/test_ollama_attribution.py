@@ -5,7 +5,33 @@ import threading
 
 import llm_service.clients.ollama as ollama_mod
 from llm_service.attribution import bind_request_id, llm_attribution
-from llm_service.clients.ollama import OllamaLLMClient
+from llm_service.clients.ollama import OllamaLLMClient, _caller_team
+
+
+def _call_from(path: str):
+    """Invoke _caller_team as if from a frame whose source file is ``path``."""
+
+    def probe():
+        return _caller_team()
+
+    ns: dict = {}
+    exec(compile("def f(probe):\n    return probe()\n", path, "exec"), ns)
+    return ns["f"](probe)
+
+
+def test_caller_team_derives_team_from_source_path() -> None:
+    # The team directory under agents/ is returned regardless of import name.
+    assert _call_from("/work/backend/agents/blogging/blog_writer_agent/agent.py") == "blogging"
+    assert (
+        _call_from("/app/agents/software_engineering_team/tech_lead_agent/agent.py")
+        == "software_engineering_team"
+    )
+
+
+def test_caller_team_skips_llm_service_and_non_team_frames() -> None:
+    # llm_service is not a team; frames outside agents/ yield no team.
+    assert _call_from("/x/agents/llm_service/factory.py") == ""
+    assert _call_from("/some/site-packages/strands/agent.py") == ""
 
 
 def _capture_records(monkeypatch) -> list:
@@ -24,8 +50,10 @@ def test_record_telemetry_sources_attribution(monkeypatch) -> None:
     client._last_usage = {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
     client._last_latency_ms = 123
 
-    with llm_attribution(team="job_matching", agent_key="ranker", objective="rank candidates"), \
-            bind_request_id("rid-42"):
+    with (
+        llm_attribution(team="job_matching", agent_key="ranker", objective="rank candidates"),
+        bind_request_id("rid-42"),
+    ):
         client._record_telemetry(status="success")
 
     assert len(records) == 1
@@ -55,8 +83,10 @@ def test_concurrent_calls_do_not_cross_attribute(monkeypatch) -> None:
     barrier = threading.Barrier(2)
 
     def worker(agent_key: str, objective: str) -> None:
-        with llm_attribution(team="team", agent_key=agent_key, objective=objective), \
-                bind_request_id(f"rid-{agent_key}"):
+        with (
+            llm_attribution(team="team", agent_key=agent_key, objective=objective),
+            bind_request_id(f"rid-{agent_key}"),
+        ):
             barrier.wait()  # maximize interleaving while contexts are active
             with lock:
                 client._record_telemetry(status="success")

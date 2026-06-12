@@ -57,6 +57,35 @@ def _caller_tag() -> str:
     return "unknown"
 
 
+def _caller_team() -> str:
+    """Return the team that owns the calling code, derived from its source path.
+
+    Every team's code lives under ``backend/agents/<team>/``; the team directory
+    name is therefore a reliable identifier regardless of how each team flattens
+    its package onto ``sys.path`` (so it succeeds where import-name inspection
+    does not). The walk skips ``llm_service`` and any non-team frames (e.g.
+    third-party Strands library frames), so it finds the originating agent even
+    when the call is dispatched through an intermediary.
+
+    Postconditions: returns the ``<team>`` directory name of the innermost stack
+        frame physically located under ``agents/`` and not owned by
+        ``llm_service``; returns ``""`` when no such frame exists.
+    """
+    import sys
+
+    frame = sys._getframe(2)  # skip _caller_team and its immediate caller
+    marker = "/agents/"
+    while frame is not None:
+        path = (frame.f_code.co_filename or "").replace("\\", "/")
+        idx = path.find(marker)
+        if idx != -1:
+            top = path[idx + len(marker) :].split("/", 1)[0]
+            if top and top != "llm_service":
+                return top
+        frame = frame.f_back
+    return ""
+
+
 # Default cap for max_tokens
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
@@ -1382,7 +1411,8 @@ class OllamaLLMClient(LLMClient):
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
-        with bind_request_id(new_request_id()), llm_attribution(objective=objective):
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._complete_json_impl(
                 prompt,
                 temperature=temperature,
@@ -1631,7 +1661,8 @@ class OllamaLLMClient(LLMClient):
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
-        with bind_request_id(new_request_id()), llm_attribution(objective=objective):
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._complete_impl(
                 prompt,
                 temperature=temperature,
@@ -1820,7 +1851,8 @@ class OllamaLLMClient(LLMClient):
         both modes. ``think=None`` (default) resolves to the platform default
         (max registered thinking level when known).
         """
-        with bind_request_id(new_request_id()), llm_attribution(objective=objective):
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             return self._chat_impl(
                 messages,
                 response_format=response_format,
