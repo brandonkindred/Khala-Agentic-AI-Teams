@@ -146,12 +146,13 @@ Try again shortly."
 
 ## 8. Build order (checklist)
 
-1. [ ] `environment.{ts,prod.ts}` — add `agentCognitionApiUrl`.
-2. [ ] `cognition.model.ts` + `cognition-labels.ts` (+ spec).
-3. [ ] `cognition-api.service.ts` (+ spec).
-4. [ ] `cognition-tab.component.*` — picker → Proposals → Memory → Rules (+ spec).
-5. [ ] Wire 7th tab into `agent-console.component.{ts,html}`.
-6. [ ] `npm run lint && npm run build && npm run test:coverage` green (≥90%).
+1. [x] `environment.{ts,prod.ts}` — add `agentCognitionApiUrl`.
+2. [x] `cognition.model.ts` + `cognition-labels.ts` (+ spec).
+3. [x] `cognition-api.service.ts` (+ spec).
+4. [x] `cognition-tab.component.*` — picker → Proposals → Memory → Rules (+ spec).
+5. [x] Wire 7th tab into `agent-console.component.{ts,html}`.
+6. [x] Lint + production build green; 100% line coverage on the new files
+   (37 specs: labels 9, service 12, component 16).
 7. [ ] Manual smoke: approve/reject round-trip against a running unified API.
 
 ## 9. Out of scope / follow-ups

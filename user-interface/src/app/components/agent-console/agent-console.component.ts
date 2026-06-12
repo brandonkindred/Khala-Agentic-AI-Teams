@@ -9,11 +9,12 @@ import { AgentProvisioningDashboardComponent } from '../agent-provisioning-dashb
 import { BacklogTabComponent } from './backlog-tab/backlog-tab.component';
 import { SprintsTabComponent } from './sprints-tab/sprints-tab.component';
 import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
+import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
 
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts six tabs:
+ * Hosts seven tabs:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
  *   - **Backlog** — `product_delivery` initiatives/epics/stories with
@@ -23,6 +24,8 @@ import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
  *     phase 4 + the new PATCH /feedback/{id}/link route).
  *   - **Provisioning & Environments** — embeds the existing provisioning
  *     dashboard verbatim so its behavior is unchanged.
+ *   - **Cognition** — operator surface for an agent's rule proposals
+ *     (approve/reject), memory timeline, and rules.
  */
 @Component({
   selector: 'app-agent-console',
@@ -38,6 +41,7 @@ import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
     BacklogTabComponent,
     SprintsTabComponent,
     FeedbackTabComponent,
+    CognitionTabComponent,
   ],
   templateUrl: './agent-console.component.html',
   styleUrl: './agent-console.component.scss',

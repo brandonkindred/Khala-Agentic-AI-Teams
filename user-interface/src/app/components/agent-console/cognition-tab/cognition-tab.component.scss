@@ -1,0 +1,248 @@
+:host {
+  display: block;
+  padding: 16px 24px;
+}
+
+.cognition-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+
+  &__header {
+    h2 {
+      margin: 0 0 4px;
+      font-size: 1.5rem;
+      color: var(--kh-text-primary, #fff);
+    }
+
+    p {
+      margin: 0;
+      color: var(--kh-text-secondary, #d4d4d8);
+      max-width: 720px;
+    }
+  }
+
+  &__picker {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  &__error {
+    color: var(--kh-error, #f87171);
+    background: rgba(248, 113, 113, 0.08);
+    padding: 8px 12px;
+    border-radius: 6px;
+  }
+}
+
+.cognition-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 16px;
+  background: var(--kh-surface-2, #1f1f1f);
+  border-radius: 10px;
+
+  &__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+
+    h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      color: var(--kh-text-primary, #fff);
+    }
+  }
+
+  &__controls {
+    display: flex;
+    gap: 12px;
+  }
+
+  &__filter {
+    min-width: 140px;
+
+    // Compact the Material form field inside the section header.
+    ::ng-deep .mat-mdc-form-field-subscript-wrapper {
+      display: none;
+    }
+  }
+
+  &__loading {
+    display: flex;
+    justify-content: center;
+    padding: 24px 0;
+  }
+
+  &__empty {
+    color: var(--kh-text-muted, #71717a);
+    padding: 12px 0;
+  }
+
+  &__error {
+    color: var(--kh-error, #f87171);
+    background: rgba(248, 113, 113, 0.08);
+    padding: 8px 12px;
+    border-radius: 6px;
+  }
+}
+
+.cognition-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+// Shared card chrome -----------------------------------------------------------
+.proposal-card,
+.memory-event,
+.rule-row {
+  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--kh-surface-1, #1a1a1a);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+// Lowercase chips, colour-coded. mat-chip default casing is left as authored.
+mat-chip {
+  &.is-action,
+  &.is-mode {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
+  }
+
+  &.is-status {
+    --mdc-chip-label-text-color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &.is-warn {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
+  }
+
+  &.is-kind-error {
+    --mdc-chip-label-text-color: var(--kh-error, #f87171);
+  }
+
+  &.is-kind-outcome {
+    --mdc-chip-label-text-color: var(--kh-success, #4ade80);
+  }
+
+  &.is-kind-action {
+    --mdc-chip-label-text-color: var(--kh-info, #93c5fd);
+  }
+}
+
+// Proposal card ----------------------------------------------------------------
+.proposal-card {
+  &.is-stale {
+    border-color: rgba(251, 191, 36, 0.55);
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  &__time {
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__lead {
+    color: var(--kh-text-primary, #fff);
+    font-weight: 500;
+  }
+
+  &__text {
+    color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &__evidence {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+
+    &.is-stale {
+      color: var(--kh-accent, #fbbf24);
+    }
+  }
+
+  &__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 4px;
+  }
+}
+
+// Memory event -----------------------------------------------------------------
+.memory-event {
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  &__relevance {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__time {
+    margin-left: auto;
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__content {
+    color: var(--kh-text-secondary, #d4d4d8);
+  }
+}
+
+// Rule row ---------------------------------------------------------------------
+.rule-row {
+  &.is-retired {
+    opacity: 0.65;
+
+    .rule-row__text {
+      text-decoration: line-through;
+    }
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  &__meta {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__spacer {
+    flex: 1 1 auto;
+  }
+
+  &__text {
+    color: var(--kh-text-primary, #fff);
+    font-weight: 500;
+  }
+
+  &__why {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+}
