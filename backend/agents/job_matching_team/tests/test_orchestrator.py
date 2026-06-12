@@ -55,11 +55,14 @@ class _JobIdCapturingRanker:
 
     def __init__(self) -> None:
         self.job_id: str | None = None
+        self.team: str | None = None
 
     def rank(self, postings, profile):
         from llm_service.attribution import current_attribution
 
-        self.job_id = current_attribution().job_id
+        attr = current_attribution()
+        self.job_id = attr.job_id
+        self.team = attr.team
         return [RankedJob(posting=p, score=1.0) for p in postings]
 
 
@@ -75,6 +78,7 @@ def test_run_binds_api_job_id_for_telemetry():
     )
     orch.run(JobMatchRequest(), profile=JobSeekerProfile(), job_id="api-job-123")
     assert ranker.job_id == "api-job-123"
+    assert ranker.team == "job_matching"
 
 
 def test_run_falls_back_to_run_id_without_api_job_id():

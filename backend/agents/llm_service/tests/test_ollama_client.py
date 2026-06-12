@@ -1,6 +1,8 @@
 """Tests for OllamaLLMClient with mocked httpx."""
 
 import json
+import logging
+import re
 from typing import Callable
 from unittest.mock import MagicMock, patch
 
@@ -198,6 +200,42 @@ def _capturing_multi_client(stream_cms: list[MagicMock]) -> tuple[MagicMock, lis
 
     mock_client.__enter__.return_value.stream = capturing_stream
     return mock_client, captured
+
+
+def test_request_and_completion_log_lines_carry_attribution_and_share_rid(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The request log line carries rid/agent/team/objective, and the completion
+    line for the same call repeats the identical rid (so a call's lines correlate)."""
+    from llm_service.attribution import llm_attribution
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    sse_lines = [
+        'data: {"choices":[{"delta":{"content":"{\\"answer\\": 42}"},"finish_reason":null}]}',
+        'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}',
+        "data: [DONE]",
+    ]
+    mock_client, _ = _make_streaming_mock(200, sse_lines)
+    with patch("httpx.Client") as mock_client_cls:
+        mock_client_cls.return_value = mock_client
+        client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+        with caplog.at_level(logging.INFO, logger="llm_service.clients.ollama"):
+            with llm_attribution(team="job_matching", agent_key="ranker"):
+                client.complete_json("q", objective="rank candidates", temperature=0)
+
+    msgs = [r.getMessage() for r in caplog.records]
+    request_lines = [m for m in msgs if m.startswith("LLM request:")]
+    assert request_lines, "no request log line emitted"
+    req = request_lines[0]
+    assert "agent=ranker" in req
+    assert "team=job_matching" in req
+    assert "objective=rank candidates" in req
+    rid = re.search(r"rid=(\S+)", req).group(1)
+    assert rid and rid != "-"
+
+    completion_lines = [m for m in msgs if "streaming response complete" in m]
+    assert completion_lines, "no completion log line emitted"
+    assert f"rid={rid}" in completion_lines[0]
 
 
 def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:

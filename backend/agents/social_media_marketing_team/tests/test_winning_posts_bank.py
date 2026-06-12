@@ -192,7 +192,7 @@ def test_save_calls_llm_for_summary_when_client_provided(fake_pg):
             self.objectives = []
 
         def complete(
-            self, prompt: str, system_prompt: str = "", *, objective: str = "", **kwargs: Any
+            self, prompt: str, system_prompt: str = "", *, objective: str, **kwargs: Any
         ) -> str:
             self.calls.append(prompt)
             self.objectives.append(objective)
@@ -326,7 +326,7 @@ def test_find_llm_rerank_reorders_when_enough_candidates(fake_pg):
             return "summary"
 
         def complete_json(
-            self, prompt: str, system_prompt: str = "", *, objective: str = "", **kwargs: Any
+            self, prompt: str, system_prompt: str = "", *, objective: str, **kwargs: Any
         ):
             self.rerank_objectives.append(objective)
             return [3, 2, 1]

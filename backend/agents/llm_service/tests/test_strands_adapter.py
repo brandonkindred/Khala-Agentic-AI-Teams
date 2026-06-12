@@ -507,6 +507,31 @@ def test_get_strands_model_forwards_response_format() -> None:
     assert model.get_config()["response_format"] == "text"
 
 
+def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> None:
+    """Two agents that resolve to the same model get distinct cached adapters,
+    each carrying its own agent_key — so the shared cache can't attribute one
+    agent's calls to another."""
+    from llm_service.strands_provider import (
+        _clear_strands_model_cache_for_testing,
+        get_strands_model,
+    )
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "shared-model")
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    _clear_strands_model_cache_for_testing()
+    try:
+        m_a = get_strands_model("agent_a")
+        m_b = get_strands_model("agent_b")
+        assert m_a is not m_b
+        assert m_a._config.agent_key == "agent_a"
+        assert m_b._config.agent_key == "agent_b"
+        # Same key still hits the cache (identity preserved per key).
+        assert get_strands_model("agent_a") is m_a
+    finally:
+        _clear_strands_model_cache_for_testing()
+
+
 def test_clone_returns_new_model_sharing_backing_client() -> None:
     """``LLMClientModel.clone(response_format=...)`` derives a sibling that
     reuses the same backing client but applies the override. Use case:
