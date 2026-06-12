@@ -57,9 +57,18 @@ class JobMatchingOrchestrator:
         return self._store
 
     def run(
-        self, request: JobMatchRequest, *, profile: Optional[JobSeekerProfile] = None
+        self,
+        request: JobMatchRequest,
+        *,
+        profile: Optional[JobSeekerProfile] = None,
+        job_id: Optional[str] = None,
     ) -> JobMatchResponse:
         """Execute one scan-and-rank run and return the ranked top-N.
+
+        ``job_id`` is the owning API/job-service identifier (e.g. the id returned
+        by ``POST /scan``); when provided it is used for LLM telemetry attribution
+        so operators can correlate records with the identifier they hold. When
+        omitted (direct/sync callers) the internal ``run_id`` is used instead.
 
         Preconditions:
             * ``request`` is a valid :class:`JobMatchRequest`.
@@ -88,9 +97,10 @@ class JobMatchingOrchestrator:
                 except Exception:  # noqa: BLE001
                     logger.warning("seen_fingerprints lookup failed", exc_info=True)
 
-            # Stamp the team + run on every LLM call this run makes; the
-            # per-agent objective/agent_key are bound at each call site.
-            with llm_attribution(team="job_matching", job_id=run_id):
+            # Stamp the team + owning job on every LLM call this run makes; the
+            # per-agent objective/agent_key are bound at each call site. Prefer
+            # the API job_id (what operators search by); fall back to run_id.
+            with llm_attribution(team="job_matching", job_id=job_id or run_id):
                 queries = self._query_builder.build(effective, max_queries=request.max_queries)
                 postings = self._scanner.scan(
                     queries, max_roles=request.max_roles, skip_fingerprints=skip

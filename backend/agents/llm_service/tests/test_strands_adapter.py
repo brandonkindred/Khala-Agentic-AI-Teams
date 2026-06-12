@@ -287,6 +287,44 @@ def test_stream_propagates_team_through_to_thread() -> None:
     assert seen["team"] == "orchestrated"
 
 
+def test_stream_binds_configured_agent_key_for_raw_client() -> None:
+    """A caller-supplied (unwrapped) client is still attributed to the configured
+    agent_key, since the adapter binds it before the ``to_thread`` hand-off."""
+    from llm_service.attribution import current_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            seen["objective"] = objective
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_AgentClient({"ok": True}), agent_key="foo")
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "foo"
+    # No bound objective → the generic strands objective is used as a fallback.
+    assert seen["objective"] == "strands agent turn (foo)"
+
+
+def test_stream_uses_bound_objective_over_generic() -> None:
+    """A task-specific objective bound by the caller (e.g. the PA wrapper) is
+    forwarded instead of the adapter's generic placeholder."""
+    from llm_service.attribution import llm_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _ObjClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["objective"] = objective
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_ObjClient({"ok": True}), agent_key="foo")
+    with llm_attribution(objective="classify user intent"):
+        _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["objective"] == "classify user intent"
+
+
 def test_stream_emits_tool_use_events_for_tool_call_response() -> None:
     client = _RecordingClient(
         {

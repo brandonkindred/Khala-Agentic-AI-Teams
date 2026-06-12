@@ -440,13 +440,19 @@ class LLMClientModel(Model):
         # Derive the team here, on the calling task whose stack still holds the
         # originating agent frame; binding it into the context means it survives
         # the ``to_thread`` hand-off (asyncio copies the context), where the
-        # worker thread's stack no longer reaches the agent.
+        # worker thread's stack no longer reaches the agent. Bind the configured
+        # agent_key too, so caller-supplied (unwrapped) clients are still
+        # attributed. The configured objective is a fallback — a caller that
+        # bound a task-specific objective (e.g. the PA wrapper) keeps it.
         team = current_attribution().team or caller_team()
-        with llm_attribution(team=team):
+        objective = (
+            current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
+        )
+        with llm_attribution(agent_key=cfg.agent_key or None, team=team):
             result = await asyncio.to_thread(
                 self._client.chat,
                 oai_messages,
-                objective=f"strands agent turn ({cfg.agent_key or 'agent'})",
+                objective=objective,
                 response_format=response_format,
                 temperature=temperature,
                 tools=oai_tools,
@@ -534,14 +540,19 @@ class LLMClientModel(Model):
         temperature = float(self._config.temperature or 0.0)
         think = self._config.think  # bool | str | None — never coerce; levels must survive
 
-        # Bind the team on the calling task (see ``stream``) so it survives the
-        # ``to_thread`` hand-off into the worker thread.
+        # Bind the team + configured agent_key on the calling task (see ``stream``)
+        # so they survive the ``to_thread`` hand-off into the worker thread. The
+        # configured objective is a fallback — a bound task-specific objective wins.
+        agent_key = getattr(self._config, "agent_key", "") or ""
         team = current_attribution().team or caller_team()
-        with llm_attribution(team=team):
+        objective = (
+            current_attribution().objective or f"strands structured output ({agent_key or 'agent'})"
+        )
+        with llm_attribution(agent_key=agent_key or None, team=team):
             data = await asyncio.to_thread(
                 self._client.complete_json,
                 text_prompt,
-                objective=f"strands structured output ({getattr(self._config, 'agent_key', '') or 'agent'})",
+                objective=objective,
                 temperature=temperature,
                 system_prompt=system_prompt,
                 think=think,

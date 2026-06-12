@@ -22,6 +22,7 @@ from llm_service import (
     LLMError,
     LLMJsonParseError,
     get_strands_model,
+    llm_attribution,
 )
 
 
@@ -342,9 +343,12 @@ class _PAStrandsWrapper(LLMClient):
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:
-            raw = self._ollama_complete(
-                prompt, temperature=temperature, system_prompt=system_prompt, think=think
-            )
+            # Bind the caller's objective so it reaches the Strands adapter →
+            # LLM telemetry (``objective=None`` inherits any outer objective).
+            with llm_attribution(objective=objective or None):
+                raw = self._ollama_complete(
+                    prompt, temperature=temperature, system_prompt=system_prompt, think=think
+                )
             parsed = self._try_parse_json(raw)
             if parsed is not None:
                 return parsed
@@ -380,7 +384,10 @@ class _PAStrandsWrapper(LLMClient):
         system_prompt: Optional[str] = None,
         objective: str = "",
     ) -> str:
-        return self._ollama_complete(prompt, temperature=temperature, system_prompt=system_prompt)
+        with llm_attribution(objective=objective or None):
+            return self._ollama_complete(
+                prompt, temperature=temperature, system_prompt=system_prompt
+            )
 
     def get_max_context_tokens(self) -> int:
         return 4096
