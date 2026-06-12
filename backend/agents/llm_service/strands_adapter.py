@@ -56,6 +56,7 @@ from strands.types.content import Messages
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
+from .attribution import caller_team, current_attribution, llm_attribution
 from .factory import get_client
 from .interface import LLMClient
 
@@ -436,16 +437,22 @@ class LLMClientModel(Model):
             cfg.agent_key,
         )
 
-        result = await asyncio.to_thread(
-            self._client.chat,
-            oai_messages,
-            objective=f"strands agent turn ({cfg.agent_key or 'agent'})",
-            response_format=response_format,
-            temperature=temperature,
-            tools=oai_tools,
-            think=think,
-            max_tokens=max_tokens,
-        )
+        # Derive the team here, on the calling task whose stack still holds the
+        # originating agent frame; binding it into the context means it survives
+        # the ``to_thread`` hand-off (asyncio copies the context), where the
+        # worker thread's stack no longer reaches the agent.
+        team = current_attribution().team or caller_team()
+        with llm_attribution(team=team):
+            result = await asyncio.to_thread(
+                self._client.chat,
+                oai_messages,
+                objective=f"strands agent turn ({cfg.agent_key or 'agent'})",
+                response_format=response_format,
+                temperature=temperature,
+                tools=oai_tools,
+                think=think,
+                max_tokens=max_tokens,
+            )
 
         yield {"messageStart": {"role": "assistant"}}
 
@@ -527,14 +534,18 @@ class LLMClientModel(Model):
         temperature = float(self._config.temperature or 0.0)
         think = self._config.think  # bool | str | None — never coerce; levels must survive
 
-        data = await asyncio.to_thread(
-            self._client.complete_json,
-            text_prompt,
-            objective=f"strands structured output ({getattr(self._config, 'agent_key', '') or 'agent'})",
-            temperature=temperature,
-            system_prompt=system_prompt,
-            think=think,
-        )
+        # Bind the team on the calling task (see ``stream``) so it survives the
+        # ``to_thread`` hand-off into the worker thread.
+        team = current_attribution().team or caller_team()
+        with llm_attribution(team=team):
+            data = await asyncio.to_thread(
+                self._client.complete_json,
+                text_prompt,
+                objective=f"strands structured output ({getattr(self._config, 'agent_key', '') or 'agent'})",
+                temperature=temperature,
+                system_prompt=system_prompt,
+                think=think,
+            )
 
         try:
             validated = output_model.model_validate(data)

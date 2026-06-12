@@ -5,6 +5,7 @@ import pytest
 
 from llm_service import (
     DummyLLMClient,
+    LLMClient,
     OllamaLLMClient,
     attributed_client,
     client_agent_key,
@@ -13,6 +14,18 @@ from llm_service import (
 )
 from llm_service.attribution import current_attribution
 from llm_service.factory import _AttributingClient
+
+
+def test_wrapper_is_an_llmclient_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The wrapper must pass ``isinstance(c, LLMClient)`` so resolvers that branch
+    on the interface (e.g. SE's resolve_strands_model) don't drop keyed clients."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    c = get_client("backend")
+    assert isinstance(c, _AttributingClient)
+    assert isinstance(c, LLMClient)
+    # Delegation still works (virtual registration adds no shadowing methods).
+    assert c.get_max_context_tokens() == c._inner.get_max_context_tokens()
 
 
 def test_get_client_dummy_when_provider_dummy(monkeypatch: pytest.MonkeyPatch) -> None:

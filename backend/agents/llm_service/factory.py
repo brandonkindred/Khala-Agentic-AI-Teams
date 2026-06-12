@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, Union
 from . import config as llm_config
 from .attribution import llm_attribution
 from .clients import DummyLLMClient, OllamaLLMClient
+from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,14 @@ class _AttributingClient:
     def __getattr__(self, name: str) -> Any:
         # Only reached for attributes not defined on the wrapper itself.
         return getattr(self._inner, name)
+
+
+# Register as a virtual LLMClient so ``isinstance(wrapper, LLMClient)`` holds for
+# resolvers that branch on the interface (e.g. the SE team's
+# ``resolve_strands_model``). Virtual registration affects only isinstance/
+# issubclass — it does NOT add LLMClient's concrete default methods to the MRO,
+# so the transparent ``__getattr__`` delegation is preserved.
+LLMClient.register(_AttributingClient)
 
 
 def unwrap_client(client: Any) -> Any:

@@ -51,9 +51,7 @@ class LLMAttribution:
 
 _EMPTY = LLMAttribution()
 
-_attribution: ContextVar[LLMAttribution] = ContextVar(
-    "llm_attribution", default=_EMPTY
-)
+_attribution: ContextVar[LLMAttribution] = ContextVar("llm_attribution", default=_EMPTY)
 _request_id: ContextVar[str] = ContextVar("llm_request_id", default="")
 
 
@@ -143,6 +141,40 @@ def bind_request_id(request_id: str) -> Iterator[str]:
             _request_id.set(prev)
 
 
+def caller_team() -> str:
+    """Return the team that owns the calling code, derived from its source path.
+
+    Every team's code lives under ``backend/agents/<team>/``, so the team
+    directory name is a reliable identifier regardless of how a team flattens
+    its package onto ``sys.path`` (so it succeeds where import-name inspection
+    does not). The walk starts at the immediate caller and skips ``llm_service``
+    and any non-team frames (e.g. third-party Strands / asyncio frames), so it
+    finds the originating agent even when the call is dispatched through an
+    intermediary.
+
+    Must be evaluated on a thread/task whose stack still contains the agent
+    frame — e.g. before an ``asyncio.to_thread`` hand-off, not inside the
+    worker thread (whose stack holds only executor frames).
+
+    Postconditions: returns the ``<team>`` directory name of the innermost stack
+        frame physically located under ``agents/`` and not owned by
+        ``llm_service``; returns ``""`` when no such frame exists.
+    """
+    import sys
+
+    marker = "/agents/"
+    frame = sys._getframe(1)  # start at the immediate caller
+    while frame is not None:
+        path = (frame.f_code.co_filename or "").replace("\\", "/")
+        idx = path.find(marker)
+        if idx != -1:
+            top = path[idx + len(marker) :].split("/", 1)[0]
+            if top and top != "llm_service":
+                return top
+        frame = frame.f_back
+    return ""
+
+
 __all__ = [
     "LLMAttribution",
     "current_attribution",
@@ -150,4 +182,5 @@ __all__ = [
     "new_request_id",
     "llm_attribution",
     "bind_request_id",
+    "caller_team",
 ]

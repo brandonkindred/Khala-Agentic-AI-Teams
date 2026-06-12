@@ -26,6 +26,9 @@ from ..attribution import (
     llm_attribution,
     new_request_id,
 )
+from ..attribution import (
+    caller_team as _caller_team,
+)
 from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from ..interface import (
     LLMClient,
@@ -55,35 +58,6 @@ def _caller_tag() -> str:
             short = ".".join(parts[-2:]) if len(parts) > 1 else mod
             return f"{short}.{func}"
     return "unknown"
-
-
-def _caller_team() -> str:
-    """Return the team that owns the calling code, derived from its source path.
-
-    Every team's code lives under ``backend/agents/<team>/``; the team directory
-    name is therefore a reliable identifier regardless of how each team flattens
-    its package onto ``sys.path`` (so it succeeds where import-name inspection
-    does not). The walk skips ``llm_service`` and any non-team frames (e.g.
-    third-party Strands library frames), so it finds the originating agent even
-    when the call is dispatched through an intermediary.
-
-    Postconditions: returns the ``<team>`` directory name of the innermost stack
-        frame physically located under ``agents/`` and not owned by
-        ``llm_service``; returns ``""`` when no such frame exists.
-    """
-    import sys
-
-    frame = sys._getframe(2)  # skip _caller_team and its immediate caller
-    marker = "/agents/"
-    while frame is not None:
-        path = (frame.f_code.co_filename or "").replace("\\", "/")
-        idx = path.find(marker)
-        if idx != -1:
-            top = path[idx + len(marker) :].split("/", 1)[0]
-            if top and top != "llm_service":
-                return top
-        frame = frame.f_back
-    return ""
 
 
 # Default cap for max_tokens

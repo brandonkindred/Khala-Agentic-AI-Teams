@@ -265,6 +265,28 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["think"] is True
 
 
+def test_stream_propagates_team_through_to_thread() -> None:
+    """The team bound on the calling task survives the ``to_thread`` hand-off.
+
+    The adapter derives/binds the team before dispatching to the worker thread,
+    where ``caller_team()`` could no longer see the agent frame. This proves the
+    bound team reaches ``chat`` (which runs in the worker).
+    """
+    from llm_service.attribution import current_attribution, llm_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _TeamClient(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["team"] = current_attribution().team
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_TeamClient({"ok": True}), agent_key="qa_agent")
+    with llm_attribution(team="orchestrated"):
+        _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["team"] == "orchestrated"
+
+
 def test_stream_emits_tool_use_events_for_tool_call_response() -> None:
     client = _RecordingClient(
         {
