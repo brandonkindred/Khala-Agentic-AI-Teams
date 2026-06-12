@@ -674,6 +674,59 @@ def test_select_review_input_deletion_only_reviews_note_as_block(tmp_path: Path)
     assert note and "gone.py" in note  # also returned for logging/inspection
 
 
+def test_select_review_input_note_key_collision_keeps_real_file(tmp_path: Path) -> None:
+    """A real changed file named like the note key is not overwritten by the note;
+    the note moves to a disambiguated key so both are reviewed."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_PATH,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / _DELETION_NOTE_PATH).write_text("real = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / _DELETION_NOTE_PATH).write_text("real = 2\n", encoding="utf-8")  # real change
+    (tmp_path / "gone.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change note-named file + delete")
+
+    task = SimpleNamespace(description="x")
+    files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert files[_DELETION_NOTE_PATH] == "real = 2\n"  # real file content preserved
+    note_keys = [k for k, v in files.items() if "gone.py" in v]
+    assert note_keys and _DELETION_NOTE_PATH not in note_keys  # note under a distinct key
+    assert note and "gone.py" in note
+
+
+def test_select_review_input_notes_file_replaced_by_directory(tmp_path: Path) -> None:
+    """A file deleted and replaced by a directory at the same path is still noted
+    deleted (the directory does not count as the file being 'present')."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "pkg").write_text("p = 1\n", encoding="utf-8")  # tracked file
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "pkg").unlink()
+    (tmp_path / "pkg").mkdir()  # same path now a directory
+    (tmp_path / "pkg" / "main.py").write_text("m = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "file -> package")
+
+    task = SimpleNamespace(description="x")
+    files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "pkg/main.py" in files  # the new child is reviewed
+    assert note is not None and "- pkg\n" in note  # the removed file is still surfaced
+
+
 def test_select_review_input_note_named_file_reviewed_normally(tmp_path: Path) -> None:
     """A real file named like the old note key is just reviewed as content; the
     deletion note is a separate value, so there is no collision to handle."""
@@ -958,6 +1011,21 @@ def test_read_files_as_dict_distinct_surrogate_paths_do_not_collide(tmp_path: Pa
 
     assert len(result) == 2  # neither overwrote the other
     assert sorted(result.values()) == ["X1\n", "X2\n"]
+
+
+def test_read_files_as_dict_surrogate_and_literal_backslash_collision(tmp_path: Path) -> None:
+    """A surrogate-escaped name and a literal-backslash name that sanitize to the
+    same key are both reviewed — the second is disambiguated, never overwritten."""
+    surrogate = "a\udcff.py"  # invalid 0xFF byte → sanitizes to 'a\\udcff.py'
+    literal = "a\\udcff.py"  # real backslashes → sanitizes to the same 'a\\udcff.py'
+    (tmp_path / surrogate).write_text("FROM_BYTE\n", encoding="utf-8")
+    (tmp_path / literal).write_text("FROM_LITERAL\n", encoding="utf-8")
+
+    result = read_files_as_dict(tmp_path, [surrogate, literal])
+
+    assert len(result) == 2  # both survive; neither silently dropped
+    assert sorted(result.values()) == ["FROM_BYTE\n", "FROM_LITERAL\n"]
+    assert all(k.encode("utf-8") for k in result)  # keys still UTF-8 encodable
 
 
 def test_strip_surrogates_preserves_literal_backslash() -> None:

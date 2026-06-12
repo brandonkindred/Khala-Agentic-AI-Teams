@@ -530,10 +530,29 @@ def _writer_output_keys(result: Any) -> Dict[str, str] | None:
 
 
 # Synthetic block label under which the deletion note travels in the segmented
-# code/files channel. Not a real repo path — it never collides with a source file
-# and clearly marks the block as the removed-files review note, so a finding
-# anchored here reads as "about the deletions", not a fix target on disk.
+# code/files channel. Not a real repo path — it clearly marks the block as the
+# removed-files review note, so a finding anchored here reads as "about the
+# deletions", not a fix target on disk.
 _DELETION_NOTE_PATH = "DELETED_FILES.review-note"
+
+
+def _free_deletion_note_key(files: Dict[str, str]) -> str:
+    """Return a key for the deletion note that is absent from *files*.
+
+    Preconditions:
+        - *files* is the review mapping the note will be inserted into.
+    Postconditions:
+        - Returns ``_DELETION_NOTE_PATH`` when free, else that base with a numeric
+          suffix appended until unique — so a real changed file that happens to be
+          named like the note key is never overwritten (and thus never dropped
+          from review).
+    """
+    if _DELETION_NOTE_PATH not in files:
+        return _DELETION_NOTE_PATH
+    n = 1
+    while f"{_DELETION_NOTE_PATH}.{n}" in files:
+        n += 1
+    return f"{_DELETION_NOTE_PATH}.{n}"
 
 
 def _format_deletion_note(deleted: List[str]) -> str:
@@ -653,14 +672,16 @@ def _select_review_input(
                 paths.append(p)
     files = read_files_as_dict(repo_path, paths, extensions=None)
 
-    # A deleted path can be restored in the worktree (a file, or a dangling
-    # symlink) in a later failed-commit iteration; treat it as present then
-    # (exists-or-symlink == lexists). A deleted secret is also dropped so its
-    # path name is not surfaced to the review model.
+    # A deleted path can be restored in the worktree (a real file, or a dangling
+    # symlink) in a later failed-commit iteration; treat it as present only then.
+    # A directory now occupying the path (a file replaced by a dir, e.g. ``pkg``
+    # -> ``pkg/main.py``) does *not* count as present — the original file was
+    # removed, so the deletion must still be surfaced. A deleted secret is dropped
+    # so its path name is not surfaced to the review model.
     deleted: List[str] = []
     for p in deleted_all:
         full = repo_path / p
-        if not (full.exists() or full.is_symlink()) and not is_sensitive_path(p):
+        if not (full.is_file() or full.is_symlink()) and not is_sensitive_path(p):
             deleted.append(p)
     note = _format_deletion_note(deleted) if deleted else None
 
@@ -669,8 +690,9 @@ def _select_review_input(
             # Mixed change: carry the deletion note as a dedicated entry in the
             # *segmented* files channel (the coordinator chunks blocks but repeats
             # task_description verbatim per chunk, so a large note there would
-            # blow every sub-review's context).
-            files = {**files, _DELETION_NOTE_PATH: note}
+            # blow every sub-review's context). Pick a key not already present so a
+            # real file literally named like the note key is never overwritten.
+            files = {**files, _free_deletion_note_key(files): note}
         return files, None, note
     if note:
         # Deletion-only change: there is no surviving content, so the note is the

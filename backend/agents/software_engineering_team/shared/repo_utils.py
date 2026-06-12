@@ -174,6 +174,26 @@ def strip_surrogates(text: str) -> str:
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
+def _disambiguated_key(result: Dict[str, str], key: str) -> str:
+    """Return *key*, or a suffixed variant when it already maps a different path.
+
+    Sanitizing surrogate-bearing paths is not injective: a non-UTF-8 name
+    ``a\\xff.py`` and a valid name with literal backslashes can both sanitize to
+    the same string. Inserting the second blindly would overwrite the first and
+    silently lose its review coverage. When the key is already taken, append a
+    numeric suffix until it is free so both files are reviewed under distinct keys.
+
+    Postconditions:
+        - The returned key is not currently present in *result*.
+    """
+    if key not in result:
+        return key
+    n = 1
+    while f"{key}~{n}" in result:
+        n += 1
+    return f"{key}~{n}"
+
+
 def read_files_as_dict(
     repo_path: Path,
     paths: Iterable[str],
@@ -215,6 +235,9 @@ def read_files_as_dict(
           :func:`strip_surrogates`, so a non-UTF-8 filename read via
           surrogateescape cannot crash downstream UTF-8/JSON serialization. The
           file content is still read from the original (surrogate-bearing) path.
+          Sanitizing is not injective, so when two distinct paths sanitize to the
+          same key the later one gets a numeric suffix (it never overwrites the
+          first) — every reviewed path keeps a distinct entry.
         - Never reads a file outside *repo_path*: keys may come from untrusted
           agent output, so containment is enforced before any read.
     """
@@ -235,9 +258,8 @@ def read_files_as_dict(
             # A symlink is reported by its target, never dereferenced (which would
             # mislabel the target's content under the link or escape the repo).
             if full_path.is_symlink():
-                result[strip_surrogates(rel_path)] = strip_surrogates(
-                    f"# symlink -> {os.readlink(full_path)}\n"
-                )
+                key = _disambiguated_key(result, strip_surrogates(rel_path))
+                result[key] = strip_surrogates(f"# symlink -> {os.readlink(full_path)}\n")
                 continue
             # Non-symlink: resolve (following any intra-repo parent links) and
             # re-check containment before reading.
@@ -259,7 +281,7 @@ def read_files_as_dict(
                 logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
                 continue
             text = (prefix + rest).decode("utf-8", errors="replace")
-            result[strip_surrogates(rel_path)] = text
+            result[_disambiguated_key(result, strip_surrogates(rel_path))] = text
         except (OSError, RuntimeError, ValueError) as exc:
             logger.debug("read_files_as_dict: skipping %s (%s)", rel_path, exc)
             continue
