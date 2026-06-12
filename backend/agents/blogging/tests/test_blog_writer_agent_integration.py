@@ -23,7 +23,13 @@ from shared.content_plan import (
     TitleCandidate,
 )
 
-from llm_service import LLMPermanentError, LLMTemporaryError, OllamaLLMClient, get_client
+from llm_service import (
+    LLMPermanentError,
+    LLMTemporaryError,
+    OllamaLLMClient,
+    get_client,
+    unwrap_client,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +96,7 @@ def test_writer_agent_with_ollama_produces_real_content() -> None:
     contains real blog-like content using fuzzy rules (length, structure, sentences).
     """
     client = get_client("blog")
-    if not isinstance(client, OllamaLLMClient):
+    if not isinstance(unwrap_client(client), OllamaLLMClient):
         pytest.skip("LLM client is not Ollama; integration test expects Ollama")
 
     # Blogging agents now use strands.Agent(model=client); skip if OllamaLLMClient

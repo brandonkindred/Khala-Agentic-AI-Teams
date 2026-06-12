@@ -16,6 +16,7 @@ from llm_service import (
     OllamaLLMClient,
     _clear_client_cache_for_testing,
     get_client,
+    unwrap_client,
 )
 
 
@@ -257,7 +258,7 @@ def test_get_llm_for_agent_per_agent_env_overrides() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "custom-model"
 
 
@@ -270,7 +271,7 @@ def test_get_llm_for_agent_global_fallback() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "qwen3.5:397b-cloud"
 
 
@@ -287,7 +288,7 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "deepseek-v4-pro:cloud"
 
 
@@ -301,7 +302,8 @@ def test_get_client_cache_returns_same_instance() -> None:
     ):
         client1 = get_client("backend")
         client2 = get_client("backend")
-    assert client1 is client2
+    # Each call returns a fresh attribution wrapper over the shared cached client.
+    assert unwrap_client(client1) is unwrap_client(client2)
 
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:

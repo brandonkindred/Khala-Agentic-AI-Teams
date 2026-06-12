@@ -177,7 +177,7 @@ def test_save_story_calls_llm_for_summary_when_provided(fake_pg):
         def __init__(self):
             self.calls = []
 
-        def complete(self, prompt: str, system_prompt: str = "") -> str:
+        def complete(self, prompt: str, system_prompt: str = "", **kwargs: object) -> str:
             self.calls.append(prompt)
             return "  A concise summary.  "
 
@@ -263,7 +263,7 @@ def test_find_relevant_stories_llm_rerank_reorders_when_enough_candidates(fake_p
         def complete(self, *a, **k):
             return "summary"
 
-        def complete_json(self, prompt: str, system_prompt: str = ""):
+        def complete_json(self, prompt: str, system_prompt: str = "", **kwargs: object):
             # Reverse the candidate order.
             return [3, 2, 1]
 
