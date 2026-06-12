@@ -529,14 +529,22 @@ def _writer_output_keys(result: Any) -> Dict[str, str] | None:
     return written
 
 
+# Synthetic block label under which the deletion note travels in the segmented
+# code/files channel. Not a real repo path — it never collides with a source file
+# and clearly marks the block as the removed-files review note, so a finding
+# anchored here reads as "about the deletions", not a fix target on disk.
+_DELETION_NOTE_PATH = "DELETED_FILES.review-note"
+
+
 def _format_deletion_note(deleted: List[str]) -> str:
     """Render *every* removed path as a reviewer note.
 
     Lists all deletions, not a capped sample: the reviewer must be able to check
     whether anything still depends on each removed path, so hiding identities
-    behind a count would leave deletions silently unreviewed (fail-open). The
-    review coordinator segments oversized inputs itself, so a long list is split
-    across review chunks rather than truncated here.
+    behind a count would leave deletions silently unreviewed (fail-open). The note
+    is carried in the segmented code/files channel (never the per-chunk-repeated
+    task description), so the coordinator splits a long list across review chunks
+    rather than blowing every sub-review's context.
     """
     listing = "\n".join(f"- {strip_surrogates(p)}" for p in deleted)
     return (
@@ -547,7 +555,7 @@ def _format_deletion_note(deleted: List[str]) -> str:
 
 
 def _whole_repo_review_input(
-    repo_path: Path, current_task: Any
+    repo_path: Path,
 ) -> Tuple[Dict[str, str] | None, str | None, str | None]:
     """Complete, fail-safe review input: every reviewable file in the repo.
 
@@ -597,18 +605,27 @@ def _select_review_input(
         - *repo_path* is the task's working tree; *written_files* is the writer's
           normalized output mapping (or None) — only its keys are used, to widen
           the set of paths re-read from disk.
+        - *current_task* is the active task. It is accepted to keep this helper's
+          signature aligned with the call site and is reserved for task-aware
+          selection; the current implementation reviews every file type in the
+          whole-repo fallback regardless, so it is not consulted.
     Postconditions:
         - Returns ``(files, code, deletion_note)``. Exactly one of ``files`` /
           ``code`` is populated (never both empty) so review is never silently
           skipped: the worktree content of every committed/uncommitted/
           just-written path that exists on disk, else the legacy whole-repo
-          ``code`` string (logged). ``deletion_note`` is a short text listing
-          removed files (or None) that the caller folds into the task-description
-          context channel. A deletion-only change (no surviving content) returns
-          an empty ``code`` plus the note, so the removal is reviewed via context
-          rather than as a pathless prose source block.
-        - For repo-setup tasks the whole-repo fallback also appends meta files
-          (.gitignore, README, ...) so an initial commit is reviewed in full.
+          ``code`` string (logged). ``deletion_note`` is the same text listing
+          removed files (or None) that is *also* carried in the returned
+          ``files``/``code`` channel under :data:`_DELETION_NOTE_PATH`; it is
+          returned separately only for logging/inspection. It rides the segmented
+          code channel — never the task description, which the coordinator
+          repeats unsegmented in every chunk — so a large deletion set is split
+          across sub-reviews instead of blowing each one's context. A
+          deletion-only change (no surviving content) returns the note as the
+          sole ``files`` entry, so ``run_coordinator`` (which auto-approves when
+          it finds no blocks) actually examines the removal.
+        - The whole-repo fallback reviews every file type, so an initial repo-
+          setup commit's meta files (.gitignore, README, ...) are included.
     """
     from software_engineering_team.shared.git_utils import (
         DEVELOPMENT_BRANCH,
@@ -623,7 +640,7 @@ def _select_review_input(
         # base ref, shallow/ambiguous history, timeout), review the whole repo
         # rather than a partial set the gate could approve without seeing it.
         logger.warning("Code review: baseline diff unavailable (%s); reviewing whole repo", exc)
-        return _whole_repo_review_input(repo_path, current_task)
+        return _whole_repo_review_input(repo_path)
 
     paths: List[str] = []
     seen: set[str] = set()
@@ -648,22 +665,23 @@ def _select_review_input(
     note = _format_deletion_note(deleted) if deleted else None
 
     if files:
-        # Mixed change: the deletion note rides in the task-description context
-        # channel (there are real blocks for the coordinator to review, so the
-        # context — and the note — is seen by the model).
+        if note:
+            # Mixed change: carry the deletion note as a dedicated entry in the
+            # *segmented* files channel (the coordinator chunks blocks but repeats
+            # task_description verbatim per chunk, so a large note there would
+            # blow every sub-review's context).
+            files = {**files, _DELETION_NOTE_PATH: note}
         return files, None, note
     if note:
-        # Deletion-only change: there is no surviving content, so the note must
-        # be the reviewable block itself. ``run_coordinator`` returns approved
-        # without invoking the model when it finds *no* blocks, so an empty
-        # ``code`` would auto-pass the removal unreviewed; pass the note as the
-        # ``code`` input so the model actually examines the deletions.
-        return None, note, None
+        # Deletion-only change: there is no surviving content, so the note is the
+        # sole reviewable block. ``run_coordinator`` auto-approves when it finds
+        # *no* blocks, so it must be a real (segmentable) block, not empty code.
+        return {_DELETION_NOTE_PATH: note}, None, note
 
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )
-    return _whole_repo_review_input(repo_path, current_task)
+    return _whole_repo_review_input(repo_path)
 
 
 def _is_repo_setup_task(task: Any) -> bool:
@@ -1683,14 +1701,15 @@ class BackendExpertAgent:
             # .gitignore) so derived/uncommitted paths are reviewed when their
             # commit didn't land.
             written = _writer_output_keys(result)
-            review_files, review_code, deletion_note = _select_review_input(
+            # The deletion note (3rd element) is already folded into review_files/
+            # review_code by _select_review_input, so it is not forwarded again.
+            review_files, review_code, _deletion_note = _select_review_input(
                 repo_path, current_task, written
             )
             review_result = self._run_code_review(
                 code_review_agent=code_review_agent,
                 files=review_files,
                 code=review_code,
-                deletion_note=deletion_note,
                 spec_content=spec_content,
                 task=current_task,
                 architecture=architecture,
@@ -2614,7 +2633,6 @@ class BackendExpertAgent:
         code_review_agent: Any,
         files: Dict[str, str] | None = None,
         code: str | None = None,
-        deletion_note: str | None = None,
         spec_content: str,
         task: Task,
         architecture: Optional[SystemArchitecture],
@@ -2628,11 +2646,9 @@ class BackendExpertAgent:
               ``{path: content}`` dict) or ``code`` (a path-headered blob) is
               provided, untruncated: the coordinator bounds its own per-call
               prompts and its coverage guarantee only holds when it sees the
-              full input.
-            - ``deletion_note`` is None or a short text listing removed paths; it
-              is appended to the task description (review *context*) rather than
-              passed as source, so a finding is never anchored onto a synthetic
-              file path.
+              full input. Any deletion note is already folded into that channel
+              by ``_select_review_input`` (so the coordinator segments it),
+              never into the task description.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:
@@ -2641,10 +2657,6 @@ class BackendExpertAgent:
         from code_review_agent.models import build_code_review_input
 
         task_description = task.description or ""
-        if deletion_note:
-            task_description = (
-                f"{task_description}\n\n{deletion_note}" if task_description else deletion_note
-            )
         return code_review_agent.run(
             build_code_review_input(
                 files=files,

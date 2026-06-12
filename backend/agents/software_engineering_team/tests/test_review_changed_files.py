@@ -361,9 +361,10 @@ def test_backend_run_code_review_falls_back_to_code() -> None:
     assert captured["code"] == "### a.py ###\nx = 1"
 
 
-def test_backend_run_code_review_appends_deletion_note_to_description() -> None:
-    """The deletion note rides in the task description (review context), not as a
-    synthetic source file."""
+def test_backend_run_code_review_keeps_task_description_clean() -> None:
+    """``_run_code_review`` forwards the task description verbatim — the deletion
+    note is folded into the segmented files channel upstream, never appended to
+    the description (which the coordinator repeats unsegmented per chunk)."""
     from software_engineering_team.backend_agent.agent import BackendExpertAgent
 
     captured: dict = {}
@@ -377,15 +378,12 @@ def test_backend_run_code_review_appends_deletion_note_to_description() -> None:
     BackendExpertAgent._run_code_review(
         code_review_agent=_StubAgent(),
         files={"a.py": "x = 1"},
-        deletion_note="Files DELETED by this task:\n- gone.py\n",
         spec_content="spec",
         task=_task(),
         architecture=None,
     )
 
-    assert "implement endpoint" in captured["task_description"]  # original description kept
-    assert "gone.py" in captured["task_description"]  # note folded into context
-    assert "gone.py" not in captured["files"]  # not injected as a source file
+    assert captured["task_description"] == "implement endpoint"  # verbatim, nothing appended
 
 
 # ---------------------------------------------------------------------------
@@ -619,7 +617,10 @@ def test_select_review_input_rename_notes_old_reviews_new(tmp_path: Path) -> Non
 
 
 def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
-    from software_engineering_team.backend_agent.agent import _select_review_input
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_PATH,
+        _select_review_input,
+    )
 
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -637,14 +638,20 @@ def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
     files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
-    assert set(files) == {"a.py"}  # only the real changed file — no synthetic entry
-    assert note is not None and "gone.py" in note  # removal surfaced as separate note
+    assert "a.py" in files  # the real changed file is reviewed
+    # The deletion note rides the segmented files channel under the synthetic key,
+    # not the per-chunk-repeated task description.
+    assert _DELETION_NOTE_PATH in files and "gone.py" in files[_DELETION_NOTE_PATH]
+    assert note is not None and "gone.py" in note  # also returned for inspection
 
 
 def test_select_review_input_deletion_only_reviews_note_as_block(tmp_path: Path) -> None:
-    """A deletion-only change passes the note as the reviewable `code` block (an
-    empty code would make run_coordinator auto-approve without reviewing)."""
-    from software_engineering_team.backend_agent.agent import _select_review_input
+    """A deletion-only change carries the note as the sole entry in the segmented
+    files channel (an empty input would make run_coordinator auto-approve)."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_PATH,
+        _select_review_input,
+    )
 
     _init_repo(tmp_path)
     (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
@@ -660,9 +667,11 @@ def test_select_review_input_deletion_only_reviews_note_as_block(tmp_path: Path)
     task = SimpleNamespace(description="remove module")
     files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
-    assert files is None
-    assert note is None  # not the context channel — it is the reviewed block
-    assert code and "gone.py" in code  # non-empty block, so the model actually runs
+    assert code is None  # not the legacy blob channel
+    assert files is not None
+    # The note is the one segmentable block — non-empty so the model actually runs.
+    assert "gone.py" in files[_DELETION_NOTE_PATH]
+    assert note and "gone.py" in note  # also returned for logging/inspection
 
 
 def test_select_review_input_note_named_file_reviewed_normally(tmp_path: Path) -> None:
@@ -787,8 +796,12 @@ def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
 
 def test_select_review_input_deletion_note_lists_every_path(tmp_path: Path) -> None:
     """Every deleted path is listed (fail-closed coverage), not hidden behind a
-    count — the reviewer must be able to inspect each removal."""
-    from software_engineering_team.backend_agent.agent import _select_review_input
+    count — the reviewer must be able to inspect each removal — and the full list
+    travels in the segmented files channel, not the per-chunk task description."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_PATH,
+        _select_review_input,
+    )
 
     total = 120
     _init_repo(tmp_path)
@@ -806,7 +819,7 @@ def test_select_review_input_deletion_note_lists_every_path(tmp_path: Path) -> N
     _git(tmp_path, "commit", "-m", "mass delete")
 
     task = SimpleNamespace(description="x")
-    _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+    files, _code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert note is not None
     assert f"{total} total" in note  # full count preserved
@@ -814,6 +827,9 @@ def test_select_review_input_deletion_note_lists_every_path(tmp_path: Path) -> N
     for i in range(total):
         assert f"gone{i}.py" in note  # every removed path is individually listed
     assert note.count("- gone") == total  # all listed, none collapsed
+    # The list is carried in the segmented files channel (the coordinator chunks
+    # blocks), never appended to a per-chunk-repeated task description.
+    assert files[_DELETION_NOTE_PATH] == note
 
 
 def test_select_review_input_restored_dangling_symlink_not_deleted(tmp_path: Path) -> None:
