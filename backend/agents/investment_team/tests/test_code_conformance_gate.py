@@ -580,6 +580,43 @@ def test_no_duplicate_engine_exit_partial_coverage_allows_uncovered_side() -> No
     assert not any("manual position-closing order" in c.lower() for c in crits), crits
 
 
+def test_no_duplicate_engine_exit_ignores_same_side_scale_in() -> None:
+    # Long-only spec with a take-profit (covers both sides). The strategy
+    # doubles its long with a SAME-side qty=pos.qty order — a scale-in, not
+    # a close. Its inferred closed side ("short") is not an entered side, so
+    # it must NOT be flagged as a duplicate exit.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="LONG")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry("long")],
+        exit_rules=[TakeProfitRule(pct=0.1)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
+
+
 # ---------------------------------------------------------------------------
 # Engine-delegated exits: the gate must NOT require the strategy to reference
 # ``entry_price``. Stop-loss / take-profit thresholds are enforced

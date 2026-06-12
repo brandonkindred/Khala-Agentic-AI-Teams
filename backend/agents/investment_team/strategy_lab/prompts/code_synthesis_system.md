@@ -71,13 +71,14 @@ class MyStrategy(Strategy):
             # <FILL IN entry decision per spec.entry_rules>
             pass
 
-        # ── EXIT ──────────────────────────────────────────
-        # Exits are engine-owned: the engine enforces every
-        # spec.exit_rules entry (stop-loss, take-profit, signal-exit) and
+        # ── ENGINE OWNS EXITS (do NOT submit close orders) ──
+        # The engine enforces every spec.exit_rules entry (stop-loss,
+        # take-profit, signal-exit) for the side(s) it applies to and
         # stamps engine_exit:<kind> on the close. Do NOT submit a closing
-        # order for a spec-declared exit — a manual close fills first,
-        # strips that attribution, and fails the trade-alignment gate.
-        # on_bar submits entries only.
+        # order for a side the engine covers — a manual close fills first,
+        # strips that attribution, and fails the trade-alignment gate. The
+        # only close you author is for a position side NO exit rule covers
+        # (e.g. a short when the spec's only stop is a long-side trailing).
 
     def on_fill(self, ctx, fill):
         """Optional — observe fills the engine produces."""
@@ -121,7 +122,7 @@ ctx.submit_order(
 )
 ```
 
-- **Exits are engine-owned**: do NOT submit a closing order (opposite `side`, `qty == position.qty`) for any stop-loss / take-profit / signal-exit declared in `spec.exit_rules`. The engine enforces those rules and stamps `engine_exit:<kind>` attribution; a manual close fills first, strips that attribution, and fails the trade-alignment gate.
+- **Exits are engine-owned**: the engine enforces every stop-loss / take-profit / signal-exit in `spec.exit_rules` for the side(s) it applies to and stamps `engine_exit:<kind>`. Do NOT submit a closing order (opposite `side`, `qty == position.qty`) for a side the engine covers — a manual close fills first, strips that attribution, and fails the trade-alignment gate. Submit a close yourself **only** for a position side no exit rule covers (e.g. a short position when the spec's only stop is a long-side `trailing_high`); otherwise `on_bar` submits entries only.
 - **Sizing**: compute `qty` yourself from `ctx.equity * pct / bar.close`. The engine's risk gates can still reject an oversize entry.
 
 ## Reading indicators — use `ctx.indicator(...)`
@@ -179,11 +180,15 @@ Do NOT use: `exec()`, `eval()`, `compile()`, `__import__()`, `open()`, `setattr(
 ## Exits are engine-owned
 
 The engine enforces every exit in `spec.exit_rules` — stop-loss,
-take-profit, and signal-exit — and stamps `engine_exit:<kind>` on the
-close. Do NOT author any position-closing order for a spec-declared
-exit: a manual close fills ahead of the engine, strips that
-attribution, and fails the trade-alignment gate. Your `on_bar` submits
-**entries only**.
+take-profit, and signal-exit — for the position side(s) each rule
+applies to, and stamps `engine_exit:<kind>` on the close. Do NOT author
+a position-closing order for a side the engine covers: a manual close
+fills ahead of the engine, strips that attribution, and fails the
+trade-alignment gate. The one exception is a position side that **no**
+exit rule covers (e.g. a short when the spec's only stop is a long-side
+`trailing_high`) — that side has no engine exit, so you must close it
+yourself. When every entered side is covered, `on_bar` submits entries
+only.
 
 For the same reason, do NOT implement bar-counting "time stop" exits.
 Variables like `bars_held`, `hold_count`, `days_held`, or any

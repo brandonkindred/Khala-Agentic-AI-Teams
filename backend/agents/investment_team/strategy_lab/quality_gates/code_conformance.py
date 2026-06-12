@@ -920,8 +920,11 @@ class CodeConformanceGate(GateResultsMixin):
         Post: returns ``()`` when ``spec`` is ``None``, for the compiled
         path (``requires_custom_code`` false — it submits no orders), for a
         spec with no exit rules, or when no reachable closing
-        ``submit_order`` retires an engine-owned side. Otherwise returns a
-        single critical naming the count of manual closes to remove.
+        ``submit_order`` retires an engine-owned side. A same-side
+        full-size scale-in (``qty=position.qty`` whose inferred closed side
+        is not an entered side) is not treated as a close. Otherwise
+        returns a single critical naming the count of manual closes to
+        remove.
         Invariant: never fires on the compiled path; only forbids closes
         the engine demonstrably owns for the side they retire.
         """
@@ -947,11 +950,21 @@ class CodeConformanceGate(GateResultsMixin):
             for node in _iter_method_body_nodes(method):
                 if not _is_submit_order_call(node) or not _submit_order_closes_position(node):
                     continue
-                # A close whose side resolves statically is judged on that
-                # one side; an unresolvable side is judged against every
-                # entered side (forbid if any is engine-owned).
+                # A ``qty=position.qty`` order is a close only when it
+                # retires a side the spec actually enters. A SAME-side
+                # full-size scale-in carries the same ``qty`` shape, but the
+                # side it "closes" (the opposite of the order side) is then
+                # not an entered side — skip it so doubling a position is not
+                # misread as a duplicate exit. A close whose side cannot be
+                # resolved statically is judged against every entered side
+                # (forbid if any is engine-owned).
                 closed_side = _submit_order_close_side(node)
-                sides_to_check = {closed_side} if closed_side else entered_sides
+                if closed_side is not None:
+                    if closed_side not in entered_sides:
+                        continue
+                    sides_to_check = {closed_side}
+                else:
+                    sides_to_check = entered_sides
                 if any(_engine_exits_cover_sides(spec, {s}) for s in sides_to_check):
                     n_closes += 1
         if n_closes == 0:
