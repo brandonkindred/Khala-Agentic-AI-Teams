@@ -57,7 +57,7 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
-from .factory import get_client
+from .factory import get_client, unwrap_client
 from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -450,9 +450,16 @@ class LLMClientModel(Model):
         objective = (
             current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
         )
+        # Dispatch to the raw (unwrapped) client so that if ``self._client`` is
+        # an ``_AttributingClient`` (from ``get_client(agent_key)``), its inner
+        # ``llm_attribution(agent_key=...)`` binding does not override the key
+        # we set above.  The correct key is already on the context via the
+        # outer ``with llm_attribution(...)``; bypassing the wrapper ensures
+        # ``cfg.agent_key`` (which may differ after ``clone``/``update_config``)
+        # is the effective binding rather than the wrapper's original key.
         with llm_attribution(agent_key=agent_key or None, team=team):
             result = await asyncio.to_thread(
-                self._client.chat,
+                unwrap_client(self._client).chat,
                 oai_messages,
                 objective=objective,
                 response_format=response_format,
@@ -555,7 +562,7 @@ class LLMClientModel(Model):
         )
         with llm_attribution(agent_key=agent_key or None, team=team):
             data = await asyncio.to_thread(
-                self._client.complete_json,
+                unwrap_client(self._client).complete_json,
                 text_prompt,
                 objective=objective,
                 temperature=temperature,

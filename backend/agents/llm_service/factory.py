@@ -107,10 +107,17 @@ def attributed_client(inner: Any, agent_key: Optional[str]) -> Any:
     per-model override) but must preserve the agent attribution of the client it
     is replacing. Pairs with :func:`client_agent_key`.
 
-    Postconditions: returns an :class:`_AttributingClient` over ``inner`` when
-        ``agent_key`` is truthy; otherwise returns ``inner`` unchanged.
+    If ``inner`` is already an :class:`_AttributingClient`, it is unwrapped
+    before re-wrapping so the new ``agent_key`` is the sole binding and the
+    old key is not shadowed by a stacked wrapper.
+
+    Postconditions: returns an :class:`_AttributingClient` over the unwrapped
+        ``inner`` when ``agent_key`` is truthy; otherwise returns ``inner`` unchanged.
     """
-    return _AttributingClient(inner, agent_key) if agent_key else inner
+    if not agent_key:
+        return inner
+    base = unwrap_client(inner)
+    return _AttributingClient(base, agent_key)
 
 
 def get_client(

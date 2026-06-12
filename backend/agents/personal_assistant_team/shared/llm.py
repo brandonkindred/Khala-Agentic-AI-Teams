@@ -121,84 +121,88 @@ class LLMClient(_BaseLLMClient):
         :param objective: Short phrase describing the call's purpose for LLM
             log/telemetry attribution. If empty, inherits from the current
             ``llm_attribution`` context; if none is set, a generic fallback is used.
+
+        Preconditions: ``prompt`` is non-empty.
+        Postconditions: returns a dict or raises ``JSONExtractionFailure``.
         """
-        raw_responses: List[str] = []
-        attempts_made = 0
-        continuation_attempts = 0
-        decomposition_attempts = 0
+        with llm_attribution(objective=objective or None):
+            raw_responses: List[str] = []
+            attempts_made = 0
+            continuation_attempts = 0
+            decomposition_attempts = 0
 
-        think = kwargs.pop("think", False)
-        # --- direct attempt ---
-        response = self._ollama_complete(
-            prompt,
-            temperature=temperature,
-            system_prompt=system_prompt,
-            json_mode=True,
-            think=think,
-        )
-        raw_responses.append(response)
-        attempts_made += 1
-
-        parsed = self._try_parse_json(response)
-        if parsed is not None:
-            return parsed
-
-        # --- continuation on truncation ---
-        accumulated = response
-        for _ in range(self.MAX_CONTINUATION_ATTEMPTS):
-            if not self._is_json_truncated(accumulated):
-                break
-            continuation = self._ollama_complete(
-                f"Continue from where you left off:\n{accumulated}",
+            think = kwargs.pop("think", False)
+            # --- direct attempt ---
+            response = self._ollama_complete(
+                prompt,
                 temperature=temperature,
                 system_prompt=system_prompt,
                 json_mode=True,
                 think=think,
             )
-            raw_responses.append(continuation)
+            raw_responses.append(response)
             attempts_made += 1
-            continuation_attempts += 1
-            accumulated = accumulated + continuation
-            parsed = self._try_parse_json(accumulated)
+
+            parsed = self._try_parse_json(response)
             if parsed is not None:
                 return parsed
 
-        # --- decomposition ---
-        combined: Dict[str, Any] = {}
-        subtasks = self._build_subtasks(prompt, expected_keys, decomposition_hints)
-        for subtask_prompt, subtask_key in subtasks:
-            if decomposition_attempts >= self.MAX_DECOMPOSITION_ATTEMPTS:
-                break
-            resp = self._ollama_complete(
-                subtask_prompt,
-                temperature=temperature,
-                system_prompt=system_prompt,
-                json_mode=True,
-                think=think,
+            # --- continuation on truncation ---
+            accumulated = response
+            for _ in range(self.MAX_CONTINUATION_ATTEMPTS):
+                if not self._is_json_truncated(accumulated):
+                    break
+                continuation = self._ollama_complete(
+                    f"Continue from where you left off:\n{accumulated}",
+                    temperature=temperature,
+                    system_prompt=system_prompt,
+                    json_mode=True,
+                    think=think,
+                )
+                raw_responses.append(continuation)
+                attempts_made += 1
+                continuation_attempts += 1
+                accumulated = accumulated + continuation
+                parsed = self._try_parse_json(accumulated)
+                if parsed is not None:
+                    return parsed
+
+            # --- decomposition ---
+            combined: Dict[str, Any] = {}
+            subtasks = self._build_subtasks(prompt, expected_keys, decomposition_hints)
+            for subtask_prompt, subtask_key in subtasks:
+                if decomposition_attempts >= self.MAX_DECOMPOSITION_ATTEMPTS:
+                    break
+                resp = self._ollama_complete(
+                    subtask_prompt,
+                    temperature=temperature,
+                    system_prompt=system_prompt,
+                    json_mode=True,
+                    think=think,
+                )
+                raw_responses.append(resp)
+                attempts_made += 1
+                decomposition_attempts += 1
+                p = self._try_parse_json(resp)
+                if p is not None:
+                    if subtask_key:
+                        combined[subtask_key] = p.get(subtask_key, p)
+                    else:
+                        combined.update(p)
+
+            if combined:
+                return combined
+
+            suggestions = self._recovery_suggestions(prompt, raw_responses)
+            raise JSONExtractionFailure(
+                "Failed to extract valid JSON after all recovery attempts",
+                original_prompt=prompt,
+                attempts_made=attempts_made,
+                continuation_attempts=continuation_attempts,
+                decomposition_attempts=decomposition_attempts,
+                raw_responses=raw_responses,
+                recovery_suggestions=suggestions,
             )
-            raw_responses.append(resp)
-            attempts_made += 1
-            decomposition_attempts += 1
-            p = self._try_parse_json(resp)
-            if p is not None:
-                if subtask_key:
-                    combined[subtask_key] = p.get(subtask_key, p)
-                else:
-                    combined.update(p)
-
-        if combined:
-            return combined
-
-        suggestions = self._recovery_suggestions(prompt, raw_responses)
-        raise JSONExtractionFailure(
-            "Failed to extract valid JSON after all recovery attempts",
-            original_prompt=prompt,
-            attempts_made=attempts_made,
-            continuation_attempts=continuation_attempts,
-            decomposition_attempts=decomposition_attempts,
-            raw_responses=raw_responses,
-            recovery_suggestions=suggestions,
-        )
 
     def complete(
         self,
@@ -215,12 +219,13 @@ class LLMClient(_BaseLLMClient):
             log/telemetry attribution. If empty, inherits from the current
             ``llm_attribution`` context; if none is set, a generic fallback is used.
         """
-        return self._ollama_complete(
-            prompt,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            system_prompt=system_prompt,
-        )
+        with llm_attribution(objective=objective or None):
+            return self._ollama_complete(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+            )
 
     def get_max_context_tokens(self) -> int:
         return 4096
