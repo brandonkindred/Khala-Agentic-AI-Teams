@@ -40,6 +40,15 @@ def test_convert_dict_preserves_id_and_options():
     assert out[0]["options"] == [{"id": "a", "label": "A", "is_default": False}]
 
 
+def test_normalize_options_renames_reserved_other_id():
+    out = hitl.convert_to_structured_questions(
+        [{"question_text": "Q?", "options": [{"id": "other", "label": "Another team"}]}]
+    )
+    # "other" is reserved for free-text; it must be renamed to avoid collision.
+    assert out[0]["options"][0]["id"] == "other_opt"
+    assert out[0]["options"][0]["label"] == "Another team"
+
+
 def test_convert_dict_alt_text_keys_and_empty_dropped():
     out = hitl.convert_to_structured_questions(
         [{"text": "via text"}, {"question": "via question"}, {"foo": "x"}]

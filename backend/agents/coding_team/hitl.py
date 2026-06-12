@@ -65,9 +65,16 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
+            opt_id = str(o["id"])
+            if opt_id == "other":
+                # "other" is the reserved synthetic free-text option added by the UI/API;
+                # using it as a structured option id would cause the answer handler to treat
+                # any selection of this option as a free-text response.
+                logger.warning("Option id 'other' is reserved; renaming to 'other_opt'")
+                opt_id = "other_opt"
             options.append(
                 {
-                    "id": str(o["id"]),
+                    "id": opt_id,
                     "label": str(o.get("label") or o["id"]),
                     "is_default": bool(o.get("is_default", False)),
                 }

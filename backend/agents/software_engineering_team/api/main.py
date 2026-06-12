@@ -2157,6 +2157,12 @@ def auto_answer_run_team_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
+    if not question_data.get("options"):
+        raise HTTPException(
+            status_code=422,
+            detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
+        )
+
     spec_content = _get_spec_content_for_job(data)
     additional_context = request.spec_context if request else None
 
@@ -2657,6 +2663,12 @@ def auto_answer_product_analysis_question(
         raise HTTPException(
             status_code=404,
             detail=f"Question {question_id} not found in pending questions.",
+        )
+
+    if not question_data.get("options"):
+        raise HTTPException(
+            status_code=422,
+            detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
         )
 
     spec_content = _get_spec_content_for_job(data)

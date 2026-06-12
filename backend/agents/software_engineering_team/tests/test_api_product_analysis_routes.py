@@ -256,3 +256,14 @@ def test_auto_answer_product_analysis_404_when_question_unknown(client, fake_job
         f"/product-analysis/{job_id}/auto-answer/q-unknown",
     )
     assert resp.status_code == 404
+
+
+def test_auto_answer_product_analysis_422_when_no_options(client, fake_job_client):
+    job_id = "job-pa-7"
+    fake_job_client.create_job(job_id, job_type="product_analysis", repo_path="/tmp/repo")
+    fake_job_client.update_job(
+        job_id,
+        pending_questions=[{"id": "q1", "question_text": "What fields?", "options": []}],
+    )
+    resp = client.post(f"/product-analysis/{job_id}/auto-answer/q1")
+    assert resp.status_code == 422

@@ -401,3 +401,14 @@ def test_auto_answer_run_team_404_when_question_unknown(client, fake_job_client)
     fake_job_client.update_job(job_id, pending_questions=[{"id": "q1"}])
     resp = client.post(f"/run-team/{job_id}/auto-answer/q-unknown")
     assert resp.status_code == 404
+
+
+def test_auto_answer_run_team_422_when_no_options(client, fake_job_client):
+    job_id = "job-aa3"
+    fake_job_client.create_job(job_id, repo_path="/tmp/repo", job_type="run_team")
+    fake_job_client.update_job(
+        job_id,
+        pending_questions=[{"id": "q1", "question_text": "What fields?", "options": []}],
+    )
+    resp = client.post(f"/run-team/{job_id}/auto-answer/q1")
+    assert resp.status_code == 422
