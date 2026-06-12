@@ -3,7 +3,14 @@ agent-key attribution wrapper returned for keyed clients."""
 
 import pytest
 
-from llm_service import DummyLLMClient, OllamaLLMClient, get_client
+from llm_service import (
+    DummyLLMClient,
+    OllamaLLMClient,
+    attributed_client,
+    client_agent_key,
+    get_client,
+    unwrap_client,
+)
 from llm_service.attribution import current_attribution
 from llm_service.factory import _AttributingClient
 
@@ -101,6 +108,27 @@ def test_wrapper_binds_agent_key_into_attribution(monkeypatch: pytest.MonkeyPatc
     assert captured["objective"] == "rank candidates"
     # Attribution is restored after the call.
     assert current_attribution().agent_key == ""
+
+
+def test_client_agent_key_and_attributed_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A reconstructed client can re-apply the original client's agent attribution."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    keyed = get_client("blog")
+    assert client_agent_key(keyed) == "blog"
+
+    raw = unwrap_client(keyed)
+    assert client_agent_key(raw) is None  # an unwrapped client carries no identity
+
+    # A fresh override client (e.g. a per-model override) can preserve the identity.
+    override = OllamaLLMClient(model="override-model")
+    rewrapped = attributed_client(override, client_agent_key(keyed))
+    assert isinstance(rewrapped, _AttributingClient)
+    assert client_agent_key(rewrapped) == "blog"
+    assert rewrapped.model == "override-model"
+
+    # No key → returned unchanged (no wrapper).
+    assert attributed_client(override, None) is override
 
 
 def test_wrapper_does_not_clobber_outer_team_objective(monkeypatch: pytest.MonkeyPatch) -> None:

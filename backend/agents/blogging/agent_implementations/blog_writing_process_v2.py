@@ -64,7 +64,13 @@ from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
-from llm_service import OllamaLLMClient, get_strands_model, unwrap_client
+from llm_service import (
+    OllamaLLMClient,
+    attributed_client,
+    client_agent_key,
+    get_strands_model,
+    unwrap_client,
+)
 from llm_service.interface import LLMClient
 
 from . import _path_setup  # noqa: F401
@@ -110,7 +116,9 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
         return base
     inner = unwrap_client(base)
     if isinstance(inner, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        override = OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        # Preserve the original client's agent attribution on the override.
+        return attributed_client(override, client_agent_key(base))
     return base
 
 
@@ -126,7 +134,9 @@ def plan_critic_llm_client(base: LLMClient) -> LLMClient:
         return base
     inner = unwrap_client(base)
     if isinstance(inner, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        override = OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        # Preserve the original client's agent attribution on the override.
+        return attributed_client(override, client_agent_key(base))
     return base
 
 

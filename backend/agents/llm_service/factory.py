@@ -79,6 +79,28 @@ def unwrap_client(client: Any) -> Any:
     return client._inner if isinstance(client, _AttributingClient) else client
 
 
+def client_agent_key(client: Any) -> Optional[str]:
+    """Return the ``agent_key`` bound to a wrapped client, else ``None``.
+
+    Postconditions: returns the agent identity for an :class:`_AttributingClient`,
+        otherwise ``None`` (an unwrapped client carries no bound identity).
+    """
+    return client._agent_key if isinstance(client, _AttributingClient) else None
+
+
+def attributed_client(inner: Any, agent_key: Optional[str]) -> Any:
+    """Wrap ``inner`` so its calls attribute to ``agent_key``, mirroring ``get_client``.
+
+    Use this when code constructs a replacement provider client (e.g. a
+    per-model override) but must preserve the agent attribution of the client it
+    is replacing. Pairs with :func:`client_agent_key`.
+
+    Postconditions: returns an :class:`_AttributingClient` over ``inner`` when
+        ``agent_key`` is truthy; otherwise returns ``inner`` unchanged.
+    """
+    return _AttributingClient(inner, agent_key) if agent_key else inner
+
+
 def get_client(
     agent_key: Optional[str] = None,
     *,
