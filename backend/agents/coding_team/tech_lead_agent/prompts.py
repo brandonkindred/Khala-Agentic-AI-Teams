@@ -16,6 +16,7 @@ Rules:
 - Dependencies: a task can only start after all its dependency tasks are completed (merged).
 - Stacks: define one stack per major technical area (e.g. one for frontend, one for backend, optionally devops). Each stack will get one Senior Software Engineer agent.
 - Open questions: if any required product/design decision is missing, put it in "open_questions" and you may return an empty "tasks" list — the job pauses for a human to answer, then you will be re-asked with the answers.
+- Open question options: every open question MUST include at least 2 context-specific answer options. Do NOT use generic yes/no/not-sure options. Options must represent the actual choices available for that specific decision. For example, if asking "Which auth strategy should be used?", options might be: [{{"id": "opt_oauth", "label": "OAuth2 (Google/GitHub)"}}, {{"id": "opt_local", "label": "Username + password (local)"}}, {{"id": "opt_sso", "label": "SSO/SAML"}}, {{"id": "opt_none", "label": "No auth required"}}]. If asking about ownership/responsibility, options should list the actual teams or roles. If asking about an approach or format, options should list the concrete approaches. Mark the most common/safe/neutral choice with "is_default": true.
 
 Plan:
 ---
@@ -25,7 +26,7 @@ Plan:
 Respond with a single JSON object with keys "tasks", "stacks", and "open_questions".
 "tasks": list of {{ "id": str, "title": str, "description": str, "dependencies": list[str] }}
 "stacks": list of {{ "name": str, "tools_services": list[str] }}
-"open_questions": list of {{ "question_text": str, "context": str (optional), "options": list[{{ "id": str, "label": str }}] (optional) }}"""
+"open_questions": list of {{ "question_text": str, "context": str, "options": list[{{ "id": str, "label": str, "is_default": bool }}] }}"""
 
 
 GROOM_TASK_SYSTEM = """You are a Tech Lead grooming a single task for implementation. For the given task and plan context, you will:

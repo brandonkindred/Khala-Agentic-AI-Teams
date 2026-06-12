@@ -34,13 +34,10 @@ logger = logging.getLogger(__name__)
 
 WAITING_STATUS = "waiting_for_user"
 
-# Mirrors software_engineering_team.orchestrator.DEFAULT_CLARIFICATION_OPTIONS so both teams
-# present an identical answer UI; the UI always offers an "other" free-text option on top.
-DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = [
-    {"id": "yes", "label": "Yes"},
-    {"id": "no", "label": "No"},
-    {"id": "not_sure", "label": "Not sure / Need more info"},
-]
+# Fallback when an agent omits options entirely (should not happen — prompts require context-specific
+# options). Empty list means the UI shows only the always-present "Other (free text)" field, which
+# is more appropriate than forcing yes/no onto open-ended questions like "What API fields are needed?"
+DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
@@ -95,10 +92,10 @@ def convert_to_structured_questions(
           question text (``question_text`` / ``text`` / ``question``).
     Postconditions:
         - Returns one dict per non-empty input question, each with a stable unique ``id``,
-          ``question_text``, ``options`` (the question's own options if provided, else the default
-          yes/no/not-sure set), ``required=True``, and ``source``. A question that already carries
-          an ``id`` and domain-specific ``options`` round-trips unchanged. Empty questions are
-          dropped.
+          ``question_text``, ``options`` (the question's own options if provided, else an empty
+          list so the UI falls back to free-text), ``required=True``, and ``source``. A question
+          that already carries an ``id`` and domain-specific ``options`` round-trips unchanged.
+          Empty questions are dropped.
     """
     structured: List[Dict[str, Any]] = []
     for idx, q in enumerate(questions or []):

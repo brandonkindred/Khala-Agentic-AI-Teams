@@ -9,7 +9,7 @@ from coding_team import hitl, job_store
 # --------------------------------------------------------------------------- convert / normalize
 
 
-def test_convert_strings_get_default_options_and_unique_ids():
+def test_convert_strings_get_empty_options_and_unique_ids():
     out = hitl.convert_to_structured_questions(
         ["Allergen strictness default?", "  "], source="plan"
     )
@@ -18,7 +18,8 @@ def test_convert_strings_get_default_options_and_unique_ids():
     assert q["question_text"] == "Allergen strictness default?"
     assert q["source"] == "plan"
     assert q["required"] is True
-    assert [o["id"] for o in q["options"]] == ["yes", "no", "not_sure"]
+    # Plain strings carry no options; UI falls back to free-text "other" field.
+    assert q["options"] == []
     assert q["id"].startswith("plan_0_")
 
 
