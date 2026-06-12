@@ -64,6 +64,10 @@ The executor delegates to **`software_engineering_team.shared.git_utils`** so su
 
 **Rollout:** `coding_team` `SeniorSWEAgent` enables Git tools by default. Other repo-backed teams can import the same definitions and bind a `GitToolContext` for their workspace.
 
+### 3.2 Agent Cognition Core (batteries-included)
+
+Newly generated agents are stamped with a default `cognition` manifest block (`agent_registry.CognitionSpec`) so the tools layer, memory, and guardrails of the **Agent Cognition Core** are wired by default — no per-agent boilerplate. Note that an agent's **roster tools** (free-text labels like "Git" or "Slack API") are deliberately **not** mapped into `cognition.tools`: those ids resolve against the cognition tool registries (`LlmToolsService` + `IntegrationRegistry` + `agent_git_tools`), so `cognition.tools` ships empty and is widened explicitly when a real, resolvable tool is bound.
+
 ---
 
 ## 4. Memory (file-backed or equivalent)
@@ -77,6 +81,8 @@ Memory is structured and tiered:
 | **Long-term** | Durable summaries or reviews (e.g. “review of all daily notes”), retrievable across sessions |
 
 Implementation may use a filesystem layout, a database, or object store; the **conceptual** split must exist so prompts do not rely on an unbounded single blob.
+
+Generated agents realize these tiers through the **Agent Cognition Core** without per-agent wiring: episodic events (pruned per `cognition.memory.retention_days_events`, default 90 days), calendar rollup summaries (day/week/month/year), and a default-on Neo4j/Graphiti knowledge graph. Each invoke returns a `CognitionWriteback` carrying at least one episodic `MemoryEvent`, and the runtime receives a compact `memory_digest` on the side channel (see §6.1) to render into its prompt.
 
 ---
 
@@ -101,6 +107,15 @@ Every agent **must** define enforceable guardrails:
 - No credential logging; secrets via env or secure stores only.
 
 The diagram shows an explicit **Security Guardrails** box—implement as middleware, validators, or post-conditions, not only as prompt text.
+
+### 6.1 Cognition guardrails & the side-channel contract
+
+Generated agents inherit day-one guardrails from the **Agent Cognition Core**: the `default_guardrails` seed pack is stamped via `cognition.rule_packs` and installs on first invoke. Steering rides a dedicated **side channel**, never the agent's input contract:
+
+- **Inbound:** the invoke proxy wraps the request in a marker envelope (DESIGN §10); the sandbox shim opens a context channel the runtime reads via `agent_cognition.tools.channel.get_cognition_context()` → `{rules, memory_digest}`. The runtime renders **only advisory** rules + the memory digest into its system prompt. **Enforced** rules are gated deterministically by the proxy/shim, **never** by prompt text.
+- **Outbound:** the runtime returns a `CognitionWriteback` (`events`, `tool_calls`, `truncated`) that the proxy persists.
+
+This is the generator wiring of DESIGN §12 Step 14: every generated agent gets the core and consumes it.
 
 ---
 

@@ -134,9 +134,19 @@ def maybe_drive_tool_loop(
     """
     try:
         from agent_cognition.models import Rule
+        from agent_cognition.tools.envelope import try_unwrap_writeback
         from agent_cognition.tools.runner import ToolLoopError, ToolLoopPlan, execute_plan
     except Exception:
         return {"output": result, "tool_calls": [], "events": [], "error": None}
+    # A pure-LLM entrypoint has no tool loop; it carries its episodic writeback in
+    # a marker-wrapped result so the events reach the response instead of being
+    # dropped. Unwrap that first — the caller gets the inner output, the shim lifts
+    # the events. `tool_calls` stays EMPTY: the trusted tool audit is shim-owned
+    # (only the brokered runner populates it), so an entrypoint can never fabricate
+    # side-effect records that invoke_gate would persist as trusted.
+    wb = try_unwrap_writeback(result)
+    if wb is not None:
+        return {"output": wb.output, "tool_calls": [], "events": wb.events, "error": None}
     if not isinstance(result, ToolLoopPlan):
         return {"output": result, "tool_calls": [], "events": [], "error": None}
 

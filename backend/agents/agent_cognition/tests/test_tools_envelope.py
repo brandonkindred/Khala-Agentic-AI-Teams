@@ -9,11 +9,15 @@ import pytest
 
 from agent_cognition.tools.envelope import (
     ENVELOPE_MARKER,
+    WRITEBACK_MARKER,
     EnvelopeError,
     UnwrappedRequest,
+    UnwrappedWriteback,
     is_envelope,
     try_unwrap_request,
+    try_unwrap_writeback,
     wrap_request,
+    wrap_writeback,
 )
 
 
@@ -86,3 +90,66 @@ def test_marked_but_missing_cognition_raises() -> None:
     # is malformed (rejected), not silently unwrapped with an empty block.
     with pytest.raises(EnvelopeError):
         try_unwrap_request({ENVELOPE_MARKER: 1, "input": {"a": 1}})
+
+
+# --- response writeback envelope -------------------------------------------
+
+
+def test_writeback_round_trips_through_unwrap() -> None:
+    wb = {"events": [{"id": "e1"}], "tool_calls": [{"tool_id": "git"}], "truncated": False}
+    wrapped = wrap_writeback({"output": "hi"}, wb)
+    assert wrapped[WRITEBACK_MARKER] == 1
+    unwrapped = try_unwrap_writeback(wrapped)
+    assert isinstance(unwrapped, UnwrappedWriteback)
+    assert unwrapped.output == {"output": "hi"}
+    assert unwrapped.events == [{"id": "e1"}]
+    # tool_calls are NOT exposed — the trusted tool audit is shim-owned.
+    assert not hasattr(unwrapped, "tool_calls")
+
+
+def test_wrap_writeback_shallow_copies_and_references_output() -> None:
+    wb = {"events": []}
+    output = {"output": "x"}
+    wrapped = wrap_writeback(output, wb)
+    # Top-level is a fresh dict, so adding a key never leaks back to the caller's.
+    wrapped["writeback"]["truncated"] = True
+    assert "truncated" not in wb
+    # output is referenced verbatim.
+    assert wrapped["output"] is output
+
+
+def test_wrap_writeback_rejects_non_mapping() -> None:
+    with pytest.raises(EnvelopeError):
+        wrap_writeback({"output": "x"}, ["bad"])  # type: ignore[arg-type]
+
+
+def test_unwrap_writeback_none_for_unmarked() -> None:
+    assert try_unwrap_writeback({"output": "x"}) is None
+    assert try_unwrap_writeback("plain") is None
+    assert try_unwrap_writeback([1, 2]) is None
+
+
+def test_unwrap_writeback_rejects_malformed_envelopes() -> None:
+    # Strict: a marked-but-malformed mapping is NOT consumed as an envelope (so an
+    # unrelated agent's ordinary output is never silently replaced by its 'output').
+    assert try_unwrap_writeback({WRITEBACK_MARKER: 1, "output": "keep", "writeback": "bad"}) is None
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: 1, "writeback": {"events": []}}) is None
+    )  # no output
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: "x", "output": 1, "writeback": {}}) is None
+    )  # marker value
+    assert (
+        try_unwrap_writeback({WRITEBACK_MARKER: 1, "output": 1, "writeback": {}, "extra": 2})
+        is None
+    )  # stray key
+
+
+def test_unwrap_writeback_events_tolerant_within_valid_envelope() -> None:
+    # A well-formed envelope whose events aren't a list degrades to [] (no crash).
+    unwrapped = try_unwrap_writeback(
+        {WRITEBACK_MARKER: 1, "output": "x", "writeback": {"events": "nope"}}
+    )
+    assert unwrapped is not None
+    assert unwrapped.output == "x"
+    assert unwrapped.events == []
