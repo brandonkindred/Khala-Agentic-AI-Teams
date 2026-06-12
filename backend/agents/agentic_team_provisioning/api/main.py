@@ -29,6 +29,7 @@ from agentic_team_provisioning.models import (
     CreateTeamResponse,
     CreateTestChatSessionRequest,
     FormRecord,
+    GeneratedManifestsResponse,
     ProcessDefinition,
     ProcessOutput,
     ProcessStatus,
@@ -105,12 +106,32 @@ _agent = ProcessDesignerAgent()
 _test_store = get_test_store()
 _pipeline_runner = get_pipeline_runner(_test_store)
 
-# Retroactive provisioning: ensure all existing teams have infrastructure
+# Retroactive provisioning: ensure all existing teams have infrastructure and
+# that their generated agents are registered in the live registry (rosters are
+# Postgres-backed, so this re-registers them after a process restart). Each team
+# is isolated, and within a team infrastructure recovery and registry restoration
+# are decoupled — a transient infrastructure failure must not hide an otherwise
+# usable roster from the registry for the lifetime of the process.
 try:
-    for _team_row in _store.list_teams():
-        get_team_infrastructure(_team_row["team_id"])
+    from agentic_team_provisioning.manifest_generation import register_team_manifests
+
+    _existing_teams = _store.list_teams()
 except Exception as _e:
-    logger.warning("Could not retroactively provision team infrastructure: %s", _e)
+    logger.warning("Could not list existing teams for retroactive provisioning: %s", _e)
+    _existing_teams = []
+
+for _team_row in _existing_teams:
+    _tid = _team_row["team_id"]
+    try:
+        get_team_infrastructure(_tid)
+    except Exception as _e:
+        logger.warning("Could not retroactively provision infrastructure for team %s: %s", _tid, _e)
+    try:
+        _team = _store.get_team(_tid)
+        if _team is not None and _team.agents:
+            register_team_manifests(_tid, _team.agents)
+    except Exception as _e:
+        logger.warning("Could not register generated manifests for team %s: %s", _tid, _e)
 
 GREETING = (
     "Hello! I'm your Process Designer assistant. I'll help you design an agentic "
@@ -146,6 +167,11 @@ def _save_agents_from_llm(team_id: str, agents_data: list | None) -> None:
         )
     if agents:
         _store.save_team_agents(team_id, agents)
+        # Install the generated agents into the live registry so the Agent Console
+        # catalog and /api/agents/{id}/invoke resolve them (best-effort).
+        from agentic_team_provisioning.manifest_generation import register_team_manifests
+
+        register_team_manifests(team_id, agents)
 
 
 def _after_process_saved(team_id: str, process: ProcessDefinition) -> None:
@@ -206,6 +232,23 @@ def list_team_agents(team_id: str):
     if not team:
         raise HTTPException(status_code=404, detail="Team not found")
     return team.agents
+
+
+@app.get("/teams/{team_id}/agents/manifests", response_model=GeneratedManifestsResponse)
+def list_team_agent_manifests(team_id: str):
+    """Generated agent_registry manifests (with the cognition core stamped) for the roster.
+
+    Every roster agent is rendered into a validated ``AgentManifest`` carrying the
+    batteries-included ``cognition`` block; nothing is written to the registry's
+    manifest discovery paths.
+    """
+    from agentic_team_provisioning.manifest_generation import build_agent_manifest
+
+    team = _store.get_team(team_id)
+    if not team:
+        raise HTTPException(status_code=404, detail="Team not found")
+    manifests = [build_agent_manifest(team_id, a) for a in team.agents]
+    return GeneratedManifestsResponse(team_id=team_id, manifests=manifests)
 
 
 @app.get("/teams/{team_id}/roster/validation", response_model=RosterValidationResult)
@@ -784,7 +827,11 @@ def send_test_chat_message(team_id: str, session_id: str, req: SendTestChatMessa
     context_parts.append(f"User: {req.content}")
     full_context = "\n\n".join(context_parts)
 
-    # Build and invoke agent
+    # Build and invoke the agent. This local test-chat path has no cognition
+    # injector (no proxy / open side channel) and no idempotency ledger, so it
+    # uses the plain runtime rather than the cognition-aware wrapper — advisory
+    # rules + memory digest are rendered on the gated sandbox invoke path, where
+    # the shim opens the channel.
     agent_instance = _build_test_agent(
         agent_def.agent_name,
         agent_def.role,
