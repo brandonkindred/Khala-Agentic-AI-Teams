@@ -221,23 +221,46 @@ def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
 
 
 def test_read_files_as_dict_bounds_large_file_read(tmp_path: Path) -> None:
-    """A file larger than the cap is read truncated (memory is bounded)."""
+    """A file larger than the cap is read truncated with an explicit marker."""
     from software_engineering_team.shared.repo_utils import MAX_REVIEW_FILE_BYTES
 
     (tmp_path / "big.py").write_text("A" * (MAX_REVIEW_FILE_BYTES + 5000), encoding="utf-8")
 
     result = read_files_as_dict(tmp_path, ["big.py"])
 
-    assert len(result["big.py"]) == MAX_REVIEW_FILE_BYTES  # truncated, not loaded whole
+    content = result["big.py"]
+    assert content.startswith("A" * 100)  # the capped prefix is present
+    assert "review-truncated" in content  # truncation made explicit, not silent
+    assert len(content) < MAX_REVIEW_FILE_BYTES + 5000  # the tail was dropped (bounded)
 
 
-def test_read_files_as_dict_skips_binary_with_late_nul(tmp_path: Path) -> None:
-    """A binary whose first 8 KiB is NUL-free is still detected (whole-file scan)."""
+def test_read_repo_files_as_dict_all_types_excludes_build_and_secrets(tmp_path: Path) -> None:
+    """The whole-repo reader covers all text types, skipping build dirs + secrets."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("a: 1\n", encoding="utf-8")
+    (tmp_path / "schema.sql").write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=1\n", encoding="utf-8")  # secret → excluded
+    (tmp_path / "node_modules").mkdir()
+    (tmp_path / "node_modules" / "dep.js").write_text("x\n", encoding="utf-8")  # build → excluded
+
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "main.py" in result
+    assert "config.yaml" in result  # non-.py types included
+    assert "schema.sql" in result
+    assert ".env" not in result  # secret excluded
+    assert "node_modules/dep.js" not in result  # build dir excluded
+
+
+def test_read_files_as_dict_skips_binary_with_nul_after_text_prefix(tmp_path: Path) -> None:
+    """A binary with a NUL only after a leading text run is still detected."""
     (tmp_path / "big.bin").write_bytes(b"A" * 9000 + b"\x00" + b"B" * 100)
 
     result = read_files_as_dict(tmp_path, ["big.bin"])
 
-    assert result == {}  # NUL past the first 8 KiB still flags it as binary
+    assert result == {}  # the NUL after the text prefix flags it as binary
 
 
 def test_read_files_as_dict_sanitizes_surrogate_key(tmp_path: Path) -> None:
@@ -620,9 +643,9 @@ def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
     assert note is not None and "gone.py" in note  # removal surfaced as separate note
 
 
-def test_select_review_input_deletion_only_uses_context_note(tmp_path: Path) -> None:
-    """A deletion-only change hands the removal to the context channel (note) with
-    an empty source, not a pathless prose block parsed as code."""
+def test_select_review_input_deletion_only_reviews_note_as_block(tmp_path: Path) -> None:
+    """A deletion-only change passes the note as the reviewable `code` block (an
+    empty code would make run_coordinator auto-approve without reviewing)."""
     from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
@@ -640,8 +663,8 @@ def test_select_review_input_deletion_only_uses_context_note(tmp_path: Path) -> 
     files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert files is None
-    assert code == ""  # empty source — nothing to review as content
-    assert note is not None and "gone.py" in note  # removal in the context channel
+    assert note is None  # not the context channel — it is the reviewed block
+    assert code and "gone.py" in code  # non-empty block, so the model actually runs
 
 
 def test_select_review_input_note_named_file_reviewed_normally(tmp_path: Path) -> None:
@@ -685,14 +708,15 @@ def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) ->
 def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
     from software_engineering_team.backend_agent.agent import _select_review_input
 
-    # Non-git dir, no written files → legacy whole-repo code string.
+    # Non-git dir, no written files → whole-repo fallback (all reviewable files).
     (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
+    (tmp_path / "config.yaml").write_text("a: 1\n", encoding="utf-8")
     task = SimpleNamespace(description="add feature")
     files, code, _note = _select_review_input(tmp_path, task, written_files=None)
 
-    assert files is None
-    assert code is not None
-    assert "main.py" in code
+    assert code is None
+    assert "main.py" in files
+    assert "config.yaml" in files  # non-.py file types reviewed in the fallback
 
 
 def test_select_review_input_excludes_sensitive_files(tmp_path: Path) -> None:
@@ -759,8 +783,8 @@ def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
     # written_files present, but the partial set must not be used on baseline failure.
     files, code, _note = _select_review_input(tmp_path, task, written_files={"main.py": "x"})
 
-    assert files is None
-    assert code is not None and "main.py" in code  # complete whole-repo review
+    assert code is None
+    assert "main.py" in files  # complete whole-repo review (as a files dict)
 
 
 def test_select_review_input_deletion_note_is_bounded(tmp_path: Path) -> None:
@@ -882,16 +906,25 @@ def test_strip_surrogates_literal_backslash_no_collision() -> None:
 def test_is_sensitive_path() -> None:
     from software_engineering_team.shared.repo_utils import is_sensitive_path
 
-    # Secrets — excluded
+    # Secrets — excluded (basename, anchored .env, key suffix)
     assert is_sensitive_path(".env")
     assert is_sensitive_path("config/.env.production")
     assert is_sensitive_path(".envrc")  # direnv often holds `export SECRET=`
     assert is_sensitive_path("deploy/server.pem")
     assert is_sensitive_path("secrets/id_rsa")
-    # Ordinary source — NOT excluded (anchored .env match, no `.env` prefix over-match)
+    # Secret directory component anywhere in the path
+    assert is_sensitive_path("secrets/config.json")
+    assert is_sensitive_path("app/credentials/token.txt")
+    assert is_sensitive_path("home/.ssh/known_hosts")
+    # Secret stem (stem + extension forms)
+    assert is_sensitive_path("config/credentials.json")
+    assert is_sensitive_path("app/secrets.py")
+    # Ordinary source — NOT excluded (anchored .env, no `.env` prefix over-match,
+    # no stem over-match)
     assert not is_sensitive_path(".environment.py")
     assert not is_sensitive_path("env.py")
     assert not is_sensitive_path("environment.py")
+    assert not is_sensitive_path("app/secret_manager.py")  # stem != "secret(s)"
     assert not is_sensitive_path("app/main.py")
     assert not is_sensitive_path("requirements.txt")
 

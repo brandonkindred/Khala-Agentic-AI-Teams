@@ -7,9 +7,12 @@ documentation_agent, and frontend_team modules.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
 
 # Directories excluded from repo scans (build artifacts, VCS, dependency caches)
 REPO_EXCLUDE_DIRS: frozenset[str] = frozenset(
@@ -113,26 +116,39 @@ _SENSITIVE_NAMES: frozenset[str] = frozenset(
 _SENSITIVE_SUFFIXES: frozenset[str] = frozenset(
     {".pem", ".key", ".pfx", ".p12", ".keystore", ".jks", ".asc", ".ppk"}
 )
+# A path with any of these as a directory component is treated as secret.
+_SENSITIVE_DIR_PARTS: frozenset[str] = frozenset(
+    {"secrets", "credentials", ".ssh", ".gnupg", ".aws", ".gpg"}
+)
+# A file whose stem (name without final suffix) is one of these is secret, so
+# stem+ext forms like ``credentials.json`` / ``secrets.py`` are caught.
+_SENSITIVE_STEMS: frozenset[str] = frozenset({"credentials", "secret", "secrets"})
 
 # Cap on bytes read per reviewed file: bounds memory (a multi-GB tracked artifact
 # is never loaded whole) and the per-file prompt size. Files larger than this are
-# read truncated to the cap.
+# read truncated to the cap with an explicit truncation marker appended.
 MAX_REVIEW_FILE_BYTES = 1_000_000
 
 
 def is_sensitive_path(path: str) -> bool:
-    """True when *path* names a likely secret (``.env``/``.env.*``, key, ...).
+    """True when *path* names or sits under a likely secret (``.env``, key, ...).
 
     Best-effort denylist used to keep secrets out of the content forwarded to the
-    external code-review model. The ``.env`` match is anchored (``.env`` exactly
-    or an ``.env.<env>`` variant) so a regular source file like ``.environment.py``
-    is *not* excluded, while ``.envrc`` (which commonly holds ``export SECRET=``)
-    is covered explicitly. Over-inclusion (e.g. ``.env.example``) is acceptable —
-    losing review of a template is preferable to leaking a key.
+    external code-review model. It inspects every path component, not just the
+    final name: a ``secrets/``/``credentials/``/``.ssh/`` ... directory anywhere
+    in the path, a ``credentials``/``secret``/``secrets`` *stem* (so
+    ``credentials.json`` and ``app/secrets.py`` match), a known secret basename,
+    an anchored ``.env``/``.env.<env>`` (so a regular ``.environment.py`` is not
+    excluded), or a key/cert suffix. Over-inclusion (e.g. ``.env.example``) is
+    acceptable — losing review of a template is preferable to leaking a key.
     """
     candidate = Path(path)
+    if _SENSITIVE_DIR_PARTS.intersection(candidate.parts[:-1]):
+        return True
     name = candidate.name
     if name in _SENSITIVE_NAMES or name == ".env" or name.startswith(".env."):
+        return True
+    if candidate.stem.lower() in _SENSITIVE_STEMS:
         return True
     return candidate.suffix in _SENSITIVE_SUFFIXES
 
@@ -207,6 +223,7 @@ def read_files_as_dict(
             # ``..`` key from untrusted agent output is rejected up front.
             lexical = Path(os.path.normpath(full_path))
             if lexical != repo_root and repo_root not in lexical.parents:
+                logger.debug("read_files_as_dict: skipping %s (outside repo)", rel_path)
                 continue
             # A symlink is reported by its target, never dereferenced (which would
             # mislabel the target's content under the link or escape the repo).
@@ -219,17 +236,58 @@ def read_files_as_dict(
             # re-check containment before reading.
             resolved = full_path.resolve()
             if repo_root not in resolved.parents:
+                logger.debug("read_files_as_dict: skipping %s (resolves outside repo)", rel_path)
                 continue
-            # Read at most a bounded prefix so a multi-GB tracked artifact cannot
-            # exhaust memory before the NUL check; oversized files are truncated.
+            # Read at most a bounded prefix (+1 byte to detect overflow) so a
+            # multi-GB tracked artifact cannot exhaust memory before the NUL check.
             with open(resolved, "rb") as handle:
-                data = handle.read(MAX_REVIEW_FILE_BYTES)
+                data = handle.read(MAX_REVIEW_FILE_BYTES + 1)
+            truncated = len(data) > MAX_REVIEW_FILE_BYTES
+            if truncated:
+                data = data[:MAX_REVIEW_FILE_BYTES]
             if b"\x00" in data:
+                logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
                 continue  # binary asset: omit rather than review as gibberish
-            result[strip_surrogates(rel_path)] = data.decode("utf-8", errors="replace")
-        except (OSError, RuntimeError, ValueError):
+            text = data.decode("utf-8", errors="replace")
+            if truncated:
+                # Make truncation explicit so the tail is not silently presented
+                # as complete (callers/coordinator otherwise claim full coverage).
+                text += (
+                    f"\n\n# [review-truncated: file exceeds {MAX_REVIEW_FILE_BYTES} "
+                    "bytes; remainder not shown]\n"
+                )
+            result[strip_surrogates(rel_path)] = text
+        except (OSError, RuntimeError, ValueError) as exc:
+            logger.debug("read_files_as_dict: skipping %s (%s)", rel_path, exc)
             continue
     return result
+
+
+def read_repo_files_as_dict(repo_path: Path) -> Dict[str, str]:
+    """Read every reviewable text file under *repo_path* into a ``{path: content}`` map.
+
+    The whole-repo, all-file-types counterpart of :func:`read_files_as_dict`, used
+    for the fail-closed fallback (when no trusted task-scoped change set exists).
+    Walks the repo excluding build/VCS dirs (:data:`REPO_EXCLUDE_DIRS` plus
+    ``.git``), drops sensitive paths, and reuses ``read_files_as_dict``'s
+    binary/size/containment handling — so the fallback reviews the same breadth
+    (config, migrations, JS, docs, ...) the normal unfiltered path does, not just
+    ``.py``/``.java``.
+
+    Postconditions:
+        - Returns ``{}`` for an empty repo; never raises for a missing file.
+    """
+    always_exclude = REPO_EXCLUDE_DIRS | {".git"}
+    paths: List[str] = []
+    for f in repo_path.rglob("*"):
+        if always_exclude & set(f.parts):
+            continue
+        if not f.is_file():
+            continue
+        rel = str(f.relative_to(repo_path))
+        if not is_sensitive_path(rel):
+            paths.append(rel)
+    return read_files_as_dict(repo_path, paths, extensions=None)
 
 
 def truncate_for_context(

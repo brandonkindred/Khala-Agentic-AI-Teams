@@ -318,13 +318,14 @@ def list_changed_and_deleted(
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return [], []
-    mb_code, mb_out = _run_git(path, ["git", "merge-base", base, head])
+    mb_code, mb_out = _run_git(path, ["git", "merge-base", "--all", base, head])
     mb_lines = [ln.strip() for ln in (mb_out or "").splitlines() if ln.strip()]
     if mb_code != 0 or not mb_lines:
         raise BaselineDiffUnavailable(f"cannot compute merge base of {base}...{head}: {mb_out!r}")
     if len(mb_lines) > 1:
-        # Criss-cross/octopus history → multiple merge bases. Diffing against an
-        # arbitrary one would omit changes vs the others, so fail closed.
+        # ``--all`` lists every merge base; >1 means criss-cross/octopus history.
+        # Diffing against an arbitrary one would omit changes vs the others, so
+        # fail closed.
         raise BaselineDiffUnavailable(
             f"ambiguous merge base of {base}...{head} ({len(mb_lines)} bases)"
         )

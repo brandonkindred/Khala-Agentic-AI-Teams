@@ -25,6 +25,7 @@ from software_engineering_team.shared.repo_utils import (
     is_sensitive_path,
     read_files_as_dict,
     read_repo_code,
+    read_repo_files_as_dict,
     strip_surrogates,
     truncate_for_context,
 )
@@ -551,19 +552,18 @@ def _format_deletion_note(deleted: List[str]) -> str:
 def _whole_repo_review_input(
     repo_path: Path, current_task: Any
 ) -> Tuple[Dict[str, str] | None, str | None, str | None]:
-    """Complete, fail-safe review input: the whole repo as a ``code`` string.
+    """Complete, fail-safe review input: every reviewable file in the repo.
 
     Used when no task-scoped change set is available (empty diff) or cannot be
-    trusted (baseline diff unavailable). For repo-setup tasks the meta files
-    (.gitignore, README, ...) are appended so an initial commit is reviewed in
-    full.
+    trusted (baseline diff unavailable). Reviews all file types (config,
+    migrations, JS, docs, ...) — not just ``.py``/``.java`` — matching the
+    breadth of the normal unfiltered path, with secrets and binaries excluded.
+    Falls back to an empty ``code`` only for an empty repo so the input is valid.
     """
-    code = _read_repo_code(repo_path)
-    if _is_repo_setup_task(current_task):
-        meta = _read_repo_meta_files(repo_path)
-        if meta:
-            code = code + "\n\n" + meta
-    return None, code, None
+    files = read_repo_files_as_dict(repo_path)
+    if files:
+        return files, None, None
+    return None, "", None
 
 
 def _select_review_input(
@@ -651,13 +651,17 @@ def _select_review_input(
     note = _format_deletion_note(deleted) if deleted else None
 
     if files:
+        # Mixed change: the deletion note rides in the task-description context
+        # channel (there are real blocks for the coordinator to review, so the
+        # context — and the note — is seen by the model).
         return files, None, note
     if note:
-        # Deletion-only change: no surviving content to review. Hand the removal
-        # list to the dedicated context channel (an empty ``code`` is a valid
-        # "nothing to review as source" input) rather than reviewing the prose
-        # note as a pathless source block.
-        return None, "", note
+        # Deletion-only change: there is no surviving content, so the note must
+        # be the reviewable block itself. ``run_coordinator`` returns approved
+        # without invoking the model when it finds *no* blocks, so an empty
+        # ``code`` would auto-pass the removal unreviewed; pass the note as the
+        # ``code`` input so the model actually examines the deletions.
+        return None, note, None
 
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
