@@ -56,7 +56,7 @@ from strands.types.content import Messages
 from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
-from .attribution import caller_team, current_attribution, llm_attribution
+from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
 from .factory import get_client
 from .interface import LLMClient
 
@@ -437,18 +437,20 @@ class LLMClientModel(Model):
             cfg.agent_key,
         )
 
-        # Derive the team here, on the calling task whose stack still holds the
-        # originating agent frame; binding it into the context means it survives
-        # the ``to_thread`` hand-off (asyncio copies the context), where the
-        # worker thread's stack no longer reaches the agent. Bind the configured
-        # agent_key too, so caller-supplied (unwrapped) clients are still
-        # attributed. The configured objective is a fallback — a caller that
-        # bound a task-specific objective (e.g. the PA wrapper) keeps it.
+        # Derive team + agent identity here, on the calling task whose stack still
+        # holds the originating agent frame; binding into the context means they
+        # survive the ``to_thread`` hand-off (asyncio copies the context), where
+        # the worker thread's stack no longer reaches the agent. The configured
+        # agent_key wins; otherwise a path-derived identity fills the field so
+        # unkeyed ``get_strands_model()`` calls aren't recorded as ``agent=-``.
+        # The configured objective is a fallback — a caller that bound a
+        # task-specific objective (e.g. the PA wrapper) keeps it.
+        agent_key = cfg.agent_key or caller_agent()
         team = current_attribution().team or caller_team()
         objective = (
             current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
         )
-        with llm_attribution(agent_key=cfg.agent_key or None, team=team):
+        with llm_attribution(agent_key=agent_key or None, team=team):
             result = await asyncio.to_thread(
                 self._client.chat,
                 oai_messages,
@@ -540,13 +542,16 @@ class LLMClientModel(Model):
         temperature = float(self._config.temperature or 0.0)
         think = self._config.think  # bool | str | None — never coerce; levels must survive
 
-        # Bind the team + configured agent_key on the calling task (see ``stream``)
-        # so they survive the ``to_thread`` hand-off into the worker thread. The
-        # configured objective is a fallback — a bound task-specific objective wins.
-        agent_key = getattr(self._config, "agent_key", "") or ""
+        # Bind the team + agent identity on the calling task (see ``stream``) so
+        # they survive the ``to_thread`` hand-off into the worker thread. The
+        # configured agent_key wins; otherwise a path-derived identity fills it.
+        # The configured objective is a fallback — a bound task-specific one wins.
+        configured_key = getattr(self._config, "agent_key", "") or ""
+        agent_key = configured_key or caller_agent()
         team = current_attribution().team or caller_team()
         objective = (
-            current_attribution().objective or f"strands structured output ({agent_key or 'agent'})"
+            current_attribution().objective
+            or f"strands structured output ({configured_key or 'agent'})"
         )
         with llm_attribution(agent_key=agent_key or None, team=team):
             data = await asyncio.to_thread(

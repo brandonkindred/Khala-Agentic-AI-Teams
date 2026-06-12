@@ -5,11 +5,44 @@ import pytest
 from llm_service.attribution import (
     LLMAttribution,
     bind_request_id,
+    caller_agent,
     current_attribution,
     current_request_id,
     llm_attribution,
     new_request_id,
 )
+
+
+def _agent_from(path: str) -> str:
+    """Invoke caller_agent as if from a frame whose source file is ``path``."""
+
+    def probe() -> str:
+        return caller_agent()
+
+    ns: dict = {}
+    exec(compile("def f(probe):\n    return probe()\n", path, "exec"), ns)
+    return ns["f"](probe)
+
+
+def test_caller_agent_uses_package_dir_or_file_stem() -> None:
+    # The agent's own package directory is the identity...
+    assert (
+        _agent_from(
+            "/x/agents/software_engineering_team/frontend_code_v2_team/tool_agents/ui_design/agent.py"
+        )
+        == "ui_design"
+    )
+    # ...but when the file sits in a generic container, the file stem is used.
+    assert _agent_from("/x/agents/job_matching_team/agents/ranker.py") == "ranker"
+    assert (
+        _agent_from("/x/agents/software_engineering_team/agent_implementations/run_team.py")
+        == "run_team"
+    )
+
+
+def test_caller_agent_skips_llm_service_and_non_team_frames() -> None:
+    assert _agent_from("/x/agents/llm_service/factory.py") == ""
+    assert _agent_from("/some/site-packages/strands/agent.py") == ""
 
 
 def test_default_is_empty() -> None:

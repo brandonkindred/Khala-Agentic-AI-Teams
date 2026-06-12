@@ -183,6 +183,54 @@ def caller_team() -> str:
     return ""
 
 
+# Directory names that are containers rather than an agent's own package — when
+# the calling file sits directly in one, its filename stem is the better identity.
+_GENERIC_AGENT_DIRS = frozenset(
+    {"agents", "shared", "tool_agents", "phases", "agent_implementations", "api"}
+)
+
+
+def caller_agent() -> str:
+    """Best-effort agent identity derived from the calling code's source path.
+
+    A fallback for the structured ``agent_key`` field when no explicit key is
+    configured (e.g. ``get_strands_model()`` called without one). Mirrors
+    :func:`caller_team` — same source-path basis and ``sys._getframe`` caveat —
+    but resolves a finer identity: the package directory immediately containing
+    the calling file (e.g. ``ui_design``), or the file's stem when that
+    directory is a generic container (e.g. ``.../agents/ranker.py`` → ``ranker``).
+
+    Must be evaluated on a thread/task whose stack still holds the agent frame
+    (before an ``asyncio.to_thread`` hand-off, not inside the worker).
+
+    Postconditions: returns a non-empty identity for the innermost ``agents/``
+        frame not owned by ``llm_service``; returns ``""`` when none exists.
+    """
+    import sys
+
+    getframe = getattr(sys, "_getframe", None)
+    if getframe is None:  # pragma: no cover - non-CPython fallback
+        return ""
+    marker = "/agents/"
+    frame = getframe(1)
+    while frame is not None:
+        path = (frame.f_code.co_filename or "").replace("\\", "/")
+        idx = path.find(marker)
+        if idx != -1:
+            rest = path[idx + len(marker) :].split("/")
+            team = rest[0]
+            if team and team != "llm_service":
+                stem = rest[-1].rsplit(".", 1)[0] if rest else ""
+                parent = rest[-2] if len(rest) >= 2 else ""
+                if parent and parent != team and parent not in _GENERIC_AGENT_DIRS:
+                    return parent
+                if stem and stem not in ("__init__", "agent", "agents", "main"):
+                    return stem
+                return parent or stem
+        frame = frame.f_back
+    return ""
+
+
 __all__ = [
     "LLMAttribution",
     "current_attribution",
@@ -191,4 +239,5 @@ __all__ = [
     "llm_attribution",
     "bind_request_id",
     "caller_team",
+    "caller_agent",
 ]

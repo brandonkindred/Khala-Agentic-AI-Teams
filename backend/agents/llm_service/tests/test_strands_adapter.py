@@ -307,6 +307,25 @@ def test_stream_binds_configured_agent_key_for_raw_client() -> None:
     assert seen["objective"] == "strands agent turn (foo)"
 
 
+def test_stream_falls_back_to_derived_agent_when_unkeyed(monkeypatch) -> None:
+    """An unkeyed model (``get_strands_model()`` with no agent_key) records a
+    path-derived agent identity instead of an empty agent_key."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "ui_design")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_AgentClient({"ok": True}), agent_key=None)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "ui_design"
+
+
 def test_stream_uses_bound_objective_over_generic() -> None:
     """A task-specific objective bound by the caller (e.g. the PA wrapper) is
     forwarded instead of the adapter's generic placeholder."""

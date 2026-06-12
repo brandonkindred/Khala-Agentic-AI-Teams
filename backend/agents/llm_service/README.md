@@ -28,7 +28,9 @@ completion, retry, and error lines of a single call together.
 
 - **`agent_key`** is bound automatically: `get_client("ranker")` returns a thin
   wrapper that stamps that agent identity onto every call — no call site has to
-  pass it.
+  pass it. When no key is supplied (e.g. `get_strands_model()` without one), the
+  Strands adapter fills the field with a path-derived identity (the calling
+  agent's package directory) rather than leaving it empty.
 - **`objective`** is a **required** keyword on `complete_json` / `complete` /
   `complete_text` / `chat` (and `generate_text` / `generate_structured` /
   `complete_validated`). Pass a short phrase describing the purpose.
