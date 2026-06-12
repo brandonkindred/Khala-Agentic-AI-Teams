@@ -439,6 +439,7 @@ class LLMClientModel(Model):
         result = await asyncio.to_thread(
             self._client.chat,
             oai_messages,
+            objective=f"strands agent turn ({cfg.agent_key or 'agent'})",
             response_format=response_format,
             temperature=temperature,
             tools=oai_tools,
@@ -529,6 +530,7 @@ class LLMClientModel(Model):
         data = await asyncio.to_thread(
             self._client.complete_json,
             text_prompt,
+            objective=f"strands structured output ({getattr(self._config, 'agent_key', '') or 'agent'})",
             temperature=temperature,
             system_prompt=system_prompt,
             think=think,

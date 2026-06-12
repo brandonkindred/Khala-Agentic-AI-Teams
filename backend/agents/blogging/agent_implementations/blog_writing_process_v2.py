@@ -64,7 +64,7 @@ from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
-from llm_service import OllamaLLMClient, get_strands_model
+from llm_service import OllamaLLMClient, get_strands_model, unwrap_client
 from llm_service.interface import LLMClient
 
 from . import _path_setup  # noqa: F401
@@ -108,8 +108,9 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
     model = planning_model_override()
     if not model:
         return base
-    if isinstance(base, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    inner = unwrap_client(base)
+    if isinstance(inner, OllamaLLMClient):
+        return OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
     return base
 
 
@@ -123,8 +124,9 @@ def plan_critic_llm_client(base: LLMClient) -> LLMClient:
     model = plan_critic_model_override()
     if not model:
         return base
-    if isinstance(base, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    inner = unwrap_client(base)
+    if isinstance(inner, OllamaLLMClient):
+        return OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
     return base
 
 
@@ -584,7 +586,9 @@ def _run_title_selection(
 
                     replacement = None
                     try:
-                        data = llm_client.complete_json(feedback_prompt, temperature=0.7)
+                        data = llm_client.complete_json(
+                            feedback_prompt, temperature=0.7, objective="regenerate blog titles"
+                        )
                         new_titles = data.get("titles", []) if data else []
                         if new_titles and isinstance(new_titles, list):
                             t = new_titles[0]

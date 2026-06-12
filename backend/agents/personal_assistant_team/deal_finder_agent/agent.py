@@ -255,6 +255,7 @@ class DealFinderAgent:
                 temperature=0.2,
                 expected_keys=["relevance_score", "matching_preferences"],
                 think=False,
+                objective="score deal relevance",
             )
             deal.relevance_score = float(data.get("relevance_score", 0.5))
             deal.matching_preferences = data.get("matching_preferences", [])
@@ -350,6 +351,7 @@ class DealFinderAgent:
                 temperature=0.4,
                 expected_keys=["queries"],
                 think=False,
+                objective="generate deal search queries",
             )
             queries = data.get("queries", [])
         except JSONExtractionFailure as e:

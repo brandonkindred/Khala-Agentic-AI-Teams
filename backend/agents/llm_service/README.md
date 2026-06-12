@@ -14,11 +14,57 @@ client = get_client()
 client = get_client("backend")
 client = get_client("personal_assistant")
 
-# Interface
-data = client.complete_json(prompt, temperature=0.0, system_prompt="...")
-text = client.complete(prompt, temperature=0.0, max_tokens=4096)
+# Interface — every generation call must declare an `objective` (the WHY)
+data = client.complete_json(prompt, objective="rank job candidates", temperature=0.0)
+text = client.complete(prompt, objective="draft email reply", temperature=0.0, max_tokens=4096)
 max_ctx = client.get_max_context_tokens()
 ```
+
+## Request attribution in logs
+
+Every LLM call is attributable in the logs and telemetry to **which agent** made
+it, **why** (its objective), and a per-call **request id** that ties the request,
+completion, retry, and error lines of a single call together.
+
+- **`agent_key`** is bound automatically: `get_client("ranker")` returns a thin
+  wrapper that stamps that agent identity onto every call — no call site has to
+  pass it.
+- **`objective`** is a **required** keyword on `complete_json` / `complete` /
+  `complete_text` / `chat` (and `generate_text` / `generate_structured` /
+  `complete_validated`). Pass a short phrase describing the purpose.
+- **`request_id`** is generated per call and printed as `rid=` on the request,
+  completion, retry, and error log lines.
+- **`team`** (and an outer `objective`) can be set once by an orchestrator with
+  the `llm_attribution` context manager; nested calls inherit it.
+
+```python
+from llm_service import llm_attribution, get_client
+
+with llm_attribution(team="job_matching", objective="match candidate to roles"):
+    client = get_client("ranker")                     # agent_key auto-bound
+    client.complete_json(prompt, objective="rank job candidates")
+```
+
+A request log line then reads:
+
+```
+LLM request: rid=8f3a1c2b9d4e agent=ranker team=job_matching objective=rank job candidates caller=ranker.agent.rank provider=ollama model=... think=...
+```
+
+The same `rid=` appears on that call's completion line and on any retry/error
+lines, and `agent_key` / `team` / `objective` / `request_id` are recorded in
+telemetry (`record_llm_call`) and emitted as OpenTelemetry span attributes
+(`khala.agent_key`, `khala.team`, `khala.objective`, `khala.request_id`).
+
+> Thread note: `agent_key` and `objective` are always correct (bound at call
+> time / passed as an argument). An *outer* `team`/`objective` propagates across
+> `asyncio.to_thread` (the Strands path) automatically, but not across a raw
+> `ThreadPoolExecutor.submit`; for raw-thread fan-out, propagate with
+> `contextvars.copy_context()` (see `shared_concurrency/heartbeat.py`).
+
+Use `unwrap_client(client)` when you need the concrete provider client (e.g. an
+`isinstance(c, OllamaLLMClient)` check), since `get_client` returns the wrapper
+for keyed clients.
 
 ## When to use which entrypoint
 
@@ -32,14 +78,18 @@ from llm_service import generate_text, generate_structured
 from pydantic import BaseModel
 
 # Free-form prose / Markdown / code — never JSON-parsed.
-spec_md = generate_text(prompt, system_prompt=PERSONA, agent_key="user_agent_founder")
+spec_md = generate_text(
+    prompt, objective="draft startup spec", system_prompt=PERSONA, agent_key="user_agent_founder"
+)
 
 # Typed structured output — JSON mode + one self-correction retry applied automatically.
 class Answer(BaseModel):
     selected_option_id: str
     rationale: str
 
-answer = generate_structured(prompt, schema=Answer, agent_key="user_agent_founder")
+answer = generate_structured(
+    prompt, schema=Answer, objective="answer founder question", agent_key="user_agent_founder"
+)
 ```
 
 Rule of thumb:

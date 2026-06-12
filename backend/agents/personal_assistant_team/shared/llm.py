@@ -112,6 +112,7 @@ class LLMClient(_BaseLLMClient):
         system_prompt: Optional[str] = None,
         expected_keys: Optional[List[str]] = None,
         decomposition_hints: Optional[List[str]] = None,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         """Robust JSON extraction with continuation and decomposition fallbacks."""
@@ -200,6 +201,7 @@ class LLMClient(_BaseLLMClient):
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        objective: str = "",
     ) -> str:
         return self._ollama_complete(
             prompt,
@@ -336,6 +338,7 @@ class _PAStrandsWrapper(LLMClient):
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         think: bool = False,
+        objective: str = "",
         **kwargs: Any,
     ) -> Dict[str, Any]:
         try:
@@ -375,6 +378,7 @@ class _PAStrandsWrapper(LLMClient):
         temperature: float = 0.0,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        objective: str = "",
     ) -> str:
         return self._ollama_complete(prompt, temperature=temperature, system_prompt=system_prompt)
 

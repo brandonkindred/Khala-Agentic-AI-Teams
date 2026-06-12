@@ -223,6 +223,7 @@ class DeepthoughtAgent:
                 temperature=0.3,
                 system_prompt=system,
                 think=True,
+                objective="analyze specialist question",
             )
             return self._parse_analysis(data)
         except Exception:
@@ -273,6 +274,7 @@ class DeepthoughtAgent:
                 temperature=0.5,
                 system_prompt=system,
                 think=True,
+                objective="answer question directly",
             )
         except Exception:
             logger.exception("Force-direct LLM call failed for agent %s", self.spec.name)
@@ -382,6 +384,7 @@ class DeepthoughtAgent:
                 temperature=0.2,
                 system_prompt=system,
                 think=True,
+                objective="deliberate specialist results",
             )
             return raw
         except Exception:
@@ -413,6 +416,7 @@ class DeepthoughtAgent:
                 temperature=0.4,
                 system_prompt=system,
                 think=True,
+                objective="synthesise specialist answers",
             )
         except Exception:
             logger.exception("Synthesis LLM call failed for agent %s", self.spec.name)

@@ -53,6 +53,7 @@ def _parse_tool_arguments(raw: Any) -> dict[str, Any]:
 def complete_json_with_tool_loop(
     llm: LLMClient,
     *,
+    objective: str,
     user_prompt: str,
     system_prompt: str,
     tools: list,
@@ -74,6 +75,7 @@ def complete_json_with_tool_loop(
     for round_idx in range(max_rounds):
         result = llm.chat(
             messages,
+            objective=objective,
             response_format="json",
             temperature=temperature,
             tools=tools,

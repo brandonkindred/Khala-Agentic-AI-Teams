@@ -256,11 +256,16 @@ class DummyLLMClient(LLMClient, Model):
         self,
         prompt: str,
         *,
+        objective: str = "dummy",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
         think: "bool | str | None" = None,
     ) -> str:
+        # ``objective`` is accepted to match the LLMClient contract; the dummy
+        # client makes no real LLM call and performs no attribution, so it
+        # tolerates an omitted objective (test stubs need not declare one).
         self._request_count += 1
         return "Dummy text completion (no LLM)."
 
@@ -268,6 +273,7 @@ class DummyLLMClient(LLMClient, Model):
         self,
         prompt: str,
         *,
+        objective: str = "dummy",
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
@@ -772,6 +778,7 @@ class DummyLLMClient(LLMClient, Model):
         self,
         messages: list,
         *,
+        objective: str = "dummy",
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,

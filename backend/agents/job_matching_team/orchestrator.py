@@ -10,6 +10,8 @@ import logging
 from typing import Optional
 from uuid import uuid4
 
+from llm_service import llm_attribution
+
 from .agents.query_builder import QueryBuilderAgent
 from .agents.ranker import JobRankerAgent
 from .agents.scanner import JobScannerAgent
@@ -86,12 +88,15 @@ class JobMatchingOrchestrator:
                 except Exception:  # noqa: BLE001
                     logger.warning("seen_fingerprints lookup failed", exc_info=True)
 
-            queries = self._query_builder.build(effective, max_queries=request.max_queries)
-            postings = self._scanner.scan(
-                queries, max_roles=request.max_roles, skip_fingerprints=skip
-            )
-            ranked = self._ranker.rank(postings, effective)
-            top = ranked[: request.top_n]
+            # Stamp the team + run on every LLM call this run makes; the
+            # per-agent objective/agent_key are bound at each call site.
+            with llm_attribution(team="job_matching", job_id=run_id):
+                queries = self._query_builder.build(effective, max_queries=request.max_queries)
+                postings = self._scanner.scan(
+                    queries, max_roles=request.max_roles, skip_fingerprints=skip
+                )
+                ranked = self._ranker.rank(postings, effective)
+                top = ranked[: request.top_n]
 
             if store is not None:
                 try:
