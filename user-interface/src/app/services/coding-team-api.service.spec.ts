@@ -80,9 +80,13 @@ describe('CodingTeamApiService', () => {
   });
 
   it('GETs /jobs unfiltered when activeOnly is false', () => {
-    service.listJobs(false).subscribe();
+    service.listJobs(false).subscribe((jobs) => {
+      expect(jobs.length).toBe(1);
+      expect(jobs[0].job_id).toBe('job-9');
+      expect(jobs[0].status).toBe('completed');
+    });
     const req = httpMock.expectOne(`${baseUrl}/jobs`);
     expect(req.request.method).toBe('GET');
-    req.flush([]);
+    req.flush([{ job_id: 'job-9', status: 'completed' }]);
   });
 });

@@ -163,17 +163,23 @@ def test_pause_renews_lease_during_slow_on_pause(monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
 
+    first_beat = _threading.Event()
+
     def update_fn(**kw):
         job.update(kw)
         if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
             heartbeats.append(kw["answer_wait_heartbeat_at"])
+            first_beat.set()
 
     started = _threading.Event()
 
     def slow_on_pause(_qs):
         started.set()
-        # Hold the callback long enough for several renewal ticks (cadence 0.01s).
-        _threading.Event().wait(0.08)
+        # Block on the actual renewal signal instead of a wall-clock sleep: the callback returns the
+        # moment the background renewer heartbeats once (which is exactly what this test asserts), so
+        # it is deterministic rather than racing real time. The generous timeout is only a safety cap
+        # that trips on a genuinely broken renewer, not on a slow/loaded CI host.
+        assert first_beat.wait(5.0), "renewer did not heartbeat during the slow on_pause callback"
 
     _run_pause_cycle(
         "j",

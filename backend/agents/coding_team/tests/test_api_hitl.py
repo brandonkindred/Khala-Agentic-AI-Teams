@@ -117,6 +117,18 @@ def test_answers_400_unknown_id(monkeypatch):
     assert "Unknown question" in r.json()["detail"]
 
 
+def test_answers_500_when_pending_question_missing_id(monkeypatch):
+    # A pending question without an "id" is a corrupted job record, not bad client input: the
+    # endpoint must surface a controlled 500 with a clear message instead of a bare KeyError.
+    bad = [{"question_text": "no id here", "required": True, "options": []}]
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(pending_questions=bad))
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "x"}]}
+    )
+    assert r.status_code == 500
+    assert "Corrupted job record" in r.json()["detail"]
+
+
 def test_answers_400_duplicate_question_id(monkeypatch):
     # Two answers for the same question must be rejected: otherwise the dedup set hides the conflict
     # at validation time and both entries get persisted, letting the orchestrator act on
@@ -418,7 +430,9 @@ def test_resume_github_job_uses_hook_path(monkeypatch):
         plan_input={"requirements_title": "T"},
         github_context=ctx,
     )
+    updates: List[Dict[str, Any]] = []
     monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: updates.append(kw))
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
     monkeypatch.setattr(api.threading, "Thread", _SyncThread)
     monkeypatch.setattr(api, "GitHubClient", _FakeClient)
@@ -434,6 +448,9 @@ def test_resume_github_job_uses_hook_path(monkeypatch):
     assert r.status_code == 200
     assert r.json()["message"] == "Job resumed."
     assert hook_calls == {"job_id": "j1", "owner": "acme", "token": "tok-123"}
+    # The resume must wipe any stale current_activity left by the dead attempt so the UI does not
+    # render a frozen sub-bar through the resumed run's early phases.
+    assert {"current_activity": None} in updates
 
 
 def test_resume_github_job_uses_persisted_token_without_env(monkeypatch):
@@ -463,6 +480,7 @@ def test_resume_github_job_uses_persisted_token_without_env(monkeypatch):
         github_token_encrypted=token_crypto.encrypt_token("persisted-pat"),
     )
     monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
     monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
     monkeypatch.setattr(api.threading, "Thread", _SyncThread)
     monkeypatch.setattr(api, "GitHubClient", _FakeClient)

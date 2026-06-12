@@ -453,6 +453,11 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
     pending = data.get("pending_questions", [])
     if not pending:
         raise HTTPException(status_code=400, detail="No pending questions to answer.")
+    # A pending question without an "id" is a corrupted job record (the orchestrator always stamps
+    # one), not bad client input — surface it as a controlled 500 instead of a bare KeyError so the
+    # failure is attributed to the server and carries a clear message.
+    if any("id" not in q for q in pending):
+        raise HTTPException(status_code=500, detail="Corrupted job record: pending question missing 'id'.")
     pending_ids = {q["id"] for q in pending}
     required_ids = {q["id"] for q in pending if q.get("required", True)}
     # Reject duplicate answers for the same question up front: the set below collapses them, so the
@@ -633,6 +638,12 @@ def _start_github_resume_thread(
             _clear_run_thread(job_id)
 
     try:
+        # Mirror _start_orchestrator_thread: a dead prior attempt may have left a mid-review
+        # current_activity behind (its finally never ran), which would render a frozen sub-bar
+        # through the resumed run's early phases. Wipe it first. This is the first job-service
+        # write after the claim, inside the claim-releasing try, so a store-outage raise here is
+        # handled by the except below rather than wedging the job.
+        update_job(job_id, current_activity=None)
         threading.Thread(target=run, daemon=True).start()
     except Exception:
         _clear_run_thread(job_id)
