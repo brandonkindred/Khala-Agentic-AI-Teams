@@ -101,7 +101,7 @@ PROJECT STRUCTURE & FILE ORGANIZATION
    **Examples:** "Create user registration endpoint" -> `app/routers/users.py` | "Build the authentication service with JWT" -> `app/services/auth.py` | "Define data models for orders" -> `app/models/order.py`
 
    **HARD RULES:**
-   - Names must be concise and descriptive -- use the fewest words that clearly convey the purpose, with no fixed word limit; never sacrifice clarity for brevity
+   - File/module names must be a short, concise noun phrase (one or two nouns), never sentence-like: keep each path segment under ~30 characters and avoid 4+ hyphenated or 5+ underscored words, which path validation rejects. (This length guidance is for file/folder/module names only -- function, variable, and class names inside the code are NOT word-capped; keep them concise but as descriptive as the purpose requires, never sacrificing clarity for brevity.)
    - NEVER use the task description as a file name -- extract the noun only
    - NEVER start a name with a verb (implement_, create_, build_, add_, setup_, etc.)
    - NEVER include filler words (_the_, _that_, _with_, _using_, _which_, _for_)
