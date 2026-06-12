@@ -304,11 +304,13 @@ def _changed_paths(path: Path, *cmds: list[str]) -> List[str]:
 def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
     """Return repo-relative paths changed on *head* since it diverged from *base*.
 
-    Runs ``git diff --name-only --diff-filter=d -z base...head``. The ``d`` filter
-    drops deletions so every returned path is a file a caller can still read; the
-    ``-z`` flag returns NUL-delimited, unquoted paths so names with non-ASCII
-    characters, tabs, or newlines round-trip as real filesystem paths instead of
-    git's default quoted/escaped form.
+    Runs ``git diff --name-only --diff-filter=d --no-renames -z base...head``. The
+    ``d`` filter drops deletions so every returned path is a file a caller can
+    still read; ``--no-renames`` decomposes a rename into delete-old + add-new so
+    the new path is reported here (and the old path is reported as a deletion by
+    :func:`list_deleted_files`); ``-z`` returns NUL-delimited, unquoted paths so
+    names with non-ASCII characters, tabs, or newlines round-trip as real
+    filesystem paths instead of git's default quoted/escaped form.
 
     Preconditions:
         - base and head are git revisions (branch name, tag, or SHA); the caller
@@ -322,7 +324,8 @@ def list_changed_files(repo_path: str | Path, base: str, head: str = "HEAD") -> 
     if not (path / ".git").exists():
         return []
     return _changed_paths(
-        path, ["git", "diff", "--name-only", "--diff-filter=d", "-z", f"{base}...{head}"]
+        path,
+        ["git", "diff", "--name-only", "--diff-filter=d", "--no-renames", "-z", f"{base}...{head}"],
     )
 
 
@@ -332,7 +335,8 @@ def list_uncommitted_files(repo_path: str | Path) -> List[str]:
     Covers staged + unstaged modifications to tracked files (deletions excluded),
     so a path an iteration modified without a landed commit — for example a
     ``.gitignore`` updated from agent ``gitignore_entries`` — is visible even
-    though it is absent from a committed ``base...head`` diff.
+    though it is absent from a committed ``base...head`` diff. ``--no-renames``
+    reports a rename's new path here (its old path surfaces as a deletion).
 
     Untracked files are deliberately **not** included: ``git ls-files --others``
     would pull in every non-ignored leftover (build/test artifacts, logs,
@@ -347,17 +351,19 @@ def list_uncommitted_files(repo_path: str | Path) -> List[str]:
     if not (path / ".git").exists():
         return []
     return _changed_paths(
-        path, ["git", "diff", "--name-only", "--diff-filter=d", "-z", "HEAD"]
+        path, ["git", "diff", "--name-only", "--diff-filter=d", "--no-renames", "-z", "HEAD"]
     )
 
 
 def list_deleted_files(repo_path: str | Path, base: str, head: str = "HEAD") -> List[str]:
     """Return paths the task deleted: committed (``base...head``) plus worktree.
 
-    Uppercase ``--diff-filter=D`` keeps only deletions. A content-based reviewer
-    sees surviving file contents but no removals, so callers surface these paths
-    separately to flag that a file (an auth module, route, migration, ...) was
-    removed.
+    Uppercase ``--diff-filter=D`` keeps only deletions, and ``--no-renames`` makes
+    a renamed-away path count as a deletion of its old location (otherwise git
+    classifies it ``R`` and the old path is reported nowhere). A content-based
+    reviewer sees surviving file contents but no removals, so callers surface
+    these paths separately to flag that a file (an auth module, route, migration,
+    a rename's old import path, ...) was removed.
 
     Postconditions:
         - Returns repo-relative paths, de-duplicated. Returns ``[]`` when not a
@@ -368,8 +374,8 @@ def list_deleted_files(repo_path: str | Path, base: str, head: str = "HEAD") -> 
         return []
     return _changed_paths(
         path,
-        ["git", "diff", "--name-only", "--diff-filter=D", "-z", f"{base}...{head}"],
-        ["git", "diff", "--name-only", "--diff-filter=D", "-z", "HEAD"],
+        ["git", "diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", f"{base}...{head}"],
+        ["git", "diff", "--name-only", "--diff-filter=D", "--no-renames", "-z", "HEAD"],
     )
 
 

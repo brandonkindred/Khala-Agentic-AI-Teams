@@ -579,9 +579,11 @@ def _select_review_input(
     ]
     if deleted:
         listing = "\n".join(f"- {p}" for p in deleted)
-        # Never clobber a real changed file that happens to share the note key.
+        # Never clobber — or anchor a finding onto — a real file that shares the
+        # note key, whether it is a changed file (in ``files``) or an unchanged
+        # one still present in the worktree.
         note_key = _DELETED_FILES_NOTE_KEY
-        while note_key in files:
+        while note_key in files or (repo_path / note_key).exists():
             note_key += "_"
         files[note_key] = (
             "The following tracked files were DELETED by this task. Verify each "

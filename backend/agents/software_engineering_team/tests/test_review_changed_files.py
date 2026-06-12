@@ -478,6 +478,61 @@ def test_select_review_input_omits_restored_deletion_from_note(tmp_path: Path) -
     assert _DELETED_FILES_NOTE_KEY not in files  # not reported as deleted
 
 
+def test_select_review_input_rename_notes_old_reviews_new(tmp_path: Path) -> None:
+    """A rename reviews the new path and notes the old path as removed (so callers
+    referencing the old import path are flagged)."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "old.py").write_text("def handler():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    _git(tmp_path, "mv", "old.py", "new.py")
+    _git(tmp_path, "commit", "-m", "rename module")
+
+    task = SimpleNamespace(description="rename module")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    assert "new.py" in files  # destination reviewed as content
+    note_text = "".join(v for k, v in files.items() if k != "new.py")
+    assert "old.py" in note_text  # old path surfaced in the deletion note
+
+
+def test_select_review_input_deletion_note_avoids_unchanged_worktree_file(tmp_path: Path) -> None:
+    """The note key avoids an *unchanged* real file (present on disk but not in the
+    review mapping), so a finding is never anchored onto an unrelated file."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETED_FILES_NOTE_KEY,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("unrelated real file\n", encoding="utf-8")
+    (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
+    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "seed.py").write_text("s = 2\n", encoding="utf-8")  # a change
+    (tmp_path / "gone.py").unlink()  # a deletion (note triggers)
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change + delete")
+    # The __DELETED_FILES__ file is unchanged: present on disk, absent from files.
+
+    task = SimpleNamespace(description="x")
+    files, code = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    note_keys = [k for k, v in files.items() if "gone.py" in v]
+    assert note_keys
+    assert note_keys[0] != _DELETED_FILES_NOTE_KEY  # did not reuse the real path
+    assert not (tmp_path / note_keys[0]).exists()  # key shadows no real worktree file
+
+
 def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
     from software_engineering_team.backend_agent.agent import (
         _DELETED_FILES_NOTE_KEY,
