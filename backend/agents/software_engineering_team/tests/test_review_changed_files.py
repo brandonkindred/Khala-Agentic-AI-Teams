@@ -170,15 +170,39 @@ def test_read_files_as_dict_no_extension_filter_includes_all(tmp_path: Path) -> 
     assert result == {"Dockerfile": "FROM python", "requirements.txt": "fastapi"}
 
 
-def test_read_files_as_dict_skips_cyclic_symlink(tmp_path: Path) -> None:
-    """A cyclic symlink (resolve() raises RuntimeError/OSError) is skipped, not fatal."""
+def test_read_files_as_dict_cyclic_symlink_not_fatal(tmp_path: Path) -> None:
+    """A cyclic symlink is represented by its target (never dereferenced), so it
+    does not abort the read."""
     (tmp_path / "ok.py").write_text("A", encoding="utf-8")
     loop = tmp_path / "loop"
     loop.symlink_to(loop)  # self-referential symlink
 
     result = read_files_as_dict(tmp_path, ["ok.py", "loop"])
 
-    assert result == {"ok.py": "A"}  # loop skipped, ok.py still read
+    assert result["ok.py"] == "A"  # sibling still read, no crash
+    assert result["loop"].startswith("# symlink ->")  # represented, not dereferenced
+
+
+def test_read_files_as_dict_represents_symlink_by_target(tmp_path: Path) -> None:
+    """A symlink is reported by its link target, never by the target's content."""
+    (tmp_path / "real.py").write_text("SECRET = 1\n", encoding="utf-8")
+    (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+
+    result = read_files_as_dict(tmp_path, ["real.py", "link.py"])
+
+    assert result["real.py"] == "SECRET = 1\n"
+    assert result["link.py"].startswith("# symlink ->")
+    assert "SECRET" not in result["link.py"]  # target content not dereferenced
+
+
+def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
+    """Binary content (NUL byte) is omitted rather than decoded into gibberish."""
+    (tmp_path / "a.py").write_text("A", encoding="utf-8")
+    (tmp_path / "img.png").write_bytes(b"\x89PNG\r\n\x00\x01\x02\x03binary")
+
+    result = read_files_as_dict(tmp_path, ["a.py", "img.png"])
+
+    assert result == {"a.py": "A"}  # binary asset skipped
 
 
 def test_read_files_as_dict_skips_missing_preserves_legacy_text(tmp_path: Path) -> None:
@@ -267,6 +291,33 @@ def test_backend_run_code_review_falls_back_to_code() -> None:
     assert captured["code"] == "### a.py ###\nx = 1"
 
 
+def test_backend_run_code_review_appends_deletion_note_to_description() -> None:
+    """The deletion note rides in the task description (review context), not as a
+    synthetic source file."""
+    from software_engineering_team.backend_agent.agent import BackendExpertAgent
+
+    captured: dict = {}
+
+    class _StubAgent:
+        def run(self, inp):
+            captured["task_description"] = inp.task_description
+            captured["files"] = inp.files
+            return SimpleNamespace(approved=True, issues=[])
+
+    BackendExpertAgent._run_code_review(
+        code_review_agent=_StubAgent(),
+        files={"a.py": "x = 1"},
+        deletion_note="Files DELETED by this task:\n- gone.py\n",
+        spec_content="spec",
+        task=_task(),
+        architecture=None,
+    )
+
+    assert "implement endpoint" in captured["task_description"]  # original description kept
+    assert "gone.py" in captured["task_description"]  # note folded into context
+    assert "gone.py" not in captured["files"]  # not injected as a source file
+
+
 # ---------------------------------------------------------------------------
 # _select_review_input fallback chain
 # ---------------------------------------------------------------------------
@@ -291,7 +342,7 @@ def test_select_review_input_unions_changed_and_written_from_worktree(tmp_path: 
 
     task = SimpleNamespace(description="add feature")
     # Only the *keys* of written_files matter; content is read from the worktree.
-    files, code = _select_review_input(
+    files, code, _note = _select_review_input(
         tmp_path, task, written_files={"a.py": "STALE", "extra.py": "STALE"}
     )
 
@@ -320,7 +371,7 @@ def test_select_review_input_includes_uncommitted_new_file(tmp_path: Path) -> No
     (tmp_path / "new.py").write_text("n = 1\n", encoding="utf-8")
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files={"new.py": "n = 1\n"})
+    files, code, _note = _select_review_input(tmp_path, task, written_files={"new.py": "n = 1\n"})
 
     assert code is None
     assert "a.py" in files  # committed diff still reviewed
@@ -343,7 +394,7 @@ def test_select_review_input_skips_unwritten_paths(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-m", "work")
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(
+    files, code, _note = _select_review_input(
         tmp_path, task, written_files={"valid.py": "ok", "rejected.py": "never written"}
     )
 
@@ -371,7 +422,7 @@ def test_select_review_input_includes_non_source_changed_files(tmp_path: Path) -
     _git(tmp_path, "commit", "-m", "deps + migration")
 
     task = SimpleNamespace(description="add dependency")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
     assert "requirements.txt" in files
@@ -408,7 +459,7 @@ def test_select_review_input_includes_writer_derived_paths(tmp_path: Path) -> No
     assert {"main.py", "tests/test_main.py"} <= set(written)  # contract we rely on
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written)
+    files, code, _note = _select_review_input(tmp_path, task, written)
 
     assert code is None
     assert "main.py" in files
@@ -437,7 +488,7 @@ def test_select_review_input_includes_uncommitted_worktree_files(tmp_path: Path)
     (tmp_path / "stray.log").write_text("noise\n", encoding="utf-8")  # unrelated leftover
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(
+    files, code, _note = _select_review_input(
         tmp_path, task, written_files={"untracked.py": "u = 1\n"}
     )
 
@@ -451,10 +502,7 @@ def test_select_review_input_includes_uncommitted_worktree_files(tmp_path: Path)
 def test_select_review_input_omits_restored_deletion_from_note(tmp_path: Path) -> None:
     """A committed deletion later restored as an uncommitted worktree file is
     reviewed as content, not reported as deleted."""
-    from software_engineering_team.backend_agent.agent import (
-        _DELETED_FILES_NOTE_KEY,
-        _select_review_input,
-    )
+    from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -471,11 +519,11 @@ def test_select_review_input_omits_restored_deletion_from_note(tmp_path: Path) -
     (tmp_path / "gone.py").write_text("g = 2\n", encoding="utf-8")
 
     task = SimpleNamespace(description="restore gone")
-    files, code = _select_review_input(tmp_path, task, written_files={"gone.py": "g = 2\n"})
+    files, code, note = _select_review_input(tmp_path, task, written_files={"gone.py": "g = 2\n"})
 
     assert code is None
     assert files["gone.py"] == "g = 2\n"  # reviewed as restored content
-    assert _DELETED_FILES_NOTE_KEY not in files  # not reported as deleted
+    assert note is None  # not reported as deleted
 
 
 def test_select_review_input_rename_notes_old_reviews_new(tmp_path: Path) -> None:
@@ -493,51 +541,15 @@ def test_select_review_input_rename_notes_old_reviews_new(tmp_path: Path) -> Non
     _git(tmp_path, "commit", "-m", "rename module")
 
     task = SimpleNamespace(description="rename module")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
     assert "new.py" in files  # destination reviewed as content
-    note_text = "".join(v for k, v in files.items() if k != "new.py")
-    assert "old.py" in note_text  # old path surfaced in the deletion note
-
-
-def test_select_review_input_deletion_note_avoids_unchanged_worktree_file(tmp_path: Path) -> None:
-    """The note key avoids an *unchanged* real file (present on disk but not in the
-    review mapping), so a finding is never anchored onto an unrelated file."""
-    from software_engineering_team.backend_agent.agent import (
-        _DELETED_FILES_NOTE_KEY,
-        _select_review_input,
-    )
-
-    _init_repo(tmp_path)
-    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("unrelated real file\n", encoding="utf-8")
-    (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
-    (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-m", "base")
-    _git(tmp_path, "branch", "-M", "development")
-    _git(tmp_path, "checkout", "-b", "feature/x")
-    (tmp_path / "seed.py").write_text("s = 2\n", encoding="utf-8")  # a change
-    (tmp_path / "gone.py").unlink()  # a deletion (note triggers)
-    _git(tmp_path, "add", "-A")
-    _git(tmp_path, "commit", "-m", "change + delete")
-    # The __DELETED_FILES__ file is unchanged: present on disk, absent from files.
-
-    task = SimpleNamespace(description="x")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
-
-    assert code is None
-    note_keys = [k for k, v in files.items() if "gone.py" in v]
-    assert note_keys
-    assert note_keys[0] != _DELETED_FILES_NOTE_KEY  # did not reuse the real path
-    assert not (tmp_path / note_keys[0]).exists()  # key shadows no real worktree file
+    assert note is not None and "old.py" in note  # old path surfaced in the deletion note
 
 
 def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
-    from software_engineering_team.backend_agent.agent import (
-        _DELETED_FILES_NOTE_KEY,
-        _select_review_input,
-    )
+    from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -552,21 +564,17 @@ def test_select_review_input_notes_deleted_files(tmp_path: Path) -> None:
     _git(tmp_path, "commit", "-m", "change + delete")
 
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
-    assert "a.py" in files  # surviving change reviewed by content
-    assert _DELETED_FILES_NOTE_KEY in files
-    assert "gone.py" in files[_DELETED_FILES_NOTE_KEY]  # removal surfaced
+    assert set(files) == {"a.py"}  # only the real changed file — no synthetic entry
+    assert note is not None and "gone.py" in note  # removal surfaced as separate note
 
 
-def test_select_review_input_deletion_only_surfaces_note(tmp_path: Path) -> None:
-    """A task whose only change is a deletion still returns the note (no
-    whole-repo fallback)."""
-    from software_engineering_team.backend_agent.agent import (
-        _DELETED_FILES_NOTE_KEY,
-        _select_review_input,
-    )
+def test_select_review_input_deletion_only_returns_note_as_code(tmp_path: Path) -> None:
+    """A task whose only change is a deletion reviews the note itself (no
+    whole-repo fallback, no synthetic file entry)."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
     (tmp_path / "seed.py").write_text("s = 1\n", encoding="utf-8")
@@ -580,41 +588,36 @@ def test_select_review_input_deletion_only_surfaces_note(tmp_path: Path) -> None
     _git(tmp_path, "commit", "-m", "delete only")
 
     task = SimpleNamespace(description="remove module")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
-    assert code is None
-    assert set(files) == {_DELETED_FILES_NOTE_KEY}  # only the deletion note
-    assert "gone.py" in files[_DELETED_FILES_NOTE_KEY]
+    assert files is None
+    assert note is None
+    assert code is not None and "gone.py" in code  # the removal is the review input
 
 
-def test_select_review_input_deletion_note_avoids_collision(tmp_path: Path) -> None:
-    """A real changed file named like the note key is not clobbered by the note."""
-    from software_engineering_team.backend_agent.agent import (
-        _DELETED_FILES_NOTE_KEY,
-        _select_review_input,
-    )
+def test_select_review_input_note_named_file_reviewed_normally(tmp_path: Path) -> None:
+    """A real file named like the old note key is just reviewed as content; the
+    deletion note is a separate value, so there is no collision to handle."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
 
     _init_repo(tmp_path)
-    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("real content\n", encoding="utf-8")
+    (tmp_path / "__DELETED_FILES__").write_text("real content\n", encoding="utf-8")
     (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
     _git(tmp_path, "branch", "-M", "development")
     _git(tmp_path, "checkout", "-b", "feature/x")
-    (tmp_path / _DELETED_FILES_NOTE_KEY).write_text("real content v2\n", encoding="utf-8")
+    (tmp_path / "__DELETED_FILES__").write_text("real content v2\n", encoding="utf-8")
     (tmp_path / "gone.py").unlink()
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "change note-named file + delete")
 
     task = SimpleNamespace(description="x")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
-    assert files[_DELETED_FILES_NOTE_KEY] == "real content v2\n"  # real file intact
-    note_keys = [
-        k for k, v in files.items() if k != _DELETED_FILES_NOTE_KEY and "gone.py" in v
-    ]
-    assert note_keys  # deletion note lives under a non-colliding key
+    assert files["__DELETED_FILES__"] == "real content v2\n"  # real file intact
+    assert note is not None and "gone.py" in note  # deletion note separate from files
 
 
 def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) -> None:
@@ -624,7 +627,7 @@ def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) ->
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("print('x')\n", encoding="utf-8")
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files={"app/main.py": "ignored"})
+    files, code, _note = _select_review_input(tmp_path, task, written_files={"app/main.py": "ignored"})
 
     assert code is None
     assert files == {"app/main.py": "print('x')\n"}  # read from worktree
@@ -636,7 +639,7 @@ def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
     # Non-git dir, no written files → legacy whole-repo code string.
     (tmp_path / "main.py").write_text("print('hello')\n", encoding="utf-8")
     task = SimpleNamespace(description="add feature")
-    files, code = _select_review_input(tmp_path, task, written_files=None)
+    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
 
     assert files is None
     assert code is not None

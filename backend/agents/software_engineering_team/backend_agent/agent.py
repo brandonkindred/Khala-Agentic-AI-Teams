@@ -506,17 +506,21 @@ def _read_repo_meta_files(repo_path: Path) -> str:
     return "\n\n".join(parts) if parts else ""
 
 
-# Synthetic review-input key carrying the list of files the task deleted.
-# A content-based review only sees surviving files, so deletions are surfaced
-# as a note rather than as (absent) content.
-_DELETED_FILES_NOTE_KEY = "__DELETED_FILES__"
+def _format_deletion_note(deleted: List[str]) -> str:
+    """Render the list of removed paths as a short reviewer note."""
+    listing = "\n".join(f"- {p}" for p in deleted)
+    return (
+        "Files DELETED by this task (verify each removal is intentional and that "
+        "nothing still depends on them):\n"
+        f"{listing}\n"
+    )
 
 
 def _select_review_input(
     repo_path: Path,
     current_task: Any,
     written_files: Dict[str, str] | None,
-) -> Tuple[Dict[str, str] | None, str | None]:
+) -> Tuple[Dict[str, str] | None, str | None, str | None]:
     """Choose the code-review input: the task's changed files, read from disk.
 
     The path set is the union of the committed ``git diff development...HEAD``,
@@ -530,24 +534,28 @@ def _select_review_input(
     and no extension filter is applied so non-source task changes
     (requirements.txt, migrations, YAML/JSON, ...) are reviewed too.
 
-    Deleted paths have no content to review, so they are surfaced as a single
-    note entry (:data:`_DELETED_FILES_NOTE_KEY`) listing the removals. Only the
-    paths are listed: re-reading the removed contents or computing reverse
-    dependencies is intentionally out of scope — this stage exists to avoid
-    dumping historical/whole-repo content into review, and the surviving changed
-    files plus the bounded ``existing_codebase`` excerpt provide caller context.
+    Deleted paths have no content to review, so they are surfaced as a separate
+    *note* (passed as review context, not as a synthetic source file — so a
+    finding is never anchored onto a non-existent path that the fix loop would
+    then try to "fix"). Only the paths are listed: re-reading removed contents or
+    computing reverse dependencies is intentionally out of scope — this stage
+    exists to avoid dumping historical/whole-repo content into review, and the
+    surviving changed files plus the bounded ``existing_codebase`` excerpt provide
+    caller context.
 
     Preconditions:
         - *repo_path* is the task's working tree; *written_files* is the writer's
           normalized output mapping (or None) — only its keys are used, to widen
           the set of paths re-read from disk.
     Postconditions:
-        - Returns ``(files, code)`` with exactly one of the two populated, never
-          both, and never both empty — so review is never silently skipped:
-            1. the worktree content of every committed/uncommitted/just-written
-               path that exists on disk and decodes as text, plus a deletion
-               note when the task removed files, else
-            2. the legacy whole-repo concatenation as a ``code`` string (logged).
+        - Returns ``(files, code, deletion_note)``. Exactly one of ``files`` /
+          ``code`` is populated (never both, never both empty) so review is never
+          silently skipped: the worktree content of every committed/uncommitted/
+          just-written path that exists on disk, else the legacy whole-repo
+          ``code`` string (logged). ``deletion_note`` is a short text listing
+          removed files (or None), passed by the caller as review context. A
+          deletion-only change (no surviving content) returns the note as
+          ``code`` so the removal is still reviewed without a whole-repo fallback.
         - For repo-setup tasks the whole-repo fallback also appends meta files
           (.gitignore, README, ...) so an initial commit is reviewed in full.
     """
@@ -577,22 +585,14 @@ def _select_review_input(
     deleted = [
         p for p in list_deleted_files(repo_path, DEVELOPMENT_BRANCH) if not (repo_path / p).exists()
     ]
-    if deleted:
-        listing = "\n".join(f"- {p}" for p in deleted)
-        # Never clobber — or anchor a finding onto — a real file that shares the
-        # note key, whether it is a changed file (in ``files``) or an unchanged
-        # one still present in the worktree.
-        note_key = _DELETED_FILES_NOTE_KEY
-        while note_key in files or (repo_path / note_key).exists():
-            note_key += "_"
-        files[note_key] = (
-            "The following tracked files were DELETED by this task. Verify each "
-            "removal is intentional and that nothing still depends on them:\n"
-            f"{listing}\n"
-        )
+    note = _format_deletion_note(deleted) if deleted else None
 
     if files:
-        return files, None
+        return files, None, note
+    if note:
+        # Deletion-only change: no surviving content, so the note itself is the
+        # review input (avoids a whole-repo fallback for a pure removal).
+        return None, note, None
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )
@@ -601,7 +601,7 @@ def _select_review_input(
         meta = _read_repo_meta_files(repo_path)
         if meta:
             code = code + "\n\n" + meta
-    return None, code
+    return None, code, None
 
 
 def _is_repo_setup_task(task: Any) -> bool:
@@ -1623,13 +1623,14 @@ class BackendExpertAgent:
             from software_engineering_team.shared.repo_writer import _output_to_files_dict
 
             written = _output_to_files_dict(result, "") if result else None
-            review_files, review_code = _select_review_input(
+            review_files, review_code, deletion_note = _select_review_input(
                 repo_path, current_task, written
             )
             review_result = self._run_code_review(
                 code_review_agent=code_review_agent,
                 files=review_files,
                 code=review_code,
+                deletion_note=deletion_note,
                 spec_content=spec_content,
                 task=current_task,
                 architecture=architecture,
@@ -2553,6 +2554,7 @@ class BackendExpertAgent:
         code_review_agent: Any,
         files: Dict[str, str] | None = None,
         code: str | None = None,
+        deletion_note: str | None = None,
         spec_content: str,
         task: Task,
         architecture: Optional[SystemArchitecture],
@@ -2567,6 +2569,10 @@ class BackendExpertAgent:
               provided, untruncated: the coordinator bounds its own per-call
               prompts and its coverage guarantee only holds when it sees the
               full input.
+            - ``deletion_note`` is None or a short text listing removed paths; it
+              is appended to the task description (review *context*) rather than
+              passed as source, so a finding is never anchored onto a synthetic
+              file path.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:
@@ -2574,12 +2580,18 @@ class BackendExpertAgent:
         """
         from code_review_agent.models import CodeReviewInput
 
+        task_description = task.description or ""
+        if deletion_note:
+            task_description = (
+                f"{task_description}\n\n{deletion_note}" if task_description else deletion_note
+            )
+
         # ``CodeReviewInput`` ignores ``code`` when ``files`` is set and rejects
         # an input that carries neither; pass each only when present so the
         # legacy ``code`` string still counts as explicitly provided.
         input_kwargs: Dict[str, Any] = {
             "spec_content": spec_content,
-            "task_description": task.description,
+            "task_description": task_description,
             "task_requirements": _task_requirements(task),
             "acceptance_criteria": getattr(task, "acceptance_criteria", []) or [],
             "language": "python",

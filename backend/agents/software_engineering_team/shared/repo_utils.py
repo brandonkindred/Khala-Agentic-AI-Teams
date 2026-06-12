@@ -114,12 +114,16 @@ def read_files_as_dict(
         - *paths* are repo-relative; the caller has already scoped them.
     Postconditions:
         - Returns a mapping in the iteration order of *paths*, skipping any path
-          that is filtered out by *extensions*, escapes *repo_path* once resolved
-          (an absolute path or one containing ``..``), is unresolvable (e.g. a
-          cyclic symlink), or is missing/unreadable.
-        - Decodes as UTF-8 with ``errors="replace"`` (matching ``read_repo_code``)
-          so a changed file with a legacy/non-UTF-8 text encoding is reviewed
-          rather than silently dropped; bytes that do not decode become U+FFFD.
+          that is filtered out by *extensions*, escapes *repo_path* (an absolute
+          path or one containing ``..``), is binary, or is missing/unreadable.
+        - A symlink is represented by its link target text (``# symlink -> ...``)
+          and never dereferenced, so the target's unrelated content is not
+          mislabeled under the link path and a link pointing outside the repo
+          cannot leak content.
+        - Text is decoded as UTF-8 with ``errors="replace"`` (matching
+          ``read_repo_code``) so a legacy/non-UTF-8 text file is reviewed rather
+          than dropped; binary content (detected by a NUL byte) is omitted rather
+          than decoded into gibberish.
         - Never reads a file outside *repo_path*: keys may come from untrusted
           agent output, so containment is enforced before any read.
     """
@@ -129,13 +133,27 @@ def read_files_as_dict(
         candidate = Path(rel_path)
         if extensions is not None and candidate.suffix not in extensions:
             continue
+        full_path = repo_root / candidate
         try:
-            # ``resolve()`` may raise RuntimeError/OSError on a symlink loop, so
-            # guard it alongside the read rather than only catching read errors.
-            full_path = (repo_path / candidate).resolve()
-            if repo_root not in full_path.parents:
+            # Lexical containment first — no symlink following — so an absolute or
+            # ``..`` key from untrusted agent output is rejected up front.
+            lexical = Path(os.path.normpath(full_path))
+            if lexical != repo_root and repo_root not in lexical.parents:
                 continue
-            result[rel_path] = full_path.read_text(encoding="utf-8", errors="replace")
+            # A symlink is reported by its target, never dereferenced (which would
+            # mislabel the target's content under the link or escape the repo).
+            if full_path.is_symlink():
+                result[rel_path] = f"# symlink -> {os.readlink(full_path)}\n"
+                continue
+            # Non-symlink: resolve (following any intra-repo parent links) and
+            # re-check containment before reading.
+            resolved = full_path.resolve()
+            if repo_root not in resolved.parents:
+                continue
+            data = resolved.read_bytes()
+            if b"\x00" in data[:8192]:
+                continue  # binary asset: omit rather than review as gibberish
+            result[rel_path] = data.decode("utf-8", errors="replace")
         except (OSError, RuntimeError, ValueError):
             continue
     return result
