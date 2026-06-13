@@ -90,6 +90,11 @@
   display: flex;
   flex-direction: column;
   gap: 10px;
+
+  &__more {
+    align-self: center;
+    margin-top: 10px;
+  }
 }
 
 // Shared card chrome -----------------------------------------------------------

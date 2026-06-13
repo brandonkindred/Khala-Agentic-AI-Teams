@@ -446,15 +446,66 @@ describe('CognitionTabComponent', () => {
     expect(api.listRules).toHaveBeenLastCalledWith('a2', { status: 'active', limit: 500 });
   });
 
-  it("routes a decision to the proposal's own agent after switching agents", () => {
+  it('does not act on a proposal whose agent is no longer selected', () => {
     const f = build();
     f.detectChanges();
-    // Operator opened the dialog for p1 (agent a1), then switched to a2.
+    // Operator opened the dialog for p1 (agent a1), then switched to a2 and confirmed.
     f.componentInstance.selectAgent('a2');
     f.componentInstance.approve(addProposal); // addProposal.agent_id === 'a1'
-    expect(api.approveProposal).toHaveBeenCalledWith('a1', 'p1');
+    expect(api.approveProposal).not.toHaveBeenCalled();
     // a2's proposal view is left untouched.
     expect(f.componentInstance.proposals()).toEqual([addProposal, staleProposal]);
+  });
+
+  it('loads more proposals when a full page is returned, then stops', () => {
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({ ...addProposal, id: 'p' + i }));
+    api.listProposals = vi.fn().mockReturnValue(of(fullPage));
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.proposalsHasMore()).toBe(true);
+    expect(c.proposals().length).toBe(200);
+    // The next page is shorter → no more pages.
+    api.listProposals = vi.fn().mockReturnValue(of([{ ...addProposal, id: 'p200' }]));
+    c.loadMoreProposals();
+    expect(api.listProposals).toHaveBeenCalledWith('a1', { status: 'pending', limit: 200, offset: 200 });
+    expect(c.proposals().length).toBe(201);
+    expect(c.proposalsHasMore()).toBe(false);
+  });
+
+  it('surfaces an error when loading more proposals fails', () => {
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({ ...addProposal, id: 'p' + i }));
+    api.listProposals = vi.fn().mockReturnValue(of(fullPage));
+    const f = build();
+    f.detectChanges();
+    api.listProposals = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'more-fail' } })));
+    f.componentInstance.loadMoreProposals();
+    expect(f.componentInstance.proposalsError()).toBe('more-fail');
+    expect(f.componentInstance.loadingProposals()).toBe(false);
+  });
+
+  it('resolves a retired target rule via the all-rules index', () => {
+    const retired = { ...rules[0], id: 'r-old', text: 'Old retired rule', status: 'retired' as const };
+    // The active-rules section shows r9; the all-rules index also has the retired target.
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { status?: string }) =>
+        q?.status === 'active' ? of([rules[0]]) : of([rules[0], retired]),
+      );
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.rules().map((r) => r.id)).toEqual(['r9']); // section: active only
+    expect(c.targetRule('r-old')?.text).toBe('Old retired rule'); // resolved via index
+  });
+
+  it('does not show the empty state when a section load errors', () => {
+    api.listProposals = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'boom' } })));
+    const f = build();
+    f.detectChanges();
+    expect(f.componentInstance.proposalsError()).toBe('boom');
+    // The error is shown, but no "Nothing to review" empty state below it.
+    expect((f.nativeElement as HTMLElement).querySelectorAll('app-empty-state').length).toBe(0);
   });
 
   it('builds a proposal summary from the proposed or target rule text', () => {

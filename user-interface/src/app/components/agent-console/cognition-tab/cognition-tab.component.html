@@ -56,9 +56,9 @@
         <app-error-message [message]="proposalsError()!"></app-error-message>
       }
 
-      @if (loadingProposals()) {
+      @if (loadingProposals() && proposals().length === 0) {
         <app-loading-spinner></app-loading-spinner>
-      } @else if (proposals().length === 0) {
+      } @else if (proposals().length === 0 && !proposalsError()) {
         <app-empty-state
           icon="rule"
           title="Nothing to review"
@@ -151,6 +151,17 @@
             </li>
           }
         </ul>
+        @if (proposalsHasMore()) {
+          <button
+            mat-stroked-button
+            type="button"
+            class="cognition-list__more"
+            [disabled]="loadingProposals()"
+            (click)="loadMoreProposals()"
+          >
+            Load more
+          </button>
+        }
       }
     </section>
 
@@ -184,7 +195,7 @@
 
       @if (loadingEvents()) {
         <app-loading-spinner></app-loading-spinner>
-      } @else if (events().length === 0) {
+      } @else if (events().length === 0 && !memoryError()) {
         <app-empty-state
           icon="history"
           title="No activity yet"
@@ -242,7 +253,7 @@
 
       @if (loadingRules()) {
         <app-loading-spinner></app-loading-spinner>
-      } @else if (rules().length === 0) {
+      } @else if (rules().length === 0 && !rulesError()) {
         <app-empty-state
           icon="gavel"
           title="No rules yet"

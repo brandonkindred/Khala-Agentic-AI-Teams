@@ -110,6 +110,8 @@ export class CognitionTabComponent implements OnInit {
   readonly loadingProposals = signal<boolean>(false);
   readonly proposalsError = signal<string | null>(null);
   readonly proposalsUnavailable = signal<boolean>(false);
+  /** True while another page of proposals is available to load. */
+  readonly proposalsHasMore = signal<boolean>(false);
   /** Proposal id currently being approved/rejected (one decision at a time). */
   readonly actingProposalId = signal<string | null>(null);
 
@@ -131,6 +133,12 @@ export class CognitionTabComponent implements OnInit {
   readonly rulesUnavailable = signal<boolean>(false);
   /** Rule id briefly highlighted after a retire-proposal link click. */
   readonly highlightedRuleId = signal<string | null>(null);
+  /**
+   * All rules (active + retired) by id, independent of the Rules section filter.
+   * Used to resolve proposal target rules — including retired targets of decided
+   * proposals that the active-rules view doesn't contain.
+   */
+  private readonly rulesIndex = signal<Map<string, Rule>>(new Map());
 
   /** Storage is "down" (panel-wide banner) only when every section failed with 503. */
   readonly storageUnavailable = computed(
@@ -141,6 +149,7 @@ export class CognitionTabComponent implements OnInit {
   private proposalsReqId = 0;
   private memoryReqId = 0;
   private rulesReqId = 0;
+  private rulesIndexReqId = 0;
 
   // Filter option lists (lowercase labels per the copy spec) ------------------
   readonly proposalFilters: readonly { value: ProposalFilter; label: string }[] = [
@@ -207,6 +216,7 @@ export class CognitionTabComponent implements OnInit {
   /** Reload all three sections for the current agent. No-op when none selected. */
   refreshAll(): void {
     if (!this.selectedAgentId()) return;
+    this.loadRulesIndex(); // before loadRules so the section's filtered call is the last one
     this.loadProposals();
     this.loadMemory();
     this.loadRules();
@@ -230,12 +240,45 @@ export class CognitionTabComponent implements OnInit {
           if (reqId !== this.proposalsReqId) return;
           this.proposalsUnavailable.set(false);
           this.proposals.set(rows);
+          this.proposalsHasMore.set(rows.length === PROPOSAL_PAGE_LIMIT);
           this.loadingProposals.set(false);
         },
         error: (err) => {
           if (reqId !== this.proposalsReqId) return;
           this.proposals.set([]);
+          this.proposalsHasMore.set(false);
           this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to load proposals.');
+          this.loadingProposals.set(false);
+        },
+      });
+  }
+
+  /**
+   * Append the next page of proposals (the endpoint caps each page at
+   * `PROPOSAL_PAGE_LIMIT`). No-op while loading, when no more remain, or when no
+   * agent is selected.
+   */
+  loadMoreProposals(): void {
+    const agentId = this.selectedAgentId();
+    if (!agentId || this.loadingProposals() || !this.proposalsHasMore()) return;
+    this.loadingProposals.set(true);
+    this.proposalsError.set(null);
+    const reqId = ++this.proposalsReqId;
+    const filter = this.proposalStatusFilter();
+    const query = filter === 'all' ? {} : { status: filter };
+    const offset = this.proposals().length;
+    this.api
+      .listProposals(agentId, { ...query, limit: PROPOSAL_PAGE_LIMIT, offset })
+      .subscribe({
+        next: (rows) => {
+          if (reqId !== this.proposalsReqId) return;
+          this.proposals.set([...this.proposals(), ...rows]);
+          this.proposalsHasMore.set(rows.length === PROPOSAL_PAGE_LIMIT);
+          this.loadingProposals.set(false);
+        },
+        error: (err) => {
+          if (reqId !== this.proposalsReqId) return;
+          this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to load more proposals.');
           this.loadingProposals.set(false);
         },
       });
@@ -245,6 +288,26 @@ export class CognitionTabComponent implements OnInit {
   setProposalFilter(filter: ProposalFilter): void {
     this.proposalStatusFilter.set(filter);
     this.loadProposals();
+  }
+
+  /**
+   * Best-effort load of all rules (active + retired) into `rulesIndex` for
+   * proposal target resolution. Independent of the Rules section filter and of
+   * the 503 banner — failures here just leave targets unresolved.
+   */
+  private loadRulesIndex(): void {
+    const agentId = this.selectedAgentId();
+    if (!agentId) return;
+    const reqId = ++this.rulesIndexReqId;
+    this.api.listRules(agentId, { limit: RULE_PAGE_LIMIT }).subscribe({
+      next: (rows) => {
+        if (reqId !== this.rulesIndexReqId) return;
+        this.rulesIndex.set(new Map(rows.map((r) => [r.id, r])));
+      },
+      error: () => {
+        /* non-fatal: targets just fall back to the loaded section rules */
+      },
+    });
   }
 
   /** Confirm, then approve. No-op if evidence is outdated or a decision is in flight. */
@@ -274,20 +337,27 @@ export class CognitionTabComponent implements OnInit {
    * @param p The pending proposal to approve.
    */
   private performApprove(p: RuleProposal): void {
-    // Bind the decision to the proposal's own agent, not the (possibly changed)
-    // selected agent, so switching agents mid-confirm can't misroute it.
     const agentId = p.agent_id;
-    if (!agentId || p.stale_evidence || this.actingProposalId()) return;
+    // Abort if the proposal's agent is no longer the selected one — e.g. the
+    // operator switched agents while the confirm dialog was open. Acting here
+    // would silently mutate a different agent than the one on screen.
+    if (
+      !agentId ||
+      agentId !== this.selectedAgentId() ||
+      p.stale_evidence ||
+      this.actingProposalId()
+    ) {
+      return;
+    }
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
-    const onCurrentAgent = agentId === this.selectedAgentId();
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
-    if (onCurrentAgent) this.proposals.set(prev.filter((x) => x.id !== p.id));
+    this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.approveProposal(agentId, p.id).subscribe({
       next: () => {
         this.actingProposalId.set(null);
-        if (agentId !== this.selectedAgentId()) return; // agent changed — leave its view alone
+        if (agentId !== this.selectedAgentId()) return; // agent changed mid-flight — leave its view alone
         this.loadRules();
         const filter = this.proposalStatusFilter();
         if (filter === 'all' || filter === 'approved' || reqId !== this.proposalsReqId) {
@@ -297,7 +367,7 @@ export class CognitionTabComponent implements OnInit {
       error: (err) => {
         this.actingProposalId.set(null);
         if (agentId !== this.selectedAgentId()) return; // don't surface a stale agent's error
-        if (reqId === this.proposalsReqId && onCurrentAgent) this.proposals.set(prev);
+        if (reqId === this.proposalsReqId) this.proposals.set(prev);
         this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
       },
     });
@@ -329,13 +399,13 @@ export class CognitionTabComponent implements OnInit {
    */
   private performReject(p: RuleProposal): void {
     const agentId = p.agent_id;
-    if (!agentId || this.actingProposalId()) return;
+    // Abort if the proposal's agent is no longer selected (see performApprove).
+    if (!agentId || agentId !== this.selectedAgentId() || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
     this.proposalsError.set(null);
-    const onCurrentAgent = agentId === this.selectedAgentId();
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
-    if (onCurrentAgent) this.proposals.set(prev.filter((x) => x.id !== p.id));
+    this.proposals.set(prev.filter((x) => x.id !== p.id));
     this.api.rejectProposal(agentId, p.id).subscribe({
       next: (updated) => {
         this.actingProposalId.set(null);
@@ -349,7 +419,7 @@ export class CognitionTabComponent implements OnInit {
       error: (err) => {
         this.actingProposalId.set(null);
         if (agentId !== this.selectedAgentId()) return;
-        if (reqId === this.proposalsReqId && onCurrentAgent) this.proposals.set(prev);
+        if (reqId === this.proposalsReqId) this.proposals.set(prev);
         this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
       },
     });
@@ -402,12 +472,15 @@ export class CognitionTabComponent implements OnInit {
   }
 
   /**
+   * Resolves against the all-rules index first (so retired targets of decided
+   * proposals resolve), then the loaded section rules.
+   *
    * @param id A target rule id (may be null/undefined).
-   * @returns The matching loaded `Rule`, or `undefined` if not present.
+   * @returns The matching `Rule`, or `undefined` if not found.
    */
   targetRule(id: string | null | undefined): Rule | undefined {
     if (!id) return undefined;
-    return this.rules().find((r) => r.id === id);
+    return this.rulesIndex().get(id) ?? this.rules().find((r) => r.id === id);
   }
 
   /**
