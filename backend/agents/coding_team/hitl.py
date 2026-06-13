@@ -39,10 +39,12 @@ WAITING_STATUS = "waiting_for_user"
 # is more appropriate than forcing yes/no onto open-ended questions like "What API fields are needed?"
 DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 
-# Option IDs that were used by the former yes/no/not-sure fallback. If a non-compliant LLM emits
-# only these IDs, the options are generic and must be discarded so the question falls back to
-# free-text rather than surfacing context-irrelevant choices.
+# Option IDs and labels that signal a generic yes/no/not-sure response pattern. Individual options
+# matching either set are culled before the minimum-count check so that mixed sets (e.g. "yes"/"no"
+# blended with one context-specific option) and variant IDs recognized by their display label
+# (e.g. id="opt_yes", label="Yes") are both removed rather than silently accepted.
 _GENERIC_OPTION_IDS: frozenset = frozenset({"yes", "no", "not_sure"})
+_GENERIC_OPTION_LABELS: frozenset = frozenset({"yes", "no", "not sure", "not_sure", "not sure / need more info"})
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
@@ -71,7 +73,7 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
             opt_id = str(o.get("id"))
-            if opt_id == "other":
+            if opt_id.lower() == "other":
                 # "other" is the reserved synthetic free-text option added by the UI/API;
                 # using it as a structured option id would cause the answer handler to treat
                 # any selection of this option as a free-text response. Drop it — the prompt
@@ -144,9 +146,10 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
     Postconditions:
         - Returns dicts each carrying ``question_text`` and ``options`` (always present); empties
           are dropped, and any ``context`` / ``options`` an agent supplied are preserved so
-          domain-specific choices round-trip. Options that fail normalization (< 2 survive) are
-          discarded and ``options`` is set to ``[]`` so callers have a uniform contract — the same
-          fallback as ``convert_to_structured_questions``. A non-list input yields ``[]``.
+          domain-specific choices round-trip. Options that fail normalization (< 2 survive after
+          deduplication, or consist exclusively of generic yes/no/not-sure IDs) are discarded and
+          ``options`` is set to ``[]`` so callers have a uniform contract — the same fallback as
+          ``convert_to_structured_questions``. A non-list input yields ``[]``.
     """
     if not isinstance(raw, list):
         return []
@@ -171,24 +174,31 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
                     seen_ids.add(o["id"])
                     deduped.append(o)
             opts = deduped
-            unique_ids = {o["id"] for o in opts}
-            if len(unique_ids) >= 2 and not unique_ids.issubset(_GENERIC_OPTION_IDS):
-                entry["options"] = opts
+            # Cull individual generic options (by ID and by label) so that mixed sets
+            # (e.g. yes/no blended with one context-specific option) and variant IDs
+            # detected via their display label (e.g. id="opt_yes", label="Yes") are
+            # removed before the minimum-count check rather than silently accepted.
+            filtered = [
+                o for o in opts
+                if o["id"].lower() not in _GENERIC_OPTION_IDS
+                and (o.get("label") or "").lower() not in _GENERIC_OPTION_LABELS
+            ]
+            if len(filtered) != len(opts):
+                logger.warning(
+                    "Question '%s': %d generic option(s) removed before acceptance check",
+                    text[:60],
+                    len(opts) - len(filtered),
+                )
+            if len(filtered) >= 2:
+                entry["options"] = filtered
             else:
                 if opts:
-                    if unique_ids.issubset(_GENERIC_OPTION_IDS):
-                        logger.warning(
-                            "Question '%s' has only generic yes/no/not-sure options; "
-                            "falling back to free-text (options discarded)",
-                            text[:60],
-                        )
-                    else:
-                        logger.warning(
-                            "Question '%s' has only %d unique option ID(s) after normalization; "
-                            "falling back to free-text (options discarded)",
-                            text[:60],
-                            len(unique_ids),
-                        )
+                    logger.warning(
+                        "Question '%s' has only %d context-specific option(s) after filtering; "
+                        "falling back to free-text (options discarded)",
+                        text[:60],
+                        len(filtered),
+                    )
                 entry["options"] = []
         else:
             entry["options"] = []

@@ -221,7 +221,7 @@ def get_auto_answer_for_job(
         # the LLM "select" the placeholder and record it as the user's decision without any
         # actual user input. Treat questions whose only option is the synthetic placeholder the
         # same as fully optionless questions.
-        if opt.get("id") != "other"
+        if (opt.get("id") or "").lower() != "other"
     ]
 
     if not options:

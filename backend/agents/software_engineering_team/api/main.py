@@ -2175,7 +2175,7 @@ def auto_answer_run_team_question(
 
     # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
     # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [o for o in (question_data.get("options") or []) if o.get("id") != "other"]
+    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
     if not real_options:
         raise HTTPException(
             status_code=422,
@@ -2686,7 +2686,7 @@ def auto_answer_product_analysis_question(
 
     # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
     # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [o for o in (question_data.get("options") or []) if o.get("id") != "other"]
+    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
     if not real_options:
         raise HTTPException(
             status_code=422,

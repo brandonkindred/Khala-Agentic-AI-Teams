@@ -105,6 +105,60 @@ def test_normalize_open_questions_drops_generic_yes_no_options():
     assert out[0]["options"] == []
 
 
+def test_normalize_open_questions_drops_generic_mixed_with_specific():
+    # A mix of generic yes/no IDs with one context-specific option is still collapsed: the generic
+    # options are culled individually, leaving only the context-specific one — fewer than 2 — so
+    # the question falls back to free-text.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "yes", "label": "Yes"},
+                    {"id": "no", "label": "No"},
+                    {"id": "deployment_target", "label": "On-premise"},
+                ],
+            }
+        ]
+    )
+    assert out[0]["options"] == []
+
+
+def test_normalize_open_questions_drops_variant_ids_by_label():
+    # IDs like opt_yes/opt_no that are not in _GENERIC_OPTION_IDS but have a generic label
+    # should be culled by label match, leaving fewer than 2 options → free-text fallback.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "opt_yes", "label": "Yes"},
+                    {"id": "opt_no", "label": "No"},
+                ],
+            }
+        ]
+    )
+    assert out[0]["options"] == []
+
+
+def test_normalize_open_questions_mixed_keeps_specific_when_two_or_more():
+    # Generic options are removed individually; if ≥ 2 context-specific options remain, they
+    # are accepted. The generic ones should not appear in the final list.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "yes", "label": "Yes"},
+                    {"id": "cloud", "label": "Cloud deployment"},
+                    {"id": "on_prem", "label": "On-premise deployment"},
+                ],
+            }
+        ]
+    )
+    assert [o["id"] for o in out[0]["options"]] == ["cloud", "on_prem"]
+
+
 def test_normalize_open_questions_keeps_two_or_more_options():
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}]

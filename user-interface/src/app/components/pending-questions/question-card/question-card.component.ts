@@ -52,7 +52,7 @@ export class QuestionCardComponent {
 
   /** True when the question has at least one real selectable option (not the synthetic "other" placeholder). */
   get hasSelectableOptions(): boolean {
-    return (this.question?.options ?? []).some(o => o.id !== 'other');
+    return (this.question?.options ?? []).some(o => o.id.toLowerCase() !== 'other');
   }
 
   onOptionToggle(optionId: string, checked: boolean): void {
