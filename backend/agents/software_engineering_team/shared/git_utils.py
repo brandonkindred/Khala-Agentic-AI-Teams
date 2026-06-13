@@ -501,6 +501,11 @@ def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
 # appended (the count is always shown, so nothing is silently hidden).
 _MAX_REFERRERS_LISTED = 25
 
+# Above this many deletions, the per-deletion reverse-reference scan (one git grep
+# each, over the whole worktree) is skipped to avoid an O(N × repo) stall on a
+# mass deletion/rename. The deletions are still listed by name in the note.
+_MAX_DELETIONS_SCANNED = 50
+
 
 def _deleted_module_patterns(rel_path: str) -> List[str]:
     """Importer-search regexes for a deleted path (best-effort; never empty for a
@@ -576,6 +581,13 @@ def find_referencing_paths(
     precise dotted/relative import forms for ``.py`` modules, and a by-name
     basename search for other languages (Java/JS/TS/config/...).
 
+    Each deletion is one ``git grep`` over the tracked worktree, so the scan is
+    bounded: a mass deletion/rename of more than :data:`_MAX_DELETIONS_SCANNED`
+    paths would rescan the whole repository that many times and could stall code
+    review for minutes, so it is skipped entirely (the deletion note still lists
+    every removed path by name; only the per-deletion referrer sub-lines are
+    omitted). This caps the worst case at a fixed number of greps.
+
     Preconditions:
         - *deleted_paths* are repo-relative paths reported deleted by
           :func:`list_changed_and_deleted`.
@@ -591,6 +603,17 @@ def find_referencing_paths(
     """
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
+        return {}
+    if len(deleted_paths) > _MAX_DELETIONS_SCANNED:
+        # A mass deletion/rename would launch one full-repo grep per path; skip the
+        # per-deletion referrer scan to bound the cost (paths are still listed by
+        # name in the deletion note).
+        logger.info(
+            "find_referencing_paths: %d deletions exceed the scan cap (%d); "
+            "skipping per-deletion reverse-reference search",
+            len(deleted_paths),
+            _MAX_DELETIONS_SCANNED,
+        )
         return {}
     deleted_set = set(deleted_paths)
     result: Dict[str, List[str]] = {}

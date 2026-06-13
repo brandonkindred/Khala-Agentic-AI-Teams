@@ -563,6 +563,41 @@ def _free_note_key(files: Dict[str, str], base: str) -> str:
     return f"{base}.{n}"
 
 
+# Binary file extensions that are legitimately non-text-reviewable *assets*
+# (images, media, fonts, archives, compiled artifacts, model weights, data). A
+# change touching one of these can't be source-reviewed, so it is advisory — it
+# must not permanently block a merge. Anything *not* in this set that read as
+# binary/unreadable (a source file with embedded NUL, a submodule gitlink, an
+# unknown type) is treated as needing manual review.
+_BINARY_ASSET_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg", ".tiff",
+        ".pdf", ".mp3", ".mp4", ".mov", ".avi", ".wav", ".ogg", ".webm", ".flac",
+        ".woff", ".woff2", ".ttf", ".otf", ".eot",
+        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar",
+        ".wasm", ".so", ".dll", ".dylib", ".a", ".o", ".class", ".pyc", ".pyd",
+        ".onnx", ".pt", ".pth", ".h5", ".pb", ".tflite", ".parquet", ".npy", ".npz",
+        ".bin", ".dat", ".db", ".sqlite", ".ico",
+    }
+)
+
+# Basename suffixes that mark a non-secret *template*/example even though the
+# secret denylist (deliberately over-broad) flags them. These are advisory; a
+# real secret (``.env``, ``id_rsa``, ``*.pem``, ``credentials``) is not a template
+# and must be manually reviewed.
+_TEMPLATE_SUFFIXES: Tuple[str, ...] = (".example", ".sample", ".template", ".dist", ".tmpl")
+
+
+def _is_binary_asset(path: str) -> bool:
+    """True when *path* is a recognized non-text-reviewable binary asset."""
+    return Path(path).suffix.lower() in _BINARY_ASSET_SUFFIXES
+
+
+def _is_template_path(path: str) -> bool:
+    """True when *path* is a non-secret template/example (``.env.example``, ...)."""
+    return Path(path).name.lower().endswith(_TEMPLATE_SUFFIXES)
+
+
 @dataclass
 class ReviewInputSelection:
     """Chosen code-review input plus the metadata the gate and fix loop need.
@@ -627,20 +662,32 @@ class ReviewInputSelection:
     def blocking_unexamined(self) -> Tuple[str, ...]:
         """The omissions that MUST force manual review on an approval.
 
-        Not every unexamined path should block a merge: a binary asset
-        (``logo.png``) and a sensitive-named template (``.env.example``, caught by
-        the deliberately over-broad denylist) are *legitimately* non-text-reviewable
-        — blocking them would make every such change permanently un-mergeable. Those
-        are advisory (surfaced as notes via :meth:`unexamined_paths`). What does
-        block is the genuinely suspicious / unknowable subset:
+        Not every unexamined path should block a merge, but most should. The only
+        omissions that stay *advisory* (surfaced as notes via
+        :meth:`unexamined_paths`, never blocking) are the ones that are
+        legitimately non-text-reviewable, so blocking them would make every such
+        change permanently un-mergeable:
 
-        - **emptied** — a changed file truncated to empty/whitespace (a destructive
-          content removal that the reviewer must confirm is intentional);
+        - a recognized **binary asset** (``logo.png``, a font, an archive, model
+          weights) — see :func:`_is_binary_asset`;
+        - a non-secret **template/example** flagged only by the over-broad secret
+          denylist (``.env.example``, ``config.sample``) — see
+          :func:`_is_template_path`.
+
+        Everything else blocks, because the reviewer (and the later source-only
+        security pass) never saw the content:
+
+        - **emptied** — a changed file truncated to empty/whitespace;
+        - a **withheld real secret** — ``.env``, ``id_rsa``, ``*.pem``,
+          ``credentials`` (changed or deleted): content withheld, must be checked;
+        - an **unreadable non-asset** — a source file that read as binary, a
+          submodule/gitlink pointer change, or an unknown type;
         - the **baseline-unavailable sentinel** — the diff couldn't be computed, so
-          a deletion may exist that we cannot enumerate or show at all.
+          a deletion may exist we cannot enumerate (not an asset → blocks here).
         """
         blockers = set(self.emptied)
-        blockers.update(p for p in self.unreadable if p == _DELETIONS_UNKNOWN_SENTINEL)
+        blockers.update(p for p in self.withheld if not _is_template_path(p))
+        blockers.update(p for p in self.unreadable if not _is_binary_asset(p))
         return tuple(sorted(blockers))
 
 

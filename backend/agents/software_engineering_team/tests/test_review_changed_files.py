@@ -1926,24 +1926,31 @@ def test_blocking_unexamined_excludes_advisory_includes_suspicious() -> None:
         ReviewInputSelection,
     )
 
-    # Binary asset + withheld secret are advisory (NOT blocking); emptied + the
-    # baseline-unavailable sentinel are blocking.
+    # Advisory (NOT blocking): a recognized binary asset and a non-secret template.
+    # Blocking: emptied/truncated, the baseline sentinel, a real withheld secret,
+    # and an unreadable non-asset (a source file or submodule).
     sel = ReviewInputSelection(
         {"a.py": "x = 1\n"},
         None,
         None,
-        withheld=("app/secrets.py", ".env.example"),
-        unreadable=("logo.png", _DELETIONS_UNKNOWN_SENTINEL),
+        withheld=(".env", "app/secrets.py", ".env.example"),
+        unreadable=("logo.png", "pkg/mod.py", _DELETIONS_UNKNOWN_SENTINEL),
         emptied=("truncated.py",),
     )
-    assert "logo.png" in sel.unexamined_paths()  # advisory: surfaced
-    assert "app/secrets.py" in sel.unexamined_paths()
+    # Everything omitted is still surfaced for the reviewer.
+    assert "logo.png" in sel.unexamined_paths()
+    assert ".env.example" in sel.unexamined_paths()
+
     blocking = sel.blocking_unexamined()
-    assert "truncated.py" in blocking  # destructive truncation blocks
-    assert _DELETIONS_UNKNOWN_SENTINEL in blocking  # unknowable deletions block
-    assert "logo.png" not in blocking  # binary asset does NOT block
-    assert "app/secrets.py" not in blocking
-    assert ".env.example" not in blocking
+    # Advisory — does NOT block:
+    assert "logo.png" not in blocking  # recognized binary asset
+    assert ".env.example" not in blocking  # non-secret template
+    # Blocking:
+    assert "truncated.py" in blocking  # destructive truncation
+    assert _DELETIONS_UNKNOWN_SENTINEL in blocking  # unknowable deletions
+    assert ".env" in blocking  # real secret
+    assert "app/secrets.py" in blocking  # real secret-named source
+    assert "pkg/mod.py" in blocking  # unreadable source (non-asset)
 
 
 def test_select_review_input_binary_asset_does_not_block(tmp_path: Path) -> None:
@@ -2081,3 +2088,82 @@ def test_select_review_input_written_binary_surfaced(tmp_path: Path) -> None:
     assert "gen.bin" in sel.unexamined_paths()  # on-disk binary surfaced
     assert "never.py" not in sel.unexamined_paths()  # absent candidate ignored
     assert sel.blocking_unexamined() == ()  # binary is advisory, not blocking
+
+
+def test_blocking_real_secret_and_unreadable_source(tmp_path: Path) -> None:
+    """A real changed secret and an unreadable source file force manual review;
+    a template and a binary asset do not."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=base\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=changed\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change + touch real secret")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert ".env" in sel.blocking_unexamined()  # real secret blocks
+
+
+def test_read_files_as_dict_omits_oversized_text(tmp_path: Path, monkeypatch) -> None:
+    """A text file over the cap is omitted (not loaded whole, not truncated)."""
+    from software_engineering_team.shared import repo_utils
+
+    (tmp_path / "big.txt").write_text("a" * 1000, encoding="utf-8")
+    monkeypatch.setattr(repo_utils, "_MAX_REVIEW_FILE_BYTES", 100)
+    omitted: list[str] = []
+    result = repo_utils.read_files_as_dict(tmp_path, ["big.txt"], extensions=None, omitted=omitted)
+
+    assert result == {}
+    assert "big.txt" in omitted
+
+
+def test_read_files_as_dict_binary_without_early_nul(tmp_path: Path) -> None:
+    """A binary file whose first chunk has no NUL is still detected (chunked scan)."""
+    from software_engineering_team.shared import repo_utils
+
+    # First _READ_CHUNK_BYTES are NUL-free text; a NUL appears later.
+    data = b"x" * (repo_utils._READ_CHUNK_BYTES + 10) + b"\x00tail"
+    (tmp_path / "weird.bin").write_bytes(data)
+    omitted: list[str] = []
+    result = repo_utils.read_files_as_dict(tmp_path, ["weird.bin"], extensions=None, omitted=omitted)
+
+    assert result == {}  # detected binary despite the late NUL
+    assert "weird.bin" in omitted
+
+
+def test_read_repo_files_as_dict_skips_worktree_git_file(tmp_path: Path) -> None:
+    """A regular file named .git (linked worktree gitlink) is not put in review."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".git").write_text("gitdir: /host/path/.git/worktrees/wt\n", encoding="utf-8")
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "main.py" in result
+    assert ".git" not in result  # gitdir metadata not leaked
+
+
+def test_find_referencing_paths_caps_mass_deletion(tmp_path: Path) -> None:
+    """A mass deletion beyond the scan cap skips the per-deletion reverse-ref scan."""
+    from software_engineering_team.shared import git_utils
+
+    _init_repo(tmp_path)
+    (tmp_path / "consumer.py").write_text("import m0\n", encoding="utf-8")
+    for i in range(git_utils._MAX_DELETIONS_SCANNED + 5):
+        (tmp_path / f"m{i}.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    deleted = [f"m{i}.py" for i in range(git_utils._MAX_DELETIONS_SCANNED + 5)]
+    for f in deleted:
+        (tmp_path / f).unlink()
+
+    assert git_utils.find_referencing_paths(tmp_path, deleted) == {}  # scan skipped

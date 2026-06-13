@@ -124,11 +124,14 @@ _SENSITIVE_DIR_PARTS: frozenset[str] = frozenset(
 # stem+ext forms like ``credentials.json`` / ``secrets.py`` are caught.
 _SENSITIVE_STEMS: frozenset[str] = frozenset({"credentials", "secret", "secrets"})
 
-# Bytes sniffed to classify a file as binary before any full read. A NUL byte in
-# this prefix marks the file binary (skipped), so a huge binary artifact is never
-# loaded whole. Text files are read in full — the review coordinator segments
-# oversized inputs itself, so truncating here would reintroduce lossy review.
-_BINARY_SNIFF_BYTES = 8192
+# Chunk size for the bounded binary-classification read. Reading in chunks lets a
+# NUL byte (binary marker) anywhere short-circuit before the whole file is loaded,
+# so a large NUL-free binary cannot exhaust memory.
+_READ_CHUNK_BYTES = 65536
+# Upper bound on a single reviewable text file. A regular text file under this is
+# read in full and passed untruncated (the coordinator segments oversized inputs);
+# a file over it is omitted rather than truncated (and rather than loaded whole).
+_MAX_REVIEW_FILE_BYTES = 5_000_000
 
 
 def is_sensitive_path(path: str) -> bool:
@@ -330,26 +333,33 @@ def read_files_as_dict(
                 if omitted is not None:
                     omitted.append(rel_path)
                 continue
-            # Sniff a bounded prefix for a NUL so a huge binary artifact is
-            # skipped before the full read; a text file is then read in full and
-            # passed untruncated (the coordinator segments oversized inputs). A
-            # path that is a directory (e.g. a changed submodule gitlink) raises
-            # IsADirectoryError here and is reported via *omitted* below.
+            # Read in bounded chunks, bailing on the first NUL (binary) or once
+            # the accumulated text passes _MAX_REVIEW_FILE_BYTES. This keeps memory
+            # bounded even for a large NUL-free binary (archive/model/media) whose
+            # first bytes look textual — reading the whole remainder up front could
+            # exhaust the worker. A regular text file under the cap is still read in
+            # full and passed untruncated (the coordinator segments oversized
+            # inputs); a file over the cap is omitted rather than truncated.
+            buf = bytearray()
+            binary_or_oversized = False
             with open(resolved, "rb") as handle:
-                prefix = handle.read(_BINARY_SNIFF_BYTES)
-                if b"\x00" in prefix:
-                    logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
-                    if omitted is not None:
-                        omitted.append(rel_path)
-                    continue  # binary asset: omit rather than review as gibberish
-                rest = handle.read()
-            if b"\x00" in rest:
-                # NUL past the sniff window still flags binary content.
-                logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
+                while True:
+                    chunk = handle.read(_READ_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    if b"\x00" in chunk:
+                        binary_or_oversized = True
+                        break
+                    buf += chunk
+                    if len(buf) > _MAX_REVIEW_FILE_BYTES:
+                        binary_or_oversized = True
+                        break
+            if binary_or_oversized:
+                logger.debug("read_files_as_dict: skipping %s (binary or oversized)", rel_path)
                 if omitted is not None:
                     omitted.append(rel_path)
                 continue
-            text = (prefix + rest).decode("utf-8", errors="replace")
+            text = bytes(buf).decode("utf-8", errors="replace")
             key = _disambiguated_key(result, sanitize_path_for_text(rel_path))
             result[key] = text
             if key_to_path is not None:
@@ -416,6 +426,12 @@ def read_repo_files_as_dict(
         # Prune excluded directories in place so os.walk never descends into them.
         dirnames[:] = [d for d in dirnames if d not in always_exclude]
         for name in filenames:
+            # In a linked worktree or submodule, ``.git`` is a regular *file*
+            # (``gitdir: ...``), not a directory, so the dirname prune above misses
+            # it; skip any filename whose basename is an excluded name so the
+            # checkout's gitdir/host-path metadata never reaches the review model.
+            if name in always_exclude:
+                continue
             rel = os.path.relpath(os.path.join(dirpath, name), repo_root)
             if is_sensitive_path(rel):
                 if sensitive_skipped is not None:
