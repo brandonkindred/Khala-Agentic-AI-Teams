@@ -73,6 +73,22 @@ def _caller_tag() -> str:
     return "unknown"
 
 
+def _attribution_log_fields() -> str:
+    """Return ``"agent=<a> team=<t> objective=<o>"`` from the current attribution.
+
+    Used to stamp every LLM lifecycle log line (request, completion, retry,
+    server-error, parse-failure, truncation, semantic-exhaustion) with the same
+    attribution the request line carries, so operators filtering by ``agent``/
+    ``team``/``objective`` see the whole life of a call — not just its opening
+    request — without a second correlation lookup by ``rid``.
+
+    Postconditions: returns a single-line, space-joined string; empty fields are
+        rendered as ``-`` so the key is always present for log-grep predicates.
+    """
+    attr = current_attribution()
+    return f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
+
+
 # Default cap for max_tokens
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
 
@@ -285,8 +301,9 @@ def _rate_limit_backoff_sleep(
         rate_limit_attempt, rate_limit_initial, rate_limit_cap, retry_after_seconds
     )
     logger.warning(
-        "LLM 429 (rid=%s, rate-limit attempt %d/%d). Retrying in %.1fs",
+        "LLM 429 (rid=%s, %s, rate-limit attempt %d/%d). Retrying in %.1fs",
         current_request_id() or "-",
+        _attribution_log_fields(),
         rate_limit_attempt + 1,
         rate_limit_max_retries + 1,
         wait,
@@ -512,8 +529,9 @@ class OllamaLLMClient(LLMClient):
                 extra_headers = " headers=" + ", ".join(parts)
         reason_str = f" reason={reason}" if reason else ""
         logger.error(
-            "LLM server error response: rid=%s status=%s model=%s base_url=%s attempt=%s%s.%s Response body: %s",
+            "LLM server error response: rid=%s %s status=%s model=%s base_url=%s attempt=%s%s.%s Response body: %s",
             current_request_id() or "-",
+            _attribution_log_fields(),
             status_code,
             self.model,
             self.base_url,
@@ -727,8 +745,9 @@ class OllamaLLMClient(LLMClient):
                 )
                 return jr_dict
         logger.error(
-            "LLM JSON parse failed. rid=%s model=%s base_url=%s. Raw content (truncated): %s",
+            "LLM JSON parse failed. rid=%s %s model=%s base_url=%s. Raw content (truncated): %s",
             current_request_id() or "-",
+            _attribution_log_fields(),
             self.model,
             self.base_url,
             text[:_MAX_LOG_BODY] + ("... [truncated]" if len(text) > _MAX_LOG_BODY else ""),
@@ -799,8 +818,9 @@ class OllamaLLMClient(LLMClient):
             if not partial_content.strip():
                 raise _EmptyResponseSignal("length", has_reasoning, len(partial_content))
             logger.warning(
-                "LLM response truncated (rid=%s, finish_reason=length). Partial content: %d chars",
+                "LLM response truncated (rid=%s, %s, finish_reason=length). Partial content: %d chars",
                 current_request_id() or "-",
+                _attribution_log_fields(),
                 len(partial_content),
             )
             raise LLMTruncatedError(
@@ -904,9 +924,10 @@ class OllamaLLMClient(LLMClient):
                 return False
             wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
             logger.warning(
-                "LLM %s (rid=%s, attempt %d/%d): %s. Retrying in %.1fs",
+                "LLM %s (rid=%s, %s, attempt %d/%d): %s. Retrying in %.1fs",
                 kind,
                 current_request_id() or "-",
+                _attribution_log_fields(),
                 attempt + 1,
                 max_total_attempts,
                 detail,
@@ -1058,9 +1079,10 @@ class OllamaLLMClient(LLMClient):
                                 total_tokens = (usage_data or {}).get("total_tokens", 0)
 
                                 logger.info(
-                                    "LLM streaming response complete in %.1fs (rid=%s, caller=%s, content=%d chars, reasoning=%s, finish=%s, tokens=%d/%d/%d p/c/t)",
+                                    "LLM streaming response complete in %.1fs (rid=%s, %s, caller=%s, content=%d chars, reasoning=%s, finish=%s, tokens=%d/%d/%d p/c/t)",
                                     elapsed,
                                     current_request_id() or "-",
+                                    _attribution_log_fields(),
                                     caller,
                                     len(joined_content),
                                     has_reasoning,
@@ -1224,8 +1246,9 @@ class OllamaLLMClient(LLMClient):
                     # LLMTemporaryError. Handled inline because a raise here
                     # cannot be caught by the sibling LLMTemporaryError clause.
                     logger.warning(
-                        "LLM returned empty response (rid=%s, finish_reason=%s). Treating as transient error for retry.",
+                        "LLM returned empty response (rid=%s, %s, finish_reason=%s). Treating as transient error for retry.",
                         current_request_id() or "-",
+                        _attribution_log_fields(),
                         sig.finish_reason,
                     )
                     last_error = LLMTemporaryError(
@@ -1244,9 +1267,10 @@ class OllamaLLMClient(LLMClient):
                 )
                 if new_think is not None:
                     logger.warning(
-                        "LLM produced no assistant content (rid=%s, finish=%s, has_reasoning=%s, attempt %d); "
+                        "LLM produced no assistant content (rid=%s, %s, finish=%s, has_reasoning=%s, attempt %d); "
                         "proof-of-change retry with thinking %r -> %r",
                         current_request_id() or "-",
+                        _attribution_log_fields(),
                         sig.finish_reason,
                         sig.has_reasoning,
                         attempt + 1,
@@ -1264,10 +1288,11 @@ class OllamaLLMClient(LLMClient):
                 )
                 retry_level = active_think if semantic_attempt else None
                 logger.error(
-                    "LLM semantic exhaustion: rid=%s failure_class=semantic_exhaustion attempts_used=%d "
+                    "LLM semantic exhaustion: rid=%s %s failure_class=semantic_exhaustion attempts_used=%d "
                     "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
                     "finish_reason=%s payload_fingerprint=%s",
                     current_request_id() or "-",
+                    _attribution_log_fields(),
                     attempt + 1,
                     resolved_think,
                     retry_level,
@@ -1364,8 +1389,9 @@ class OllamaLLMClient(LLMClient):
                         "(e.g. 900–1200) for slow cloud models or very long prompts."
                     )
                 logger.error(
-                    "LLM connection/timeout failed after all retries. rid=%s model=%s base_url=%s attempt=%s error=%s%s%s",
+                    "LLM connection/timeout failed after all retries. rid=%s %s model=%s base_url=%s attempt=%s error=%s%s%s",
                     current_request_id() or "-",
+                    _attribution_log_fields(),
                     self.model,
                     self.base_url,
                     attempt + 1,

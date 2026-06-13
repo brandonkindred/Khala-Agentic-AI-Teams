@@ -235,7 +235,14 @@ def test_request_and_completion_log_lines_carry_attribution_and_share_rid(
 
     completion_lines = [m for m in msgs if "streaming response complete" in m]
     assert completion_lines, "no completion log line emitted"
-    assert f"rid={rid}" in completion_lines[0]
+    completion = completion_lines[0]
+    assert f"rid={rid}" in completion
+    # The completion line carries the same attribution fields as the request
+    # line, so operators filtering by agent/team/objective see the whole call
+    # lifecycle without a second correlation lookup by rid.
+    assert "agent=ranker" in completion
+    assert "team=job_matching" in completion
+    assert "objective=rank candidates" in completion
 
 
 def test_ollama_complete_json_parses_response(monkeypatch: pytest.MonkeyPatch) -> None:
