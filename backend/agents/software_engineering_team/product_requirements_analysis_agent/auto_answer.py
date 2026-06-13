@@ -216,13 +216,19 @@ def get_auto_answer_for_job(
             confidence=float(opt.get("confidence", 0.0)),
         )
         for i, opt in enumerate(question_data.get("options", []))
+        # Filter out the synthetic "other" placeholder: _convert_to_pending_questions inserts
+        # {"id": "other", ...} when a question has no real options. Including it here would let
+        # the LLM "select" the placeholder and record it as the user's decision without any
+        # actual user input. Treat questions whose only option is the synthetic placeholder the
+        # same as fully optionless questions.
+        if opt.get("id") != "other"
     ]
 
     if not options:
-        # Auto-answer requires at least one option to select from; questions without options
-        # must be answered by the user via free-text (the "other" field).
+        # Auto-answer requires at least one selectable (non-synthetic) option; questions without
+        # real options must be answered by the user via free-text (the "other" field).
         logger.warning(
-            "Question %s in job %s has no options; cannot auto-answer", question_id, job_id
+            "Question %s in job %s has no selectable options; cannot auto-answer", question_id, job_id
         )
         return None
 

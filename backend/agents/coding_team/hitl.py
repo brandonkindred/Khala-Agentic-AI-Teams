@@ -39,6 +39,11 @@ WAITING_STATUS = "waiting_for_user"
 # is more appropriate than forcing yes/no onto open-ended questions like "What API fields are needed?"
 DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 
+# Option IDs that were used by the former yes/no/not-sure fallback. If a non-compliant LLM emits
+# only these IDs, the options are generic and must be discarded so the question falls back to
+# free-text rather than surfacing context-irrelevant choices.
+_GENERIC_OPTION_IDS: frozenset = frozenset({"yes", "no", "not_sure"})
+
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 
@@ -155,16 +160,24 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
-            if len(opts) >= 2:
+            unique_ids = {o["id"] for o in opts}
+            if len(unique_ids) >= 2 and not unique_ids.issubset(_GENERIC_OPTION_IDS):
                 entry["options"] = opts
             else:
                 if opts:
-                    logger.warning(
-                        "Question '%s' has only %d option(s) after normalization; "
-                        "falling back to free-text (options discarded)",
-                        text[:60],
-                        len(opts),
-                    )
+                    if unique_ids.issubset(_GENERIC_OPTION_IDS):
+                        logger.warning(
+                            "Question '%s' has only generic yes/no/not-sure options; "
+                            "falling back to free-text (options discarded)",
+                            text[:60],
+                        )
+                    else:
+                        logger.warning(
+                            "Question '%s' has only %d unique option ID(s) after normalization; "
+                            "falling back to free-text (options discarded)",
+                            text[:60],
+                            len(unique_ids),
+                        )
                 entry["options"] = []
         else:
             entry["options"] = []

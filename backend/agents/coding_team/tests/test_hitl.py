@@ -57,6 +57,31 @@ def test_normalize_open_questions_drops_options_fewer_than_two():
     assert out[0]["options"] == []
 
 
+def test_normalize_open_questions_drops_duplicate_option_ids():
+    # Two entries with the same ID count as only one unique ID → fall back to free-text.
+    out = hitl.normalize_open_questions(
+        [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "a", "label": "A2"}]}]
+    )
+    assert out[0]["options"] == []
+
+
+def test_normalize_open_questions_drops_generic_yes_no_options():
+    # The former yes/no/not_sure fallback IDs are rejected as non-context-specific.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "yes", "label": "Yes"},
+                    {"id": "no", "label": "No"},
+                    {"id": "not_sure", "label": "Not sure"},
+                ],
+            }
+        ]
+    )
+    assert out[0]["options"] == []
+
+
 def test_normalize_open_questions_keeps_two_or_more_options():
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "b", "label": "B"}]}]
