@@ -5,12 +5,18 @@ carrying as an unvalidated ``Dict[str, Any]``.  ``RiskFilter`` consumes it at
 simulation runtime to:
 
 - vol-target position sizing (replaces the hard-coded ``position_pct = 0.06``),
-- enforce per-symbol concentration, gross leverage, and max-open-position caps,
-- circuit-break the run when trailing drawdown breaches ``max_drawdown_pct``.
+- enforce per-symbol concentration, gross leverage, and max-open-position caps.
+
+There is intentionally **no** drawdown circuit-breaker. Strategy Lab runs are
+experiments (backtest / paper trading, no real capital), and a strategy must be
+free to lose up to 100% of the account so its true downside is observed rather
+than truncated by an arbitrary trailing-loss limit. Realised drawdown is still
+*measured* and reported as a performance metric — it is just never a constraint
+that halts a run.
 
 Both the look-ahead-safe engine (Phase 2) and the legacy engine invoke the
-filter through the same ``size()`` / ``can_enter()`` / ``check_drawdown()``
-methods, so risk limits are tested identically in backtest and live modes.
+filter through the same ``size()`` / ``can_enter()`` methods, so risk limits are
+tested identically in backtest and live modes.
 """
 
 from __future__ import annotations
@@ -53,7 +59,6 @@ class RiskLimits(BaseModel):
         ),
     )
     max_symbol_concentration_pct: float = Field(default=20.0, ge=0, le=100)
-    max_drawdown_pct: float = Field(default=25.0, ge=0, le=100)
     max_open_positions: int = Field(default=10, ge=1)
     target_annual_vol: Optional[float] = Field(
         default=None,
@@ -117,7 +122,6 @@ _RISK_LIMIT_TIGHTEN_DIRECTION: Dict[str, Optional[str]] = {
     "max_gross_leverage": "lower",
     "max_position_pct": "lower",
     "max_symbol_concentration_pct": "lower",
-    "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,
@@ -134,13 +138,6 @@ class SizingDecision:
 class EntryDecision:
     allowed: bool
     reason: str
-
-
-@dataclass
-class DrawdownBreach:
-    breached: bool
-    current_drawdown_pct: float
-    limit_pct: float
 
 
 #: Relative epsilon absorbing float noise so an order clamped exactly to
@@ -218,8 +215,9 @@ class RiskFilter:
         cap at the sizing price (``OrderRequest.risk_presized``): re-checking
         those at the fill price would falsely reject an order the dispatcher
         sized correctly whenever the fill gaps above the sizing price (the cap is
-        a sizing-time bound; ``max_drawdown_pct`` is the realised-exposure
-        backstop). It is ``True`` for custom-code orders, which bypass the
+        a sizing-time bound, and post-fill notional drift on already-committed
+        shares is normal holding behaviour — there is no drawdown backstop, by
+        design). It is ``True`` for custom-code orders, which bypass the
         dispatcher, so this gate is their sole position-cap enforcement point.
         The leverage and concentration checks always run on ``notional``.
         """
@@ -290,28 +288,6 @@ class RiskFilter:
                 )
 
         return EntryDecision(allowed=True, reason="within limits")
-
-    # ------------------------------------------------------------------
-    # Drawdown circuit-breaker
-    # ------------------------------------------------------------------
-
-    def check_drawdown(
-        self,
-        current_equity: float,
-        peak_equity: float,
-    ) -> DrawdownBreach:
-        """Return whether trailing drawdown breaches the configured limit."""
-        if peak_equity <= 0:
-            return DrawdownBreach(
-                breached=False, current_drawdown_pct=0.0, limit_pct=self.limits.max_drawdown_pct
-            )
-
-        dd_pct = (peak_equity - current_equity) / peak_equity * 100.0
-        return DrawdownBreach(
-            breached=dd_pct >= self.limits.max_drawdown_pct,
-            current_drawdown_pct=round(dd_pct, 2),
-            limit_pct=self.limits.max_drawdown_pct,
-        )
 
     # ------------------------------------------------------------------
     # Helpers
