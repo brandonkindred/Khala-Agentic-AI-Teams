@@ -64,7 +64,13 @@ from shared.style_loader import append_guidelines, load_style_file
 from temporalio.exceptions import CancelledError
 from validators.runner import run_validators_from_work_dir
 
-from llm_service import OllamaLLMClient, get_strands_model
+from llm_service import (
+    OllamaLLMClient,
+    attributed_client,
+    client_agent_key,
+    get_strands_model,
+    unwrap_client,
+)
 from llm_service.interface import LLMClient
 
 from . import _path_setup  # noqa: F401
@@ -104,27 +110,66 @@ def _is_external_cancellation(exc: BaseException) -> bool:
 
 
 def planning_llm_client(base: LLMClient) -> LLMClient:
-    """Use BLOG_PLANNING_MODEL for planning when set (Ollama clients only)."""
+    """Return the LLM client to use for blog planning.
+
+    When ``BLOG_PLANNING_MODEL`` is set and ``base`` is Ollama-backed, returns a
+    client pinned to that model; otherwise returns ``base`` unchanged. The
+    per-model override preserves ``base``'s agent attribution (re-applies the
+    original ``agent_key`` via :func:`attributed_client`) so planning requests
+    are still attributed to the originating agent.
+
+    :param base: The default client the blog pipeline would otherwise use.
+    :returns: ``base``, or an attribution-preserving override pinned to
+        ``BLOG_PLANNING_MODEL``.
+    """
     model = planning_model_override()
     if not model:
         return base
-    if isinstance(base, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    inner = unwrap_client(base)
+    if isinstance(inner, OllamaLLMClient):
+        override = OllamaLLMClient(
+            model=model,
+            base_url=inner.base_url,
+            timeout=inner.timeout,
+            # Carry the reasoning sink across so a streaming-reasoning caller
+            # doesn't lose its hook on the model-pinned override.
+            on_reasoning=inner.on_reasoning,
+        )
+        # Preserve the original client's agent attribution on the override.
+        return attributed_client(override, client_agent_key(base))
     return base
 
 
 def plan_critic_llm_client(base: LLMClient) -> LLMClient:
-    """Use BLOG_PLAN_CRITIC_MODEL for the plan critic when set (Ollama clients only).
+    """Return the LLM client to use for the plan critic.
+
+    When ``BLOG_PLAN_CRITIC_MODEL`` is set and ``base`` is Ollama-backed, returns
+    a client pinned to that model; otherwise returns ``base`` unchanged. The
+    override preserves ``base``'s agent attribution (see :func:`planning_llm_client`).
 
     Per the architectural tenet, the critic runs on the same model as the writer
     by default. This hook exists so per-role model diversification can be flipped
     on later without further code changes.
+
+    :param base: The default client the blog pipeline would otherwise use.
+    :returns: ``base``, or an attribution-preserving override pinned to
+        ``BLOG_PLAN_CRITIC_MODEL``.
     """
     model = plan_critic_model_override()
     if not model:
         return base
-    if isinstance(base, OllamaLLMClient):
-        return OllamaLLMClient(model=model, base_url=base.base_url, timeout=base.timeout)
+    inner = unwrap_client(base)
+    if isinstance(inner, OllamaLLMClient):
+        override = OllamaLLMClient(
+            model=model,
+            base_url=inner.base_url,
+            timeout=inner.timeout,
+            # Carry the reasoning sink across so a streaming-reasoning caller
+            # doesn't lose its hook on the model-pinned override.
+            on_reasoning=inner.on_reasoning,
+        )
+        # Preserve the original client's agent attribution on the override.
+        return attributed_client(override, client_agent_key(base))
     return base
 
 
@@ -584,7 +629,9 @@ def _run_title_selection(
 
                     replacement = None
                     try:
-                        data = llm_client.complete_json(feedback_prompt, temperature=0.7)
+                        data = llm_client.complete_json(
+                            feedback_prompt, temperature=0.7, objective="regenerate blog titles"
+                        )
                         new_titles = data.get("titles", []) if data else []
                         if new_titles and isinstance(new_titles, list):
                             t = new_titles[0]

@@ -228,18 +228,23 @@ def test_extract_plan_keywords_returns_filtered_unique() -> None:
 def test_planning_llm_client_overrides_when_model_set(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
+    sink = lambda _t: None  # noqa: E731 - stand-in reasoning callback
+
     class _FakeOllama:
-        def __init__(self, model="m", base_url="http://x", timeout=10):
+        def __init__(self, model="m", base_url="http://x", timeout=10, on_reasoning=None):
             self.model = model
             self.base_url = base_url
             self.timeout = timeout
+            self.on_reasoning = on_reasoning
 
     monkeypatch.setattr(v2, "OllamaLLMClient", _FakeOllama)
     monkeypatch.setattr(v2, "planning_model_override", lambda: "override-model")
-    base = _FakeOllama(model="orig")
+    base = _FakeOllama(model="orig", on_reasoning=sink)
     out = v2.planning_llm_client(base)
     assert isinstance(out, _FakeOllama)
     assert out.model == "override-model"
+    # The reasoning sink is carried across to the model-pinned override.
+    assert out.on_reasoning is sink
 
 
 def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
@@ -253,18 +258,23 @@ def test_planning_llm_client_no_override_returns_base(monkeypatch) -> None:
 def test_plan_critic_llm_client_overrides_when_model_set(monkeypatch) -> None:
     import agent_implementations.blog_writing_process_v2 as v2
 
+    sink = lambda _t: None  # noqa: E731 - stand-in reasoning callback
+
     class _FakeOllama:
-        def __init__(self, model="m", base_url="http://x", timeout=10):
+        def __init__(self, model="m", base_url="http://x", timeout=10, on_reasoning=None):
             self.model = model
             self.base_url = base_url
             self.timeout = timeout
+            self.on_reasoning = on_reasoning
 
     monkeypatch.setattr(v2, "OllamaLLMClient", _FakeOllama)
     monkeypatch.setattr(v2, "plan_critic_model_override", lambda: "critic-model")
-    base = _FakeOllama(model="orig")
+    base = _FakeOllama(model="orig", on_reasoning=sink)
     out = v2.plan_critic_llm_client(base)
     assert isinstance(out, _FakeOllama)
     assert out.model == "critic-model"
+    # The reasoning sink is carried across to the model-pinned override.
+    assert out.on_reasoning is sink
 
 
 def test_plan_critic_llm_client_no_override_returns_base(monkeypatch) -> None:

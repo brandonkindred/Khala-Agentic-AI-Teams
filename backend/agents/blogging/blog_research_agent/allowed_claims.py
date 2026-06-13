@@ -98,7 +98,7 @@ def extract_allowed_claims(
     )
 
     try:
-        data = llm_client.complete_json(prompt, temperature=0.2)
+        data = llm_client.complete_json(prompt, temperature=0.2, objective="extract allowed claims")
     except Exception as e:
         logger.warning("Claims extraction failed: %s; returning empty claims", e)
         return AllowedClaims(topic=topic, claims=[])

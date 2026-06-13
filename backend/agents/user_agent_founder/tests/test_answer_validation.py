@@ -209,11 +209,12 @@ def test_answer_question_passes_bounded_schema_to_generate_structured(monkeypatc
     """The schema handed to generate_structured must reflect the question's ids."""
     captured: dict[str, Any] = {}
 
-    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key):
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
         captured["schema"] = schema
         captured["prompt"] = prompt
         captured["system_prompt"] = system_prompt
         captured["agent_key"] = agent_key
+        captured["objective"] = objective
         return schema.model_validate(
             {
                 "selected_option_id": "opt-a",
@@ -240,6 +241,8 @@ def test_answer_question_passes_bounded_schema_to_generate_structured(monkeypatc
     # regresses in the LLM-side routing.
     assert captured["system_prompt"] == agent_module.FOUNDER_SYSTEM_PROMPT
     assert captured["agent_key"] == "user_agent_founder"
+    # The objective must be plumbed through for log/telemetry attribution.
+    assert captured["objective"] == "answer founder question"
 
 
 def test_answer_question_hallucinated_id_is_rejected_at_boundary(monkeypatch):
@@ -249,7 +252,7 @@ def test_answer_question_hallucinated_id_is_rejected_at_boundary(monkeypatch):
     """
     bounded_schemas: list[type[BaseModel]] = []
 
-    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key):
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
         bounded_schemas.append(schema)
         # Simulate what the LLM would return pre-correction — an id that's
         # not in the question's options. complete_validated normally catches
@@ -280,7 +283,7 @@ def test_answer_question_terminal_validation_failure_propagates(monkeypatch):
     """
     from llm_service import LLMSchemaValidationError
 
-    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key):
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
         raise LLMSchemaValidationError(
             f"terminal failure for schema {schema.__name__}",
             correction_attempts_used=1,
@@ -300,7 +303,7 @@ def test_answer_question_handles_empty_options(monkeypatch):
     returns a dict with the 'other' id and the free-text reply.
     """
 
-    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key):
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
         assert _allowed_option_ids(schema) == ("other",)
         return schema.model_validate(
             {
@@ -346,7 +349,7 @@ def test_answer_question_recovers_from_hallucination_on_retry(monkeypatch):
         {"selected_option_id": "opt-a", "rationale": "corrected"},
     ]
 
-    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key):
+    def fake_generate_structured(prompt, *, schema, system_prompt, agent_key, objective):
         # Try each payload in order, mirroring complete_validated: surface a
         # ValidationError on the first hallucinated payload, then return the
         # corrected instance.

@@ -244,6 +244,7 @@ def run_tool_loop(
     try:
         result = complete_json_with_tool_loop(
             llm,
+            objective="run agent cognition tool loop",
             user_prompt=user_prompt,
             system_prompt=system_prompt,
             tools=toolset.definitions(),

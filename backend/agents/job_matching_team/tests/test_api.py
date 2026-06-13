@@ -60,7 +60,7 @@ class InMemoryJobs:
 
 
 class FakeOrchestrator:
-    def run(self, request):
+    def run(self, request, *, job_id: str | None = None, **kwargs):
         posting = JobPosting(company="Acme", title="Engineer").ensure_fingerprint()
         return JobMatchResponse(
             run_id="run-1",

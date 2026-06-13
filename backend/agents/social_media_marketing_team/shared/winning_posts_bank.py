@@ -117,6 +117,7 @@ def save_winning_post(
                 llm_client.complete(
                     f"Summarize this social post in one sentence:\n\n{title}\n\n{body}",
                     system_prompt="Write a single sentence summary. No preamble, no quotes.",
+                    objective="summarize winning post",
                 )
                 or ""
             ).strip()
@@ -264,6 +265,7 @@ def _llm_rerank(
         data = llm_client.complete_json(
             prompt,
             system_prompt="Return a JSON array of integers only. No other text.",
+            objective="rerank winning posts",
         )
         indices = data if isinstance(data, list) else data.get("indices", data.get("text", []))
         if isinstance(indices, list):

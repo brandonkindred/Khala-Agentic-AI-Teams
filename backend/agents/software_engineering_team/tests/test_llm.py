@@ -16,6 +16,7 @@ from llm_service import (
     OllamaLLMClient,
     _clear_client_cache_for_testing,
     get_client,
+    unwrap_client,
 )
 
 
@@ -44,7 +45,7 @@ def test_ollama_429_raises_rate_limit_error_after_retries() -> None:
             clear=False,
         ):
             with pytest.raises(LLMRateLimitError) as exc_info:
-                client.complete_json("test prompt")
+                client.complete_json("test prompt", objective="test")
 
     assert exc_info.value.status_code == 429
     assert "429" in str(exc_info.value) or "rate" in str(exc_info.value).lower()
@@ -70,7 +71,7 @@ def test_ollama_500_raises_temporary_error_after_retries() -> None:
 
         with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
             with pytest.raises(LLMTemporaryError) as exc_info:
-                client.complete_json("test prompt")
+                client.complete_json("test prompt", objective="test")
 
     assert exc_info.value.status_code == 500
 
@@ -87,7 +88,7 @@ def test_ollama_400_raises_permanent_error_no_retry() -> None:
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
         with pytest.raises(LLMPermanentError) as exc_info:
-            client.complete_json("test prompt")
+            client.complete_json("test prompt", objective="test")
 
     assert exc_info.value.status_code == 400
     assert "400" in str(exc_info.value)
@@ -108,7 +109,7 @@ def test_ollama_200_returns_parsed_json() -> None:
         mock_client.stream.return_value.__enter__.return_value = mock_response
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
-        result = client.complete_json("test prompt")
+        result = client.complete_json("test prompt", objective="test")
 
     assert result == {"key": "value"}
 
@@ -130,7 +131,7 @@ def test_ollama_malformed_response_raises_permanent_error() -> None:
         mock_client_cls.return_value.__enter__.return_value = mock_client
 
         with pytest.raises(LLMPermanentError) as exc_info:
-            client.complete_json("test prompt")
+            client.complete_json("test prompt", objective="test")
 
     assert "JSON" in str(exc_info.value) or "parse" in str(exc_info.value).lower()
 
@@ -145,7 +146,7 @@ def test_ollama_connection_error_raises_temporary_error_after_retries() -> None:
 
         with patch.dict(os.environ, {"LLM_MAX_RETRIES": "1"}, clear=False):
             with pytest.raises(LLMTemporaryError) as exc_info:
-                client.complete_json("test prompt")
+                client.complete_json("test prompt", objective="test")
 
     assert "connection" in str(exc_info.value).lower() or "Connection" in str(exc_info.value)
 
@@ -257,7 +258,7 @@ def test_get_llm_for_agent_per_agent_env_overrides() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "custom-model"
 
 
@@ -270,7 +271,7 @@ def test_get_llm_for_agent_global_fallback() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "qwen3.5:397b-cloud"
 
 
@@ -287,7 +288,7 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
         clear=False,
     ):
         client = get_client("backend")
-    assert isinstance(client, OllamaLLMClient)
+    assert isinstance(unwrap_client(client), OllamaLLMClient)
     assert client.model == "deepseek-v4-pro:cloud"
 
 
@@ -301,7 +302,8 @@ def test_get_client_cache_returns_same_instance() -> None:
     ):
         client1 = get_client("backend")
         client2 = get_client("backend")
-    assert client1 is client2
+    # Each call returns a fresh attribution wrapper over the shared cached client.
+    assert unwrap_client(client1) is unwrap_client(client2)
 
 
 def test_extract_task_assignment_from_content_recovers_tasks() -> None:
