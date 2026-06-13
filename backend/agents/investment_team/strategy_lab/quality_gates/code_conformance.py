@@ -1018,8 +1018,11 @@ class CodeConformanceGate(GateResultsMixin):
         (via :func:`_engine_exits_cover_sides`), intersected with the spec's
         entered sides so a same-side full-size scale-in (``qty=position.qty``
         whose inferred opposite side the spec never enters) is not misread as
-        a close. A close whose ``side=`` cannot be resolved statically is
-        judged against every entered side.
+        a close. A close (or bracket) whose ``side=`` cannot be resolved
+        statically is a hard critical only when the engine covers EVERY
+        entered side — under partial coverage it may legitimately retire the
+        engine-uncovered side, so it is deferred to the runtime gate rather
+        than flagged.
 
         Pre: ``cctx`` is a built context; ``cctx.spec`` is a
         ``StrategySpec`` or ``None``.
@@ -1068,6 +1071,14 @@ class CodeConformanceGate(GateResultsMixin):
         # just the literal ``position`` / ``pos`` names.
         position_names = _collect_position_aliases(cctx.cls)
 
+        # Whether the engine covers EVERY entered side. Used for closes whose
+        # side cannot be resolved statically: only then is a hard critical
+        # safe (any close hits a covered side, with no legitimate uncovered
+        # side to retire). Under partial coverage a dynamic-side close may
+        # legitimately retire the engine-uncovered side, so it is left to the
+        # runtime gate rather than flagged as a false positive.
+        all_sides_covered = bool(entered_sides) and _engine_exits_cover_sides(spec, entered_sides)
+
         n_closes = 0
         for method in _iter_strategy_methods(cctx.cls):
             if method.name not in cctx.reachable:
@@ -1075,24 +1086,32 @@ class CodeConformanceGate(GateResultsMixin):
             for node in _iter_method_body_nodes(method):
                 if not _is_submit_order_call(node):
                     continue
-                closed_sides: set[str] = set()
+                resolved_sides: set[str] = set()
+                unresolved = False
                 if _submit_order_qty_references_position(node, position_names):
                     side = _submit_order_close_side(node)
-                    # Resolved side → the one opposite side it retires;
-                    # unresolvable side → fall back to every entered side.
-                    closed_sides |= {side} if side is not None else set(entered_sides)
+                    if side is not None:
+                        resolved_sides.add(side)
+                    else:
+                        unresolved = True
                 has_bracket, bracket_side = _submit_order_attached_bracket(node)
                 if has_bracket:
-                    # Bracket closes the order's OWN side; a dynamic side falls
-                    # back to every entered side (as explicit closes do).
-                    closed_sides |= (
-                        {bracket_side} if bracket_side is not None else set(entered_sides)
-                    )
-                # A real close retires a side the spec actually enters; this
-                # also drops a same-side scale-in whose inferred opposite side
-                # the spec never enters.
-                closed_sides &= entered_sides
-                if any(_engine_exits_cover_sides(spec, {s}) for s in closed_sides):
+                    # Bracket closes the order's OWN side.
+                    if bracket_side is not None:
+                        resolved_sides.add(bracket_side)
+                    else:
+                        unresolved = True
+                # A real close retires a side the spec actually enters; the
+                # intersection also drops a same-side scale-in whose inferred
+                # opposite side the spec never enters.
+                resolved_sides &= entered_sides
+                flagged = any(_engine_exits_cover_sides(spec, {s}) for s in resolved_sides)
+                # A dynamic (unresolved) side is a hard critical only when the
+                # engine covers every entered side — otherwise it may be the
+                # legitimate close of an engine-uncovered side.
+                if unresolved and all_sides_covered:
+                    flagged = True
+                if flagged:
                     n_closes += 1
         if n_closes == 0:
             return ()
