@@ -60,7 +60,8 @@ class MyStrategy(Strategy):
             return
 
         # ── COMPUTE SIGNALS ───────────────────────────────
-        # Read each spec indicator via ``ctx.indicator(name, **params)``.
+        # Read each indicator your ENTRY logic needs (see spec.entry_rules)
+        # via ``ctx.indicator(name, **params)``.
         # Guard for ``None`` (warm-up) before comparing.
         # <FILL IN per the spec's entry rules>
 

@@ -427,25 +427,83 @@ def _submit_order_close_side(call: ast.Call) -> Optional[str]:
     return None
 
 
-def _submit_order_qty_references_position(call: ast.Call, position_names: frozenset[str]) -> bool:
+def _submit_order_qty_references_position(
+    call: ast.Call,
+    position_names: frozenset[str],
+    qty_alias_names: frozenset[str] = frozenset(),
+) -> bool:
     """True iff the call's keyword ``qty=`` references a position's ``.qty``.
 
     Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``;
     ``position_names`` is the alias set from
-    :func:`_collect_position_aliases`.
+    :func:`_collect_position_aliases`; ``qty_alias_names`` is the local-name
+    set from :func:`_collect_qty_aliases`.
     Post: True when the ``qty=`` argument is, or wraps, ``<alias>.qty`` for
     any ``<alias>`` in ``position_names`` — covering plain
     ``qty=position.qty``, a renamed alias (``current = ctx.position(...)``;
     ``qty=current.qty``), and wrapped forms (``abs(position.qty)``,
-    ``position.qty * 1``). Broader than :func:`_submit_order_closes_position`
-    (which matches only the literal names ``position`` / ``pos``), so a manual
-    close cannot evade the duplicate-exit check through an alias or wrapping
-    expression.
+    ``position.qty * 1``) — or when ``qty=`` is a bare name bound earlier to
+    such an expression (``close_qty = pos.qty; qty=close_qty``). Broader than
+    :func:`_submit_order_closes_position` (which matches only the literal
+    names ``position`` / ``pos``), so a manual close cannot evade the
+    duplicate-exit check through an alias or wrapping expression.
     """
     for kw in call.keywords:
         if kw.arg == "qty":
-            return _expr_references_position_qty(kw.value, position_names)
+            if _expr_references_position_qty(kw.value, position_names):
+                return True
+            return isinstance(kw.value, ast.Name) and kw.value.id in qty_alias_names
     return False
+
+
+def _collect_qty_aliases(cls: ast.ClassDef, position_names: frozenset[str]) -> frozenset[str]:
+    """Return local names bound to a position's ``.qty`` (or an expression wrapping it).
+
+    Pre: ``cls`` is a parsed ``ClassDef``; ``position_names`` is the alias
+    set from :func:`_collect_position_aliases`.
+    Post: every ``<name> = <expr>`` assignment anywhere in ``cls`` whose RHS
+    satisfies :func:`_expr_references_position_qty` contributes ``<name>``,
+    so the close detector sees ``close_qty = pos.qty; submit_order(qty=close_qty)``.
+    Only one indirection hop is resolved (a name bound directly to a
+    position-qty expression); deeper chains fall to the runtime gate.
+    """
+    names: set[str] = set()
+    for node in ast.walk(cls):
+        if not isinstance(node, ast.Assign):
+            continue
+        if not _expr_references_position_qty(node.value, position_names):
+            continue
+        for target in node.targets:
+            if isinstance(target, ast.Name):
+                names.add(target.id)
+    return frozenset(names)
+
+
+def _submit_order_attached_bracket_side(call: ast.Call) -> Optional[str]:
+    """Return the entry side a non-``None`` attached bracket leg closes.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
+    Post: returns the order's OWN side (``"long"`` / ``"short"``) when the
+    call passes a non-``None`` ``attached_stop_loss`` or
+    ``attached_take_profit`` — the runtime materialises opposite-side
+    ``bracket_sl`` / ``bracket_tp`` children that close the position this
+    order opens, before ``_EngineExitDispatcher`` stamps
+    ``engine_exit:<kind>``. Returns ``None`` when no non-``None`` bracket leg
+    is attached or the order side is not a resolvable ``OrderSide`` literal.
+    Unlike an explicit close the bracket retires the order's OWN side, so the
+    side is NOT inverted.
+    """
+    has_bracket = any(
+        kw.arg in ("attached_stop_loss", "attached_take_profit")
+        and not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+        for kw in call.keywords
+    )
+    if not has_bracket:
+        return None
+    for kw in call.keywords:
+        if kw.arg == "side":
+            return _extract_side_literal(kw.value)
+    return None
 
 
 def _node_references_ctx_equity(node: ast.AST) -> bool:
@@ -748,7 +806,7 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_indicator_presence(cctx))
             results.extend(self._check_symbol_gate(cctx))
             results.extend(self._check_entry_coverage(cctx))
-            results.extend(self._check_signal_exit_coverage(cctx))
+            results.extend(self._note_signal_exit_engine_ownership(cctx))
             results.extend(self._check_no_duplicate_engine_exit(cctx))
             results.extend(self._check_bar_counting_exit(cctx))
             results.extend(self._check_sizing_math(cctx))
@@ -882,7 +940,9 @@ class CodeConformanceGate(GateResultsMixin):
     # ------------------------------------------------------------------
     # Check 4 — signal-exit rules are engine-owned
     # ------------------------------------------------------------------
-    def _check_signal_exit_coverage(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+    def _note_signal_exit_engine_ownership(
+        self, cctx: _ConformanceCtx
+    ) -> Iterable[QualityGateResult]:
         """Signal exits are enforced engine-side for every strategy.
 
         Pre: ``cctx`` is a built context; ``cctx.spec`` is a
@@ -923,32 +983,49 @@ class CodeConformanceGate(GateResultsMixin):
 
         The engine enforces ``spec.exit_rules`` on the custom-code path too
         (the backtest mode passes the spec's exit rules to the engine
-        unconditionally). A strategy-submitted close fills ahead of the
+        unconditionally). A strategy-emitted close fills ahead of the
         engine's close and overwrites the ``engine_exit:<kind>``
         attribution the trade-alignment gate depends on, so a manual close
         of an engine-owned side is a critical conformance violation.
 
+        Two manual-close shapes are detected, across every ``on_bar``-
+        reachable ``submit_order`` (if/elif/else bodies, post-guard top-level
+        statements, and reachable helpers):
+          * an explicit opposite-side close whose ``qty=`` retires the
+            position — ``position.qty``, a renamed position alias, a wrapping
+            expression (``abs(position.qty)``), or a local name bound to one
+            (``close_qty = pos.qty``) — which retires the OPPOSITE of the
+            order side; and
+          * an entry carrying a non-``None`` ``attached_stop_loss`` /
+            ``attached_take_profit`` bracket leg, whose ``bracket_sl`` /
+            ``bracket_tp`` children close the order's OWN side.
+
         Coverage is judged per-side: a close is forbidden only when the
-        position side it retires is covered by some ``spec.exit_rules``
-        entry (via :func:`_engine_exits_cover_sides`). A close whose
-        ``side=`` cannot be resolved statically is checked against every
-        entered side — if any is engine-owned the close may duplicate that
-        exit. Every ``on_bar``-reachable ``submit_order`` is inspected
-        (if/elif/else bodies, post-guard top-level statements, and reachable
-        helpers), not just the if-branch coverage view.
+        position side it retires is covered by some ``spec.exit_rules`` entry
+        (via :func:`_engine_exits_cover_sides`), intersected with the spec's
+        entered sides so a same-side full-size scale-in (``qty=position.qty``
+        whose inferred opposite side the spec never enters) is not misread as
+        a close. A close whose ``side=`` cannot be resolved statically is
+        judged against every entered side.
 
         Pre: ``cctx`` is a built context; ``cctx.spec`` is a
         ``StrategySpec`` or ``None``.
-        Post: returns ``()`` when ``spec`` is ``None``, for the compiled
-        path (``requires_custom_code`` false — it submits no orders), for a
-        spec with no exit rules, or when no reachable closing
-        ``submit_order`` retires an engine-owned side. A same-side
-        full-size scale-in (``qty=position.qty`` whose inferred closed side
-        is not an entered side) is not treated as a close. Otherwise
-        returns a single critical naming the count of manual closes to
-        remove.
-        Invariant: never fires on the compiled path; only forbids closes
-        the engine demonstrably owns for the side they retire.
+        Post: returns ``()`` when ``spec`` is ``None``, for the compiled path
+        (``requires_custom_code`` false — it submits no orders), for a spec
+        with no exit rules, or when no reachable close retires an
+        engine-owned, entered side. Otherwise returns a single critical
+        naming the count of manual closes to remove.
+        Invariant: never fires on the compiled path; only forbids closes the
+        engine demonstrably owns for the side they retire.
+
+        Static limits (caught by the runtime trade-alignment gate, which
+        verifies ``engine_exit:<kind>`` attribution per executed trade and is
+        the authoritative backstop): a close that computes an opposite-side
+        quantity without referencing ``position.qty`` is not recognised here,
+        and in a spec that enters BOTH sides a full-size same-side scale-in
+        cannot be told apart from a cross-side close without the runtime
+        position side — so it may be flagged (false positive) or a cross-side
+        close waved through. The runtime gate reconciles both.
         """
         spec = cctx.spec
         if spec is None:
@@ -967,11 +1044,13 @@ class CodeConformanceGate(GateResultsMixin):
             if isinstance(r, EntryRule) and r.side is not None
         }
 
-        # Resolve position aliases once so the close detector catches renamed
-        # handles (``current = ctx.position(...)``; ``qty=current.qty``) and
-        # wrapped qty expressions (``abs(position.qty)``), not just the literal
+        # Resolve position aliases and qty aliases once so the close detector
+        # catches renamed handles (``current = ctx.position(...)``), wrapped
+        # qty expressions (``abs(position.qty)``), and names bound to a
+        # position qty (``close_qty = pos.qty``) — not just the literal
         # ``position`` / ``pos`` names.
         position_names = _collect_position_aliases(cctx.cls)
+        qty_alias_names = _collect_qty_aliases(cctx.cls, position_names)
 
         n_closes = 0
         for method in _iter_strategy_methods(cctx.cls):
@@ -980,42 +1059,35 @@ class CodeConformanceGate(GateResultsMixin):
             for node in _iter_method_body_nodes(method):
                 if not _is_submit_order_call(node):
                     continue
-                if not _submit_order_qty_references_position(node, position_names):
-                    continue
-                # A position-qty order is a close only when it
-                # retires a side the spec actually enters. A SAME-side
-                # full-size scale-in carries the same ``qty`` shape, but the
-                # side it "closes" (the opposite of the order side) is then
-                # not an entered side — skip it so doubling a position is not
-                # misread as a duplicate exit. A close whose side cannot be
-                # resolved statically is judged against every entered side
-                # (forbid if any is engine-owned). That is deliberately
-                # conservative: a dynamic close that only ever targets an
-                # uncovered side at runtime may be flagged as a false
-                # positive — the gate prefers a refinement round over
-                # silently letting a duplicate engine exit through.
-                closed_side = _submit_order_close_side(node)
-                if closed_side is not None:
-                    if closed_side not in entered_sides:
-                        continue
-                    sides_to_check = {closed_side}
-                else:
-                    sides_to_check = entered_sides
-                if any(_engine_exits_cover_sides(spec, {s}) for s in sides_to_check):
+                closed_sides: set[str] = set()
+                if _submit_order_qty_references_position(node, position_names, qty_alias_names):
+                    side = _submit_order_close_side(node)
+                    # Resolved side → the one opposite side it retires;
+                    # unresolvable side → fall back to every entered side.
+                    closed_sides |= {side} if side is not None else set(entered_sides)
+                bracket_side = _submit_order_attached_bracket_side(node)
+                if bracket_side is not None:
+                    closed_sides.add(bracket_side)
+                # A real close retires a side the spec actually enters; this
+                # also drops a same-side scale-in whose inferred opposite side
+                # the spec never enters.
+                closed_sides &= entered_sides
+                if any(_engine_exits_cover_sides(spec, {s}) for s in closed_sides):
                     n_closes += 1
         if n_closes == 0:
             return ()
         return (
             self._critical(
                 f"Custom-code strategy submits {n_closes} manual "
-                "position-closing order(s) (ctx.submit_order(..., "
-                "qty=position.qty)) for a side the engine already owns. The "
-                "engine enforces every spec.exit_rules entry (stop_loss / "
-                "take_profit / signal_exit) and stamps engine_exit:<kind> "
-                "attribution; a manual close fills first and overwrites it, "
-                "breaking exit alignment. Remove the close(s) for "
-                "engine-owned sides and let the engine own spec.exit_rules — "
-                "author entry logic only."
+                "position-closing order(s) — an opposite-side close "
+                "(ctx.submit_order(..., qty=position.qty)) or an entry with an "
+                "attached_stop_loss / attached_take_profit bracket leg — for a "
+                "side the engine already owns. The engine enforces every "
+                "spec.exit_rules entry (stop_loss / take_profit / signal_exit) "
+                "and stamps engine_exit:<kind> attribution; a manual close "
+                "fills first and overwrites it, breaking exit alignment. Remove "
+                "the close(s)/bracket(s) for engine-owned sides and let the "
+                "engine own spec.exit_rules — author entry logic only."
             ),
         )
 

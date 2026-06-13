@@ -66,7 +66,7 @@ A JSON object with these fields:
 - Exits are engine-owned. The engine enforces every ``spec.exit_rules``
   entry (stop-loss / take-profit / signal-exit) for the side(s) it
   applies to and stamps ``engine_exit:<kind>`` attribution. When a
-  finding cites a ``signal_exit`` or ``take_profit`` divergence, the fix
+  finding cites a ``signal_exit``, ``take_profit``, or ``stop_loss`` divergence, the fix
   is to REMOVE the strategy's manual position-closing order (opposite
   ``side``, ``qty == position.qty``) for a side the engine covers and let
   the engine own it — not to add or strengthen a manual close. Keep any
