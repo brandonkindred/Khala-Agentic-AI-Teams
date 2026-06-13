@@ -275,7 +275,7 @@ def answers_to_resolved(
         other = a.get("other_text") or ""
         label = ""
         for opt in q.get("options") or []:
-            if opt.get("id") == selected:
+            if (opt.get("id") or "").lower() == selected.lower():
                 label = opt.get("label") or selected
                 break
         if (selected.lower() == "other" or not label) and other:

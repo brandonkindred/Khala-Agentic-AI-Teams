@@ -326,6 +326,21 @@ def test_answers_to_resolved_other_text_wins_for_capitalized_other():
     assert out[0]["answer"] == "custom answer"
 
 
+def test_answers_to_resolved_case_insensitive_option_id_match():
+    # The auto-answer LLM may return an option ID with different casing than stored.
+    # Case-insensitive comparison ensures the correct label is still resolved.
+    pending = [
+        {
+            "id": "q1",
+            "question_text": "Pick deployment",
+            "options": [{"id": "cloud_deploy", "label": "Cloud deployment"}],
+        }
+    ]
+    submitted = [{"question_id": "q1", "selected_option_id": "Cloud_Deploy"}]
+    out = hitl.answers_to_resolved(submitted, pending)
+    assert out[0]["answer"] == "Cloud deployment"
+
+
 # --------------------------------------------------------------------------- terminal / wait
 
 
