@@ -53,8 +53,8 @@ def test_normalize_open_questions_drops_options_fewer_than_two():
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}]}]
     )
-    # Single option after normalization → fall back to free-text (no "options" key).
-    assert "options" not in out[0]
+    # Single option after normalization → discard and fall back to empty options list.
+    assert out[0]["options"] == []
 
 
 def test_normalize_open_questions_keeps_two_or_more_options():
@@ -85,7 +85,7 @@ def test_normalize_open_questions_strings_and_dicts():
             "",
         ]
     )
-    assert out[0] == {"question_text": "plain?"}
+    assert out[0] == {"question_text": "plain?", "options": []}
     assert out[1]["question_text"] == "rich?"
     assert out[1]["context"] == "ctx"
     assert out[1]["options"][0]["id"] == "a"

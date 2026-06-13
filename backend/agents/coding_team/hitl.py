@@ -65,7 +65,7 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
-            opt_id = str(o["id"])
+            opt_id = str(o.get("id"))
             if opt_id == "other":
                 # "other" is the reserved synthetic free-text option added by the UI/API;
                 # using it as a structured option id would cause the answer handler to treat
@@ -137,9 +137,11 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
     Preconditions:
         - ``raw`` is a list of strings or dicts (or None).
     Postconditions:
-        - Returns dicts each carrying at least ``question_text``; empties are dropped, and any
-          ``context`` / ``options`` an agent supplied are preserved so domain-specific choices
-          round-trip. A non-list input yields ``[]``.
+        - Returns dicts each carrying ``question_text`` and ``options`` (always present); empties
+          are dropped, and any ``context`` / ``options`` an agent supplied are preserved so
+          domain-specific choices round-trip. Options that fail normalization (< 2 survive) are
+          discarded and ``options`` is set to ``[]`` so callers have a uniform contract — the same
+          fallback as ``convert_to_structured_questions``. A non-list input yields ``[]``.
     """
     if not isinstance(raw, list):
         return []
@@ -153,17 +155,19 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
-            # Fewer than 2 options after normalization indicates a non-compliant LLM
-            # response (e.g. single option, or "other" dropped). Fall back to free-text.
             if len(opts) >= 2:
                 entry["options"] = opts
-            elif opts:
-                logger.warning(
-                    "Question '%s' has only %d option(s) after normalization; "
-                    "falling back to free-text (options discarded)",
-                    text[:60],
-                    len(opts),
-                )
+            else:
+                if opts:
+                    logger.warning(
+                        "Question '%s' has only %d option(s) after normalization; "
+                        "falling back to free-text (options discarded)",
+                        text[:60],
+                        len(opts),
+                    )
+                entry["options"] = []
+        else:
+            entry["options"] = []
         out.append(entry)
     return out
 
