@@ -653,7 +653,7 @@ export class CognitionTabComponent implements OnInit {
         this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
         this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
         this.loadingRules.set(false);
-        this.flushPendingScroll(rows);
+        this.flushPendingScroll();
       },
       error: (err) => {
         if (reqId !== this.rulesReqId) return;
@@ -686,9 +686,12 @@ export class CognitionTabComponent implements OnInit {
         this.rules.set([...this.rules(), ...rows].sort((a, b) => b.priority - a.priority));
         this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
         this.loadingRules.set(false);
+        this.flushPendingScroll();
       },
       error: (err) => {
         if (reqId !== this.rulesReqId) return;
+        // Stop chasing a pending scroll target across pages if paging fails.
+        this.pendingScrollRuleId = null;
         this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load more rules.');
         this.loadingRules.set(false);
       },
@@ -701,13 +704,24 @@ export class CognitionTabComponent implements OnInit {
     this.loadRules();
   }
 
-  /** After a rules load, scroll to a pending target once it's in the rendered list. */
-  private flushPendingScroll(rows: Rule[]): void {
+  /**
+   * Resolve a pending scroll target after a rules load. The target is known to
+   * exist (the all-rules index resolved its text), but the Rules section is
+   * paged, so it may sit beyond the loaded pages: scroll once it's rendered,
+   * keep paging while more pages remain, and give up (clearing the pending id so
+   * it can't trigger a stray future scroll) once every page is exhausted.
+   */
+  private flushPendingScroll(): void {
     const target = this.pendingScrollRuleId;
-    if (target && rows.some((r) => r.id === target)) {
+    if (!target) return;
+    if (this.rules().some((r) => r.id === target)) {
       this.pendingScrollRuleId = null;
       // Defer so the @for row exists in the DOM before scrolling.
       setTimeout(() => this.scrollRuleIntoView(target));
+    } else if (this.rulesHasMore()) {
+      this.loadMoreRules(); // target is on a later page — fetch it, then re-flush
+    } else {
+      this.pendingScrollRuleId = null; // not on any page; don't leave it dangling
     }
   }
 

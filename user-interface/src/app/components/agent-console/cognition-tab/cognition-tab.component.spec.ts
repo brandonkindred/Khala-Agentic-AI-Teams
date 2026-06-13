@@ -596,6 +596,38 @@ describe('CognitionTabComponent', () => {
     expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500 });
   });
 
+  it('pages the rules section until a scroll target on a later page appears', () => {
+    vi.useFakeTimers();
+    const target = { ...rules[0], id: 'r-deep', priority: 5, status: 'retired' as const };
+    const page1 = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'a' + i, priority: 1000 - i }));
+    // 'all' view: first page full (no target), second page short and holds it.
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { status?: string; offset?: number }) => {
+        if (q?.status === 'active') return of([rules[0]]);
+        return of((q?.offset ?? 0) >= 500 ? [target] : page1);
+      });
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    c.scrollToRule('r-deep'); // not in the active section → reveal, then page through 'all'
+    expect(c.ruleStatusFilter()).toBe('all');
+    expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500, offset: 500 });
+    expect(c.rules().some((r) => r.id === 'r-deep')).toBe(true);
+    // The pending target was consumed, not left dangling for a stray future scroll.
+    expect((c as unknown as { pendingScrollRuleId: string | null }).pendingScrollRuleId).toBeNull();
+    vi.advanceTimersByTime(1500);
+    vi.useRealTimers();
+  });
+
+  it('gives up the pending scroll target when no page contains it', () => {
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    c.scrollToRule('r-missing'); // never present in any page
+    expect((c as unknown as { pendingScrollRuleId: string | null }).pendingScrollRuleId).toBeNull();
+  });
+
   it('renders the disabled-approve a11y contract and memory toggle for a stale proposal', () => {
     api.listProposals = vi.fn().mockReturnValue(of([staleProposal]));
     api.listMemoryEvents = vi.fn().mockReturnValue(of([{ ...events[0], data: { k: 1 } }]));
