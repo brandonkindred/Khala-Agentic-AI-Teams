@@ -115,19 +115,25 @@ quality-gate warning will be raised. Fix the **code** instead.
 
 The only spec key you may adjust is `risk_limits`, and only when the
 **diagnostics** show the current limits are actually responsible for
-the zero-trade outcome (e.g. `orders_rejected` with a
-`risk_gate:max_drawdown` reason against an overly tight
-`max_drawdown_pct`). When you do propose a `risk_limits` update, return
-the FULL replacement object — for example:
+the zero-trade outcome (e.g. `orders_rejected` with a risk-gate reason
+such as a position-cap or concentration breach against an overly tight
+`max_position_pct` / `max_symbol_concentration_pct`, or every order
+rejected by a `max_gross_leverage` / `max_open_positions` cap of 0/1).
+When you do propose a `risk_limits` update, return the FULL replacement
+object — for example:
 
 ```json
 {
   "risk_limits": {
     "max_position_pct": 5,
-    "max_drawdown_pct": 10
+    "max_symbol_concentration_pct": 20
   }
 }
 ```
+
+There is no `max_drawdown_pct` field — max drawdown is not a constraint
+(a strategy may lose up to 100% by design), so never emit it; it would be
+discarded as an unknown key.
 
 The orchestrator will only honour `risk_limits`; any other key in
 `proposed_spec_updates` is silently dropped and logged.

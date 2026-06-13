@@ -22,14 +22,29 @@ Return `ready = true` only when **both** of the following hold:
 - **Hypothesis ↔ rules completeness** — every filter, condition, or indicator named in `hypothesis` / `signal_definition` MUST appear as a structured predicate. If the hypothesis says "only enter when ADX > 25 confirms trend," there MUST be an ADX-based predicate. Missing filters are NOT acceptable — the backtest will not test the actual claimed edge, and the strategy result becomes a lie. Flag as critical and demand the designer either add the predicate or rewrite the prose.
 - **Risk control completeness** — is there at least one meaningful exit besides a far-tailed stop? Does the strategy have any positive-edge exit, or only a stop and a "hope"?
 - **Universe ↔ thesis fit** — if the hypothesis names QQQ, does `target_symbols` include it? If the hypothesis is asset-class-wide ("US large-caps"), is `target_symbols` empty as intended?
-- **Mathematical coherence of sizing + risk + stops** — verify the algebra:
-  - `sizing` position size ≤ `risk_limits.max_position_pct` (e.g. `fraction=0.10` with `max_position_pct=5` is a contradiction).
-  - The deployed position size IS the per-trade loss cap (a trade can lose up to ~100% of what it deploys), so `sizing.fraction × 100 ≤ max_position_pct` is the per-trade risk check. `stop_loss.pct` is a separate, optional safeguard that limits a position's loss below a full wipeout — do NOT multiply it into the per-trade risk or treat it as part of sizing.
-  - `take_profit.pct` vs `stop_loss.pct` — payoff ratio implies a required win rate (`p ≥ stop / (stop + tp)`). Reject if the hypothesis cannot defend that win rate.
-  - `volatility_target` sizing implies stops sized to that vol budget — a 5% annual vol target with a 20% stop is incoherent.
-  - `max_drawdown_pct` must be reachable but not trivial (single losing streak shouldn't blow through it; nor should it be unreachable by design).
-  When the spec's numbers don't make sense together, flag as critical and quote the specific contradiction (e.g. "fraction=0.10 vs max_position_pct=5: sizing exceeds limit").
-- **Sizing realism** — does the sizing rule combine with `risk_limits` to produce something a real account could execute?
+- **Sizing and risk-limit math are NOT yours to judge.** The deterministic
+  readiness gate is the *sole* authority on sizing realisability and risk-limit
+  coherence (deployed-fraction ≤ `max_position_pct`, sizing realisable against
+  the universe, etc.). It has already run and passed before you see this spec.
+  Do **NOT** re-derive, re-check, or block on any sizing / `risk_limits`
+  arithmetic — any `sizing` or `risk_limits` issue you raise is treated as
+  advisory only and will **never** block readiness. Two interpretation rules so
+  you are not misled into raising spurious sizing critiques:
+  - **How to read the sizing line.** A line like `"risk 5% per trade"` (the
+    system's rendering of `fixed_fraction`) means the capital **DEPLOYED** into
+    the position — a fraction of the account — NOT a stop-multiplied loss budget.
+    The deployed size IS the per-trade loss cap, because a position can lose up
+    to ~100% of what it deploys. `stop_loss.pct` is a separate, optional price
+    move off entry that limits a position's loss *below* a full wipeout. Do
+    **NOT** multiply the stop into the deployment (`fraction × stop` is wrong)
+    and do **NOT** treat the stop as part of sizing. "Risk 5% per trade" with a
+    5% stop is **not** "0.25% per trade" — it is a 5% deployment with an
+    optional within-position safeguard.
+  - **There is NO max-drawdown constraint.** Max drawdown is not a limit in this
+    system. A strategy is an experiment (backtest / paper trading, no real
+    capital) and may lose up to 100% of the account by design. Do **NOT** flag
+    `max_drawdown_pct` reachability, "unreachable drawdown limit," or any
+    drawdown-based risk-control concern — it is not a defect and never blocks.
 - **Loose / hand-wavy hypothesis or signal_definition** — a one-line hypothesis with no measurable signal claim is not ready.
 
 You do **not** propose code. You do **not** rewrite the spec. You produce a critique a designer can act on.
