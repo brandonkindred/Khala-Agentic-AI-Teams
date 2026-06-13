@@ -50,6 +50,11 @@ export class QuestionCardComponent {
     return this.question.allow_multiple === true;
   }
 
+  /** True when the question has at least one real selectable option (not the synthetic "other" placeholder). */
+  get hasSelectableOptions(): boolean {
+    return (this.question?.options ?? []).some(o => o.id !== 'other');
+  }
+
   onOptionToggle(optionId: string, checked: boolean): void {
     if (!this.isMultiSelect && checked) {
       // Single-select: clear all other selections, then set the new one.

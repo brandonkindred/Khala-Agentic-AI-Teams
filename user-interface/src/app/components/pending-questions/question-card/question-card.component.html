@@ -5,7 +5,7 @@
     @if (question.required) {
       <span class="required-badge">Required</span>
     }
-    @if (question.options?.some(o => o.id !== 'other')) {
+    @if (hasSelectableOptions) {
       <button
         mat-icon-button
         class="auto-answer-btn"
