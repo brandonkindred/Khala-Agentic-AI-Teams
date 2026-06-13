@@ -256,11 +256,16 @@ class DummyLLMClient(LLMClient, Model):
         self,
         prompt: str,
         *,
+        objective: str = "dummy",
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
         think: "bool | str | None" = None,
     ) -> str:
+        # ``objective`` is accepted to match the LLMClient contract; the dummy
+        # client makes no real LLM call and performs no attribution, so it
+        # tolerates an omitted objective (test stubs need not declare one).
         self._request_count += 1
         return "Dummy text completion (no LLM)."
 
@@ -268,12 +273,18 @@ class DummyLLMClient(LLMClient, Model):
         self,
         prompt: str,
         *,
+        objective: str = "dummy",
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
         think: "bool | str | None" = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # ``objective`` keeps a default here (unlike the required LLMClient
+        # contract) on purpose: the dummy records no telemetry, and forcing every
+        # test stub call to pass an objective adds churn with no attribution value.
+        # Production enforcement lives in the real OllamaLLMClient (required, and
+        # rejects empty strings).
         # Pattern-match against the user prompt only. Callers (including
         # Strands-migrated agents that hand their persona to the Strands
         # ``Agent`` as a system prompt) must include the anchor tokens the
@@ -772,6 +783,7 @@ class DummyLLMClient(LLMClient, Model):
         self,
         messages: list,
         *,
+        objective: str = "dummy",
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,

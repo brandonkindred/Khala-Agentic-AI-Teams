@@ -57,6 +57,8 @@ class LLMCallRecord:
     status: str  # "success", "error", "rate_limited", "truncated"
     error_type: Optional[str] = None
     job_id: Optional[str] = None
+    objective: str = ""
+    request_id: str = ""
     # Opt-in prompt/response capture (when LLM_CAPTURE_PROMPTS=true)
     prompt_preview: Optional[str] = None
     response_preview: Optional[str] = None
@@ -78,6 +80,10 @@ class LLMCallRecord:
             d["error_type"] = self.error_type
         if self.job_id:
             d["job_id"] = self.job_id
+        if self.objective:
+            d["objective"] = self.objective
+        if self.request_id:
+            d["request_id"] = self.request_id
         return d
 
 
@@ -105,6 +111,8 @@ def record_llm_call(
     status: str = "success",
     error_type: Optional[str] = None,
     job_id: Optional[str] = None,
+    objective: str = "",
+    request_id: str = "",
     prompt_text: Optional[str] = None,
     response_text: Optional[str] = None,
 ) -> LLMCallRecord:
@@ -131,6 +139,8 @@ def record_llm_call(
         status=status,
         error_type=error_type,
         job_id=job_id,
+        objective=objective,
+        request_id=request_id,
         prompt_preview=prompt_preview,
         response_preview=response_preview,
     )
@@ -215,6 +225,10 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
             attributes["llm.error_type"] = record.error_type
         if record.job_id:
             attributes["khala.job_id"] = record.job_id
+        if record.objective:
+            attributes["khala.objective"] = record.objective
+        if record.request_id:
+            attributes["khala.request_id"] = record.request_id
 
         span_name = f"llm.call {record.agent_key or 'agent'}"
         span = _otel_tracer.start_span(span_name, attributes=attributes)

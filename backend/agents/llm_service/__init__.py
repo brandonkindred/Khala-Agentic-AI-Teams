@@ -10,10 +10,24 @@ from typing import TYPE_CHECKING, Any
 
 from . import config as _config
 from .api import generate_structured, generate_text
+from .attribution import (
+    LLMAttribution,
+    bind_request_id,
+    current_attribution,
+    current_request_id,
+    llm_attribution,
+    new_request_id,
+)
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from .clients import DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
-from .factory import _clear_client_cache_for_testing, get_client
+from .factory import (
+    _clear_client_cache_for_testing,
+    attributed_client,
+    client_agent_key,
+    get_client,
+    unwrap_client,
+)
 from .interface import (
     OLLAMA_WEEKLY_LIMIT_MESSAGE,
     LLMClient,
@@ -67,6 +81,12 @@ def get_llm_config_summary() -> str:
 __all__ = [
     "_clear_client_cache_for_testing",
     "_clear_strands_model_cache_for_testing",
+    "LLMAttribution",
+    "llm_attribution",
+    "current_attribution",
+    "current_request_id",
+    "new_request_id",
+    "bind_request_id",
     "complete_json_with_tool_loop",
     "complete_validated",
     "call_llm_with_retries",
@@ -77,6 +97,9 @@ __all__ = [
     "parse_rate_limit_retry_config",
     "rate_limit_retry_delay",
     "get_client",
+    "unwrap_client",
+    "client_agent_key",
+    "attributed_client",
     "get_strands_model",
     "get_llm_config_summary",
     "LLMClient",

@@ -67,6 +67,8 @@ class CannedLLM(LLMClient):
         system_prompt: str | None = None,
         tools: list | None = None,
         think: bool = False,
+        objective: str,
+        **kwargs: object,
     ) -> str:
         # Used only by compact_text when the input is over budget.
         self.text_calls.append(prompt)

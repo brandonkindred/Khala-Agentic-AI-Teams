@@ -68,6 +68,7 @@ def run_discovery(
             DISCOVERY_PROMPT.format(input_text=input_text[:15000]),
             temperature=0.0,
             think=True,
+            objective="extract discovery facts",
         )
         text = (response or "").strip()
         if text.startswith("```"):

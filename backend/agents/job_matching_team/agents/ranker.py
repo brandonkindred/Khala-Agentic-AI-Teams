@@ -93,6 +93,7 @@ class JobRankerAgent:
                 prompt,
                 temperature=0.1,
                 system_prompt=RANKER_SYSTEM_PROMPT,
+                objective="rank job candidates",
             )
         except Exception:  # noqa: BLE001 - scoring is best-effort per posting
             logger.warning("Ranker LLM call failed for %s", posting.url, exc_info=True)

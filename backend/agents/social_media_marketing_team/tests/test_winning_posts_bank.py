@@ -189,9 +189,13 @@ def test_save_calls_llm_for_summary_when_client_provided(fake_pg):
     class _StubLLM:
         def __init__(self):
             self.calls = []
+            self.objectives = []
 
-        def complete(self, prompt: str, system_prompt: str = "") -> str:
+        def complete(
+            self, prompt: str, system_prompt: str = "", *, objective: str, **kwargs: Any
+        ) -> str:
             self.calls.append(prompt)
+            self.objectives.append(objective)
             return "  A concise summary.  "
 
     llm = _StubLLM()
@@ -199,6 +203,7 @@ def test_save_calls_llm_for_summary_when_client_provided(fake_pg):
     assert fake_pg["posts"][pid]["summary"] == "A concise summary."
     assert len(llm.calls) == 1
     assert "Summarize this social post" in llm.calls[0]
+    assert llm.objectives == ["summarize winning post"]
 
 
 def test_save_llm_failure_is_non_fatal(fake_pg, caplog):
@@ -314,10 +319,16 @@ def test_find_llm_rerank_reorders_when_enough_candidates(fake_pg):
     )
 
     class _SummaryLLM:
+        def __init__(self):
+            self.rerank_objectives = []
+
         def complete(self, *a, **k):
             return "summary"
 
-        def complete_json(self, prompt: str, system_prompt: str = ""):
+        def complete_json(
+            self, prompt: str, system_prompt: str = "", *, objective: str, **kwargs: Any
+        ):
+            self.rerank_objectives.append(objective)
             return [3, 2, 1]
 
     llm = _SummaryLLM()
@@ -333,6 +344,7 @@ def test_find_llm_rerank_reorders_when_enough_candidates(fake_pg):
     )
     assert len(results) == 2
     assert {r["id"] for r in results} <= {a, b, c}
+    assert llm.rerank_objectives == ["rerank winning posts"]
 
 
 def test_find_rerank_failure_falls_back_to_keyword(fake_pg):

@@ -116,6 +116,7 @@ class UserProfileAgent:
                 temperature=0.2,
                 expected_keys=["extracted_info", "reasoning"],
                 think=False,
+                objective="extract user preferences",
             )
         except JSONExtractionFailure as e:
             logger.error("Failed to extract preferences (JSON extraction failed):\n%s", e)
@@ -247,7 +248,7 @@ class UserProfileAgent:
             query=request.query,
         )
 
-        return self.llm.complete(prompt, temperature=0.3)
+        return self.llm.complete(prompt, temperature=0.3, objective="query user profile")
 
     def _format_profile_for_query(
         self,
