@@ -101,7 +101,7 @@ Your task is to review the following repository content and identify compliance 
 Identify any gaps, missing controls, or risks relative to this criterion. If the codebase does not address this criterion (e.g. no backup/monitoring for Availability), report that as a finding.
 {_TSC_OUTPUT_FORMAT}"""
 
-    data = llm.complete_json(prompt, temperature=0.1, think=True)
+    data = llm.complete_json(prompt, temperature=0.1, think=True, objective="evaluate soc2 control")
     summary = data.get("summary") or ""
     findings_raw = data.get("findings") or []
     findings = []
@@ -252,7 +252,9 @@ Write a single JSON object with:
 
 Respond with valid JSON only. No text outside JSON."""
 
-        data = llm.complete_json(prompt, temperature=0.2, think=True)
+        data = llm.complete_json(
+            prompt, temperature=0.2, think=True, objective="generate soc2 report"
+        )
         findings_typed: Dict[str, List[TSCFinding]] = {}
         for cat, list_dicts in findings_by_tsc.items():
             try:
@@ -291,7 +293,9 @@ Write a single JSON object with:
 
 Respond with valid JSON only. No text outside JSON."""
 
-        data = llm.complete_json(prompt, temperature=0.2, think=True)
+        data = llm.complete_json(
+            prompt, temperature=0.2, think=True, objective="produce soc2 next steps"
+        )
         steps = data.get("steps") or []
         if not isinstance(steps, list):
             steps = []

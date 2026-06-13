@@ -513,6 +513,7 @@ class ProductOwnerAgent:
                 prompt,
                 temperature=0.0,
                 system_prompt=SYSTEM_PROMPT,
+                objective="score backlog stories",
             )
         except Exception as exc:
             # End-to-end LLM failure (network, model, JSON parse). Convert

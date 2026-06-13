@@ -85,6 +85,7 @@ class PersonalAssistantOrchestrator:
                 temperature=0.1,
                 expected_keys=["primary_intent", "secondary_intents", "entities", "confidence"],
                 think=False,
+                objective="classify user intent",
             )
         except JSONExtractionFailure as e:
             logger.error("Intent classification failed with JSON extraction error:\n%s", e)
@@ -555,6 +556,7 @@ class PersonalAssistantOrchestrator:
             f"User says: {request.message}\n\n"
             f"Respond helpfully:",
             temperature=0.7,
+            objective="answer general request",
         )
 
         return AgentAction(
@@ -600,7 +602,9 @@ class PersonalAssistantOrchestrator:
         )
 
         try:
-            data = self.llm.complete_json(prompt, temperature=0.4, think=False)
+            data = self.llm.complete_json(
+                prompt, temperature=0.4, think=False, objective="generate response"
+            )
             response_message = data.get("message", "I've processed your request.")
             suggestions = data.get("follow_up_suggestions", [])
         except Exception as e:

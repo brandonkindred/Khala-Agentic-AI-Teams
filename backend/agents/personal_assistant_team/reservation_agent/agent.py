@@ -219,6 +219,7 @@ class ReservationAgent:
                 temperature=0.1,
                 expected_keys=["reservation_type", "venue_name", "datetime", "party_size", "notes"],
                 think=False,
+                objective="parse reservation request",
             )
             return data
         except JSONExtractionFailure as e:
