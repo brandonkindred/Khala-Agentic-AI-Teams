@@ -8,6 +8,7 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
 import { MatChipsModule } from '@angular/material/chips';
@@ -131,6 +132,8 @@ export class CognitionTabComponent implements OnInit {
   readonly loadingRules = signal<boolean>(false);
   readonly rulesError = signal<string | null>(null);
   readonly rulesUnavailable = signal<boolean>(false);
+  /** True while another page of rules is available to load. */
+  readonly rulesHasMore = signal<boolean>(false);
   /** Rule id briefly highlighted after a retire-proposal link click. */
   readonly highlightedRuleId = signal<string | null>(null);
   /**
@@ -139,6 +142,8 @@ export class CognitionTabComponent implements OnInit {
    * proposals that the active-rules view doesn't contain.
    */
   private readonly rulesIndex = signal<Map<string, Rule>>(new Map());
+  /** Rule id to scroll to once the next rules load renders it. */
+  private pendingScrollRuleId: string | null = null;
 
   /** Storage is "down" (panel-wide banner) only when every section failed with 503. */
   readonly storageUnavailable = computed(
@@ -204,19 +209,33 @@ export class CognitionTabComponent implements OnInit {
     });
   }
 
-  /** Scope the panel to `agentId`, reset filters to defaults, and reload all sections. */
+  /** Scope the panel to `agentId`, reset filters/state to defaults, and reload all sections. */
   selectAgent(agentId: string): void {
     this.selectedAgentId.set(agentId);
     // Reset filters so each agent starts from the default view.
     this.proposalStatusFilter.set('pending');
     this.ruleStatusFilter.set('active');
+    // Clear the previous agent's data so it isn't shown under the new agent
+    // (and its action buttons aren't live) while the reload is in flight.
+    this.proposals.set([]);
+    this.proposalsHasMore.set(false);
+    this.proposalsError.set(null);
+    this.events.set([]);
+    this.memoryError.set(null);
+    this.rules.set([]);
+    this.rulesHasMore.set(false);
+    this.rulesError.set(null);
+    this.rulesIndex.set(new Map());
     this.refreshAll();
   }
 
-  /** Reload all three sections for the current agent. No-op when none selected. */
+  /** Reload all sections for the current agent. No-op when none selected. */
   refreshAll(): void {
     if (!this.selectedAgentId()) return;
-    this.loadRulesIndex(); // before loadRules so the section's filtered call is the last one
+    // Best-effort all-rules index for target resolution; `targetRule` falls back
+    // to the section rules until it lands. Issued before the section's filtered
+    // `listRules` so that call is the most recent one for the Rules list.
+    this.loadRulesIndex();
     this.loadProposals();
     this.loadMemory();
     this.loadRules();
@@ -272,6 +291,7 @@ export class CognitionTabComponent implements OnInit {
       .subscribe({
         next: (rows) => {
           if (reqId !== this.proposalsReqId) return;
+          this.proposalsUnavailable.set(false);
           this.proposals.set([...this.proposals(), ...rows]);
           this.proposalsHasMore.set(rows.length === PROPOSAL_PAGE_LIMIT);
           this.loadingProposals.set(false);
@@ -494,16 +514,33 @@ export class CognitionTabComponent implements OnInit {
     return this.targetRule(id)?.text ?? '';
   }
 
-  /** Scroll the Rules section to a target rule and briefly highlight it. */
+  /**
+   * Scroll the Rules section to a target rule and briefly highlight it. If the
+   * target isn't in the current (filtered) Rules list — e.g. a retired target
+   * while the section shows `active` — widen the filter to `all` and scroll once
+   * it has loaded so the link doesn't appear to do nothing.
+   *
+   * @param id The target rule id (no-op when null/undefined).
+   */
   scrollToRule(id: string | null | undefined): void {
     if (!id) return;
     this.highlightedRuleId.set(id);
-    // Direct DOM read for scroll-into-view only; the highlight itself is a
-    // signal-bound class. Guarded for jsdom (no scrollIntoView in tests).
-    document.getElementById('rule-' + id)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
+    if (this.rules().some((r) => r.id === id)) {
+      this.scrollRuleIntoView(id);
+    } else {
+      this.pendingScrollRuleId = id;
+      this.ruleStatusFilter.set('all');
+      this.loadRules();
+    }
     setTimeout(() => {
       if (this.highlightedRuleId() === id) this.highlightedRuleId.set(null);
     }, 1500);
+  }
+
+  private scrollRuleIntoView(id: string): void {
+    // Direct DOM read for scroll-into-view only; the highlight itself is a
+    // signal-bound class. Guarded for jsdom (no scrollIntoView in tests).
+    document.getElementById('rule-' + id)?.scrollIntoView?.({ behavior: 'smooth', block: 'center' });
   }
 
   // Memory --------------------------------------------------------------------
@@ -591,12 +628,45 @@ export class CognitionTabComponent implements OnInit {
         this.rulesUnavailable.set(false);
         // Defensive: ensure highest priority first regardless of API ordering.
         this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
+        this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
         this.loadingRules.set(false);
+        this.flushPendingScroll(rows);
       },
       error: (err) => {
         if (reqId !== this.rulesReqId) return;
         this.rules.set([]);
+        this.rulesHasMore.set(false);
+        this.pendingScrollRuleId = null;
         this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load rules.');
+        this.loadingRules.set(false);
+      },
+    });
+  }
+
+  /**
+   * Append the next page of rules (the endpoint caps each page at
+   * `RULE_PAGE_LIMIT`). No-op while loading, when no more remain, or with no agent.
+   */
+  loadMoreRules(): void {
+    const agentId = this.selectedAgentId();
+    if (!agentId || this.loadingRules() || !this.rulesHasMore()) return;
+    this.loadingRules.set(true);
+    this.rulesError.set(null);
+    const reqId = ++this.rulesReqId;
+    const filter = this.ruleStatusFilter();
+    const query = filter === 'all' ? {} : { status: filter };
+    const offset = this.rules().length;
+    this.api.listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT, offset }).subscribe({
+      next: (rows) => {
+        if (reqId !== this.rulesReqId) return;
+        this.rulesUnavailable.set(false);
+        this.rules.set([...this.rules(), ...rows].sort((a, b) => b.priority - a.priority));
+        this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
+        this.loadingRules.set(false);
+      },
+      error: (err) => {
+        if (reqId !== this.rulesReqId) return;
+        this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load more rules.');
         this.loadingRules.set(false);
       },
     });
@@ -606,6 +676,16 @@ export class CognitionTabComponent implements OnInit {
   setRuleFilter(filter: RuleFilter): void {
     this.ruleStatusFilter.set(filter);
     this.loadRules();
+  }
+
+  /** After a rules load, scroll to a pending target once it's in the rendered list. */
+  private flushPendingScroll(rows: Rule[]): void {
+    const target = this.pendingScrollRuleId;
+    if (target && rows.some((r) => r.id === target)) {
+      this.pendingScrollRuleId = null;
+      // Defer so the @for row exists in the DOM before scrolling.
+      setTimeout(() => this.scrollRuleIntoView(target));
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -621,7 +701,7 @@ export class CognitionTabComponent implements OnInit {
     unavailSig: WritableSignal<boolean>,
     fallback: string,
   ): void {
-    if ((err as { status?: number })?.status === 503) {
+    if (err instanceof HttpErrorResponse && err.status === 503) {
       unavailSig.set(true);
       errSig.set(STORAGE_UNAVAILABLE_MESSAGE);
       return;

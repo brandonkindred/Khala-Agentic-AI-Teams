@@ -5,7 +5,7 @@
   </header>
 
   <div class="cognition-tab__picker">
-    <mat-form-field appearance="outline">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
       <mat-label>Agent</mat-label>
       <mat-select
         [value]="selectedAgentId()"
@@ -28,8 +28,8 @@
     </button>
   </div>
 
-  @if (agentsError()) {
-    <app-error-message [message]="agentsError()!"></app-error-message>
+  @if (agentsError(); as error) {
+    <app-error-message [message]="error"></app-error-message>
   }
 
   @if (storageUnavailable()) {
@@ -42,7 +42,7 @@
     <section class="cognition-section" aria-label="Rule proposals">
       <header class="cognition-section__head">
         <h3>Rule proposals</h3>
-        <mat-form-field appearance="outline" class="cognition-section__filter">
+        <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
           <mat-label>Status</mat-label>
           <mat-select [value]="proposalStatusFilter()" (selectionChange)="setProposalFilter($event.value)">
             @for (f of proposalFilters; track f.value) {
@@ -52,8 +52,8 @@
         </mat-form-field>
       </header>
 
-      @if (proposalsError()) {
-        <app-error-message [message]="proposalsError()!"></app-error-message>
+      @if (proposalsError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
       }
 
       @if (loadingProposals() && proposals().length === 0) {
@@ -128,19 +128,27 @@
                   >
                     Reject
                   </button>
-                  <button
-                    mat-flat-button
-                    type="button"
-                    color="primary"
-                    [attr.aria-label]="'Approve ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
-                    [attr.aria-describedby]="p.stale_evidence ? 'approve-tip-' + p.id : null"
-                    [disabled]="p.stale_evidence || actingProposalId() !== null"
+                  <!-- The tooltip lives on the wrapper so it's discoverable even
+                       when the button itself is disabled (disabled controls can't
+                       be focused or long-pressed). -->
+                  <span
+                    class="proposal-card__approve-wrap"
                     [matTooltip]="'Can\'t approve while evidence is outdated.'"
                     [matTooltipDisabled]="!p.stale_evidence"
-                    (click)="approve(p)"
+                    [attr.tabindex]="p.stale_evidence ? 0 : null"
                   >
-                    Approve
-                  </button>
+                    <button
+                      mat-flat-button
+                      type="button"
+                      color="primary"
+                      [attr.aria-label]="'Approve ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
+                      [attr.aria-describedby]="p.stale_evidence ? 'approve-tip-' + p.id : null"
+                      [disabled]="p.stale_evidence || actingProposalId() !== null"
+                      (click)="approve(p)"
+                    >
+                      Approve
+                    </button>
+                  </span>
                   @if (p.stale_evidence) {
                     <span [id]="'approve-tip-' + p.id" class="visually-hidden">
                       Can't approve while evidence is outdated.
@@ -170,7 +178,7 @@
       <header class="cognition-section__head">
         <h3>Memory</h3>
         <div class="cognition-section__controls">
-          <mat-form-field appearance="outline" class="cognition-section__filter">
+          <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
             <mat-label>Order</mat-label>
             <mat-select [value]="memoryBySalience()" (selectionChange)="setMemoryOrder($event.value)">
               @for (o of memoryOrders; track o.value) {
@@ -178,7 +186,7 @@
               }
             </mat-select>
           </mat-form-field>
-          <mat-form-field appearance="outline" class="cognition-section__filter">
+          <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
             <mat-label>Show</mat-label>
             <mat-select [value]="memoryTopN()" (selectionChange)="setMemoryTopN($event.value)">
               @for (n of topNOptions; track n) {
@@ -189,8 +197,8 @@
         </div>
       </header>
 
-      @if (memoryError()) {
-        <app-error-message [message]="memoryError()!"></app-error-message>
+      @if (memoryError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
       }
 
       @if (loadingEvents()) {
@@ -237,7 +245,7 @@
     <section class="cognition-section" aria-label="Rules">
       <header class="cognition-section__head">
         <h3>Rules</h3>
-        <mat-form-field appearance="outline" class="cognition-section__filter">
+        <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
           <mat-label>Status</mat-label>
           <mat-select [value]="ruleStatusFilter()" (selectionChange)="setRuleFilter($event.value)">
             @for (f of ruleFilters; track f.value) {
@@ -247,11 +255,11 @@
         </mat-form-field>
       </header>
 
-      @if (rulesError()) {
-        <app-error-message [message]="rulesError()!"></app-error-message>
+      @if (rulesError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
       }
 
-      @if (loadingRules()) {
+      @if (loadingRules() && rules().length === 0) {
         <app-loading-spinner></app-loading-spinner>
       } @else if (rules().length === 0 && !rulesError()) {
         <app-empty-state
@@ -297,6 +305,17 @@
             </li>
           }
         </ul>
+        @if (rulesHasMore()) {
+          <button
+            mat-stroked-button
+            type="button"
+            class="cognition-list__more"
+            [disabled]="loadingRules()"
+            (click)="loadMoreRules()"
+          >
+            Load more
+          </button>
+        }
       }
     </section>
   }

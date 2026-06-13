@@ -1,4 +1,5 @@
 import { TestBed } from '@angular/core/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { MatDialog } from '@angular/material/dialog';
 import { NEVER, Subject, of, throwError } from 'rxjs';
@@ -334,7 +335,7 @@ describe('CognitionTabComponent', () => {
   });
 
   it('surfaces a 503 as a single panel-wide banner only when every section is down', () => {
-    const err503 = { status: 503, error: { detail: 'down' } };
+    const err503 = new HttpErrorResponse({ status: 503 });
     api.listProposals = vi.fn().mockReturnValue(throwError(() => err503));
     api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => err503));
     api.listRules = vi.fn().mockReturnValue(throwError(() => err503));
@@ -346,7 +347,7 @@ describe('CognitionTabComponent', () => {
   });
 
   it('does not show the panel-wide banner when only one section is 503', () => {
-    api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => ({ status: 503 })));
+    api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => new HttpErrorResponse({ status: 503 })));
     const f = build();
     f.detectChanges();
     const c = f.componentInstance;
@@ -355,15 +356,45 @@ describe('CognitionTabComponent', () => {
     expect((f.nativeElement as HTMLElement).querySelectorAll('.cognition-section').length).toBe(3);
   });
 
-  it('highlights a rule via signal when a retire link is clicked', () => {
+  it('scrolls directly and highlights when the target rule is already listed', () => {
     vi.useFakeTimers();
     const f = build();
+    f.detectChanges(); // rules() = [r9], so 'r9' is present
     f.componentInstance.scrollToRule('r9');
     expect(f.componentInstance.highlightedRuleId()).toBe('r9');
+    expect(f.componentInstance.ruleStatusFilter()).toBe('active'); // no filter change needed
     vi.advanceTimersByTime(1500);
     expect(f.componentInstance.highlightedRuleId()).toBeNull();
     f.componentInstance.scrollToRule(null); // no-op branch
     vi.useRealTimers();
+  });
+
+  it('scrolls to a revealed target once the all-rules reload includes it', () => {
+    vi.useFakeTimers();
+    const target = { ...rules[0], id: 'r-old', status: 'retired' as const };
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { status?: string }) =>
+        q?.status === 'active' ? of([rules[0]]) : of([rules[0], target]),
+      );
+    const f = build();
+    f.detectChanges(); // section shows active [r9]
+    f.componentInstance.scrollToRule('r-old'); // not present → filter all + reload, then scroll
+    expect(f.componentInstance.ruleStatusFilter()).toBe('all');
+    expect(f.componentInstance.rules().some((r) => r.id === 'r-old')).toBe(true);
+    vi.advanceTimersByTime(1500); // fire the deferred scroll + clear highlight
+    vi.useRealTimers();
+  });
+
+  it('surfaces an error when loading more rules fails', () => {
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'r' + i, priority: i }));
+    api.listRules = vi.fn().mockReturnValue(of(fullPage));
+    const f = build();
+    f.detectChanges();
+    api.listRules = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'more-rules-fail' } })));
+    f.componentInstance.loadMoreRules();
+    expect(f.componentInstance.rulesError()).toBe('more-rules-fail');
+    expect(f.componentInstance.loadingRules()).toBe(false);
   });
 
   it('toggles a memory event data panel', () => {
@@ -420,7 +451,7 @@ describe('CognitionTabComponent', () => {
   });
 
   it('clears the storage-unavailable banner once a section loads again', () => {
-    const err503 = { status: 503 };
+    const err503 = new HttpErrorResponse({ status: 503 });
     api.listProposals = vi.fn().mockReturnValue(throwError(() => err503));
     api.listMemoryEvents = vi.fn().mockReturnValue(throwError(() => err503));
     api.listRules = vi.fn().mockReturnValue(throwError(() => err503));
@@ -506,6 +537,71 @@ describe('CognitionTabComponent', () => {
     expect(f.componentInstance.proposalsError()).toBe('boom');
     // The error is shown, but no "Nothing to review" empty state below it.
     expect((f.nativeElement as HTMLElement).querySelectorAll('app-empty-state').length).toBe(0);
+  });
+
+  it('clears the previous agent state when switching agents', () => {
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.proposals().length).toBe(2);
+    // Switching agents wipes the old data before the reload (which then refills).
+    let cleared = false;
+    api.listProposals = vi.fn().mockImplementation(() => {
+      cleared = c.proposals().length === 0; // observed at request time
+      return of([addProposal]);
+    });
+    c.selectAgent('a2');
+    expect(cleared).toBe(true);
+  });
+
+  it('loads more rules when a full page is returned, then stops', () => {
+    const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'r' + i, priority: i }));
+    api.listRules = vi.fn().mockReturnValue(of(fullPage));
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(c.rulesHasMore()).toBe(true);
+    expect(c.rules().length).toBe(500);
+    api.listRules = vi.fn().mockReturnValue(of([{ ...rules[0], id: 'r500' }]));
+    c.loadMoreRules();
+    expect(api.listRules).toHaveBeenCalledWith('a1', { status: 'active', limit: 500, offset: 500 });
+    expect(c.rules().length).toBe(501);
+    expect(c.rulesHasMore()).toBe(false);
+  });
+
+  it('clears the unavailable flag after a successful load-more', () => {
+    const fullPage = Array.from({ length: 200 }, (_, i) => ({ ...addProposal, id: 'p' + i }));
+    api.listProposals = vi.fn().mockReturnValue(of(fullPage));
+    const f = build();
+    f.detectChanges();
+    f.componentInstance.proposalsUnavailable.set(true); // simulate a prior 503
+    api.listProposals = vi.fn().mockReturnValue(of([{ ...addProposal, id: 'p200' }]));
+    f.componentInstance.loadMoreProposals();
+    expect(f.componentInstance.proposalsUnavailable()).toBe(false);
+  });
+
+  it('reveals a retired target (filter → all) before scrolling, when not in the list', () => {
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    api.listRules.mockClear();
+    c.scrollToRule('r-not-loaded'); // not in the active-rules list
+    expect(c.ruleStatusFilter()).toBe('all');
+    expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500 });
+  });
+
+  it('renders the disabled-approve a11y contract and memory toggle for a stale proposal', () => {
+    api.listProposals = vi.fn().mockReturnValue(of([staleProposal]));
+    api.listMemoryEvents = vi.fn().mockReturnValue(of([{ ...events[0], data: { k: 1 } }]));
+    const f = build();
+    f.detectChanges();
+    const host = f.nativeElement as HTMLElement;
+    const approve = host.querySelector('button[aria-describedby^="approve-tip-"]');
+    expect(approve).not.toBeNull();
+    const tipId = approve!.getAttribute('aria-describedby')!;
+    expect(host.querySelector('#' + tipId)?.classList.contains('visually-hidden')).toBe(true);
+    expect(host.querySelector('.proposal-card__approve-wrap[tabindex="0"]')).not.toBeNull();
+    expect(host.querySelector('.memory-event__toggle[aria-expanded="false"]')).not.toBeNull();
   });
 
   it('builds a proposal summary from the proposed or target rule text', () => {

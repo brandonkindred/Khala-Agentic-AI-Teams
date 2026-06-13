@@ -69,17 +69,11 @@
     gap: 12px;
   }
 
+  // The filter form fields use `subscriptSizing="dynamic"` in the template so
+  // the (empty) hint/error subscript row collapses without piercing Material's
+  // view encapsulation.
   &__filter {
     min-width: 140px;
-
-    // Compact the Material form field inside the section header by hiding the
-    // hint/error subscript row. `::ng-deep` is deprecated but remains the
-    // supported way to reach Material's internal nodes from a scoped component.
-    // TODO: migrate to a global Material theme override when the project adopts
-    // one, to drop `::ng-deep`.
-    ::ng-deep .mat-mdc-form-field-subscript-wrapper {
-      display: none;
-    }
   }
 }
 
@@ -160,7 +154,7 @@ mat-chip {
 // Proposal card ----------------------------------------------------------------
 .proposal-card {
   &.is-stale {
-    border-color: rgba(251, 191, 36, 0.55);
+    border-color: color-mix(in srgb, var(--kh-accent, #fbbf24) 55%, transparent);
   }
 
   &__head {
@@ -209,6 +203,11 @@ mat-chip {
     color: var(--kh-info, #93c5fd);
     cursor: pointer;
     text-decoration: underline;
+  }
+
+  // Focusable wrapper carrying the disabled-Approve tooltip.
+  &__approve-wrap {
+    display: inline-flex;
   }
 
   &__actions {
@@ -264,7 +263,7 @@ mat-chip {
   transition: background-color 0.4s ease;
 
   &.is-highlighted {
-    background: rgba(251, 191, 36, 0.12);
+    background: color-mix(in srgb, var(--kh-accent, #fbbf24) 12%, transparent);
   }
 
   &.is-retired {
