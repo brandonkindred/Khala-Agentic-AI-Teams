@@ -22,14 +22,17 @@ from investment_team.strategy_lab.agents.design_review import (
     DesignReviewAgent,
     SpecCritique,
     _coerce_critique,
+    _sizing_owned_by_gate,
     format_prior_critiques,
 )
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
+    FixedFractionSizing,
     IndicatorRef,
     Predicate,
     SignalExitRule,
+    VolatilityTargetSizing,
 )
 
 # ---------------------------------------------------------------------------
@@ -709,6 +712,104 @@ def test_coerce_critique_keeps_defect_that_only_mentions_drawdown(description: s
     assert len(blocking) == 1
     assert blocking[0].field == "exit_rules"
     assert blocking[0].severity == "critical"
+
+
+@pytest.mark.parametrize(
+    ("kind", "owned"),
+    [
+        ("fixed_fraction", True),
+        ("fixed_notional", True),
+        ("volatility_target", False),
+        (None, False),
+        ("bogus", False),
+    ],
+)
+def test_sizing_owned_by_gate(kind: object, owned: bool) -> None:
+    """Only the static sizing kinds the deterministic gate fully validates are
+    'owned'. volatility_target (gate abstains) and unknown/missing kinds are not."""
+    assert _sizing_owned_by_gate(kind) is owned
+
+
+def test_coerce_critique_volatility_sizing_objection_keeps_blocking() -> None:
+    """When the spec's sizing kind is NOT gate-owned (volatility_target), a
+    sizing objection must keep blocking — the deterministic gate abstains on it,
+    so the reviewer's plausibility critique is the only substantive check."""
+    parsed = {
+        "ready": False,
+        "rationale": "implausible vol target",
+        "issues": [
+            {
+                "field": "sizing",
+                "severity": "critical",
+                "description": "target_annual_vol=0.001 is implausibly low and untradeable",
+            }
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [], sizing_owned=False)
+
+    assert critique.ready is False
+    blocking = [i for i in critique.issues if i.severity in ("warning", "critical")]
+    assert len(blocking) == 1
+    assert blocking[0].field == "sizing"
+    assert blocking[0].severity == "critical"
+
+
+def test_design_review_run_keeps_volatility_target_sizing_objection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end: a volatility_target spec whose reviewer flags an implausible
+    target keeps the verdict not-ready — ``run`` resolves ``sizing_owned`` from
+    the spec's sizing kind, so the gate-abstained objection is not demoted."""
+    spec = _spec().model_copy(update={"sizing": VolatilityTargetSizing(target_annual_vol=0.001)})
+    payload = json.dumps(
+        {
+            "ready": False,
+            "rationale": "implausible vol target",
+            "issues": [
+                {
+                    "field": "sizing",
+                    "severity": "critical",
+                    "description": "target_annual_vol=0.001 is implausibly low and untradeable",
+                }
+            ],
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(spec, readiness_results=[])
+
+    assert critique.ready is False
+    blocking = [i for i in critique.issues if i.severity in ("warning", "critical")]
+    assert len(blocking) == 1
+    assert blocking[0].field == "sizing"
+
+
+def test_design_review_run_demotes_sizing_for_gate_owned_kind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """End-to-end counterpart: for a gate-owned kind (fixed_fraction) a sole
+    sizing objection IS demoted and the verdict promoted to ready."""
+    spec = _spec().model_copy(update={"sizing": FixedFractionSizing(fraction=0.05)})
+    payload = json.dumps(
+        {
+            "ready": False,
+            "rationale": "risk 5% per trade is 0.25% with the stop",
+            "issues": [
+                {
+                    "field": "sizing",
+                    "severity": "critical",
+                    "description": "risk 5% per trade is only 0.25% per trade with the 5% stop",
+                }
+            ],
+        }
+    )
+    _patch_review(monkeypatch, payload)
+
+    critique = DesignReviewAgent().run(spec, readiness_results=[])
+
+    assert critique.ready is True
+    assert all(i.severity == "info" for i in critique.issues)
 
 
 def test_coerce_critique_not_ready_only_sizing_is_promoted_to_ready() -> None:
