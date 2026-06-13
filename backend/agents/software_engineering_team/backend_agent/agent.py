@@ -792,16 +792,22 @@ def _select_review_input(
 ) -> ReviewInputSelection:
     """Choose the code-review input: the task's changed files, read from disk.
 
-    The path set is the union of the committed ``git diff development...HEAD``,
-    the uncommitted worktree/index changes (so a fix whose ``write_agent_output``
-    commit failed — including files synthesized during writing, e.g. a
-    ``.gitignore`` from agent ``gitignore_entries`` — is still reviewed), and the
-    writer's normalized output keys. Every path's content is read from the
-    **worktree**, never from the in-memory output dict, so review reflects exactly
-    what is on the branch: paths that write validation rejected — or that a failed
-    write never created — are absent from disk and therefore correctly excluded,
-    and no extension filter is applied so non-source task changes
-    (requirements.txt, migrations, YAML/JSON, ...) are reviewed too.
+    The path set is the union of the net base→worktree diff
+    (``list_changed_and_deleted`` runs ``git diff <merge-base>`` with no ``HEAD``,
+    so it compares the merge base to the **working tree** — every committed *and*
+    uncommitted *tracked* change is captured; only untracked new files are not,
+    which the writer's output keys cover) and the writer's normalized output keys.
+    Every path's content is read from the **worktree**, never from the in-memory
+    output dict, so review reflects exactly what is on the branch: paths that write
+    validation rejected — or that a failed write never created — are absent from
+    disk and therefore correctly excluded, and no extension filter is applied so
+    non-source task changes (requirements.txt, migrations, YAML/JSON, ...) are
+    reviewed too.
+
+    Fallback ordering on this path is fail-closed: when the baseline diff *cannot*
+    be computed (``BaselineDiffUnavailable``), it reviews the whole repo rather
+    than the writer's just-written set, since that partial set could approve while
+    silently omitting committed task changes.
 
     Deletions are surfaced two ways: the pre-deletion content of each removed
     path is read from the merge-base blob and added *byte-for-byte* (line numbers
