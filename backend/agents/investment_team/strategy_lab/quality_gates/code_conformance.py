@@ -54,6 +54,7 @@ from .code_safety import (
     _engine_exits_cover_sides,
     _expr_references_position_qty,
     _extract_side_literal,
+    _is_ctx_position_call,
 )
 from .code_safety_ast import (
     _find_strategy_subclasses,
@@ -427,83 +428,93 @@ def _submit_order_close_side(call: ast.Call) -> Optional[str]:
     return None
 
 
-def _submit_order_qty_references_position(
-    call: ast.Call,
-    position_names: frozenset[str],
-    qty_alias_names: frozenset[str] = frozenset(),
-) -> bool:
-    """True iff the call's keyword ``qty=`` references a position's ``.qty``.
+def _expr_is_position_qty(node: ast.AST, position_names: frozenset[str]) -> bool:
+    """True iff ``node`` (or a sub-expression) reads a position's ``.qty``.
 
-    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``;
-    ``position_names`` is the alias set from
-    :func:`_collect_position_aliases`; ``qty_alias_names`` is the local-name
-    set from :func:`_collect_qty_aliases`.
-    Post: True when the ``qty=`` argument is, or wraps, ``<alias>.qty`` for
-    any ``<alias>`` in ``position_names`` — covering plain
-    ``qty=position.qty``, a renamed alias (``current = ctx.position(...)``;
-    ``qty=current.qty``), and wrapped forms (``abs(position.qty)``,
-    ``position.qty * 1``) — or when ``qty=`` is a bare name bound earlier to
-    such an expression (``close_qty = pos.qty; qty=close_qty``). Broader than
-    :func:`_submit_order_closes_position` (which matches only the literal
-    names ``position`` / ``pos``), so a manual close cannot evade the
-    duplicate-exit check through an alias or wrapping expression.
+    Pre: ``position_names`` is the alias set from
+    :func:`_collect_position_aliases`.
+    Post: True for ``<alias>.qty`` (alias in ``position_names``) and any
+    wrapping expression (``abs(position.qty)``, ``position.qty * 1``) — via
+    :func:`_expr_references_position_qty` — and additionally for a direct
+    ``ctx.position(...).qty`` receiver. Name-bound and attribute-bound qty
+    aliases (``close_qty = pos.qty``; ``self.held = pos.qty``) are NOT
+    resolved here: collecting them class-wide produced false positives on
+    legitimately-computed entry quantities, so those shapes are left to the
+    runtime trade-alignment gate.
     """
-    for kw in call.keywords:
-        if kw.arg == "qty":
-            if _expr_references_position_qty(kw.value, position_names):
-                return True
-            return isinstance(kw.value, ast.Name) and kw.value.id in qty_alias_names
+    if _expr_references_position_qty(node, position_names):
+        return True
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Attribute)
+            and sub.attr == "qty"
+            and _is_ctx_position_call(sub.value)
+        ):
+            return True
     return False
 
 
-def _collect_qty_aliases(cls: ast.ClassDef, position_names: frozenset[str]) -> frozenset[str]:
-    """Return local names bound to a position's ``.qty`` (or an expression wrapping it).
+def _submit_order_qty_references_position(call: ast.Call, position_names: frozenset[str]) -> bool:
+    """True iff the call's keyword ``qty=`` reads a position's ``.qty``.
 
-    Pre: ``cls`` is a parsed ``ClassDef``; ``position_names`` is the alias
-    set from :func:`_collect_position_aliases`.
-    Post: every ``<name> = <expr>`` assignment anywhere in ``cls`` whose RHS
-    satisfies :func:`_expr_references_position_qty` contributes ``<name>``,
-    so the close detector sees ``close_qty = pos.qty; submit_order(qty=close_qty)``.
-    Only one indirection hop is resolved (a name bound directly to a
-    position-qty expression); deeper chains fall to the runtime gate.
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``;
+    ``position_names`` is the alias set from
+    :func:`_collect_position_aliases`.
+    Post: delegates to :func:`_expr_is_position_qty` — True for
+    ``qty=position.qty``, a renamed position alias, a wrapping expression, or
+    a direct ``qty=ctx.position(...).qty``. Broader than
+    :func:`_submit_order_closes_position` (literal ``position`` / ``pos``
+    only) without the false-positive surface of class-wide name aliasing.
     """
-    names: set[str] = set()
-    for node in ast.walk(cls):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not _expr_references_position_qty(node.value, position_names):
-            continue
-        for target in node.targets:
-            if isinstance(target, ast.Name):
-                names.add(target.id)
-    return frozenset(names)
+    for kw in call.keywords:
+        if kw.arg == "qty":
+            return _expr_is_position_qty(kw.value, position_names)
+    return False
 
 
-def _submit_order_attached_bracket_side(call: ast.Call) -> Optional[str]:
-    """Return the entry side a non-``None`` attached bracket leg closes.
+def _attachment_is_active(node: ast.AST) -> bool:
+    """True iff a bracket-attachment value is demonstrably not ``None``.
+
+    Pre: ``node`` is the value of an ``attached_stop_loss`` /
+    ``attached_take_profit`` keyword.
+    Post: True for a non-``None`` constant or a computed expression
+    (``BinOp`` / ``Call`` / ``BoolOp`` / ...); False for ``None`` and for a
+    bare ``Name`` / ``Attribute`` whose value cannot be established
+    statically (``stop = None; attached_stop_loss=stop``). Treating an
+    ambiguous attachment as inactive avoids a false-positive hard critical;
+    a genuinely-active bracket built from a variable is caught by the runtime
+    trade-alignment gate instead.
+    """
+    if isinstance(node, ast.Constant):
+        return node.value is not None
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return False
+    return True
+
+
+def _submit_order_attached_bracket(call: ast.Call) -> tuple[bool, Optional[str]]:
+    """Return ``(has_bracket, own_side)`` for an attached-bracket entry.
 
     Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
-    Post: returns the order's OWN side (``"long"`` / ``"short"``) when the
-    call passes a non-``None`` ``attached_stop_loss`` or
-    ``attached_take_profit`` — the runtime materialises opposite-side
+    Post: ``has_bracket`` is True iff the call passes a demonstrably
+    non-``None`` ``attached_stop_loss`` / ``attached_take_profit``
+    (:func:`_attachment_is_active`) — the runtime materialises opposite-side
     ``bracket_sl`` / ``bracket_tp`` children that close the position this
-    order opens, before ``_EngineExitDispatcher`` stamps
-    ``engine_exit:<kind>``. Returns ``None`` when no non-``None`` bracket leg
-    is attached or the order side is not a resolvable ``OrderSide`` literal.
-    Unlike an explicit close the bracket retires the order's OWN side, so the
-    side is NOT inverted.
+    order opens, ahead of ``_EngineExitDispatcher``. ``own_side`` is the
+    resolved ``OrderSide`` literal the bracket closes (the order's OWN side,
+    NOT inverted), or ``None`` when the side is dynamic — the caller then
+    falls back to every entered side, as it does for explicit closes.
     """
     has_bracket = any(
-        kw.arg in ("attached_stop_loss", "attached_take_profit")
-        and not (isinstance(kw.value, ast.Constant) and kw.value.value is None)
+        kw.arg in ("attached_stop_loss", "attached_take_profit") and _attachment_is_active(kw.value)
         for kw in call.keywords
     )
     if not has_bracket:
-        return None
+        return (False, None)
     for kw in call.keywords:
         if kw.arg == "side":
-            return _extract_side_literal(kw.value)
-    return None
+            return (True, _extract_side_literal(kw.value))
+    return (True, None)
 
 
 def _node_references_ctx_equity(node: ast.AST) -> bool:
@@ -991,10 +1002,10 @@ class CodeConformanceGate(GateResultsMixin):
         Two manual-close shapes are detected, across every ``on_bar``-
         reachable ``submit_order`` (if/elif/else bodies, post-guard top-level
         statements, and reachable helpers):
-          * an explicit opposite-side close whose ``qty=`` retires the
+          * an explicit opposite-side close whose ``qty=`` reads the
             position — ``position.qty``, a renamed position alias, a wrapping
-            expression (``abs(position.qty)``), or a local name bound to one
-            (``close_qty = pos.qty``) — which retires the OPPOSITE of the
+            expression (``abs(position.qty)``), or a direct
+            ``ctx.position(...).qty`` — which retires the OPPOSITE of the
             order side; and
           * an entry carrying a non-``None`` ``attached_stop_loss`` /
             ``attached_take_profit`` bracket leg, whose ``bracket_sl`` /
@@ -1020,12 +1031,17 @@ class CodeConformanceGate(GateResultsMixin):
 
         Static limits (caught by the runtime trade-alignment gate, which
         verifies ``engine_exit:<kind>`` attribution per executed trade and is
-        the authoritative backstop): a close that computes an opposite-side
-        quantity without referencing ``position.qty`` is not recognised here,
-        and in a spec that enters BOTH sides a full-size same-side scale-in
-        cannot be told apart from a cross-side close without the runtime
-        position side — so it may be flagged (false positive) or a cross-side
-        close waved through. The runtime gate reconciles both.
+        the authoritative backstop): a close whose ``qty`` is a name- or
+        attribute-bound position alias (``close_qty = pos.qty``;
+        ``self.held = pos.qty``) or a computed opposite-side quantity that
+        never references ``position.qty`` is not recognised here — class-wide
+        qty-alias collection was tried and produced false positives on
+        legitimately-computed entry quantities, so it was removed in favour
+        of the runtime backstop. Likewise, in a spec that enters BOTH sides a
+        full-size same-side scale-in cannot be told apart from a cross-side
+        close without the runtime position side — so it may be flagged (false
+        positive) or a cross-side close waved through. The runtime gate
+        reconciles all of these.
         """
         spec = cctx.spec
         if spec is None:
@@ -1044,13 +1060,11 @@ class CodeConformanceGate(GateResultsMixin):
             if isinstance(r, EntryRule) and r.side is not None
         }
 
-        # Resolve position aliases and qty aliases once so the close detector
-        # catches renamed handles (``current = ctx.position(...)``), wrapped
-        # qty expressions (``abs(position.qty)``), and names bound to a
-        # position qty (``close_qty = pos.qty``) — not just the literal
-        # ``position`` / ``pos`` names.
+        # Resolve position aliases once so the close detector catches renamed
+        # handles (``current = ctx.position(...)``), wrapped qty expressions
+        # (``abs(position.qty)``), and direct ``ctx.position(...).qty`` — not
+        # just the literal ``position`` / ``pos`` names.
         position_names = _collect_position_aliases(cctx.cls)
-        qty_alias_names = _collect_qty_aliases(cctx.cls, position_names)
 
         n_closes = 0
         for method in _iter_strategy_methods(cctx.cls):
@@ -1060,14 +1074,18 @@ class CodeConformanceGate(GateResultsMixin):
                 if not _is_submit_order_call(node):
                     continue
                 closed_sides: set[str] = set()
-                if _submit_order_qty_references_position(node, position_names, qty_alias_names):
+                if _submit_order_qty_references_position(node, position_names):
                     side = _submit_order_close_side(node)
                     # Resolved side → the one opposite side it retires;
                     # unresolvable side → fall back to every entered side.
                     closed_sides |= {side} if side is not None else set(entered_sides)
-                bracket_side = _submit_order_attached_bracket_side(node)
-                if bracket_side is not None:
-                    closed_sides.add(bracket_side)
+                has_bracket, bracket_side = _submit_order_attached_bracket(node)
+                if has_bracket:
+                    # Bracket closes the order's OWN side; a dynamic side falls
+                    # back to every entered side (as explicit closes do).
+                    closed_sides |= (
+                        {bracket_side} if bracket_side is not None else set(entered_sides)
+                    )
                 # A real close retires a side the spec actually enters; this
                 # also drops a same-side scale-in whose inferred opposite side
                 # the spec never enters.

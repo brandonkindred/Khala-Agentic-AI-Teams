@@ -66,10 +66,14 @@ together tell you where in the lifecycle execution stopped.
   closed trades exist (`entries_filled > 0`, `closed_trades == 0`,
   `open_positions_at_end` non-empty). The exit rules are too strict,
   reference an unset attribute, or only fire on conditions that never
-  occur in the test window. Loosen the exit predicate thresholds,
-  add a signal-based fallback exit (e.g. a reversal or momentum-
-  exhaustion condition), or widen the stop-loss / take-profit bands
-  so trades close within the test window. Do NOT add bar-counting
+  occur in the test window. Fix this at the SPEC level — exits are
+  engine-owned: loosen the exit predicate thresholds, add a
+  signal-based fallback to `spec.exit_rules` (e.g. a reversal or
+  momentum-exhaustion `signal_exit`), or widen the stop-loss /
+  take-profit bands so the engine closes trades within the test window.
+  Do NOT add a manual opposite-side `qty==position.qty` close in code —
+  the engine enforces `spec.exit_rules` and a manual close is rejected
+  by the conformance gate. Do NOT add bar-counting
   "time stop" exits (e.g. `if bars_held >= N: close`) — they are
   not a supported exit kind and will be rejected by the code
   conformance gate.

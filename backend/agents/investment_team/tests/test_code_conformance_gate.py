@@ -762,9 +762,11 @@ def test_no_duplicate_engine_exit_detects_attached_bracket_leg() -> None:
     assert any("manual position-closing order" in c.lower() for c in crits), crits
 
 
-def test_no_duplicate_engine_exit_detects_qty_alias_close() -> None:
-    # The close binds pos.qty to a local (close_qty) and submits qty=close_qty.
-    # The qty-alias propagation must still flag it.
+def test_no_duplicate_engine_exit_qty_name_alias_is_runtime_caught() -> None:
+    # A close that binds pos.qty to a local (close_qty = pos.qty; qty=close_qty)
+    # is a documented STATIC limit: class-wide qty-alias collection caused
+    # false positives on computed entry quantities, so name aliases are left
+    # to the runtime trade-alignment gate. The static gate must NOT flag it.
     code = textwrap.dedent(
         """
         from contract import Strategy
@@ -795,7 +797,126 @@ def test_no_duplicate_engine_exit_detects_qty_alias_close() -> None:
     spec = spec.model_copy(update={"requires_custom_code": True})
     results = CodeConformanceGate().check(code, spec)
     crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
+
+
+def test_no_duplicate_engine_exit_detects_direct_ctx_position_qty_close() -> None:
+    # Close uses qty=ctx.position(bar.symbol).qty directly (no intermediate
+    # variable). The direct-receiver detector must flag it.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and fast < slow:
+                    ctx.submit_order(
+                        symbol=bar.symbol,
+                        qty=ctx.position(bar.symbol).qty,
+                        side="SHORT",
+                    )
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[_rsi_signal_exit(), StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
     assert any("manual position-closing order" in c.lower() for c in crits), crits
+
+
+def test_no_duplicate_engine_exit_ignores_none_attachment() -> None:
+    # attached_stop_loss=stop where stop=None must NOT be treated as a bracket
+    # (the runtime creates no bracket child) — no false-positive critical.
+    code = textwrap.dedent(
+        """
+        from contract import OrderSide, Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    stop = None
+                    ctx.submit_order(
+                        symbol=bar.symbol,
+                        qty=qty,
+                        side=OrderSide.LONG,
+                        attached_stop_loss=stop,
+                    )
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry("long")],
+        exit_rules=[StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
+
+
+def test_no_duplicate_engine_exit_no_false_positive_on_computed_qty_entry() -> None:
+    # A hook references pos.qty (bookkeeping) while entries use a qty computed
+    # from equity. Class-wide qty-alias collection used to bind "qty" globally
+    # and flag these entries as closes; per-call detection must not.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_fill(self, ctx, fill):
+                pos = ctx.position(fill.symbol)
+                qty = pos.qty if pos is not None else 0
+                return qty
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is None and fast < slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry("long"), _sma_cross_entry("short")],
+        exit_rules=[TakeProfitRule(pct=0.1)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert not any("manual position-closing order" in c.lower() for c in crits), crits
 
 
 # ---------------------------------------------------------------------------
