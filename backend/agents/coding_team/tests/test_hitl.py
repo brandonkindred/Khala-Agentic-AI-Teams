@@ -49,6 +49,45 @@ def test_normalize_options_drops_reserved_other_id():
     assert out[0]["options"] == []
 
 
+def test_normalize_options_deduplicates_within_convert_to_structured_questions():
+    # Dedup in _normalize_options applies to BOTH conversion paths, not just
+    # normalize_open_questions. Two inputs whose IDs normalize to the same string must collapse.
+    out = hitl.convert_to_structured_questions(
+        [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": " a ", "label": "A-dup"}]}]
+    )
+    assert len(out[0]["options"]) == 1
+    assert out[0]["options"][0]["id"] == "a"
+
+
+def test_normalize_options_deduplicates_case_insensitive():
+    # IDs differing only by case are treated as the same ID (consistent with
+    # the case-insensitive comparison in answers_to_resolved).
+    out = hitl.convert_to_structured_questions(
+        [{"question_text": "Q?", "options": [{"id": "Cloud", "label": "Cloud"}, {"id": "cloud", "label": "Cloud 2"}]}]
+    )
+    assert len(out[0]["options"]) == 1
+    assert out[0]["options"][0]["id"] == "Cloud"  # first occurrence kept
+
+
+def test_normalize_open_questions_drops_generic_other_label():
+    # A non-compliant LLM may emit {id:"choice_other", label:"Other"} — the label filter
+    # must catch it even though the id is not the reserved "other" string.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "choice_other", "label": "Other"},
+                    {"id": "cloud", "label": "Cloud deployment"},
+                    {"id": "on_prem", "label": "On-premise deployment"},
+                ],
+            }
+        ]
+    )
+    ids = [o["id"] for o in out[0]["options"]]
+    assert ids == ["cloud", "on_prem"]
+
+
 def test_normalize_options_strips_whitespace_from_id_and_label():
     # IDs and labels with surrounding whitespace are stripped before storage and comparison,
     # so "other " is treated as the reserved ID and dropped, and " Yes " is matched against
@@ -85,7 +124,7 @@ def test_normalize_open_questions_drops_options_fewer_than_two():
 
 
 def test_normalize_open_questions_drops_duplicate_option_ids():
-    # Two entries with the same ID → deduplicated to one → fewer than 2 unique → free-text.
+    # Two entries with the same ID → _normalize_options deduplicates to one → fewer than 2 → free-text.
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "a", "label": "A2"}]}]
     )

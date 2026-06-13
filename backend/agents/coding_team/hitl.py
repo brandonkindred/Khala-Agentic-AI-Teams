@@ -44,7 +44,12 @@ DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 # blended with one context-specific option) and variant IDs recognized by their display label
 # (e.g. id="opt_yes", label="Yes") are both removed rather than silently accepted.
 _GENERIC_OPTION_IDS: frozenset = frozenset({"yes", "no", "not_sure"})
-_GENERIC_OPTION_LABELS: frozenset = frozenset({"yes", "no", "not sure", "not_sure", "not sure / need more info"})
+_GENERIC_OPTION_LABELS: frozenset = frozenset({
+    "yes", "no", "not sure", "not_sure", "not sure / need more info",
+    # "other" variants — a non-compliant LLM may emit {id:"choice_other", label:"Other"};
+    # filtering by label catches these even when the id is not the reserved "other" string.
+    "other", "other (specify)", "other (please specify)", "other (free text)",
+})
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
@@ -70,10 +75,15 @@ def answer_wait_timeout_s() -> float:
 
 def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
+    # Dedup by lowercased ID (first occurrence wins) so that: (a) IDs that differ only by
+    # whitespace after stripping are collapsed, (b) IDs that differ only by case are collapsed —
+    # consistent with the case-insensitive comparison in answers_to_resolved.
+    seen_ids: set = set()
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
             opt_id = str(o.get("id")).strip()
             if not opt_id:
+                logger.warning("Option with whitespace-only id will be dropped")
                 continue
             if opt_id.lower() == "other":
                 # "other" is the reserved synthetic free-text option added by the UI/API;
@@ -82,6 +92,11 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
                 # already prohibits it, so this is a defensive guard against a non-compliant LLM.
                 logger.warning("Option id 'other' is reserved and will be dropped")
                 continue
+            norm_key = opt_id.lower()
+            if norm_key in seen_ids:
+                logger.warning("Duplicate option id '%s' (case-insensitive) will be dropped", opt_id)
+                continue
+            seen_ids.add(norm_key)
             options.append(
                 {
                     "id": opt_id,
@@ -149,9 +164,10 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
         - Returns dicts each carrying ``question_text`` and ``options`` (always present); empties
           are dropped, and any ``context`` / ``options`` an agent supplied are preserved so
           domain-specific choices round-trip. Options that fail normalization (< 2 survive after
-          deduplication, or consist exclusively of generic yes/no/not-sure IDs) are discarded and
-          ``options`` is set to ``[]`` so callers have a uniform contract — the same fallback as
-          ``convert_to_structured_questions``. A non-list input yields ``[]``.
+          deduplication and generic-option filtering) are discarded and ``options`` is set to ``[]``
+          so callers have a uniform contract — the same fallback as ``convert_to_structured_questions``.
+          Deduplication is case-insensitive (consistent with ``answers_to_resolved``). A non-list
+          input yields ``[]``.
     """
     if not isinstance(raw, list):
         return []
@@ -165,17 +181,8 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
-            # Deduplicate by ID (first occurrence wins). Angular tracks options with
-            # `track option.id` and logs NG0955 for duplicates; answer resolution also
-            # picks the first label matching a submitted ID, so duplicate IDs corrupt
-            # both rendering and recorded decisions.
-            seen_ids: set = set()
-            deduped: list = []
-            for o in opts:
-                if o["id"] not in seen_ids:
-                    seen_ids.add(o["id"])
-                    deduped.append(o)
-            opts = deduped
+            # Deduplication by case-insensitive ID and the "other" guard are handled inside
+            # _normalize_options, so opts is already free of duplicates and reserved IDs here.
             # Cull individual generic options (by ID and by label) so that mixed sets
             # (e.g. yes/no blended with one context-specific option) and variant IDs
             # detected via their display label (e.g. id="opt_yes", label="Yes") are
