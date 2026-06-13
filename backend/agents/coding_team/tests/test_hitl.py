@@ -49,6 +49,27 @@ def test_normalize_options_drops_reserved_other_id():
     assert out[0]["options"] == []
 
 
+def test_normalize_options_strips_whitespace_from_id_and_label():
+    # IDs and labels with surrounding whitespace are stripped before storage and comparison,
+    # so "other " is treated as the reserved ID and dropped, and " Yes " is matched against
+    # the generic-label set and culled.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "other ", "label": "Another team"},   # trailing space → reserved, dropped
+                    {"id": "opt_a", "label": " Yes "},            # padded generic label → dropped
+                    {"id": "opt_b", "label": "Deploy to cloud"},  # clean label → kept
+                    {"id": "opt_c", "label": "Deploy on-premise"},  # clean label → kept
+                ],
+            }
+        ]
+    )
+    ids = [o["id"] for o in out[0]["options"]]
+    assert ids == ["opt_b", "opt_c"]
+
+
 def test_normalize_open_questions_missing_options_key():
     # A dict question that omits the options key entirely is treated as optionless.
     out = hitl.normalize_open_questions([{"question_text": "Q?"}])

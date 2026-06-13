@@ -72,7 +72,9 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
-            opt_id = str(o.get("id"))
+            opt_id = str(o.get("id")).strip()
+            if not opt_id:
+                continue
             if opt_id.lower() == "other":
                 # "other" is the reserved synthetic free-text option added by the UI/API;
                 # using it as a structured option id would cause the answer handler to treat
@@ -83,7 +85,7 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
             options.append(
                 {
                     "id": opt_id,
-                    "label": str(o.get("label") or o["id"]),
+                    "label": str(o.get("label") or opt_id).strip(),
                     "is_default": bool(o.get("is_default", False)),
                 }
             )
