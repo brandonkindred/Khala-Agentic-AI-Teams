@@ -50,8 +50,46 @@ class RecordingStore:
         return self._seen
 
 
+class _JobIdCapturingRanker:
+    """Records the ``job_id`` bound in the attribution context during rank()."""
+
+    def __init__(self) -> None:
+        self.job_id: str | None = None
+        self.team: str | None = None
+
+    def rank(self, postings, profile):
+        from llm_service.attribution import current_attribution
+
+        attr = current_attribution()
+        self.job_id = attr.job_id
+        self.team = attr.team
+        return [RankedJob(posting=p, score=1.0) for p in postings]
+
+
 def _make_postings(n):
     return [JobPosting(company=f"C{i}", title="Eng").ensure_fingerprint() for i in range(n)]
+
+
+def test_run_binds_api_job_id_for_telemetry():
+    """The owning API job_id (not the internal run_id) is bound when provided."""
+    ranker = _JobIdCapturingRanker()
+    orch = JobMatchingOrchestrator(
+        query_builder=FakeQB(), scanner=FakeScanner(_make_postings(1)), ranker=ranker, store=None
+    )
+    orch.run(JobMatchRequest(), profile=JobSeekerProfile(), job_id="api-job-123")
+    assert ranker.job_id == "api-job-123"
+    assert ranker.team == "job_matching"
+
+
+def test_run_falls_back_to_run_id_without_api_job_id():
+    """Direct/sync callers (no API job_id) still attribute to the internal run_id."""
+    ranker = _JobIdCapturingRanker()
+    orch = JobMatchingOrchestrator(
+        query_builder=FakeQB(), scanner=FakeScanner(_make_postings(1)), ranker=ranker, store=None
+    )
+    orch.run(JobMatchRequest(), profile=JobSeekerProfile())
+    assert ranker.job_id  # a non-empty uuid run_id
+    assert ranker.job_id != "api-job-123"
 
 
 def test_run_persists_and_returns_top_n():

@@ -64,6 +64,7 @@ def test_complete_validated_succeeds_after_parse_error(caplog):
         result = complete_validated(
             client,
             "generate an answer",
+            objective="test",
             schema=FounderAnswer,
         )
 
@@ -97,7 +98,7 @@ def test_complete_validated_terminal_parse_failure_raises_with_attempts(caplog):
 
     with caplog.at_level(logging.WARNING, logger="llm_service.structured"):
         with pytest.raises(LLMJsonParseError) as excinfo:
-            complete_validated(client, "prompt", schema=FounderAnswer)
+            complete_validated(client, "prompt", objective="test", schema=FounderAnswer)
 
     assert excinfo.value.correction_attempts_used == 1
     assert len(client.call_prompts) == 2
@@ -127,7 +128,7 @@ def test_complete_validated_corrects_validation_error():
         }
 
     client = _StubClient(handler)
-    result = complete_validated(client, "prompt", schema=FounderAnswer)
+    result = complete_validated(client, "prompt", objective="test", schema=FounderAnswer)
 
     assert isinstance(result, FounderAnswer)
     assert result.rationale == "validated on retry"
@@ -144,7 +145,7 @@ def test_complete_validated_terminal_validation_failure():
 
     client = _StubClient(handler)
     with pytest.raises(LLMSchemaValidationError) as excinfo:
-        complete_validated(client, "prompt", schema=FounderAnswer)
+        complete_validated(client, "prompt", objective="test", schema=FounderAnswer)
 
     assert excinfo.value.correction_attempts_used == 1
     assert len(client.call_prompts) == 2
@@ -182,7 +183,7 @@ def test_complete_validated_never_calls_extract_json_from_response(monkeypatch):
         }
 
     client = _StubClient(handler)
-    result = complete_validated(client, "prompt", schema=FounderAnswer)
+    result = complete_validated(client, "prompt", objective="test", schema=FounderAnswer)
     assert isinstance(result, FounderAnswer)
 
 
@@ -199,7 +200,9 @@ def test_correction_attempts_zero_opts_out():
 
     client = _StubClient(handler)
     with pytest.raises(LLMJsonParseError) as excinfo:
-        complete_validated(client, "prompt", schema=FounderAnswer, correction_attempts=0)
+        complete_validated(
+            client, "prompt", objective="test", schema=FounderAnswer, correction_attempts=0
+        )
 
     assert excinfo.value.correction_attempts_used == 0
     assert len(client.call_prompts) == 1
@@ -229,6 +232,7 @@ def test_context_is_forwarded_to_model_validate():
     result = complete_validated(
         client,
         "prompt",
+        objective="test",
         schema=ContextAwareModel,
         context={"allowed": {"green", "amber"}},
     )
@@ -237,7 +241,9 @@ def test_context_is_forwarded_to_model_validate():
     # Without the context, the validator rejects the same payload.
     client2 = _StubClient(handler)
     with pytest.raises(LLMSchemaValidationError):
-        complete_validated(client2, "prompt", schema=ContextAwareModel, correction_attempts=0)
+        complete_validated(
+            client2, "prompt", objective="test", schema=ContextAwareModel, correction_attempts=0
+        )
 
 
 def test_context_is_isolated_across_retry_attempts():
@@ -288,6 +294,7 @@ def test_context_is_isolated_across_retry_attempts():
     result = complete_validated(
         client,
         "prompt",
+        objective="test",
         schema=MutatingRetryModel,
         context=caller_context,
         correction_attempts=1,

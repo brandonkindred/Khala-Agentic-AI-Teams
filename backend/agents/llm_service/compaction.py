@@ -90,7 +90,9 @@ def _compact_single(
         f"--- END CONTENT ---\n\n"
         f"Compacted version:"
     )
-    result = llm.complete(prompt, temperature=0.0)
+    result = llm.complete(
+        prompt, objective=f"compact oversized {content_description}", temperature=0.0
+    )
     return result.strip()
 
 

@@ -114,7 +114,7 @@ def _run_scan_background(job_id: str, request: JobMatchRequest) -> None:
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_RUNNING)
-        result = _get_orchestrator().run(request)
+        result = _get_orchestrator().run(request, job_id=job_id)
         if is_job_cancelled(job_id):
             return
         update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))

@@ -126,6 +126,7 @@ class JobScannerAgent:
                 prompt,
                 temperature=0.0,
                 system_prompt=POSTING_EXTRACTION_SYSTEM_PROMPT,
+                objective="scan job posting",
             )
         except Exception:  # noqa: BLE001 - extraction is best-effort per page
             logger.warning("Posting extraction failed for %s", hit.url, exc_info=True)

@@ -36,5 +36,5 @@ def test_dummy_complete_json_architecture_stub() -> None:
 
 def test_dummy_complete_text_alias() -> None:
     c = DummyLLMClient()
-    s = c.complete_text("hi", temperature=0.0)
+    s = c.complete_text("hi", objective="test", temperature=0.0)
     assert isinstance(s, str)
