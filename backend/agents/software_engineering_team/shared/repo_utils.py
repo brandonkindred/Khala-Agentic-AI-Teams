@@ -224,6 +224,7 @@ def read_files_as_dict(
     extensions: Optional[List[str]] = None,
     *,
     omitted: Optional[List[str]] = None,
+    key_to_path: Optional[Dict[str, str]] = None,
 ) -> Dict[str, str]:
     """Read *paths* under *repo_path* into a ``{path: content}`` mapping.
 
@@ -257,6 +258,10 @@ def read_files_as_dict(
         - When *omitted* is provided, it gains one entry per non-extension skip,
           so ``set(paths)`` minus extension-filtered equals the reviewed keys'
           originals plus *omitted* (no path vanishes without a trace).
+        - When *key_to_path* is provided, it gains a ``review_key -> original_path``
+          entry for every included file, so a caller that receives a review
+          finding tagged with a (display-safe, possibly suffixed) key can
+          translate it back to the real on-disk path the fixer must edit.
         - A symlink is represented by its link target text (``# symlink -> ...``)
           and never dereferenced, so the target's unrelated content is not
           mislabeled under the link path and a link pointing outside the repo
@@ -270,12 +275,14 @@ def read_files_as_dict(
           than dropped; binary content (a NUL byte in the read prefix) is omitted
           rather than decoded into gibberish.
         - Result keys (and the symlink-target marker) are run through
-          :func:`strip_surrogates`, so a non-UTF-8 filename read via
-          surrogateescape cannot crash downstream UTF-8/JSON serialization. The
-          file content is still read from the original (surrogate-bearing) path.
-          Sanitizing is not injective, so when two distinct paths sanitize to the
-          same key the later one gets a numeric suffix (it never overwrites the
-          first) — every reviewed path keeps a distinct entry.
+          :func:`sanitize_path_for_text`, so a non-UTF-8 *or* control-character
+          filename cannot crash downstream UTF-8/JSON serialization or inject
+          prompt text via the coordinator's file label. The file content is still
+          read from the original (surrogate-bearing) path, and *key_to_path* keeps
+          the key→original mapping. Sanitizing is not injective, so when two
+          distinct paths sanitize to the same key the later one gets a numeric
+          suffix (it never overwrites the first) — every reviewed path keeps a
+          distinct entry.
         - Never reads a file outside *repo_path*: keys may come from untrusted
           agent output, so containment is enforced before any read.
     """
@@ -298,8 +305,12 @@ def read_files_as_dict(
             # A symlink is reported by its target, never dereferenced (which would
             # mislabel the target's content under the link or escape the repo).
             if full_path.is_symlink():
-                key = _disambiguated_key(result, strip_surrogates(rel_path))
-                result[key] = strip_surrogates(f"# symlink -> {os.readlink(full_path)}\n")
+                key = _disambiguated_key(result, sanitize_path_for_text(rel_path))
+                # Escape the target (it can carry control bytes) but keep a real
+                # trailing newline so the marker renders as one line.
+                result[key] = f"# symlink -> {sanitize_path_for_text(os.readlink(full_path))}\n"
+                if key_to_path is not None:
+                    key_to_path[key] = rel_path
                 continue
             # Non-symlink: resolve (following any intra-repo parent links) and
             # re-check containment before reading.
@@ -329,7 +340,10 @@ def read_files_as_dict(
                     omitted.append(rel_path)
                 continue
             text = (prefix + rest).decode("utf-8", errors="replace")
-            result[_disambiguated_key(result, strip_surrogates(rel_path))] = text
+            key = _disambiguated_key(result, sanitize_path_for_text(rel_path))
+            result[key] = text
+            if key_to_path is not None:
+                key_to_path[key] = rel_path
         except (OSError, RuntimeError, ValueError) as exc:
             logger.debug("read_files_as_dict: skipping %s (%s)", rel_path, exc)
             if omitted is not None:
@@ -338,7 +352,9 @@ def read_files_as_dict(
     return result
 
 
-def read_repo_files_as_dict(repo_path: Path) -> Dict[str, str]:
+def read_repo_files_as_dict(
+    repo_path: Path, *, key_to_path: Optional[Dict[str, str]] = None
+) -> Dict[str, str]:
     """Read every reviewable text file under *repo_path* into a ``{path: content}`` map.
 
     The whole-repo, all-file-types counterpart of :func:`read_files_as_dict`, used
@@ -373,7 +389,7 @@ def read_repo_files_as_dict(repo_path: Path) -> Dict[str, str]:
         rel = str(Path(*rel_parts))
         if not is_sensitive_path(rel):
             paths.append(rel)
-    return read_files_as_dict(repo_path, paths, extensions=None)
+    return read_files_as_dict(repo_path, paths, extensions=None, key_to_path=key_to_path)
 
 
 def truncate_for_context(

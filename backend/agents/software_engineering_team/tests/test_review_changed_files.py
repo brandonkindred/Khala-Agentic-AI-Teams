@@ -844,9 +844,15 @@ def test_select_review_input_withheld_only_change_is_reviewable(tmp_path: Path) 
     assert "TOKEN = 'changed'" not in files[_WITHHELD_NOTE_PATH]
 
 
-def test_select_review_input_excludes_deleted_secret_from_note(tmp_path: Path) -> None:
-    """A deleted secret's path is not surfaced in the deletion note."""
-    from software_engineering_team.backend_agent.agent import _select_review_input
+def test_select_review_input_deleted_secret_path_surfaced_without_content(
+    tmp_path: Path,
+) -> None:
+    """A deleted secret's CONTENT is withheld, but its PATH is surfaced (in the
+    withheld note) so a deletion-only secret change is not silently approved."""
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        _select_review_input,
+    )
 
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -863,11 +869,14 @@ def test_select_review_input_excludes_deleted_secret_from_note(tmp_path: Path) -
     _git(tmp_path, "commit", "-m", "delete env + gone")
 
     task = SimpleNamespace(description="x")
-    _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+    files, _code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert note is not None
-    assert "gone.py" in note  # ordinary deletion surfaced
-    assert ".env" not in note  # secret path name not surfaced
+    assert "gone.py" in note  # ordinary deletion surfaced in the deletion note
+    assert ".env" not in note  # secret stays OUT of the deletion note
+    # ...but the secret deletion is surfaced (path only) in the withheld note.
+    assert ".env" in files[_WITHHELD_NOTE_PATH]
+    assert "SECRET=base" not in files[_WITHHELD_NOTE_PATH]  # never its content
 
 
 def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
@@ -1158,13 +1167,15 @@ def test_select_review_input_includes_deleted_file_content(tmp_path: Path) -> No
     _git(tmp_path, "commit", "-m", "delete module")
 
     task = SimpleNamespace(description="x")
-    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = _select_review_input(tmp_path, task, written_files=None)
 
     assert code is None
-    # Removed content anchors under the real path so a finding can restore it.
+    # Removed content anchors byte-for-byte under the real path so a finding can
+    # restore it; the "this was deleted" framing lives in the note, not the blob
+    # (so line numbers and non-Python syntax stay intact).
     assert "module.py" in files
-    assert "def critical()" in files["module.py"]
-    assert "DELETED" in files["module.py"]
+    assert files["module.py"] == "def critical():\n    return 42\n"
+    assert note is not None and "DELETED" in note and "module.py" in note
 
 
 def test_select_review_input_deleted_binary_listed_without_content(tmp_path: Path) -> None:
@@ -1244,23 +1255,31 @@ def test_select_review_input_flags_unreadable_changed_file(tmp_path: Path) -> No
     assert "data.dat" in files[_UNREADABLE_NOTE_PATH]
 
 
-def test_strip_review_note_paths_blanks_synthetic_keys() -> None:
-    """An issue anchored on a synthetic note label has its file_path cleared so the
-    fix loop does not try to create a nonexistent artifact; real paths pass through."""
+def test_translate_finding_paths_neutralizes_only_synthesized_keys() -> None:
+    """A finding on an exact synthesized note key is cleared; a display-safe key is
+    mapped back to its real path; a real file that merely lives under the note
+    prefix (but was not synthesized) keeps its target."""
     from software_engineering_team.backend_agent.agent import (
         _DELETION_NOTE_PATH,
-        _strip_review_note_paths,
+        _translate_finding_paths,
     )
 
+    synthetic_keys = frozenset({_DELETION_NOTE_PATH})
+    key_to_path = {"caf\\xff.py": "caf\udcff.py", f"{_DELETION_NOTE_PATH}/real.py": "x"}
     issues = [
         {"file_path": _DELETION_NOTE_PATH, "description": "deletion looks unsafe"},
-        {"file_path": "app/main.py", "description": "real finding"},
+        {"file_path": "caf\\xff.py", "description": "bad encoding handling"},
+        {"file_path": f"{_DELETION_NOTE_PATH}/real.py", "description": "real finding"},
+        {"file_path": "app/main.py", "description": "untranslated real path"},
     ]
-    out = _strip_review_note_paths(issues)
+    out = _translate_finding_paths(issues, key_to_path, synthetic_keys)
 
-    assert out[0]["file_path"] == ""  # synthetic label neutralized
+    assert out[0]["file_path"] == ""  # exact synthetic label neutralized
     assert out[0]["description"] == "deletion looks unsafe"  # other fields intact
-    assert out[1]["file_path"] == "app/main.py"  # real path untouched
+    assert out[1]["file_path"] == "caf\udcff.py"  # display key → real on-disk path
+    # A real file under the note prefix that was NOT synthesized keeps its target.
+    assert out[2]["file_path"] == "x"
+    assert out[3]["file_path"] == "app/main.py"  # already real, untouched
 
 
 def test_format_path_note_escapes_control_characters() -> None:
@@ -1375,3 +1394,167 @@ def test_sanitize_path_for_text_escapes_controls_keeps_unicode() -> None:
     out = sanitize_path_for_text("x\udcff\x07.py")
     out.encode("utf-8")  # must not raise
     assert "\x07" not in out
+
+
+# ---------------------------------------------------------------------------
+# Reverse references, note-only gating, key→path mapping
+# ---------------------------------------------------------------------------
+
+
+def test_find_referencing_paths_lists_surviving_importers(tmp_path: Path) -> None:
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "consumer.py").write_text("from pkg.helper import h\n", encoding="utf-8")
+    (tmp_path / "unrelated.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    # Delete the helper from the worktree (consumer still imports it).
+    (tmp_path / "pkg" / "helper.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["pkg/helper.py"])
+
+    assert "consumer.py" in refs["pkg/helper.py"]  # surviving importer surfaced
+    assert "unrelated.py" not in refs.get("pkg/helper.py", [])
+
+
+def test_find_referencing_paths_skips_non_python_and_non_repo(tmp_path: Path) -> None:
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    assert find_referencing_paths(tmp_path, ["a.py"]) == {}  # non-repo → {}
+    _init_repo(tmp_path)
+    (tmp_path / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    assert find_referencing_paths(tmp_path, ["data.bin"]) == {}  # non-.py skipped
+
+
+def test_select_review_input_deletion_note_lists_dependents(tmp_path: Path) -> None:
+    """A deletion whose module is still imported lists the importer inline so the
+    reviewer can check the 'nothing depends on it' claim."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "consumer.py").write_text("import helper\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "helper.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete helper")
+
+    task = SimpleNamespace(description="x")
+    _files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert note is not None
+    assert "helper.py" in note
+    assert "still referenced by: consumer.py" in note
+
+
+def test_review_input_selection_unpacks_as_triple() -> None:
+    """ReviewInputSelection stays unpackable as the legacy (files, code, note)."""
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection({"a.py": "x"}, None, "note")
+    files, code, note = sel
+    assert files == {"a.py": "x"} and code is None and note == "note"
+
+
+def test_has_examinable_content_true_for_real_file() -> None:
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection({"a.py": "x = 1\n"}, None, None)
+    assert sel.has_examinable_content() is True
+
+
+def test_has_examinable_content_false_for_note_only() -> None:
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        ReviewInputSelection,
+    )
+
+    sel = ReviewInputSelection(
+        {_WITHHELD_NOTE_PATH: "withheld: app/secrets.py\n"},
+        None,
+        None,
+        synthetic_keys=frozenset({_WITHHELD_NOTE_PATH}),
+    )
+    assert sel.has_examinable_content() is False  # only an omission note
+
+
+def test_has_examinable_content_false_for_emptied_only() -> None:
+    from software_engineering_team.backend_agent.agent import (
+        _EMPTIED_NOTE_PATH,
+        ReviewInputSelection,
+    )
+
+    # An emptied file (empty content under a real key) plus its note — nothing the
+    # reviewer can actually examine.
+    sel = ReviewInputSelection(
+        {"truncated.py": "   \n", _EMPTIED_NOTE_PATH: "emptied: truncated.py\n"},
+        None,
+        None,
+        synthetic_keys=frozenset({_EMPTIED_NOTE_PATH}),
+    )
+    assert sel.has_examinable_content() is False
+
+
+def test_has_examinable_content_true_for_whole_repo_code() -> None:
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    assert ReviewInputSelection(None, "", None).has_examinable_content() is True
+
+
+def test_force_unexamined_rejection_blocks_and_adds_issue() -> None:
+    from types import SimpleNamespace as NS
+
+    from software_engineering_team.backend_agent.agent import _force_unexamined_rejection
+
+    review = NS(approved=True, issues=[])
+    out = _force_unexamined_rejection(review)
+
+    assert out.approved is False
+    assert len(out.issues) == 1
+    assert out.issues[0].file_path == ""  # not targeted at a file
+    assert "manual review" in out.issues[0].description.lower()
+
+
+def test_select_review_input_key_to_path_maps_real_paths(tmp_path: Path) -> None:
+    """key_to_path lets a finding tagged with a (display-safe) review key be
+    translated back to the real on-disk path."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "app" / "main.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "app/main.py" in sel.files
+    assert sel.key_to_path["app/main.py"] == "app/main.py"  # identity for ASCII paths
+
+
+def test_read_files_as_dict_key_to_path_for_control_char_name(tmp_path: Path) -> None:
+    """A control-char filename is sanitized in the key (no prompt injection) while
+    key_to_path retains the real path for finding translation."""
+    (tmp_path / "a\tb.py").write_text("x = 1\n", encoding="utf-8")
+    key_to_path: dict[str, str] = {}
+
+    result = read_files_as_dict(tmp_path, ["a\tb.py"], extensions=None, key_to_path=key_to_path)
+
+    assert "a\\tb.py" in result  # tab escaped in the review key
+    assert "a\tb.py" not in result  # raw control char never a key
+    assert key_to_path["a\\tb.py"] == "a\tb.py"  # maps back to the real path

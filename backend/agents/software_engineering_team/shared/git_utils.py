@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 from pathlib import Path
 from typing import Dict, List, Tuple
@@ -346,6 +347,68 @@ def read_paths_at_merge_base(
         if "\x00" in out:
             continue  # binary blob: omit rather than review as gibberish
         result[rel] = out
+    return result
+
+
+def find_referencing_paths(
+    repo_path: str | Path,
+    deleted_paths: List[str],
+    *,
+    max_refs_per_path: int = 10,
+) -> Dict[str, List[str]]:
+    """For each deleted path, the surviving worktree files that still mention it.
+
+    Best-effort reverse-dependency signal so a reviewer can check the deletion
+    note's instruction that "nothing still depends on" a removed module. For each
+    deleted ``.py`` path it ``git grep``s the *worktree* (tracked files, so the
+    just-removed file itself is gone) for the module's dotted import path
+    (``a.b.c`` derived from ``a/b/c.py``) and for a bare ``import <stem>`` — both
+    precise importer signals that keep the false-positive rate far below a bare
+    stem search. Non-``.py`` deletions are skipped (no language-agnostic import
+    form to match).
+
+    Preconditions:
+        - *deleted_paths* are repo-relative paths reported deleted by
+          :func:`list_changed_and_deleted`.
+    Postconditions:
+        - Returns ``{deleted_path: [referrer, ...]}`` only for deletions with at
+          least one surviving referrer; referrers exclude the deleted paths
+          themselves and are capped at *max_refs_per_path* (sorted) so a widely
+          imported module cannot flood the note. Returns ``{}`` when not a git
+          repository or git grep is unavailable; never raises for a bad pattern.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return {}
+    deleted_set = set(deleted_paths)
+    result: Dict[str, List[str]] = {}
+    for dp in deleted_paths:
+        p = Path(dp)
+        if p.suffix != ".py":
+            continue
+        stem = p.stem
+        if not stem or stem == "__init__":
+            continue
+        dotted = ".".join([*p.with_suffix("").parts])
+        # Two precise importer forms: the dotted module path and ``import <stem>``.
+        patterns = [
+            "-e",
+            re.escape(dotted),
+            "-e",
+            rf"import\s+{re.escape(stem)}\b",
+        ]
+        code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns])
+        if code != 0:
+            continue  # no matches (grep exits non-zero) or grep unavailable
+        refs = sorted(
+            {
+                ref.strip()
+                for ref in (out or "").splitlines()
+                if ref.strip() and ref.strip() not in deleted_set
+            }
+        )
+        if refs:
+            result[dp] = refs[:max_refs_per_path]
     return result
 
 
