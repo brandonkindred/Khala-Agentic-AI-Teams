@@ -49,7 +49,12 @@ from ..spec_dsl import (
     SignalExitRule,
     Source,
 )
-from .code_safety import _engine_exits_cover_sides
+from .code_safety import (
+    _collect_position_aliases,
+    _engine_exits_cover_sides,
+    _expr_references_position_qty,
+    _extract_side_literal,
+)
 from .code_safety_ast import (
     _find_strategy_subclasses,
     _get_call_name,
@@ -389,48 +394,58 @@ def _submit_order_closes_position(call: ast.Call) -> bool:
     return False
 
 
-# ``side=`` token (lowercased) → the position side a *closing* order
-# retires. A close submits the side OPPOSITE the open position, so a
-# SHORT/sell order closes a long and a LONG/buy order closes a short.
-_CLOSE_SIDE_OF_ORDER_SIDE: dict[str, str] = {
-    "short": "long",
-    "sell": "long",
-    "long": "short",
-    "buy": "short",
-}
-
-
 def _submit_order_close_side(call: ast.Call) -> Optional[str]:
     """Return the position side a closing ``submit_order`` retires.
 
     Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
-    Post: returns ``"long"`` / ``"short"`` when the ``side=`` value is a
-    string literal (``"SHORT"`` / ``"sell"`` / ...) or an
-    ``OrderSide.<NAME>`` attribute that maps to a known order side;
-    ``None`` when ``side`` is absent, a non-literal expression that cannot
-    be resolved statically, or an unrecognised token. The mapping inverts
-    the order side because a close submits the side opposite the position.
+    Post: returns ``"long"`` / ``"short"`` — the position side the order
+    closes — when the keyword ``side=`` value is a side literal
+    :func:`_extract_side_literal` recognises (an ``OrderSide.LONG`` /
+    ``OrderSide.SHORT`` attribute rooted at ``OrderSide``, an
+    ``OrderSide(...)`` call, or a bare ``"LONG"`` / ``"SHORT"`` string).
+    Returns ``None`` when ``side`` is absent or cannot be resolved to an
+    ``OrderSide`` literal (variables, opaque calls, or a non-``OrderSide``
+    enum such as a user-defined ``FakeSide.SHORT``).
 
-    Only the keyword ``side=`` form is inspected, consistent with
-    :func:`_submit_order_closes_position` (keyword ``qty=``) and the
-    synthesis prompt's mandated keyword-argument call shape. A positional
-    ``side`` is not recognised — but such a call also escapes
-    ``_submit_order_closes_position``, so it never reaches this helper as a
-    close in the first place.
+    The returned side is the OPPOSITE of the order side, because a close
+    submits the side opposite the position it retires (an ``OrderSide.SHORT``
+    order closes a long). Reusing :func:`_extract_side_literal` keeps side
+    inference identical to ``code_safety``'s entry-side detection and avoids
+    misreading an unrelated enum member as an order side.
+
+    Only the keyword ``side=`` form is inspected, consistent with the
+    position-``qty`` close detector and the synthesis prompt's mandated
+    keyword-argument call shape.
     """
     for kw in call.keywords:
         if kw.arg != "side":
             continue
-        v = kw.value
-        token: Optional[str] = None
-        if isinstance(v, ast.Constant) and isinstance(v.value, str):
-            token = v.value.lower()
-        elif isinstance(v, ast.Attribute):
-            token = v.attr.lower()
-        if token is None:
+        order_side = _extract_side_literal(kw.value)
+        if order_side is None:
             return None
-        return _CLOSE_SIDE_OF_ORDER_SIDE.get(token)
+        return "short" if order_side == "long" else "long"
     return None
+
+
+def _submit_order_qty_references_position(call: ast.Call, position_names: frozenset[str]) -> bool:
+    """True iff the call's keyword ``qty=`` references a position's ``.qty``.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``;
+    ``position_names`` is the alias set from
+    :func:`_collect_position_aliases`.
+    Post: True when the ``qty=`` argument is, or wraps, ``<alias>.qty`` for
+    any ``<alias>`` in ``position_names`` — covering plain
+    ``qty=position.qty``, a renamed alias (``current = ctx.position(...)``;
+    ``qty=current.qty``), and wrapped forms (``abs(position.qty)``,
+    ``position.qty * 1``). Broader than :func:`_submit_order_closes_position`
+    (which matches only the literal names ``position`` / ``pos``), so a manual
+    close cannot evade the duplicate-exit check through an alias or wrapping
+    expression.
+    """
+    for kw in call.keywords:
+        if kw.arg == "qty":
+            return _expr_references_position_qty(kw.value, position_names)
+    return False
 
 
 def _node_references_ctx_equity(node: ast.AST) -> bool:
@@ -952,14 +967,22 @@ class CodeConformanceGate(GateResultsMixin):
             if isinstance(r, EntryRule) and r.side is not None
         }
 
+        # Resolve position aliases once so the close detector catches renamed
+        # handles (``current = ctx.position(...)``; ``qty=current.qty``) and
+        # wrapped qty expressions (``abs(position.qty)``), not just the literal
+        # ``position`` / ``pos`` names.
+        position_names = _collect_position_aliases(cctx.cls)
+
         n_closes = 0
         for method in _iter_strategy_methods(cctx.cls):
             if method.name not in cctx.reachable:
                 continue
             for node in _iter_method_body_nodes(method):
-                if not _is_submit_order_call(node) or not _submit_order_closes_position(node):
+                if not _is_submit_order_call(node):
                     continue
-                # A ``qty=position.qty`` order is a close only when it
+                if not _submit_order_qty_references_position(node, position_names):
+                    continue
+                # A position-qty order is a close only when it
                 # retires a side the spec actually enters. A SAME-side
                 # full-size scale-in carries the same ``qty`` shape, but the
                 # side it "closes" (the opposite of the order side) is then
