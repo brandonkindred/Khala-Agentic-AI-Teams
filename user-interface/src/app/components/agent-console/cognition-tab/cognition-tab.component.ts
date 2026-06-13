@@ -2,6 +2,7 @@ import {
   ChangeDetectionStrategy,
   Component,
   OnInit,
+  WritableSignal,
   computed,
   inject,
   signal,
@@ -46,11 +47,6 @@ import type {
 
 type ProposalFilter = ProposalStatus | 'all';
 type RuleFilter = RuleStatus | 'all';
-
-/** Minimal writable-signal shape used by the shared error helper. */
-interface Settable<T> {
-  set(value: T): void;
-}
 
 /** Panel-wide message shown when cognition storage is unavailable (503). */
 const STORAGE_UNAVAILABLE_MESSAGE = 'Cognition data is temporarily unavailable. Try again shortly.';
@@ -268,12 +264,16 @@ export class CognitionTabComponent implements OnInit {
   }
 
   /**
-   * Public for tests. Optimistic remove + rollback; on success refetch rules so
-   * the activated rule appears, and keep the now-approved card visible when the
-   * current filter still includes it (`all`/`approved`). Skips reconciliation if
-   * the proposals list was reloaded mid-flight (filter/agent change).
+   * Optimistic remove + rollback; on success refetch rules so the activated
+   * rule appears. The approve endpoint returns only a `Rule` (no
+   * `decided_by`/`decided_at`), so when the decided card stays visible
+   * (`all`/`approved`) or a load superseded us, re-fetch proposals for the
+   * server's audit fields rather than fabricating them; under other filters the
+   * optimistic removal already reflects reality.
+   *
+   * @param p The pending proposal to approve.
    */
-  performApprove(p: RuleProposal): void {
+  private performApprove(p: RuleProposal): void {
     // Bind the decision to the proposal's own agent, not the (possibly changed)
     // selected agent, so switching agents mid-confirm can't misroute it.
     const agentId = p.agent_id;
@@ -289,11 +289,10 @@ export class CognitionTabComponent implements OnInit {
         this.actingProposalId.set(null);
         if (agentId !== this.selectedAgentId()) return; // agent changed — leave its view alone
         this.loadRules();
-        if (reqId !== this.proposalsReqId) {
-          this.loadProposals(); // a concurrent load won; re-sync so the card isn't stale
-          return;
+        const filter = this.proposalStatusFilter();
+        if (filter === 'all' || filter === 'approved' || reqId !== this.proposalsReqId) {
+          this.loadProposals(); // re-sync for server audit fields / superseding load
         }
-        this.reconcileDecided(prev, { ...p, status: 'approved' });
       },
       error: (err) => {
         this.actingProposalId.set(null);
@@ -322,12 +321,13 @@ export class CognitionTabComponent implements OnInit {
   }
 
   /**
-   * Public for tests. Optimistic remove + rollback; on success keep the
-   * now-rejected card (from the server response) visible when the current
-   * filter still includes it. Skips reconciliation if the proposals list was
-   * reloaded mid-flight.
+   * Optimistic remove + rollback; on success keep the now-rejected card (from
+   * the server response, which carries `decided_by`/`decided_at`) visible when
+   * the current filter still includes it. Re-fetches if a load superseded us.
+   *
+   * @param p The pending proposal to reject.
    */
-  performReject(p: RuleProposal): void {
+  private performReject(p: RuleProposal): void {
     const agentId = p.agent_id;
     if (!agentId || this.actingProposalId()) return;
     this.actingProposalId.set(p.id);
@@ -369,36 +369,53 @@ export class CognitionTabComponent implements OnInit {
 
   // Proposal display helpers --------------------------------------------------
 
-  /** Count of evidence refs backing a proposal. */
+  /**
+   * @param p A rule proposal.
+   * @returns The count of evidence refs backing it (`0` when absent).
+   */
   evidenceCount(p: RuleProposal): number {
     return p.evidence?.length ?? 0;
   }
 
-  /** Text of a proposal's proposed rule (`''` when absent). */
+  /**
+   * @param p A rule proposal.
+   * @returns The proposed rule's text, or `''` when absent.
+   */
   proposedRuleText(p: RuleProposal): string {
     return p.proposed_rule?.text ?? '';
   }
 
-  /** Mode of a proposal's proposed rule (defaults to `advisory`). */
+  /**
+   * @param p A rule proposal.
+   * @returns The proposed rule's mode, defaulting to `advisory`.
+   */
   proposedRuleMode(p: RuleProposal): RuleMode {
     return p.proposed_rule?.mode ?? 'advisory';
   }
 
-  /** Short human summary of a proposal, for aria-labels. */
+  /**
+   * @param p A rule proposal.
+   * @returns A short human summary (proposed-rule text, else target-rule text) for aria-labels.
+   */
   proposalSummary(p: RuleProposal): string {
     return this.proposedRuleText(p) || this.targetRuleText(p.target_rule_id);
   }
 
-  /** Resolve a target rule from the loaded rules, or `undefined` if not present. */
+  /**
+   * @param id A target rule id (may be null/undefined).
+   * @returns The matching loaded `Rule`, or `undefined` if not present.
+   */
   targetRule(id: string | null | undefined): Rule | undefined {
     if (!id) return undefined;
     return this.rules().find((r) => r.id === id);
   }
 
   /**
-   * Text of a target rule when it is loaded; empty otherwise. Never returns the
-   * raw id, which would leak an internal identifier (e.g. for a retired target
-   * absent from the active-rules view).
+   * Never returns the raw id, which would leak an internal identifier (e.g. for
+   * a retired target absent from the active-rules view).
+   *
+   * @param id A target rule id (may be null/undefined).
+   * @returns The target rule's text when loaded; `''` otherwise.
    */
   targetRuleText(id: string | null | undefined): string {
     return this.targetRule(id)?.text ?? '';
@@ -468,12 +485,18 @@ export class CognitionTabComponent implements OnInit {
     return this.expandedEventIds().has(id);
   }
 
-  /** Whether a memory event carries a non-empty `data` payload. */
+  /**
+   * @param e A memory event.
+   * @returns Whether it carries a non-empty `data` payload.
+   */
   hasData(e: MemoryEvent): boolean {
     return !!e.data && Object.keys(e.data).length > 0;
   }
 
-  /** Pretty-printed JSON of a memory event's `data`. */
+  /**
+   * @param e A memory event.
+   * @returns Its `data` payload pretty-printed as JSON.
+   */
   formatData(e: MemoryEvent): string {
     return JSON.stringify(e.data, null, 2);
   }
@@ -521,8 +544,8 @@ export class CognitionTabComponent implements OnInit {
    */
   private applyError(
     err: unknown,
-    errSig: Settable<string | null>,
-    unavailSig: Settable<boolean>,
+    errSig: WritableSignal<string | null>,
+    unavailSig: WritableSignal<boolean>,
     fallback: string,
   ): void {
     if ((err as { status?: number })?.status === 503) {

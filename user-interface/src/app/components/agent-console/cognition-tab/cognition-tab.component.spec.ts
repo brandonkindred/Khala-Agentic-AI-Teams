@@ -158,7 +158,7 @@ describe('CognitionTabComponent', () => {
     const f = build();
     f.detectChanges();
     api.listRules.mockClear();
-    f.componentInstance.performApprove(addProposal);
+    f.componentInstance.approve(addProposal);
     expect(api.approveProposal).toHaveBeenCalledWith('a1', 'p1');
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')).toBeUndefined();
     expect(api.listRules).toHaveBeenCalledTimes(1); // refetch after activation
@@ -170,7 +170,7 @@ describe('CognitionTabComponent', () => {
       .mockReturnValue(throwError(() => ({ error: { detail: 'conflict' } })));
     const f = build();
     f.detectChanges();
-    f.componentInstance.performApprove(addProposal);
+    f.componentInstance.approve(addProposal);
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')).toBeDefined();
     expect(f.componentInstance.proposalsError()).toBe('conflict');
   });
@@ -178,25 +178,31 @@ describe('CognitionTabComponent', () => {
   it('never approves a stale-evidence proposal', () => {
     const f = build();
     f.detectChanges();
-    f.componentInstance.performApprove(staleProposal);
-    expect(api.approveProposal).not.toHaveBeenCalled();
     f.componentInstance.approve(staleProposal);
     expect(dialog.open).not.toHaveBeenCalled();
+    expect(api.approveProposal).not.toHaveBeenCalled();
   });
 
-  it('keeps an approved card visible (as approved) under the all filter', () => {
+  it('re-fetches proposals after approve so server audit fields appear (all filter)', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setProposalFilter('all');
-    f.componentInstance.performApprove(addProposal);
+    // The post-approval reload returns the server's decided proposal.
+    api.listProposals = vi
+      .fn()
+      .mockReturnValue(
+        of([{ ...addProposal, status: 'approved', decided_by: 'op', decided_at: 't' }, staleProposal]),
+      );
+    f.componentInstance.approve(addProposal);
     const card = f.componentInstance.proposals().find((p) => p.id === 'p1');
     expect(card?.status).toBe('approved');
+    expect(card?.decided_by).toBe('op');
   });
 
   it('rejects: optimistically removes the card', () => {
     const f = build();
     f.detectChanges();
-    f.componentInstance.performReject(addProposal);
+    f.componentInstance.reject(addProposal);
     expect(api.rejectProposal).toHaveBeenCalledWith('a1', 'p1');
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')).toBeUndefined();
   });
@@ -208,7 +214,7 @@ describe('CognitionTabComponent', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setProposalFilter('all');
-    f.componentInstance.performReject(addProposal);
+    f.componentInstance.reject(addProposal);
     const card = f.componentInstance.proposals().find((p) => p.id === 'p1');
     expect(card?.status).toBe('rejected');
     expect(card?.decided_by).toBe('op');
@@ -220,7 +226,7 @@ describe('CognitionTabComponent', () => {
       .mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
     const f = build();
     f.detectChanges();
-    f.componentInstance.performReject(addProposal);
+    f.componentInstance.reject(addProposal);
     expect(f.componentInstance.proposals().find((p) => p.id === 'p1')).toBeDefined();
     expect(f.componentInstance.proposalsError()).toBe('nope');
   });
@@ -372,18 +378,18 @@ describe('CognitionTabComponent', () => {
     expect(c.isEventExpanded('e1')).toBe(false);
   });
 
-  it('skips approve reconciliation when proposals reload mid-flight', () => {
+  it('re-syncs proposals when a reload finishes mid-approve (pending filter)', () => {
     const approveSubject = new Subject<typeof rules[0]>();
     api.approveProposal = vi.fn().mockReturnValue(approveSubject);
     const f = build();
-    f.detectChanges();
-    f.componentInstance.setProposalFilter('all'); // list = [add, stale]
-    f.componentInstance.performApprove(addProposal); // captures reqId, optimistic remove
+    f.detectChanges(); // default filter = pending
+    f.componentInstance.approve(addProposal); // optimistic remove, captures reqId
+    api.listProposals.mockClear();
     f.componentInstance.loadProposals(); // concurrent reload bumps the request id
     approveSubject.next(rules[0]);
     approveSubject.complete();
-    // Reconcile is skipped: the reloaded list wins, p1 is not forced to approved.
-    expect(f.componentInstance.proposals().find((p) => p.id === 'p1')?.status).toBe('pending');
+    // Request id changed under the pending filter → success path re-fetches.
+    expect(api.listProposals).toHaveBeenCalledTimes(2);
   });
 
   it('re-syncs proposals when a reload finishes mid-reject', () => {
@@ -392,7 +398,7 @@ describe('CognitionTabComponent', () => {
     const f = build();
     f.detectChanges();
     f.componentInstance.setProposalFilter('all');
-    f.componentInstance.performReject(addProposal); // captures reqId, optimistic remove
+    f.componentInstance.reject(addProposal); // captures reqId, optimistic remove
     api.listProposals.mockClear();
     f.componentInstance.loadProposals(); // concurrent reload bumps the request id
     rejectSubject.next({ ...addProposal, status: 'rejected' });
@@ -406,10 +412,10 @@ describe('CognitionTabComponent', () => {
     api.approveProposal = vi.fn().mockReturnValue(NEVER); // stays pending
     const f = build();
     f.detectChanges();
-    f.componentInstance.performApprove(addProposal);
+    f.componentInstance.approve(addProposal);
     expect(f.componentInstance.actingProposalId()).toBe('p1');
     // A concurrent reject on another proposal must be ignored.
-    f.componentInstance.performReject({ ...addProposal, id: 'p2' });
+    f.componentInstance.reject({ ...addProposal, id: 'p2' });
     expect(api.rejectProposal).not.toHaveBeenCalled();
   });
 
@@ -445,7 +451,7 @@ describe('CognitionTabComponent', () => {
     f.detectChanges();
     // Operator opened the dialog for p1 (agent a1), then switched to a2.
     f.componentInstance.selectAgent('a2');
-    f.componentInstance.performApprove(addProposal); // addProposal.agent_id === 'a1'
+    f.componentInstance.approve(addProposal); // addProposal.agent_id === 'a1'
     expect(api.approveProposal).toHaveBeenCalledWith('a1', 'p1');
     // a2's proposal view is left untouched.
     expect(f.componentInstance.proposals()).toEqual([addProposal, staleProposal]);
