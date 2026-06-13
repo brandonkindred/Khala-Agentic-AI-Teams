@@ -326,6 +326,61 @@ def test_stream_falls_back_to_derived_agent_when_unkeyed(monkeypatch) -> None:
     assert seen["agent_key"] == "ui_design"
 
 
+def test_stream_recovers_agent_key_from_wrapped_client_when_unkeyed(monkeypatch) -> None:
+    """A keyed client adapted without repeating agent_key — e.g.
+    ``get_strands_model(client=get_client("backend"))`` — is still attributed to
+    that key. The adapter recovers it from the backing ``_AttributingClient``
+    before the path-derived fallback, even though the dispatch unwraps it."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+    from llm_service.factory import attributed_client
+
+    # If the path fallback were reached it would record "wrong_path"; assert it isn't.
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "wrong_path")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return super().chat(messages, **kwargs)
+
+    keyed = attributed_client(_AgentClient({"ok": True}), "backend")
+    model = LLMClientModel(keyed, agent_key=None)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "backend"
+
+
+def test_structured_output_recovers_agent_key_from_wrapped_client(monkeypatch) -> None:
+    """``structured_output`` mirrors ``stream``: a backing ``_AttributingClient``'s
+    key is recovered when the adapter itself is unkeyed."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+    from llm_service.factory import attributed_client
+
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "wrong_path")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return {"value": 1}
+
+    class _Out(BaseModel):
+        value: int
+
+    keyed = attributed_client(_AgentClient({"value": 1}), "backend")
+    model = LLMClientModel(keyed, agent_key=None)
+
+    async def _run() -> None:
+        async for _ in model.structured_output(
+            _Out, [{"role": "user", "content": [{"text": "hi"}]}]
+        ):
+            pass
+
+    asyncio.run(_run())
+    assert seen["agent_key"] == "backend"
+
+
 def test_stream_uses_bound_objective_over_generic() -> None:
     """A task-specific objective bound by the caller (e.g. the PA wrapper) is
     forwarded instead of the adapter's generic placeholder."""

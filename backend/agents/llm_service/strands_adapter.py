@@ -57,7 +57,7 @@ from strands.types.streaming import StreamEvent
 from strands.types.tools import ToolChoice, ToolSpec
 
 from .attribution import caller_agent, caller_team, current_attribution, llm_attribution
-from .factory import get_client, unwrap_client
+from .factory import client_agent_key, get_client, unwrap_client
 from .interface import LLMClient
 
 logger = logging.getLogger(__name__)
@@ -440,12 +440,25 @@ class LLMClientModel(Model):
         # Derive team + agent identity here, on the calling task whose stack still
         # holds the originating agent frame; binding into the context means they
         # survive the ``to_thread`` hand-off (asyncio copies the context), where
-        # the worker thread's stack no longer reaches the agent. The configured
-        # agent_key wins; otherwise a path-derived identity fills the field so
-        # unkeyed ``get_strands_model()`` calls aren't recorded as ``agent=-``.
-        # The configured objective is a fallback — a caller that bound a
-        # task-specific objective (e.g. the PA wrapper) keeps it.
-        agent_key = cfg.agent_key or caller_agent()
+        # the worker thread's stack no longer reaches the agent.
+        #
+        # Priority for the agent key: the explicitly configured ``cfg.agent_key``
+        # (which also reflects ``clone``/``update_config`` changes) wins; then a
+        # key already bound on the context by an orchestrator; then the key held
+        # by the backing ``_AttributingClient`` when the model was built via
+        # ``get_strands_model(client=get_client("backend"))`` *without* repeating
+        # ``agent_key`` — recovering it here is essential because the dispatch
+        # below unwraps that client, discarding its binding. Only when none of
+        # those authoritative keys exist does a path-derived identity fill the
+        # field so unkeyed ``get_strands_model()`` calls aren't recorded as
+        # ``agent=-``. The configured objective is a fallback — a caller that
+        # bound a task-specific objective (e.g. the PA wrapper) keeps it.
+        agent_key = (
+            cfg.agent_key
+            or current_attribution().agent_key
+            or client_agent_key(self._client)
+            or caller_agent()
+        )
         team = current_attribution().team or caller_team()
         objective = (
             current_attribution().objective or f"strands agent turn ({cfg.agent_key or 'agent'})"
@@ -550,11 +563,18 @@ class LLMClientModel(Model):
         think = self._config.think  # bool | str | None — never coerce; levels must survive
 
         # Bind the team + agent identity on the calling task (see ``stream``) so
-        # they survive the ``to_thread`` hand-off into the worker thread. The
-        # configured agent_key wins; otherwise a path-derived identity fills it.
-        # The configured objective is a fallback — a bound task-specific one wins.
+        # they survive the ``to_thread`` hand-off into the worker thread. Same
+        # key priority as ``stream``: configured key, then a context-bound key,
+        # then the backing ``_AttributingClient``'s key (which the unwrap below
+        # would otherwise discard), and only then a path-derived fallback. The
+        # configured objective is a fallback — a bound task-specific one wins.
         configured_key = getattr(self._config, "agent_key", "") or ""
-        agent_key = configured_key or caller_agent()
+        agent_key = (
+            configured_key
+            or current_attribution().agent_key
+            or client_agent_key(self._client)
+            or caller_agent()
+        )
         team = current_attribution().team or caller_team()
         objective = (
             current_attribution().objective

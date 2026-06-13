@@ -209,6 +209,16 @@ def caller_team() -> str:
 
 # Directory names that are containers rather than an agent's own package — when
 # the calling file sits directly in one, its filename stem is the better identity.
+#
+# Maintenance note: this is a deliberately conservative denylist, not an
+# exhaustive one. It must be extended when a new *generic container* directory
+# convention is introduced (e.g. a shared ``handlers/`` or ``runners/`` layer);
+# the failure mode of omitting one is benign and self-evident — ``caller_agent``
+# reports the container directory name (e.g. ``handlers``) instead of the finer
+# file stem, which is visibly wrong in logs and points straight back here. It is
+# intentionally a module constant rather than env-configurable: the value is a
+# property of the repository's directory layout, known at author time, not a
+# per-deployment tuning knob.
 _GENERIC_AGENT_DIRS = frozenset(
     {"agents", "shared", "tool_agents", "phases", "agent_implementations", "api"}
 )

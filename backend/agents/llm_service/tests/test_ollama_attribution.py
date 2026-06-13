@@ -90,11 +90,11 @@ def test_concurrent_calls_do_not_cross_attribute(monkeypatch) -> None:
     """
     records: dict = {}
     lock = threading.Lock()
-    monkeypatch.setattr(
-        ollama_mod,
-        "record_llm_call",
-        lambda **kw: records.__setitem__(kw["agent_key"], kw),
-    )
+
+    def _capture(**kw):
+        records[kw["agent_key"]] = kw
+
+    monkeypatch.setattr(ollama_mod, "record_llm_call", _capture)
     # A single shared client instance, as the factory cache would hand out.
     client = OllamaLLMClient(model="m")
     barrier = threading.Barrier(2)

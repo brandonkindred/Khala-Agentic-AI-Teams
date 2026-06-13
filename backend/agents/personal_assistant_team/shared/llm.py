@@ -120,7 +120,9 @@ class LLMClient(_BaseLLMClient):
 
         :param objective: Short phrase describing the call's purpose for LLM
             log/telemetry attribution. If empty, inherits from the current
-            ``llm_attribution`` context; if none is set, a generic fallback is used.
+            ``llm_attribution`` context. If no objective is set anywhere, the
+            downstream consumer supplies the generic fallback — for the Strands
+            path that is the adapter (e.g. ``"strands agent turn (<agent_key>)"``).
 
         Preconditions: ``prompt`` is non-empty.
         Postconditions: returns a dict or raises ``JSONExtractionFailure``.

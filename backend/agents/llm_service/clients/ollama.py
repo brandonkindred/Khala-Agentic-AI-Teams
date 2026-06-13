@@ -59,17 +59,33 @@ _latency_var: ContextVar[int] = ContextVar("llm_ollama_latency_ms", default=0)
 
 
 def _caller_tag() -> str:
-    """Return 'module.function' of the first caller outside llm_service for log context."""
-    import inspect
+    """Return 'module.function' of the first caller outside llm_service for log context.
 
-    for frame_info in inspect.stack()[2:]:  # skip _caller_tag and its immediate caller
-        mod = frame_info.frame.f_globals.get("__name__", "")
+    Walks the stack with ``sys._getframe`` rather than ``inspect.stack()``: this
+    runs once per LLM request, and ``inspect.stack()`` materializes the whole
+    stack *and* reads each frame's source file off disk to populate context
+    lines we never use. Frame walking reads only ``f_globals['__name__']`` and
+    ``f_code.co_name`` — no file I/O. On a runtime without ``sys._getframe`` it
+    degrades to ``"unknown"`` (it does not error).
+    """
+    import sys
+
+    getframe = getattr(sys, "_getframe", None)
+    if getframe is None:  # pragma: no cover - non-CPython fallback
+        return "unknown"
+    try:
+        frame = getframe(2)  # skip _caller_tag and its immediate (in-llm_service) caller
+    except ValueError:  # pragma: no cover - shallow stack
+        return "unknown"
+    while frame is not None:
+        mod = frame.f_globals.get("__name__", "")
         if mod and "llm_service" not in mod:
-            func = frame_info.function
+            func = frame.f_code.co_name
             # Shorten module path: "blogging.blog_writer_agent.agent" -> "blog_writer_agent.agent"
             parts = mod.rsplit(".", 2)
             short = ".".join(parts[-2:]) if len(parts) > 1 else mod
             return f"{short}.{func}"
+        frame = frame.f_back
     return "unknown"
 
 

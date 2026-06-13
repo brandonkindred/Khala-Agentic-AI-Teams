@@ -114,6 +114,11 @@ def test_wrapper_binds_agent_key_into_attribution(monkeypatch: pytest.MonkeyPatc
 
     # Patch the inner implementation so the real public complete_json (which binds
     # the objective) and the factory wrapper (which binds agent_key) both run.
+    # The public/_impl split is a deliberate, stable seam: the public method owns
+    # the attribution binding and delegates the actual generation to ``_*_impl``,
+    # which is exactly the boundary a test must observe to assert what the wrapper
+    # bound. Patching it (rather than the public method) is intentional, not a
+    # leak of an unstable internal — a rename would update this seam in lockstep.
     monkeypatch.setattr(c._inner, "_complete_json_impl", spy)
     out = c.complete_json("p", objective="rank candidates")
     assert out == {"ok": True}
