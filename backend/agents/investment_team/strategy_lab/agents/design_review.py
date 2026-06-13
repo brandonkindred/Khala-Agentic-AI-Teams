@@ -55,6 +55,72 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
 )
 
 
+# The LLM reviewer must not block on objections the deterministic
+# ``SpecReadinessGate`` already owns, nor on the (removed) max-drawdown
+# constraint. The orchestrator only invokes the reviewer once that gate has
+# passed, so:
+#   * a ``sizing`` objection re-litigates a cleared check (Rule 5 realisability
+#     + Rule 9 deployed-vs-cap coherence) — including the recurring
+#     deployed-size-vs-stop "0.25% per trade" misread; and
+#   * an objection about the retired max-drawdown *limit* is moot — max drawdown
+#     is not a constraint (a strategy may lose up to 100% by design).
+# Both are demoted to ``info`` in :func:`_coerce_critique`.
+#
+# This is deliberately NOT a blanket ``risk_limits`` carve-out: the gate does
+# NOT check every risk-limit failure mode (e.g. ``max_gross_leverage=0`` passes
+# the gate yet makes ``RiskFilter.can_enter`` reject every order — a guaranteed
+# zero-trade strategy), so a genuine non-drawdown ``risk_limits`` critique
+# (leverage, open positions, concentration) MUST keep blocking readiness.
+
+# Matches a reference to the *retired max-drawdown limit/constraint* — NOT a
+# generic mention of "drawdown". A real exit-completeness defect such as
+# "no stop-loss or drawdown-protection exit" must keep blocking, so only the
+# limit phrasing ("max drawdown", "maximum drawdown", "max_drawdown_pct",
+# "drawdown limit/cap/ceiling/threshold/constraint") is treated as demotable.
+_MAX_DRAWDOWN_LIMIT_RE = re.compile(
+    r"max(?:imum)?[\s_-]*drawdown(?:_pct)?"
+    r"|drawdown[\s_-]+(?:limit|cap|constraint|ceiling|threshold)",
+    re.IGNORECASE,
+)
+
+# Sizing kinds whose realisability/coherence the deterministic gate FULLY owns
+# (Rule 5 realisability + Rule 9 deployed-vs-cap). ``volatility_target`` is
+# deliberately absent: ``SpecReadinessGate._check_sizing_realisable`` abstains on
+# it and only emits a *warning* (e.g. an implausible ``target_annual_vol``),
+# which the orchestrator treats as ready — so for vol-target the LLM reviewer's
+# sizing objection is the ONLY substantive check and must keep blocking.
+_GATE_OWNED_SIZING_KINDS: frozenset[str] = frozenset({"fixed_fraction", "fixed_notional"})
+
+
+def _sizing_owned_by_gate(sizing_kind: object) -> bool:
+    """True when the deterministic gate fully validates this sizing kind.
+
+    Pre: ``sizing_kind`` is the spec's ``sizing.kind`` (str) or None.
+    Post: True iff ``sizing_kind`` is a gate-owned static kind; False for
+    ``volatility_target`` (gate abstains) and for unknown/missing kinds (fail
+    safe — keep a sizing objection blocking when we cannot confirm ownership).
+    """
+    return sizing_kind in _GATE_OWNED_SIZING_KINDS
+
+
+def _is_demotable_issue(issue: "CritiqueIssue", *, sizing_owned: bool) -> bool:
+    """True when ``issue`` re-litigates a deterministic-gate-owned check or the
+    removed max-drawdown constraint, so the reviewer may not block on it.
+
+    Pre: ``issue`` is a :class:`CritiqueIssue`; ``sizing_owned`` says whether the
+    spec's sizing kind is one the deterministic gate fully validates.
+    Post: returns True iff (the issue is a ``sizing`` objection AND
+    ``sizing_owned``) OR it references the retired max-drawdown *limit* (per
+    ``_MAX_DRAWDOWN_LIMIT_RE``). A ``sizing`` objection on a non-owned kind
+    (``volatility_target``), a substantive objection that merely mentions the
+    word "drawdown" (e.g. a missing drawdown-protection *exit*), and non-drawdown
+    ``risk_limits`` objections are all left blocking.
+    """
+    if issue.field == "sizing":
+        return sizing_owned
+    return bool(_MAX_DRAWDOWN_LIMIT_RE.search(issue.description))
+
+
 def _normalize_issue_text(text: str) -> str:
     """Normalise critique prose so trivial rewordings map to one identity.
 
@@ -320,9 +386,13 @@ Speculative: {speculative}
 
 You are the only LLM in this loop. The deterministic gate already
 catches mechanical errors — do not duplicate them. Focus on substantive
-defects: thesis coherence, signal alignment, risk-control completeness,
-universe ↔ thesis fit, sizing realism, and hand-wavy or measurable-edge-
-absent specifications.
+defects: thesis coherence, signal alignment, exit/risk-control
+completeness, universe ↔ thesis fit, and hand-wavy or measurable-edge-
+absent specifications. Sizing and `risk_limits` arithmetic are owned by
+the deterministic gate — do NOT block on them (any sizing / risk_limits
+issue you raise is advisory only), and there is NO max-drawdown
+constraint: a strategy may lose up to 100% by design, so never flag
+drawdown reachability.
 
 Return ONLY a JSON object — no markdown — with this shape:
 
@@ -423,7 +493,11 @@ class DesignReviewAgent:
             logger.warning("DesignReviewAgent failed to produce parseable JSON: %s", exc)
             return _fail_closed_critique(exc, readiness_findings)
 
-        critique = _coerce_critique(parsed, readiness_findings)
+        critique = _coerce_critique(
+            parsed,
+            readiness_findings,
+            sizing_owned=_sizing_owned_by_gate(getattr(spec.sizing, "kind", None)),
+        )
         return critique
 
 
@@ -490,6 +564,7 @@ def _coerce_critique(
     readiness_findings: List[str],
     *,
     demote_min_severity: Literal["warning", "critical"] = "warning",
+    sizing_owned: bool = True,
 ) -> SpecCritique:
     """Convert a parsed LLM JSON dict into a :class:`SpecCritique`.
 
@@ -518,13 +593,27 @@ def _coerce_critique(
     on an otherwise-ready verdict are accepted verbatim instead of burning
     a self-revision round.
 
+    Deterministic-gate carve-out: issues for which :func:`_is_demotable_issue`
+    is true are demoted to ``info`` before the blocking computation — i.e.
+    ``sizing`` objections *when* ``sizing_owned`` (the spec's sizing kind is one
+    the gate fully validates), and any objection referencing the retired
+    max-drawdown *limit* (max drawdown is not a constraint). ``sizing_owned`` is
+    ``False`` for ``volatility_target`` (the gate abstains and only warns, so the
+    reviewer's plausibility objection is the only substantive check) — such a
+    sizing objection keeps blocking. Non-drawdown ``risk_limits`` objections
+    (e.g. ``max_gross_leverage=0``) are likewise never demoted. A not-ready
+    verdict whose ONLY blocking objections were demotable ones is promoted to
+    ``ready=True`` (with an audit-trail ``info`` note) rather than left to churn
+    the loop on a veto the reviewer may not cast.
+
     Preconditions: ``parsed`` is a dict from a parsed LLM JSON payload;
     ``demote_min_severity`` is one of ``"warning"`` / ``"critical"``.
-    Postconditions: returns a :class:`SpecCritique` whose ``ready`` is
-    ``False`` whenever a blocking issue (per the threshold) is present, and
-    whose ``open_issue_ids`` is non-empty whenever ``ready`` is ``False`` (a
-    not-ready verdict always carries at least one blocking issue, synthesised
-    if the reviewer named none or only ``info`` notes).
+    Postconditions: returns a :class:`SpecCritique`. Demotable issues (see
+    :func:`_is_demotable_issue`) never carry a blocking severity (demoted to
+    ``info``). ``ready`` is ``False`` whenever a non-demotable blocking issue is
+    present; when ``ready`` is ``False`` the ``open_issue_ids`` set is non-empty
+    (a blocking issue is synthesised if the reviewer named none, or only ``info``
+    notes, with no demoted blocking objection to promote on).
     """
     ready = _coerce_strict_bool(parsed.get("ready"))
     rationale = str(parsed.get("rationale", "")).strip()
@@ -553,6 +642,25 @@ def _coerce_critique(
         except Exception:
             # Best-effort: one bad item shouldn't bin the rest.
             continue
+
+    # Demote gate-owned sizing objections and max-drawdown-limit objections to
+    # ``info``: the deterministic gate owns sizing for gate-owned kinds and max
+    # drawdown is not a constraint, so the reviewer must not veto on them (see
+    # ``_is_demotable_issue``). A ``volatility_target`` sizing objection (gate
+    # abstains) and non-drawdown ``risk_limits`` critiques (e.g.
+    # ``max_gross_leverage=0``) are left untouched so genuine mechanically-
+    # unusable settings still block. ``demoted_blocking`` records
+    # how many *blocking* (warning/critical) issues were demoted this way, so a
+    # not-ready verdict whose ONLY blocking objections were these can advance
+    # rather than churn the loop on a veto the reviewer is not allowed to cast.
+    demoted_blocking = 0
+    for issue in issues:
+        if _is_demotable_issue(issue, sizing_owned=sizing_owned) and issue.severity in (
+            "warning",
+            "critical",
+        ):
+            issue.severity = "info"
+            demoted_blocking += 1
 
     # Contract: ready=True alongside an issue at or above the demotion
     # threshold is incoherent. Demote the verdict and append a synthetic
@@ -592,14 +700,40 @@ def _coerce_critique(
     # open issue. ``info`` issues remain advisory and never block on their own.
     has_blocking = any(_SEVERITY_ORDER[i.severity] >= _SEVERITY_ORDER["warning"] for i in issues)
     if not ready and not has_blocking:
-        issues.append(
-            CritiqueIssue(
-                field="hypothesis",
-                severity="warning",
-                description=(rationale or "Reviewer reported not-ready without naming an issue."),
-                suggested_fix="Tighten the hypothesis or rule definitions.",
+        if demoted_blocking:
+            # The reviewer's only blocking objections were sizing or drawdown
+            # concerns — the deterministic gate owns sizing and max drawdown is
+            # not a constraint, so the reviewer may not block on them. With
+            # nothing blockable left to act on, advance the spec rather than
+            # churn the design loop to the round cap on a veto we have already
+            # neutralised. Record the override as an info note so the lineage
+            # shows why a not-ready verdict was promoted.
+            ready = True
+            issues.append(
+                CritiqueIssue(
+                    field="sizing",
+                    severity="info",
+                    description=(
+                        "Reviewer's only blocking objection(s) were sizing or "
+                        "drawdown concerns, which the deterministic readiness "
+                        "gate owns; demoted to advisory and verdict promoted to "
+                        "ready (max drawdown is not a constraint; deployed size, "
+                        "not fraction×stop, is the per-trade risk)."
+                    ),
+                    suggested_fix="",
+                )
             )
-        )
+        else:
+            issues.append(
+                CritiqueIssue(
+                    field="hypothesis",
+                    severity="warning",
+                    description=(
+                        rationale or "Reviewer reported not-ready without naming an issue."
+                    ),
+                    suggested_fix="Tighten the hypothesis or rule definitions.",
+                )
+            )
 
     return SpecCritique(
         ready=ready,
