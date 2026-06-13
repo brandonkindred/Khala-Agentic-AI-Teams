@@ -1255,3 +1255,123 @@ def test_resume_releases_claim_when_activity_clear_fails(monkeypatch):
     assert second.status_code == 200
     assert second.json()["message"] == "Job resumed."
     assert started["n"] == 1, "claim must have been released so the retry can spawn"
+
+
+# --------------------------------------------------------------------------- clock-skew tolerance
+
+
+def test_heartbeat_fresh_tolerates_small_forward_clock_skew():
+    """A heartbeat stamped slightly in the future (NTP drift on a faster-clocked worker) must
+    still be treated as fresh, so a live wait loop in that worker doesn't appear dead to the
+    checking worker and prompt a spurious second orchestrator spawn."""
+    from datetime import datetime, timedelta, timezone
+
+    skewed = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": skewed}) is True
+
+
+def test_heartbeat_implausibly_future_stamp_is_not_fresh():
+    """A stamp far in the future (more than _HEARTBEAT_CLOCK_SKEW_TOLERANCE_S ahead) is
+    corruption or severe misconfiguration — it must NOT block resume indefinitely."""
+    from datetime import datetime, timedelta, timezone
+
+    far_future = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 30)
+    ).isoformat()
+    assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": far_future}) is False
+
+
+# --------------------------------------------------------------------------- post-claim terminal check
+
+
+def test_auto_resume_aborts_post_claim_if_job_becomes_terminal(monkeypatch):
+    """TOCTOU: cancellation that occurs after the resume claim is acquired but before the
+    orchestrator is spawned must abort the spawn. The post-claim get_job re-read detects the
+    terminal state and the claim is released so a later attempt can succeed."""
+    waiting = _job()
+    cancelled = _job(status="cancelled")
+    read_count = {"n": 0}
+
+    def _get_job(jid):
+        read_count["n"] += 1
+        # Reads 1 (endpoint) and 2 (TOCTOU reread after store) → waiting.
+        # Read 3 (post-claim re-read inside _try_auto_resume) → cancelled.
+        return waiting if read_count["n"] < 3 else cancelled
+
+    monkeypatch.setattr(api, "get_job", _get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn for a job that became terminal after claiming")
+
+    monkeypatch.setattr(api, "_start_orchestrator_thread", _no_spawn)
+    monkeypatch.setattr(api, "_start_github_resume_thread", _no_spawn)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert release_calls, "claim must be released when the post-claim terminal check fires"
+
+
+# --------------------------------------------------------------------------- GitHub resume status advance
+
+
+def test_github_resume_thread_advances_status_before_io(monkeypatch):
+    """The GitHub-resume thread must update the job to status='running' BEFORE the GitHub issue
+    fetch. The cross-worker claim TTL is 60s; a slow issue fetch or branch prep could outlast it
+    and let another worker steal the claim. Advancing the status out of waiting_for_user first
+    closes that window: _try_auto_resume and resume_job only proceed for waiting_for_user jobs."""
+    events: List[Any] = []
+    ctx = {"owner": "acme", "repo": "widgets", "issue_number": 42, "remote": "origin"}
+
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(github_context=ctx))
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: events.append(("update", dict(kw))))
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            events.append(("get_issue",))
+            return {"number": number}
+
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(api, "_run_with_github_hooks", lambda *a, **k: None)
+
+    class _SyncThread:
+        def __init__(self, target, daemon=None):
+            self._target = target
+
+        def start(self):
+            self._target()
+
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+
+    running_update_idx = next(
+        (i for i, e in enumerate(events) if e[0] == "update" and e[1].get("status") == "running"),
+        None,
+    )
+    io_idx = next((i for i, e in enumerate(events) if e[0] == "get_issue"), None)
+    assert running_update_idx is not None, "thread must update status to 'running'"
+    assert io_idx is not None, "thread must call get_issue"
+    assert running_update_idx < io_idx, "status must advance to 'running' before GitHub I/O"

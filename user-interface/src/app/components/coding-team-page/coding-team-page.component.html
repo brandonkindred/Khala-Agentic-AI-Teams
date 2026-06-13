@@ -136,6 +136,27 @@
                 (answersSubmitted)="onAnswersSubmitted($event)"
               />
             }
+            @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
+              <div class="github-banner github-banner--waiting" role="status">
+                <mat-icon>play_circle_outline</mat-icon>
+                <span>Answers were received but the run could not restart automatically.</span>
+                <button
+                  mat-flat-button
+                  color="accent"
+                  (click)="resumeJob()"
+                  [disabled]="resumingJob"
+                  aria-label="Resume the coding-team run"
+                >
+                  @if (resumingJob) {
+                    <mat-spinner diameter="18"></mat-spinner>
+                    Resuming…
+                  } @else {
+                    <mat-icon>play_arrow</mat-icon>
+                    Resume Run
+                  }
+                </button>
+              </div>
+            }
             @if (jobStatus.thinking) {
               <mat-expansion-panel class="thinking-panel" [expanded]="true">
                 <mat-expansion-panel-header>

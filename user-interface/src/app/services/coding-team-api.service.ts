@@ -48,4 +48,21 @@ export class CodingTeamApiService {
     const suffix = activeOnly ? '?active=true' : '';
     return this.http.get<CodingTeamJobListItem[]>(`${this.baseUrl}/jobs${suffix}`);
   }
+
+  /**
+   * Restart a paused job whose thread died after answers were stored.
+   *
+   * Preconditions: `jobId` identifies a `waiting_for_user` job with no live
+   * thread or heartbeat; answers have already been submitted via
+   * `submitAnswers`.
+   * Postconditions: on success the orchestrator is restarted (or the response
+   * reports it was already running). Returns 400 for terminal or non-paused
+   * jobs, or a GitHub job with no available token.
+   */
+  resumeJob(jobId: string): Observable<{ job_id: string; status: string; message: string }> {
+    return this.http.post<{ job_id: string; status: string; message: string }>(
+      `${this.baseUrl}/run/${jobId}/resume`,
+      {},
+    );
+  }
 }

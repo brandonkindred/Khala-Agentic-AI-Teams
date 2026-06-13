@@ -534,6 +534,11 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
 # process-local thread registry cannot see.
 _ANSWER_WAIT_HEARTBEAT_STALE_S = 30.0
 
+# Tolerated clock skew between worker hosts: a heartbeat stamped up to this many seconds in the
+# future (relative to the checking worker) is still treated as fresh. This covers NTP drift in
+# multi-host deployments without blocking resume indefinitely on a far-future/corrupt stamp.
+_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S = 10.0
+
 
 def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
     """True when a live answer-wait loop (possibly in another worker process) heartbeated recently.
@@ -542,9 +547,10 @@ def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
         - ``data`` is a job record dict (possibly empty).
     Postconditions:
         - Returns True iff ``answer_wait_heartbeat_at`` parses as an ISO timestamp whose age is in
-          ``[0, _ANSWER_WAIT_HEARTBEAT_STALE_S)``. A future-dated stamp (clock skew or corruption)
-          is NOT fresh — it must never make a dead loop look alive and block resume until that
-          future time passes. Missing/garbage values → False, never raises.
+          ``(-_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S, _ANSWER_WAIT_HEARTBEAT_STALE_S)``. Stamps more
+          than ``_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S`` seconds in the future (implausible skew or
+          corruption) are NOT fresh — they must never block resume indefinitely. Missing/garbage
+          values → False, never raises.
     """
     raw = (data or {}).get("answer_wait_heartbeat_at")
     if not raw:
@@ -556,7 +562,7 @@ def _answer_wait_heartbeat_fresh(data: Dict[str, Any]) -> bool:
     if beat.tzinfo is None:
         beat = beat.replace(tzinfo=timezone.utc)
     age = (datetime.now(timezone.utc) - beat).total_seconds()
-    return 0 <= age < _ANSWER_WAIT_HEARTBEAT_STALE_S
+    return age > -_HEARTBEAT_CLOCK_SKEW_TOLERANCE_S and age < _ANSWER_WAIT_HEARTBEAT_STALE_S
 
 
 def _start_orchestrator_thread(job_id: str, repo_path: str, plan: CodingTeamPlanInput) -> None:
@@ -637,6 +643,13 @@ def _start_github_resume_thread(
             # Registration is inside the try so the finally always releases the claim — even if
             # _register_run_thread itself fails — instead of leaving it wedged in _starting_run_jobs.
             _register_run_thread(job_id)
+            # Advance the job out of waiting_for_user BEFORE the GitHub network I/O. The
+            # cross-worker resume claim (claim_resume) has a TTL of RESUME_CLAIM_TTL_S; if the
+            # issue fetch or branch prep takes longer than that, another worker could treat the
+            # expired claim as abandoned and spawn a second hook path. Moving the status to
+            # "running" here makes _try_auto_resume and resume_job decline (they only proceed for
+            # waiting_for_user), so the re-claiming window closes before the slow I/O begins.
+            update_job(job_id, status="running", status_text="Resuming via GitHub hook…")
             with GitHubClient(token=token) as client:
                 issue = client.get_issue(request.owner, request.repo, int(ctx["issue_number"]))
             _run_with_github_hooks(job_id, request, plan, issue, token)
@@ -793,6 +806,20 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         # waiting with no live thread, that recheck reclaims and resumes it.
         _schedule_resume_recheck(job_id, delay=RESUME_CLAIM_TTL_S + 5.0)
         return True
+    # Post-claim freshness check: the job could have been cancelled or completed between the
+    # caller's get_job snapshot and the claim. claim_resume only checks the claim stamp, not the
+    # job status, so re-read here and abort if the job is now terminal — rather than spawning an
+    # orchestrator that would immediately find the job terminal and potentially clobber its status.
+    try:
+        post_claim_data = get_job(job_id)
+    except Exception:
+        post_claim_data = None
+    if post_claim_data and hitl.is_terminal(post_claim_data):
+        release_resume_claim(job_id)
+        logger.warning(
+            "Auto-resume for job %s aborted: job became terminal after claim was acquired.", job_id
+        )
+        return False
     if not _claim_run_thread(job_id):
         # The cross-worker claim is ours but this process is already spawning (a racing thread):
         # release the shared claim so the in-flight spawn (or a later retry) isn't blocked.

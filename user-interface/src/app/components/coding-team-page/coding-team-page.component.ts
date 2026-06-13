@@ -313,6 +313,31 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.activeIssueNumbers.has(issue.number);
   }
 
+  /** True while a manual resume POST is in flight (drives a spinner on the Resume button). */
+  resumingJob = false;
+
+  /**
+   * Restart the active job's orchestrator after answers were stored but auto-resume failed. No-op
+   * when no active job is displayed. On success, restarts polling from scratch; on error, surfaces
+   * `issueError`.
+   */
+  resumeJob(): void {
+    if (!this.activeJob) return;
+    const jobId = this.activeJob.job_id;
+    this.resumingJob = true;
+    this.issueError = null;
+    this.api.resumeJob(jobId).subscribe({
+      next: () => {
+        this.resumingJob = false;
+        this.startPolling(jobId);
+      },
+      error: (err: { error?: { detail?: string }; message?: string }) => {
+        this.resumingJob = false;
+        this.issueError = err?.error?.detail ?? err?.message ?? 'Failed to resume job.';
+      },
+    });
+  }
+
   private startPolling(jobId: string): void {
     this.stopPolling();
     this.pollSub = pollJobStatus(

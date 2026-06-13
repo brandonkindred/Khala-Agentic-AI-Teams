@@ -89,4 +89,16 @@ describe('CodingTeamApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush([{ job_id: 'job-9', status: 'completed' }]);
   });
+
+  it('POSTs to /run/{jobId}/resume', () => {
+    service.resumeJob('job-1').subscribe((r) => {
+      expect(r.job_id).toBe('job-1');
+      expect(r.status).toBe('running');
+      expect(r.message).toBe('Job resumed.');
+    });
+    const req = httpMock.expectOne(`${baseUrl}/run/job-1/resume`);
+    expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({});
+    req.flush({ job_id: 'job-1', status: 'running', message: 'Job resumed.' });
+  });
 });

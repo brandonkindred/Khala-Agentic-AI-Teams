@@ -192,12 +192,19 @@ _RESUME_CLAIM_SEQ_FIELD = "resume_claim_seq"
 _RESUME_CLAIM_AT_FIELD = "resume_claim_at"
 RESUME_CLAIM_TTL_S = 60.0
 
+# Tolerated clock skew between worker hosts: a claim stamped up to this many seconds in the
+# future (relative to the checking worker) is still treated as fresh. Covers NTP drift without
+# wedging the lease on a far-future/corrupt stamp (those still expire naturally).
+_CLAIM_CLOCK_SKEW_TOLERANCE_S = 10.0
+
 
 def _claim_lease_fresh(stamp: Any, now: datetime) -> bool:
     """True when ``stamp`` is a parseable timestamp whose age is within the lease TTL.
 
-    A future-dated or unparseable stamp is NOT fresh: it must never make a dead claim look alive
-    (clock skew / corruption would otherwise wedge the lease until that future time passes).
+    A stamp more than ``_CLAIM_CLOCK_SKEW_TOLERANCE_S`` seconds in the future is NOT fresh:
+    implausible skew or corruption must not wedge the lease until a far-future time passes.
+    Stamps within the bounded skew window are accepted as fresh to tolerate NTP drift in
+    multi-host deployments.
     """
     if not stamp:
         return False
@@ -208,7 +215,7 @@ def _claim_lease_fresh(stamp: Any, now: datetime) -> bool:
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
     age = (now - ts).total_seconds()
-    return 0 <= age < RESUME_CLAIM_TTL_S
+    return age > -_CLAIM_CLOCK_SKEW_TOLERANCE_S and age < RESUME_CLAIM_TTL_S
 
 
 def claim_resume(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> bool:

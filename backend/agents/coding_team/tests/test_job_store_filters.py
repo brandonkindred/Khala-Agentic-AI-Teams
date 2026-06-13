@@ -136,3 +136,34 @@ def test_claim_resume_returns_false_for_missing_job(monkeypatch):
 
     monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: _NoneClient())
     assert job_store.claim_resume("ghost") is False
+
+
+def test_claim_tolerates_small_forward_clock_skew(monkeypatch):
+    """A claim stamp a few seconds in the future (NTP drift on the stamping host) must still
+    be treated as fresh so the checking worker doesn't immediately re-claim an active lease
+    and allow two orchestrators to run against the same checkout."""
+    from datetime import datetime, timedelta, timezone
+
+    future_stamp = (datetime.now(timezone.utc) + timedelta(seconds=5)).isoformat()
+    fake = _AtomicFakeClient(
+        {"job_id": "j1", "resume_claim_seq": 1, "resume_claim_at": future_stamp}
+    )
+    monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: fake)
+    assert job_store.claim_resume("j1") is False  # 5s ahead is within tolerance → still fresh
+
+
+def test_claim_implausibly_future_stamp_is_not_fresh(monkeypatch):
+    """A stamp far in the future (beyond _CLAIM_CLOCK_SKEW_TOLERANCE_S) is corruption or
+    severe misconfiguration — treat it as expired so the lease can be re-claimed rather
+    than wedged indefinitely."""
+    from datetime import datetime, timedelta, timezone
+
+    far_future = (
+        datetime.now(timezone.utc)
+        + timedelta(seconds=job_store._CLAIM_CLOCK_SKEW_TOLERANCE_S + 30)
+    ).isoformat()
+    fake = _AtomicFakeClient(
+        {"job_id": "j1", "resume_claim_seq": 1, "resume_claim_at": far_future}
+    )
+    monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: fake)
+    assert job_store.claim_resume("j1") is True  # far-future stamp re-claimable
