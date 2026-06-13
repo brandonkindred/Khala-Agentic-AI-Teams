@@ -726,9 +726,9 @@ class FillSimulator:
         # remainder of that one already-clamped order — the total share count is
         # bounded by the dispatcher's one-time cap, not a fresh sizing decision.
         # Notional drift from price movement on those committed shares is normal
-        # holding behaviour (``max_drawdown_pct`` is the realised-exposure
-        # backstop), and the catastrophic case — equity falling to non-positive
-        # before a later slice — is still rejected unconditionally inside
+        # holding behaviour (there is no drawdown backstop, by design), and the
+        # catastrophic case — equity falling to non-positive before a later
+        # slice — is still rejected unconditionally inside
         # ``can_enter``. Leverage / concentration always run on the post-extend
         # notional.
         gate = self.risk.can_enter(

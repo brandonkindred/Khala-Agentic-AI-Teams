@@ -265,7 +265,10 @@ class TestCheckSpecStability:
             spec_history=[
                 {
                     "phase": "synthesis",
-                    "diff": '- "max_drawdown_pct": 0.20\n+ "max_drawdown_pct": 0.15',
+                    "diff": (
+                        '- "max_symbol_concentration_pct": 0.20\n'
+                        '+ "max_symbol_concentration_pct": 0.15'
+                    ),
                     "reason": "tighten risk",
                 },
             ]
@@ -279,7 +282,10 @@ class TestCheckSpecStability:
             spec_history=[
                 {
                     "phase": "synthesis",
-                    "diff": '- "max_drawdown_pct": 0.15\n+ "max_drawdown_pct": 0.25',
+                    "diff": (
+                        '- "max_symbol_concentration_pct": 0.15\n'
+                        '+ "max_symbol_concentration_pct": 0.25'
+                    ),
                     "reason": "relax risk",
                 },
             ]
@@ -287,7 +293,7 @@ class TestCheckSpecStability:
         result = check_spec_stability(rec)
         assert result.status == "FAIL"
         assert "loosened" in result.details
-        assert "max_drawdown_pct" in result.details
+        assert "max_symbol_concentration_pct" in result.details
 
     def test_fail_immutable_risk_limit(self) -> None:
         from investment_team.scripts.audit_recent_runs import check_spec_stability
