@@ -87,10 +87,12 @@
       } @else {
         <ul class="cognition-list">
           @for (p of proposals(); track p.id) {
+            @let actionLabel = proposalActionLabel(p.action);
+            @let summary = proposalSummary(p);
             <li class="proposal-card" [class.is-stale]="p.stale_evidence">
               <header class="proposal-card__head">
                 <mat-chip-set>
-                  <mat-chip class="is-action">{{ proposalActionLabel(p.action) }}</mat-chip>
+                  <mat-chip class="is-action">{{ actionLabel }}</mat-chip>
                   <mat-chip class="is-status is-dot">{{ p.status }}</mat-chip>
                   @if (p.stale_evidence) {
                     <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
@@ -142,7 +144,7 @@
                     mat-stroked-button
                     type="button"
                     color="warn"
-                    [attr.aria-label]="'Reject ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
+                    [attr.aria-label]="'Reject ' + actionLabel + ': ' + summary"
                     [disabled]="actingProposalId() !== null"
                     (click)="reject(p)"
                   >
@@ -161,7 +163,7 @@
                       mat-flat-button
                       type="button"
                       color="primary"
-                      [attr.aria-label]="'Approve ' + proposalActionLabel(p.action) + ': ' + proposalSummary(p)"
+                      [attr.aria-label]="'Approve ' + actionLabel + ': ' + summary"
                       [attr.aria-describedby]="p.stale_evidence ? 'approve-tip-' + p.id : null"
                       [disabled]="p.stale_evidence || actingProposalId() !== null"
                       (click)="approve(p)"
