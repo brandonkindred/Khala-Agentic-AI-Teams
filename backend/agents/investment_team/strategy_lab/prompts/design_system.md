@@ -169,7 +169,7 @@ Pick whichever option best matches your real signal — DO NOT silently encode a
 
 - **Volatility-target sizing implies a notional consistent with `target_annual_vol`.** Pairing `target_annual_vol = 0.05` (5%) with a stop_loss of 20% means the strategy holds positions through losses ~4× its annual vol budget — incoherent. Match the stop to the vol scale.
 
-- **`max_drawdown_pct` should be reachable but not trivial.** A 50-trade strategy with 2% per-trade risk should not declare `max_drawdown_pct = 5` (one losing streak of 3 trades crosses it). Conversely, `max_drawdown_pct = 80` is not a meaningful limit. Aim for 2-3× the standard deviation of cumulative losses under your sizing.
+- **There is NO max-drawdown constraint — do not author one or design around one.** Max drawdown is not a limit in this system. A strategy is an experiment (backtest / paper trading, no real capital) and may lose up to 100% of the account by design; realised drawdown is reported as a metric, never enforced. Do not add a `max_drawdown_pct` to `risk_limits`, do not size positions to "stay under" a drawdown number, and do not let a drawdown figure shape the thesis. The reviewer will not block on drawdown.
 
 When in doubt, add an explicit `note` on the sizing rule that states the deployed fraction and the cap ("deploy 4% per trade, within max_position_pct=5%"). Keep any `stop_loss` rationale separate — it bounds a position's loss below a full wipeout and is not part of the sizing math.
 

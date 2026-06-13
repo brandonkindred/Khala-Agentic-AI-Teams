@@ -1,4 +1,9 @@
-"""Tests for the Phase 3 RiskFilter: sizing, entry gates, drawdown breaker."""
+"""Tests for the Phase 3 RiskFilter: sizing and entry gates.
+
+There is intentionally no drawdown circuit-breaker — a Strategy Lab run may lose
+up to 100% of the account by design, so drawdown is reported as a metric, never
+enforced as a constraint.
+"""
 
 from __future__ import annotations
 
@@ -16,7 +21,6 @@ def test_risk_limits_defaults():
     rl = RiskLimits()
     assert rl.max_position_pct == 6.0
     assert rl.max_gross_leverage == 1.0
-    assert rl.max_drawdown_pct == 25.0
     assert rl.max_open_positions == 10
 
 
@@ -34,15 +38,11 @@ def test_risk_limits_from_legacy_dict_drops_retired_max_loss_per_trade_pct():
     deployed cap would wrongly shrink the position. The authored
     ``max_position_pct`` stands; a 0 / negative / None legacy value must not zero
     or invalidate the cap."""
-    rl = RiskLimits.from_legacy_dict(
-        {"max_position_pct": 10.0, "max_loss_per_trade_pct": 0.5}
-    )
+    rl = RiskLimits.from_legacy_dict({"max_position_pct": 10.0, "max_loss_per_trade_pct": 0.5})
     assert rl.max_position_pct == 10.0  # not min(10, 0.5)
     # Degenerate legacy values are harmlessly ignored, not folded in.
     for bad in (0, -1, None, float("nan")):
-        rl = RiskLimits.from_legacy_dict(
-            {"max_position_pct": 12.0, "max_loss_per_trade_pct": bad}
-        )
+        rl = RiskLimits.from_legacy_dict({"max_position_pct": 12.0, "max_loss_per_trade_pct": bad})
         assert rl.max_position_pct == 12.0
 
 
@@ -198,19 +198,13 @@ def test_can_enter_allows_within_limits():
     assert result.allowed
 
 
-# ---------------------------------------------------------------------------
-# RiskFilter.check_drawdown()
-# ---------------------------------------------------------------------------
-
-
-def test_drawdown_breaches_on_limit():
-    rf = RiskFilter(RiskLimits(max_drawdown_pct=20.0))
-    result = rf.check_drawdown(current_equity=78_000.0, peak_equity=100_000.0)
-    assert result.breached
-    assert result.current_drawdown_pct == pytest.approx(22.0)
-
-
-def test_drawdown_not_breached():
-    rf = RiskFilter(RiskLimits(max_drawdown_pct=20.0))
-    result = rf.check_drawdown(current_equity=90_000.0, peak_equity=100_000.0)
-    assert not result.breached
+def test_risk_limits_has_no_drawdown_constraint():
+    """Max drawdown is not a constraint: the field and the circuit-breaker are
+    gone. A strategy may lose up to 100% of the account by design."""
+    rl = RiskLimits()
+    assert not hasattr(rl, "max_drawdown_pct")
+    assert not hasattr(RiskFilter(rl), "check_drawdown")
+    # A legacy spec dict carrying the retired key still loads (extra ignored).
+    revived = RiskLimits.from_legacy_dict({"max_position_pct": 5, "max_drawdown_pct": 20.0})
+    assert revived.max_position_pct == 5
+    assert not hasattr(revived, "max_drawdown_pct")

@@ -688,13 +688,13 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
                 evidence="entries_filled=4 closed_trades=0",
                 proposed_code=_REPAIRED_CODE,
                 proposed_spec_updates={
-                    "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 10},
+                    "risk_limits": {"max_position_pct": 5},
                     # Off-list keys MUST NOT mutate the spec (#530).
                     "exit_rules": [StopLossRule(pct=0.05, note="added stop").model_dump()],
                     "strategy_id": "hijacked",
                     "asset_class": "crypto",
                 },
-                changes_made="loosened drawdown limit",
+                changes_made="adjusted position cap",
             ),
         ],
         sandbox_results=[
@@ -712,7 +712,6 @@ def test_zero_trade_repair_applies_proposed_spec_updates(
     assert outcome.new_spec is not None
     # Whitelisted update applied …
     assert outcome.new_spec.risk_limits.max_position_pct == 5
-    assert outcome.new_spec.risk_limits.max_drawdown_pct == 10
     # … and off-list mutations were silently dropped (rule + immutable keys).
     original_exit_rules = _spec().exit_rules
     assert outcome.new_spec.exit_rules == original_exit_rules
@@ -961,14 +960,14 @@ def test_zero_trade_repair_accepted_carries_post_repair_spec_gates(
                 root_cause_category="ENTRY_WITH_NO_EXIT",
                 evidence="entries_filled=4 closed_trades=0",
                 proposed_code=_REPAIRED_CODE,
-                # ``max_drawdown_pct=4`` is below the validator's warning
-                # threshold of 5% (strategy_validator.py:91-102) — warning,
-                # not critical — so the repair is accepted but the gate must
-                # be carried forward.
-                proposed_spec_updates={
-                    "risk_limits": {"max_position_pct": 5, "max_drawdown_pct": 4}
-                },
-                changes_made="tightened risk limits",
+                # The risk_limits mutation is Pydantic-valid and non-critical
+                # (max_position_pct in the safe [1, 25] band). The base spec's
+                # hypothesis ("hyp") names no indicator while its rules use RSI,
+                # so the post-repair StrategySpecValidator emits a non-critical
+                # hypothesis/rules-consistency WARNING — accepted, but the gate
+                # must still be carried forward onto the committed outcome.
+                proposed_spec_updates={"risk_limits": {"max_position_pct": 8}},
+                changes_made="adjusted position cap",
             ),
         ],
         sandbox_results=[
