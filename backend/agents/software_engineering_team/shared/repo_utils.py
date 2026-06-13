@@ -320,6 +320,16 @@ def read_files_as_dict(
                 if omitted is not None:
                     omitted.append(rel_path)
                 continue
+            # Require a *regular* file before opening: a FIFO/socket/device node
+            # (possible among untracked entries on the whole-repo fallback) would
+            # block ``open`` indefinitely waiting for a writer, hanging the review.
+            # A directory (a changed submodule gitlink) is likewise not a regular
+            # file. ``is_file()`` stats without opening, so neither blocks.
+            if not resolved.is_file():
+                logger.debug("read_files_as_dict: skipping %s (not a regular file)", rel_path)
+                if omitted is not None:
+                    omitted.append(rel_path)
+                continue
             # Sniff a bounded prefix for a NUL so a huge binary artifact is
             # skipped before the full read; a text file is then read in full and
             # passed untruncated (the coordinator segments oversized inputs). A
@@ -387,6 +397,20 @@ def read_repo_files_as_dict(
     repo_root = repo_path.resolve()
     paths: List[str] = []
     for dirpath, dirnames, filenames in os.walk(repo_root):
+        # A symlink to a directory lands in *dirnames* and, with the default
+        # followlinks=False, os.walk neither descends it nor emits it via
+        # *filenames* — so it would vanish from the review. Surface it as a path
+        # (read_files_as_dict represents it by its link target, never dereferenced)
+        # before pruning excluded dirs from the traversal set.
+        for d in dirnames:
+            full = os.path.join(dirpath, d)
+            if os.path.islink(full):
+                rel = os.path.relpath(full, repo_root)
+                if is_sensitive_path(rel):
+                    if sensitive_skipped is not None:
+                        sensitive_skipped.append(rel)
+                else:
+                    paths.append(rel)
         # Prune excluded directories in place so os.walk never descends into them.
         dirnames[:] = [d for d in dirnames if d not in always_exclude]
         for name in filenames:

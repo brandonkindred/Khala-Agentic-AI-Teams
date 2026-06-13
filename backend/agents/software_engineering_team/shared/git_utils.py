@@ -343,6 +343,8 @@ def read_paths_at_merge_base(
     merge_base = _unambiguous_merge_base(path, base, head)
     result: Dict[str, str] = {}
     for rel in paths:
+        # The ``<rev>:<path>`` object syntax names the blob directly, so the path
+        # is never parsed as a revision/flag (no ``--`` separator needed).
         code, out = _run_git(path, ["git", "show", f"{merge_base}:{rel}"])
         if code != 0:
             continue  # path absent at base, or a tree (submodule/dir): no blob
@@ -394,6 +396,17 @@ def list_changed_and_deleted(
     seen_changed: set[str] = set()
     seen_deleted: set[str] = set()
     fields = [f for f in (out or "").split("\0") if f]
+    if len(fields) % 2 != 0:
+        # ``--name-status -z`` emits alternating <status> <path> pairs; an odd
+        # count means a trailing status with no path (truncated/unexpected
+        # output). Drop the dangling field but log it rather than silently
+        # mispairing every subsequent entry.
+        logger.warning(
+            "list_changed_and_deleted: odd field count (%d) from name-status -z; "
+            "dropping trailing status",
+            len(fields),
+        )
+        fields = fields[:-1]
     # ``--name-status -z`` emits alternating <status> and <path> fields.
     for status, entry in zip(fields[::2], fields[1::2]):
         if status.startswith("D"):
@@ -447,57 +460,63 @@ def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
     return True, f"Deleted branch {branch}"
 
 
-# Conventional Python source roots stripped when deriving a deleted module's
-# importable dotted path: code under ``src/pkg/x.py`` is imported as ``pkg.x``.
-_PYTHON_SOURCE_ROOTS: frozenset[str] = frozenset({"src", "lib", "app"})
-
 # Cap on referrers listed per deletion before an explicit truncation marker is
 # appended (the count is always shown, so nothing is silently hidden).
 _MAX_REFERRERS_LISTED = 25
 
 
 def _deleted_module_patterns(rel_path: str) -> List[str]:
-    """Importer-search regexes for a deleted ``.py`` path (``[]`` if not Python).
+    """Importer-search regexes for a deleted path (best-effort; never empty for a
+    file with a stem).
 
-    Produces precise importer signals — far below a bare-stem search's
-    false-positive rate — covering common layouts:
+    For a ``.py`` module the patterns are precise importer signals — far below a
+    bare-stem search's false-positive rate — covering common layouts:
 
-    - the full dotted path (``a.b.c`` from ``a/b/c.py``) and the same with a
-      leading source root stripped (``pkg.x`` from ``src/pkg/x.py``), since
-      surviving code imports the *package* path, not the on-disk source root;
+    - every multi-component dotted suffix of the path (``backend.app.services`` and
+      ``app.services`` from ``backend/app/services.py``), so a module under *any*
+      depth of source root (``src``/``lib``/``backend``/...) is matched without a
+      hardcoded root list;
     - a bare ``import <stem>`` / ``from ... import <stem>``;
+    - a *relative* import of the module (``from .helper import x`` /
+      ``from ..helper import x``);
     - for a deleted package initializer (``pkg/__init__.py``), the package name
       itself (``import pkg`` / ``pkg.``), since removing it breaks ``import pkg``.
+
+    For a non-Python deletion (Java/JS/TS/config/schema/...) there is no portable
+    import grammar, so it falls back to the file's basename — the bare stem as a
+    word and the full filename — which catches ``import ... from './foo'``,
+    ``require('foo')``, ``foo.json`` config references, and similar by-name uses.
     """
     p = Path(rel_path)
-    if p.suffix != ".py":
-        return []
-    parts = list(p.with_suffix("").parts)
-    if not parts:
+    stem = p.stem
+    if not stem:
         return []
 
-    # Candidate dotted module paths: full, and with a leading source root dropped.
-    dotted_variants: set[str] = set()
-    if parts[-1] == "__init__":
-        pkg_parts = parts[:-1]  # the package this file initializes
-        if pkg_parts:
-            dotted_variants.add(".".join(pkg_parts))
-            if pkg_parts[0] in _PYTHON_SOURCE_ROOTS and len(pkg_parts) > 1:
-                dotted_variants.add(".".join(pkg_parts[1:]))
-            names = [pkg_parts[-1]]
-        else:
+    if p.suffix == ".py":
+        parts = list(p.with_suffix("").parts)
+        if parts and parts[-1] == "__init__":
+            parts = parts[:-1]  # the package this file initializes
+        if not parts:
             return []
-    else:
+        name = parts[-1]
+        # Every multi-component dotted suffix (>=2 parts) is precise enough to
+        # search; the single-component case is covered by the import patterns.
+        dotted_variants = {
+            ".".join(parts[i:]) for i in range(len(parts)) if len(parts) - i >= 2
+        }
         dotted_variants.add(".".join(parts))
-        if parts[0] in _PYTHON_SOURCE_ROOTS and len(parts) > 1:
-            dotted_variants.add(".".join(parts[1:]))
-        names = [parts[-1]]
-
-    patterns: List[str] = []
-    for dotted in dotted_variants:
-        patterns += ["-e", rf"\b{re.escape(dotted)}\b"]
-    for name in names:
+        patterns: List[str] = []
+        for dotted in sorted(dotted_variants):
+            patterns += ["-e", rf"\b{re.escape(dotted)}\b"]
+        # Absolute and relative imports of the leaf module name.
         patterns += ["-e", rf"import\s+{re.escape(name)}\b"]
+        patterns += ["-e", rf"from\s+\.+{re.escape(name)}\b"]
+        return patterns
+
+    # Non-Python: best-effort by-name reference search.
+    patterns = ["-e", rf"\b{re.escape(stem)}\b"]
+    if p.name != stem:
+        patterns += ["-e", re.escape(p.name)]
     return patterns
 
 
@@ -508,13 +527,11 @@ def find_referencing_paths(
     """For each deleted path, the surviving worktree files that still mention it.
 
     Best-effort reverse-dependency signal so a reviewer can check the deletion
-    note's instruction that "nothing still depends on" a removed module. For each
-    deleted ``.py`` path it ``git grep``s the *worktree* (tracked files, so the
-    just-removed file itself is gone) for the module's importable dotted path(s)
-    — with conventional source roots (``src``/``lib``/``app``) stripped — a bare
-    ``import <name>``, and, for a deleted ``__init__.py``, the package name. These
-    are precise importer signals that keep the false-positive rate far below a
-    bare stem search. Non-``.py`` deletions are skipped.
+    note's instruction that "nothing still depends on" a removed file. For each
+    deletion it ``git grep``s the *worktree* (tracked files, so the just-removed
+    file itself is gone) for importer signals (see :func:`_deleted_module_patterns`):
+    precise dotted/relative import forms for ``.py`` modules, and a by-name
+    basename search for other languages (Java/JS/TS/config/...).
 
     Preconditions:
         - *deleted_paths* are repo-relative paths reported deleted by

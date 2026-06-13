@@ -1689,3 +1689,227 @@ def test_read_files_as_dict_key_to_path_for_control_char_name(tmp_path: Path) ->
     assert "a\\tb.py" in result  # tab escaped in the review key
     assert "a\tb.py" not in result  # raw control char never a key
     assert key_to_path["a\\tb.py"] == "a\tb.py"  # maps back to the real path
+
+
+# ---------------------------------------------------------------------------
+# Gate hardening: baseline-unavailable, unreadable deletions, writer candidates,
+# omission preservation, special files, dir symlinks, broader reverse-refs
+# ---------------------------------------------------------------------------
+
+
+def test_select_review_input_baseline_unavailable_forces_manual_review(tmp_path: Path) -> None:
+    """When the baseline diff can't be computed, deletions can't be enumerated, so
+    the whole-repo fallback records an unexamined sentinel → manual review."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETIONS_UNKNOWN_SENTINEL,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "main.py").write_text("print('hi')\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    # No `development` branch → merge-base fails → BaselineDiffUnavailable.
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files={"main.py": "x"})
+
+    assert "main.py" in sel.files  # whole-repo content still reviewed
+    assert sel.has_examinable_content() is True
+    # ...but the unknown-deletions sentinel forces the approval to manual review.
+    assert _DELETIONS_UNKNOWN_SENTINEL in sel.unexamined_paths()
+
+
+def test_select_review_input_unreadable_deletion_is_unexamined(tmp_path: Path) -> None:
+    """A binary file deleted alongside a readable change is recorded unreadable, so
+    a mixed change can't be approved with the removed (unexaminable) blob unseen."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "img.bin").write_bytes(b"\x00\x01\x02BIN\x00")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "img.bin").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change + delete binary")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "a.py" in sel.files  # the readable change is examinable
+    assert "img.bin" in sel.unexamined_paths()  # the unreadable deletion blocks approval
+
+
+def test_select_review_input_writer_candidate_not_omission(tmp_path: Path) -> None:
+    """A writer output key that was never materialized on disk (e.g. rejected by
+    write validation) is NOT counted as an unexamined omission — otherwise an
+    otherwise-clean approved workflow would fail the manual-review gate."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change a")
+
+    task = SimpleNamespace(description="x")
+    # 'never_written.py' is a writer candidate not present on disk.
+    sel = _select_review_input(
+        tmp_path, task, written_files={"a.py": "x", "never_written.py": "rejected"}
+    )
+
+    assert "a.py" in sel.files
+    assert sel.unexamined_paths() == ()  # the missing candidate is not an omission
+
+
+def test_whole_repo_review_input_only_sensitive_preserves_evidence(tmp_path: Path) -> None:
+    """A repo of only sensitive/binary files returns no readable content, but the
+    omission notes/metadata are preserved (not discarded), so the reviewer gets
+    the evidence and the gate blocks."""
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        _whole_repo_review_input,
+    )
+
+    (tmp_path / ".env").write_text("SECRET=v\n", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01binary")
+    sel = _whole_repo_review_input(tmp_path)
+
+    assert sel.has_examinable_content() is False  # nothing readable
+    assert _WITHHELD_NOTE_PATH in sel.files  # but evidence preserved
+    assert ".env" in sel.unexamined_paths()
+    assert "blob.bin" in sel.unexamined_paths()
+
+
+def test_read_files_as_dict_skips_fifo_without_hanging(tmp_path: Path) -> None:
+    """A FIFO is reported via omitted and never opened (opening would block)."""
+    import os as _os
+
+    fifo = tmp_path / "pipe"
+    try:
+        _os.mkfifo(fifo)
+    except (AttributeError, NotImplementedError, OSError):
+        pytest.skip("mkfifo not supported on this platform")
+    omitted: list[str] = []
+    result = read_files_as_dict(tmp_path, ["pipe"], extensions=None, omitted=omitted)
+
+    assert result == {}  # not read
+    assert "pipe" in omitted  # reported, not silently dropped
+
+
+def test_read_repo_files_as_dict_includes_directory_symlink(tmp_path: Path) -> None:
+    """A symlink to a directory is surfaced (by its link target), not silently
+    dropped by os.walk's default no-follow behavior."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "real").mkdir()
+    (tmp_path / "real" / "f.py").write_text("x = 1\n", encoding="utf-8")
+    try:
+        (tmp_path / "linkdir").symlink_to("real", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported on this platform")
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "real/f.py" in result
+    assert "linkdir" in result and "symlink ->" in result["linkdir"]
+
+
+def test_run_code_review_rejects_neither_or_both() -> None:
+    """The DbC precondition is enforced: exactly one of files/code."""
+    from software_engineering_team.backend_agent.agent import BackendExpertAgent
+
+    task = SimpleNamespace(description="t", acceptance_criteria=[])
+    with pytest.raises(ValueError):
+        BackendExpertAgent._run_code_review(
+            code_review_agent=object(), files=None, code=None,
+            spec_content="", task=task, architecture=None,
+        )
+    with pytest.raises(ValueError):
+        BackendExpertAgent._run_code_review(
+            code_review_agent=object(), files={"a.py": "x"}, code="blob",
+            spec_content="", task=task, architecture=None,
+        )
+
+
+def test_find_referencing_paths_relative_import(tmp_path: Path) -> None:
+    """A relative `from .helper import x` importer is detected."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg" / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "pkg" / "user.py").write_text("from .helper import h\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "pkg" / "helper.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["pkg/helper.py"])
+
+    assert "pkg/user.py" in refs["pkg/helper.py"]
+
+
+def test_find_referencing_paths_nested_source_root(tmp_path: Path) -> None:
+    """A module under a nested root (backend/app/services.py) matches importers of
+    app.services without a hardcoded root list."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "backend" / "app").mkdir(parents=True)
+    (tmp_path / "backend" / "app" / "services.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "consumer.py").write_text("from app.services import x\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "backend" / "app" / "services.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["backend/app/services.py"])
+
+    assert "consumer.py" in refs["backend/app/services.py"]
+
+
+def test_find_referencing_paths_non_python_basename(tmp_path: Path) -> None:
+    """A non-Python deletion still gets a best-effort by-name reverse-ref scan."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "widget.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    (tmp_path / "app.ts").write_text("import { x } from './widget';\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "widget.ts").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["widget.ts"])
+
+    assert "app.ts" in refs["widget.ts"]
+
+
+def test_list_changed_and_deleted_odd_fields_guarded(tmp_path: Path, monkeypatch) -> None:
+    """An odd NUL-field count drops the dangling field instead of mispairing."""
+    from software_engineering_team.shared import git_utils
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+
+    real_run = git_utils._run_git
+
+    def fake_run(path, cmd, timeout=30):
+        if cmd[:3] == ["git", "diff", "--name-status"]:
+            return 0, "M\x00a.py\x00D"  # dangling trailing status, no path
+        return real_run(path, cmd, timeout)
+
+    monkeypatch.setattr(git_utils, "_run_git", fake_run)
+    changed, deleted = git_utils.list_changed_and_deleted(tmp_path, "development")
+
+    assert changed == ["a.py"]
+    assert deleted == []  # the dangling 'D' is dropped, not mispaired

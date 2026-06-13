@@ -746,7 +746,16 @@ def _format_deletion_note(
     return "\n".join(lines) + "\n"
 
 
-def _whole_repo_review_input(repo_path: Path) -> ReviewInputSelection:
+# Sentinel recorded as "unreadable" when the baseline diff is unavailable: the
+# whole-repo fallback scans only the current worktree, so a file *deleted* by the
+# task cannot be enumerated and is invisible. It forces the gate to manual review
+# rather than certifying a current-tree scan that may hide an unreviewed deletion.
+_DELETIONS_UNKNOWN_SENTINEL = "<deletions not enumerable: baseline diff unavailable>"
+
+
+def _whole_repo_review_input(
+    repo_path: Path, *, baseline_unavailable: bool = False
+) -> ReviewInputSelection:
     """Complete, fail-safe review input: every reviewable file in the repo.
 
     Used when no task-scoped change set is available (empty diff) or cannot be
@@ -757,8 +766,15 @@ def _whole_repo_review_input(repo_path: Path) -> ReviewInputSelection:
     — are not discarded silently: they are surfaced as omission notes and recorded
     on the selection's ``withheld``/``unreadable`` fields, so the gate treats an
     approval on this fallback as incomplete (manual review) rather than certifying
-    a "whole-repo" review that quietly excluded files. An empty repo yields an
-    empty ``code`` whose ``has_examinable_content()`` is False (nothing reviewed).
+    a "whole-repo" review that quietly excluded files. The omission notes/metadata
+    are attached even when *no* readable file remains (a repo of only
+    sensitive/binary files), so the reviewer still gets the evidence and the gate
+    still blocks; only a genuinely empty repo yields an empty ``code`` whose
+    ``has_examinable_content()`` is False.
+
+    When *baseline_unavailable* is set, a sentinel is recorded as unexamined
+    because deletions cannot be enumerated from the current tree — so an approval
+    on this degraded path always routes to manual review.
     """
     key_to_path: Dict[str, str] = {}
     omitted: List[str] = []
@@ -769,10 +785,16 @@ def _whole_repo_review_input(repo_path: Path) -> ReviewInputSelection:
         omitted=omitted,
         sensitive_skipped=sensitive_skipped,
     )
-    if not files:
+    unreadable = list(omitted)
+    if baseline_unavailable:
+        unreadable.append(_DELETIONS_UNKNOWN_SENTINEL)
+    # Truly empty repo (nothing readable, nothing omitted): an empty code channel
+    # whose has_examinable_content() is False.
+    if not files and not sensitive_skipped and not unreadable:
         return ReviewInputSelection(None, "", None)
+    files = files or {}
     synthetic = _attach_review_notes(
-        files, withheld=sensitive_skipped or None, unreadable=omitted or None
+        files, withheld=sensitive_skipped or None, unreadable=unreadable or None
     )
     return ReviewInputSelection(
         files,
@@ -781,7 +803,7 @@ def _whole_repo_review_input(repo_path: Path) -> ReviewInputSelection:
         synthetic,
         key_to_path,
         withheld=tuple(sensitive_skipped),
-        unreadable=tuple(omitted),
+        unreadable=tuple(unreadable),
     )
 
 
@@ -871,12 +893,21 @@ def _select_review_input(
         changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
     except BaselineDiffUnavailable as exc:
         # Fail closed: if the net base→worktree diff can't be computed (missing
-        # base ref, shallow/ambiguous history, timeout), review the whole repo
-        # rather than a partial set the gate could approve without seeing it.
+        # base ref, shallow/ambiguous history, timeout), review the whole repo.
+        # Deletions can't be enumerated from the current tree, so the fallback is
+        # flagged to force manual review rather than certify a current-tree scan.
         logger.warning("Code review: baseline diff unavailable (%s); reviewing whole repo", exc)
-        return _whole_repo_review_input(repo_path)
+        return _whole_repo_review_input(repo_path, baseline_unavailable=True)
 
-    # Order-preserving union of committed diff + writer output keys.
+    # Order-preserving union of committed diff + writer output keys. The git-diff
+    # ``changed`` set is the authoritative set of task-owned changes that MUST be
+    # reviewed; the writer's output keys only *widen* the read set (so an uncommitted
+    # or untracked just-written file is reviewed too). A writer key that is a mere
+    # candidate — rejected by write validation, or a no-op — is therefore not on
+    # disk; it must not be counted as an "unexamined" omission (that would fail the
+    # manual-review gate for an otherwise-clean workflow), so only ``changed`` paths
+    # feed the omission accumulator.
+    changed_owned = {p for p in changed if not is_sensitive_path(p)}
     ordered: List[str] = []
     seen: set[str] = set()
     for source in (changed, list(written_files or ())):
@@ -890,11 +921,14 @@ def _select_review_input(
     sensitive = [p for p in ordered if is_sensitive_path(p)]
     readable = [p for p in ordered if not is_sensitive_path(p)]
 
-    omitted: List[str] = []
+    all_omitted: List[str] = []
     key_to_path: Dict[str, str] = {}
     files = read_files_as_dict(
-        repo_path, readable, extensions=None, omitted=omitted, key_to_path=key_to_path
+        repo_path, readable, extensions=None, omitted=all_omitted, key_to_path=key_to_path
     )
+    # Only a *confirmed* changed path that could not be read counts as unexamined;
+    # a writer-only candidate that was never materialized does not.
+    omitted = [p for p in all_omitted if p in changed_owned]
 
     # A changed file truncated to empty/whitespace yields an empty block, which the
     # coordinator drops — silently approving the content removal. Flag those paths.
@@ -915,13 +949,18 @@ def _select_review_input(
         (deleted_sensitive if is_sensitive_path(p) else deleted).append(p)
 
     # Read what each deletion removed from the merge-base blob (the content is gone
-    # from the worktree). Unreadable/binary deletions still appear by name below.
+    # from the worktree). A deletion whose blob could not be fetched (binary,
+    # gitlink, or a read failure) has no examinable content, so it is recorded as
+    # *unreadable* — otherwise a mixed change (one readable file + an unreadable
+    # deletion) would look fully examined and slip an unreviewed removal through.
     deleted_content: Dict[str, str] = {}
     if deleted:
         try:
             deleted_content = read_paths_at_merge_base(repo_path, DEVELOPMENT_BRANCH, deleted)
         except BaselineDiffUnavailable as exc:
             logger.warning("Code review: deleted-file content unavailable (%s)", exc)
+    unreadable_deleted = [p for p in deleted if p not in deleted_content]
+    unreadable = list(omitted) + unreadable_deleted
 
     # Best-effort: which surviving files still import each removed module, so the
     # reviewer can check the deletion note's "nothing depends on it" instruction.
@@ -949,7 +988,7 @@ def _select_review_input(
         files,
         deletion_note=note,
         withheld=withheld or None,
-        unreadable=omitted or None,
+        unreadable=unreadable or None,
         emptied=emptied or None,
     )
 
@@ -961,7 +1000,7 @@ def _select_review_input(
             synthetic_keys,
             key_to_path,
             withheld=tuple(withheld),
-            unreadable=tuple(omitted),
+            unreadable=tuple(unreadable),
             emptied=tuple(emptied),
         )
 
@@ -2972,9 +3011,14 @@ class BackendExpertAgent:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:
             CodeReviewUnavailableError: when the review could not be completed.
+            ValueError: when neither or both of ``files``/``code`` are provided
+                (a caller-contract violation surfaced at the boundary rather than
+                silently mis-reviewed).
         """
         from code_review_agent.models import build_code_review_input
 
+        if (files is None) == (code is None):
+            raise ValueError("_run_code_review requires exactly one of 'files' or 'code'")
         task_description = task.description or ""
         return code_review_agent.run(
             build_code_review_input(
