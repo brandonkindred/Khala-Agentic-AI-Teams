@@ -127,7 +127,14 @@ def planning_llm_client(base: LLMClient) -> LLMClient:
         return base
     inner = unwrap_client(base)
     if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        override = OllamaLLMClient(
+            model=model,
+            base_url=inner.base_url,
+            timeout=inner.timeout,
+            # Carry the reasoning sink across so a streaming-reasoning caller
+            # doesn't lose its hook on the model-pinned override.
+            on_reasoning=inner.on_reasoning,
+        )
         # Preserve the original client's agent attribution on the override.
         return attributed_client(override, client_agent_key(base))
     return base
@@ -153,7 +160,14 @@ def plan_critic_llm_client(base: LLMClient) -> LLMClient:
         return base
     inner = unwrap_client(base)
     if isinstance(inner, OllamaLLMClient):
-        override = OllamaLLMClient(model=model, base_url=inner.base_url, timeout=inner.timeout)
+        override = OllamaLLMClient(
+            model=model,
+            base_url=inner.base_url,
+            timeout=inner.timeout,
+            # Carry the reasoning sink across so a streaming-reasoning caller
+            # doesn't lose its hook on the model-pinned override.
+            on_reasoning=inner.on_reasoning,
+        )
         # Preserve the original client's agent attribution on the override.
         return attributed_client(override, client_agent_key(base))
     return base

@@ -110,7 +110,8 @@ def test_bind_request_id_restores_after_exception() -> None:
 
 
 def test_bind_request_id_rejects_empty() -> None:
-    with pytest.raises(AssertionError):
+    # ValueError (not AssertionError): the precondition must hold under ``python -O``.
+    with pytest.raises(ValueError, match="request_id must be a non-empty string"):
         with bind_request_id(""):
             pass
 

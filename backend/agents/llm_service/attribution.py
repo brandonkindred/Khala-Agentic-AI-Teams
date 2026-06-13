@@ -129,7 +129,11 @@ def bind_request_id(request_id: str) -> Iterator[str]:
         ``request_id``; on exit (including via exception) the previous value is
         restored.
     """
-    assert request_id, "request_id must be non-empty"
+    if not request_id:
+        # Explicit validation rather than ``assert``: the precondition must hold
+        # even under ``python -O`` (which strips asserts), or attribution would
+        # silently bind an empty id and break log/telemetry correlation.
+        raise ValueError("request_id must be a non-empty string")
     prev = _request_id.get()
     token = _request_id.set(request_id)
     try:
@@ -141,46 +145,66 @@ def bind_request_id(request_id: str) -> Iterator[str]:
             _request_id.set(prev)
 
 
-def caller_team() -> str:
-    """Return the team that owns the calling code, derived from its source path.
+def _find_agent_frame() -> Optional[list[str]]:
+    """Return the source-path parts after ``/agents/`` for the originating frame.
 
-    Every team's code lives under ``backend/agents/<team>/``, so the team
-    directory name is a reliable identifier regardless of how a team flattens
-    its package onto ``sys.path`` (so it succeeds where import-name inspection
-    does not). The walk starts at the immediate caller and skips ``llm_service``
-    and any non-team frames (e.g. third-party Strands / asyncio frames), so it
-    finds the originating agent even when the call is dispatched through an
-    intermediary.
+    Walks the call stack for the innermost frame physically located under
+    ``backend/agents/<team>/`` that is *not* owned by ``llm_service`` (skipping
+    third-party Strands / asyncio frames and the central client itself), and
+    returns the ``"/"``-split path components after the ``/agents/`` marker —
+    so ``[0]`` is the team directory and ``[-1]`` is the filename. This is the
+    shared basis for both :func:`caller_team` (which wants ``[0]``) and
+    :func:`caller_agent` (which wants a finer identity), centralizing the
+    frame-walk and the CPython-specific ``sys._getframe`` fallback in one place.
 
-    Must be evaluated on a thread/task whose stack still contains the agent
-    frame — e.g. before an ``asyncio.to_thread`` hand-off, not inside the
+    Source path is used (rather than import-name inspection) because it is a
+    reliable identifier regardless of how a team flattens its package onto
+    ``sys.path``.
+
+    Must be called *directly* from :func:`caller_team` / :func:`caller_agent`:
+    it starts the walk at ``sys._getframe(2)`` to skip its own frame and its
+    caller's, landing on the originating code. That code must still be on the
+    stack — evaluate before an ``asyncio.to_thread`` hand-off, not inside the
     worker thread (whose stack holds only executor frames).
 
-    Implementation note: uses ``sys._getframe`` (CPython-specific, chosen over
-    ``inspect.stack()`` to avoid reading source context on every LLM call). On a
-    runtime without ``sys._getframe`` this returns ``""`` — attribution degrades
-    to the explicitly-bound team and ``caller_tag``, it does not error.
-
-    Postconditions: returns the ``<team>`` directory name of the innermost stack
-        frame physically located under ``agents/`` and not owned by
-        ``llm_service``; returns ``""`` when no such frame exists.
+    Postconditions: returns the path-part list for the innermost matching frame,
+        or ``None`` when no such frame exists or the runtime lacks
+        ``sys._getframe`` (attribution then degrades to the explicitly-bound
+        value and ``caller_tag``, it does not error).
     """
     import sys
 
     getframe = getattr(sys, "_getframe", None)
     if getframe is None:  # pragma: no cover - non-CPython fallback
-        return ""
+        return None
     marker = "/agents/"
-    frame = getframe(1)  # start at the immediate caller
+    frame = getframe(2)  # skip _find_agent_frame + its caller (caller_team/agent)
     while frame is not None:
         path = (frame.f_code.co_filename or "").replace("\\", "/")
         idx = path.find(marker)
         if idx != -1:
-            top = path[idx + len(marker) :].split("/", 1)[0]
-            if top and top != "llm_service":
-                return top
+            rest = path[idx + len(marker) :].split("/")
+            if rest and rest[0] and rest[0] != "llm_service":
+                return rest
         frame = frame.f_back
-    return ""
+    return None
+
+
+def caller_team() -> str:
+    """Return the team that owns the calling code, derived from its source path.
+
+    Every team's code lives under ``backend/agents/<team>/``, so the team
+    directory name is a reliable identifier regardless of how a team flattens
+    its package onto ``sys.path``. Delegates the frame-walk to
+    :func:`_find_agent_frame`; see its docstring for the ``sys._getframe`` caveat
+    and the "must run before an ``asyncio.to_thread`` hand-off" requirement.
+
+    Postconditions: returns the ``<team>`` directory name of the innermost stack
+        frame physically located under ``agents/`` and not owned by
+        ``llm_service``; returns ``""`` when no such frame exists.
+    """
+    rest = _find_agent_frame()
+    return rest[0] if rest else ""
 
 
 # Directory names that are containers rather than an agent's own package — when
@@ -195,40 +219,26 @@ def caller_agent() -> str:
 
     A fallback for the structured ``agent_key`` field when no explicit key is
     configured (e.g. ``get_strands_model()`` called without one). Mirrors
-    :func:`caller_team` — same source-path basis and ``sys._getframe`` caveat —
-    but resolves a finer identity: the package directory immediately containing
-    the calling file (e.g. ``ui_design``), or the file's stem when that
-    directory is a generic container (e.g. ``.../agents/ranker.py`` → ``ranker``).
-
-    Must be evaluated on a thread/task whose stack still holds the agent frame
-    (before an ``asyncio.to_thread`` hand-off, not inside the worker).
+    :func:`caller_team` — same source-path basis (via :func:`_find_agent_frame`)
+    and ``sys._getframe`` caveat — but resolves a finer identity: the package
+    directory immediately containing the calling file (e.g. ``ui_design``), or
+    the file's stem when that directory is a generic container (e.g.
+    ``.../agents/ranker.py`` → ``ranker``).
 
     Postconditions: returns a non-empty identity for the innermost ``agents/``
         frame not owned by ``llm_service``; returns ``""`` when none exists.
     """
-    import sys
-
-    getframe = getattr(sys, "_getframe", None)
-    if getframe is None:  # pragma: no cover - non-CPython fallback
+    rest = _find_agent_frame()
+    if not rest:
         return ""
-    marker = "/agents/"
-    frame = getframe(1)
-    while frame is not None:
-        path = (frame.f_code.co_filename or "").replace("\\", "/")
-        idx = path.find(marker)
-        if idx != -1:
-            rest = path[idx + len(marker) :].split("/")
-            team = rest[0]
-            if team and team != "llm_service":
-                stem = rest[-1].rsplit(".", 1)[0] if rest else ""
-                parent = rest[-2] if len(rest) >= 2 else ""
-                if parent and parent != team and parent not in _GENERIC_AGENT_DIRS:
-                    return parent
-                if stem and stem not in ("__init__", "agent", "agents", "main"):
-                    return stem
-                return parent or stem
-        frame = frame.f_back
-    return ""
+    team = rest[0]
+    stem = rest[-1].rsplit(".", 1)[0]
+    parent = rest[-2] if len(rest) >= 2 else ""
+    if parent and parent != team and parent not in _GENERIC_AGENT_DIRS:
+        return parent
+    if stem and stem not in ("__init__", "agent", "agents", "main"):
+        return stem
+    return parent or stem
 
 
 __all__ = [
