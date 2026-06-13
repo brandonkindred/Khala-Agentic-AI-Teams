@@ -92,12 +92,9 @@ class StrategySpecValidator(GateResultsMixin):
                     self._critical(f"max_position_pct={max_pos}% is outside safe range [1%, 25%].")
                 )
 
-            if risk.max_drawdown_pct < 5 or risk.max_drawdown_pct > 50:
-                results.append(
-                    self._warning(
-                        f"max_drawdown_pct={risk.max_drawdown_pct}% is outside typical range [5%, 50%]."
-                    )
-                )
+            # No drawdown check: max drawdown is not a constraint. A Strategy Lab
+            # run is an experiment and may lose up to 100% of the account;
+            # realised drawdown is reported as a metric, never enforced as a cap.
 
             # Spec rule fields are structured DSL nodes — render through the
             # spec_dsl formatters to recover a human-readable text view for the

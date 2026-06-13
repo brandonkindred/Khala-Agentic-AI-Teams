@@ -558,8 +558,9 @@ class _EngineEntryDispatcher:
         # decide how much capital may be deployed BEFORE placing the order, then
         # let the order fill like a real broker fill — a price gap between the
         # sizing bar and the fill bar may leave the realised position marginally
-        # above the cap, and that is acceptable holding behaviour governed by the
-        # ``max_drawdown_pct`` backstop, not a reason to drop the entry. This also
+        # above the cap, and that is acceptable holding behaviour (post-fill
+        # notional drift on committed shares), not a reason to drop the entry.
+        # This also
         # gates ``risk_presized``: a clamped order tells ``RiskFilter.can_enter``
         # to skip the fill-time cap re-check (which would otherwise falsely reject
         # the gap). ``fixed_fraction`` deploys ``fraction`` of current equity, so
@@ -1509,20 +1510,16 @@ class TradingService:
                             for trade in outcome.closed_trades:
                                 on_trade(trade)
 
-                        # 3) Drawdown circuit-breaker.
+                        # 3) Mark-to-market and stamp the equity curve. There is
+                        # no drawdown circuit-breaker — a Strategy Lab run is an
+                        # experiment and must be free to lose up to 100% so its
+                        # true downside is observed, not truncated by a limit.
                         portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
                         equity = portfolio.mark_to_market()
                         # #430: stamp EOD equity for the streaming curve.
                         # Sub-daily bars overwrite the same calendar-day key,
                         # so the last MTM of each trading day wins.
                         eod_buffer.record(cur_bar.timestamp, equity)
-                        dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
-                        if dd.breached:
-                            result.terminated_reason = (
-                                f"max_drawdown breached "
-                                f"({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
-                            )
-                            break
 
                         # Issue #527 — refresh engine-side per-position state
                         # for ``cur_bar.symbol`` based on the post-fill
@@ -1783,19 +1780,14 @@ class TradingService:
                         for trade in outcome.closed_trades:
                             on_trade(trade)
 
-                    # 3) Drawdown circuit-breaker.
+                    # 3) Mark-to-market and stamp the equity curve. There is no
+                    # drawdown circuit-breaker — a Strategy Lab run is an
+                    # experiment and must be free to lose up to 100% so its true
+                    # downside is observed, not truncated by a limit.
                     portfolio.update_last_price(cur_bar.symbol, cur_bar.close)
                     equity = portfolio.mark_to_market()
                     # #430: stamp EOD equity for the streaming curve.
                     eod_buffer.record(cur_bar.timestamp, equity)
-                    dd = self._risk.check_drawdown(equity, portfolio.peak_equity)
-                    if dd.breached:
-                        result.terminated_reason = (
-                            f"max_drawdown breached "
-                            f"({dd.current_drawdown_pct:.1f}% >= {dd.limit_pct}%)"
-                        )
-                        chunk_buffer.clear()
-                        return False
 
                     result.bars_processed += 1
 

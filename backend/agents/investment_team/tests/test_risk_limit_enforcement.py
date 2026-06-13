@@ -92,12 +92,17 @@ def test_risk_limits_passes_through_explicit_instance() -> None:
 
 
 def test_spec_json_round_trips_through_model_dump() -> None:
-    """Ensure persisted StrategySpec rows still deserialize after the schema change."""
-    original = _base_spec(risk_limits={"max_position_pct": 7.5, "max_drawdown_pct": 12.0})
+    """Persisted StrategySpec rows still deserialize. A legacy row that carried
+    the retired ``max_drawdown_pct`` constraint loads cleanly with the key
+    dropped — it is no longer a field (max drawdown is not a constraint)."""
+    original = _base_spec(risk_limits={"max_position_pct": 7.5, "max_open_positions": 4})
     payload = original.model_dump(mode="json")
+    # Simulate a legacy persisted row that still carries the retired key.
+    payload["risk_limits"]["max_drawdown_pct"] = 12.0
     revived = StrategySpec.model_validate(payload)
     assert revived.risk_limits.max_position_pct == 7.5
-    assert revived.risk_limits.max_drawdown_pct == 12.0
+    assert revived.risk_limits.max_open_positions == 4
+    assert not hasattr(revived.risk_limits, "max_drawdown_pct")
 
 
 # ---------------------------------------------------------------------------
@@ -133,13 +138,14 @@ def test_trading_service_accepts_legacy_dict() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Drawdown circuit-breaker → terminated_reason propagation
+# No drawdown circuit-breaker: a deep crash must NOT terminate the run early —
+# a Strategy Lab run may lose up to 100% of the account by design.
 # ---------------------------------------------------------------------------
 
 
 _BUY_AND_HOLD_CODE = textwrap.dedent('''\
-    """Enter LONG immediately so a crash-mode price series blows past the
-    max_drawdown limit on the very first bar after entry."""
+    """Enter LONG immediately and ride a crash-mode price series all the way
+    down — there is no drawdown circuit-breaker to bail it out."""
     from contract import OrderSide, OrderType, Strategy
 
 
@@ -175,14 +181,15 @@ def _crash_bars(n: int) -> List[OHLCVBar]:
     return out
 
 
-def test_drawdown_breach_sets_terminated_reason_on_backtest_result() -> None:
-    """A strategy that enters and rides a crash past max_drawdown_pct must
-    record ``terminated_reason`` on the persisted ``BacktestResult``."""
+def test_deep_crash_does_not_terminate_run_early() -> None:
+    """A strategy that enters and rides a catastrophic crash runs to the end of
+    the stream — there is no max-drawdown circuit-breaker, so ``terminated_reason``
+    is never populated by a drawdown limit and the experiment's full downside is
+    observed (it may lose up to ~100%)."""
     spec = _base_spec(
         strategy_id="dd-crash",
         strategy_code=_BUY_AND_HOLD_CODE,
         risk_limits={
-            "max_drawdown_pct": 20.0,
             "max_position_pct": 80.0,
             "max_symbol_concentration_pct": 80.0,
         },
@@ -197,15 +204,9 @@ def test_drawdown_breach_sets_terminated_reason_on_backtest_result() -> None:
     market_data = {"AAA": _crash_bars(10)}
     result = run_backtest(strategy=spec, config=config, market_data=market_data)
 
-    assert result.service_result.terminated_reason is not None, (
-        "service_result should carry the termination signal"
-    )
-    assert "max_drawdown" in result.service_result.terminated_reason
-
-    assert result.result.terminated_reason is not None, (
-        "BacktestResult must propagate terminated_reason from TradingServiceResult"
-    )
-    assert "max_drawdown" in result.result.terminated_reason
+    # The run completes; nothing halted it on a drawdown limit.
+    assert result.service_result.terminated_reason is None
+    assert result.result.terminated_reason is None
 
 
 def test_clean_run_leaves_terminated_reason_none() -> None:

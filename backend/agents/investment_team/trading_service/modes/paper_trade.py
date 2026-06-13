@@ -310,10 +310,6 @@ def run_paper_trade(
         final_reason = "lookahead_violation"
     elif service_result.error:
         final_reason = "provider_error"
-    elif service_result.terminated_reason and service_result.terminated_reason.startswith(
-        "max_drawdown"
-    ):
-        final_reason = "max_drawdown"
     elif terminated_reason["reason"] != "unknown":
         final_reason = terminated_reason["reason"]
     else:

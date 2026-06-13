@@ -14,15 +14,23 @@ Every filter, condition, or indicator NAMED in `hypothesis` or `signal_definitio
 
 If the prose makes a claim the rules cannot test, the backtest result is a lie — flag it `critical` with `field="entry_rules"` (or `exit_rules` as appropriate) and a `suggested_fix` that names the missing predicate.
 
-### 2. Risk-math coherence
+### 2. Sizing-vs-cap contradiction
 
-Verify the arithmetic between `sizing`, `risk_limits`, stop / take-profit rules, and any per-trade risk claim the prose makes:
+The deterministic gate is the authority on sizing and `risk_limits` math, and
+the external reviewer does NOT block on it. The ONE thing worth pre-catching
+here — because it is the single sizing defect the deterministic gate raises as
+critical — is a sizing rule that deploys more than the position cap:
 
-- **`sizing.fraction` vs `risk_limits.max_position_pct`** — `fraction=0.10` with `max_position_pct=5` is a direct contradiction. Flag critical with `field="sizing"`.
-- **The deployed position size IS the per-trade loss cap.** A trade can lose up to ~100% of what it deploys, so the per-trade risk is `sizing.fraction` (bounded by `max_position_pct`), NOT `fraction × stop`. If the prose claims "5% equity risk per trade" and `sizing.fraction=0.05`, that's coherent. If the prose claims "5% risk" but the spec deploys 50% (`fraction=0.50`), flag critical with `field="sizing"` and quote both numbers. `stop_loss.pct` is a separate, optional safeguard and is never multiplied into the per-trade risk.
-- **Take-profit ÷ stop-loss implies required win rate.** A `take_profit.pct < stop_loss.pct` strategy needs a >50% win rate to break even. If the hypothesis doesn't defend that, flag critical with `field="sizing"`.
-- **`volatility_target` + `stop_loss.pct`** — a 5% annual vol target with a 20% stop is incoherent. Flag critical with `field="sizing"`.
-- **`max_drawdown_pct` reachability** — should be reachable by a plausible losing streak but not trivial. A 50-trade strategy at 2% per-trade risk with `max_drawdown_pct=5` is incoherent (one 3-loss streak crosses it). Flag critical with `field="risk_limits"`.
+- **`sizing.fraction` vs `risk_limits.max_position_pct`** — `fraction=0.10` (10% deployed) with `max_position_pct=5` is a direct contradiction (sizing exceeds the cap). Flag critical with `field="sizing"`. This is the only sizing/risk check to make here.
+
+Read sizing correctly so you do not flag a coherent spec: `"risk X% per trade"`
+means capital **DEPLOYED** (a fraction of the account, which IS the per-trade
+loss cap), NOT a stop-multiplied loss budget. Never compute per-trade risk as
+`fraction × stop`, and never treat `stop_loss.pct` as part of sizing.
+
+Do **NOT** check max-drawdown reachability, take-profit/stop win-rate, or
+vol-target/stop coherence — none of those block the external reviewer, and max
+drawdown is not a constraint at all (a strategy may lose up to 100% by design).
 
 ## What NOT to check
 

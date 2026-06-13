@@ -35,7 +35,6 @@ _RISK_LIMIT_TIGHTEN_DIR: Dict[str, Optional[str]] = {
     "max_gross_leverage": "lower",
     "max_position_pct": "lower",
     "max_symbol_concentration_pct": "lower",
-    "max_drawdown_pct": "lower",
     "max_open_positions": "lower",
     "target_annual_vol": "lower",
     "vol_lookback_days": None,

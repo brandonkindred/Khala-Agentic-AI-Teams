@@ -40,7 +40,7 @@ from ._parse_helpers import (
     validate_structured_rules,
 )
 from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
-from .design_review import _coerce_critique, format_prior_critiques
+from .design_review import _coerce_critique, _sizing_owned_by_gate, format_prior_critiques
 from .model_factory import get_strands_model
 
 if TYPE_CHECKING:
@@ -504,7 +504,18 @@ class DesignAgent:
         # self-revision round, so demote only on critical here. (The
         # external DesignReviewAgent keeps the stricter default, where any
         # non-info issue demotes.)
-        return _coerce_critique(parsed, readiness_findings=[], demote_min_severity="critical")
+        #
+        # The sizing carve-out only applies to gate-owned sizing kinds; a
+        # ``volatility_target`` plausibility objection (which the deterministic
+        # gate abstains on) must keep blocking, so resolve ``sizing_owned`` from
+        # the draft's sizing kind rather than assuming it.
+        sizing_kind = (strategy_dict.get("sizing") or {}).get("kind")
+        return _coerce_critique(
+            parsed,
+            readiness_findings=[],
+            demote_min_severity="critical",
+            sizing_owned=_sizing_owned_by_gate(sizing_kind),
+        )
 
 
 def _design_self_review_enabled() -> bool:
