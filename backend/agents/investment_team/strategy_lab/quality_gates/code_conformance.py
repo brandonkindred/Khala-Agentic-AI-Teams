@@ -477,16 +477,18 @@ def _attachment_is_active(node: ast.AST) -> bool:
 
     Pre: ``node`` is the value of an ``attached_stop_loss`` /
     ``attached_take_profit`` keyword.
-    Post: True for a non-``None`` constant or a computed expression
-    (``BinOp`` / ``Call`` / ``BoolOp`` / ...); False for ``None`` and for a
-    bare ``Name`` / ``Attribute`` whose value cannot be established
-    statically (``stop = None; attached_stop_loss=stop``). Treating an
-    ambiguous attachment as inactive avoids a false-positive hard critical;
-    a genuinely-active bracket built from a variable is caught by the runtime
-    trade-alignment gate instead.
+    Post: True for a truthy constant (non-``None``, non-zero) or a computed
+    expression (``BinOp`` / ``Call`` / ``BoolOp`` / ...); False for a falsy
+    constant (``None`` / ``0`` / ``0.0`` / ``False`` / ``""``) and for a bare
+    ``Name`` / ``Attribute`` whose value cannot be established statically
+    (``stop = None; attached_stop_loss=stop``). An engine that treats a
+    falsy attachment as "no bracket" creates no bracket child, so a falsy
+    or ambiguous attachment is treated as inactive to avoid a false-positive
+    hard critical; a genuinely-active bracket built from a variable is caught
+    by the runtime trade-alignment gate instead.
     """
     if isinstance(node, ast.Constant):
-        return node.value is not None
+        return bool(node.value)
     if isinstance(node, (ast.Name, ast.Attribute)):
         return False
     return True
