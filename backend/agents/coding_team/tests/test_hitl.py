@@ -49,6 +49,12 @@ def test_normalize_options_drops_reserved_other_id():
     assert out[0]["options"] == []
 
 
+def test_normalize_open_questions_missing_options_key():
+    # A dict question that omits the options key entirely is treated as optionless.
+    out = hitl.normalize_open_questions([{"question_text": "Q?"}])
+    assert out[0]["options"] == []
+
+
 def test_normalize_open_questions_drops_options_fewer_than_two():
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}]}]
