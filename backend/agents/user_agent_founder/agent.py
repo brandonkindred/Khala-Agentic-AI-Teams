@@ -301,6 +301,7 @@ class FounderAgent:
                     prompt,
                     system_prompt=system_prompt,
                     temperature=0.7,
+                    objective="generate founder spec",
                 )
                 return str(result).strip()
             except Exception as exc:
@@ -395,6 +396,7 @@ class FounderAgent:
         answer = generate_structured(
             prompt,
             schema=bounded_schema,
+            objective="answer founder question",
             system_prompt=self._system_prompt,
             agent_key="user_agent_founder",
         )

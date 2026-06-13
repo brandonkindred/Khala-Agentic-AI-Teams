@@ -385,6 +385,7 @@ def _propose(
         llm,
         prompt,
         schema=_ReflectionResult,
+        objective="propose rule changes",
         system_prompt=_REFLECTION_SYSTEM_PROMPT,
         temperature=0.0,
         correction_attempts=1,

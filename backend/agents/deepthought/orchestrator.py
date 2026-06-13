@@ -129,6 +129,7 @@ class DeepthoughtOrchestrator:
                 temperature=0.1,
                 system_prompt=CLASSIFY_QUESTION_SYSTEM_PROMPT,
                 think=False,
+                objective="classify question strategy",
             )
             # Parse JSON from response
             cleaned = raw.strip().strip("`").strip()

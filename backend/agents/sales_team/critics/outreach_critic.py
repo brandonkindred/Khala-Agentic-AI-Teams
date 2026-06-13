@@ -130,6 +130,7 @@ class OutreachCriticAgent:
                 system_prompt=_OUTREACH_CRITIC_SYSTEM_PROMPT,
                 temperature=0.0,
                 correction_attempts=2,
+                objective="critique outreach sequence",
             )
         except Exception as exc:
             logger.warning("sales.outreach_critic.failed reason=%s", exc)

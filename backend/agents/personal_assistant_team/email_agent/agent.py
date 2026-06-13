@@ -142,6 +142,7 @@ class EmailAgent:
                     "sentiment",
                 ],
                 think=False,
+                objective="summarize email",
             )
         except JSONExtractionFailure as e:
             logger.error("Failed to summarize email (JSON extraction failed):\n%s", e)
@@ -219,7 +220,9 @@ class EmailAgent:
         )
 
         try:
-            data = self.llm.complete_json(prompt, temperature=0.1, think=False)
+            data = self.llm.complete_json(
+                prompt, temperature=0.1, think=False, objective="extract events from email"
+            )
             return data.get("events", [])
         except Exception as e:
             logger.error("Failed to extract events: %s", e)
@@ -287,7 +290,9 @@ class EmailAgent:
         )
 
         try:
-            data = self.llm.complete_json(prompt, temperature=0.4, think=False)
+            data = self.llm.complete_json(
+                prompt, temperature=0.4, think=False, objective="draft email"
+            )
         except Exception as e:
             logger.error("Failed to draft email: %s", e)
             return DraftResult(
@@ -319,7 +324,9 @@ class EmailAgent:
         )
 
         try:
-            data = self.llm.complete_json(prompt, temperature=0.5, think=False)
+            data = self.llm.complete_json(
+                prompt, temperature=0.5, think=False, objective="generate quick replies"
+            )
             return data.get("replies", [])
         except Exception as e:
             logger.error("Failed to generate quick replies: %s", e)

@@ -32,6 +32,7 @@ T = TypeVar("T", bound=BaseModel)
 def generate_text(
     prompt: str,
     *,
+    objective: str,
     system_prompt: str | None = None,
     temperature: float = 0.7,
     agent_key: str | None = None,
@@ -44,6 +45,9 @@ def generate_text(
 
     Args:
         prompt: The user prompt.
+        objective: Required short phrase describing *why* this call is made
+            (e.g. ``"summarize research notes"``). Stamped onto every LLM log
+            line and telemetry record so the call is attributable in the logs.
         system_prompt: Optional system prompt.
         temperature: Sampling temperature (default 0.7 for text generation).
         agent_key: Per-agent config selector forwarded to ``get_client``.
@@ -56,6 +60,7 @@ def generate_text(
     return str(
         client.complete(
             prompt,
+            objective=objective,
             system_prompt=system_prompt,
             temperature=temperature,
             think=think,
@@ -67,6 +72,7 @@ def generate_structured(
     prompt: str,
     *,
     schema: type[T],
+    objective: str,
     system_prompt: str | None = None,
     temperature: float = 0.0,
     agent_key: str | None = None,
@@ -101,6 +107,7 @@ def generate_structured(
         client,
         prompt,
         schema=schema,
+        objective=objective,
         system_prompt=system_prompt,
         temperature=temperature,
         correction_attempts=correction_attempts,

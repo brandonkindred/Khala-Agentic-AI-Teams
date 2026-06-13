@@ -150,6 +150,7 @@ class NutritionistAgent:
                 client,
                 prompt,
                 schema=schema,
+                objective="narrate nutrition plan",
                 system_prompt=system_prompt,
             )
         except LLMSchemaValidationError as e:

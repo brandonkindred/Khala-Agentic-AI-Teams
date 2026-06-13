@@ -90,7 +90,11 @@ def get_strands_model(
 
     model_id = llm_config.resolve_model(agent_key)
 
-    cache_key = (model_id, base_url, response_format)
+    # ``agent_key`` is part of the cache key so two agents that resolve to the
+    # same model don't share one ``LLMClientModel`` (which would attribute every
+    # later call to whichever agent constructed it first). Distinct keys get
+    # distinct adapters, each backed by its own attribution-wrapped client.
+    cache_key = (model_id, base_url, response_format, agent_key)
 
     with _cache_lock:
         if cache_key not in _model_cache:
