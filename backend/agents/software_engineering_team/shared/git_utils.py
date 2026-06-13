@@ -66,8 +66,19 @@ def git_identity_env() -> Dict[str, str]:
     return env
 
 
-def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, str]:
-    """Run git command in repo. Returns (returncode, stdout+stderr).
+def _run_git(
+    repo_path: Path, cmd: list[str], timeout: int = 30, *, merge_stderr: bool = True
+) -> Tuple[int, str]:
+    """Run git command in repo. Returns (returncode, output).
+
+    Parameters
+    ----------
+    merge_stderr:
+        When True (default) the returned text is ``stdout + stderr`` — convenient
+        for surfacing error detail in failure messages. When False, only
+        ``stdout`` is returned, so a command whose stdout is *data* (e.g.
+        ``git show <rev>:<path>`` reading a file blob) is not polluted by warnings
+        git may emit to stderr while still exiting 0 (CRLF/filter-driver advice).
 
     Postconditions:
         - The spawned git process observes a complete author/committer
@@ -86,7 +97,10 @@ def _run_git(repo_path: Path, cmd: list[str], timeout: int = 30) -> Tuple[int, s
             timeout=timeout,
             env=git_identity_env(),
         )
-        return result.returncode, (result.stdout or "") + (result.stderr or "")
+        out = result.stdout or ""
+        if merge_stderr:
+            out += result.stderr or ""
+        return result.returncode, out
     except subprocess.TimeoutExpired:
         return -1, "Command timed out"
     except Exception as e:
@@ -278,6 +292,12 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
     return out or ""
 
 
+# Upper bound on a single deleted blob read inline for review. A removed file
+# larger than this is skipped (and surfaced by name in the deletion note) so a
+# huge binary deletion can never be loaded whole into memory and OOM the worker.
+_MAX_DELETED_BLOB_BYTES = 2_000_000
+
+
 class BaselineDiffUnavailable(RuntimeError):
     """The net base→worktree diff could not be computed.
 
@@ -325,13 +345,17 @@ def read_paths_at_merge_base(
           dropped by the caller) — this reader does no denylisting of its own.
     Postconditions:
         - Returns ``{path: content}`` for each path whose merge-base blob is
-          readable text. A path that did not exist at the base, that resolves to
-          a tree (a directory/submodule has no blob), or whose blob is binary (a
-          NUL byte) is omitted rather than returned as gibberish. Content is made
-          UTF-8/JSON safe: ``_run_git`` decodes with ``surrogateescape``, so a
-          blob with invalid-UTF-8 (but NUL-free) bytes would otherwise carry lone
-          surrogates that crash a later UTF-8/JSON encode; those bytes are
-          re-decoded with ``errors="replace"`` here.
+          readable text *and* within :data:`_MAX_DELETED_BLOB_BYTES`. A path that
+          did not exist at the base, that resolves to a tree (a directory/submodule
+          has no blob), that exceeds the size cap, or whose blob is binary (a NUL
+          byte) is omitted rather than returned as gibberish. The size is checked
+          with ``git cat-file -s`` *before* the blob is read, so an arbitrarily
+          large removed binary is never loaded whole (mirroring the worktree
+          reader's bounded sniff and avoiding an OOM).
+        - Content is read with ``merge_stderr=False`` so a git stderr warning
+          (CRLF/filter advice emitted while still exiting 0) is not spliced into
+          the blob; it is then made UTF-8/JSON safe by re-deriving the
+          surrogateescaped bytes and decoding with ``errors="replace"``.
         - Returns ``{}`` when not a git repository.
         - Raises :class:`BaselineDiffUnavailable` when the merge base cannot be
           computed, mirroring :func:`list_changed_and_deleted` so the caller
@@ -344,10 +368,23 @@ def read_paths_at_merge_base(
     result: Dict[str, str] = {}
     for rel in paths:
         # The ``<rev>:<path>`` object syntax names the blob directly, so the path
-        # is never parsed as a revision/flag (no ``--`` separator needed).
-        code, out = _run_git(path, ["git", "show", f"{merge_base}:{rel}"])
-        if code != 0:
+        # is never parsed as a revision/flag (no ``--`` separator needed). Check
+        # the blob size first so a huge removed binary is never read into memory.
+        sz_code, sz_out = _run_git(path, ["git", "cat-file", "-s", f"{merge_base}:{rel}"])
+        if sz_code != 0:
             continue  # path absent at base, or a tree (submodule/dir): no blob
+        try:
+            blob_size = int(sz_out.strip())
+        except ValueError:
+            continue
+        if blob_size > _MAX_DELETED_BLOB_BYTES:
+            continue  # too large to review inline; surfaced by name in the note
+        # stdout only — a git stderr warning must not contaminate the blob.
+        code, out = _run_git(
+            path, ["git", "show", f"{merge_base}:{rel}"], merge_stderr=False
+        )
+        if code != 0:
+            continue
         if "\x00" in out:
             continue  # binary blob: omit rather than review as gibberish
         # _run_git decoded with surrogateescape; re-derive the original bytes and
@@ -483,9 +520,12 @@ def _deleted_module_patterns(rel_path: str) -> List[str]:
       itself (``import pkg`` / ``pkg.``), since removing it breaks ``import pkg``.
 
     For a non-Python deletion (Java/JS/TS/config/schema/...) there is no portable
-    import grammar, so it falls back to the file's basename — the bare stem as a
-    word and the full filename — which catches ``import ... from './foo'``,
-    ``require('foo')``, ``foo.json`` config references, and similar by-name uses.
+    import grammar, so it falls back to *path-delimited* basename references: the
+    full filename (``widget.ts``) and the stem when immediately preceded by a path
+    separator, quote, or dot (``'widget'``, ``./widget``, ``com.x.Widget``). A bare
+    word-boundary stem search is deliberately avoided — for a common basename
+    (``index``, ``data``, ``main``, ``utils``) it would match nearly every file
+    mentioning the word and flood the deletion note with false dependents.
     """
     p = Path(rel_path)
     stem = p.stem
@@ -513,8 +553,11 @@ def _deleted_module_patterns(rel_path: str) -> List[str]:
         patterns += ["-e", rf"from\s+\.+{re.escape(name)}\b"]
         return patterns
 
-    # Non-Python: best-effort by-name reference search.
-    patterns = ["-e", rf"\b{re.escape(stem)}\b"]
+    # Non-Python: path-delimited basename references only (no bare-word stem,
+    # which is far too broad for common basenames). Matches the full filename and
+    # the stem preceded by ``/``, a quote, or ``.`` — i.e. used like a path or a
+    # qualified name, not an arbitrary occurrence of the word.
+    patterns = ["-e", rf"['\"/.]{re.escape(stem)}"]
     if p.name != stem:
         patterns += ["-e", re.escape(p.name)]
     return patterns
@@ -556,8 +599,19 @@ def find_referencing_paths(
         if not patterns:
             continue
         code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns])
+        # git grep exits 1 for a clean "no matches"; >=2 (or our -1) is an actual
+        # error (bad pattern, grep unavailable). Don't conflate them — a silent
+        # error would be presented as "nothing depends on it"; log it instead.
+        if code == 1:
+            continue  # no surviving referrers
         if code != 0:
-            continue  # no matches (grep exits non-zero) or grep unavailable
+            logger.warning(
+                "find_referencing_paths: git grep failed (code %s) for %s; "
+                "reverse-reference signal unavailable for this deletion",
+                code,
+                dp,
+            )
+            continue
         refs = sorted(
             {
                 ref.strip()

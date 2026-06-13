@@ -614,13 +614,34 @@ class ReviewInputSelection:
         )
 
     def unexamined_paths(self) -> Tuple[str, ...]:
-        """Task-owned paths whose content the reviewer never saw (sorted, unique).
+        """All task-owned paths whose content the reviewer never saw (advisory).
 
-        Non-empty ⇒ an ``approved`` verdict cannot certify the whole change (a
-        secret, binary/submodule, or emptied file was omitted), so the gate must
-        route to manual review rather than letting the approval merge.
+        The full omission set — withheld secrets, unreadable/binary/submodule
+        files, and emptied files. Every entry is surfaced to the reviewer as a
+        note, but only :meth:`blocking_unexamined` forces manual review; see there
+        for why a binary asset or sensitive-named template is advisory rather than
+        a hard block.
         """
         return tuple(sorted(set(self.withheld) | set(self.unreadable) | set(self.emptied)))
+
+    def blocking_unexamined(self) -> Tuple[str, ...]:
+        """The omissions that MUST force manual review on an approval.
+
+        Not every unexamined path should block a merge: a binary asset
+        (``logo.png``) and a sensitive-named template (``.env.example``, caught by
+        the deliberately over-broad denylist) are *legitimately* non-text-reviewable
+        — blocking them would make every such change permanently un-mergeable. Those
+        are advisory (surfaced as notes via :meth:`unexamined_paths`). What does
+        block is the genuinely suspicious / unknowable subset:
+
+        - **emptied** — a changed file truncated to empty/whitespace (a destructive
+          content removal that the reviewer must confirm is intentional);
+        - the **baseline-unavailable sentinel** — the diff couldn't be computed, so
+          a deletion may exist that we cannot enumerate or show at all.
+        """
+        blockers = set(self.emptied)
+        blockers.update(p for p in self.unreadable if p == _DELETIONS_UNKNOWN_SENTINEL)
+        return tuple(sorted(blockers))
 
 
 def _translate_finding_paths(
@@ -926,13 +947,22 @@ def _select_review_input(
     files = read_files_as_dict(
         repo_path, readable, extensions=None, omitted=all_omitted, key_to_path=key_to_path
     )
-    # Only a *confirmed* changed path that could not be read counts as unexamined;
-    # a writer-only candidate that was never materialized does not.
-    omitted = [p for p in all_omitted if p in changed_owned]
+    # An omission is a genuine unexamined task artifact when it is either a
+    # confirmed git-diff change, or a writer-emitted file that *exists on disk* but
+    # could not be read (e.g. a generated binary). A writer-only *candidate* that
+    # was never materialized (rejected by write validation, a no-op .gitignore) is
+    # not on disk, so it is excluded — it must not pollute the omission notes.
+    omitted = [
+        p for p in all_omitted if p in changed_owned or (repo_path / p).is_file()
+    ]
 
     # A changed file truncated to empty/whitespace yields an empty block, which the
-    # coordinator drops — silently approving the content removal. Flag those paths.
-    emptied = [key for key, content in files.items() if not content.strip()]
+    # coordinator drops — silently approving the content removal. Flag those paths
+    # by their *real* repo path (the dict key is a display-safe, possibly suffixed
+    # review key), so the manual-review message names a file that exists on disk.
+    emptied = [
+        key_to_path.get(key, key) for key, content in files.items() if not content.strip()
+    ]
 
     # A deleted path can be restored in the worktree (a real file, or a dangling
     # symlink) in a later failed-commit iteration; treat it as present only then.
@@ -2042,20 +2072,23 @@ class BackendExpertAgent:
                     _read_repo_code(repo_path), compute_existing_code_chars(self.llm)
                 ),
             )
-            # Fail closed: an approval cannot certify files the reviewer never saw.
-            # If any task-owned file was withheld (secret), unreadable (binary/
-            # submodule), or emptied — or there was no examinable content at all —
-            # do NOT let the approval merge. Re-entering the regeneration loop would
-            # not change the omission set deterministically and, on exhaustion,
-            # would fall through to the merge path; so return a terminal
-            # manual-review result instead.
-            unexamined = review_selection.unexamined_paths()
-            if review_result.approved and (unexamined or not review_selection.has_examinable_content()):
-                shown = ", ".join(unexamined[:20]) + (" ..." if len(unexamined) > 20 else "")
+            # Fail closed on the *suspicious* omissions only. A file truncated to
+            # empty (destructive removal) or a baseline diff we couldn't compute
+            # (a deletion may exist that we can't even enumerate) must not merge on
+            # an approval — re-running wouldn't change the set deterministically and
+            # exhaustion would fall through to merge, so return a terminal
+            # manual-review result. Binary assets and sensitive-named templates are
+            # legitimately non-text-reviewable and stay advisory (surfaced as notes
+            # via unexamined_paths) rather than blocking every such change forever.
+            blocking = review_selection.blocking_unexamined()
+            if review_result.approved and blocking:
+                advisory = review_selection.unexamined_paths()
+                shown = ", ".join(blocking[:20]) + (" ..." if len(blocking) > 20 else "")
                 failure_reason = (
-                    "Code review approved, but task-owned files were not examinable "
-                    "(withheld secret, binary/submodule, or emptied) — manual review is "
-                    f"required before merge. Unexamined: {shown or '(no examinable content)'}"
+                    "Code review approved, but the change includes destructive/unknowable "
+                    "omissions that require manual review before merge (emptied files, or a "
+                    f"baseline diff that could not be computed): {shown}. "
+                    f"Also not examined (advisory): {', '.join(advisory[:20]) or 'none'}"
                 )
                 logger.warning("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
                 record.code_review_approved = False

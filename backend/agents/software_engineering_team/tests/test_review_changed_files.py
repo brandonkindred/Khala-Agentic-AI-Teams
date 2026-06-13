@@ -1913,3 +1913,171 @@ def test_list_changed_and_deleted_odd_fields_guarded(tmp_path: Path, monkeypatch
 
     assert changed == ["a.py"]
     assert deleted == []  # the dangling 'D' is dropped, not mispaired
+
+
+# ---------------------------------------------------------------------------
+# Gate relaxation + reverse-ref precision + OOM bound + symlink/emptied fixes
+# ---------------------------------------------------------------------------
+
+
+def test_blocking_unexamined_excludes_advisory_includes_suspicious() -> None:
+    from software_engineering_team.backend_agent.agent import (
+        _DELETIONS_UNKNOWN_SENTINEL,
+        ReviewInputSelection,
+    )
+
+    # Binary asset + withheld secret are advisory (NOT blocking); emptied + the
+    # baseline-unavailable sentinel are blocking.
+    sel = ReviewInputSelection(
+        {"a.py": "x = 1\n"},
+        None,
+        None,
+        withheld=("app/secrets.py", ".env.example"),
+        unreadable=("logo.png", _DELETIONS_UNKNOWN_SENTINEL),
+        emptied=("truncated.py",),
+    )
+    assert "logo.png" in sel.unexamined_paths()  # advisory: surfaced
+    assert "app/secrets.py" in sel.unexamined_paths()
+    blocking = sel.blocking_unexamined()
+    assert "truncated.py" in blocking  # destructive truncation blocks
+    assert _DELETIONS_UNKNOWN_SENTINEL in blocking  # unknowable deletions block
+    assert "logo.png" not in blocking  # binary asset does NOT block
+    assert "app/secrets.py" not in blocking
+    assert ".env.example" not in blocking
+
+
+def test_select_review_input_binary_asset_does_not_block(tmp_path: Path) -> None:
+    """Adding a binary asset alongside code is advisory, not a merge blocker."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "logo.png").write_bytes(b"\x89PNG\x00\x01\x02")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "code + binary asset")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "logo.png" in sel.unexamined_paths()  # surfaced for the reviewer
+    assert sel.blocking_unexamined() == ()  # but does not block the merge
+
+
+def test_select_review_input_emptied_blocks_with_real_path(tmp_path: Path) -> None:
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "important.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "important.py").write_text("   \n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "truncate")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "important.py" in sel.blocking_unexamined()  # real repo path, blocks
+
+
+def test_emptied_uses_real_path_not_review_key() -> None:
+    """A control-char filename truncated to empty surfaces its REAL path, not the
+    escaped review key, in the manual-review set."""
+    # Simulate what _select_review_input does: read produces a sanitized key, and
+    # emptied maps it back through key_to_path.
+    import tempfile
+
+    from software_engineering_team.shared.repo_utils import read_files_as_dict
+
+    with tempfile.TemporaryDirectory() as d:
+        p = Path(d)
+        (p / "a\tb.py").write_text("   \n", encoding="utf-8")
+        k2p: dict[str, str] = {}
+        files = read_files_as_dict(p, ["a\tb.py"], extensions=None, key_to_path=k2p)
+        emptied = [k2p.get(k, k) for k, v in files.items() if not v.strip()]
+        assert emptied == ["a\tb.py"]  # real path, not the escaped "a\\tb.py" key
+
+
+def test_find_referencing_paths_nonpython_precise(tmp_path: Path) -> None:
+    """A deleted non-Python file matches path/quote-delimited references, not bare
+    occurrences of a common word."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "data.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "consumer.js").write_text("import x from './data'\n", encoding="utf-8")
+    (tmp_path / "prose.py").write_text("# the data is processed; metadata too\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "data.json").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["data.json"])["data.json"]
+
+    assert "consumer.js" in refs  # './data' is a path-delimited reference
+    assert "prose.py" not in refs  # bare word "data" in prose is NOT a false hit
+
+
+def test_read_paths_at_merge_base_skips_oversized_blob(tmp_path: Path, monkeypatch) -> None:
+    from software_engineering_team.shared import git_utils
+
+    _init_repo(tmp_path)
+    (tmp_path / "big.py").write_text("x = 1\n" + ("# pad\n" * 100), encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+
+    monkeypatch.setattr(git_utils, "_MAX_DELETED_BLOB_BYTES", 10)  # tiny cap
+    content = git_utils.read_paths_at_merge_base(tmp_path, "development", ["big.py"])
+
+    assert content == {}  # blob exceeds the cap → not loaded, omitted
+
+
+def test_read_repo_files_as_dict_excluded_dir_symlink_not_surfaced(tmp_path: Path) -> None:
+    """A symlink whose name is an excluded dir (node_modules) is not emitted."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "external").mkdir()
+    (tmp_path / "external" / "dep.py").write_text("y = 1\n", encoding="utf-8")
+    try:
+        (tmp_path / "node_modules").symlink_to("external", target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks not supported")
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "main.py" in result
+    assert not any("node_modules" in k for k in result)  # excluded-name symlink dropped
+
+
+def test_select_review_input_written_binary_surfaced(tmp_path: Path) -> None:
+    """An untracked writer-emitted binary that exists on disk is surfaced as an
+    omission note (not a blocker), while a never-written candidate is ignored."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change a")
+    # Writer emitted an untracked binary (on disk) + a rejected candidate (absent).
+    (tmp_path / "gen.bin").write_bytes(b"\x00\x01binary")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(
+        tmp_path, task, written_files={"gen.bin": "x", "never.py": "rejected"}
+    )
+
+    assert "gen.bin" in sel.unexamined_paths()  # on-disk binary surfaced
+    assert "never.py" not in sel.unexamined_paths()  # absent candidate ignored
+    assert sel.blocking_unexamined() == ()  # binary is advisory, not blocking

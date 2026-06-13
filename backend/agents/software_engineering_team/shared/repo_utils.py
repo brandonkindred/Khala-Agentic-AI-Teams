@@ -403,6 +403,8 @@ def read_repo_files_as_dict(
         # (read_files_as_dict represents it by its link target, never dereferenced)
         # before pruning excluded dirs from the traversal set.
         for d in dirnames:
+            if d in always_exclude:
+                continue  # an excluded dir (even a symlink named .git/node_modules)
             full = os.path.join(dirpath, d)
             if os.path.islink(full):
                 rel = os.path.relpath(full, repo_root)
