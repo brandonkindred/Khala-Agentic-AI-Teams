@@ -176,8 +176,11 @@ def get_client(
 
     if agent_key is None:
         logger.info("LLM config: %s", llm_config.get_llm_config_summary())
-        return client
-    return _AttributingClient(client, agent_key)
+    # Falsy agent_key (None or "") binds nothing — return the raw client, matching
+    # the on_reasoning branch above. Wrapping with an empty key would bind
+    # ``llm_attribution(agent_key="")``, which (since "" overrides rather than
+    # inherits) would clobber an enclosing orchestrator's agent_key with ``-``.
+    return _AttributingClient(client, agent_key) if agent_key else client
 
 
 def _clear_client_cache_for_testing() -> None:

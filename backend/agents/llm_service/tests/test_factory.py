@@ -12,7 +12,7 @@ from llm_service import (
     get_client,
     unwrap_client,
 )
-from llm_service.attribution import current_attribution
+from llm_service.attribution import current_attribution, llm_attribution
 from llm_service.factory import _AttributingClient
 
 
@@ -126,6 +126,32 @@ def test_wrapper_binds_agent_key_into_attribution(monkeypatch: pytest.MonkeyPatc
     assert captured["objective"] == "rank candidates"
     # Attribution is restored after the call.
     assert current_attribution().agent_key == ""
+
+
+def test_get_client_empty_agent_key_returns_raw_and_does_not_clobber(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A falsy ("") agent_key binds nothing — the raw client is returned (matching
+    the on_reasoning branch), so a call made under it never overwrites an
+    enclosing orchestrator's agent_key with an empty string."""
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    c = get_client("")
+    # Not wrapped: an empty key would otherwise bind agent_key="" and clobber.
+    assert not isinstance(c, _AttributingClient)
+    assert isinstance(c, OllamaLLMClient)
+
+    captured: dict = {}
+
+    def spy(prompt: str, **kwargs: object) -> dict:
+        captured["agent_key"] = current_attribution().agent_key
+        return {"ok": True}
+
+    monkeypatch.setattr(c, "_complete_json_impl", spy)
+    with llm_attribution(agent_key="orchestrator"):
+        c.complete_json("p", objective="x")
+    # The outer agent_key survives — the empty-key client did not override it.
+    assert captured["agent_key"] == "orchestrator"
 
 
 def test_client_agent_key_and_attributed_client(monkeypatch: pytest.MonkeyPatch) -> None:

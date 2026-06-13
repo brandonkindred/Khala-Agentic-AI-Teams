@@ -220,7 +220,7 @@ def caller_team() -> str:
 # property of the repository's directory layout, known at author time, not a
 # per-deployment tuning knob.
 _GENERIC_AGENT_DIRS = frozenset(
-    {"agents", "shared", "tool_agents", "phases", "agent_implementations", "api"}
+    {"agents", "shared", "tool_agents", "phases", "agent_implementations", "api", "critics"}
 )
 
 
