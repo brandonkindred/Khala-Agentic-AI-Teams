@@ -37,6 +37,26 @@
       title="Cognition unavailable"
       [message]="STORAGE_UNAVAILABLE_MESSAGE"
     ></app-error-message>
+  } @else if (!selectedAgentId()) {
+    <!-- No agent in scope yet: the sections are agent-scoped, so render a
+         picker-level state instead of three misleading "nothing here" cards. -->
+    @if (loadingAgents()) {
+      <app-loading-spinner></app-loading-spinner>
+    } @else if (!agentsError()) {
+      @if (agents().length === 0) {
+        <app-empty-state
+          icon="smart_toy"
+          title="No agents available"
+          description="No agents are registered to review yet."
+        ></app-empty-state>
+      } @else {
+        <app-empty-state
+          icon="smart_toy"
+          title="Select an agent"
+          description="Choose an agent above to review its cognition."
+        ></app-empty-state>
+      }
+    }
   } @else {
     <!-- Proposals (first — the HITL gate) -->
     <section class="cognition-section" aria-label="Rule proposals">

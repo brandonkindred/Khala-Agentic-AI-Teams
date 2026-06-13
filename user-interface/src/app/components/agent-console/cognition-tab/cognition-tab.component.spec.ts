@@ -388,7 +388,10 @@ describe('CognitionTabComponent', () => {
 
   it('surfaces an error when loading more rules fails', () => {
     const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'r' + i, priority: i }));
-    api.listRules = vi.fn().mockReturnValue(of(fullPage));
+    // First page full, later pages empty — so the all-rules index terminates.
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { offset?: number }) => of((q?.offset ?? 0) > 0 ? [] : fullPage));
     const f = build();
     f.detectChanges();
     api.listRules = vi.fn().mockReturnValue(throwError(() => ({ error: { detail: 'more-rules-fail' } })));
@@ -556,7 +559,10 @@ describe('CognitionTabComponent', () => {
 
   it('loads more rules when a full page is returned, then stops', () => {
     const fullPage = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'r' + i, priority: i }));
-    api.listRules = vi.fn().mockReturnValue(of(fullPage));
+    // First page full, later pages empty — so the all-rules index terminates.
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { offset?: number }) => of((q?.offset ?? 0) > 0 ? [] : fullPage));
     const f = build();
     f.detectChanges();
     const c = f.componentInstance;
@@ -612,5 +618,56 @@ describe('CognitionTabComponent', () => {
     expect(c.proposalSummary({ ...staleProposal, proposed_rule: null })).toBe(
       'Cap writeback at 8 KB',
     );
+  });
+
+  it('pages the rule index past the first page to resolve a later target', () => {
+    const page1 = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'r' + i, priority: i }));
+    const target = { ...rules[0], id: 'r-late', text: 'A rule on page two', status: 'retired' as const };
+    // Section list (status:'active') stays small; the index (no status) pages
+    // through: page one is full, page two is short and carries the target.
+    api.listRules = vi
+      .fn()
+      .mockImplementation((_id: string, q?: { status?: string; offset?: number }) => {
+        if (q?.status === 'active') return of([rules[0]]);
+        return of((q?.offset ?? 0) >= 500 ? [target] : page1);
+      });
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500, offset: 0 });
+    expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500, offset: 500 });
+    expect(c.targetRule('r-late')?.text).toBe('A rule on page two');
+  });
+
+  it('shows a "no agents" empty state and fires no section loads when the catalogue is empty', () => {
+    catalog.listAgents = vi.fn().mockReturnValue(of([]));
+    const f = build();
+    f.detectChanges();
+    const host = f.nativeElement as HTMLElement;
+    expect(f.componentInstance.selectedAgentId()).toBeNull();
+    expect(host.textContent).toContain('No agents available');
+    expect(host.querySelectorAll('.cognition-section').length).toBe(0);
+    expect(api.listProposals).not.toHaveBeenCalled();
+  });
+
+  it('shows a spinner while the agent catalogue is still loading', () => {
+    catalog.listAgents = vi.fn().mockReturnValue(NEVER);
+    const f = build();
+    f.detectChanges();
+    const host = f.nativeElement as HTMLElement;
+    expect(f.componentInstance.loadingAgents()).toBe(true);
+    expect(host.querySelector('app-loading-spinner')).not.toBeNull();
+    expect(host.querySelectorAll('.cognition-section').length).toBe(0);
+  });
+
+  it('prompts to select an agent when agents exist but none is selected', () => {
+    const f = build();
+    f.detectChanges();
+    const c = f.componentInstance;
+    c.selectedAgentId.set(null); // de-select while the catalogue still has agents
+    f.detectChanges();
+    const host = f.nativeElement as HTMLElement;
+    expect(host.textContent).toContain('Select an agent');
+    expect(host.querySelectorAll('.cognition-section').length).toBe(0);
   });
 });

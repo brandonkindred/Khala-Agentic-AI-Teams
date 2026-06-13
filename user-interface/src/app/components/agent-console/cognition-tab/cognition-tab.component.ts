@@ -314,15 +314,38 @@ export class CognitionTabComponent implements OnInit {
    * Best-effort load of all rules (active + retired) into `rulesIndex` for
    * proposal target resolution. Independent of the Rules section filter and of
    * the 503 banner — failures here just leave targets unresolved.
+   *
+   * The endpoint caps each page at `RULE_PAGE_LIMIT`, so for agents with more
+   * rules than that this pages through every offset; otherwise an amend/retire
+   * proposal targeting a later rule would resolve to the generic "existing
+   * rule" without its text or navigation link.
    */
   private loadRulesIndex(): void {
     const agentId = this.selectedAgentId();
     if (!agentId) return;
     const reqId = ++this.rulesIndexReqId;
-    this.api.listRules(agentId, { limit: RULE_PAGE_LIMIT }).subscribe({
+    this.fetchRulesIndexPage(agentId, reqId, 0, new Map());
+  }
+
+  /**
+   * Fetch one page of the all-rules index and recurse while full pages keep
+   * coming. Publishes the accumulated map after each page so targets resolve
+   * incrementally; drops its result once a newer index load supersedes it.
+   */
+  private fetchRulesIndexPage(
+    agentId: string,
+    reqId: number,
+    offset: number,
+    acc: Map<string, Rule>,
+  ): void {
+    this.api.listRules(agentId, { limit: RULE_PAGE_LIMIT, offset }).subscribe({
       next: (rows) => {
         if (reqId !== this.rulesIndexReqId) return;
-        this.rulesIndex.set(new Map(rows.map((r) => [r.id, r])));
+        for (const r of rows) acc.set(r.id, r);
+        this.rulesIndex.set(new Map(acc));
+        if (rows.length === RULE_PAGE_LIMIT) {
+          this.fetchRulesIndexPage(agentId, reqId, offset + RULE_PAGE_LIMIT, acc);
+        }
       },
       error: () => {
         /* non-fatal: targets just fall back to the loaded section rules */
