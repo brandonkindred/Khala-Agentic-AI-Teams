@@ -622,22 +622,30 @@ def test_coerce_critique_not_ready_no_issues_still_gets_placeholder() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic-gate carve-out: the LLM reviewer may not block on sizing /
-# risk_limits (the deterministic SpecReadinessGate owns that math and has
-# already passed), and max drawdown is not a constraint at all. Such issues are
+# Deterministic-gate carve-out: the LLM reviewer may not block on sizing (the
+# deterministic SpecReadinessGate owns that math and has already passed) or on
+# any drawdown objection (max drawdown is not a constraint). Such issues are
 # demoted to info, and a not-ready verdict whose ONLY blocking objections were
-# these is promoted to ready.
+# these is promoted to ready. Non-drawdown risk_limits objections still block.
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("field", ["sizing", "risk_limits"])
-def test_coerce_critique_demotes_owned_field_to_info(field: str) -> None:
-    """A blocking sizing/risk_limits issue is demoted to ``info`` so it can never
-    keep an otherwise-ready verdict from advancing."""
+@pytest.mark.parametrize(
+    ("field", "description"),
+    [
+        ("sizing", "fraction looks tight"),
+        ("risk_limits", "the 20% max drawdown limit is unreachable by design"),
+        ("hypothesis", "thesis implies a max drawdown the sizing can't reach"),
+    ],
+)
+def test_coerce_critique_demotes_sizing_and_drawdown_to_info(field: str, description: str) -> None:
+    """A blocking ``sizing`` objection or any ``drawdown`` objection (whatever
+    field) is demoted to ``info`` so it can never keep a ready verdict from
+    advancing."""
     parsed = {
         "ready": True,
         "rationale": "fine",
-        "issues": [{"field": field, "severity": "critical", "description": "tight"}],
+        "issues": [{"field": field, "severity": "critical", "description": description}],
     }
 
     critique = _coerce_critique(parsed, [])
@@ -647,6 +655,32 @@ def test_coerce_critique_demotes_owned_field_to_info(field: str) -> None:
     assert critique.issues[0].severity == "info"
     # Demoted to info ⇒ not a blocking open issue.
     assert critique.open_issue_ids == set()
+
+
+def test_coerce_critique_keeps_non_drawdown_risk_limit_blocking() -> None:
+    """A genuine risk_limits defect the deterministic gate does NOT check —
+    ``max_gross_leverage=0`` rejects every order at runtime — must keep blocking
+    rather than be demoted and promoted (the deterministic gate only guards the
+    zero/ceiling cases of ``max_position_pct``, not leverage)."""
+    parsed = {
+        "ready": False,
+        "rationale": "leverage cap makes the strategy untradeable",
+        "issues": [
+            {
+                "field": "risk_limits",
+                "severity": "critical",
+                "description": "max_gross_leverage=0 rejects every positive-notional order",
+            }
+        ],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    blocking = [i for i in critique.issues if i.severity in ("warning", "critical")]
+    assert len(blocking) == 1
+    assert blocking[0].field == "risk_limits"
+    assert blocking[0].severity == "critical"
 
 
 def test_coerce_critique_not_ready_only_sizing_is_promoted_to_ready() -> None:

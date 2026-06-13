@@ -54,17 +54,35 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
     "signal_definition",
 )
 
-# Fields the deterministic ``SpecReadinessGate`` is the SOLE authority on:
-# sizing realisability and risk-limit coherence. The orchestrator only invokes
-# the LLM reviewer once that gate has already passed (no critical findings), so
-# any ``sizing`` / ``risk_limits`` objection the reviewer raises is
-# re-litigating a check the gate already cleared — including the recurring
-# deployed-size-vs-stop "0.25% per trade" misreading and max-drawdown
-# reachability (max drawdown is not a constraint; a strategy may lose up to 100%
-# by design). Issues on these fields are demoted to ``info`` in
-# :func:`_coerce_critique` so they are recorded for the audit trail but can never
-# block readiness.
-_DETERMINISTIC_OWNED_FIELDS: frozenset[str] = frozenset({"sizing", "risk_limits"})
+
+# The LLM reviewer must not block on objections the deterministic
+# ``SpecReadinessGate`` already owns, nor on the (removed) max-drawdown
+# constraint. The orchestrator only invokes the reviewer once that gate has
+# passed, so:
+#   * a ``sizing`` objection re-litigates a cleared check (Rule 5 realisability
+#     + Rule 9 deployed-vs-cap coherence) — including the recurring
+#     deployed-size-vs-stop "0.25% per trade" misread; and
+#   * any drawdown objection is moot — max drawdown is not a constraint (a
+#     strategy may lose up to 100% by design).
+# Both are demoted to ``info`` in :func:`_coerce_critique`.
+#
+# This is deliberately NOT a blanket ``risk_limits`` carve-out: the gate does
+# NOT check every risk-limit failure mode (e.g. ``max_gross_leverage=0`` passes
+# the gate yet makes ``RiskFilter.can_enter`` reject every order — a guaranteed
+# zero-trade strategy), so a genuine non-drawdown ``risk_limits`` critique
+# (leverage, open positions, concentration) MUST keep blocking readiness.
+def _is_demotable_issue(issue: "CritiqueIssue") -> bool:
+    """True when ``issue`` re-litigates a deterministic-gate-owned check or the
+    removed max-drawdown constraint, so the reviewer may not block on it.
+
+    Pre: ``issue`` is a :class:`CritiqueIssue`.
+    Post: returns True iff the issue is a ``sizing`` objection OR mentions
+    drawdown (case-insensitive). Non-drawdown ``risk_limits`` objections return
+    False so they keep their blocking severity.
+    """
+    if issue.field == "sizing":
+        return True
+    return "drawdown" in issue.description.lower()
 
 
 def _normalize_issue_text(text: str) -> str:
@@ -534,13 +552,15 @@ def _coerce_critique(
     on an otherwise-ready verdict are accepted verbatim instead of burning
     a self-revision round.
 
-    Deterministic-gate carve-out: issues whose ``field`` is in
-    ``_DETERMINISTIC_OWNED_FIELDS`` (``sizing`` / ``risk_limits``) are demoted
-    to ``info`` before the blocking computation, because the deterministic
-    readiness gate is the sole authority on that math and has already passed.
-    A not-ready verdict whose ONLY blocking objections were those demoted
-    fields is promoted to ``ready=True`` (with an audit-trail ``info`` note)
-    rather than left to churn the loop on a veto the reviewer may not cast.
+    Deterministic-gate carve-out: issues for which :func:`_is_demotable_issue`
+    is true (``sizing`` objections, and any drawdown objection — max drawdown is
+    not a constraint) are demoted to ``info`` before the blocking computation,
+    because the deterministic readiness gate owns sizing and has already passed.
+    Non-drawdown ``risk_limits`` objections (e.g. ``max_gross_leverage=0``) are
+    NOT demoted — the gate does not check them, so they keep blocking. A
+    not-ready verdict whose ONLY blocking objections were demotable ones is
+    promoted to ``ready=True`` (with an audit-trail ``info`` note) rather than
+    left to churn the loop on a veto the reviewer may not cast.
 
     Preconditions: ``parsed`` is a dict from a parsed LLM JSON payload;
     ``demote_min_severity`` is one of ``"warning"`` / ``"critical"``.
@@ -579,15 +599,17 @@ def _coerce_critique(
             # Best-effort: one bad item shouldn't bin the rest.
             continue
 
-    # Demote sizing / risk_limits objections to ``info``: the deterministic gate
-    # owns those checks and has already passed, so the reviewer must not veto on
-    # them (see ``_DETERMINISTIC_OWNED_FIELDS``). ``demoted_blocking`` records how
-    # many *blocking* (warning/critical) issues were demoted this way, so a
+    # Demote sizing / drawdown objections to ``info``: the deterministic gate
+    # owns sizing and max drawdown is not a constraint, so the reviewer must not
+    # veto on them (see ``_is_demotable_issue``). Non-drawdown ``risk_limits``
+    # critiques are left untouched so genuine mechanically-unusable settings
+    # (e.g. ``max_gross_leverage=0``) still block. ``demoted_blocking`` records
+    # how many *blocking* (warning/critical) issues were demoted this way, so a
     # not-ready verdict whose ONLY blocking objections were these can advance
     # rather than churn the loop on a veto the reviewer is not allowed to cast.
     demoted_blocking = 0
     for issue in issues:
-        if issue.field in _DETERMINISTIC_OWNED_FIELDS and issue.severity in ("warning", "critical"):
+        if _is_demotable_issue(issue) and issue.severity in ("warning", "critical"):
             issue.severity = "info"
             demoted_blocking += 1
 
@@ -630,20 +652,21 @@ def _coerce_critique(
     has_blocking = any(_SEVERITY_ORDER[i.severity] >= _SEVERITY_ORDER["warning"] for i in issues)
     if not ready and not has_blocking:
         if demoted_blocking:
-            # The reviewer's only blocking objections were on sizing /
-            # risk_limits — axes the deterministic gate owns and the reviewer is
-            # not permitted to block on. With nothing blockable left to act on,
-            # advance the spec rather than churn the design loop to the round cap
-            # on a veto we have already neutralised. Record the override as an
-            # info note so the lineage shows why a not-ready verdict was promoted.
+            # The reviewer's only blocking objections were sizing or drawdown
+            # concerns — the deterministic gate owns sizing and max drawdown is
+            # not a constraint, so the reviewer may not block on them. With
+            # nothing blockable left to act on, advance the spec rather than
+            # churn the design loop to the round cap on a veto we have already
+            # neutralised. Record the override as an info note so the lineage
+            # shows why a not-ready verdict was promoted.
             ready = True
             issues.append(
                 CritiqueIssue(
                     field="sizing",
                     severity="info",
                     description=(
-                        "Reviewer's only blocking objection(s) were on "
-                        "sizing/risk_limits, which the deterministic readiness "
+                        "Reviewer's only blocking objection(s) were sizing or "
+                        "drawdown concerns, which the deterministic readiness "
                         "gate owns; demoted to advisory and verdict promoted to "
                         "ready (max drawdown is not a constraint; deployed size, "
                         "not fraction×stop, is the per-trade risk)."
