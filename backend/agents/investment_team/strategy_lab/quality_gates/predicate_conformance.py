@@ -332,7 +332,9 @@ class PredicateConformanceGate(GateResultsMixin):
             # keeping those fixtures would demand a close the conformance
             # contract now forbids. Drop them; entry fixtures still run
             # (entries remain inline for custom code).
-            entered_sides = {r.side for r in entry_rules if isinstance(r, _EntryRule)}
+            entered_sides = {
+                r.side for r in entry_rules if isinstance(r, _EntryRule) and r.side is not None
+            }
             if entered_sides and _engine_exits_cover_sides(spec, entered_sides):
                 fixtures = [f for f in fixtures if f.rule_kind != "signal_exit"]
             if not fixtures:

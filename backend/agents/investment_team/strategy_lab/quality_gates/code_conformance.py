@@ -410,6 +410,13 @@ def _submit_order_close_side(call: ast.Call) -> Optional[str]:
     ``None`` when ``side`` is absent, a non-literal expression that cannot
     be resolved statically, or an unrecognised token. The mapping inverts
     the order side because a close submits the side opposite the position.
+
+    Only the keyword ``side=`` form is inspected, consistent with
+    :func:`_submit_order_closes_position` (keyword ``qty=``) and the
+    synthesis prompt's mandated keyword-argument call shape. A positional
+    ``side`` is not recognised — but such a call also escapes
+    ``_submit_order_closes_position``, so it never reaches this helper as a
+    close in the first place.
     """
     for kw in call.keywords:
         if kw.arg != "side":
@@ -940,7 +947,9 @@ class CodeConformanceGate(GateResultsMixin):
         # source) rather than the AST: a dynamic ``side=`` expression would
         # leave an AST-derived side set empty and silently disable the check.
         entered_sides = {
-            r.side for r in (getattr(spec, "entry_rules", []) or []) if isinstance(r, EntryRule)
+            r.side
+            for r in (getattr(spec, "entry_rules", []) or [])
+            if isinstance(r, EntryRule) and r.side is not None
         }
 
         n_closes = 0
@@ -957,7 +966,11 @@ class CodeConformanceGate(GateResultsMixin):
                 # not an entered side — skip it so doubling a position is not
                 # misread as a duplicate exit. A close whose side cannot be
                 # resolved statically is judged against every entered side
-                # (forbid if any is engine-owned).
+                # (forbid if any is engine-owned). That is deliberately
+                # conservative: a dynamic close that only ever targets an
+                # uncovered side at runtime may be flagged as a false
+                # positive — the gate prefers a refinement round over
+                # silently letting a duplicate engine exit through.
                 closed_side = _submit_order_close_side(node)
                 if closed_side is not None:
                     if closed_side not in entered_sides:

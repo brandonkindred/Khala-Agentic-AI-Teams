@@ -190,6 +190,10 @@ exit rule covers (e.g. a short when the spec's only stop is a long-side
 yourself. When every entered side is covered, `on_bar` submits entries
 only.
 
+Indicators referenced only by `spec.exit_rules` (e.g. an RSI used solely
+by a signal-exit) are computed by the engine — you do not need to read
+them in `on_bar`. Read only the indicators your entry logic uses.
+
 For the same reason, do NOT implement bar-counting "time stop" exits.
 Variables like `bars_held`, `hold_count`, `days_held`, or any
 `if counter >= N: close_position()` pattern are forbidden and rejected
