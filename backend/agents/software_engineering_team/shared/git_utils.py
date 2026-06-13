@@ -287,6 +287,68 @@ class BaselineDiffUnavailable(RuntimeError):
     """
 
 
+def _unambiguous_merge_base(path: Path, base: str, head: str) -> str:
+    """Return the single merge base of *base*/*head*, or fail closed.
+
+    Postconditions:
+        - Returns the lone merge-base commit SHA.
+        - Raises :class:`BaselineDiffUnavailable` when no merge base exists
+          (missing ref, shallow clone) or when more than one exists
+          (criss-cross/octopus history) — diffing against an arbitrary one of
+          several would omit changes versus the others.
+    """
+    mb_code, mb_out = _run_git(path, ["git", "merge-base", "--all", base, head])
+    mb_lines = [ln.strip() for ln in (mb_out or "").splitlines() if ln.strip()]
+    if mb_code != 0 or not mb_lines:
+        raise BaselineDiffUnavailable(f"cannot compute merge base of {base}...{head}: {mb_out!r}")
+    if len(mb_lines) > 1:
+        # ``--all`` lists every merge base; >1 means criss-cross/octopus history.
+        raise BaselineDiffUnavailable(
+            f"ambiguous merge base of {base}...{head} ({len(mb_lines)} bases)"
+        )
+    return mb_lines[0]
+
+
+def read_paths_at_merge_base(
+    repo_path: str | Path, base: str, paths: List[str], head: str = "HEAD"
+) -> Dict[str, str]:
+    """Read the *pre-change* content of *paths* at the ``base``/``head`` merge base.
+
+    Used to show the reviewer what a deletion removed: the deleted content is gone
+    from the worktree, so it is fetched from the merge-base blob via
+    ``git show <merge-base>:<path>`` (the same baseline ``list_changed_and_deleted``
+    diffs against, so the two views are consistent).
+
+    Preconditions:
+        - *paths* are repo-relative and already filtered (e.g. sensitive paths
+          dropped by the caller) — this reader does no denylisting of its own.
+    Postconditions:
+        - Returns ``{path: content}`` for each path whose merge-base blob is
+          readable UTF-8 text. A path that did not exist at the base, that
+          resolves to a tree (a directory/submodule has no blob), or whose blob
+          is binary (a NUL byte) is omitted rather than returned as gibberish.
+        - Returns ``{}`` when not a git repository.
+        - Raises :class:`BaselineDiffUnavailable` when the merge base cannot be
+          computed, mirroring :func:`list_changed_and_deleted` so the caller
+          treats an unavailable baseline uniformly.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return {}
+    merge_base = _unambiguous_merge_base(path, base, head)
+    result: Dict[str, str] = {}
+    for rel in paths:
+        # ``--`` separates the revision from the pathspec so a path that looks
+        # like a flag/revision is never misinterpreted.
+        code, out = _run_git(path, ["git", "show", f"{merge_base}:{rel}"])
+        if code != 0:
+            continue  # path absent at base, or a tree (submodule/dir): no blob
+        if "\x00" in out:
+            continue  # binary blob: omit rather than review as gibberish
+        result[rel] = out
+    return result
+
+
 def list_changed_and_deleted(
     repo_path: str | Path, base: str, head: str = "HEAD"
 ) -> Tuple[List[str], List[str]]:
@@ -318,18 +380,7 @@ def list_changed_and_deleted(
     path = Path(repo_path).resolve()
     if not (path / ".git").exists():
         return [], []
-    mb_code, mb_out = _run_git(path, ["git", "merge-base", "--all", base, head])
-    mb_lines = [ln.strip() for ln in (mb_out or "").splitlines() if ln.strip()]
-    if mb_code != 0 or not mb_lines:
-        raise BaselineDiffUnavailable(f"cannot compute merge base of {base}...{head}: {mb_out!r}")
-    if len(mb_lines) > 1:
-        # ``--all`` lists every merge base; >1 means criss-cross/octopus history.
-        # Diffing against an arbitrary one would omit changes vs the others, so
-        # fail closed.
-        raise BaselineDiffUnavailable(
-            f"ambiguous merge base of {base}...{head} ({len(mb_lines)} bases)"
-        )
-    merge_base = mb_lines[0]
+    merge_base = _unambiguous_merge_base(path, base, head)
     code, out = _run_git(
         path, ["git", "diff", "--name-status", "--no-renames", "-z", merge_base]
     )

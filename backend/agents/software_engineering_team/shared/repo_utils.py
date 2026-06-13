@@ -174,6 +174,30 @@ def strip_surrogates(text: str) -> str:
     return text.encode("utf-8", "backslashreplace").decode("utf-8")
 
 
+def sanitize_path_for_text(path: str) -> str:
+    """Make *path* safe to embed inside a line of model-facing text.
+
+    Git permits filenames containing newlines, tabs, and other control bytes, and
+    ``list_changed_and_deleted`` deliberately preserves them (``-z``). Splicing
+    such a name verbatim into a bulleted note would let a crafted filename inject
+    extra bullets or reviewer "instructions", corrupt a count, or attribute
+    findings to invented paths. This first strips lone surrogates
+    (:func:`strip_surrogates`) so the result is UTF-8 safe, then escapes every
+    non-printable character (``\\n`` → ``\\\\n`` etc.) so the path renders on a
+    single line as inert text. Ordinary printable characters — including non-ASCII
+    letters in a valid filename — are left unchanged.
+    """
+    safe = strip_surrogates(path)
+    named = {"\n": "\\n", "\r": "\\r", "\t": "\\t"}
+    out: List[str] = []
+    for ch in safe:
+        if ch == " " or ch.isprintable():
+            out.append(ch)
+        else:
+            out.append(named.get(ch, f"\\x{ord(ch):02x}"))
+    return "".join(out)
+
+
 def _disambiguated_key(result: Dict[str, str], key: str) -> str:
     """Return *key*, or a suffixed variant when it already maps a different path.
 
@@ -198,6 +222,8 @@ def read_files_as_dict(
     repo_path: Path,
     paths: Iterable[str],
     extensions: Optional[List[str]] = None,
+    *,
+    omitted: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     """Read *paths* under *repo_path* into a ``{path: content}`` mapping.
 
@@ -212,6 +238,15 @@ def read_files_as_dict(
         When given, only paths whose suffix is in this list are included.
         ``None`` means no extension filter (so files without a code suffix,
         such as ``Dockerfile`` or ``requirements.txt``, pass through).
+    omitted:
+        Optional list the function appends to. Every requested path that is
+        dropped for a reason *other* than the ``extensions`` filter — outside the
+        repo, binary, a directory/submodule, missing, or otherwise unreadable —
+        is appended (its original repo-relative string). The caller can then
+        surface these as a blocking review note instead of silently approving a
+        change set with a task-owned file that was never examined. The
+        ``extensions`` filter is a deliberate caller scoping choice, so
+        extension-filtered paths are *not* reported as omissions.
 
     Preconditions:
         - *paths* are repo-relative; the caller has already scoped them.
@@ -219,6 +254,9 @@ def read_files_as_dict(
         - Returns a mapping in the iteration order of *paths*, skipping any path
           that is filtered out by *extensions*, escapes *repo_path* (an absolute
           path or one containing ``..``), is binary, or is missing/unreadable.
+        - When *omitted* is provided, it gains one entry per non-extension skip,
+          so ``set(paths)`` minus extension-filtered equals the reviewed keys'
+          originals plus *omitted* (no path vanishes without a trace).
         - A symlink is represented by its link target text (``# symlink -> ...``)
           and never dereferenced, so the target's unrelated content is not
           mislabeled under the link path and a link pointing outside the repo
@@ -254,6 +292,8 @@ def read_files_as_dict(
             lexical = Path(os.path.normpath(full_path))
             if lexical != repo_root and repo_root not in lexical.parents:
                 logger.debug("read_files_as_dict: skipping %s (outside repo)", rel_path)
+                if omitted is not None:
+                    omitted.append(rel_path)
                 continue
             # A symlink is reported by its target, never dereferenced (which would
             # mislabel the target's content under the link or escape the repo).
@@ -266,24 +306,34 @@ def read_files_as_dict(
             resolved = full_path.resolve()
             if repo_root not in resolved.parents:
                 logger.debug("read_files_as_dict: skipping %s (resolves outside repo)", rel_path)
+                if omitted is not None:
+                    omitted.append(rel_path)
                 continue
             # Sniff a bounded prefix for a NUL so a huge binary artifact is
             # skipped before the full read; a text file is then read in full and
-            # passed untruncated (the coordinator segments oversized inputs).
+            # passed untruncated (the coordinator segments oversized inputs). A
+            # path that is a directory (e.g. a changed submodule gitlink) raises
+            # IsADirectoryError here and is reported via *omitted* below.
             with open(resolved, "rb") as handle:
                 prefix = handle.read(_BINARY_SNIFF_BYTES)
                 if b"\x00" in prefix:
                     logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
+                    if omitted is not None:
+                        omitted.append(rel_path)
                     continue  # binary asset: omit rather than review as gibberish
                 rest = handle.read()
             if b"\x00" in rest:
                 # NUL past the sniff window still flags binary content.
                 logger.debug("read_files_as_dict: skipping %s (binary)", rel_path)
+                if omitted is not None:
+                    omitted.append(rel_path)
                 continue
             text = (prefix + rest).decode("utf-8", errors="replace")
             result[_disambiguated_key(result, strip_surrogates(rel_path))] = text
         except (OSError, RuntimeError, ValueError) as exc:
             logger.debug("read_files_as_dict: skipping %s (%s)", rel_path, exc)
+            if omitted is not None:
+                omitted.append(rel_path)
             continue
     return result
 
@@ -293,16 +343,22 @@ def read_repo_files_as_dict(repo_path: Path) -> Dict[str, str]:
 
     The whole-repo, all-file-types counterpart of :func:`read_files_as_dict`, used
     for the fail-closed fallback (when no trusted task-scoped change set exists).
-    Walks the repo excluding build/VCS dirs (:data:`REPO_EXCLUDE_DIRS` plus
-    ``.git``), drops sensitive paths, and reuses ``read_files_as_dict``'s
+    Walks the repo excluding build/VCS dirs (:data:`REPO_INSPECT_EXCLUDE_DIRS`
+    plus ``.git``), drops sensitive paths, and reuses ``read_files_as_dict``'s
     binary/size/containment handling — so the fallback reviews the same breadth
     (config, migrations, JS, docs, ...) the normal unfiltered path does, not just
     ``.py``/``.java``.
 
+    Uses :data:`REPO_INSPECT_EXCLUDE_DIRS` (not the narrower
+    :data:`REPO_EXCLUDE_DIRS`) so a checkout with a local virtual environment or
+    interpreter cache (``venv``/``.venv``/``__pycache__``) does not flood the
+    fallback with thousands of dependency files — which would explode the number
+    of review LLM calls and could exhaust the budget before reaching project code.
+
     Postconditions:
         - Returns ``{}`` for an empty repo; never raises for a missing file.
     """
-    always_exclude = REPO_EXCLUDE_DIRS | {".git"}
+    always_exclude = REPO_INSPECT_EXCLUDE_DIRS | {".git"}
     paths: List[str] = []
     for f in repo_path.rglob("*"):
         if not f.is_file():

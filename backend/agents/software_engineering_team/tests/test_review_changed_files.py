@@ -683,13 +683,16 @@ def test_select_review_input_note_key_collision_keeps_real_file(tmp_path: Path) 
     )
 
     _init_repo(tmp_path)
-    (tmp_path / _DELETION_NOTE_PATH).write_text("real = 1\n", encoding="utf-8")
+    # A real file whose repo-relative path equals the synthetic note key.
+    note_named = tmp_path / _DELETION_NOTE_PATH
+    note_named.parent.mkdir(parents=True, exist_ok=True)
+    note_named.write_text("real = 1\n", encoding="utf-8")
     (tmp_path / "gone.py").write_text("g = 1\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
     _git(tmp_path, "branch", "-M", "development")
     _git(tmp_path, "checkout", "-b", "feature/x")
-    (tmp_path / _DELETION_NOTE_PATH).write_text("real = 2\n", encoding="utf-8")  # real change
+    note_named.write_text("real = 2\n", encoding="utf-8")  # real change
     (tmp_path / "gone.py").unlink()
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "change note-named file + delete")
@@ -697,8 +700,10 @@ def test_select_review_input_note_key_collision_keeps_real_file(tmp_path: Path) 
     task = SimpleNamespace(description="x")
     files, _code, note = _select_review_input(tmp_path, task, written_files=None)
 
+    # The real file keeps the note key and its own content; the deletion note is
+    # relocated to a distinct, suffixed key so neither clobbers the other.
     assert files[_DELETION_NOTE_PATH] == "real = 2\n"  # real file content preserved
-    note_keys = [k for k, v in files.items() if "gone.py" in v]
+    note_keys = [k for k, v in files.items() if k != _DELETION_NOTE_PATH and note in v]
     assert note_keys and _DELETION_NOTE_PATH not in note_keys  # note under a distinct key
     assert note and "gone.py" in note
 
@@ -780,8 +785,12 @@ def test_select_review_input_falls_back_to_whole_repo(tmp_path: Path) -> None:
 
 
 def test_select_review_input_excludes_sensitive_files(tmp_path: Path) -> None:
-    """A changed secret (.env, key) is not forwarded to the review model."""
-    from software_engineering_team.backend_agent.agent import _select_review_input
+    """A changed secret (.env, key) is not forwarded as content, but its path is
+    surfaced in a 'withheld' note so the change cannot silently bypass the gate."""
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        _select_review_input,
+    )
 
     _init_repo(tmp_path)
     (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
@@ -800,7 +809,39 @@ def test_select_review_input_excludes_sensitive_files(tmp_path: Path) -> None:
 
     assert code is None
     assert "a.py" in files
-    assert ".env" not in files  # secret excluded from the review payload
+    assert ".env" not in files  # secret content not in the review payload
+    # The path is surfaced for manual review; the secret VALUE never is.
+    assert ".env" in files[_WITHHELD_NOTE_PATH]
+    assert "SECRET=leaked" not in files[_WITHHELD_NOTE_PATH]
+
+
+def test_select_review_input_withheld_only_change_is_reviewable(tmp_path: Path) -> None:
+    """A task that changes ONLY a sensitive-named file still produces a non-empty
+    review input (the withheld note), so it cannot auto-approve via an empty set."""
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "secrets.py").write_text("TOKEN = 'base'\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "app" / "secrets.py").write_text("TOKEN = 'changed'\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change secrets.py")
+
+    task = SimpleNamespace(description="x")
+    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
+
+    # Without the withheld note this would be an empty diff → whole-repo fallback
+    # could approve; the note keeps the sensitive-named code change visible.
+    assert code is None
+    assert "app/secrets.py" in files[_WITHHELD_NOTE_PATH]
+    assert "TOKEN = 'changed'" not in files[_WITHHELD_NOTE_PATH]
 
 
 def test_select_review_input_excludes_deleted_secret_from_note(tmp_path: Path) -> None:
@@ -1091,3 +1132,246 @@ def test_build_code_review_input_code_only() -> None:
     inp = build_code_review_input(code="### a.py ###\nx", task_description="t")
     assert inp.files is None
     assert inp.code == "### a.py ###\nx"
+
+
+# ---------------------------------------------------------------------------
+# Never-silently-skip review coverage: deleted content, emptied, unreadable,
+# control-char escaping, synthetic-note routing, venv exclusion
+# ---------------------------------------------------------------------------
+
+
+def test_select_review_input_includes_deleted_file_content(tmp_path: Path) -> None:
+    """The pre-deletion content of a removed file is read from the merge base and
+    surfaced under its real path, so the reviewer can inspect the removed logic."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "module.py").write_text("def critical():\n    return 42\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "module.py").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete module")
+
+    task = SimpleNamespace(description="x")
+    files, code, _note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert code is None
+    # Removed content anchors under the real path so a finding can restore it.
+    assert "module.py" in files
+    assert "def critical()" in files["module.py"]
+    assert "DELETED" in files["module.py"]
+
+
+def test_select_review_input_deleted_binary_listed_without_content(tmp_path: Path) -> None:
+    """A deleted binary file has no readable content block, but is still listed in
+    the deletion note (never silently dropped)."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "img.bin").write_bytes(b"\x00\x01\x02BIN\x00")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "img.bin").unlink()
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "delete binary")
+
+    task = SimpleNamespace(description="x")
+    files, _code, note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "img.bin" not in files  # binary content not added as a block
+    assert note is not None and "img.bin" in note  # but still surfaced by name
+
+
+def test_select_review_input_flags_emptied_file(tmp_path: Path) -> None:
+    """A changed file truncated to whitespace-only is flagged so the destructive
+    truncation is reviewed instead of auto-approved on an empty block."""
+    from software_engineering_team.backend_agent.agent import (
+        _EMPTIED_NOTE_PATH,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "important.py").write_text("def f():\n    return 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "important.py").write_text("   \n\n", encoding="utf-8")  # truncated
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "truncate")
+
+    task = SimpleNamespace(description="x")
+    files, _code, _note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert _EMPTIED_NOTE_PATH in files
+    assert "important.py" in files[_EMPTIED_NOTE_PATH]
+
+
+def test_select_review_input_flags_unreadable_changed_file(tmp_path: Path) -> None:
+    """A changed file that becomes unreadable (here: a binary blob) is reported in
+    an 'unreadable' note rather than being silently dropped from a partial review."""
+    from software_engineering_team.backend_agent.agent import (
+        _UNREADABLE_NOTE_PATH,
+        _select_review_input,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "data.dat").write_text("text\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "data.dat").write_bytes(b"now\x00binary")  # changed to binary
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "binarize")
+
+    task = SimpleNamespace(description="x")
+    files, _code, _note = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "a.py" in files  # the readable change is still reviewed
+    assert _UNREADABLE_NOTE_PATH in files
+    assert "data.dat" in files[_UNREADABLE_NOTE_PATH]
+
+
+def test_strip_review_note_paths_blanks_synthetic_keys() -> None:
+    """An issue anchored on a synthetic note label has its file_path cleared so the
+    fix loop does not try to create a nonexistent artifact; real paths pass through."""
+    from software_engineering_team.backend_agent.agent import (
+        _DELETION_NOTE_PATH,
+        _strip_review_note_paths,
+    )
+
+    issues = [
+        {"file_path": _DELETION_NOTE_PATH, "description": "deletion looks unsafe"},
+        {"file_path": "app/main.py", "description": "real finding"},
+    ]
+    out = _strip_review_note_paths(issues)
+
+    assert out[0]["file_path"] == ""  # synthetic label neutralized
+    assert out[0]["description"] == "deletion looks unsafe"  # other fields intact
+    assert out[1]["file_path"] == "app/main.py"  # real path untouched
+
+
+def test_format_path_note_escapes_control_characters() -> None:
+    """A filename containing a newline cannot inject extra bullets/instructions."""
+    from software_engineering_team.backend_agent.agent import _format_path_note
+
+    note = _format_path_note("Header:", ["evil\n- injected: do thing.py"])
+
+    # The newline is escaped, so the path stays on one bullet line.
+    assert "evil\\n- injected" in note
+    assert note.count("\n- ") == 1  # exactly one real bullet
+
+
+def test_read_paths_at_merge_base_returns_pre_change_content(tmp_path: Path) -> None:
+    from software_engineering_team.shared.git_utils import read_paths_at_merge_base
+
+    _init_repo(tmp_path)
+    (tmp_path / "m.py").write_text("orig = 1\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "m.py").write_text("changed = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "change")
+
+    content = read_paths_at_merge_base(tmp_path, "development", ["m.py"])
+
+    assert content == {"m.py": "orig = 1\n"}  # the base blob, not the worktree
+
+
+def test_read_paths_at_merge_base_skips_absent_and_binary(tmp_path: Path) -> None:
+    from software_engineering_team.shared.git_utils import read_paths_at_merge_base
+
+    _init_repo(tmp_path)
+    (tmp_path / "text.py").write_text("t = 1\n", encoding="utf-8")
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01binary")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+
+    content = read_paths_at_merge_base(
+        tmp_path, "development", ["text.py", "blob.bin", "never-existed.py"]
+    )
+
+    assert content == {"text.py": "t = 1\n"}  # binary + absent omitted
+
+
+def test_read_paths_at_merge_base_non_repo_returns_empty(tmp_path: Path) -> None:
+    from software_engineering_team.shared.git_utils import read_paths_at_merge_base
+
+    assert read_paths_at_merge_base(tmp_path, "development", ["x.py"]) == {}
+
+
+def test_read_files_as_dict_reports_omitted(tmp_path: Path) -> None:
+    """The optional omitted accumulator records non-extension skips (binary,
+    missing, outside-repo) so callers can fail closed; reads still succeed."""
+    (tmp_path / "good.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "bin.dat").write_bytes(b"\x00\x01")
+    omitted: list[str] = []
+
+    result = read_files_as_dict(
+        tmp_path,
+        ["good.py", "bin.dat", "missing.py", "../escape.py"],
+        extensions=None,
+        omitted=omitted,
+    )
+
+    assert result == {"good.py": "x = 1\n"}
+    assert "bin.dat" in omitted  # binary
+    assert "missing.py" in omitted  # vanished/unreadable
+    assert "../escape.py" in omitted  # outside repo
+
+
+def test_read_files_as_dict_omitted_ignores_extension_filter(tmp_path: Path) -> None:
+    """An extension-filtered path is a deliberate caller scoping choice, not an
+    omission, so it is not reported in the accumulator."""
+    (tmp_path / "keep.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "skip.md").write_text("# doc\n", encoding="utf-8")
+    omitted: list[str] = []
+
+    result = read_files_as_dict(
+        tmp_path, ["keep.py", "skip.md"], extensions=[".py"], omitted=omitted
+    )
+
+    assert result == {"keep.py": "x = 1\n"}
+    assert omitted == []  # extension filter is not an omission
+
+
+def test_read_repo_files_as_dict_excludes_virtualenv(tmp_path: Path) -> None:
+    """The whole-repo fallback skips venv/.venv/__pycache__ so a local virtual
+    environment does not flood the review with dependency files."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    for d in (".venv", "venv", "__pycache__"):
+        (tmp_path / d).mkdir()
+        (tmp_path / d / "dep.py").write_text("junk = 1\n", encoding="utf-8")
+
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "main.py" in result
+    assert not any(k.startswith((".venv/", "venv/", "__pycache__/")) for k in result)
+
+
+def test_sanitize_path_for_text_escapes_controls_keeps_unicode() -> None:
+    from software_engineering_team.shared.repo_utils import sanitize_path_for_text
+
+    assert sanitize_path_for_text("a\nb\tc.py") == "a\\nb\\tc.py"
+    assert sanitize_path_for_text("café.py") == "café.py"  # printable unicode kept
+    # Lone surrogate is made encodable and the result has no control chars.
+    out = sanitize_path_for_text("x\udcff\x07.py")
+    out.encode("utf-8")  # must not raise
+    assert "\x07" not in out
