@@ -78,6 +78,7 @@ def complete_validated(
     prompt: str,
     *,
     schema: type[T],
+    objective: str,
     system_prompt: str | None = None,
     temperature: float = 0.0,
     correction_attempts: int = 1,
@@ -95,6 +96,8 @@ def complete_validated(
         client: The underlying :class:`LLMClient` (from ``llm_service.get_client``).
         prompt: The user prompt.
         schema: Pydantic ``BaseModel`` subclass the response must satisfy.
+        objective: Required short phrase describing *why* this call is made,
+            forwarded to ``complete_json`` for log/telemetry attribution.
         system_prompt: Optional system prompt forwarded to ``complete_json``.
         temperature: Sampling temperature (default 0.0 for structured output).
         correction_attempts: Max corrective follow-up calls (default 1).
@@ -131,6 +134,7 @@ def complete_validated(
         try:
             data = client.complete_json(
                 current_prompt,
+                objective=objective,
                 system_prompt=system_prompt,
                 temperature=temperature,
                 **kwargs,

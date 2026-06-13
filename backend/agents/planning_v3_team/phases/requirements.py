@@ -106,7 +106,10 @@ def run_requirements(
     open_questions: List[OpenQuestion] = []
     try:
         response = llm.complete_text(
-            REQUIREMENTS_PROMPT.format(input_text=input_text), temperature=0.0, think=True
+            REQUIREMENTS_PROMPT.format(input_text=input_text),
+            temperature=0.0,
+            think=True,
+            objective="derive requirements and open questions",
         )
         text = (response or "").strip()
         if text.startswith("```"):
