@@ -180,7 +180,7 @@ describe('CodeReviewPanelComponent', () => {
         pr_number: 1,
         pr_url: 'https://example.com/pull/1',
         status: 'completed',
-        review_summary: { total_issues: 1, inline_comments: 1, body_findings: 0, event: 'COMMENT' },
+        review_summary: { total_issues: 1, inline_comments: 1, comment_findings: 0, event: 'COMMENT' },
         created_at: '2026-02-01T00:00:00Z',
       },
       {
@@ -271,7 +271,7 @@ describe('CodeReviewPanelComponent', () => {
         status: 'completed',
         status_text: 'done',
         github_pr_url: 'https://example.com/pull/1',
-        review_summary: { total_issues: 2, inline_comments: 1, body_findings: 1, event: 'REQUEST_CHANGES' },
+        review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
       }),
     );
     component.startReview(component.pulls[0]);
@@ -294,7 +294,7 @@ describe('CodeReviewPanelComponent', () => {
       of({
         job_id: 'j1',
         status: 'completed',
-        review_summary: { total_issues: 0, inline_comments: 0, body_findings: 0, event: 'APPROVE' },
+        review_summary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'APPROVE' },
       }),
     );
     component.startReview(component.pulls[0]);
@@ -362,7 +362,7 @@ describe('CodeReviewPanelComponent', () => {
         review_summary: {
           total_issues: 0,
           inline_comments: 0,
-          body_findings: 0,
+          comment_findings: 0,
           event: id === 'ja' ? 'APPROVE' : 'COMMENT',
         },
       }),
@@ -402,7 +402,7 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.isLatestRunning(1)).toBe(true);
 
     component.reviews.set(1, [
-      record({ status: 'completed', reviewSummary: { total_issues: 0, inline_comments: 0, body_findings: 0, event: 'COMMENT' } }),
+      record({ status: 'completed', reviewSummary: { total_issues: 0, inline_comments: 0, comment_findings: 0, event: 'COMMENT' } }),
     ]);
     expect(component.badgeLabel(1)).toBe('COMMENT');
     expect(component.badgeClass(1)).toBe('cr-job-status--completed');
@@ -456,7 +456,7 @@ describe('CodeReviewPanelComponent', () => {
           pr_number: 1,
           pr_url: 'https://example.com/pull/1',
           status: 'completed',
-          review_summary: { total_issues: 3, inline_comments: 2, body_findings: 1, event: 'REQUEST_CHANGES' },
+          review_summary: { total_issues: 3, inline_comments: 2, comment_findings: 1, event: 'REQUEST_CHANGES' },
           created_at: '2026-02-01T00:00:00Z',
         },
       ] as CodeReviewRunItem[]),
@@ -479,7 +479,7 @@ describe('CodeReviewPanelComponent', () => {
       of({
         job_id: 'j1',
         status: 'completed',
-        review_summary: { total_issues: 2, inline_comments: 1, body_findings: 1, event: 'REQUEST_CHANGES' },
+        review_summary: { total_issues: 2, inline_comments: 1, comment_findings: 1, event: 'REQUEST_CHANGES' },
       }),
     );
     const el: HTMLElement = fixture.nativeElement;

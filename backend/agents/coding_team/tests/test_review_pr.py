@@ -380,11 +380,18 @@ class TestReviewEndpoint:
         # The in-diff line (2) is an inline comment; the out-of-diff line (999) is not.
         assert review["comments"] == [c for c in review["comments"] if c["line"] == 2]
         assert len(review["comments"]) == 1
+        # The body is summary-only — no finding is batched into it.
+        assert "General findings" not in review["body"]
+        # The out-of-diff finding (line 999) is posted as its own conversation comment.
+        assert len(gh.comments) == 1
+        assert gh.comments[0][0] == 7
+        assert "desc" in gh.comments[0][1]
         # Job completed with the PR url + review summary.
         job = review_app["jobs"].get_job(data["job_id"])
         assert job["status"] == "completed"
         assert job["github_pr_url"] == "https://example/pull/7"
         assert job["review_summary"]["inline_comments"] == 1
+        assert job["review_summary"]["comment_findings"] == 1
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -429,6 +436,29 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert len(gh.reviews) == 2
         assert gh.reviews[-1]["event"] == "COMMENT"
+        # The retry kept the inline comment, so only the out-of-diff finding is a
+        # standalone comment — the inline finding is not re-posted.
+        assert len(gh.comments) == 1
+
+    def test_dropped_inline_findings_reposted_as_comments(self, review_app) -> None:
+        # When every attempt that carries inline comments 422s, the review
+        # degrades to a body-only COMMENT and the dropped inline finding must be
+        # re-posted as its own conversation comment so nothing is lost.
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 2  # both comment-carrying attempts 422; body-only wins
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert len(gh.reviews) == 3
+        assert gh.reviews[-1]["event"] == "COMMENT"
+        assert gh.reviews[-1]["comments"] == []
+        # Two standalone comments: the out-of-diff finding + the dropped inline one.
+        assert len(gh.comments) == 2
+        # The dropped inline finding carries its `path:line` location.
+        assert any("a.py:2" in body for _n, body in gh.comments)
+        assert job["review_summary"]["inline_comments"] == 0
+        assert job["review_summary"]["comment_findings"] == 2
 
     def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
         # A non-GitHubAPIError during submit must be caught by the broad outer
@@ -516,7 +546,7 @@ class TestReviewPersistence:
                 "review_summary": {
                     "total_issues": 1,
                     "inline_comments": 1,
-                    "body_findings": 0,
+                    "comment_findings": 0,
                     "event": "COMMENT",
                 },
                 "error": None,

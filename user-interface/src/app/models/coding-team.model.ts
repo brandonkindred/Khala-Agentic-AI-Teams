@@ -38,7 +38,7 @@ export interface CodingTeamJobStatus {
 export interface CodeReviewSummary {
   total_issues: number;
   inline_comments: number;
-  body_findings: number;
+  comment_findings: number;
   event: string;
 }
 

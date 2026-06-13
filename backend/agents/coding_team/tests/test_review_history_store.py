@@ -48,7 +48,7 @@ def test_update_transitions_to_completed() -> None:
         review_summary={
             "total_issues": 2,
             "inline_comments": 1,
-            "body_findings": 1,
+            "comment_findings": 1,
             "event": "COMMENT",
         },
         completed=True,

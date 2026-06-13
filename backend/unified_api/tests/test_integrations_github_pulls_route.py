@@ -352,7 +352,7 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
             "pr_url": "u",
             "status": "completed",
             "status_text": "done",
-            "review_summary": {"total_issues": 1, "inline_comments": 1, "body_findings": 0, "event": "COMMENT"},
+            "review_summary": {"total_issues": 1, "inline_comments": 1, "comment_findings": 0, "event": "COMMENT"},
             "error": None,
             "created_at": "2026-01-01T00:00:00Z",
             "completed_at": "2026-01-01T00:01:00Z",

@@ -5,9 +5,16 @@ Pure, side-effect-free helpers used by the ``/review-pr`` flow:
 - ``parse_valid_lines`` — turn one file's unified diff into the set of new-file
   line numbers that can carry an inline comment on ``side="RIGHT"``.
 - ``map_issues_to_comments`` — route each review finding to either an inline
-  comment (its line is in the diff) or the review body (it is not).
-- ``format_comment_body`` / ``build_review_body`` — render comment and review text.
+  comment (its line is in the diff) or a standalone leftover (it is not).
+- ``format_comment_body`` — render one finding as an inline-comment body.
+- ``format_issue_comment`` / ``inline_comment_to_timeline_body`` — render one
+  finding as its own standalone PR conversation (issue) comment.
+- ``build_review_body`` — render the summary-only review body.
 - ``choose_event`` — pick the GitHub review event from issue severity.
+
+Every finding gets exactly one comment: anchorable findings become inline review
+comments (one each), and the rest are posted as individual conversation comments
+by the caller — the review body never lists findings.
 
 Kept free of any GitHub-client or LLM dependency so it is cheap to unit-test and
 reusable. Findings are duck-typed: any object exposing ``severity``, ``category``,
@@ -134,15 +141,15 @@ def _normalize_path(file_path: str, valid_by_path: dict[str, set[int]]) -> Optio
 def map_issues_to_comments(
     issues: Iterable[Any], valid_by_path: dict[str, set[int]]
 ) -> tuple[list[dict[str, Any]], list[Any]]:
-    """Split findings into inline comments and body-only leftovers.
+    """Split findings into inline comments and standalone leftovers.
 
     Postconditions:
         - Returns ``(inline_comments, leftover_issues)``. A finding becomes an
           inline comment iff it carries a ``line`` that resolves to a path in
           ``valid_by_path`` and falls on a commentable line; every other finding
-          is returned as a leftover so the caller can render it in the review body
-          (nothing is dropped). Each inline comment is
-          ``{"path", "line", "side": "RIGHT", "body"}``.
+          is returned as a leftover so the caller can post it as its own
+          standalone conversation comment (nothing is dropped). Each inline
+          comment is ``{"path", "line", "side": "RIGHT", "body"}``.
     """
     inline: list[dict[str, Any]] = []
     leftover: list[Any] = []
@@ -180,27 +187,60 @@ def format_comment_body(issue: Any) -> str:
     return body
 
 
-def build_review_body(summary: str, spec_compliance_notes: str, leftovers: list[Any]) -> str:
-    """Assemble the top-level review body from summary, spec notes, and leftovers.
+def format_issue_comment(issue: Any) -> str:
+    """Render one finding as its own standalone PR conversation comment.
+
+    Used for findings that could not be anchored to a diff line: each is posted
+    as a separate conversation comment rather than batched, so every issue gets
+    exactly one comment and no comment ever lists more than one issue.
 
     Postconditions:
-        - Returns markdown combining the review summary, spec-compliance notes, and
-          a "General findings" section for every leftover finding (so findings that
-          could not be anchored to a diff line are still reported). Never empty —
-          falls back to a "no blocking issues" line.
+        - Returns ``format_comment_body(issue)`` prefixed with a `` `file_path` — ``
+          location when the finding names a file, so the standalone comment still
+          points at where the issue lives.
+    """
+    fp = getattr(issue, "file_path", "") or ""
+    location = f"`{fp}` — " if fp else ""
+    return f"{location}{format_comment_body(issue)}"
+
+
+def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
+    """Render an inline-comment dict as a standalone conversation comment body.
+
+    Only used on the rare path where GitHub rejects the review's inline comments
+    and the submission degrades to a body-only review (see ``_submit_review``):
+    the dropped inline findings are re-posted as individual conversation comments
+    so no finding is lost.
+
+    Preconditions:
+        - ``comment`` is an entry produced by ``map_issues_to_comments`` — it
+          carries ``path``, ``line`` and an already-formatted ``body``.
+    Postconditions:
+        - Returns the comment ``body`` prefixed with a `` `path:line` — `` location.
+    """
+    path = comment.get("path", "") or ""
+    line = comment.get("line")
+    body = comment.get("body", "") or ""
+    location = f"`{path}:{line}` — " if path else ""
+    return f"{location}{body}"
+
+
+def build_review_body(summary: str, spec_compliance_notes: str) -> str:
+    """Assemble the summary-only top-level review body.
+
+    The body never lists findings: each finding is posted as its own comment
+    (inline when anchorable, otherwise a standalone conversation comment), so the
+    body carries only the overall summary and spec-compliance narrative.
+
+    Postconditions:
+        - Returns markdown combining the review summary and spec-compliance notes.
+          Never empty — falls back to a "no blocking issues" line.
     """
     parts: list[str] = []
     if summary and summary.strip():
         parts.append(summary.strip())
     if spec_compliance_notes and spec_compliance_notes.strip():
         parts.append(f"**Spec compliance:** {spec_compliance_notes.strip()}")
-    if leftovers:
-        lines = ["**General findings (not tied to a diff line):**", ""]
-        for issue in leftovers:
-            fp = getattr(issue, "file_path", "") or ""
-            location = f"`{fp}` — " if fp else ""
-            lines.append(f"- {location}{format_comment_body(issue)}")
-        parts.append("\n".join(lines))
     body = "\n\n".join(parts).strip()
     return body or "Automated code review completed. No blocking issues found."
 
