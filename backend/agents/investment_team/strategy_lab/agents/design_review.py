@@ -62,8 +62,8 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
 #   * a ``sizing`` objection re-litigates a cleared check (Rule 5 realisability
 #     + Rule 9 deployed-vs-cap coherence) — including the recurring
 #     deployed-size-vs-stop "0.25% per trade" misread; and
-#   * any drawdown objection is moot — max drawdown is not a constraint (a
-#     strategy may lose up to 100% by design).
+#   * an objection about the retired max-drawdown *limit* is moot — max drawdown
+#     is not a constraint (a strategy may lose up to 100% by design).
 # Both are demoted to ``info`` in :func:`_coerce_critique`.
 #
 # This is deliberately NOT a blanket ``risk_limits`` carve-out: the gate does
@@ -71,18 +71,33 @@ _CRITIQUE_FIELDS: tuple[str, ...] = (
 # the gate yet makes ``RiskFilter.can_enter`` reject every order — a guaranteed
 # zero-trade strategy), so a genuine non-drawdown ``risk_limits`` critique
 # (leverage, open positions, concentration) MUST keep blocking readiness.
+
+# Matches a reference to the *retired max-drawdown limit/constraint* — NOT a
+# generic mention of "drawdown". A real exit-completeness defect such as
+# "no stop-loss or drawdown-protection exit" must keep blocking, so only the
+# limit phrasing ("max drawdown", "maximum drawdown", "max_drawdown_pct",
+# "drawdown limit/cap/ceiling/threshold/constraint") is treated as demotable.
+_MAX_DRAWDOWN_LIMIT_RE = re.compile(
+    r"max(?:imum)?[\s_-]*drawdown(?:_pct)?"
+    r"|drawdown[\s_-]+(?:limit|cap|constraint|ceiling|threshold)",
+    re.IGNORECASE,
+)
+
+
 def _is_demotable_issue(issue: "CritiqueIssue") -> bool:
     """True when ``issue`` re-litigates a deterministic-gate-owned check or the
     removed max-drawdown constraint, so the reviewer may not block on it.
 
     Pre: ``issue`` is a :class:`CritiqueIssue`.
-    Post: returns True iff the issue is a ``sizing`` objection OR mentions
-    drawdown (case-insensitive). Non-drawdown ``risk_limits`` objections return
-    False so they keep their blocking severity.
+    Post: returns True iff the issue is a ``sizing`` objection OR references the
+    retired max-drawdown *limit* (per ``_MAX_DRAWDOWN_LIMIT_RE``). A substantive
+    objection that merely mentions the word "drawdown" (e.g. a missing
+    drawdown-protection *exit*) is NOT demoted; non-drawdown ``risk_limits``
+    objections are likewise left blocking.
     """
     if issue.field == "sizing":
         return True
-    return "drawdown" in issue.description.lower()
+    return bool(_MAX_DRAWDOWN_LIMIT_RE.search(issue.description))
 
 
 def _normalize_issue_text(text: str) -> str:

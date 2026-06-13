@@ -683,6 +683,34 @@ def test_coerce_critique_keeps_non_drawdown_risk_limit_blocking() -> None:
     assert blocking[0].severity == "critical"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        # Genuine missing-exit defect that merely *mentions* drawdown — must NOT
+        # be demoted just because the word appears.
+        "strategy has neither a stop-loss nor a drawdown-protection exit",
+        "no protective exit; an adverse move produces an unbounded drawdown",
+    ],
+)
+def test_coerce_critique_keeps_defect_that_only_mentions_drawdown(description: str) -> None:
+    """Only references to the retired max-drawdown *limit* are demoted. A
+    substantive exit-completeness defect that merely contains the word
+    "drawdown" keeps blocking."""
+    parsed = {
+        "ready": False,
+        "rationale": "missing protective exit",
+        "issues": [{"field": "exit_rules", "severity": "critical", "description": description}],
+    }
+
+    critique = _coerce_critique(parsed, [])
+
+    assert critique.ready is False
+    blocking = [i for i in critique.issues if i.severity in ("warning", "critical")]
+    assert len(blocking) == 1
+    assert blocking[0].field == "exit_rules"
+    assert blocking[0].severity == "critical"
+
+
 def test_coerce_critique_not_ready_only_sizing_is_promoted_to_ready() -> None:
     """The recurring failure mode: the reviewer says not-ready solely because of
     a sizing/drawdown objection (e.g. the deployed-size-vs-stop '0.25% per trade'
