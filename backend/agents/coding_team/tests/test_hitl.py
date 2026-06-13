@@ -64,11 +64,28 @@ def test_normalize_open_questions_drops_options_fewer_than_two():
 
 
 def test_normalize_open_questions_drops_duplicate_option_ids():
-    # Two entries with the same ID count as only one unique ID → fall back to free-text.
+    # Two entries with the same ID → deduplicated to one → fewer than 2 unique → free-text.
     out = hitl.normalize_open_questions(
         [{"question_text": "Q?", "options": [{"id": "a", "label": "A"}, {"id": "a", "label": "A2"}]}]
     )
     assert out[0]["options"] == []
+
+
+def test_normalize_open_questions_deduplicates_partial_duplicates():
+    # [a, a, b] deduplicates to [a, b] → 2 unique IDs → accepted, not rejected.
+    out = hitl.normalize_open_questions(
+        [
+            {
+                "question_text": "Q?",
+                "options": [
+                    {"id": "a", "label": "A"},
+                    {"id": "a", "label": "A-dup"},
+                    {"id": "b", "label": "B"},
+                ],
+            }
+        ]
+    )
+    assert [o["id"] for o in out[0]["options"]] == ["a", "b"]
 
 
 def test_normalize_open_questions_drops_generic_yes_no_options():

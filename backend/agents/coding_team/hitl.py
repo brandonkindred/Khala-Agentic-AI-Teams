@@ -160,6 +160,17 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
+            # Deduplicate by ID (first occurrence wins). Angular tracks options with
+            # `track option.id` and logs NG0955 for duplicates; answer resolution also
+            # picks the first label matching a submitted ID, so duplicate IDs corrupt
+            # both rendering and recorded decisions.
+            seen_ids: set = set()
+            deduped: list = []
+            for o in opts:
+                if o["id"] not in seen_ids:
+                    seen_ids.add(o["id"])
+                    deduped.append(o)
+            opts = deduped
             unique_ids = {o["id"] for o in opts}
             if len(unique_ids) >= 2 and not unique_ids.issubset(_GENERIC_OPTION_IDS):
                 entry["options"] = opts

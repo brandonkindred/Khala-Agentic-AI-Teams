@@ -2173,7 +2173,10 @@ def auto_answer_run_team_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
-    if not question_data.get("options"):
+    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
+    # _convert_to_pending_questions inserts it when a question has no structured options.
+    real_options = [o for o in (question_data.get("options") or []) if o.get("id") != "other"]
+    if not real_options:
         raise HTTPException(
             status_code=422,
             detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
@@ -2681,7 +2684,10 @@ def auto_answer_product_analysis_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
-    if not question_data.get("options"):
+    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
+    # _convert_to_pending_questions inserts it when a question has no structured options.
+    real_options = [o for o in (question_data.get("options") or []) if o.get("id") != "other"]
+    if not real_options:
         raise HTTPException(
             status_code=422,
             detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
