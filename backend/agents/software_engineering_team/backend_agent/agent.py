@@ -585,6 +585,11 @@ class ReviewInputSelection:
     deletion_note: str | None
     synthetic_keys: frozenset[str] = frozenset()
     key_to_path: Dict[str, str] = field(default_factory=dict)
+    # Task-owned paths the reviewer could NOT examine the content of: secrets
+    # (withheld), binary/submodule/unreadable, and emptied/whitespace-only files.
+    withheld: Tuple[str, ...] = ()
+    unreadable: Tuple[str, ...] = ()
+    emptied: Tuple[str, ...] = ()
 
     def __iter__(self):
         return iter((self.files, self.code, self.deletion_note))
@@ -592,15 +597,14 @@ class ReviewInputSelection:
     def has_examinable_content(self) -> bool:
         """True when the reviewer actually saw file content, not only notes.
 
-        The legacy ``code`` channel (whole-repo fallback / empty repo) always
-        counts. For the files-dict channel, at least one block must be a real
-        (non-synthetic) key holding non-whitespace content — a restored deletion
-        blob or a changed file. A mapping of only omission notes (withheld,
-        unreadable, emptied, deletion listing) — or only emptied files — is *not*
-        examinable, so the gate must refuse to let an ``approved=true`` stand on
-        it (the content was never reviewed).
+        A non-empty ``code`` channel (whole-repo fallback) counts; an *empty*
+        ``code`` (truly empty repo) does not. For the files-dict channel, at least
+        one block must be a real (non-synthetic) key holding non-whitespace
+        content — a restored deletion blob or a changed file. A mapping of only
+        omission notes (withheld, unreadable, emptied, deletion listing) — or only
+        emptied files — is *not* examinable.
         """
-        if self.code is not None:
+        if self.code:
             return True
         if not self.files:
             return False
@@ -608,6 +612,15 @@ class ReviewInputSelection:
             key not in self.synthetic_keys and (value or "").strip()
             for key, value in self.files.items()
         )
+
+    def unexamined_paths(self) -> Tuple[str, ...]:
+        """Task-owned paths whose content the reviewer never saw (sorted, unique).
+
+        Non-empty ⇒ an ``approved`` verdict cannot certify the whole change (a
+        secret, binary/submodule, or emptied file was omitted), so the gate must
+        route to manual review rather than letting the approval merge.
+        """
+        return tuple(sorted(set(self.withheld) | set(self.unreadable) | set(self.emptied)))
 
 
 def _translate_finding_paths(
@@ -642,42 +655,54 @@ def _translate_finding_paths(
     return out
 
 
-def _force_unexamined_rejection(review_result: Any) -> Any:
-    """Override an approval that rests on no examinable content with a rejection.
+_WITHHELD_NOTE_HEADER = (
+    "Files CHANGED or DELETED by this task but WITHHELD from review (path matches the "
+    "secret denylist); content is NOT shown — review these manually:"
+)
+_UNREADABLE_NOTE_HEADER = (
+    "Files CHANGED by this task that could NOT be read (binary, a submodule/gitlink, "
+    "or vanished mid-scan) and so were not reviewed — verify each manually:"
+)
+_EMPTIED_NOTE_HEADER = (
+    "Files reduced to EMPTY/whitespace-only by this task — confirm the content removal "
+    "is intentional:"
+)
 
-    When the review input was note-only (all task-owned files were withheld as
-    sensitive, unreadable/binary, or emptied — no real content block), an
-    ``approved=true`` verdict means the reviewer approved changes it never saw.
-    This appends a blocking finding and flips ``approved`` to False so the change
-    cannot silently merge; the fix loop re-runs and, failing to produce
-    examinable content, terminates in the workflow's manual-review path rather
-    than auto-approving.
+
+def _attach_review_notes(
+    files: Dict[str, str],
+    *,
+    deletion_note: str | None = None,
+    withheld: List[str] | None = None,
+    unreadable: List[str] | None = None,
+    emptied: List[str] | None = None,
+) -> frozenset[str]:
+    """Insert each non-empty omission note into *files* (mutated); return its keys.
+
+    Used by both the task-scoped selection and the whole-repo fallback so the two
+    surface omissions identically. Each note rides the segmented code/files channel
+    under a free synthetic key (so a real file sharing the label is never dropped).
 
     Postconditions:
-        - ``review_result.approved`` is False and ``issues`` has one extra
-          blocking entry. Idempotent in effect (re-running only adds notes).
+        - *files* gains one block per non-empty note; the returned frozenset is the
+          exact set of keys inserted (for precise finding detachment).
     """
-    from code_review_agent.models import CodeReviewIssue
-
-    review_result.approved = False
-    review_result.issues = list(review_result.issues) + [
-        CodeReviewIssue(
-            severity="high",
-            category="integration",
-            file_path="",
-            description=(
-                "Code review examined no task-owned file content: every changed file "
-                "was withheld (sensitive path), unreadable/binary, a submodule, or "
-                "emptied, so only omission notes were available. An approval here would "
-                "merge unreviewed changes — manual review required."
-            ),
-            suggestion=(
-                "Restore reviewable content (e.g. undo an unintended truncation) or have "
-                "a human review the withheld/unreadable changes before merging."
-            ),
-        )
-    ]
-    return review_result
+    synthetic: set[str] = set()
+    specs = (
+        (_DELETION_NOTE_PATH, deletion_note),
+        (_WITHHELD_NOTE_PATH, _format_path_note(_WITHHELD_NOTE_HEADER, withheld) if withheld else None),
+        (
+            _UNREADABLE_NOTE_PATH,
+            _format_path_note(_UNREADABLE_NOTE_HEADER, unreadable) if unreadable else None,
+        ),
+        (_EMPTIED_NOTE_PATH, _format_path_note(_EMPTIED_NOTE_HEADER, emptied) if emptied else None),
+    )
+    for base_label, text in specs:
+        if text:
+            key = _free_note_key(files, base_label)
+            files[key] = text
+            synthetic.add(key)
+    return frozenset(synthetic)
 
 
 def _format_path_note(header: str, paths: List[str]) -> str:
@@ -726,15 +751,38 @@ def _whole_repo_review_input(repo_path: Path) -> ReviewInputSelection:
 
     Used when no task-scoped change set is available (empty diff) or cannot be
     trusted (baseline diff unavailable). Reviews all file types (config,
-    migrations, JS, docs, ...) — not just ``.py``/``.java`` — matching the
-    breadth of the normal unfiltered path, with secrets and binaries excluded.
-    Falls back to an empty ``code`` only for an empty repo so the input is valid.
+    migrations, JS, docs, ...) — not just ``.py``/``.java``.
+
+    The files it cannot show the model — sensitive (withheld) and binary/unreadable
+    — are not discarded silently: they are surfaced as omission notes and recorded
+    on the selection's ``withheld``/``unreadable`` fields, so the gate treats an
+    approval on this fallback as incomplete (manual review) rather than certifying
+    a "whole-repo" review that quietly excluded files. An empty repo yields an
+    empty ``code`` whose ``has_examinable_content()`` is False (nothing reviewed).
     """
     key_to_path: Dict[str, str] = {}
-    files = read_repo_files_as_dict(repo_path, key_to_path=key_to_path)
-    if files:
-        return ReviewInputSelection(files, None, None, frozenset(), key_to_path)
-    return ReviewInputSelection(None, "", None)
+    omitted: List[str] = []
+    sensitive_skipped: List[str] = []
+    files = read_repo_files_as_dict(
+        repo_path,
+        key_to_path=key_to_path,
+        omitted=omitted,
+        sensitive_skipped=sensitive_skipped,
+    )
+    if not files:
+        return ReviewInputSelection(None, "", None)
+    synthetic = _attach_review_notes(
+        files, withheld=sensitive_skipped or None, unreadable=omitted or None
+    )
+    return ReviewInputSelection(
+        files,
+        None,
+        None,
+        synthetic,
+        key_to_path,
+        withheld=tuple(sensitive_skipped),
+        unreadable=tuple(omitted),
+    )
 
 
 def _select_review_input(
@@ -756,16 +804,18 @@ def _select_review_input(
     (requirements.txt, migrations, YAML/JSON, ...) are reviewed too.
 
     Deletions are surfaced two ways: the pre-deletion content of each removed
-    path is read from the merge-base blob and added *byte-for-byte* under the real
-    removed path (so a finding like "this module is still imported" anchors there
-    and the fix loop restores it; the "this is a deletion" framing lives in the
-    note, not prepended into the blob, so line numbers and non-Python syntax stay
-    intact), and a separate *note* lists every removed path — including
-    binary/unreadable ones whose content could not be fetched, and any surviving
-    files that still import a removed module (a best-effort reverse-reference scan)
-    so the "nothing depends on it" claim can be checked. Pure file-metadata changes
-    (e.g. a mode/chmod-only change) are not separately surfaced: this pipeline
-    writes file *content* via ``write_agent_output``.
+    path is read from the merge-base blob and added *byte-for-byte* (line numbers
+    and non-Python syntax intact) under a DELETED-marked display *label* — the
+    marker lives in the key, which the coordinator carries as every segment's file
+    label, so even a large blob split across chunks is never mistaken for current
+    source; ``key_to_path`` maps the label back to the real removed path so a
+    finding ("this module is still imported") drives the fix loop to restore it. A
+    separate *note* lists every removed path — including binary/unreadable ones
+    whose content could not be fetched, and any surviving files that still import a
+    removed module (a best-effort reverse-reference scan) so the "nothing depends
+    on it" claim can be checked. Pure file-metadata changes (e.g. a mode/chmod-only
+    change) are not separately surfaced: this pipeline writes file *content* via
+    ``write_agent_output``.
 
     Never-silently-skip notes ride the same segmented channel:
         - **withheld-sensitive** — a changed *or deleted* path matching the secret
@@ -872,65 +922,42 @@ def _select_review_input(
     references = find_referencing_paths(repo_path, deleted) if deleted else {}
     note = _format_deletion_note(deleted, references) if deleted else None
 
-    # Restored pre-deletion content rides byte-for-byte under the *real* removed
-    # path (the "deleted" framing is in the note, not prepended into the blob, so
-    # line numbers and non-Python syntax are preserved). A reviewer finding anchors
-    # on that path so the fix loop can restore it; suffix only on the rare
-    # collision with a surviving file.
+    # Restored pre-deletion content rides byte-for-byte (no header prepended, so
+    # line numbers and non-Python syntax are preserved) under a *display label*
+    # that marks it DELETED. The marker lives in the key — which the coordinator
+    # carries as every segment's file label — so even a large blob split across
+    # chunks is never mistaken for current source. The label is sanitized (a raw
+    # git path may carry control/invalid-UTF-8 bytes); key_to_path maps it back to
+    # the raw removed path so a finding still drives the fix loop to restore it.
     for p, content in deleted_content.items():
-        key = _free_note_key(files, p)
+        label = f"{sanitize_path_for_text(p)} (DELETED by this task — pre-deletion content)"
+        key = _free_note_key(files, label)
         files[key] = content
         key_to_path[key] = p
 
-    # Attach each non-empty note as a real (segmentable) block under its synthetic
-    # key, choosing a free key so a real file sharing the label is never dropped.
-    # The exact inserted keys are tracked so a finding on one (and *only* one) can
-    # be detached from the fix loop without catching a real ``[review-note]/`` file.
-    synthetic_keys: set[str] = set()
+    # Attach each non-empty omission note as a real (segmentable) block; the exact
+    # inserted keys are tracked so a finding on one (and only one) is detached from
+    # the fix loop without catching a real ``[review-note]/`` file.
     withheld = sorted(set(sensitive) | set(deleted_sensitive))
-    note_blocks = (
-        (_DELETION_NOTE_PATH, note),
-        (
-            _WITHHELD_NOTE_PATH,
-            _format_path_note(
-                "Files CHANGED or DELETED by this task but WITHHELD from review (path "
-                "matches the secret denylist); content is NOT shown — review these "
-                "manually:",
-                withheld,
-            )
-            if withheld
-            else None,
-        ),
-        (
-            _UNREADABLE_NOTE_PATH,
-            _format_path_note(
-                "Files CHANGED by this task that could NOT be read (binary, a "
-                "submodule/gitlink, or vanished mid-scan) and so were not reviewed — "
-                "verify each manually:",
-                omitted,
-            )
-            if omitted
-            else None,
-        ),
-        (
-            _EMPTIED_NOTE_PATH,
-            _format_path_note(
-                "Files reduced to EMPTY/whitespace-only by this task — confirm the "
-                "content removal is intentional:",
-                emptied,
-            )
-            if emptied
-            else None,
-        ),
+    synthetic_keys = _attach_review_notes(
+        files,
+        deletion_note=note,
+        withheld=withheld or None,
+        unreadable=omitted or None,
+        emptied=emptied or None,
     )
-    for base_label, text in note_blocks:
-        if text:
-            key = _free_note_key(files, base_label)
-            files[key] = text
-            synthetic_keys.add(key)
 
     if files:
-        return ReviewInputSelection(files, None, note, frozenset(synthetic_keys), key_to_path)
+        return ReviewInputSelection(
+            files,
+            None,
+            note,
+            synthetic_keys,
+            key_to_path,
+            withheld=tuple(withheld),
+            unreadable=tuple(omitted),
+            emptied=tuple(emptied),
+        )
 
     logger.warning(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
@@ -1970,17 +1997,35 @@ class BackendExpertAgent:
                     _read_repo_code(repo_path), compute_existing_code_chars(self.llm)
                 ),
             )
-            # Fail closed: an approval that rests on note-only input (every changed
-            # file withheld/unreadable/emptied — no examinable content) would merge
-            # unreviewed changes, so override it into a blocking, manual-review result.
-            if review_result.approved and not review_selection.has_examinable_content():
-                logger.warning(
-                    "[%s] WORKFLOW   [%d] Code review approved on note-only input "
-                    "(no examinable content); forcing manual-review rejection",
-                    task_id,
-                    iteration,
+            # Fail closed: an approval cannot certify files the reviewer never saw.
+            # If any task-owned file was withheld (secret), unreadable (binary/
+            # submodule), or emptied — or there was no examinable content at all —
+            # do NOT let the approval merge. Re-entering the regeneration loop would
+            # not change the omission set deterministically and, on exhaustion,
+            # would fall through to the merge path; so return a terminal
+            # manual-review result instead.
+            unexamined = review_selection.unexamined_paths()
+            if review_result.approved and (unexamined or not review_selection.has_examinable_content()):
+                shown = ", ".join(unexamined[:20]) + (" ..." if len(unexamined) > 20 else "")
+                failure_reason = (
+                    "Code review approved, but task-owned files were not examinable "
+                    "(withheld secret, binary/submodule, or emptied) — manual review is "
+                    f"required before merge. Unexamined: {shown or '(no examinable content)'}"
                 )
-                review_result = _force_unexamined_rejection(review_result)
+                logger.warning("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                record.code_review_approved = False
+                review_history.append(record)
+                checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                return BackendWorkflowResult(
+                    task_id=task_id,
+                    success=False,
+                    branch_name=branch_name,
+                    iterations_used=len(review_history),
+                    review_history=review_history,
+                    summary=result.summary if result else "",
+                    failure_reason=failure_reason,
+                    needs_followup=True,
+                )
             record.code_review_approved = review_result.approved
             record.code_review_issue_count = len(review_result.issues)
             if not review_result.approved:

@@ -353,7 +353,11 @@ def read_files_as_dict(
 
 
 def read_repo_files_as_dict(
-    repo_path: Path, *, key_to_path: Optional[Dict[str, str]] = None
+    repo_path: Path,
+    *,
+    key_to_path: Optional[Dict[str, str]] = None,
+    omitted: Optional[List[str]] = None,
+    sensitive_skipped: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     """Read every reviewable text file under *repo_path* into a ``{path: content}`` map.
 
@@ -365,31 +369,36 @@ def read_repo_files_as_dict(
     (config, migrations, JS, docs, ...) the normal unfiltered path does, not just
     ``.py``/``.java``.
 
-    Uses :data:`REPO_INSPECT_EXCLUDE_DIRS` (not the narrower
-    :data:`REPO_EXCLUDE_DIRS`) so a checkout with a local virtual environment or
-    interpreter cache (``venv``/``.venv``/``__pycache__``) does not flood the
-    fallback with thousands of dependency files — which would explode the number
-    of review LLM calls and could exhaust the budget before reaching project code.
+    Excluded directories are pruned *during* the walk (``os.walk`` with in-place
+    ``dirnames`` filtering), not enumerated-then-discarded, so a checkout with a
+    huge ``node_modules``/``.venv``/``.git`` is never descended into — the fallback
+    cannot stall enumerating millions of dependency files precisely in the repos
+    these exclusions protect.
 
     Postconditions:
         - Returns ``{}`` for an empty repo; never raises for a missing file.
+        - When *omitted* / *sensitive_skipped* are provided, they collect the
+          paths dropped as unreadable/binary and as sensitive (respectively), so
+          the caller can surface them rather than approving a whole-repo review
+          that silently excluded files. *key_to_path* maps review keys back to
+          real paths.
     """
     always_exclude = REPO_INSPECT_EXCLUDE_DIRS | {".git"}
+    repo_root = repo_path.resolve()
     paths: List[str] = []
-    for f in repo_path.rglob("*"):
-        if not f.is_file():
-            continue
-        rel_parts = f.relative_to(repo_path).parts
-        # Match exclusions against repo-relative components only: if the repo
-        # itself lives under a dir named e.g. ``node_modules``, that ancestor is
-        # not part of rel_parts, so the whole repo isn't wrongly excluded (which
-        # would degrade a fallback to an empty, trivially-approved review).
-        if always_exclude.intersection(rel_parts):
-            continue
-        rel = str(Path(*rel_parts))
-        if not is_sensitive_path(rel):
+    for dirpath, dirnames, filenames in os.walk(repo_root):
+        # Prune excluded directories in place so os.walk never descends into them.
+        dirnames[:] = [d for d in dirnames if d not in always_exclude]
+        for name in filenames:
+            rel = os.path.relpath(os.path.join(dirpath, name), repo_root)
+            if is_sensitive_path(rel):
+                if sensitive_skipped is not None:
+                    sensitive_skipped.append(rel)
+                continue
             paths.append(rel)
-    return read_files_as_dict(repo_path, paths, extensions=None, key_to_path=key_to_path)
+    return read_files_as_dict(
+        repo_path, paths, extensions=None, omitted=omitted, key_to_path=key_to_path
+    )
 
 
 def truncate_for_context(

@@ -325,9 +325,13 @@ def read_paths_at_merge_base(
           dropped by the caller) — this reader does no denylisting of its own.
     Postconditions:
         - Returns ``{path: content}`` for each path whose merge-base blob is
-          readable UTF-8 text. A path that did not exist at the base, that
-          resolves to a tree (a directory/submodule has no blob), or whose blob
-          is binary (a NUL byte) is omitted rather than returned as gibberish.
+          readable text. A path that did not exist at the base, that resolves to
+          a tree (a directory/submodule has no blob), or whose blob is binary (a
+          NUL byte) is omitted rather than returned as gibberish. Content is made
+          UTF-8/JSON safe: ``_run_git`` decodes with ``surrogateescape``, so a
+          blob with invalid-UTF-8 (but NUL-free) bytes would otherwise carry lone
+          surrogates that crash a later UTF-8/JSON encode; those bytes are
+          re-decoded with ``errors="replace"`` here.
         - Returns ``{}`` when not a git repository.
         - Raises :class:`BaselineDiffUnavailable` when the merge base cannot be
           computed, mirroring :func:`list_changed_and_deleted` so the caller
@@ -339,76 +343,14 @@ def read_paths_at_merge_base(
     merge_base = _unambiguous_merge_base(path, base, head)
     result: Dict[str, str] = {}
     for rel in paths:
-        # ``--`` separates the revision from the pathspec so a path that looks
-        # like a flag/revision is never misinterpreted.
         code, out = _run_git(path, ["git", "show", f"{merge_base}:{rel}"])
         if code != 0:
             continue  # path absent at base, or a tree (submodule/dir): no blob
         if "\x00" in out:
             continue  # binary blob: omit rather than review as gibberish
-        result[rel] = out
-    return result
-
-
-def find_referencing_paths(
-    repo_path: str | Path,
-    deleted_paths: List[str],
-    *,
-    max_refs_per_path: int = 10,
-) -> Dict[str, List[str]]:
-    """For each deleted path, the surviving worktree files that still mention it.
-
-    Best-effort reverse-dependency signal so a reviewer can check the deletion
-    note's instruction that "nothing still depends on" a removed module. For each
-    deleted ``.py`` path it ``git grep``s the *worktree* (tracked files, so the
-    just-removed file itself is gone) for the module's dotted import path
-    (``a.b.c`` derived from ``a/b/c.py``) and for a bare ``import <stem>`` — both
-    precise importer signals that keep the false-positive rate far below a bare
-    stem search. Non-``.py`` deletions are skipped (no language-agnostic import
-    form to match).
-
-    Preconditions:
-        - *deleted_paths* are repo-relative paths reported deleted by
-          :func:`list_changed_and_deleted`.
-    Postconditions:
-        - Returns ``{deleted_path: [referrer, ...]}`` only for deletions with at
-          least one surviving referrer; referrers exclude the deleted paths
-          themselves and are capped at *max_refs_per_path* (sorted) so a widely
-          imported module cannot flood the note. Returns ``{}`` when not a git
-          repository or git grep is unavailable; never raises for a bad pattern.
-    """
-    path = Path(repo_path).resolve()
-    if not (path / ".git").exists():
-        return {}
-    deleted_set = set(deleted_paths)
-    result: Dict[str, List[str]] = {}
-    for dp in deleted_paths:
-        p = Path(dp)
-        if p.suffix != ".py":
-            continue
-        stem = p.stem
-        if not stem or stem == "__init__":
-            continue
-        dotted = ".".join([*p.with_suffix("").parts])
-        # Two precise importer forms: the dotted module path and ``import <stem>``.
-        patterns = [
-            "-e",
-            re.escape(dotted),
-            "-e",
-            rf"import\s+{re.escape(stem)}\b",
-        ]
-        code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns])
-        if code != 0:
-            continue  # no matches (grep exits non-zero) or grep unavailable
-        refs = sorted(
-            {
-                ref.strip()
-                for ref in (out or "").splitlines()
-                if ref.strip() and ref.strip() not in deleted_set
-            }
-        )
-        if refs:
-            result[dp] = refs[:max_refs_per_path]
+        # _run_git decoded with surrogateescape; re-derive the original bytes and
+        # decode with replacement so an invalid-UTF-8 blob is UTF-8/JSON safe.
+        result[rel] = out.encode("utf-8", "surrogateescape").decode("utf-8", "replace")
     return result
 
 
@@ -444,9 +386,7 @@ def list_changed_and_deleted(
     if not (path / ".git").exists():
         return [], []
     merge_base = _unambiguous_merge_base(path, base, head)
-    code, out = _run_git(
-        path, ["git", "diff", "--name-status", "--no-renames", "-z", merge_base]
-    )
+    code, out = _run_git(path, ["git", "diff", "--name-status", "--no-renames", "-z", merge_base])
     if code != 0:
         raise BaselineDiffUnavailable(f"net diff vs {merge_base} failed: {out!r}")
     changed: List[str] = []
@@ -464,8 +404,6 @@ def list_changed_and_deleted(
             seen.add(entry)
             bucket.append(entry)
     return changed, deleted
-
-
 
 
 def merge_branch(repo_path: str | Path, source_branch: str, target_branch: str) -> Tuple[bool, str]:
@@ -507,6 +445,121 @@ def delete_branch(repo_path: str | Path, branch: str) -> Tuple[bool, str]:
     if code != 0:
         return False, f"Failed to delete branch {branch}: {out}"
     return True, f"Deleted branch {branch}"
+
+
+# Conventional Python source roots stripped when deriving a deleted module's
+# importable dotted path: code under ``src/pkg/x.py`` is imported as ``pkg.x``.
+_PYTHON_SOURCE_ROOTS: frozenset[str] = frozenset({"src", "lib", "app"})
+
+# Cap on referrers listed per deletion before an explicit truncation marker is
+# appended (the count is always shown, so nothing is silently hidden).
+_MAX_REFERRERS_LISTED = 25
+
+
+def _deleted_module_patterns(rel_path: str) -> List[str]:
+    """Importer-search regexes for a deleted ``.py`` path (``[]`` if not Python).
+
+    Produces precise importer signals — far below a bare-stem search's
+    false-positive rate — covering common layouts:
+
+    - the full dotted path (``a.b.c`` from ``a/b/c.py``) and the same with a
+      leading source root stripped (``pkg.x`` from ``src/pkg/x.py``), since
+      surviving code imports the *package* path, not the on-disk source root;
+    - a bare ``import <stem>`` / ``from ... import <stem>``;
+    - for a deleted package initializer (``pkg/__init__.py``), the package name
+      itself (``import pkg`` / ``pkg.``), since removing it breaks ``import pkg``.
+    """
+    p = Path(rel_path)
+    if p.suffix != ".py":
+        return []
+    parts = list(p.with_suffix("").parts)
+    if not parts:
+        return []
+
+    # Candidate dotted module paths: full, and with a leading source root dropped.
+    dotted_variants: set[str] = set()
+    if parts[-1] == "__init__":
+        pkg_parts = parts[:-1]  # the package this file initializes
+        if pkg_parts:
+            dotted_variants.add(".".join(pkg_parts))
+            if pkg_parts[0] in _PYTHON_SOURCE_ROOTS and len(pkg_parts) > 1:
+                dotted_variants.add(".".join(pkg_parts[1:]))
+            names = [pkg_parts[-1]]
+        else:
+            return []
+    else:
+        dotted_variants.add(".".join(parts))
+        if parts[0] in _PYTHON_SOURCE_ROOTS and len(parts) > 1:
+            dotted_variants.add(".".join(parts[1:]))
+        names = [parts[-1]]
+
+    patterns: List[str] = []
+    for dotted in dotted_variants:
+        patterns += ["-e", rf"\b{re.escape(dotted)}\b"]
+    for name in names:
+        patterns += ["-e", rf"import\s+{re.escape(name)}\b"]
+    return patterns
+
+
+def find_referencing_paths(
+    repo_path: str | Path,
+    deleted_paths: List[str],
+) -> Dict[str, List[str]]:
+    """For each deleted path, the surviving worktree files that still mention it.
+
+    Best-effort reverse-dependency signal so a reviewer can check the deletion
+    note's instruction that "nothing still depends on" a removed module. For each
+    deleted ``.py`` path it ``git grep``s the *worktree* (tracked files, so the
+    just-removed file itself is gone) for the module's importable dotted path(s)
+    — with conventional source roots (``src``/``lib``/``app``) stripped — a bare
+    ``import <name>``, and, for a deleted ``__init__.py``, the package name. These
+    are precise importer signals that keep the false-positive rate far below a
+    bare stem search. Non-``.py`` deletions are skipped.
+
+    Preconditions:
+        - *deleted_paths* are repo-relative paths reported deleted by
+          :func:`list_changed_and_deleted`.
+    Postconditions:
+        - Returns ``{deleted_path: [referrer, ...]}`` only for deletions with at
+          least one surviving referrer; referrers exclude the deleted paths
+          themselves and are sorted. Nothing is silently dropped: if more than
+          :data:`_MAX_REFERRERS_LISTED` referrers match, the list is truncated but
+          a final ``(+N more ...)`` marker carrying the full count is appended, so
+          the reviewer always sees that additional dependents exist. Returns
+          ``{}`` when not a git repository or git grep is unavailable; never
+          raises for a bad pattern.
+    """
+    path = Path(repo_path).resolve()
+    if not (path / ".git").exists():
+        return {}
+    deleted_set = set(deleted_paths)
+    result: Dict[str, List[str]] = {}
+    for dp in deleted_paths:
+        patterns = _deleted_module_patterns(dp)
+        if not patterns:
+            continue
+        code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns])
+        if code != 0:
+            continue  # no matches (grep exits non-zero) or grep unavailable
+        refs = sorted(
+            {
+                ref.strip()
+                for ref in (out or "").splitlines()
+                if ref.strip() and ref.strip() not in deleted_set
+            }
+        )
+        if not refs:
+            continue
+        if len(refs) > _MAX_REFERRERS_LISTED:
+            shown = refs[:_MAX_REFERRERS_LISTED]
+            shown.append(
+                f"(+{len(refs) - _MAX_REFERRERS_LISTED} more importers; "
+                f"{len(refs)} total — review all before approving)"
+            )
+            result[dp] = shown
+        else:
+            result[dp] = refs
+    return result
 
 
 # Default .gitignore for new repos (Python, Node, IDE)

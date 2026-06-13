@@ -1167,14 +1167,17 @@ def test_select_review_input_includes_deleted_file_content(tmp_path: Path) -> No
     _git(tmp_path, "commit", "-m", "delete module")
 
     task = SimpleNamespace(description="x")
-    files, code, note = _select_review_input(tmp_path, task, written_files=None)
+    sel = _select_review_input(tmp_path, task, written_files=None)
+    files, code, note = sel
 
     assert code is None
-    # Removed content anchors byte-for-byte under the real path so a finding can
-    # restore it; the "this was deleted" framing lives in the note, not the blob
-    # (so line numbers and non-Python syntax stay intact).
-    assert "module.py" in files
-    assert files["module.py"] == "def critical():\n    return 42\n"
+    # The blob is byte-for-byte (no header), under a DELETED-marked display label
+    # so every segment carries the deletion context; key_to_path maps the label
+    # back to the real removed path for finding-driven restoration.
+    del_keys = [k for k in files if "module.py" in k and "DELETED" in k]
+    assert len(del_keys) == 1
+    assert files[del_keys[0]] == "def critical():\n    return 42\n"  # byte-for-byte
+    assert sel.key_to_path[del_keys[0]] == "module.py"
     assert note is not None and "DELETED" in note and "module.py" in note
 
 
@@ -1432,6 +1435,121 @@ def test_find_referencing_paths_skips_non_python_and_non_repo(tmp_path: Path) ->
     assert find_referencing_paths(tmp_path, ["data.bin"]) == {}  # non-.py skipped
 
 
+def test_find_referencing_paths_strips_source_root(tmp_path: Path) -> None:
+    """A module under a src/ root is imported by its package path (pkg.helper),
+    not the on-disk path (src.pkg.helper) — the scan strips the source root."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "src" / "pkg").mkdir(parents=True)
+    (tmp_path / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "src" / "pkg" / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "consumer.py").write_text("from pkg.helper import h\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "src" / "pkg" / "helper.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["src/pkg/helper.py"])
+
+    assert "consumer.py" in refs["src/pkg/helper.py"]  # matched on pkg.helper
+
+
+def test_find_referencing_paths_init_uses_package_name(tmp_path: Path) -> None:
+    """Deleting pkg/__init__.py can break `import pkg`; the scan keys on the
+    package name rather than skipping initializers."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "__init__.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (tmp_path / "consumer.py").write_text("import pkg\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "pkg" / "__init__.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["pkg/__init__.py"])
+
+    assert "consumer.py" in refs["pkg/__init__.py"]
+
+
+def test_find_referencing_paths_truncation_marker(tmp_path: Path) -> None:
+    """More than the cap of referrers are not silently dropped: a marker carrying
+    the full count is appended."""
+    from software_engineering_team.shared.git_utils import (
+        _MAX_REFERRERS_LISTED,
+        find_referencing_paths,
+    )
+
+    _init_repo(tmp_path)
+    (tmp_path / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    total = _MAX_REFERRERS_LISTED + 5
+    for i in range(total):
+        (tmp_path / f"c{i}.py").write_text("import helper\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "helper.py").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["helper.py"])["helper.py"]
+
+    assert len(refs) == _MAX_REFERRERS_LISTED + 1  # listed + one marker
+    assert any("+5 more" in r and f"{total} total" in r for r in refs)
+
+
+def test_read_paths_at_merge_base_surrogate_safe(tmp_path: Path) -> None:
+    """A deleted blob with invalid UTF-8 bytes is returned UTF-8/JSON safe (no
+    lone surrogate that would crash a later encode)."""
+    from software_engineering_team.shared.git_utils import read_paths_at_merge_base
+
+    _init_repo(tmp_path)
+    (tmp_path / "weird.py").write_bytes(b"x = 1  # caf\xe9\xff bytes\n")  # invalid UTF-8, no NUL
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+
+    content = read_paths_at_merge_base(tmp_path, "development", ["weird.py"])
+
+    assert "weird.py" in content
+    content["weird.py"].encode("utf-8")  # must not raise
+
+
+def test_whole_repo_review_input_surfaces_omissions(tmp_path: Path) -> None:
+    """The whole-repo fallback no longer silently drops sensitive/binary files —
+    they are surfaced as omission notes and recorded for the gate."""
+    from software_engineering_team.backend_agent.agent import (
+        _UNREADABLE_NOTE_PATH,
+        _WITHHELD_NOTE_PATH,
+        _whole_repo_review_input,
+    )
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("SECRET=v\n", encoding="utf-8")  # sensitive
+    (tmp_path / "blob.bin").write_bytes(b"\x00\x01binary")  # binary
+    sel = _whole_repo_review_input(tmp_path)
+
+    assert "main.py" in sel.files
+    assert ".env" in sel.files[_WITHHELD_NOTE_PATH] and "SECRET=v" not in sel.files[_WITHHELD_NOTE_PATH]
+    assert "blob.bin" in sel.files[_UNREADABLE_NOTE_PATH]
+    assert ".env" in sel.unexamined_paths() and "blob.bin" in sel.unexamined_paths()
+
+
+def test_read_repo_files_as_dict_prunes_excluded_dirs_during_walk(tmp_path: Path) -> None:
+    """Excluded dirs are pruned during the walk (os.walk), not enumerated then
+    discarded — a .git/node_modules subtree is never descended into."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    nm = tmp_path / "node_modules" / "dep"
+    nm.mkdir(parents=True)
+    (nm / "index.js").write_text("module.exports = 1\n", encoding="utf-8")
+    omitted: list[str] = []
+    result = read_repo_files_as_dict(tmp_path, omitted=omitted)
+
+    assert "main.py" in result
+    assert not any("node_modules" in k for k in result)
+    # node_modules entries are pruned (never visited), so not reported as omitted.
+    assert not any("node_modules" in o for o in omitted)
+
+
 def test_select_review_input_deletion_note_lists_dependents(tmp_path: Path) -> None:
     """A deletion whose module is still imported lists the importer inline so the
     reviewer can check the 'nothing depends on it' claim."""
@@ -1504,24 +1622,37 @@ def test_has_examinable_content_false_for_emptied_only() -> None:
     assert sel.has_examinable_content() is False
 
 
-def test_has_examinable_content_true_for_whole_repo_code() -> None:
+def test_has_examinable_content_nonempty_code_true_empty_repo_false() -> None:
     from software_engineering_team.backend_agent.agent import ReviewInputSelection
 
-    assert ReviewInputSelection(None, "", None).has_examinable_content() is True
+    # A non-empty whole-repo code string is examinable; an empty repo (code="")
+    # is NOT — nothing was reviewed, so an approval must not be certified.
+    assert ReviewInputSelection(None, "### a.py ###\nx", None).has_examinable_content() is True
+    assert ReviewInputSelection(None, "", None).has_examinable_content() is False
 
 
-def test_force_unexamined_rejection_blocks_and_adds_issue() -> None:
-    from types import SimpleNamespace as NS
+def test_unexamined_paths_unions_omission_categories() -> None:
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
 
-    from software_engineering_team.backend_agent.agent import _force_unexamined_rejection
+    sel = ReviewInputSelection(
+        {"a.py": "x = 1\n"},
+        None,
+        None,
+        withheld=("secrets.py",),
+        unreadable=("img.bin",),
+        emptied=("a.py",),
+    )
+    # Even with an examinable file present, every omitted category is reported so
+    # the gate can require manual review for the unexamined parts of the change.
+    assert sel.has_examinable_content() is True
+    assert sel.unexamined_paths() == ("a.py", "img.bin", "secrets.py")
 
-    review = NS(approved=True, issues=[])
-    out = _force_unexamined_rejection(review)
 
-    assert out.approved is False
-    assert len(out.issues) == 1
-    assert out.issues[0].file_path == ""  # not targeted at a file
-    assert "manual review" in out.issues[0].description.lower()
+def test_unexamined_paths_empty_when_all_examined() -> None:
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection({"a.py": "x = 1\n"}, None, None)
+    assert sel.unexamined_paths() == ()
 
 
 def test_select_review_input_key_to_path_maps_real_paths(tmp_path: Path) -> None:
