@@ -121,7 +121,7 @@ def convert_to_structured_questions(
             continue
         if isinstance(q, dict):
             qid = str(q.get("id") or f"{source}_{idx}_{uuid.uuid4().hex[:8]}")
-            options = _normalize_options(q.get("options")) or list(DEFAULT_CLARIFICATION_OPTIONS)
+            options = _normalize_options(q.get("options"))
             context = q.get("context")
         else:
             qid = f"{source}_{idx}_{uuid.uuid4().hex[:8]}"
@@ -271,14 +271,14 @@ def answers_to_resolved(
             # An answer from a different pause batch (submitted_answers accumulates); skip it.
             continue
         q = by_id.get(qid) or {}
-        selected = a.get("selected_option_id") or a.get("selected_answer") or ""
+        selected = (a.get("selected_option_id") or a.get("selected_answer") or "").strip()
         other = a.get("other_text") or ""
         label = ""
         for opt in q.get("options") or []:
             if opt.get("id") == selected:
                 label = opt.get("label") or selected
                 break
-        if (selected == "other" or not label) and other:
+        if (selected.lower() == "other" or not label) and other:
             answer_text = other
         else:
             answer_text = label or selected

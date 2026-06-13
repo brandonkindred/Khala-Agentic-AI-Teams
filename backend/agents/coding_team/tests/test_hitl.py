@@ -310,6 +310,22 @@ def test_answers_to_resolved_skips_non_dicts():
     )
 
 
+def test_answers_to_resolved_strips_whitespace_from_selected_option_id():
+    # selected_option_id with surrounding whitespace must still resolve to the correct label.
+    pending = [{"id": "q1", "question_text": "Pick", "options": [{"id": "opt_a", "label": "Option A"}]}]
+    submitted = [{"question_id": "q1", "selected_option_id": " opt_a "}]
+    out = hitl.answers_to_resolved(submitted, pending)
+    assert out[0]["answer"] == "Option A"
+
+
+def test_answers_to_resolved_other_text_wins_for_capitalized_other():
+    # selected_option_id="Other" (capital O) must still trigger the free-text fallback.
+    pending = [{"id": "q1", "question_text": "Pick", "options": []}]
+    submitted = [{"question_id": "q1", "selected_option_id": "Other", "other_text": "custom answer"}]
+    out = hitl.answers_to_resolved(submitted, pending)
+    assert out[0]["answer"] == "custom answer"
+
+
 # --------------------------------------------------------------------------- terminal / wait
 
 
