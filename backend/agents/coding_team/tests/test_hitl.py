@@ -49,6 +49,26 @@ def test_normalize_options_drops_reserved_other_id():
     assert out[0]["options"] == []
 
 
+def test_convert_to_structured_questions_filters_generic_options():
+    # Generic yes/no/not-sure/other options are removed from both normalization paths.
+    # convert_to_structured_questions applies _filter_generic_options (no minimum count),
+    # so a single surviving domain-specific option is kept rather than forced to free-text.
+    out = hitl.convert_to_structured_questions(
+        [
+            {
+                "question_text": "Which approach?",
+                "options": [
+                    {"id": "yes", "label": "Yes"},
+                    {"id": "no", "label": "No"},
+                    {"id": "rest", "label": "REST API"},
+                ],
+            }
+        ]
+    )
+    ids = [o["id"] for o in out[0]["options"]]
+    assert ids == ["rest"]
+
+
 def test_normalize_options_deduplicates_within_convert_to_structured_questions():
     # Dedup in _normalize_options applies to BOTH conversion paths, not just
     # normalize_open_questions. Two inputs whose IDs normalize to the same string must collapse.

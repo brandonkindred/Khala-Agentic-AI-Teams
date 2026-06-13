@@ -107,6 +107,35 @@ def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     return options
 
 
+def _filter_generic_options(
+    opts: List[Dict[str, Any]], question_text: str = ""
+) -> List[Dict[str, Any]]:
+    """Remove options whose ID or label matches the generic yes/no/not-sure/other sets.
+
+    Preconditions:
+        - ``opts`` is the output of ``_normalize_options`` (IDs are non-empty stripped strings,
+          labels are non-empty stripped strings, no reserved "other" IDs present).
+    Postconditions:
+        - Returns a sublist of ``opts`` with every option matching ``_GENERIC_OPTION_IDS`` or
+          ``_GENERIC_OPTION_LABELS`` removed. If any options are removed, a warning is logged.
+          Callers decide the minimum-count policy (``normalize_open_questions`` requires ≥ 2;
+          ``convert_to_structured_questions`` keeps whatever survives).
+    """
+    filtered = [
+        o for o in opts
+        if o["id"].lower() not in _GENERIC_OPTION_IDS
+        and o["label"].lower() not in _GENERIC_OPTION_LABELS
+    ]
+    if len(filtered) != len(opts):
+        label = question_text[:60] if question_text else "(unknown)"
+        logger.warning(
+            "Question '%s': %d generic option(s) removed before acceptance check",
+            label,
+            len(opts) - len(filtered),
+        )
+    return filtered
+
+
 def _question_text(q: Any) -> str:
     """Extract the human-readable question text from a string or partially-structured dict."""
     if isinstance(q, dict):
@@ -124,10 +153,11 @@ def convert_to_structured_questions(
           question text (``question_text`` / ``text`` / ``question``).
     Postconditions:
         - Returns one dict per non-empty input question, each with a stable unique ``id``,
-          ``question_text``, ``options`` (the question's own options if provided, else an empty
-          list so the UI falls back to free-text), ``required=True``, and ``source``. A question
-          that already carries an ``id`` and domain-specific ``options`` round-trips unchanged.
-          Empty questions are dropped.
+          ``question_text``, ``options`` (normalized and generic-option-filtered; empty list when
+          none survive so the UI falls back to free-text), ``required=True``, and ``source``.
+          Generic yes/no/not-sure/other options are removed via ``_filter_generic_options``;
+          unlike ``normalize_open_questions`` no minimum count is enforced here. Empty questions
+          are dropped.
     """
     structured: List[Dict[str, Any]] = []
     for idx, q in enumerate(questions or []):
@@ -136,7 +166,7 @@ def convert_to_structured_questions(
             continue
         if isinstance(q, dict):
             qid = str(q.get("id") or f"{source}_{idx}_{uuid.uuid4().hex[:8]}")
-            options = _normalize_options(q.get("options"))
+            options = _filter_generic_options(_normalize_options(q.get("options")), text)
             context = q.get("context")
         else:
             qid = f"{source}_{idx}_{uuid.uuid4().hex[:8]}"
@@ -183,21 +213,11 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             opts = _normalize_options(q.get("options"))
             # Deduplication by case-insensitive ID and the "other" guard are handled inside
             # _normalize_options, so opts is already free of duplicates and reserved IDs here.
-            # Cull individual generic options (by ID and by label) so that mixed sets
-            # (e.g. yes/no blended with one context-specific option) and variant IDs
-            # detected via their display label (e.g. id="opt_yes", label="Yes") are
-            # removed before the minimum-count check rather than silently accepted.
-            filtered = [
-                o for o in opts
-                if o["id"].lower() not in _GENERIC_OPTION_IDS
-                and (o.get("label") or "").lower() not in _GENERIC_OPTION_LABELS
-            ]
-            if len(filtered) != len(opts):
-                logger.warning(
-                    "Question '%s': %d generic option(s) removed before acceptance check",
-                    text[:60],
-                    len(opts) - len(filtered),
-                )
+            # _filter_generic_options culls individual generic options (by ID and by label) so
+            # that mixed sets (e.g. yes/no blended with one context-specific option) and variant
+            # IDs detected via their display label (e.g. id="opt_yes", label="Yes") are removed
+            # before the minimum-count check rather than silently accepted.
+            filtered = _filter_generic_options(opts, text)
             if len(filtered) >= 2:
                 entry["options"] = filtered
             else:
