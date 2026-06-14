@@ -24,6 +24,9 @@ NON_TERMINAL_STATUSES: tuple[str, ...] = ("pending", "running", "waiting_for_use
 
 
 def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
+    # cache_dir is accepted for API compatibility with callers that were written when this module
+    # was file-backed. JobServiceClient uses HTTP (configured via JOB_SERVICE_URL) and does not
+    # use a local filesystem cache, so cache_dir is intentionally not forwarded.
     return JobServiceClient(team="coding_team")
 
 
@@ -89,16 +92,16 @@ def update_job_task_graph(
 
 def list_jobs(
     cache_dir: str | Path = DEFAULT_CACHE_DIR,
-    running_only: bool = False,
+    active_only: bool = False,
 ) -> List[Dict[str, Any]]:
     """List coding_team jobs.
 
     Postconditions:
-        - With ``running_only`` True, returns only jobs in a NON_TERMINAL_STATUSES status —
+        - With ``active_only`` True, returns only jobs in a NON_TERMINAL_STATUSES status —
           including ``waiting_for_user``: a paused job still owns its checkout and issue, so
           admission guards and list consumers must not treat it as gone.
     """
-    statuses = list(NON_TERMINAL_STATUSES) if running_only else None
+    statuses = list(NON_TERMINAL_STATUSES) if active_only else None
     return _client(cache_dir).list_jobs(statuses=statuses)
 
 
@@ -221,6 +224,11 @@ def _claim_lease_fresh(stamp: Any, now: datetime) -> bool:
 def claim_resume(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> bool:
     """Atomically and recoverably claim cross-worker ownership of a resume.
 
+    Preconditions:
+        - Callers must confirm the job is in ``waiting_for_user`` state before calling; this
+          function only enforces the claim stamp, not the job status. Invoking on a running or
+          terminal job is a logic error in the caller — it may acquire a lease for a job that
+          no longer needs resuming.
     Postconditions:
         - Returns True iff this caller acquired the lease: the prior claim was absent or expired
           (its stamp older than ``RESUME_CLAIM_TTL_S``) AND this caller's atomic seq increment was

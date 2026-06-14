@@ -80,7 +80,7 @@ def test_jobs_empty_list(monkeypatch):
 
 
 def test_jobs_active_filter_pushed_to_store(monkeypatch):
-    """?active=true must filter at the job service (running_only) rather than client-side, so
+    """?active=true must filter at the job service (active_only) rather than client-side, so
     terminal jobs' full records never cross the wire."""
     seen = {}
 
@@ -90,6 +90,6 @@ def test_jobs_active_filter_pushed_to_store(monkeypatch):
 
     monkeypatch.setattr(api, "list_jobs", fake_list_jobs)
     assert client.get("/jobs?active=true").status_code == 200
-    assert seen == {"running_only": True}
+    assert seen == {"active_only": True}
     assert client.get("/jobs").status_code == 200
-    assert seen == {"running_only": False}
+    assert seen == {"active_only": False}

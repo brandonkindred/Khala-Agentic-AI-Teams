@@ -16,11 +16,11 @@ class _FakeClient:
         return []
 
 
-def test_running_only_includes_waiting_for_user(monkeypatch):
+def test_active_only_includes_waiting_for_user(monkeypatch):
     fake = _FakeClient()
     monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: fake)
 
-    job_store.list_jobs(running_only=True)
+    job_store.list_jobs(active_only=True)
     assert fake.calls[-1] == list(job_store.NON_TERMINAL_STATUSES)
     assert "waiting_for_user" in fake.calls[-1]
 
@@ -159,11 +159,8 @@ def test_claim_implausibly_future_stamp_is_not_fresh(monkeypatch):
     from datetime import datetime, timedelta, timezone
 
     far_future = (
-        datetime.now(timezone.utc)
-        + timedelta(seconds=job_store._CLAIM_CLOCK_SKEW_TOLERANCE_S + 30)
+        datetime.now(timezone.utc) + timedelta(seconds=job_store._CLAIM_CLOCK_SKEW_TOLERANCE_S + 30)
     ).isoformat()
-    fake = _AtomicFakeClient(
-        {"job_id": "j1", "resume_claim_seq": 1, "resume_claim_at": far_future}
-    )
+    fake = _AtomicFakeClient({"job_id": "j1", "resume_claim_seq": 1, "resume_claim_at": far_future})
     monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: fake)
     assert job_store.claim_resume("j1") is True  # far-future stamp re-claimable

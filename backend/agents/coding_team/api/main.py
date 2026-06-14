@@ -458,7 +458,9 @@ def _validate_answers(data: Dict[str, Any], request: SubmitAnswersRequest) -> Li
     # one), not bad client input — surface it as a controlled 500 instead of a bare KeyError so the
     # failure is attributed to the server and carries a clear message.
     if any("id" not in q for q in pending):
-        raise HTTPException(status_code=500, detail="Corrupted job record: pending question missing 'id'.")
+        raise HTTPException(
+            status_code=500, detail="Corrupted job record: pending question missing 'id'."
+        )
     pending_ids = {q["id"] for q in pending}
     required_ids = {q["id"] for q in pending if q.get("required", True)}
     # Reject duplicate answers for the same question up front: the set below collapses them, so the
@@ -806,18 +808,27 @@ def _try_auto_resume(job_id: str, data: Dict[str, Any]) -> bool:
         # waiting with no live thread, that recheck reclaims and resumes it.
         _schedule_resume_recheck(job_id, delay=RESUME_CLAIM_TTL_S + 5.0)
         return True
-    # Post-claim freshness check: the job could have been cancelled or completed between the
-    # caller's get_job snapshot and the claim. claim_resume only checks the claim stamp, not the
-    # job status, so re-read here and abort if the job is now terminal — rather than spawning an
-    # orchestrator that would immediately find the job terminal and potentially clobber its status.
+    # Post-claim freshness check: the job could have transitioned out of waiting_for_user between
+    # the caller's snapshot and the claim. claim_resume checks only the claim stamp, not the
+    # job status, so re-read here. If the job is no longer waiting (terminal OR a wait loop in
+    # another worker consumed the answers and moved the job to 'running'), release the claim and
+    # abort — spawning here would double-drive a running job or clobber a terminal one. If the
+    # read itself fails (store temporarily unavailable), the unknown state is treated conservatively:
+    # release the claim and return False so the caller gets the manual-resume hint.
     try:
         post_claim_data = get_job(job_id)
     except Exception:
-        post_claim_data = None
-    if post_claim_data and hitl.is_terminal(post_claim_data):
+        logger.exception(
+            "Auto-resume for job %s aborted: could not verify state after acquiring claim.", job_id
+        )
+        release_resume_claim(job_id)
+        return False
+    if post_claim_data and post_claim_data.get("status") != hitl.WAITING_STATUS:
         release_resume_claim(job_id)
         logger.warning(
-            "Auto-resume for job %s aborted: job became terminal after claim was acquired.", job_id
+            "Auto-resume for job %s aborted: status is '%s' after claim (no longer waiting).",
+            job_id,
+            post_claim_data.get("status"),
         )
         return False
     if not _claim_run_thread(job_id):
@@ -934,7 +945,9 @@ def resume_job(job_id: str) -> RunResponse:
         )
     plan_raw = data.get("plan_input") or {}
     if not isinstance(plan_raw, dict):
-        raise HTTPException(status_code=400, detail="Job has a corrupted plan_input and cannot be resumed.")
+        raise HTTPException(
+            status_code=400, detail="Job has a corrupted plan_input and cannot be resumed."
+        )
     repo_path = data.get("repo_path") or plan_raw.get("repo_path")
     if not repo_path:
         raise HTTPException(status_code=400, detail="Job has no plan_input/repo_path to resume.")
@@ -976,6 +989,23 @@ def resume_job(job_id: str) -> RunResponse:
         return RunResponse(
             job_id=job_id, status=data.get("status", "running"), message="Job already running."
         )
+    # Post-claim re-read: a wait loop in another worker may have consumed answers and advanced the
+    # job out of waiting_for_user between the initial GET and the claim. claim_resume checks only
+    # the stamp, not the status, so verify freshness here before spawning.
+    try:
+        post_claim = get_job(job_id)
+    except Exception as exc:
+        release_resume_claim(job_id)
+        raise HTTPException(
+            status_code=500, detail="Failed to verify job state after acquiring resume claim."
+        ) from exc
+    if not post_claim or post_claim.get("status") != hitl.WAITING_STATUS:
+        release_resume_claim(job_id)
+        return RunResponse(
+            job_id=job_id,
+            status=(post_claim or data).get("status", "running"),
+            message="Job already running.",
+        )
     if not _claim_run_thread(job_id):
         release_resume_claim(job_id)
         return RunResponse(
@@ -1008,7 +1038,7 @@ def get_jobs(active: bool = False) -> List[JobListItem]:
         - Missing fields fall back to ``None``/``False``; ``status`` defaults to
           ``"pending"`` for records that predate the field.
     """
-    jobs = list_jobs(running_only=active)
+    jobs = list_jobs(active_only=active)
     return [
         JobListItem(
             job_id=j.get("job_id", ""),
@@ -1040,7 +1070,7 @@ def _running_job_for_issue(owner: str, repo: str, issue_number: int) -> Optional
     scan is acceptable; if active-job volume ever grows materially, add an owner/repo/issue filter
     to ``list_jobs`` (or an in-memory index) rather than scanning here.
     """
-    for j in list_jobs(running_only=True):
+    for j in list_jobs(active_only=True):
         ctx = (j or {}).get("github_context") or {}
         if (
             str(ctx.get("owner") or "").casefold() == owner.casefold()
@@ -1070,7 +1100,7 @@ def _running_sibling_on_checkout(repo_path: str, own_job_id: str) -> Optional[Di
           never reported.
     """
     target = os.path.realpath(repo_path)
-    for j in list_jobs(running_only=True):
+    for j in list_jobs(active_only=True):
         if not j or j.get("job_id") == own_job_id:
             continue
         sibling_path = j.get("repo_path")

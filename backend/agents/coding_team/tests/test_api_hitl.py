@@ -1276,8 +1276,7 @@ def test_heartbeat_implausibly_future_stamp_is_not_fresh():
     from datetime import datetime, timedelta, timezone
 
     far_future = (
-        datetime.now(timezone.utc)
-        + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 30)
+        datetime.now(timezone.utc) + timedelta(seconds=api._HEARTBEAT_CLOCK_SKEW_TOLERANCE_S + 30)
     ).isoformat()
     assert api._answer_wait_heartbeat_fresh({"answer_wait_heartbeat_at": far_future}) is False
 
@@ -1317,6 +1316,109 @@ def test_auto_resume_aborts_post_claim_if_job_becomes_terminal(monkeypatch):
     )
     assert r.status_code == 200
     assert release_calls, "claim must be released when the post-claim terminal check fires"
+
+
+def test_auto_resume_aborts_post_claim_if_job_becomes_running(monkeypatch):
+    """TOCTOU: if a concurrent worker advances the job from waiting_for_user to running between
+    claim and post-claim re-read, the spawn must be aborted and the claim released. 'running' is
+    non-terminal but non-waiting, so the post-claim status check must cover it — not just terminal
+    states (which the earlier is_terminal check already handled)."""
+    waiting = _job()
+    running = _job(status="running", waiting_for_answers=False)
+    read_count = {"n": 0}
+
+    def _get_job(jid):
+        read_count["n"] += 1
+        # Reads 1 (endpoint) and 2 (TOCTOU reread after store) → waiting.
+        # Read 3 (post-claim re-read inside _try_auto_resume) → running.
+        return waiting if read_count["n"] < 3 else running
+
+    monkeypatch.setattr(api, "get_job", _get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn for a job that became 'running' after claiming")
+
+    monkeypatch.setattr(api, "_start_orchestrator_thread", _no_spawn)
+    monkeypatch.setattr(api, "_start_github_resume_thread", _no_spawn)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert release_calls, "claim must be released when post-claim check finds job is 'running'"
+
+
+def test_auto_resume_post_claim_store_error_releases_claim_and_falls_back_to_hint(monkeypatch):
+    """A job-store transport error during the post-claim re-read in _try_auto_resume must release
+    the claim immediately (so the TTL window is recovered) and return False so the endpoint falls
+    back to the manual-resume hint — never leaves the claim wedged, never raises, never spawns."""
+    waiting = _job()
+    read_count = {"n": 0}
+
+    def _get_job(jid):
+        read_count["n"] += 1
+        # Reads 1 (endpoint initial) and 2 (TOCTOU re-read after store) → waiting.
+        # Read 3 (post-claim re-read inside _try_auto_resume) → store error.
+        # Read 4+ (get_status at end of submit_pending_answers) → waiting (not part of test).
+        if read_count["n"] == 3:
+            raise RuntimeError("store error during post-claim read")
+        return waiting
+
+    monkeypatch.setattr(api, "get_job", _get_job)
+    monkeypatch.setattr(api, "store_submit_answers", lambda jid, a: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    calls: dict = {}
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: calls.update(kw))
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn when post-claim store read fails")
+
+    monkeypatch.setattr(api, "_start_orchestrator_thread", _no_spawn)
+    monkeypatch.setattr(api, "_start_github_resume_thread", _no_spawn)
+
+    r = client.post(
+        "/run/j1/answers", json={"answers": [{"question_id": "q1", "selected_option_id": "strict"}]}
+    )
+    assert r.status_code == 200
+    assert release_calls, "claim must be released on post-claim store error"
+    assert "Resume" in calls.get("status_text", ""), "must fall back to the manual-resume hint"
+
+
+def test_resume_post_claim_abort_when_job_advances_to_running(monkeypatch):
+    """TOCTOU on /resume: if the job status advances from waiting_for_user to running between
+    claim_resume and the post-claim re-read, the endpoint must release the claim and return
+    'already running' rather than spawning a second orchestrator for a job already in flight."""
+    waiting = _job(status="waiting_for_user", plan_input={"requirements_title": "T"})
+    running = _job(status="running", waiting_for_answers=False)
+    read_count = {"n": 0}
+
+    def _get_job(jid):
+        read_count["n"] += 1
+        # Read 1 (initial endpoint check): waiting. Read 2 (post-claim re-read): running.
+        return waiting if read_count["n"] == 1 else running
+
+    monkeypatch.setattr(api, "get_job", _get_job)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    release_calls: List[str] = []
+    monkeypatch.setattr(api, "release_resume_claim", lambda jid: release_calls.append(jid))
+
+    def _no_spawn(*a, **k):
+        raise AssertionError("must not spawn when post-claim re-read finds job is 'running'")
+
+    monkeypatch.setattr(api.threading, "Thread", _no_spawn)
+
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert "already running" in r.json()["message"]
+    assert release_calls, "claim must be released when job is no longer waiting after claiming"
 
 
 # --------------------------------------------------------------------------- GitHub resume status advance
