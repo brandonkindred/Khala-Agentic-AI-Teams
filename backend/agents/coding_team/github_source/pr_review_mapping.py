@@ -187,6 +187,20 @@ def format_comment_body(issue: Any) -> str:
     return body
 
 
+def _location_prefix(path: str, line: Optional[int] = None) -> str:
+    """Render the `` `path` — `` / `` `path:line` — `` prefix for a standalone comment.
+
+    Postconditions:
+        - Returns ``"`path` — "`` (or ``"`path:line` — "`` when ``line`` is given),
+          or ``""`` when ``path`` is empty, so callers can prepend a location to a
+          finding posted away from its diff line.
+    """
+    if not path:
+        return ""
+    anchor = f"{path}:{line}" if line is not None else path
+    return f"`{anchor}` — "
+
+
 def format_issue_comment(issue: Any) -> str:
     """Render one finding as its own standalone PR conversation comment.
 
@@ -199,9 +213,7 @@ def format_issue_comment(issue: Any) -> str:
           location when the finding names a file, so the standalone comment still
           points at where the issue lives.
     """
-    fp = getattr(issue, "file_path", "") or ""
-    location = f"`{fp}` — " if fp else ""
-    return f"{location}{format_comment_body(issue)}"
+    return f"{_location_prefix(getattr(issue, 'file_path', '') or '')}{format_comment_body(issue)}"
 
 
 def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
@@ -218,14 +230,11 @@ def inline_comment_to_timeline_body(comment: dict[str, Any]) -> str:
     Postconditions:
         - Returns the comment ``body`` prefixed with a `` `path:line` — `` location.
     """
-    path = comment.get("path", "") or ""
-    line = comment.get("line")
-    body = comment.get("body", "") or ""
-    location = f"`{path}:{line}` — " if path else ""
-    return f"{location}{body}"
+    prefix = _location_prefix(comment.get("path", "") or "", comment.get("line"))
+    return f"{prefix}{comment.get('body', '') or ''}"
 
 
-def build_review_body(summary: str, spec_compliance_notes: str) -> str:
+def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int = 0) -> str:
     """Assemble the summary-only top-level review body.
 
     The body never lists findings: each finding is posted as its own comment
@@ -234,7 +243,10 @@ def build_review_body(summary: str, spec_compliance_notes: str) -> str:
 
     Postconditions:
         - Returns markdown combining the review summary and spec-compliance notes.
-          Never empty — falls back to a "no blocking issues" line.
+          Never empty — when both are blank it falls back to a line that reflects
+          ``issue_count``: a "N finding(s) posted as comment(s)" line when findings
+          exist (so an empty summary never claims "no blocking issues" while
+          change-requesting comments sit on the PR), otherwise a "no issues" line.
     """
     parts: list[str] = []
     if summary and summary.strip():
@@ -242,7 +254,11 @@ def build_review_body(summary: str, spec_compliance_notes: str) -> str:
     if spec_compliance_notes and spec_compliance_notes.strip():
         parts.append(f"**Spec compliance:** {spec_compliance_notes.strip()}")
     body = "\n\n".join(parts).strip()
-    return body or "Automated code review completed. No blocking issues found."
+    if body:
+        return body
+    if issue_count > 0:
+        return f"Automated code review completed: {issue_count} finding(s) posted as comment(s)."
+    return "Automated code review completed. No blocking issues found."
 
 
 def choose_event(issues: Iterable[Any], author: str = "", reviewer: str = "") -> str:

@@ -217,6 +217,14 @@ def test_build_review_body_fallback_when_empty() -> None:
     assert "No blocking issues" in build_review_body("", "")
 
 
+def test_build_review_body_fallback_reflects_findings_when_summary_empty() -> None:
+    # An empty summary must not claim "no blocking issues" when findings were
+    # posted as comments — the fallback reports the count instead.
+    body = build_review_body("", "", issue_count=2)
+    assert "No blocking issues" not in body
+    assert "2 finding(s) posted as comment(s)" in body
+
+
 # ---------------------------------------------------------------------------
 # choose_event
 # ---------------------------------------------------------------------------

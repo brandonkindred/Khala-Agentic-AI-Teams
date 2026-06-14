@@ -985,7 +985,9 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
-            body = build_review_body(output.summary, output.spec_compliance_notes)
+            body = build_review_body(
+                output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
+            )
             event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
 
             dropped = _submit_review(
@@ -1023,6 +1025,16 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 err = (
                     f"{comments_failed} of {comment_findings} finding comment(s) "
                     "could not be posted"
+                )
+                # Notify on the PR itself: the dropped findings no longer live in
+                # the review body, so without this the author has no signal on
+                # GitHub that part of the review is missing.
+                _safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review incomplete: {err}. See the coding team job for details.",
                 )
                 update_job(
                     job_id,

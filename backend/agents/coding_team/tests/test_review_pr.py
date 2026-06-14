@@ -260,7 +260,8 @@ class _FakeReviewClient:
         self.fail_get_pr = False
         self.review_fail_times = 0  # number of leading create_review calls that 422
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
-        self.comment_fail = False  # when True, add_issue_comment 422s every call
+        self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
+        self._comment_calls = 0
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -293,7 +294,8 @@ class _FakeReviewClient:
         return self.login
 
     def add_issue_comment(self, _o: str, _r: str, n: int, body: str) -> None:
-        if self.comment_fail:
+        self._comment_calls += 1
+        if self._comment_calls <= self.comment_fail_times:
             raise GitHubAPIError(403, "rate limited")
         self.comments.append((n, body))
 
@@ -468,7 +470,7 @@ class TestReviewEndpoint:
         # so a rejected comment would drop the finding. The job must report failure
         # (with a count) rather than claiming every finding was posted.
         gh = review_app["github"]["client"]
-        gh.comment_fail = True  # the out-of-diff finding's standalone comment 422s
+        gh.comment_fail_times = 1  # the out-of-diff finding's standalone comment 422s
         resp = review_app["client"].post("/review-pr", json=_review_body())
         assert resp.status_code == 200
         job = review_app["jobs"].get_job(resp.json()["job_id"])
@@ -477,6 +479,9 @@ class TestReviewEndpoint:
         assert job["review_summary"]["comments_failed"] == 1
         # The review itself was still submitted (inline comment for the in-diff line).
         assert len(gh.reviews) == 1
+        # The author is notified on the PR that part of the review is missing
+        # (the finding comment failed, but the follow-up notification succeeds).
+        assert any("could not be posted" in body for _n, body in gh.comments)
 
     def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
         # A non-GitHubAPIError during submit must be caught by the broad outer
