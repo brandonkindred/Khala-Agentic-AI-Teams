@@ -161,6 +161,38 @@ def is_sensitive_path(path: str) -> bool:
     return candidate.suffix.lower() in _SENSITIVE_SUFFIXES
 
 
+# Suffixes that mark a placeholder *template*/example.
+_TEMPLATE_SUFFIXES: tuple[str, ...] = (".example", ".sample", ".template", ".dist", ".tmpl")
+
+
+def is_secret_template_path(path: str) -> bool:
+    """True for a placeholder ``.env`` template (``.env.example``/``.env.sample`` ...).
+
+    Used to decide whether a *withheld* (sensitive) path is a harmless example
+    that a caller may treat as advisory rather than a hard secret. Only the
+    ``.env`` family qualifies, because it is flagged sensitive solely by the
+    deliberately over-broad ``.env.<x>`` rule (placeholder env files). A file that
+    is sensitive for a *strong* reason — sitting under a secret directory
+    (``secrets/``/``.ssh/`` ...), a ``credentials``/``secret`` stem, or a key/cert
+    suffix — is NOT downgraded to a template even when it carries a template
+    suffix (so ``secrets/config.sample``, ``credentials.template``, ``key.pem.dist``
+    are not treated as harmless).
+
+    Preconditions:
+        - none. Returns False for any non-``.env`` path.
+    """
+    candidate = Path(path)
+    name = candidate.name.lower()
+    if not (name.startswith(".env") and name.endswith(_TEMPLATE_SUFFIXES)):
+        return False
+    # Reject if any *strong* secret signal is present.
+    if _SENSITIVE_DIR_PARTS.intersection(p.lower() for p in candidate.parts[:-1]):
+        return False
+    if candidate.stem.lower() in _SENSITIVE_STEMS:
+        return False
+    return candidate.suffix.lower() not in _SENSITIVE_SUFFIXES
+
+
 def strip_surrogates(text: str) -> str:
     """Return *text* with any lone surrogates escaped so it is UTF-8/JSON safe.
 
@@ -428,9 +460,12 @@ def read_repo_files_as_dict(
         for name in filenames:
             # In a linked worktree or submodule, ``.git`` is a regular *file*
             # (``gitdir: ...``), not a directory, so the dirname prune above misses
-            # it; skip any filename whose basename is an excluded name so the
-            # checkout's gitdir/host-path metadata never reaches the review model.
-            if name in always_exclude:
+            # it; skip that one file so the checkout's gitdir/host-path metadata
+            # never reaches the review model. Only ``.git`` is matched here (not the
+            # whole dir-exclude set) so a legitimate regular file that merely shares
+            # an excluded *directory* name (e.g. a script named ``dist``) is still
+            # reviewed.
+            if name == ".git":
                 continue
             rel = os.path.relpath(os.path.join(dirpath, name), repo_root)
             if is_sensitive_path(rel):

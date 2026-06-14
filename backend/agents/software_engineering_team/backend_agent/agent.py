@@ -23,6 +23,7 @@ from software_engineering_team.shared.prompt_utils import (
 )
 from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
+    is_secret_template_path,
     is_sensitive_path,
     read_files_as_dict,
     read_repo_code,
@@ -577,25 +578,14 @@ _BINARY_ASSET_SUFFIXES: frozenset[str] = frozenset(
         ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar",
         ".wasm", ".so", ".dll", ".dylib", ".a", ".o", ".class", ".pyc", ".pyd",
         ".onnx", ".pt", ".pth", ".h5", ".pb", ".tflite", ".parquet", ".npy", ".npz",
-        ".bin", ".dat", ".db", ".sqlite", ".ico",
+        ".bin", ".dat", ".db", ".sqlite",
     }
 )
-
-# Basename suffixes that mark a non-secret *template*/example even though the
-# secret denylist (deliberately over-broad) flags them. These are advisory; a
-# real secret (``.env``, ``id_rsa``, ``*.pem``, ``credentials``) is not a template
-# and must be manually reviewed.
-_TEMPLATE_SUFFIXES: Tuple[str, ...] = (".example", ".sample", ".template", ".dist", ".tmpl")
 
 
 def _is_binary_asset(path: str) -> bool:
     """True when *path* is a recognized non-text-reviewable binary asset."""
     return Path(path).suffix.lower() in _BINARY_ASSET_SUFFIXES
-
-
-def _is_template_path(path: str) -> bool:
-    """True when *path* is a non-secret template/example (``.env.example``, ...)."""
-    return Path(path).name.lower().endswith(_TEMPLATE_SUFFIXES)
 
 
 @dataclass
@@ -670,23 +660,26 @@ class ReviewInputSelection:
 
         - a recognized **binary asset** (``logo.png``, a font, an archive, model
           weights) — see :func:`_is_binary_asset`;
-        - a non-secret **template/example** flagged only by the over-broad secret
-          denylist (``.env.example``, ``config.sample``) — see
-          :func:`_is_template_path`.
+        - a placeholder ``.env`` **template** flagged only by the over-broad secret
+          denylist (``.env.example``/``.env.sample``) — see
+          :func:`is_secret_template_path`. A file that is sensitive for a *strong*
+          reason (a secret dir, a ``credentials``/``secret`` stem, a key/cert
+          suffix) is NOT downgraded even with a template suffix.
 
         Everything else blocks, because the reviewer (and the later source-only
         security pass) never saw the content:
 
         - **emptied** — a changed file truncated to empty/whitespace;
         - a **withheld real secret** — ``.env``, ``id_rsa``, ``*.pem``,
-          ``credentials`` (changed or deleted): content withheld, must be checked;
+          ``credentials``, ``secrets/...`` (changed or deleted): content withheld,
+          must be checked;
         - an **unreadable non-asset** — a source file that read as binary, a
           submodule/gitlink pointer change, or an unknown type;
         - the **baseline-unavailable sentinel** — the diff couldn't be computed, so
           a deletion may exist we cannot enumerate (not an asset → blocks here).
         """
         blockers = set(self.emptied)
-        blockers.update(p for p in self.withheld if not _is_template_path(p))
+        blockers.update(p for p in self.withheld if not is_secret_template_path(p))
         blockers.update(p for p in self.unreadable if not _is_binary_asset(p))
         return tuple(sorted(blockers))
 

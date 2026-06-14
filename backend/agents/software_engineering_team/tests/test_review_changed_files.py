@@ -2167,3 +2167,75 @@ def test_find_referencing_paths_caps_mass_deletion(tmp_path: Path) -> None:
         (tmp_path / f).unlink()
 
     assert git_utils.find_referencing_paths(tmp_path, deleted) == {}  # scan skipped
+
+
+# ---------------------------------------------------------------------------
+# Code-review follow-ups: precise secret-template carve-out, keyword imports,
+# .git-only filename exclude
+# ---------------------------------------------------------------------------
+
+
+def test_is_secret_template_path_only_env_family() -> None:
+    from software_engineering_team.shared.repo_utils import is_secret_template_path
+
+    # Advisory: placeholder env templates.
+    assert is_secret_template_path(".env.example") is True
+    assert is_secret_template_path(".env.production.sample") is True
+    assert is_secret_template_path("config/.env.template") is True
+    # NOT advisory (strong secret signal even with a template suffix):
+    assert is_secret_template_path("secrets/config.sample") is False  # secret dir
+    assert is_secret_template_path("credentials.template") is False  # credentials stem
+    assert is_secret_template_path("secret.dist") is False  # secret stem
+    # NOT a template at all:
+    assert is_secret_template_path(".env") is False
+    assert is_secret_template_path("app/main.py") is False
+
+
+def test_blocking_secret_template_overlap() -> None:
+    """A real secret carrying a template suffix still blocks; only a true env
+    template is advisory."""
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection(
+        {"a.py": "x = 1\n"},
+        None,
+        None,
+        withheld=(".env.example", "secrets/api.sample", "credentials.template"),
+    )
+    blocking = sel.blocking_unexamined()
+    assert ".env.example" not in blocking  # genuine env template: advisory
+    assert "secrets/api.sample" in blocking  # secret dir: blocks
+    assert "credentials.template" in blocking  # credentials stem: blocks
+
+
+def test_find_referencing_paths_nonpython_bare_keyword_import(tmp_path: Path) -> None:
+    """A space-preceded bare `import widget` is recovered by the keyword pattern."""
+    from software_engineering_team.shared.git_utils import find_referencing_paths
+
+    _init_repo(tmp_path)
+    (tmp_path / "widget.ts").write_text("export const x = 1;\n", encoding="utf-8")
+    (tmp_path / "app.ts").write_text("import widget;\n", encoding="utf-8")  # bare, spaced
+    (tmp_path / "prose.md").write_text("the widget framework is nice\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    (tmp_path / "widget.ts").unlink()
+
+    refs = find_referencing_paths(tmp_path, ["widget.ts"])["widget.ts"]
+
+    assert "app.ts" in refs  # keyword-anchored bare import matched
+    assert "prose.md" not in refs  # bare word in prose still not matched
+
+
+def test_read_repo_files_as_dict_reviews_file_named_like_excluded_dir(tmp_path: Path) -> None:
+    """A regular file literally named like an excluded dir (e.g. `dist`) is still
+    reviewed; only a `.git` worktree file is dropped."""
+    from software_engineering_team.shared.repo_utils import read_repo_files_as_dict
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "dist").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")  # a script
+    (tmp_path / ".git").write_text("gitdir: /host/.git/worktrees/wt\n", encoding="utf-8")
+    result = read_repo_files_as_dict(tmp_path)
+
+    assert "main.py" in result
+    assert "dist" in result  # real file named like an excluded dir is reviewed
+    assert ".git" not in result  # worktree gitlink still dropped

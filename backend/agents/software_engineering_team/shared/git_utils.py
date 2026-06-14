@@ -558,13 +558,18 @@ def _deleted_module_patterns(rel_path: str) -> List[str]:
         patterns += ["-e", rf"from\s+\.+{re.escape(name)}\b"]
         return patterns
 
-    # Non-Python: path-delimited basename references only (no bare-word stem,
-    # which is far too broad for common basenames). Matches the full filename and
-    # the stem preceded by ``/``, a quote, or ``.`` — i.e. used like a path or a
-    # qualified name, not an arbitrary occurrence of the word.
+    # Non-Python: path-/quote-delimited basename references (no bare-word stem,
+    # which is far too broad for common basenames). Matches:
+    #   - the stem preceded by ``/``, a quote, or ``.`` — used like a path or a
+    #     qualified name (``'widget'``, ``./widget``, ``com.x.Widget``);
+    #   - the full filename (``widget.ts``);
+    #   - a *keyword-anchored* bare stem (``import widget``, ``require widget``,
+    #     ``use widget``) — the import keyword keeps this from matching arbitrary
+    #     occurrences of a common word, recovering the bare ``import <name>`` form.
     patterns = ["-e", rf"['\"/.]{re.escape(stem)}"]
     if p.name != stem:
         patterns += ["-e", re.escape(p.name)]
+    patterns += ["-e", rf"(import|require|include|use|from)\s+['\"]?{re.escape(stem)}\b"]
     return patterns
 
 
