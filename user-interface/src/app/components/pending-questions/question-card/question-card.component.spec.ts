@@ -127,4 +127,16 @@ describe('QuestionCardComponent', () => {
     expect(component.hasSelections()).toBe(true);
     expect(component.getSelectedOptionIds().sort()).toEqual(['a1', 'b1']);
   });
+
+  it('renders the auto-answer button by default', () => {
+    const btn = fixture.nativeElement.querySelector('.auto-answer-btn');
+    expect(btn).toBeTruthy();
+  });
+
+  it('hides the auto-answer button when autoAnswerEnabled is false', () => {
+    fixture.componentRef.setInput('autoAnswerEnabled', false);
+    fixture.detectChanges();
+    const btn = fixture.nativeElement.querySelector('.auto-answer-btn');
+    expect(btn).toBeFalsy();
+  });
 });

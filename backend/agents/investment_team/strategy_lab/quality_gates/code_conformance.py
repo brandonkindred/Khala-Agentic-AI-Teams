@@ -49,6 +49,13 @@ from ..spec_dsl import (
     SignalExitRule,
     Source,
 )
+from .code_safety import (
+    _collect_position_aliases,
+    _engine_exits_cover_sides,
+    _expr_references_position_qty,
+    _extract_side_literal,
+    _is_ctx_position_call,
+)
 from .code_safety_ast import (
     _find_strategy_subclasses,
     _get_call_name,
@@ -106,14 +113,28 @@ def _indicators_in_predicate(p: Predicate) -> set[str]:
 
 
 def _collect_required_indicators(spec: Any) -> set[str]:
-    """Return the union of indicator names referenced by every rule in ``spec``."""
+    """Indicator names the generated code must read at runtime.
+
+    Pre: ``spec`` is a ``StrategySpec`` or ``None``.
+    Post: returns the union of indicator names the code is required to
+    compute. Entry-rule indicators are always included — entries are
+    authored inline on both the compiled and custom-code paths.
+    ``SignalExitRule`` indicators are included only for the compiled path:
+    on the custom-code path exits are engine-owned (the engine computes
+    their indicators via ``_EngineExitDispatcher`` and the strategy
+    authors no exit branch), so requiring the code to read an exit-only
+    indicator would contradict the engine-owned-exits contract.
+    """
+    if spec is None:
+        return set()
     refs: set[str] = set()
     for rule in getattr(spec, "entry_rules", []) or []:
         if isinstance(rule, EntryRule):
             refs |= _indicators_in_predicate(rule.when)
-    for rule in getattr(spec, "exit_rules", []) or []:
-        if isinstance(rule, SignalExitRule):
-            refs |= _indicators_in_predicate(rule.when)
+    if not getattr(spec, "requires_custom_code", False):
+        for rule in getattr(spec, "exit_rules", []) or []:
+            if isinstance(rule, SignalExitRule):
+                refs |= _indicators_in_predicate(rule.when)
     return refs
 
 
@@ -374,6 +395,180 @@ def _submit_order_closes_position(call: ast.Call) -> bool:
     return False
 
 
+def _submit_order_close_side(call: ast.Call) -> Optional[str]:
+    """Return the position side a closing ``submit_order`` retires.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
+    Post: returns ``"long"`` / ``"short"`` — the position side the order
+    closes — when the keyword ``side=`` value is a side literal
+    :func:`_extract_side_literal` recognises (an ``OrderSide.LONG`` /
+    ``OrderSide.SHORT`` attribute rooted at ``OrderSide``, an
+    ``OrderSide(...)`` call, or a bare ``"LONG"`` / ``"SHORT"`` string).
+    Returns ``None`` when ``side`` is absent or cannot be resolved to an
+    ``OrderSide`` literal (variables, opaque calls, or a non-``OrderSide``
+    enum such as a user-defined ``FakeSide.SHORT``).
+
+    The returned side is the OPPOSITE of the order side, because a close
+    submits the side opposite the position it retires (an ``OrderSide.SHORT``
+    order closes a long). Reusing :func:`_extract_side_literal` keeps side
+    inference identical to ``code_safety``'s entry-side detection and avoids
+    misreading an unrelated enum member as an order side.
+
+    Only the keyword ``side=`` form is inspected, consistent with the
+    position-``qty`` close detector and the synthesis prompt's mandated
+    keyword-argument call shape.
+    """
+    for kw in call.keywords:
+        if kw.arg != "side":
+            continue
+        order_side = _extract_side_literal(kw.value)
+        if order_side is None:
+            return None
+        return "short" if order_side == "long" else "long"
+    return None
+
+
+def _expr_is_position_qty(node: ast.AST, position_names: frozenset[str]) -> bool:
+    """True iff ``node`` (or a sub-expression) reads a position's ``.qty``.
+
+    Pre: ``position_names`` is the alias set from
+    :func:`_collect_position_aliases`.
+    Post: True for ``<alias>.qty`` (alias in ``position_names``) and any
+    wrapping expression (``abs(position.qty)``, ``position.qty * 1``) — via
+    :func:`_expr_references_position_qty` — and additionally for a direct
+    ``ctx.position(...).qty`` receiver. Name-bound and attribute-bound qty
+    aliases (``close_qty = pos.qty``; ``self.held = pos.qty``) are NOT
+    resolved here: collecting them class-wide produced false positives on
+    legitimately-computed entry quantities, so those shapes are left to the
+    runtime trade-alignment gate.
+    """
+    if _expr_references_position_qty(node, position_names):
+        return True
+    for sub in ast.walk(node):
+        if (
+            isinstance(sub, ast.Attribute)
+            and sub.attr == "qty"
+            and _is_ctx_position_call(sub.value)
+        ):
+            return True
+    return False
+
+
+def _submit_order_qty_references_position(call: ast.Call, position_names: frozenset[str]) -> bool:
+    """True iff the call's keyword ``qty=`` reads a position's ``.qty``.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``;
+    ``position_names`` is the alias set from
+    :func:`_collect_position_aliases`.
+    Post: delegates to :func:`_expr_is_position_qty` — True for
+    ``qty=position.qty``, a renamed position alias, a wrapping expression, or
+    a direct ``qty=ctx.position(...).qty``. Broader than
+    :func:`_submit_order_closes_position` (literal ``position`` / ``pos``
+    only) without the false-positive surface of class-wide name aliasing.
+    """
+    for kw in call.keywords:
+        if kw.arg == "qty":
+            return _expr_is_position_qty(kw.value, position_names)
+    return False
+
+
+def _attachment_is_active(node: ast.AST) -> bool:
+    """True iff a bracket-attachment value is demonstrably not ``None``.
+
+    Pre: ``node`` is the value of an ``attached_stop_loss`` /
+    ``attached_take_profit`` keyword.
+    Post: True for a truthy constant (non-``None``, non-zero) or a computed
+    expression (``BinOp`` / ``Call`` / ``BoolOp`` / ...); False for a falsy
+    constant (``None`` / ``0`` / ``0.0`` / ``False`` / ``""``) and for a bare
+    ``Name`` / ``Attribute`` whose value cannot be established statically
+    (``stop = None; attached_stop_loss=stop``). An engine that treats a
+    falsy attachment as "no bracket" creates no bracket child, so a falsy
+    or ambiguous attachment is treated as inactive to avoid a false-positive
+    hard critical; a genuinely-active bracket built from a variable is caught
+    by the runtime trade-alignment gate instead.
+    """
+    if isinstance(node, ast.Constant):
+        return bool(node.value)
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        return False
+    return True
+
+
+def _submit_order_attached_bracket(call: ast.Call) -> tuple[bool, Optional[str]]:
+    """Return ``(has_bracket, own_side)`` for an attached-bracket entry.
+
+    Pre: ``call`` is a ``ctx.submit_order(...)`` ``ast.Call``.
+    Post: ``has_bracket`` is True iff the call passes a demonstrably
+    non-``None`` ``attached_stop_loss`` / ``attached_take_profit``
+    (:func:`_attachment_is_active`) — the runtime materialises opposite-side
+    ``bracket_sl`` / ``bracket_tp`` children that close the position this
+    order opens, ahead of ``_EngineExitDispatcher``. ``own_side`` is the
+    resolved ``OrderSide`` literal the bracket closes (the order's OWN side,
+    NOT inverted), or ``None`` when the side is dynamic — the caller then
+    falls back to every entered side, as it does for explicit closes.
+    """
+    has_bracket = any(
+        kw.arg in ("attached_stop_loss", "attached_take_profit") and _attachment_is_active(kw.value)
+        for kw in call.keywords
+    )
+    if not has_bracket:
+        return (False, None)
+    for kw in call.keywords:
+        if kw.arg == "side":
+            return (True, _extract_side_literal(kw.value))
+    return (True, None)
+
+
+def _node_is_duplicate_close(
+    node: ast.Call,
+    *,
+    position_names: frozenset[str],
+    entered_sides: set[str],
+    all_sides_covered: bool,
+    spec: Any,
+) -> bool:
+    """True iff ``node`` closes (or brackets) a position side the engine owns.
+
+    Pre: ``node`` is an ``on_bar``-reachable ``ctx.submit_order(...)`` call;
+    ``position_names`` is the alias set from :func:`_collect_position_aliases`;
+    ``entered_sides`` is the spec's entered side set; ``all_sides_covered`` is
+    True iff the engine covers every entered side.
+    Post: True when the order's resolved closed / bracket side is
+    engine-covered (intersected with ``entered_sides``, which also drops a
+    same-side full-size scale-in). A side that cannot be resolved statically
+    is a duplicate only when ``all_sides_covered`` — otherwise it may
+    legitimately retire an engine-uncovered side and is deferred to the
+    runtime gate. Extracted from
+    :meth:`CodeConformanceGate._check_no_duplicate_engine_exit` (which owns the
+    full policy rationale).
+    """
+    resolved_sides: set[str] = set()
+    unresolved = False
+    if _submit_order_qty_references_position(node, position_names):
+        side = _submit_order_close_side(node)
+        if side is not None:
+            resolved_sides.add(side)
+        else:
+            unresolved = True
+    has_bracket, bracket_side = _submit_order_attached_bracket(node)
+    if has_bracket:
+        # Bracket closes the order's OWN side.
+        if bracket_side is not None:
+            resolved_sides.add(bracket_side)
+        else:
+            unresolved = True
+    # A real close retires a side the spec actually enters; the intersection
+    # also drops a same-side scale-in whose inferred opposite side the spec
+    # never enters.
+    resolved_sides &= entered_sides
+    if any(_engine_exits_cover_sides(spec, {s}) for s in resolved_sides):
+        return True
+    # A dynamic (unresolved) side is a duplicate only when the engine covers
+    # every entered side — otherwise it may be the legitimate close of an
+    # engine-uncovered side.
+    return unresolved and all_sides_covered
+
+
 def _node_references_ctx_equity(node: ast.AST) -> bool:
     """True iff ``node`` (or any sub-expression) references ``ctx.equity``
     or ``ctx.capital``. Used by the sizing check to confirm the account
@@ -618,9 +813,7 @@ class _ConformanceCtx:
 
     @cached_property
     def submit_branches(self) -> List[tuple[ast.If, List[ast.Call]]]:
-        return _find_if_branches_with_submit_order(
-            self.cls, reachable_method_names=self.reachable
-        )
+        return _find_if_branches_with_submit_order(self.cls, reachable_method_names=self.reachable)
 
 
 class CodeConformanceGate(GateResultsMixin):
@@ -676,7 +869,8 @@ class CodeConformanceGate(GateResultsMixin):
             results.extend(self._check_indicator_presence(cctx))
             results.extend(self._check_symbol_gate(cctx))
             results.extend(self._check_entry_coverage(cctx))
-            results.extend(self._check_signal_exit_coverage(cctx))
+            results.extend(self._note_signal_exit_engine_ownership(cctx))
+            results.extend(self._check_no_duplicate_engine_exit(cctx))
             results.extend(self._check_bar_counting_exit(cctx))
             results.extend(self._check_sizing_math(cctx))
             results.extend(self._check_no_extra_side_effects(tree, cctx))
@@ -807,61 +1001,193 @@ class CodeConformanceGate(GateResultsMixin):
         return ()
 
     # ------------------------------------------------------------------
-    # Check 4 — signal-exit predicate coverage
+    # Check 4 — signal-exit rules are engine-owned
     # ------------------------------------------------------------------
-    def _check_signal_exit_coverage(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+    def _note_signal_exit_engine_ownership(
+        self, cctx: _ConformanceCtx
+    ) -> Iterable[QualityGateResult]:
+        """Signal exits are enforced engine-side for every strategy.
+
+        Pre: ``cctx`` is a built context; ``cctx.spec`` is a
+        ``StrategySpec`` or ``None``.
+        Post: returns ``()`` when the spec declares no ``SignalExitRule``;
+        otherwise a single ``info`` result. The engine evaluates every
+        ``SignalExitRule`` via ``_EngineExitDispatcher`` (with streaming
+        history views) for both the compiled and the custom-code path, so
+        an inline ``submit_order`` exit branch is never required.
+        Invariant: emits no critical. The requirement direction is retired
+        (the engine owns the exit); the prohibition direction — forbidding
+        a manual close that duplicates an engine-owned exit — is owned by
+        :meth:`_check_no_duplicate_engine_exit`.
+        """
         spec = cctx.spec
+        if spec is None:
+            return ()
         signal_exits = [
             r for r in (getattr(spec, "exit_rules", []) or []) if isinstance(r, SignalExitRule)
         ]
         if not signal_exits:
             return ()
+        return (
+            self._info(
+                f"Spec declares {len(signal_exits)} signal-exit rule(s); the "
+                "engine enforces every spec.exit_rules entry via "
+                "_EngineExitDispatcher and stamps engine_exit:<kind> "
+                "attribution — no inline submit_order exit branch is required "
+                "(the strategy authors entries only)."
+            ),
+        )
 
-        if _is_engine_managed(spec):
-            return (
-                self._info(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s); "
-                    "signal exits are engine-managed via _EngineExitDispatcher "
-                    "— no inline submit_order exit branches required."
-                ),
-            )
+    # ------------------------------------------------------------------
+    # Check 4b — no manual close duplicating an engine-owned exit
+    # ------------------------------------------------------------------
+    def _check_no_duplicate_engine_exit(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
+        """Forbid custom code from closing positions the engine already owns.
 
-        exit_branches = [
-            (if_node, calls)
-            for if_node, calls in cctx.submit_branches
-            if any(
-                _submit_order_closes_position(c) or _submit_order_is_kwargs_spread(c) for c in calls
-            )
-        ]
-        if not exit_branches:
-            return (
-                self._critical(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s) "
-                    "but no if/elif branch reachable from on_bar contains a "
-                    "ctx.submit_order(..., qty=position.qty) close call."
-                ),
-            )
+        The engine enforces ``spec.exit_rules`` on the custom-code path too
+        (the backtest mode passes the spec's exit rules to the engine
+        unconditionally). A strategy-emitted close fills ahead of the
+        engine's close and overwrites the ``engine_exit:<kind>``
+        attribution the trade-alignment gate depends on, so a manual close
+        of an engine-owned side is a critical conformance violation.
 
-        if len(exit_branches) < len(signal_exits):
-            return (
-                self._critical(
-                    f"Spec declares {len(signal_exits)} signal-exit rule(s) "
-                    f"but only {len(exit_branches)} exit branch(es) were found "
-                    "reachable from on_bar."
-                ),
-            )
-        return ()
+        Two manual-close shapes are detected, across every ``on_bar``-
+        reachable ``submit_order`` (if/elif/else bodies, post-guard top-level
+        statements, and reachable helpers):
+          * an explicit opposite-side close whose ``qty=`` reads the
+            position — ``position.qty``, a renamed position alias, a wrapping
+            expression (``abs(position.qty)``), or a direct
+            ``ctx.position(...).qty`` — which retires the OPPOSITE of the
+            order side; and
+          * an entry carrying a non-``None`` ``attached_stop_loss`` /
+            ``attached_take_profit`` bracket leg, whose ``bracket_sl`` /
+            ``bracket_tp`` children close the order's OWN side.
+
+        Coverage is judged per-side: a close is forbidden only when the
+        position side it retires is covered by some ``spec.exit_rules`` entry
+        (via :func:`_engine_exits_cover_sides`), intersected with the spec's
+        entered sides so a same-side full-size scale-in (``qty=position.qty``
+        whose inferred opposite side the spec never enters) is not misread as
+        a close. A close (or bracket) whose ``side=`` cannot be resolved
+        statically is a hard critical only when the engine covers EVERY
+        entered side — under partial coverage it may legitimately retire the
+        engine-uncovered side, so it is deferred to the runtime gate rather
+        than flagged.
+
+        Pre: ``cctx`` is a built context; ``cctx.spec`` is a
+        ``StrategySpec`` or ``None``.
+        Post: returns ``()`` when ``spec`` is ``None``, for the compiled path
+        (``requires_custom_code`` false — it submits no orders), for a spec
+        with no exit rules, or when no reachable close retires an
+        engine-owned, entered side. Otherwise returns a single critical
+        naming the count of manual closes to remove.
+        Invariant: never fires on the compiled path; only forbids closes the
+        engine demonstrably owns for the side they retire.
+
+        Static limits (caught by the runtime trade-alignment gate, which
+        verifies ``engine_exit:<kind>`` attribution per executed trade and is
+        the authoritative backstop): a close whose ``qty`` is a name- or
+        attribute-bound position alias (``close_qty = pos.qty``;
+        ``self.held = pos.qty``) or a computed opposite-side quantity that
+        never references ``position.qty`` is not recognised here — class-wide
+        qty-alias collection was tried and produced false positives on
+        legitimately-computed entry quantities, so it was removed in favour
+        of the runtime backstop. Likewise, in a spec that enters BOTH sides a
+        full-size same-side scale-in cannot be told apart from a cross-side
+        close without the runtime position side — so it may be flagged (false
+        positive) or a cross-side close waved through. The runtime gate
+        reconciles all of these.
+        """
+        spec = cctx.spec
+        if spec is None:
+            return ()
+        if not getattr(spec, "requires_custom_code", False):
+            return ()
+        exit_rules = getattr(spec, "exit_rules", None) or []
+        if not exit_rules:
+            return ()
+        # Entered sides come from the spec (the authoritative, validated
+        # source) rather than the AST: a dynamic ``side=`` expression would
+        # leave an AST-derived side set empty and silently disable the check.
+        entered_sides = {
+            r.side
+            for r in (getattr(spec, "entry_rules", []) or [])
+            if isinstance(r, EntryRule) and r.side is not None
+        }
+
+        # Resolve position aliases once so the close detector catches renamed
+        # handles (``current = ctx.position(...)``), wrapped qty expressions
+        # (``abs(position.qty)``), and direct ``ctx.position(...).qty`` — not
+        # just the literal ``position`` / ``pos`` names.
+        position_names = _collect_position_aliases(cctx.cls)
+
+        # Whether the engine covers EVERY entered side. Used for closes whose
+        # side cannot be resolved statically: only then is a hard critical
+        # safe (any close hits a covered side, with no legitimate uncovered
+        # side to retire). Under partial coverage a dynamic-side close may
+        # legitimately retire the engine-uncovered side, so it is left to the
+        # runtime gate rather than flagged as a false positive.
+        all_sides_covered = bool(entered_sides) and _engine_exits_cover_sides(spec, entered_sides)
+
+        # Each flagged entry records the offending close's location
+        # (``<method>:L<lineno>``) so the refinement agent / developer can
+        # jump straight to the call to remove.
+        flagged: list[str] = []
+        for method in _iter_strategy_methods(cctx.cls):
+            if method.name not in cctx.reachable:
+                continue
+            for node in _iter_method_body_nodes(method):
+                if not _is_submit_order_call(node):
+                    continue
+                if _node_is_duplicate_close(
+                    node,
+                    position_names=position_names,
+                    entered_sides=entered_sides,
+                    all_sides_covered=all_sides_covered,
+                    spec=spec,
+                ):
+                    flagged.append(f"{method.name}:L{getattr(node, 'lineno', 0)}")
+        if not flagged:
+            return ()
+        return (
+            self._critical(
+                f"Custom-code strategy submits {len(flagged)} manual "
+                "position-closing order(s) — an opposite-side close "
+                "(ctx.submit_order(..., qty=position.qty)) or an entry with an "
+                "attached_stop_loss / attached_take_profit bracket leg — for a "
+                f"side the engine already owns (at {', '.join(flagged)}). The "
+                "engine enforces every spec.exit_rules entry (stop_loss / "
+                "take_profit / signal_exit) and stamps engine_exit:<kind> "
+                "attribution; a manual close fills first and overwrites it, "
+                "breaking exit alignment. Remove the close(s)/bracket(s) for "
+                "engine-owned sides and let the engine own spec.exit_rules — "
+                "author entry logic only."
+            ),
+        )
 
     # ------------------------------------------------------------------
     # Check 5 — bar-counting exit rejection
     # ------------------------------------------------------------------
 
-    _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset({
-        "bars_held", "hold_count", "days_held", "bars_in_trade",
-        "held_bars", "bar_count", "hold_period", "bars_since_entry",
-        "hold_bars", "n_bars_held", "num_bars_held", "time_in_trade",
-        "holding_period", "exit_countdown", "bar_counter",
-    })
+    _BAR_COUNTER_NAMES: ClassVar[frozenset] = frozenset(
+        {
+            "bars_held",
+            "hold_count",
+            "days_held",
+            "bars_in_trade",
+            "held_bars",
+            "bar_count",
+            "hold_period",
+            "bars_since_entry",
+            "hold_bars",
+            "n_bars_held",
+            "num_bars_held",
+            "time_in_trade",
+            "holding_period",
+            "exit_countdown",
+            "bar_counter",
+        }
+    )
 
     def _check_bar_counting_exit(self, cctx: _ConformanceCtx) -> Iterable[QualityGateResult]:
         violations: list[str] = []

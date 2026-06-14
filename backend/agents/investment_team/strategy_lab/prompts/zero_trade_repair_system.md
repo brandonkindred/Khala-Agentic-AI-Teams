@@ -64,12 +64,18 @@ together tell you where in the lifecycle execution stopped.
 
 - **ENTRY_WITH_NO_EXIT** — entries filled but exits never fired so no
   closed trades exist (`entries_filled > 0`, `closed_trades == 0`,
-  `open_positions_at_end` non-empty). The exit rules are too strict,
-  reference an unset attribute, or only fire on conditions that never
-  occur in the test window. Loosen the exit predicate thresholds,
-  add a signal-based fallback exit (e.g. a reversal or momentum-
-  exhaustion condition), or widen the stop-loss / take-profit bands
-  so trades close within the test window. Do NOT add bar-counting
+  `open_positions_at_end` non-empty). The engine-owned `spec.exit_rules`
+  only fire on conditions that never occurred in the test window. This
+  category is NOT code-repairable here: exits are engine-owned, a manual
+  code close is forbidden (rejected by the conformance gate), and
+  `exit_rules` spec edits are dropped (only `risk_limits` is honoured).
+  Do NOT add a manual close; do NOT emit an `exit_rules` update (it is
+  silently discarded); and do NOT *widen* the stop-loss / take-profit
+  bands — widening moves the trigger farther from entry and makes an exit
+  *less* likely, worsening this exact condition. Report
+  `root_cause_category = ENTRY_WITH_NO_EXIT` with evidence and propose no
+  code rewrite; the run then falls through to redesign / spec refinement
+  rather than a discarded repair. Do NOT add bar-counting
   "time stop" exits (e.g. `if bars_held >= N: close`) — they are
   not a supported exit kind and will be rejected by the code
   conformance gate.
