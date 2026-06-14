@@ -28,6 +28,7 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -53,9 +54,23 @@ _GENERIC_OPTION_LABELS: frozenset = frozenset({
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
+# Public alias: the cadence at which the answer-wait lease (heartbeat) is renewed. Callers that
+# must keep the lease fresh outside the wait loop (e.g. during a slow on_pause callback) reuse
+# this so the renewal cadence and the wait-loop cadence stay in lockstep, well under the answer
+# endpoint's staleness window.
+ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
 _TERMINAL_STATUSES = frozenset({"failed", "cancelled", "completed", "completed_with_failures"})
+
+
+def heartbeat_timestamp() -> str:
+    """Current UTC ISO-8601 timestamp for an answer-wait liveness heartbeat.
+
+    Postconditions:
+        - Returns a timezone-aware ISO-8601 string parseable by ``datetime.fromisoformat``.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def answer_wait_timeout_s() -> float:
@@ -361,6 +376,7 @@ def wait_for_answers(
     poll_interval_s: float = _ANSWER_WAIT_POLL_INTERVAL_S,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
+    heartbeat_fn: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Block until the job's ``waiting_for_answers`` flag clears, the job goes terminal, or timeout.
 
@@ -371,6 +387,10 @@ def wait_for_answers(
         - Returns True iff ``waiting_for_answers`` became False (answers submitted) before the job
           went terminal or the timeout elapsed; returns False on terminal/timeout. Never proceeds on
           its own — the only True path is an explicit answer submission clearing the flag.
+        - When ``heartbeat_fn`` is provided, it is invoked with a current UTC ISO timestamp once per
+          poll iteration while waiting, so other processes can distinguish a live (but blocked)
+          wait loop from a dead one. Heartbeat failures are swallowed — proving liveness must never
+          break the wait itself.
     """
     timeout = timeout_s if timeout_s is not None else answer_wait_timeout_s()
     start = now()
@@ -380,6 +400,11 @@ def wait_for_answers(
             return True
         if is_terminal(data):
             return False
+        if heartbeat_fn is not None:
+            try:
+                heartbeat_fn(heartbeat_timestamp())
+            except Exception:
+                logger.debug("answer-wait heartbeat write failed for job %s", job_id, exc_info=True)
         sleep(poll_interval_s)
     logger.warning("Coding team job %s timed out waiting for user answers", job_id)
     return False

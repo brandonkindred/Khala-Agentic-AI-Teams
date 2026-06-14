@@ -1,4 +1,14 @@
-import { CurrentActivityEntry } from './software-engineering.model';
+import type { CurrentActivityEntry, PendingQuestion } from './software-engineering.model';
+
+/** GitHub issue/PR metadata attached to a coding-team job started from an issue. */
+export interface CodingTeamGitHubContext {
+  owner: string;
+  repo: string;
+  issue_number?: number;
+  issue_url?: string;
+  pr_number?: number;
+  pr_url?: string;
+}
 
 export interface CodingTeamJobStatus {
   job_id: string;
@@ -8,14 +18,7 @@ export interface CodingTeamJobStatus {
   /** Most recent agent reasoning ("thinking") tokens, for live display. */
   thinking?: string;
   error?: string;
-  github_context?: {
-    owner: string;
-    repo: string;
-    issue_number?: number;
-    issue_url?: string;
-    pr_number?: number;
-    pr_url?: string;
-  };
+  github_context?: CodingTeamGitHubContext;
   github_pr_url?: string;
   /** Set by the PR-review flow with the posted-review stats. */
   review_summary?: CodeReviewSummary;
@@ -32,6 +35,22 @@ export interface CodingTeamJobStatus {
   progress?: number | null;
   /** Server UTC time when the response was built; staleness math uses this, not the browser clock. */
   server_time?: string | null;
+  /** Decisions awaiting a user answer before the job can proceed. */
+  pending_questions?: PendingQuestion[];
+  /** True when the job is paused waiting for the user to answer pending questions. */
+  waiting_for_answers?: boolean;
+}
+
+/** One row of GET /jobs — enough to spot active GitHub-issue runs without per-job status calls. */
+export interface CodingTeamJobListItem {
+  job_id: string;
+  status: string;
+  repo_path?: string;
+  phase?: string;
+  status_text?: string;
+  updated_at?: string;
+  waiting_for_answers?: boolean;
+  github_context?: CodingTeamGitHubContext;
 }
 
 /** Summary of a posted PR review (from the /review-pr flow). */

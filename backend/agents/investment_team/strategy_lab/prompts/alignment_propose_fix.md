@@ -61,7 +61,18 @@ A JSON object with these fields:
 - Sizing must derive from ``ctx.equity`` or ``ctx.capital``; do not
   hardcode integer share counts.
 - Do not implement bar-counting "time stop" exits (e.g. ``bars_held``,
-  ``hold_count``, ``if counter >= N: close``). Exits must use price,
-  P&L, or signal-based logic only.
+  ``hold_count``, ``if counter >= N: close``); they are rejected by the
+  conformance gate.
+- Exits are engine-owned. The engine enforces every ``spec.exit_rules``
+  entry (stop-loss / take-profit / signal-exit) for the side(s) it
+  applies to and stamps ``engine_exit:<kind>`` attribution. When a
+  finding cites a ``signal_exit``, ``take_profit``, or ``stop_loss`` divergence, the fix
+  is to REMOVE the strategy's manual position-closing order (opposite
+  ``side``, ``qty == position.qty``) for a side the engine covers and let
+  the engine own it — not to add or strengthen a manual close. Keep any
+  manual close for a position side no exit rule covers (e.g. a short when
+  the spec's only stop is a long-side ``trailing_high``): that side has
+  no engine exit, so removing its close would strand the position and
+  fail the safety gate.
 
 Return ONLY the JSON object with no markdown fencing.

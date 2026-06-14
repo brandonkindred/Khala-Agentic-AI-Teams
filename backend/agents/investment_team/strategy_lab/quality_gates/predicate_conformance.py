@@ -17,6 +17,13 @@ The gate only runs for ``requires_custom_code=True`` strategies — the
 compiled path (engine-managed) emits zero ``submit_order`` calls and
 has no inline predicate logic to drift.
 
+When ``spec.exit_rules`` cover every entered side, ``SignalExitRule``
+predicates are engine-owned (enforced via ``_EngineExitDispatcher``) and
+conforming custom code authors no manual close — those fixtures are
+skipped so the shadow check does not demand a close the conformance
+contract forbids. Entry predicates are always checked (entries remain
+inline for the custom-code path).
+
 Routing on failure: critical results join the synthesis loop's
 ``critical_failures`` collection and route through
 ``_refine_or_exhaust(failure_phase="validation", ...)``.  The
@@ -44,6 +51,7 @@ from ..spec_dsl import EntryRule as _EntryRule
 from ..spec_dsl import Predicate as _Predicate
 from ..spec_dsl import SignalExitRule as _SignalExitRule
 from ..spec_dsl import _format_predicate
+from .code_safety import _engine_exits_cover_sides
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 from .predicate_conformance_fixtures import ConformanceFixture, generate_conformance_fixtures
 
@@ -284,8 +292,12 @@ class PredicateConformanceGate(GateResultsMixin):
           ``code`` is Python source; ``spec`` is a ``StrategySpec``.
           ``attempt`` is the zero-based retry counter from the orchestrator.
         Postconditions:
-          One ``QualityGateResult`` per fixture. After ``attempt >=
-          _code_conformance_retries()``, criticals are demoted to warnings.
+          One ``QualityGateResult`` per checked fixture. ``SignalExitRule``
+          fixtures are skipped when ``spec.exit_rules`` cover every entered
+          side (the engine owns the exit, so conforming code submits no
+          manual close); entry fixtures are always checked. After ``attempt
+          >= _code_conformance_retries()``, criticals are demoted to
+          warnings.
         """
         with self._using_phase(phase):
             if not code or not code.strip():
@@ -313,6 +325,18 @@ class PredicateConformanceGate(GateResultsMixin):
                 ]
 
             fixtures = generate_conformance_fixtures(spec, compiled_code=code)
+            # Signal exits are engine-owned: when spec.exit_rules cover every
+            # entered side, the engine enforces the SignalExitRule via
+            # _EngineExitDispatcher and conforming custom code submits no manual
+            # close. The shadow context only sees strategy-submitted orders, so
+            # keeping those fixtures would demand a close the conformance
+            # contract now forbids. Drop them; entry fixtures still run
+            # (entries remain inline for custom code).
+            entered_sides = {
+                r.side for r in entry_rules if isinstance(r, _EntryRule) and r.side is not None
+            }
+            if entered_sides and _engine_exits_cover_sides(spec, entered_sides):
+                fixtures = [f for f in fixtures if f.rule_kind != "signal_exit"]
             if not fixtures:
                 return [self._info("No conformance fixtures generated.")]
 

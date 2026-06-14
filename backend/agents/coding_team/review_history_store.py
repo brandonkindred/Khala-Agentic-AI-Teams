@@ -37,9 +37,7 @@ _STORE = "coding_team"
 # Columns `update_review` is permitted to write. The SET clause is composed only
 # from these constants — never from caller-supplied identifiers — so the query
 # can never carry user-controlled SQL.
-_UPDATABLE_COLUMNS = frozenset(
-    {"status", "status_text", "review_summary", "error", "completed_at"}
-)
+_UPDATABLE_COLUMNS = frozenset({"status", "status_text", "review_summary", "error", "completed_at"})
 
 
 def _now() -> datetime:
@@ -120,13 +118,19 @@ def update_review(
         # column rather than risk an injected identifier. Cannot happen with the
         # hardcoded columns above; using an ``if`` (not ``assert``) keeps the
         # guard active even under ``python -O``.
-        logger.error("code_review_runs: refusing update with non-allowlisted column(s): %s", unexpected)
+        logger.error(
+            "code_review_runs: refusing update with non-allowlisted column(s): %s", unexpected
+        )
         return
     # Compose the SET clause with psycopg.sql.Identifier so column names are
     # quoted as identifiers (never string-interpolated), making the injection
     # safety structurally evident; values stay parameterized via %s placeholders.
-    set_clause = sql.SQL(", ").join(sql.SQL("{} = %s").format(sql.Identifier(col)) for col in columns)
-    query = sql.SQL("UPDATE code_review_runs SET {set_clause} WHERE job_id = %s").format(set_clause=set_clause)
+    set_clause = sql.SQL(", ").join(
+        sql.SQL("{} = %s").format(sql.Identifier(col)) for col in columns
+    )
+    query = sql.SQL("UPDATE code_review_runs SET {set_clause} WHERE job_id = %s").format(
+        set_clause=set_clause
+    )
     params: list[Any] = [val for _, val in assignments]
     params.append(job_id)
     try:
