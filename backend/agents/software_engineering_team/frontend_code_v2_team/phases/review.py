@@ -11,6 +11,7 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
+from code_review_agent.coordinator import build_review_chunks
 from strands import Agent
 
 from llm_service import LLMClient
@@ -46,29 +47,49 @@ def _run_llm_review(
     task: Task,
     files: Dict[str, str],
 ) -> List[ReviewIssue]:
-    """LLM-based code review when no external review agent is available."""
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(files.items()))
-    prompt = REVIEW_PROMPT.format(
-        requirements=task.requirements or task.description,
-        acceptance_criteria=", ".join(task.acceptance_criteria)
-        if task.acceptance_criteria
-        else "N/A",
-        code=code_text[:MAX_REVIEW_CODE_CHARS],
-    )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-    data = parse_review_template(raw)
+    """LLM-based code review when no external review agent is available.
+
+    Preconditions:
+        - ``files`` maps file paths to their full source text.
+
+    Postconditions:
+        - Inputs that exceed the per-call budget are split into function-aware
+          chunks (cuts land between whole functions/methods, never mid-body)
+          and every chunk is reviewed; issues from all chunks are returned.
+          No file content is silently truncated away, so a large file's tail is
+          reviewed rather than dropped. Blank files contribute nothing.
+        - Small inputs are reviewed in a single call, as before.
+    """
+    blocks = [(path, content) for path, content in files.items() if content and content.strip()]
+    if not blocks:
+        return []
+    # Budget each prompt at the same per-call size the old code truncated to,
+    # but split at function/method boundaries so no construct is severed and no
+    # file tail is dropped.
     issues: List[ReviewIssue] = []
-    for item in data.get("issues") or []:
-        if isinstance(item, dict):
-            issues.append(
-                ReviewIssue(
-                    source=item.get("source", "code_review"),
-                    severity=item.get("severity", "medium"),
-                    description=item.get("description", ""),
-                    file_path=item.get("file_path", ""),
-                    recommendation=item.get("recommendation", ""),
+    for chunk in build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS):
+        prompt = REVIEW_PROMPT.format(
+            requirements=task.requirements or task.description,
+            acceptance_criteria=", ".join(task.acceptance_criteria)
+            if task.acceptance_criteria
+            else "N/A",
+            code=chunk.content,
+        )
+        raw = (lambda _r: str(_r))(
+            Agent(model=resolve_text_mode_strands_model(llm))(prompt)
+        ).strip()
+        data = parse_review_template(raw)
+        for item in data.get("issues") or []:
+            if isinstance(item, dict):
+                issues.append(
+                    ReviewIssue(
+                        source=item.get("source", "code_review"),
+                        severity=item.get("severity", "medium"),
+                        description=item.get("description", ""),
+                        file_path=item.get("file_path", ""),
+                        recommendation=item.get("recommendation", ""),
+                    )
                 )
-            )
     return issues
 
 
@@ -145,9 +166,7 @@ def run_review(
         except Exception as exc:
             logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
 
-    code_text = "\n\n".join(
-        f"--- {p} ---\n{c}" for p, c in list(execution_result.files.items())
-    )
+    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(execution_result.files.items()))
     code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
     if code_review_agent is not None:
         try:
@@ -567,7 +586,9 @@ def run_documentation_self_review(
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+            raw = (lambda _r: str(_r))(
+                Agent(model=resolve_text_mode_strands_model(llm))(prompt)
+            ).strip()
         except Exception as exc:
             logger.warning(
                 "Documentation self-review LLM call failed (iteration %d): %s",

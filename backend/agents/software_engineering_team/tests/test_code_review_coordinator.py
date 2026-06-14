@@ -394,6 +394,83 @@ def test_split_never_breaks_a_line_even_when_oversized() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Function-aware splitting: cuts land between whole constructs, never mid-body
+# ---------------------------------------------------------------------------
+
+
+def _python_functions(n_funcs: int, body_lines: int = 8) -> str:
+    """A .py file of equal-sized top-level functions, blank-line separated."""
+    parts: List[str] = []
+    for f in range(1, n_funcs + 1):
+        parts.append(f"def func_{f:03d}():")
+        for b in range(body_lines):
+            parts.append(f"    value_{f:03d}_{b} = compute({b})  " + "y" * 20)
+        parts.append("")
+    return "\n".join(parts)
+
+
+def _ts_functions(n_funcs: int, body_lines: int = 8) -> str:
+    """A .ts file of equal-sized top-level functions with column-0 braces."""
+    parts: List[str] = []
+    for f in range(1, n_funcs + 1):
+        parts.append(f"function fn_{f:03d}() {{")
+        for b in range(body_lines):
+            parts.append(f"  const value_{f:03d}_{b} = compute({b});  " + "z" * 20)
+        parts.append("}")
+        parts.append("")
+    return "\n".join(parts)
+
+
+def test_split_breaks_at_function_boundary_python() -> None:
+    content = _python_functions(12)  # ~12 functions, each well under the budget
+    segments = split_block_into_segments("svc.py", content, max_chars=1_500)
+    assert len(segments) > 1
+    # Every segment begins at a top-level ``def`` — no function is severed.
+    for seg in segments:
+        assert seg.content.splitlines()[0].startswith("def func_")
+    # No function start is lost or duplicated, and content reassembles exactly.
+    assert sum(s.content.count("def func_") for s in segments) == 12
+    assert "".join(s.content for s in segments) == content
+    assert all(len(s.prompt_content) <= 1_500 for s in segments)
+
+
+def test_split_breaks_at_function_boundary_typescript() -> None:
+    content = _ts_functions(12)
+    segments = split_block_into_segments("widget.ts", content, max_chars=1_500)
+    assert len(segments) > 1
+    for seg in segments:
+        assert seg.content.splitlines()[0].startswith("function fn_")
+    assert sum(s.content.count("function fn_") for s in segments) == 12
+    assert "".join(s.content for s in segments) == content
+    assert all(len(s.prompt_content) <= 1_500 for s in segments)
+
+
+def test_split_falls_back_to_line_boundary_when_no_constructs() -> None:
+    # One giant function larger than the budget: its only construct boundary is
+    # line 1, which the splitter never cuts before, so it degrades to splitting
+    # on line boundaries within the function body.
+    body = "\n".join(f"    step_{i:04d} = run({i})  " + "y" * 20 for i in range(300))
+    content = "def one_big_function():\n" + body
+    segments = split_block_into_segments("mono.py", content, max_chars=2_000)
+    assert len(segments) > 1
+    assert "".join(s.content for s in segments) == content
+    assert all(len(s.prompt_content) <= 2_000 for s in segments)
+
+
+def test_split_function_aware_keeps_contiguous_line_bookkeeping() -> None:
+    content = _python_functions(10)
+    segments = split_block_into_segments("svc.py", content, max_chars=1_200)
+    assert len(segments) > 1
+    assert "".join(s.content for s in segments) == content
+    assert segments[0].start_line == 1
+    for prev, cur in zip(segments, segments[1:]):
+        assert cur.start_line == prev.end_line + 1
+    total_lines = len(content.splitlines())
+    assert segments[-1].end_line == total_lines
+    assert all(s.total_lines == total_lines for s in segments)
+
+
+# ---------------------------------------------------------------------------
 # pre_numbered: explicit producer flag (never sniffed from content)
 # ---------------------------------------------------------------------------
 
