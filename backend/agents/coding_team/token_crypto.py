@@ -65,7 +65,9 @@ def encrypt_token(token: str) -> Optional[str]:
     try:
         return Fernet(key).encrypt(token.encode()).decode()
     except Exception:
-        logger.warning("GitHub token encryption failed; token will not be persisted.", exc_info=True)
+        logger.warning(
+            "GitHub token encryption failed; token will not be persisted.", exc_info=True
+        )
         return None
 
 
