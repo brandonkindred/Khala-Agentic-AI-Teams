@@ -90,7 +90,7 @@ The engine calls:
 
 `ctx` carries `capital`, `equity`, `now`, `is_warmup`, `position(symbol)`, `history(symbol, n)`, `submit_order(...)`, `cancel(order_id)`. `bar` carries `symbol`, `timestamp`, `timeframe`, `open`, `high`, `low`, `close`, `volume`.
 
-`ctx.submit_order(symbol=..., side=OrderSide.LONG|SHORT, qty=<positive>, order_type=OrderType.MARKET|LIMIT|STOP, limit_price=..., stop_price=..., tif=TimeInForce.DAY|GTC, reason="...")` — submit an opposite-side order with `qty==position.qty` to close.
+`ctx.submit_order(symbol=..., side=OrderSide.LONG|SHORT, qty=<positive>, order_type=OrderType.MARKET|LIMIT|STOP, limit_price=..., stop_price=..., tif=TimeInForce.DAY|GTC, reason="...")` — submit ENTRY orders. Exits are engine-owned: the engine enforces every `spec.exit_rules` entry (stop-loss / take-profit / signal-exit) and stamps `engine_exit:<kind>`, so do NOT submit an opposite-side `qty==position.qty` close for a side the engine covers (the conformance gate rejects it). Only close a position side that no exit rule covers (e.g. a short when the only stop is a long-side `trailing_high`).
 
 ## Output format — JSON only
 
