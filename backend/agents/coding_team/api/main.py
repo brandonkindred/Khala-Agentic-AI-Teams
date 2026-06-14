@@ -221,7 +221,10 @@ class StatusResponse(BaseModel):
     github_pr_url: Optional[str] = None
     review_summary: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Set by the PR-review flow: total_issues, inline_comments, comment_findings, event.",
+        description=(
+            "Set by the PR-review flow: total_issues, inline_comments, "
+            "comment_findings, comments_failed, event."
+        ),
     )
     pending_questions: List[PendingQuestion] = Field(
         default_factory=list,
@@ -991,13 +994,16 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
 
             # One comment per finding: post each un-anchorable finding as its own
             # conversation comment, plus any inline comments the review had to drop
-            # (rare 422 fallback) so no finding is lost and none is batched.
-            for issue in leftovers:
-                _safe_comment(client, owner, repo, pr_number, format_issue_comment(issue))
-            for comment in dropped:
-                _safe_comment(
-                    client, owner, repo, pr_number, inline_comment_to_timeline_body(comment)
-                )
+            # (rare 422 fallback) so no finding is lost and none is batched. These
+            # findings no longer live in the review body, so a failed post would
+            # drop the finding silently — count failures and fail the job instead
+            # of falsely reporting every finding as posted.
+            standalone_bodies = [format_issue_comment(issue) for issue in leftovers]
+            standalone_bodies += [inline_comment_to_timeline_body(c) for c in dropped]
+            comments_failed = sum(
+                0 if _safe_comment(client, owner, repo, pr_number, body) else 1
+                for body in standalone_bodies
+            )
 
             inline_count = len(comments) - len(dropped)
             comment_findings = len(leftovers) + len(dropped)
@@ -1005,9 +1011,36 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 "total_issues": len(output.issues),
                 "inline_comments": inline_count,
                 "comment_findings": comment_findings,
+                "comments_failed": comments_failed,
                 "event": event,
                 "files_reviewed": files_reviewed,
             }
+            if comments_failed:
+                # Some findings could not be posted as their own comment; the
+                # review (inline comments + body) is already submitted, but the
+                # contract "one comment per finding" is broken — surface it as a
+                # failure rather than reporting completion.
+                err = (
+                    f"{comments_failed} of {comment_findings} finding comment(s) "
+                    "could not be posted"
+                )
+                update_job(
+                    job_id,
+                    status="failed",
+                    status_text=err,
+                    github_pr_url=pr.html_url,
+                    review_summary=review_summary,
+                    error=err,
+                )
+                update_review(
+                    job_id,
+                    status="failed",
+                    status_text=err,
+                    review_summary=review_summary,
+                    error=err,
+                    completed=True,
+                )
+                return
             status_text = (
                 f"Review posted: {len(output.issues)} finding(s), "
                 f"{inline_count} inline, {comment_findings} comment(s), event={event}"
@@ -1108,15 +1141,21 @@ def _submit_review(
 # ---------------------------------------------------------------------------
 
 
-def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body: str) -> None:
+def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body: str) -> bool:
     """Best-effort issue comment; never blocks the job on a failed comment.
 
     Body is scrubbed to redact tokens that might have leaked from git stderr.
+
+    Postconditions:
+        - Returns True when the comment was posted, False when GitHub rejected it.
+          Never raises — callers that must not drop a finding inspect the result.
     """
     try:
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
+        return True
     except GitHubAPIError as e:
         logger.warning("Failed to comment on issue #%s: %s", number, e)
+        return False
 
 
 def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> str:

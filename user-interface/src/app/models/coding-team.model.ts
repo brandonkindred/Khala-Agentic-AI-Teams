@@ -38,7 +38,13 @@ export interface CodingTeamJobStatus {
 export interface CodeReviewSummary {
   total_issues: number;
   inline_comments: number;
+  /** Findings posted as their own standalone PR conversation comments. */
   comment_findings: number;
+  /** Legacy name for `comment_findings`, kept so review rows persisted before the
+   * rename still render a count. Prefer `comment_findings`. */
+  body_findings?: number;
+  /** Findings that could not be posted as their own comment (review still submitted). */
+  comments_failed?: number;
   event: string;
 }
 

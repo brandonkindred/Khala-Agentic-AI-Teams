@@ -260,6 +260,7 @@ class _FakeReviewClient:
         self.fail_get_pr = False
         self.review_fail_times = 0  # number of leading create_review calls that 422
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
+        self.comment_fail = False  # when True, add_issue_comment 422s every call
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -292,6 +293,8 @@ class _FakeReviewClient:
         return self.login
 
     def add_issue_comment(self, _o: str, _r: str, n: int, body: str) -> None:
+        if self.comment_fail:
+            raise GitHubAPIError(403, "rate limited")
         self.comments.append((n, body))
 
     def create_pull_request_review(self, **kwargs: Any) -> dict[str, Any]:
@@ -459,6 +462,21 @@ class TestReviewEndpoint:
         assert any("a.py:2" in body for _n, body in gh.comments)
         assert job["review_summary"]["inline_comments"] == 0
         assert job["review_summary"]["comment_findings"] == 2
+
+    def test_failed_finding_comment_marks_job_failed(self, review_app) -> None:
+        # A finding posted as its own comment no longer lives in the review body,
+        # so a rejected comment would drop the finding. The job must report failure
+        # (with a count) rather than claiming every finding was posted.
+        gh = review_app["github"]["client"]
+        gh.comment_fail = True  # the out-of-diff finding's standalone comment 422s
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "could not be posted" in (job["error"] or "")
+        assert job["review_summary"]["comments_failed"] == 1
+        # The review itself was still submitted (inline comment for the in-diff line).
+        assert len(gh.reviews) == 1
 
     def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
         # A non-GitHubAPIError during submit must be caught by the broad outer

@@ -421,6 +421,27 @@ describe('CodeReviewPanelComponent', () => {
     expect(component.isLatestRunning(1)).toBe(false);
   });
 
+  it('normalizes the standalone-comment count across the body_findings rename', async () => {
+    await setup();
+    // New rows carry comment_findings.
+    expect(
+      component.commentFindings({ total_issues: 3, inline_comments: 1, comment_findings: 2, event: 'COMMENT' }),
+    ).toBe(2);
+    // Rows persisted before the rename only carry the legacy body_findings.
+    expect(
+      component.commentFindings({
+        total_issues: 3,
+        inline_comments: 1,
+        body_findings: 2,
+        event: 'COMMENT',
+      } as never),
+    ).toBe(2);
+    // Neither present → 0 rather than a blank count.
+    expect(
+      component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' } as never),
+    ).toBe(0);
+  });
+
   it('reports per-record terminality', async () => {
     await setup();
     expect(component.isRecordTerminal(record({ status: 'running' }))).toBe(false);
