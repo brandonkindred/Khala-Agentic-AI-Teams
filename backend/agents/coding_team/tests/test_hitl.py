@@ -433,6 +433,33 @@ def test_wait_for_answers_resumes_after_polls():
     assert state["polls"] >= 3
 
 
+def test_wait_for_answers_heartbeats_each_poll():
+    state = {"polls": 0}
+    beats: list = []
+
+    def get_job(jid):
+        state["polls"] += 1
+        return {"waiting_for_answers": state["polls"] < 3}
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=beats.append)
+    assert len(beats) == 2  # one per waiting poll; none once the flag clears
+    for ts in beats:
+        assert "T" in ts  # ISO-8601 timestamps
+
+
+def test_wait_for_answers_heartbeat_failure_does_not_break_wait():
+    state = {"polls": 0}
+
+    def get_job(jid):
+        state["polls"] += 1
+        return {"waiting_for_answers": state["polls"] < 3}
+
+    def boom(ts):
+        raise RuntimeError("job service down")
+
+    assert hitl.wait_for_answers("j", get_job, sleep=lambda s: None, heartbeat_fn=boom) is True
+
+
 def test_wait_for_answers_times_out():
     clock = {"t": 0.0}
 

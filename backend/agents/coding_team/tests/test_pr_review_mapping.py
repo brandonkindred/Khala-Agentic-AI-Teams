@@ -172,7 +172,9 @@ def test_map_unknown_file_goes_to_body() -> None:
 
 
 def test_format_comment_body_includes_severity_and_fix() -> None:
-    body = format_comment_body(_Issue(severity="high", category="logic", description="X", suggestion="Y"))
+    body = format_comment_body(
+        _Issue(severity="high", category="logic", description="X", suggestion="Y")
+    )
     assert "**[HIGH] logic** — X" in body
     assert "**Suggested fix:** Y" in body
 

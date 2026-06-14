@@ -1,4 +1,4 @@
-import { EMPTY, Observable, Subject, Subscription, interval } from 'rxjs';
+import { EMPTY, Observable, Subject, Subscription, timer } from 'rxjs';
 import { catchError, switchMap, takeUntil, takeWhile, tap } from 'rxjs/operators';
 import type { CodingTeamJobStatus } from '../models/coding-team.model';
 import { isCodingTeamTerminalStatus } from '../models/job-status.model';
@@ -11,11 +11,13 @@ export interface JobStatusSource {
 /**
  * Poll a coding-team job's status until it reaches a terminal state.
  *
- * Emits each fetched status to `onStatus`; after `maxConsecutiveErrors` consecutive
- * fetch failures it calls `onConnectionLost` and stops. Polling also stops once the
- * status is terminal. Returns the `Subscription` so the caller can tear it down on
- * destroy. Shared by the Coding Team and Code Review panels so the interval, error
- * budget, and terminal-status handling stay consistent.
+ * The first fetch fires immediately on subscribe (then every `intervalMs`), so callers
+ * never wait a full interval for the initial status. Emits each fetched status to
+ * `onStatus`; after `maxConsecutiveErrors` consecutive fetch failures it calls
+ * `onConnectionLost` and stops. Polling also stops once the status is terminal.
+ * Returns the `Subscription` so the caller can tear it down on destroy. Shared by the
+ * Coding Team and Code Review panels so the interval, error budget, and
+ * terminal-status handling stay consistent.
  */
 export function pollJobStatus(
   api: JobStatusSource,
@@ -27,7 +29,7 @@ export function pollJobStatus(
 ): Subscription {
   let errors = 0;
   const stop$ = new Subject<void>();
-  return interval(intervalMs)
+  return timer(0, intervalMs)
     .pipe(
       switchMap(() =>
         api.getJobStatus(jobId).pipe(
