@@ -423,6 +423,42 @@ def test_no_duplicate_engine_exit_fires_on_manual_close() -> None:
     assert any("manual position-closing order" in c.lower() for c in crits), crits
 
 
+def test_no_duplicate_engine_exit_critical_includes_location() -> None:
+    # The critical pinpoints the offending close's location (<method>:L<line>)
+    # so the refinement agent / developer can jump straight to it.
+    code = textwrap.dedent(
+        """
+        from contract import Strategy
+
+        class S(Strategy):
+            UNIVERSE = frozenset({"QQQ"})
+
+            def on_bar(self, ctx, bar):
+                if bar.symbol not in self.UNIVERSE:
+                    return
+                bars = ctx.history(bar.symbol, 200)
+                fast = sma(bars, 50)
+                slow = sma(bars, 200)
+                pos = ctx.position(bar.symbol)
+                qty = max(1, int(ctx.equity * 0.02 / bar.close))
+                if pos is None and fast > slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=qty, side="LONG")
+                elif pos is not None and fast < slow:
+                    ctx.submit_order(symbol=bar.symbol, qty=pos.qty, side="SHORT")
+        """
+    )
+    spec = _spec(
+        entry_rules=[_sma_cross_entry()],
+        exit_rules=[_rsi_signal_exit(), StopLossRule(pct=0.05)],
+        target_symbols=["QQQ"],
+    )
+    spec = spec.model_copy(update={"requires_custom_code": True})
+    results = CodeConformanceGate().check(code, spec)
+    crits = _critical_details(results)
+    assert any("manual position-closing order" in c.lower() for c in crits), crits
+    assert any("on_bar:l" in c.lower() for c in crits), crits
+
+
 def test_no_duplicate_engine_exit_silent_for_compiled_path() -> None:
     # requires_custom_code defaults to False: the compiled path submits no
     # orders in production, so the duplicate-exit check must never fire even

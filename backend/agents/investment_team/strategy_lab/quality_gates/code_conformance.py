@@ -519,6 +519,56 @@ def _submit_order_attached_bracket(call: ast.Call) -> tuple[bool, Optional[str]]
     return (True, None)
 
 
+def _node_is_duplicate_close(
+    node: ast.Call,
+    *,
+    position_names: frozenset[str],
+    entered_sides: set[str],
+    all_sides_covered: bool,
+    spec: Any,
+) -> bool:
+    """True iff ``node`` closes (or brackets) a position side the engine owns.
+
+    Pre: ``node`` is an ``on_bar``-reachable ``ctx.submit_order(...)`` call;
+    ``position_names`` is the alias set from :func:`_collect_position_aliases`;
+    ``entered_sides`` is the spec's entered side set; ``all_sides_covered`` is
+    True iff the engine covers every entered side.
+    Post: True when the order's resolved closed / bracket side is
+    engine-covered (intersected with ``entered_sides``, which also drops a
+    same-side full-size scale-in). A side that cannot be resolved statically
+    is a duplicate only when ``all_sides_covered`` — otherwise it may
+    legitimately retire an engine-uncovered side and is deferred to the
+    runtime gate. Extracted from
+    :meth:`CodeConformanceGate._check_no_duplicate_engine_exit` (which owns the
+    full policy rationale).
+    """
+    resolved_sides: set[str] = set()
+    unresolved = False
+    if _submit_order_qty_references_position(node, position_names):
+        side = _submit_order_close_side(node)
+        if side is not None:
+            resolved_sides.add(side)
+        else:
+            unresolved = True
+    has_bracket, bracket_side = _submit_order_attached_bracket(node)
+    if has_bracket:
+        # Bracket closes the order's OWN side.
+        if bracket_side is not None:
+            resolved_sides.add(bracket_side)
+        else:
+            unresolved = True
+    # A real close retires a side the spec actually enters; the intersection
+    # also drops a same-side scale-in whose inferred opposite side the spec
+    # never enters.
+    resolved_sides &= entered_sides
+    if any(_engine_exits_cover_sides(spec, {s}) for s in resolved_sides):
+        return True
+    # A dynamic (unresolved) side is a duplicate only when the engine covers
+    # every entered side — otherwise it may be the legitimate close of an
+    # engine-uncovered side.
+    return unresolved and all_sides_covered
+
+
 def _node_references_ctx_equity(node: ast.AST) -> bool:
     """True iff ``node`` (or any sub-expression) references ``ctx.equity``
     or ``ctx.capital``. Used by the sizing check to confirm the account
@@ -1079,54 +1129,39 @@ class CodeConformanceGate(GateResultsMixin):
         # runtime gate rather than flagged as a false positive.
         all_sides_covered = bool(entered_sides) and _engine_exits_cover_sides(spec, entered_sides)
 
-        n_closes = 0
+        # Each flagged entry records the offending close's location
+        # (``<method>:L<lineno>``) so the refinement agent / developer can
+        # jump straight to the call to remove.
+        flagged: list[str] = []
         for method in _iter_strategy_methods(cctx.cls):
             if method.name not in cctx.reachable:
                 continue
             for node in _iter_method_body_nodes(method):
                 if not _is_submit_order_call(node):
                     continue
-                resolved_sides: set[str] = set()
-                unresolved = False
-                if _submit_order_qty_references_position(node, position_names):
-                    side = _submit_order_close_side(node)
-                    if side is not None:
-                        resolved_sides.add(side)
-                    else:
-                        unresolved = True
-                has_bracket, bracket_side = _submit_order_attached_bracket(node)
-                if has_bracket:
-                    # Bracket closes the order's OWN side.
-                    if bracket_side is not None:
-                        resolved_sides.add(bracket_side)
-                    else:
-                        unresolved = True
-                # A real close retires a side the spec actually enters; the
-                # intersection also drops a same-side scale-in whose inferred
-                # opposite side the spec never enters.
-                resolved_sides &= entered_sides
-                flagged = any(_engine_exits_cover_sides(spec, {s}) for s in resolved_sides)
-                # A dynamic (unresolved) side is a hard critical only when the
-                # engine covers every entered side — otherwise it may be the
-                # legitimate close of an engine-uncovered side.
-                if unresolved and all_sides_covered:
-                    flagged = True
-                if flagged:
-                    n_closes += 1
-        if n_closes == 0:
+                if _node_is_duplicate_close(
+                    node,
+                    position_names=position_names,
+                    entered_sides=entered_sides,
+                    all_sides_covered=all_sides_covered,
+                    spec=spec,
+                ):
+                    flagged.append(f"{method.name}:L{getattr(node, 'lineno', 0)}")
+        if not flagged:
             return ()
         return (
             self._critical(
-                f"Custom-code strategy submits {n_closes} manual "
+                f"Custom-code strategy submits {len(flagged)} manual "
                 "position-closing order(s) — an opposite-side close "
                 "(ctx.submit_order(..., qty=position.qty)) or an entry with an "
                 "attached_stop_loss / attached_take_profit bracket leg — for a "
-                "side the engine already owns. The engine enforces every "
-                "spec.exit_rules entry (stop_loss / take_profit / signal_exit) "
-                "and stamps engine_exit:<kind> attribution; a manual close "
-                "fills first and overwrites it, breaking exit alignment. Remove "
-                "the close(s)/bracket(s) for engine-owned sides and let the "
-                "engine own spec.exit_rules — author entry logic only."
+                f"side the engine already owns (at {', '.join(flagged)}). The "
+                "engine enforces every spec.exit_rules entry (stop_loss / "
+                "take_profit / signal_exit) and stamps engine_exit:<kind> "
+                "attribution; a manual close fills first and overwrites it, "
+                "breaking exit alignment. Remove the close(s)/bracket(s) for "
+                "engine-owned sides and let the engine own spec.exit_rules — "
+                "author entry logic only."
             ),
         )
 
