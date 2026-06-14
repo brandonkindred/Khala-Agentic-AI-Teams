@@ -855,7 +855,7 @@ def _run_code_review(
 
     # No pre-truncation: the coordinator bounds its own per-call prompts, and
     # its full-coverage guarantee only holds when it sees all the code.
-    review_input = build_code_review_input(  # pragma: no cover  # integration-only
+    review_input = build_code_review_input(
         files=files,
         code=None if files is not None else code_to_review,
         spec_content=spec_content,
@@ -866,7 +866,7 @@ def _run_code_review(
         architecture=architecture,
         existing_codebase=existing_codebase,
     )
-    return agents["code_review"].run(review_input)  # pragma: no cover  # integration-only
+    return agents["code_review"].run(review_input)
 
 
 def _code_review_issues_to_dicts(issues: Any) -> List[Dict[str, Any]]:

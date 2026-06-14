@@ -108,10 +108,12 @@ def test_list_changed_and_deleted_ambiguous_merge_base_raises(tmp_path: Path, mo
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
 
-    def fake_run_git(path, cmd, timeout=30):
+    def fake_run_git(path, cmd, timeout=30, **kwargs):
         if cmd[:2] == ["git", "merge-base"]:
             return 0, "1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n"
-        return 0, ""
+        # Any further git call (e.g. the diff) means the ambiguity guard did NOT
+        # fire — fail loudly so the test can't pass for the wrong reason.
+        raise AssertionError(f"unexpected git command after ambiguous merge base: {cmd}")
 
     monkeypatch.setattr(git_utils, "_run_git", fake_run_git)
 
@@ -188,7 +190,10 @@ def test_read_files_as_dict_cyclic_symlink_not_fatal(tmp_path: Path) -> None:
     does not abort the read."""
     (tmp_path / "ok.py").write_text("A", encoding="utf-8")
     loop = tmp_path / "loop"
-    loop.symlink_to(loop)  # self-referential symlink
+    try:
+        loop.symlink_to(loop)  # self-referential symlink
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
 
     result = read_files_as_dict(tmp_path, ["ok.py", "loop"])
 
@@ -265,7 +270,10 @@ def test_read_files_as_dict_sanitizes_surrogate_key(tmp_path: Path) -> None:
     """A non-UTF-8 filename (read via surrogateescape) yields an encodable key, so
     downstream UTF-8/JSON serialization cannot crash; content is still read."""
     name = "caf\udcff.py"  # lone surrogate, as surrogateescape produces for 0xFF
-    (tmp_path / name).write_text("X = 1\n", encoding="utf-8")
+    try:
+        (tmp_path / name).write_text("X = 1\n", encoding="utf-8")
+    except (OSError, UnicodeEncodeError):
+        pytest.skip("filesystem cannot represent a lone-surrogate filename")
 
     result = read_files_as_dict(tmp_path, [name])
 
@@ -890,11 +898,14 @@ def test_select_review_input_fails_closed_to_whole_repo(tmp_path: Path) -> None:
     # No `development` branch exists → merge-base fails → fail closed.
 
     task = SimpleNamespace(description="x")
-    # written_files present, but the partial set must not be used on baseline failure.
+    # written_files present, but the partial set must NOT be used on baseline
+    # failure — the fail-closed path reviews the whole repo from disk instead.
     files, code, _note = _select_review_input(tmp_path, task, written_files={"main.py": "x"})
 
     assert code is None
-    assert "main.py" in files  # complete whole-repo review (as a files dict)
+    # Content proves it is the whole-repo on-disk read, not the written_files dict
+    # (which would have been the placeholder "x").
+    assert files["main.py"] == "print('hi')\n"
 
 
 def test_select_review_input_deletion_note_lists_every_path(tmp_path: Path) -> None:

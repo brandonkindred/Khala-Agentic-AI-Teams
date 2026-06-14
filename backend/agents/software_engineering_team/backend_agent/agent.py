@@ -931,7 +931,9 @@ def _select_review_input(
           ``code`` is populated so review is never silently skipped: the worktree
           content of every committed/uncommitted/just-written path that exists on
           disk plus the deletion/withheld/unreadable/emptied notes and restored
-          deletion content, else the legacy whole-repo ``code`` string (logged).
+          deletion content, else (the fail-closed fallback) a *whole-repo files
+          dict* via :func:`_whole_repo_review_input` (logged) — ``code`` is then
+          ``None``; only a genuinely empty repo yields an empty ``code`` string.
           ``synthetic_keys`` is the exact set of note labels inserted, and
           ``key_to_path`` maps every real review key back to its on-disk path, so
           the caller can translate a finding's key and detach note-anchored

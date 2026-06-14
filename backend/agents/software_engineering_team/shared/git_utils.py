@@ -626,7 +626,10 @@ def find_referencing_paths(
         patterns = _deleted_module_patterns(dp)
         if not patterns:
             continue
-        code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns])
+        # stdout only — a git stderr warning must not be parsed as a referrer path.
+        code, out = _run_git(
+            path, ["git", "grep", "-l", "-I", "-E", *patterns], merge_stderr=False
+        )
         # git grep exits 1 for a clean "no matches"; >=2 (or our -1) is an actual
         # error (bad pattern, grep unavailable). Don't conflate them — a silent
         # error would be presented as "nothing depends on it"; log it instead.
