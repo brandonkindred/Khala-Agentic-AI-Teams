@@ -282,12 +282,17 @@ def apply_patch(
     merge_nested: dict[str, Any] | None = None,
     append_to: dict[str, list[Any]] | None = None,
     increment: dict[str, int] | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     """Atomic read-modify-write: merge fields, merge into nested dicts, append to lists, increment counters.
 
-    Postconditions: ``data.last_activity_at`` is stamped with the server's UTC now
-    unless ``merge_fields`` supplied it explicitly (a patch is a real update — see
-    :func:`update_job`).
+    Postconditions:
+        - ``data.last_activity_at`` is stamped with the server's UTC now unless ``merge_fields``
+          supplied it explicitly (a patch is a real update — see :func:`update_job`).
+        - Returns the updated job record, read back WITHIN the same row-locked transaction as the
+          write — so a caller that increments a counter observes its OWN result, never a value a
+          concurrent patch committed afterward (the readback must not be a separate transaction, or
+          two racing increments could each read the final value and both mis-conclude they lost).
+          Returns None when the job does not exist.
     """
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
@@ -296,7 +301,7 @@ def apply_patch(
         )
         row = cur.fetchone()
         if row is None:
-            return
+            return None
         data = row[0] if isinstance(row[0], dict) else json.loads(row[0])
         current_status = row[1]
         new_status = current_status
@@ -352,6 +357,11 @@ def apply_patch(
                 """,
             (json.dumps(data), new_status, now, now, team, job_id),
         )
+        # Read back inside the same row-locked transaction so the returned record reflects THIS
+        # patch's write (the FOR UPDATE lock is held until commit, so a concurrent patch can't
+        # interleave between this write and read).
+        cur.execute("SELECT * FROM jobs WHERE team = %s AND job_id = %s", (team, job_id))
+        return _row_to_dict(cur.fetchone(), cur)
 
 
 def append_event(

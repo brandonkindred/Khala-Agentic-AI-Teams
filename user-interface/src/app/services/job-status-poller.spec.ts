@@ -7,6 +7,18 @@ describe('pollJobStatus', () => {
   beforeEach(() => vi.useFakeTimers());
   afterEach(() => vi.useRealTimers());
 
+  it('fetches immediately on subscribe, before the first interval elapses', () => {
+    const api = { getJobStatus: vi.fn(() => of({ job_id: 'j', status: 'running' })) };
+    const seen: CodingTeamJobStatus[] = [];
+
+    const sub = pollJobStatus(api, 'j', (s) => seen.push(s), vi.fn());
+    vi.advanceTimersByTime(0);
+
+    expect(api.getJobStatus).toHaveBeenCalledTimes(1);
+    expect(seen.map((s) => s.status)).toEqual(['running']);
+    sub.unsubscribe();
+  });
+
   it('emits each status until terminal, then stops', () => {
     const statuses: CodingTeamJobStatus[] = [
       { job_id: 'j', status: 'running' },
@@ -18,8 +30,8 @@ describe('pollJobStatus', () => {
     const lost = vi.fn();
 
     const sub = pollJobStatus(api, 'j', (s) => seen.push(s), lost);
-    vi.advanceTimersByTime(5000);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(0); // immediate fetch → running
+    vi.advanceTimersByTime(5000); // → completed (terminal)
     vi.advanceTimersByTime(5000); // no further emissions after terminal
 
     expect(seen.map((s) => s.status)).toEqual(['running', 'completed']);
@@ -27,13 +39,51 @@ describe('pollJobStatus', () => {
     expect(sub.closed).toBe(true);
   });
 
+  it('counts only consecutive errors: a success resets the budget', () => {
+    // error, error, success, error, error — never 3 in a row, so onConnectionLost must not fire.
+    const seq = ['err', 'err', 'ok', 'err', 'err'];
+    let i = 0;
+    const api = {
+      getJobStatus: vi.fn(() =>
+        seq[i++] === 'ok'
+          ? of({ job_id: 'j', status: 'running' } as CodingTeamJobStatus)
+          : throwError(() => new Error('boom')),
+      ),
+    };
+    const lost = vi.fn();
+
+    const sub = pollJobStatus(api, 'j', vi.fn(), lost);
+    vi.advanceTimersByTime(0); // err (1)
+    vi.advanceTimersByTime(5000); // err (2)
+    vi.advanceTimersByTime(5000); // ok → resets to 0
+    vi.advanceTimersByTime(5000); // err (1 again)
+    vi.advanceTimersByTime(5000); // err (2)
+
+    expect(lost).not.toHaveBeenCalled();
+    expect(api.getJobStatus).toHaveBeenCalledTimes(5);
+    sub.unsubscribe();
+  });
+
+  it('stops polling once the returned subscription is unsubscribed', () => {
+    const api = { getJobStatus: vi.fn(() => of({ job_id: 'j', status: 'running' })) };
+
+    const sub = pollJobStatus(api, 'j', vi.fn(), vi.fn());
+    vi.advanceTimersByTime(0); // immediate fetch
+    expect(api.getJobStatus).toHaveBeenCalledTimes(1);
+
+    sub.unsubscribe();
+    vi.advanceTimersByTime(5000); // interval would fire, but we've torn down
+    vi.advanceTimersByTime(5000);
+    expect(api.getJobStatus).toHaveBeenCalledTimes(1); // no further calls after unsubscribe
+  });
+
   it('calls onConnectionLost after the error budget is exhausted', () => {
     const api = { getJobStatus: vi.fn(() => throwError(() => new Error('boom'))) };
     const lost = vi.fn();
 
     const sub = pollJobStatus(api, 'j', vi.fn(), lost);
-    vi.advanceTimersByTime(5000);
-    vi.advanceTimersByTime(5000);
+    vi.advanceTimersByTime(0); // 1st error (immediate fetch)
+    vi.advanceTimersByTime(5000); // 2nd error
     expect(lost).not.toHaveBeenCalled(); // only 2 errors so far
     vi.advanceTimersByTime(5000);
     expect(lost).toHaveBeenCalledTimes(1); // 3rd error trips the budget

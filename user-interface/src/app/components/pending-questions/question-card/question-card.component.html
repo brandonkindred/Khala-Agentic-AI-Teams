@@ -5,10 +5,11 @@
     @if (question.required) {
       <span class="required-badge">Required</span>
     }
-    @if (hasSelectableOptions) {
+    @if (autoAnswerEnabled && hasSelectableOptions) {
       <button
         mat-icon-button
         class="auto-answer-btn"
+        aria-label="Auto-answer using AI based on industry best practices"
         [disabled]="isAutoAnswering"
         (click)="onAutoAnswerRequest()"
         matTooltip="Auto-answer using AI based on industry best practices"

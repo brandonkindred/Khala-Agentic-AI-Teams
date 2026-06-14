@@ -28,6 +28,7 @@
             [autoAnswerResult]="getAutoAnswerResult(question.id)"
             [isAutoAnswering]="isAutoAnswering(question.id)"
             [isAnswered]="isQuestionAnswered(question)"
+            [autoAnswerEnabled]="autoAnswerEnabled"
             (optionToggled)="onQuestionOptionToggled(question.id, $event)"
             (otherTextChanged)="onQuestionOtherTextChanged(question.id, $event)"
             (autoAnswerRequested)="autoAnswerQuestion(question)"
@@ -49,7 +50,7 @@
       <button
         mat-raised-button
         color="primary"
-        [disabled]="!allRequiredAnswered || submitting"
+        [disabled]="!allAnswersSubmittable || submitting"
         (click)="submitAnswers()"
       >
         @if (submitting) {
