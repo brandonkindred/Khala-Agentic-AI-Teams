@@ -38,7 +38,11 @@ describe('CognitionApiService', () => {
       expect(r).toEqual(stub);
     });
     const req = httpMock.expectOne(
-      `${base}/proposals?status=pending&limit=20&offset=5`,
+      (r) =>
+        r.url === `${base}/proposals` &&
+        r.params.get('status') === 'pending' &&
+        r.params.get('limit') === '20' &&
+        r.params.get('offset') === '5',
     );
     expect(req.request.method).toBe('GET');
     req.flush(stub);
@@ -155,7 +159,9 @@ describe('CognitionApiService', () => {
   it('lists rules with a status filter', () => {
     const stub: Rule[] = [{ id: 'r1' } as Rule];
     service.listRules('a1', { status: 'active' }).subscribe((r) => expect(r).toEqual(stub));
-    const req = httpMock.expectOne(`${base}/rules?status=active`);
+    const req = httpMock.expectOne(
+      (r) => r.url === `${base}/rules` && r.params.get('status') === 'active',
+    );
     expect(req.request.method).toBe('GET');
     req.flush(stub);
   });

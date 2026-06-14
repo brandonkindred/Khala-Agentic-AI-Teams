@@ -14,16 +14,16 @@ import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts seven tabs:
+ * Hosts seven tabs, in template order:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
+ *   - **Provisioning & Environments** — embeds the existing provisioning
+ *     dashboard verbatim so its behavior is unchanged.
  *   - **Backlog** — `product_delivery` initiatives/epics/stories with
  *     inline edit + grooming (#243 phase 4).
  *   - **Sprints** — sprint list with `Plan sprint` action (#243 phase 4).
  *   - **Feedback** — auto-promoted feedback with story-linking (#243
  *     phase 4 + the new PATCH /feedback/{id}/link route).
- *   - **Provisioning & Environments** — embeds the existing provisioning
- *     dashboard verbatim so its behavior is unchanged.
  *   - **Cognition** — operator surface for an agent's rule proposals
  *     (approve/reject), memory timeline, and rules.
  */

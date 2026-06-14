@@ -1,12 +1,14 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  DestroyRef,
   OnInit,
   WritableSignal,
   computed,
   inject,
   signal,
 } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { HttpErrorResponse } from '@angular/common/http';
 import { FormsModule } from '@angular/forms';
@@ -96,6 +98,12 @@ export class CognitionTabComponent implements OnInit {
   private readonly catalog = inject(AgentCatalogApiService);
   private readonly api = inject(CognitionApiService);
   private readonly dialog = inject(MatDialog);
+  private readonly destroyRef = inject(DestroyRef);
+
+  // Deferred-render timers (highlight clear + scroll-into-view). Tracked so they
+  // can be cancelled if the component is destroyed before they fire.
+  private highlightTimer: ReturnType<typeof setTimeout> | null = null;
+  private scrollTimer: ReturnType<typeof setTimeout> | null = null;
 
   readonly STORAGE_UNAVAILABLE_MESSAGE = STORAGE_UNAVAILABLE_MESSAGE;
 
@@ -185,6 +193,12 @@ export class CognitionTabComponent implements OnInit {
   readonly ruleModeTooltip = ruleModeTooltip;
 
   ngOnInit(): void {
+    // Cancel any deferred-render timers still pending at teardown so their
+    // callbacks don't run against a destroyed view.
+    this.destroyRef.onDestroy(() => {
+      if (this.highlightTimer !== null) clearTimeout(this.highlightTimer);
+      if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
+    });
     this.loadAgents();
   }
 
@@ -194,19 +208,22 @@ export class CognitionTabComponent implements OnInit {
   loadAgents(): void {
     this.loadingAgents.set(true);
     this.agentsError.set(null);
-    this.catalog.listAgents().subscribe({
-      next: (rows) => {
-        this.agents.set(rows);
-        this.loadingAgents.set(false);
-        if (rows.length && this.selectedAgentId() === null) {
-          this.selectAgent(rows[0].id);
-        }
-      },
-      error: (err) => {
-        this.agentsError.set(this.extractError(err, 'Failed to load agents.'));
-        this.loadingAgents.set(false);
-      },
-    });
+    this.catalog
+      .listAgents()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          this.agents.set(rows);
+          this.loadingAgents.set(false);
+          if (rows.length && this.selectedAgentId() === null) {
+            this.selectAgent(rows[0].id);
+          }
+        },
+        error: (err) => {
+          this.agentsError.set(this.extractError(err, 'Failed to load agents.'));
+          this.loadingAgents.set(false);
+        },
+      });
   }
 
   /** Scope the panel to `agentId`, reset filters/state to defaults, and reload all sections. */
@@ -215,6 +232,8 @@ export class CognitionTabComponent implements OnInit {
     // Reset filters so each agent starts from the default view.
     this.proposalStatusFilter.set('pending');
     this.ruleStatusFilter.set('active');
+    this.memoryBySalience.set(true);
+    this.memoryTopN.set(50);
     // Clear the previous agent's data so it isn't shown under the new agent
     // (and its action buttons aren't live) while the reload is in flight.
     this.proposals.set([]);
@@ -254,6 +273,7 @@ export class CognitionTabComponent implements OnInit {
     const query = filter === 'all' ? {} : { status: filter };
     this.api
       .listProposals(agentId, { ...query, limit: PROPOSAL_PAGE_LIMIT })
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (rows) => {
           if (reqId !== this.proposalsReqId) return;
@@ -288,6 +308,7 @@ export class CognitionTabComponent implements OnInit {
     const offset = this.proposals().length;
     this.api
       .listProposals(agentId, { ...query, limit: PROPOSAL_PAGE_LIMIT, offset })
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (rows) => {
           if (reqId !== this.proposalsReqId) return;
@@ -338,19 +359,22 @@ export class CognitionTabComponent implements OnInit {
     offset: number,
     acc: Map<string, Rule>,
   ): void {
-    this.api.listRules(agentId, { limit: RULE_PAGE_LIMIT, offset }).subscribe({
-      next: (rows) => {
-        if (reqId !== this.rulesIndexReqId) return;
-        for (const r of rows) acc.set(r.id, r);
-        this.rulesIndex.set(new Map(acc));
-        if (rows.length === RULE_PAGE_LIMIT) {
-          this.fetchRulesIndexPage(agentId, reqId, offset + RULE_PAGE_LIMIT, acc);
-        }
-      },
-      error: () => {
-        /* non-fatal: targets just fall back to the loaded section rules */
-      },
-    });
+    this.api
+      .listRules(agentId, { limit: RULE_PAGE_LIMIT, offset })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          if (reqId !== this.rulesIndexReqId) return;
+          for (const r of rows) acc.set(r.id, r);
+          this.rulesIndex.set(new Map(acc));
+          if (rows.length === RULE_PAGE_LIMIT) {
+            this.fetchRulesIndexPage(agentId, reqId, offset + RULE_PAGE_LIMIT, acc);
+          }
+        },
+        error: () => {
+          /* non-fatal: targets just fall back to the loaded section rules */
+        },
+      });
   }
 
   /** Confirm, then approve. No-op if evidence is outdated or a decision is in flight. */
@@ -364,6 +388,7 @@ export class CognitionTabComponent implements OnInit {
     this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
       .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((ok) => {
         if (ok) this.performApprove(p);
       });
@@ -397,23 +422,26 @@ export class CognitionTabComponent implements OnInit {
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
     this.proposals.set(prev.filter((x) => x.id !== p.id));
-    this.api.approveProposal(agentId, p.id).subscribe({
-      next: () => {
-        this.actingProposalId.set(null);
-        if (agentId !== this.selectedAgentId()) return; // agent changed mid-flight — leave its view alone
-        this.loadRules();
-        const filter = this.proposalStatusFilter();
-        if (filter === 'all' || filter === 'approved' || reqId !== this.proposalsReqId) {
-          this.loadProposals(); // re-sync for server audit fields / superseding load
-        }
-      },
-      error: (err) => {
-        this.actingProposalId.set(null);
-        if (agentId !== this.selectedAgentId()) return; // don't surface a stale agent's error
-        if (reqId === this.proposalsReqId) this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
-      },
-    });
+    this.api
+      .approveProposal(agentId, p.id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: () => {
+          this.actingProposalId.set(null);
+          if (agentId !== this.selectedAgentId()) return; // agent changed mid-flight — leave its view alone
+          this.loadRules();
+          const filter = this.proposalStatusFilter();
+          if (filter === 'all' || filter === 'approved' || reqId !== this.proposalsReqId) {
+            this.loadProposals(); // re-sync for server audit fields / superseding load
+          }
+        },
+        error: (err) => {
+          this.actingProposalId.set(null);
+          if (agentId !== this.selectedAgentId()) return; // don't surface a stale agent's error
+          if (reqId === this.proposalsReqId) this.proposals.set(prev);
+          this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to approve proposal.');
+        },
+      });
   }
 
   /** Confirm, then reject. No-op if a decision is in flight. */
@@ -428,6 +456,7 @@ export class CognitionTabComponent implements OnInit {
     this.dialog
       .open<ConfirmDialogComponent, ConfirmDialogData, boolean>(ConfirmDialogComponent, { data })
       .afterClosed()
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe((ok) => {
         if (ok) this.performReject(p);
       });
@@ -449,23 +478,26 @@ export class CognitionTabComponent implements OnInit {
     const prev = this.proposals();
     const reqId = this.proposalsReqId;
     this.proposals.set(prev.filter((x) => x.id !== p.id));
-    this.api.rejectProposal(agentId, p.id).subscribe({
-      next: (updated) => {
-        this.actingProposalId.set(null);
-        if (agentId !== this.selectedAgentId()) return;
-        if (reqId !== this.proposalsReqId) {
-          this.loadProposals();
-          return;
-        }
-        this.reconcileDecided(prev, updated);
-      },
-      error: (err) => {
-        this.actingProposalId.set(null);
-        if (agentId !== this.selectedAgentId()) return;
-        if (reqId === this.proposalsReqId) this.proposals.set(prev);
-        this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
-      },
-    });
+    this.api
+      .rejectProposal(agentId, p.id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (updated) => {
+          this.actingProposalId.set(null);
+          if (agentId !== this.selectedAgentId()) return;
+          if (reqId !== this.proposalsReqId) {
+            this.loadProposals();
+            return;
+          }
+          this.reconcileDecided(prev, updated);
+        },
+        error: (err) => {
+          this.actingProposalId.set(null);
+          if (agentId !== this.selectedAgentId()) return;
+          if (reqId === this.proposalsReqId) this.proposals.set(prev);
+          this.applyError(err, this.proposalsError, this.proposalsUnavailable, 'Failed to reject proposal.');
+        },
+      });
   }
 
   /**
@@ -555,7 +587,9 @@ export class CognitionTabComponent implements OnInit {
       this.ruleStatusFilter.set('all');
       this.loadRules();
     }
-    setTimeout(() => {
+    if (this.highlightTimer !== null) clearTimeout(this.highlightTimer);
+    this.highlightTimer = setTimeout(() => {
+      this.highlightTimer = null;
       if (this.highlightedRuleId() === id) this.highlightedRuleId.set(null);
     }, 1500);
   }
@@ -577,6 +611,7 @@ export class CognitionTabComponent implements OnInit {
     const reqId = ++this.memoryReqId;
     this.api
       .listMemoryEvents(agentId, { bySalience: this.memoryBySalience(), topN: this.memoryTopN() })
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: (rows) => {
           if (reqId !== this.memoryReqId) return;
@@ -645,25 +680,28 @@ export class CognitionTabComponent implements OnInit {
     const reqId = ++this.rulesReqId;
     const filter = this.ruleStatusFilter();
     const query = filter === 'all' ? {} : { status: filter };
-    this.api.listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT }).subscribe({
-      next: (rows) => {
-        if (reqId !== this.rulesReqId) return;
-        this.rulesUnavailable.set(false);
-        // Defensive: ensure highest priority first regardless of API ordering.
-        this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
-        this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
-        this.loadingRules.set(false);
-        this.flushPendingScroll();
-      },
-      error: (err) => {
-        if (reqId !== this.rulesReqId) return;
-        this.rules.set([]);
-        this.rulesHasMore.set(false);
-        this.pendingScrollRuleId = null;
-        this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load rules.');
-        this.loadingRules.set(false);
-      },
-    });
+    this.api
+      .listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          if (reqId !== this.rulesReqId) return;
+          this.rulesUnavailable.set(false);
+          // Defensive: ensure highest priority first regardless of API ordering.
+          this.rules.set([...rows].sort((a, b) => b.priority - a.priority));
+          this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
+          this.loadingRules.set(false);
+          this.flushPendingScroll();
+        },
+        error: (err) => {
+          if (reqId !== this.rulesReqId) return;
+          this.rules.set([]);
+          this.rulesHasMore.set(false);
+          this.pendingScrollRuleId = null;
+          this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load rules.');
+          this.loadingRules.set(false);
+        },
+      });
   }
 
   /**
@@ -679,23 +717,26 @@ export class CognitionTabComponent implements OnInit {
     const filter = this.ruleStatusFilter();
     const query = filter === 'all' ? {} : { status: filter };
     const offset = this.rules().length;
-    this.api.listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT, offset }).subscribe({
-      next: (rows) => {
-        if (reqId !== this.rulesReqId) return;
-        this.rulesUnavailable.set(false);
-        this.rules.set([...this.rules(), ...rows].sort((a, b) => b.priority - a.priority));
-        this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
-        this.loadingRules.set(false);
-        this.flushPendingScroll();
-      },
-      error: (err) => {
-        if (reqId !== this.rulesReqId) return;
-        // Stop chasing a pending scroll target across pages if paging fails.
-        this.pendingScrollRuleId = null;
-        this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load more rules.');
-        this.loadingRules.set(false);
-      },
-    });
+    this.api
+      .listRules(agentId, { ...query, limit: RULE_PAGE_LIMIT, offset })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (rows) => {
+          if (reqId !== this.rulesReqId) return;
+          this.rulesUnavailable.set(false);
+          this.rules.set([...this.rules(), ...rows].sort((a, b) => b.priority - a.priority));
+          this.rulesHasMore.set(rows.length === RULE_PAGE_LIMIT);
+          this.loadingRules.set(false);
+          this.flushPendingScroll();
+        },
+        error: (err) => {
+          if (reqId !== this.rulesReqId) return;
+          // Stop chasing a pending scroll target across pages if paging fails.
+          this.pendingScrollRuleId = null;
+          this.applyError(err, this.rulesError, this.rulesUnavailable, 'Failed to load more rules.');
+          this.loadingRules.set(false);
+        },
+      });
   }
 
   /** Change the rule status filter and reload. */
@@ -717,7 +758,11 @@ export class CognitionTabComponent implements OnInit {
     if (this.rules().some((r) => r.id === target)) {
       this.pendingScrollRuleId = null;
       // Defer so the @for row exists in the DOM before scrolling.
-      setTimeout(() => this.scrollRuleIntoView(target));
+      if (this.scrollTimer !== null) clearTimeout(this.scrollTimer);
+      this.scrollTimer = setTimeout(() => {
+        this.scrollTimer = null;
+        this.scrollRuleIntoView(target);
+      });
     } else if (this.rulesHasMore()) {
       this.loadMoreRules(); // target is on a later page — fetch it, then re-flush
     } else {

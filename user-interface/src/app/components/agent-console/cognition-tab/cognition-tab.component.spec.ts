@@ -598,34 +598,69 @@ describe('CognitionTabComponent', () => {
 
   it('pages the rules section until a scroll target on a later page appears', () => {
     vi.useFakeTimers();
-    const target = { ...rules[0], id: 'r-deep', priority: 5, status: 'retired' as const };
-    const page1 = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'a' + i, priority: 1000 - i }));
-    // 'all' view: first page full (no target), second page short and holds it.
-    api.listRules = vi
-      .fn()
-      .mockImplementation((_id: string, q?: { status?: string; offset?: number }) => {
-        if (q?.status === 'active') return of([rules[0]]);
-        return of((q?.offset ?? 0) >= 500 ? [target] : page1);
-      });
-    const f = build();
-    f.detectChanges();
-    const c = f.componentInstance;
-    c.scrollToRule('r-deep'); // not in the active section → reveal, then page through 'all'
-    expect(c.ruleStatusFilter()).toBe('all');
-    expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500, offset: 500 });
-    expect(c.rules().some((r) => r.id === 'r-deep')).toBe(true);
-    // The pending target was consumed, not left dangling for a stray future scroll.
-    expect((c as unknown as { pendingScrollRuleId: string | null }).pendingScrollRuleId).toBeNull();
-    vi.advanceTimersByTime(1500);
-    vi.useRealTimers();
+    const scrollSpy = vi.fn();
+    const origScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollSpy;
+    try {
+      const target = { ...rules[0], id: 'r-deep', priority: 5, status: 'retired' as const };
+      const page1 = Array.from({ length: 500 }, (_, i) => ({ ...rules[0], id: 'a' + i, priority: 1000 - i }));
+      // 'all' view: first page full (no target), second page short and holds it.
+      api.listRules = vi
+        .fn()
+        .mockImplementation((_id: string, q?: { status?: string; offset?: number }) => {
+          if (q?.status === 'active') return of([rules[0]]);
+          return of((q?.offset ?? 0) >= 500 ? [target] : page1);
+        });
+      const f = build();
+      f.detectChanges();
+      const c = f.componentInstance;
+      c.scrollToRule('r-deep'); // not in the active section → reveal, then page through 'all'
+      expect(c.ruleStatusFilter()).toBe('all');
+      expect(api.listRules).toHaveBeenCalledWith('a1', { limit: 500, offset: 500 });
+      expect(c.rules().some((r) => r.id === 'r-deep')).toBe(true);
+      f.detectChanges(); // render the now-loaded rows so #rule-r-deep exists
+      vi.advanceTimersByTime(1500); // fire the deferred scroll
+      // The target was consumed and scrolled into view, not left dangling.
+      expect(scrollSpy).toHaveBeenCalled();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = origScroll;
+      vi.useRealTimers();
+    }
   });
 
-  it('gives up the pending scroll target when no page contains it', () => {
-    const f = build();
-    f.detectChanges();
-    const c = f.componentInstance;
-    c.scrollToRule('r-missing'); // never present in any page
-    expect((c as unknown as { pendingScrollRuleId: string | null }).pendingScrollRuleId).toBeNull();
+  it('cancels a pending highlight timer on destroy without throwing', () => {
+    vi.useFakeTimers();
+    try {
+      const f = build();
+      f.detectChanges();
+      f.componentInstance.scrollToRule('r9'); // r9 is loaded → schedules the highlight timer
+      expect(() => f.destroy()).not.toThrow(); // teardown clears the pending timer
+      vi.advanceTimersByTime(1500); // the cleared timer is now a no-op
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not scroll to a given-up target when a later load includes it', () => {
+    vi.useFakeTimers();
+    const scrollSpy = vi.fn();
+    const origScroll = HTMLElement.prototype.scrollIntoView;
+    HTMLElement.prototype.scrollIntoView = scrollSpy;
+    try {
+      const f = build();
+      f.detectChanges();
+      const c = f.componentInstance;
+      c.scrollToRule('r-missing'); // absent from every page → widen to 'all', still absent → give up
+      // A later, unrelated load brings the id in; the given-up target must not auto-scroll.
+      api.listRules = vi.fn().mockReturnValue(of([{ ...rules[0], id: 'r-missing' }]));
+      c.setRuleFilter('all');
+      f.detectChanges();
+      vi.advanceTimersByTime(1500);
+      expect(scrollSpy).not.toHaveBeenCalled();
+    } finally {
+      HTMLElement.prototype.scrollIntoView = origScroll;
+      vi.useRealTimers();
+    }
   });
 
   it('renders the disabled-approve a11y contract and memory toggle for a stale proposal', () => {
