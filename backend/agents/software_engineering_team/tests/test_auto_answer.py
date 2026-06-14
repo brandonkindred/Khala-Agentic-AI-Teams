@@ -249,6 +249,48 @@ def test_get_auto_answer_for_job_not_found(monkeypatch, patched_job_store) -> No
     assert out is None
 
 
+def test_get_auto_answer_for_job_no_options_returns_none(patched_job_store) -> None:
+    from software_engineering_team.product_requirements_analysis_agent import auto_answer
+    from software_engineering_team.shared import job_store as js
+
+    js.create_job("job1", repo_path="/tmp")
+    js.update_job(
+        "job1",
+        pending_questions=[
+            {"id": "q1", "question_text": "What fields?", "context": "", "options": []}
+        ],
+    )
+    # Questions with no options cannot be auto-answered; the user must provide free-text.
+    out = auto_answer.get_auto_answer_for_job(
+        llm=None, job_id="job1", question_id="q1", spec_content=""
+    )
+    assert out is None
+
+
+def test_get_auto_answer_for_job_synthetic_other_option_returns_none(patched_job_store) -> None:
+    from software_engineering_team.product_requirements_analysis_agent import auto_answer
+    from software_engineering_team.shared import job_store as js
+
+    js.create_job("job2", repo_path="/tmp")
+    js.update_job(
+        "job2",
+        pending_questions=[
+            {
+                "id": "q1",
+                "question_text": "What is the deployment target?",
+                "context": "",
+                # Synthetic placeholder inserted by _convert_to_pending_questions when the
+                # OpenQuestion had no options — must NOT be treated as a real selectable option.
+                "options": [{"id": "other", "label": "Provide answer in text field"}],
+            }
+        ],
+    )
+    out = auto_answer.get_auto_answer_for_job(
+        llm=None, job_id="job2", question_id="q1", spec_content=""
+    )
+    assert out is None
+
+
 def test_get_auto_answer_for_job_question_not_found(patched_job_store) -> None:
     from software_engineering_team.product_requirements_analysis_agent import auto_answer
     from software_engineering_team.shared import job_store as js

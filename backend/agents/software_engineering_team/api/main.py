@@ -1414,10 +1414,26 @@ def submit_pending_answers(job_id: str, request: SubmitAnswersRequest) -> JobSta
         )
 
     for answer in request.answers:
-        if answer.selected_option_id == "other" and not answer.other_text:
+        other_text = (answer.other_text or "").strip()
+        q = next((q for q in pending_questions if q["id"] == answer.question_id), None)
+        question_options = {o.get("id") for o in (q.get("options") or [])} if q else set()
+
+        if answer.selected_option_id == "other":
+            if not other_text:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {answer.question_id}: 'other' selected but no text provided.",
+                )
+        elif answer.selected_option_id:
+            if answer.selected_option_id not in question_options:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Question {answer.question_id}: unknown option '{answer.selected_option_id}'.",
+                )
+        elif not other_text:
             raise HTTPException(
                 status_code=400,
-                detail=f"Question {answer.question_id}: 'other' selected but no text provided.",
+                detail=f"Question {answer.question_id}: no option selected and no text provided.",
             )
 
     answers_dicts = [
@@ -2157,6 +2173,15 @@ def auto_answer_run_team_question(
             detail=f"Question {question_id} not found in pending questions.",
         )
 
+    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
+    # _convert_to_pending_questions inserts it when a question has no structured options.
+    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
+    if not real_options:
+        raise HTTPException(
+            status_code=422,
+            detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
+        )
+
     spec_content = _get_spec_content_for_job(data)
     additional_context = request.spec_context if request else None
 
@@ -2657,6 +2682,15 @@ def auto_answer_product_analysis_question(
         raise HTTPException(
             status_code=404,
             detail=f"Question {question_id} not found in pending questions.",
+        )
+
+    # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
+    # _convert_to_pending_questions inserts it when a question has no structured options.
+    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
+    if not real_options:
+        raise HTTPException(
+            status_code=422,
+            detail="This question has no selectable options. Provide a free-text answer via the /answers endpoint using the other_text field.",
         )
 
     spec_content = _get_spec_content_for_job(data)
