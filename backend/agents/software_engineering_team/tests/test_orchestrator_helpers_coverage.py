@@ -47,7 +47,7 @@ def test_convert_to_structured_questions_assigns_unique_ids_and_options():
     assert len(ids) == 2  # unique
     for q in qs:
         assert q["question_text"] in ("What is the goal?", "What is the deadline?")
-        assert q["options"]  # options copied from DEFAULT_CLARIFICATION_OPTIONS
+        assert q["options"] == []  # empty-list fallback; UI shows free-text field only
         assert q["required"] is True
         assert q["source"] == "planning"
 
