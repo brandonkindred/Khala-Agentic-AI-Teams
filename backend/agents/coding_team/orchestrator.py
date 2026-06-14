@@ -384,21 +384,115 @@ def _run_pause_cycle(
     structured = hitl.convert_to_structured_questions(questions, source=source)
     if not structured:
         return [], True
+    # Record the wait-loop lease (the first heartbeat) ATOMICALLY with the pause flag: the same
+    # update publishes ``waiting_for_answers=True`` and a fresh ``answer_wait_heartbeat_at``, so a
+    # concurrent answer that lands on another worker can never observe the pause without also
+    # observing a live heartbeat. Doing the heartbeat after on_pause (which may post a slow GitHub
+    # comment) or only on the first wait_for_answers tick would leave a window where another worker
+    # sees the flag but no heartbeat, declares the orchestrator dead, and double-drives the job.
     update_fn(
         status=hitl.WAITING_STATUS,
         phase="paused",
         status_text=f"Waiting for {len(structured)} decision(s) from the user",
         waiting_for_answers=True,
         pending_questions=structured,
+        answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
+        # Clear the cross-worker resume-claim lease so THIS pause is immediately claimable without
+        # waiting out the prior lease's TTL (the seq counter is left monotonic).
+        resume_claim_at=None,
     )
+    # The answer-wait heartbeats below are liveness pings, NOT real orchestrator activity, but they
+    # route through the normal update path which stamps last_activity_at on every write. Pin it to
+    # its just-published value and pass it back on each heartbeat so a job that waits hours for a
+    # user doesn't look continuously active (the API contract is that last_activity_at excludes
+    # heartbeats, and stall/age indicators depend on it). Nothing real happens while waiting, so the
+    # value is stable for the whole pause.
+    # Thread 10: wrap the post-pause get_job so a transient store error doesn't crash the
+    # orchestrator after the pause flag is already written (which would leave waiting_for_answers
+    # True while the thread handler marks the job failed). On failure, continue with None —
+    # heartbeats simply won't pin last_activity_at (see Thread 12 guard below).
+    try:
+        pinned_activity_at = (get_job_fn(job_id) or {}).get("last_activity_at")
+    except Exception:
+        logger.debug(
+            "Failed to read pinned_activity_at after pause update for job %s; "
+            "answer-wait heartbeats will not pin last_activity_at.",
+            job_id,
+            exc_info=True,
+        )
+        pinned_activity_at = None
     if on_pause is not None:
+        # on_pause can post a GitHub comment whose client uses ~30s timeouts with retries, which
+        # can exceed the answer endpoint's heartbeat-staleness window. Periodic wait-loop heartbeats
+        # don't start until on_pause returns, so without renewal the single initial heartbeat could
+        # go stale mid-callback and let another worker conclude the orchestrator died and spawn a
+        # second run. Keep renewing the lease in the background for the callback's full duration.
+        _renew_stop = threading.Event()
+        # Thread 12: only forward last_activity_at when we have a concrete value; passing None
+        # would overwrite the field with null on every heartbeat, breaking the contract that
+        # last_activity_at reflects real work, not liveness pings.
+        _pinned_kw = (
+            {"last_activity_at": pinned_activity_at} if pinned_activity_at is not None else {}
+        )
+
+        def _renew_lease() -> None:
+            while not _renew_stop.wait(hitl.ANSWER_WAIT_POLL_INTERVAL_S):
+                try:
+                    update_fn(
+                        answer_wait_heartbeat_at=hitl.heartbeat_timestamp(),
+                        **_pinned_kw,
+                    )
+                except Exception:  # noqa: BLE001 — renewal must never abort the pause
+                    logger.debug(
+                        "answer-wait lease renewal during on_pause failed for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+
+        _renew_thread = threading.Thread(
+            target=_renew_lease, name=f"pause-lease-{job_id}", daemon=True
+        )
+        # Thread 14: a system resource exhaustion may prevent the thread from starting; swallow
+        # that error and continue without the renewer (the initial heartbeat from the pause-publish
+        # update will cover short on_pause callbacks; a long callback may let the lease go stale).
+        _renew_started = False
+        try:
+            _renew_thread.start()
+            _renew_started = True
+        except RuntimeError:
+            logger.warning(
+                "Could not start pause-lease renewal thread for job %s; "
+                "on_pause callback runs without background heartbeat renewal.",
+                job_id,
+                exc_info=True,
+            )
         try:
             on_pause(structured)
         except Exception as e:  # noqa: BLE001 — surfacing the pause must never abort the job
             logger.warning("on_pause callback failed for job %s: %s", job_id, e)
-    got = hitl.wait_for_answers(job_id, get_job_fn)
+        finally:
+            _renew_stop.set()
+            if _renew_started:
+                _renew_thread.join(timeout=5.0)
+    # The heartbeat lets the answers endpoint (possibly in another worker process) tell a live,
+    # blocked wait loop apart from a dead one before it considers auto-resuming the job.
+    # Thread 12: same guard — omit last_activity_at from the wait-loop heartbeat when unknown.
+    _pinned_kw = {"last_activity_at": pinned_activity_at} if pinned_activity_at is not None else {}
+    got = hitl.wait_for_answers(
+        job_id,
+        get_job_fn,
+        heartbeat_fn=lambda ts: update_fn(answer_wait_heartbeat_at=ts, **_pinned_kw),
+    )
     if not got:
-        data = get_job_fn(job_id) or {}
+        # Thread 11: wrap the terminal-check read; a store error here means we cannot distinguish
+        # a timed-out wait from a cancellation, so default to the safer "mark failed" path.
+        try:
+            data = get_job_fn(job_id) or {}
+        except Exception:
+            logger.debug(
+                "Failed to read job status after wait timeout for job %s", job_id, exc_info=True
+            )
+            data = {}
         if hitl.is_terminal(data):
             logger.info(
                 "Job %s ended while waiting for answers (status=%s)", job_id, data.get("status")
@@ -412,7 +506,18 @@ def _run_pause_cycle(
                 waiting_for_answers=False,
             )
         return [], False
-    submitted = (get_job_fn(job_id) or {}).get("submitted_answers") or []
+    # Thread 11: wrap the submitted-answers read; if it fails after answers were received, log and
+    # continue with an empty list so the job is cleared from the paused state (the update below
+    # clears waiting_for_answers) rather than crashing with the pause flag still set.
+    try:
+        submitted = (get_job_fn(job_id) or {}).get("submitted_answers") or []
+    except Exception:
+        logger.warning(
+            "Failed to read submitted_answers for job %s; proceeding with empty answers.",
+            job_id,
+            exc_info=True,
+        )
+        submitted = []
     resolved = hitl.answers_to_resolved(submitted, structured)
     update_fn(
         status="running",
