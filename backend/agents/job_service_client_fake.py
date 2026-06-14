@@ -252,6 +252,32 @@ class FakeJobServiceClient:
             job["last_activity_at"] = _now_iso()
         self._stamp(job)
 
+    def apply_and_get(
+        self,
+        job_id: str,
+        *,
+        merge_fields: dict[str, Any] | None = None,
+        merge_nested: dict[str, Any] | None = None,
+        append_to: dict[str, list[Any]] | None = None,
+        increment: dict[str, int] | None = None,
+    ) -> dict[str, Any] | None:
+        """Like ``atomic_update`` but returns the updated job (mirrors production fencing-token use).
+
+        Invariant: this fake is single-threaded and in-memory — tests drive it sequentially from the
+        test thread. ``atomic_update`` mutates the live job dict in place and ``get_job`` returns a
+        fresh copy of that same dict, so the returned snapshot always reflects this call's own
+        increment with no read-after-write gap. The production service guarantees the same via a
+        row-locked transaction; behaviour under genuine concurrency can only be exercised against it.
+        """
+        self.atomic_update(
+            job_id,
+            merge_fields=merge_fields,
+            merge_nested=merge_nested,
+            append_to=append_to,
+            increment=increment,
+        )
+        return self.get_job(job_id)
+
 
 @pytest.fixture
 def fake_job_client() -> FakeJobServiceClient:

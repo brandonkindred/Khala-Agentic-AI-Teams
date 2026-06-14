@@ -54,7 +54,7 @@ def _patch_git(monkeypatch, diff: str = "", merge=(True, "ok")):
 def _answer_all(job: Dict[str, Any], option: str = "yes"):
     """Fake hitl.wait_for_answers: answer every surfaced question and clear the wait flag."""
 
-    def fake_wait(job_id, get_job_fn):
+    def fake_wait(job_id, get_job_fn, **kw):
         pend = job.get("pending_questions") or []
         job["submitted_answers"] = list(job.get("submitted_answers") or []) + [
             {"question_id": q["id"], "selected_option_id": option} for q in pend
@@ -129,6 +129,106 @@ def test_pause_cycle_success_calls_on_pause(monkeypatch):
     assert job["waiting_for_answers"] is False
 
 
+def test_pause_publish_writes_heartbeat_atomically_with_flag(monkeypatch):
+    """The pause flag and the first heartbeat must be set in the SAME update, so a concurrent
+    answer on another worker can never see waiting_for_answers without a live heartbeat."""
+    updates: List[Dict[str, Any]] = []
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+    _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=lambda j: job,
+        update_fn=lambda **kw: (job.update(kw), updates.append(dict(kw))),
+        on_pause=lambda qs: None,
+    )
+    # The update that publishes the pause flag also carries the heartbeat timestamp and clears the
+    # cross-worker resume-claim lease so this pause is immediately claimable.
+    pause_update = next(u for u in updates if u.get("waiting_for_answers") is True)
+    assert pause_update.get("answer_wait_heartbeat_at")
+    assert "T" in pause_update["answer_wait_heartbeat_at"]  # ISO-8601
+    assert "resume_claim_at" in pause_update
+    assert pause_update["resume_claim_at"] is None
+
+
+def test_pause_renews_lease_during_slow_on_pause(monkeypatch):
+    """A slow on_pause (e.g. a GitHub comment with retries exceeding the 30s staleness window) must
+    not let the lease go stale: a background renewer heartbeats while the callback runs."""
+    import threading as _threading
+
+    # Shrink the renewal cadence so the test is fast and deterministic.
+    monkeypatch.setattr(orch_mod.hitl, "ANSWER_WAIT_POLL_INTERVAL_S", 0.01)
+    heartbeats: List[str] = []
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+
+    first_beat = _threading.Event()
+
+    def update_fn(**kw):
+        job.update(kw)
+        if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
+            heartbeats.append(kw["answer_wait_heartbeat_at"])
+            first_beat.set()
+
+    started = _threading.Event()
+
+    def slow_on_pause(_qs):
+        started.set()
+        # Block on the actual renewal signal instead of a wall-clock sleep: the callback returns the
+        # moment the background renewer heartbeats once (which is exactly what this test asserts), so
+        # it is deterministic rather than racing real time. The generous timeout is only a safety cap
+        # that trips on a genuinely broken renewer, not on a slow/loaded CI host.
+        assert first_beat.wait(5.0), "renewer did not heartbeat during the slow on_pause callback"
+
+    _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=lambda j: job,
+        update_fn=update_fn,
+        on_pause=slow_on_pause,
+    )
+    assert started.is_set()
+    # The lease was renewed at least once *during* the slow callback (separate from the atomic
+    # initial heartbeat that rides the pause-publish update).
+    assert len(heartbeats) >= 1
+
+
+def test_pause_heartbeats_preserve_last_activity_at(monkeypatch):
+    """Answer-wait heartbeats are liveness pings, not real activity: they must pin last_activity_at
+    to its pre-pause value so a job waiting hours on the user does not look continuously active
+    (the API contract excludes heartbeats from last_activity_at)."""
+    import threading as _threading
+
+    monkeypatch.setattr(orch_mod.hitl, "ANSWER_WAIT_POLL_INTERVAL_S", 0.01)
+    pinned = "2020-01-01T00:00:00+00:00"
+    job: Dict[str, Any] = {"last_activity_at": pinned}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+
+    hb_calls: List[Dict[str, Any]] = []
+    first_beat = _threading.Event()
+
+    def update_fn(**kw):
+        job.update(kw)
+        # Capture the renewal/wait-loop heartbeats (which carry answer_wait_heartbeat_at but not the
+        # waiting_for_answers flag that rides the one-shot pause-publish update).
+        if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
+            hb_calls.append(kw)
+            first_beat.set()
+
+    def slow_on_pause(_qs):
+        assert first_beat.wait(5.0), "renewer did not heartbeat during on_pause"
+
+    _run_pause_cycle(
+        "j", ["Q?"], "src", get_job_fn=lambda j: job, update_fn=update_fn, on_pause=slow_on_pause
+    )
+
+    assert hb_calls, "expected at least one answer-wait heartbeat"
+    # Every heartbeat pins last_activity_at to the pre-pause value rather than advancing it.
+    assert all(c.get("last_activity_at") == pinned for c in hb_calls)
+
+
 def test_pause_cycle_on_pause_error_is_swallowed(monkeypatch):
     job: Dict[str, Any] = {}
     monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
@@ -160,7 +260,7 @@ def test_pause_cycle_timeout_sets_failed(monkeypatch):
 def test_pause_cycle_terminal_leaves_status(monkeypatch):
     job: Dict[str, Any] = {}
 
-    def fake_wait(job_id, gj):
+    def fake_wait(job_id, gj, **kw):
         job["status"] = "cancelled"  # job goes terminal while waiting
         return False
 
@@ -170,6 +270,149 @@ def test_pause_cycle_terminal_leaves_status(monkeypatch):
     )
     assert ok is False
     assert job["status"] == "cancelled"  # not overwritten to failed
+
+
+# --------------------------------------------------------------------------- _run_pause_cycle resilience (orchestrator threads 10/11/12/14)
+
+
+def test_pause_cycle_pinned_activity_falls_back_on_store_error(monkeypatch):
+    """Thread 10+12: if get_job_fn raises during the post-pause pin read, _run_pause_cycle must
+    continue with pinned_activity_at=None rather than crashing. Thread 12: with None pin, heartbeats
+    must NOT write last_activity_at=None (which would clobber the real field with null)."""
+    import threading as _threading
+
+    monkeypatch.setattr(orch_mod.hitl, "ANSWER_WAIT_POLL_INTERVAL_S", 0.01)
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+
+    call_count = {"n": 0}
+
+    def get_job_fn(jid):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("store error during pin read")
+        return dict(job)
+
+    hb_calls: List[Dict[str, Any]] = []
+    first_beat = _threading.Event()
+
+    def update_fn(**kw):
+        job.update(kw)
+        if "answer_wait_heartbeat_at" in kw and kw.get("waiting_for_answers") is None:
+            hb_calls.append(dict(kw))
+            first_beat.set()
+
+    def slow_on_pause(_qs):
+        assert first_beat.wait(5.0), "renewer did not heartbeat during on_pause"
+
+    _, ok = _run_pause_cycle(
+        "j", ["Q?"], "src", get_job_fn=get_job_fn, update_fn=update_fn, on_pause=slow_on_pause
+    )
+    assert ok is True
+    assert hb_calls, "expected heartbeats even when the pin read failed"
+    # Thread 12: when pinned_activity_at is unknown (None), heartbeats must not forward
+    # last_activity_at=None — that would overwrite real activity data with a null sentinel.
+    assert not any("last_activity_at" in c for c in hb_calls), (
+        "heartbeats must not write last_activity_at=None when the pin read failed"
+    )
+
+
+def test_pause_cycle_terminal_check_store_error_marks_failed(monkeypatch):
+    """Thread 11 (timeout path): if get_job_fn raises during the terminal check after wait_for_answers
+    times out, the cycle must default to 'mark failed' rather than crashing — it cannot distinguish a
+    cancelled job from a timeout when the store is down, so failing closed is the safe default."""
+    job: Dict[str, Any] = {}
+    call_count = {"n": 0}
+
+    def get_job_fn(jid):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            raise RuntimeError("store error during pin read")  # Thread 10: falls back to None
+        raise RuntimeError("store error during terminal check")  # Thread 11: defaults to failed
+
+    updates: List[Dict[str, Any]] = []
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", lambda *a, **k: False)
+
+    _, ok = _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=get_job_fn,
+        update_fn=lambda **kw: (job.update(kw), updates.append(dict(kw))),
+    )
+    assert ok is False
+    assert any(u.get("status") == "failed" for u in updates)
+
+
+def test_pause_cycle_submitted_answers_store_error_continues_with_empty(monkeypatch):
+    """Thread 11 (answers path): if get_job_fn raises when reading submitted_answers after answers
+    are received, the cycle must proceed with an empty list and return ok=True rather than crashing
+    with waiting_for_answers still True (which would strand the run in the paused state)."""
+    job: Dict[str, Any] = {}
+    answered = {"did": False}
+
+    def fake_wait(job_id, gj, **kw):
+        job["waiting_for_answers"] = False
+        answered["did"] = True
+        return True
+
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", fake_wait)
+
+    call_count = {"n": 0}
+
+    def get_job_fn(jid):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return dict(job)  # pin read: succeeds, no last_activity_at → pinned=None
+        raise RuntimeError("store error reading submitted_answers")
+
+    resolved, ok = _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=get_job_fn,
+        update_fn=lambda **kw: job.update(kw),
+    )
+    assert ok is True
+    assert answered["did"]
+    assert resolved == [], "must continue with empty answers rather than raising"
+
+
+def test_pause_renewer_thread_start_failure_is_swallowed(monkeypatch):
+    """Thread 14: if threading.Thread.start raises RuntimeError (resource exhaustion), the pause
+    cycle must still invoke on_pause and wait for answers — the run continues without background
+    heartbeat renewal rather than aborting due to the OS failure."""
+    job: Dict[str, Any] = {}
+    monkeypatch.setattr(orch_mod.hitl, "wait_for_answers", _answer_all(job))
+    pause_called: List[bool] = []
+
+    class _FailStartThread:
+        """Thread stand-in whose start() raises RuntimeError to simulate resource exhaustion."""
+
+        def __init__(self, target=None, daemon=None, name=None):
+            self._target = target
+
+        def start(self):
+            raise RuntimeError("max threads exceeded")
+
+        def join(self, timeout=None):
+            pass
+
+    monkeypatch.setattr(orch_mod.threading, "Thread", _FailStartThread)
+
+    def on_pause(_qs):
+        pause_called.append(True)
+
+    _, ok = _run_pause_cycle(
+        "j",
+        ["Q?"],
+        "src",
+        get_job_fn=lambda j: job,
+        update_fn=lambda **kw: job.update(kw),
+        on_pause=on_pause,
+    )
+    assert ok is True
+    assert pause_called, "on_pause must be called even when the renewer thread fails to start"
 
 
 # --------------------------------------------------------------------------- _plan_with_hitl

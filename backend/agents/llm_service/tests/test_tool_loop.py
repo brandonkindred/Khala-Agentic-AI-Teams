@@ -44,6 +44,7 @@ def test_tool_loop_dummy_runs_git_handler_then_returns_json() -> None:
     ]
     out = complete_json_with_tool_loop(
         llm,
+        objective="test",
         user_prompt="Task: **Task:** demo",
         system_prompt="You are a Senior Software Engineer. Output JSON with files_to_create_or_edit.",
         tools=tools,
@@ -65,6 +66,7 @@ def test_tool_loop_max_rounds() -> None:
     with pytest.raises(LLMPermanentError, match="max_rounds"):
         complete_json_with_tool_loop(
             LoopLLM(),
+            objective="test",
             user_prompt="u",
             system_prompt="You are a Senior Software Engineer. files_to_create_or_edit.",
             tools=[
@@ -110,6 +112,7 @@ def test_tool_loop_echoes_reasoning_content_on_assistant_turn() -> None:
     llm = ReasoningLLM()
     result = complete_json_with_tool_loop(
         llm,
+        objective="test",
         system_prompt="s",
         user_prompt="u",
         tools=[{"type": "function", "function": {"name": "noop", "parameters": {}}}],

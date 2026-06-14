@@ -1,4 +1,12 @@
-import { Component, EventEmitter, Input, Output, ChangeDetectionStrategy } from '@angular/core';
+import {
+  Component,
+  EventEmitter,
+  Input,
+  Output,
+  ChangeDetectionStrategy,
+  OnChanges,
+  SimpleChanges,
+} from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCheckboxModule } from '@angular/material/checkbox';
@@ -28,17 +36,35 @@ import type { PendingQuestion, AutoAnswerResponse } from '../../../models';
   templateUrl: './question-card.component.html',
   styleUrl: './question-card.component.scss',
 })
-export class QuestionCardComponent {
+/**
+ * Presentational card for a single pending question. Owns its own selection state
+ * (`selectedOptionIds`/`otherText`) and emits user intent to the parent
+ * `PendingQuestionsComponent` via the outputs below; it never mutates its inputs. OnPush — the
+ * parent feeds it fresh input references on change.
+ */
+export class QuestionCardComponent implements OnChanges {
+  /** The question to render (text, options, required/multi-select flags). */
   @Input({ required: true }) question!: PendingQuestion;
+  /** Zero-based position in the batch; rendered as the 1-based "Q{n}" label. */
   @Input({ required: true }) questionIndex!: number;
+  /** AI auto-answer suggestion to surface for this question, when one has been fetched. */
   @Input() autoAnswerResult?: AutoAnswerResponse;
+  /** True while an auto-answer request for this question is in flight (drives the spinner). */
   @Input() isAutoAnswering = false;
+  /** True when the parent considers this question answered (drives the answered styling). */
   @Input() isAnswered = false;
+  /** When false, the AI auto-answer affordance is hidden (user-only decisions). */
+  @Input() autoAnswerEnabled = true;
 
+  /** Emitted when an option's checked state changes (checkbox toggle or radio select). */
   @Output() optionToggled = new EventEmitter<{ optionId: string; checked: boolean }>();
+  /** Emitted with the latest free-text value when the "other" text field changes. */
   @Output() otherTextChanged = new EventEmitter<string>();
+  /** Emitted when the user asks the AI to auto-answer this question. */
   @Output() autoAnswerRequested = new EventEmitter<void>();
+  /** Emitted when the user accepts the displayed auto-answer suggestion. */
   @Output() autoAnswerApplied = new EventEmitter<void>();
+  /** Emitted when the user dismisses the displayed auto-answer suggestion. */
   @Output() autoAnswerDismissed = new EventEmitter<void>();
 
   selectedOptionIds = new Set<string>();
@@ -46,8 +72,25 @@ export class QuestionCardComponent {
   wasAutoAnswered = false;
   autoAnswerConfidence = 0;
 
+  ngOnChanges(changes: SimpleChanges): void {
+    // When this card is reused for a different question (same DOM node, new question identity),
+    // clear the locally-held selection so stale checks/text can't carry over and desync from the
+    // parent's freshly-initialised answer for the new question.
+    const q = changes['question'];
+    if (q && !q.firstChange && q.previousValue?.id !== q.currentValue?.id) {
+      this.selectedOptionIds = new Set<string>();
+      this.otherText = '';
+      this.wasAutoAnswered = false;
+    }
+  }
+
   get isMultiSelect(): boolean {
     return this.question.allow_multiple === true;
+  }
+
+  /** True when the question has at least one real selectable option (not the synthetic "other" placeholder). */
+  get hasSelectableOptions(): boolean {
+    return (this.question?.options ?? []).some(o => !!o.id && o.id.toLowerCase() !== 'other');
   }
 
   onOptionToggle(optionId: string, checked: boolean): void {

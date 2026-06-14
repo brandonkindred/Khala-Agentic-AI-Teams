@@ -60,9 +60,10 @@ class MyStrategy(Strategy):
             return
 
         # ── COMPUTE SIGNALS ───────────────────────────────
-        # Read each spec indicator via ``ctx.indicator(name, **params)``.
+        # Read each indicator your ENTRY logic needs (see spec.entry_rules)
+        # via ``ctx.indicator(name, **params)``.
         # Guard for ``None`` (warm-up) before comparing.
-        # <FILL IN per the spec's entry/exit rules>
+        # <FILL IN per the spec's entry rules>
 
         position = ctx.position(bar.symbol)
 
@@ -71,10 +72,14 @@ class MyStrategy(Strategy):
             # <FILL IN entry decision per spec.entry_rules>
             pass
 
-        # ── EXIT ──────────────────────────────────────────
-        else:
-            # <FILL IN exit decision per spec.exit_rules>
-            pass
+        # ── ENGINE OWNS EXITS (do NOT submit close orders) ──
+        # The engine enforces every spec.exit_rules entry (stop-loss,
+        # take-profit, signal-exit) for the side(s) it applies to and
+        # stamps engine_exit:<kind> on the close. Do NOT submit a closing
+        # order for a side the engine covers — a manual close fills first,
+        # strips that attribution, and fails the trade-alignment gate. The
+        # only close you author is for a position side NO exit rule covers
+        # (e.g. a short when the spec's only stop is a long-side trailing).
 
     def on_fill(self, ctx, fill):
         """Optional — observe fills the engine produces."""
@@ -118,7 +123,7 @@ ctx.submit_order(
 )
 ```
 
-- **Closing a position**: submit an order with `side` *opposite* the open position's `side` and `qty == position.qty`.
+- **Exits are engine-owned**: the engine enforces every stop-loss / take-profit / signal-exit in `spec.exit_rules` for the side(s) it applies to and stamps `engine_exit:<kind>`. Do NOT submit a closing order (opposite `side`, `qty == position.qty`) for a side the engine covers — a manual close fills first, strips that attribution, and fails the trade-alignment gate. Submit a close yourself **only** for a position side no exit rule covers (e.g. a short position when the spec's only stop is a long-side `trailing_high`); otherwise `on_bar` submits entries only.
 - **Sizing**: compute `qty` yourself from `ctx.equity * pct / bar.close`. The engine's risk gates can still reject an oversize entry.
 
 ## Reading indicators — use `ctx.indicator(...)`
@@ -173,13 +178,27 @@ Do NOT import: `pandas`, `numpy`, `os`, `sys`, `subprocess`, `socket`, `http`, `
 
 Do NOT use: `exec()`, `eval()`, `compile()`, `__import__()`, `open()`, `setattr()`, `delattr()`.
 
-## Forbidden exit patterns
+## Exits are engine-owned
 
-Do NOT implement bar-counting "time stop" exits. Variables like
-`bars_held`, `hold_count`, `days_held`, or any `if counter >= N:
-close_position()` pattern are forbidden. The engine will reject them.
-Exits must be based on price (stop-loss), P&L (take-profit), or signal
-reversal (signal_exit) only.
+The engine enforces every exit in `spec.exit_rules` — stop-loss,
+take-profit, and signal-exit — for the position side(s) each rule
+applies to, and stamps `engine_exit:<kind>` on the close. Do NOT author
+a position-closing order for a side the engine covers: a manual close
+fills ahead of the engine, strips that attribution, and fails the
+trade-alignment gate. The one exception is a position side that **no**
+exit rule covers (e.g. a short when the spec's only stop is a long-side
+`trailing_high`) — that side has no engine exit, so you must close it
+yourself. When every entered side is covered, `on_bar` submits entries
+only.
+
+Indicators referenced only by `spec.exit_rules` (e.g. an RSI used solely
+by a signal-exit) are computed by the engine — you do not need to read
+them in `on_bar`. Read only the indicators your entry logic uses.
+
+For the same reason, do NOT implement bar-counting "time stop" exits.
+Variables like `bars_held`, `hold_count`, `days_held`, or any
+`if counter >= N: close_position()` pattern are forbidden and rejected
+by the conformance gate.
 
 ## Code quality requirements
 

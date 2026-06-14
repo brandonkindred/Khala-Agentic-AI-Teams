@@ -264,6 +264,36 @@ class JobServiceClient:
             },
         )
 
+    def apply_and_get(
+        self,
+        job_id: str,
+        *,
+        merge_fields: Optional[Dict[str, Any]] = None,
+        merge_nested: Optional[Dict[str, Any]] = None,
+        append_to: Optional[Dict[str, List[Any]]] = None,
+        increment: Optional[Dict[str, int]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Like :meth:`atomic_update`, but return the updated job record.
+
+        The job service applies the patch under a row lock (``SELECT ... FOR UPDATE``) and returns
+        the post-update record, so a caller can read back an atomically-incremented counter — a
+        cross-worker fencing token — and learn whether its own increment produced a given value.
+
+        Postconditions:
+            - Returns the updated job dict, or None when the job does not exist.
+        """
+        resp = self._request(
+            "POST",
+            self._url(f"/jobs/{self.team}/{job_id}/apply"),
+            json={
+                "merge_fields": merge_fields,
+                "merge_nested": merge_nested,
+                "append_to": append_to,
+                "increment": increment,
+            },
+        )
+        return resp.json().get("job")
+
     def increment_field(self, job_id: str, field: str, delta: int = 1) -> None:
         """Atomically increment an integer field by *delta*."""
         self.atomic_update(job_id, increment={field: delta})

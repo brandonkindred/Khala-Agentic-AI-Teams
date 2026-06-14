@@ -28,25 +28,49 @@ import logging
 import os
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 WAITING_STATUS = "waiting_for_user"
 
-# Mirrors software_engineering_team.orchestrator.DEFAULT_CLARIFICATION_OPTIONS so both teams
-# present an identical answer UI; the UI always offers an "other" free-text option on top.
-DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = [
-    {"id": "yes", "label": "Yes"},
-    {"id": "no", "label": "No"},
-    {"id": "not_sure", "label": "Not sure / Need more info"},
-]
+# Fallback when an agent omits options entirely (should not happen — prompts require context-specific
+# options). Empty list means the UI shows only the always-present "Other (free text)" field, which
+# is more appropriate than forcing yes/no onto open-ended questions like "What API fields are needed?"
+DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
+
+# Option IDs and labels that signal a generic yes/no/not-sure response pattern. Individual options
+# matching either set are culled before the minimum-count check so that mixed sets (e.g. "yes"/"no"
+# blended with one context-specific option) and variant IDs recognized by their display label
+# (e.g. id="opt_yes", label="Yes") are both removed rather than silently accepted.
+_GENERIC_OPTION_IDS: frozenset = frozenset({"yes", "no", "not_sure"})
+_GENERIC_OPTION_LABELS: frozenset = frozenset({
+    "yes", "no", "not sure", "not_sure", "not sure / need more info",
+    # "other" variants — a non-compliant LLM may emit {id:"choice_other", label:"Other"};
+    # filtering by label catches these even when the id is not the reserved "other" string.
+    "other", "other (specify)", "other (please specify)", "other (free text)",
+})
 
 _DEFAULT_ANSWER_WAIT_TIMEOUT_S = 3600.0
 _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
+# Public alias: the cadence at which the answer-wait lease (heartbeat) is renewed. Callers that
+# must keep the lease fresh outside the wait loop (e.g. during a slow on_pause callback) reuse
+# this so the renewal cadence and the wait-loop cadence stay in lockstep, well under the answer
+# endpoint's staleness window.
+ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
 _TERMINAL_STATUSES = frozenset({"failed", "cancelled", "completed", "completed_with_failures"})
+
+
+def heartbeat_timestamp() -> str:
+    """Current UTC ISO-8601 timestamp for an answer-wait liveness heartbeat.
+
+    Postconditions:
+        - Returns a timezone-aware ISO-8601 string parseable by ``datetime.fromisoformat``.
+    """
+    return datetime.now(timezone.utc).isoformat()
 
 
 def answer_wait_timeout_s() -> float:
@@ -66,16 +90,65 @@ def answer_wait_timeout_s() -> float:
 
 def _normalize_options(raw: Any) -> List[Dict[str, Any]]:
     options: List[Dict[str, Any]] = []
+    # Dedup by lowercased ID (first occurrence wins) so that: (a) IDs that differ only by
+    # whitespace after stripping are collapsed, (b) IDs that differ only by case are collapsed —
+    # consistent with the case-insensitive comparison in answers_to_resolved.
+    seen_ids: set = set()
     for o in raw or []:
         if isinstance(o, dict) and o.get("id"):
+            opt_id = str(o.get("id")).strip()
+            if not opt_id:
+                logger.warning("Option with whitespace-only id will be dropped")
+                continue
+            if opt_id.lower() == "other":
+                # "other" is the reserved synthetic free-text option added by the UI/API;
+                # using it as a structured option id would cause the answer handler to treat
+                # any selection of this option as a free-text response. Drop it — the prompt
+                # already prohibits it, so this is a defensive guard against a non-compliant LLM.
+                logger.warning("Option id 'other' is reserved and will be dropped")
+                continue
+            norm_key = opt_id.lower()
+            if norm_key in seen_ids:
+                logger.warning("Duplicate option id '%s' (case-insensitive) will be dropped", opt_id)
+                continue
+            seen_ids.add(norm_key)
             options.append(
                 {
-                    "id": str(o["id"]),
-                    "label": str(o.get("label") or o["id"]),
+                    "id": opt_id,
+                    "label": str(o.get("label") or opt_id).strip(),
                     "is_default": bool(o.get("is_default", False)),
                 }
             )
     return options
+
+
+def _filter_generic_options(
+    opts: List[Dict[str, Any]], question_text: str = ""
+) -> List[Dict[str, Any]]:
+    """Remove options whose ID or label matches the generic yes/no/not-sure/other sets.
+
+    Preconditions:
+        - ``opts`` is the output of ``_normalize_options`` (IDs are non-empty stripped strings,
+          labels are non-empty stripped strings, no reserved "other" IDs present).
+    Postconditions:
+        - Returns a sublist of ``opts`` with every option matching ``_GENERIC_OPTION_IDS`` or
+          ``_GENERIC_OPTION_LABELS`` removed. If any options are removed, a warning is logged.
+          Callers decide the minimum-count policy (``normalize_open_questions`` requires ≥ 2;
+          ``convert_to_structured_questions`` keeps whatever survives).
+    """
+    filtered = [
+        o for o in opts
+        if o["id"].lower() not in _GENERIC_OPTION_IDS
+        and o["label"].lower() not in _GENERIC_OPTION_LABELS
+    ]
+    if len(filtered) != len(opts):
+        label = question_text[:60] if question_text else "(unknown)"
+        logger.warning(
+            "Question '%s': %d generic option(s) removed before acceptance check",
+            label,
+            len(opts) - len(filtered),
+        )
+    return filtered
 
 
 def _question_text(q: Any) -> str:
@@ -95,10 +168,11 @@ def convert_to_structured_questions(
           question text (``question_text`` / ``text`` / ``question``).
     Postconditions:
         - Returns one dict per non-empty input question, each with a stable unique ``id``,
-          ``question_text``, ``options`` (the question's own options if provided, else the default
-          yes/no/not-sure set), ``required=True``, and ``source``. A question that already carries
-          an ``id`` and domain-specific ``options`` round-trips unchanged. Empty questions are
-          dropped.
+          ``question_text``, ``options`` (normalized and generic-option-filtered; empty list when
+          none survive so the UI falls back to free-text), ``required=True``, and ``source``.
+          Generic yes/no/not-sure/other options are removed via ``_filter_generic_options``;
+          unlike ``normalize_open_questions`` no minimum count is enforced here. Empty questions
+          are dropped.
     """
     structured: List[Dict[str, Any]] = []
     for idx, q in enumerate(questions or []):
@@ -107,7 +181,7 @@ def convert_to_structured_questions(
             continue
         if isinstance(q, dict):
             qid = str(q.get("id") or f"{source}_{idx}_{uuid.uuid4().hex[:8]}")
-            options = _normalize_options(q.get("options")) or list(DEFAULT_CLARIFICATION_OPTIONS)
+            options = _filter_generic_options(_normalize_options(q.get("options")), text)
             context = q.get("context")
         else:
             qid = f"{source}_{idx}_{uuid.uuid4().hex[:8]}"
@@ -132,9 +206,13 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
     Preconditions:
         - ``raw`` is a list of strings or dicts (or None).
     Postconditions:
-        - Returns dicts each carrying at least ``question_text``; empties are dropped, and any
-          ``context`` / ``options`` an agent supplied are preserved so domain-specific choices
-          round-trip. A non-list input yields ``[]``.
+        - Returns dicts each carrying ``question_text`` and ``options`` (always present); empties
+          are dropped, and any ``context`` / ``options`` an agent supplied are preserved so
+          domain-specific choices round-trip. Options that fail normalization (< 2 survive after
+          deduplication and generic-option filtering) are discarded and ``options`` is set to ``[]``
+          so callers have a uniform contract — the same fallback as ``convert_to_structured_questions``.
+          Deduplication is case-insensitive (consistent with ``answers_to_resolved``). A non-list
+          input yields ``[]``.
     """
     if not isinstance(raw, list):
         return []
@@ -148,8 +226,26 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
             if q.get("context"):
                 entry["context"] = str(q["context"])
             opts = _normalize_options(q.get("options"))
-            if opts:
-                entry["options"] = opts
+            # Deduplication by case-insensitive ID and the "other" guard are handled inside
+            # _normalize_options, so opts is already free of duplicates and reserved IDs here.
+            # _filter_generic_options culls individual generic options (by ID and by label) so
+            # that mixed sets (e.g. yes/no blended with one context-specific option) and variant
+            # IDs detected via their display label (e.g. id="opt_yes", label="Yes") are removed
+            # before the minimum-count check rather than silently accepted.
+            filtered = _filter_generic_options(opts, text)
+            if len(filtered) >= 2:
+                entry["options"] = filtered
+            else:
+                if opts:
+                    logger.warning(
+                        "Question '%s' has only %d context-specific option(s) after filtering; "
+                        "falling back to free-text (options discarded)",
+                        text[:60],
+                        len(filtered),
+                    )
+                entry["options"] = []
+        else:
+            entry["options"] = []
         out.append(entry)
     return out
 
@@ -217,14 +313,14 @@ def answers_to_resolved(
             # An answer from a different pause batch (submitted_answers accumulates); skip it.
             continue
         q = by_id.get(qid) or {}
-        selected = a.get("selected_option_id") or a.get("selected_answer") or ""
+        selected = (a.get("selected_option_id") or a.get("selected_answer") or "").strip()
         other = a.get("other_text") or ""
         label = ""
         for opt in q.get("options") or []:
-            if opt.get("id") == selected:
+            if (opt.get("id") or "").lower() == selected.lower():
                 label = opt.get("label") or selected
                 break
-        if (selected == "other" or not label) and other:
+        if (selected.lower() == "other" or not label) and other:
             answer_text = other
         else:
             answer_text = label or selected
@@ -280,6 +376,7 @@ def wait_for_answers(
     poll_interval_s: float = _ANSWER_WAIT_POLL_INTERVAL_S,
     sleep: Callable[[float], None] = time.sleep,
     now: Callable[[], float] = time.monotonic,
+    heartbeat_fn: Optional[Callable[[str], None]] = None,
 ) -> bool:
     """Block until the job's ``waiting_for_answers`` flag clears, the job goes terminal, or timeout.
 
@@ -290,6 +387,10 @@ def wait_for_answers(
         - Returns True iff ``waiting_for_answers`` became False (answers submitted) before the job
           went terminal or the timeout elapsed; returns False on terminal/timeout. Never proceeds on
           its own — the only True path is an explicit answer submission clearing the flag.
+        - When ``heartbeat_fn`` is provided, it is invoked with a current UTC ISO timestamp once per
+          poll iteration while waiting, so other processes can distinguish a live (but blocked)
+          wait loop from a dead one. Heartbeat failures are swallowed — proving liveness must never
+          break the wait itself.
     """
     timeout = timeout_s if timeout_s is not None else answer_wait_timeout_s()
     start = now()
@@ -299,6 +400,11 @@ def wait_for_answers(
             return True
         if is_terminal(data):
             return False
+        if heartbeat_fn is not None:
+            try:
+                heartbeat_fn(heartbeat_timestamp())
+            except Exception:
+                logger.debug("answer-wait heartbeat write failed for job %s", job_id, exc_info=True)
         sleep(poll_interval_s)
     logger.warning("Coding team job %s timed out waiting for user answers", job_id)
     return False

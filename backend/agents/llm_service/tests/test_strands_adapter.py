@@ -265,6 +265,140 @@ def test_stream_emits_text_events_for_plain_response() -> None:
     assert call["think"] is True
 
 
+def test_stream_propagates_team_through_to_thread() -> None:
+    """The team bound on the calling task survives the ``to_thread`` hand-off.
+
+    The adapter derives/binds the team before dispatching to the worker thread,
+    where ``caller_team()`` could no longer see the agent frame. This proves the
+    bound team reaches ``chat`` (which runs in the worker).
+    """
+    from llm_service.attribution import current_attribution, llm_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _TeamClient(_RecordingClient):
+        def chat(self, messages: list, **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["team"] = current_attribution().team
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_TeamClient({"ok": True}), agent_key="qa_agent")
+    with llm_attribution(team="orchestrated"):
+        _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["team"] == "orchestrated"
+
+
+def test_stream_binds_configured_agent_key_for_raw_client() -> None:
+    """A caller-supplied (unwrapped) client is still attributed to the configured
+    agent_key, since the adapter binds it before the ``to_thread`` hand-off."""
+    from llm_service.attribution import current_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            seen["objective"] = objective
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_AgentClient({"ok": True}), agent_key="foo")
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "foo"
+    # No bound objective → the generic strands objective is used as a fallback.
+    assert seen["objective"] == "strands agent turn (foo)"
+
+
+def test_stream_falls_back_to_derived_agent_when_unkeyed(monkeypatch) -> None:
+    """An unkeyed model (``get_strands_model()`` with no agent_key) records a
+    path-derived agent identity instead of an empty agent_key."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "ui_design")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_AgentClient({"ok": True}), agent_key=None)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "ui_design"
+
+
+def test_stream_recovers_agent_key_from_wrapped_client_when_unkeyed(monkeypatch) -> None:
+    """A keyed client adapted without repeating agent_key — e.g.
+    ``get_strands_model(client=get_client("backend"))`` — is still attributed to
+    that key. The adapter recovers it from the backing ``_AttributingClient``
+    before the path-derived fallback, even though the dispatch unwraps it."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+    from llm_service.factory import attributed_client
+
+    # If the path fallback were reached it would record "wrong_path"; assert it isn't.
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "wrong_path")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return super().chat(messages, **kwargs)
+
+    keyed = attributed_client(_AgentClient({"ok": True}), "backend")
+    model = LLMClientModel(keyed, agent_key=None)
+    _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["agent_key"] == "backend"
+
+
+def test_structured_output_recovers_agent_key_from_wrapped_client(monkeypatch) -> None:
+    """``structured_output`` mirrors ``stream``: a backing ``_AttributingClient``'s
+    key is recovered when the adapter itself is unkeyed."""
+    import llm_service.strands_adapter as adapter_mod
+    from llm_service.attribution import current_attribution
+    from llm_service.factory import attributed_client
+
+    monkeypatch.setattr(adapter_mod, "caller_agent", lambda: "wrong_path")
+    seen: Dict[str, Any] = {}
+
+    class _AgentClient(_RecordingClient):
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            seen["agent_key"] = current_attribution().agent_key
+            return {"value": 1}
+
+    class _Out(BaseModel):
+        value: int
+
+    keyed = attributed_client(_AgentClient({"value": 1}), "backend")
+    model = LLMClientModel(keyed, agent_key=None)
+
+    async def _run() -> None:
+        async for _ in model.structured_output(
+            _Out, [{"role": "user", "content": [{"text": "hi"}]}]
+        ):
+            pass
+
+    asyncio.run(_run())
+    assert seen["agent_key"] == "backend"
+
+
+def test_stream_uses_bound_objective_over_generic() -> None:
+    """A task-specific objective bound by the caller (e.g. the PA wrapper) is
+    forwarded instead of the adapter's generic placeholder."""
+    from llm_service.attribution import llm_attribution
+
+    seen: Dict[str, Any] = {}
+
+    class _ObjClient(_RecordingClient):
+        def chat(self, messages: list, *, objective: str = "", **kwargs: Any) -> Any:  # type: ignore[override]
+            seen["objective"] = objective
+            return super().chat(messages, **kwargs)
+
+    model = LLMClientModel(_ObjClient({"ok": True}), agent_key="foo")
+    with llm_attribution(objective="classify user intent"):
+        _drain(model.stream(messages=[{"role": "user", "content": [{"text": "hi"}]}]))
+    assert seen["objective"] == "classify user intent"
+
+
 def test_stream_emits_tool_use_events_for_tool_call_response() -> None:
     client = _RecordingClient(
         {
@@ -426,6 +560,31 @@ def test_get_strands_model_forwards_response_format() -> None:
     client = _RecordingClient({"ok": True})
     model = get_strands_model(client=client, response_format="text")
     assert model.get_config()["response_format"] == "text"
+
+
+def test_get_strands_model_does_not_alias_distinct_agent_keys(monkeypatch) -> None:
+    """Two agents that resolve to the same model get distinct cached adapters,
+    each carrying its own agent_key — so the shared cache can't attribute one
+    agent's calls to another."""
+    from llm_service.strands_provider import (
+        _clear_strands_model_cache_for_testing,
+        get_strands_model,
+    )
+
+    monkeypatch.setenv("LLM_PROVIDER", "ollama")
+    monkeypatch.setenv("LLM_MODEL", "shared-model")
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:11434")
+    _clear_strands_model_cache_for_testing()
+    try:
+        m_a = get_strands_model("agent_a")
+        m_b = get_strands_model("agent_b")
+        assert m_a is not m_b
+        assert m_a._config.agent_key == "agent_a"
+        assert m_b._config.agent_key == "agent_b"
+        # Same key still hits the cache (identity preserved per key).
+        assert get_strands_model("agent_a") is m_a
+    finally:
+        _clear_strands_model_cache_for_testing()
 
 
 def test_clone_returns_new_model_sharing_backing_client() -> None:

@@ -227,12 +227,9 @@ REPAIRABLE_EXCEPTIONS = (
     ModuleNotFoundError,
 )
 
-# Default options for clarification questions
-DEFAULT_CLARIFICATION_OPTIONS = [
-    {"id": "yes", "label": "Yes"},
-    {"id": "no", "label": "No"},
-    {"id": "not_sure", "label": "Not sure / Need more info"},
-]
+# Fallback options for clarification questions. Empty so the UI shows only the always-present
+# free-text "other" field rather than misleading yes/no options for open-ended questions.
+DEFAULT_CLARIFICATION_OPTIONS: List[Dict[str, Any]] = []
 
 # Poll interval for waiting for user answers (in seconds)
 ANSWER_WAIT_POLL_INTERVAL = 5.0
@@ -260,8 +257,8 @@ def _convert_to_structured_questions(
 
     Each question gets:
     - A unique ID based on index
-    - Default yes/no/not_sure options
-    - An 'other' option is implicitly available in the UI
+    - An empty options list (agents are prompted to supply context-specific options; when they
+      don't, the UI falls back to the always-present free-text "other" field)
     """
     import uuid
 

@@ -76,8 +76,20 @@ def _with_insights(base_prompt: str, insights_context: Optional[str]) -> str:
     return f"{insights_context}\n\n---\n\n{base_prompt}"
 
 
-def _invoke(client: LLMClient, prompt: str, schema: type, system_prompt: str, **extra: Any):
-    """Shared call into ``complete_validated`` with the sales-team defaults."""
+def _invoke(
+    client: LLMClient,
+    prompt: str,
+    schema: type,
+    system_prompt: str,
+    *,
+    objective: str,
+    **extra: Any,
+):
+    """Shared call into ``complete_validated`` with the sales-team defaults.
+
+    :param objective: Required short phrase describing the call's purpose, stamped
+        onto LLM logs/telemetry for attribution. Forwarded to ``complete_validated``.
+    """
     return complete_validated(
         client,
         prompt,
@@ -85,6 +97,7 @@ def _invoke(client: LLMClient, prompt: str, schema: type, system_prompt: str, **
         system_prompt=system_prompt,
         temperature=0.0,
         correction_attempts=2,
+        objective=objective,
         **extra,
     )
 
@@ -122,7 +135,13 @@ class ProspectorAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, ProspectList, PROSPECTOR_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            ProspectList,
+            PROSPECTOR_SYSTEM_PROMPT,
+            objective="qualify sales prospect",
+        )
 
     def prospect_companies(
         self,
@@ -153,7 +172,13 @@ class ProspectorAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, ProspectList, PROSPECTOR_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            ProspectList,
+            PROSPECTOR_SYSTEM_PROMPT,
+            objective="prospect target companies",
+        )
 
 
 @dataclass
@@ -189,7 +214,13 @@ class DecisionMakerMapperAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, DecisionMakerList, DECISION_MAKER_MAPPER_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            DecisionMakerList,
+            DECISION_MAKER_MAPPER_SYSTEM_PROMPT,
+            objective="map decision makers",
+        )
 
 
 @dataclass
@@ -218,7 +249,13 @@ class DossierBuilderAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, ProspectDossier, DOSSIER_BUILDER_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            ProspectDossier,
+            DOSSIER_BUILDER_SYSTEM_PROMPT,
+            objective="build prospect dossier",
+        )
 
 
 @dataclass
@@ -276,7 +313,12 @@ class OutreachAgent:
             "citations_stripped": False,
         }
         return _invoke(
-            self._llm, prompt, OutreachVariantList, OUTREACH_SYSTEM_PROMPT, context=context
+            self._llm,
+            prompt,
+            OutreachVariantList,
+            OUTREACH_SYSTEM_PROMPT,
+            objective="draft outreach messages",
+            context=context,
         )
 
 
@@ -311,7 +353,13 @@ class LeadQualifierAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, QualificationScoreBody, QUALIFIER_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            QualificationScoreBody,
+            QUALIFIER_SYSTEM_PROMPT,
+            objective="qualify sales lead",
+        )
 
 
 @dataclass
@@ -345,7 +393,13 @@ class NurtureAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, NurtureSequenceBody, NURTURE_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            NurtureSequenceBody,
+            NURTURE_SYSTEM_PROMPT,
+            objective="plan nurture sequence",
+        )
 
 
 @dataclass
@@ -379,7 +433,13 @@ class DiscoveryAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, DiscoveryPlanBody, DISCOVERY_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            DiscoveryPlanBody,
+            DISCOVERY_SYSTEM_PROMPT,
+            objective="plan discovery call",
+        )
 
 
 @dataclass
@@ -419,7 +479,13 @@ class ProposalAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, SalesProposalBody, PROPOSAL_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            SalesProposalBody,
+            PROPOSAL_SYSTEM_PROMPT,
+            objective="draft sales proposal",
+        )
 
 
 @dataclass
@@ -453,7 +519,13 @@ class CloserAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, ClosingStrategyBody, CLOSER_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            ClosingStrategyBody,
+            CLOSER_SYSTEM_PROMPT,
+            objective="plan deal closing strategy",
+        )
 
 
 @dataclass
@@ -485,4 +557,10 @@ class SalesCoachAgent:
             ),
             insights_context,
         )
-        return _invoke(self._llm, prompt, PipelineCoachingReport, COACH_SYSTEM_PROMPT)
+        return _invoke(
+            self._llm,
+            prompt,
+            PipelineCoachingReport,
+            COACH_SYSTEM_PROMPT,
+            objective="coach sales pipeline",
+        )

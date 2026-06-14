@@ -5,19 +5,22 @@
     @if (question.required) {
       <span class="required-badge">Required</span>
     }
-    <button
-      mat-icon-button
-      class="auto-answer-btn"
-      [disabled]="isAutoAnswering"
-      (click)="onAutoAnswerRequest()"
-      matTooltip="Auto-answer using AI based on industry best practices"
-    >
-      @if (isAutoAnswering) {
-        <mat-spinner diameter="20"></mat-spinner>
-      } @else {
-        <mat-icon>auto_awesome</mat-icon>
-      }
-    </button>
+    @if (autoAnswerEnabled && hasSelectableOptions) {
+      <button
+        mat-icon-button
+        class="auto-answer-btn"
+        aria-label="Auto-answer using AI based on industry best practices"
+        [disabled]="isAutoAnswering"
+        (click)="onAutoAnswerRequest()"
+        matTooltip="Auto-answer using AI based on industry best practices"
+      >
+        @if (isAutoAnswering) {
+          <mat-spinner diameter="20"></mat-spinner>
+        } @else {
+          <mat-icon>auto_awesome</mat-icon>
+        }
+      </button>
+    }
   </div>
 
   @if (question.context) {

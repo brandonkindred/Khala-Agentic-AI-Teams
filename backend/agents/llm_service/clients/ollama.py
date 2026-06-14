@@ -14,11 +14,22 @@ import random
 import re
 import threading
 import time
+from contextvars import ContextVar
 from typing import Any, Callable, Dict, Optional
 
 import httpx
 
 from .. import config as llm_config
+from ..attribution import (
+    bind_request_id,
+    current_attribution,
+    current_request_id,
+    llm_attribution,
+    new_request_id,
+)
+from ..attribution import (
+    caller_team as _caller_team,
+)
 from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from ..interface import (
     LLMClient,
@@ -35,19 +46,63 @@ from ..util import sha256_fingerprint
 logger = logging.getLogger(__name__)
 
 
-def _caller_tag() -> str:
-    """Return 'module.function' of the first caller outside llm_service for log context."""
-    import inspect
+# Per-call response state (caller tag, token usage, latency). These are
+# ContextVars rather than instance attributes because the client is a
+# process-wide cached singleton shared across concurrent agents: per-thread/task
+# isolation keeps each request's telemetry self-consistent, so a concurrent call
+# can't overwrite one request's usage/latency/caller before ``_record_telemetry``
+# reads them. Reset at the start of every public call so a failed call never
+# records a previous call's token counts.
+_caller_var: ContextVar[str] = ContextVar("llm_ollama_caller", default="unknown")
+_usage_var: ContextVar[Optional[Dict[str, Any]]] = ContextVar("llm_ollama_usage", default=None)
+_latency_var: ContextVar[int] = ContextVar("llm_ollama_latency_ms", default=0)
 
-    for frame_info in inspect.stack()[2:]:  # skip _caller_tag and its immediate caller
-        mod = frame_info.frame.f_globals.get("__name__", "")
+
+def _caller_tag() -> str:
+    """Return 'module.function' of the first caller outside llm_service for log context.
+
+    Walks the stack with ``sys._getframe`` rather than ``inspect.stack()``: this
+    runs once per LLM request, and ``inspect.stack()`` materializes the whole
+    stack *and* reads each frame's source file off disk to populate context
+    lines we never use. Frame walking reads only ``f_globals['__name__']`` and
+    ``f_code.co_name`` — no file I/O. On a runtime without ``sys._getframe`` it
+    degrades to ``"unknown"`` (it does not error).
+    """
+    import sys
+
+    getframe = getattr(sys, "_getframe", None)
+    if getframe is None:  # pragma: no cover - non-CPython fallback
+        return "unknown"
+    try:
+        frame = getframe(2)  # skip _caller_tag and its immediate (in-llm_service) caller
+    except ValueError:  # pragma: no cover - shallow stack
+        return "unknown"
+    while frame is not None:
+        mod = frame.f_globals.get("__name__", "")
         if mod and "llm_service" not in mod:
-            func = frame_info.function
+            func = frame.f_code.co_name
             # Shorten module path: "blogging.blog_writer_agent.agent" -> "blog_writer_agent.agent"
             parts = mod.rsplit(".", 2)
             short = ".".join(parts[-2:]) if len(parts) > 1 else mod
             return f"{short}.{func}"
+        frame = frame.f_back
     return "unknown"
+
+
+def _attribution_log_fields() -> str:
+    """Return ``"agent=<a> team=<t> objective=<o>"`` from the current attribution.
+
+    Used to stamp every LLM lifecycle log line (request, completion, retry,
+    server-error, parse-failure, truncation, semantic-exhaustion) with the same
+    attribution the request line carries, so operators filtering by ``agent``/
+    ``team``/``objective`` see the whole life of a call — not just its opening
+    request — without a second correlation lookup by ``rid``.
+
+    Postconditions: returns a single-line, space-joined string; empty fields are
+        rendered as ``-`` so the key is always present for log-grep predicates.
+    """
+    attr = current_attribution()
+    return f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
 
 
 # Default cap for max_tokens
@@ -262,7 +317,9 @@ def _rate_limit_backoff_sleep(
         rate_limit_attempt, rate_limit_initial, rate_limit_cap, retry_after_seconds
     )
     logger.warning(
-        "LLM 429 (rate-limit attempt %d/%d). Retrying in %.1fs",
+        "LLM 429 (rid=%s, %s, rate-limit attempt %d/%d). Retrying in %.1fs",
+        current_request_id() or "-",
+        _attribution_log_fields(),
         rate_limit_attempt + 1,
         rate_limit_max_retries + 1,
         wait,
@@ -320,9 +377,6 @@ class OllamaLLMClient(LLMClient):
         # with the wall-clock time it was recorded. Never written to _model_num_ctx.
         self._fallback_num_ctx: Optional[int] = None
         self._fallback_num_ctx_ts: float = 0.0
-        # Token usage from the last successful LLM call (populated by _ollama_post)
-        self._last_usage: Optional[Dict[str, Any]] = None
-        self._last_latency_ms: int = 0
 
     def _record_telemetry(
         self,
@@ -332,24 +386,36 @@ class OllamaLLMClient(LLMClient):
         prompt_text: Optional[str] = None,
         response_text: Optional[str] = None,
     ) -> None:
-        """Record LLM call telemetry using data from the last _ollama_post call."""
-        usage = self._last_usage or {}
-        caller = getattr(self, "_current_caller", "unknown")
-        # Extract team/agent from caller_tag (e.g. "blog_writer_agent.agent.write_draft")
-        agent_key = getattr(self, "_current_agent_key", "") or ""
-        team = getattr(self, "_current_team", "") or ""
+        """Record LLM call telemetry using data from the last _ollama_post call.
+
+        Attribution (agent_key/team/objective/request_id) and response state
+        (caller/usage/latency) are all sourced from per-call contextvars bound by
+        the public ``complete_json``/``complete``/``chat`` entrypoints and
+        ``_ollama_post``, so the whole record stays self-consistent even though the
+        client is a process-wide cached singleton shared across concurrent agents.
+
+        Invariant: this is only ever called from within one of those entrypoints'
+        bound request scope (so the contextvars reflect *this* call). It is not a
+        standalone public API — do not call it outside that scope.
+        """
+        usage = _usage_var.get() or {}
+        caller = _caller_var.get()
+        attr = current_attribution()
         try:
             record_llm_call(
-                team=team,
-                agent_key=agent_key,
+                team=attr.team,
+                agent_key=attr.agent_key,
                 model=self.model,
                 caller_tag=caller,
                 prompt_tokens=usage.get("prompt_tokens", 0),
                 completion_tokens=usage.get("completion_tokens", 0),
                 total_tokens=usage.get("total_tokens", 0),
-                latency_ms=self._last_latency_ms,
+                latency_ms=_latency_var.get(),
                 status=status,
                 error_type=error_type,
+                job_id=attr.job_id or None,
+                objective=attr.objective,
+                request_id=current_request_id(),
                 prompt_text=prompt_text,
                 response_text=response_text,
             )
@@ -479,7 +545,9 @@ class OllamaLLMClient(LLMClient):
                 extra_headers = " headers=" + ", ".join(parts)
         reason_str = f" reason={reason}" if reason else ""
         logger.error(
-            "LLM server error response: status=%s model=%s base_url=%s attempt=%s%s.%s Response body: %s",
+            "LLM server error response: rid=%s %s status=%s model=%s base_url=%s attempt=%s%s.%s Response body: %s",
+            current_request_id() or "-",
+            _attribution_log_fields(),
             status_code,
             self.model,
             self.base_url,
@@ -693,7 +761,9 @@ class OllamaLLMClient(LLMClient):
                 )
                 return jr_dict
         logger.error(
-            "LLM JSON parse failed. model=%s base_url=%s. Raw content (truncated): %s",
+            "LLM JSON parse failed. rid=%s %s model=%s base_url=%s. Raw content (truncated): %s",
+            current_request_id() or "-",
+            _attribution_log_fields(),
             self.model,
             self.base_url,
             text[:_MAX_LOG_BODY] + ("... [truncated]" if len(text) > _MAX_LOG_BODY else ""),
@@ -764,7 +834,9 @@ class OllamaLLMClient(LLMClient):
             if not partial_content.strip():
                 raise _EmptyResponseSignal("length", has_reasoning, len(partial_content))
             logger.warning(
-                "LLM response truncated (finish_reason=length). Partial content: %d chars",
+                "LLM response truncated (rid=%s, %s, finish_reason=length). Partial content: %d chars",
+                current_request_id() or "-",
+                _attribution_log_fields(),
                 len(partial_content),
             )
             raise LLMTruncatedError(
@@ -797,8 +869,9 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         """POST to /v1/chat/completions with SSE streaming; return raw content. Raises LLM* on non-200 or malformed.
 
-        Token usage from the response is stored in ``self._last_usage`` after each
-        successful call so callers can inspect prompt/completion token counts.
+        Token usage and latency from the response are stored in the per-call
+        ``_usage_var`` / ``_latency_var`` contextvars after each successful call,
+        keeping each request's telemetry self-consistent under concurrency.
 
         Retries use two INDEPENDENT budgets: transient 5xx/network faults retry on
         the fast schedule (``max_retries`` / ``initial_backoff`` / ``backoff_max``),
@@ -867,8 +940,10 @@ class OllamaLLMClient(LLMClient):
                 return False
             wait = _exponential_retry_delay(transient_attempt, initial_backoff, backoff_max)
             logger.warning(
-                "LLM %s (attempt %d/%d): %s. Retrying in %.1fs",
+                "LLM %s (rid=%s, %s, attempt %d/%d): %s. Retrying in %.1fs",
                 kind,
+                current_request_id() or "-",
+                _attribution_log_fields(),
                 attempt + 1,
                 max_total_attempts,
                 detail,
@@ -1009,18 +1084,21 @@ class OllamaLLMClient(LLMClient):
                                             finish_reason = fr
                                 elapsed = time.monotonic() - t0
                                 joined_content = "".join(content_parts)
-                                caller = getattr(self, "_current_caller", "unknown")
+                                caller = _caller_var.get()
 
-                                # Store usage for telemetry consumers
-                                self._last_usage = usage_data
-                                self._last_latency_ms = int(elapsed * 1000)
+                                # Store usage for telemetry consumers (per-call,
+                                # see _usage_var / _latency_var).
+                                _usage_var.set(usage_data)
+                                _latency_var.set(int(elapsed * 1000))
                                 prompt_tokens = (usage_data or {}).get("prompt_tokens", 0)
                                 completion_tokens = (usage_data or {}).get("completion_tokens", 0)
                                 total_tokens = (usage_data or {}).get("total_tokens", 0)
 
                                 logger.info(
-                                    "LLM streaming response complete in %.1fs (caller=%s, content=%d chars, reasoning=%s, finish=%s, tokens=%d/%d/%d p/c/t)",
+                                    "LLM streaming response complete in %.1fs (rid=%s, %s, caller=%s, content=%d chars, reasoning=%s, finish=%s, tokens=%d/%d/%d p/c/t)",
                                     elapsed,
+                                    current_request_id() or "-",
+                                    _attribution_log_fields(),
                                     caller,
                                     len(joined_content),
                                     has_reasoning,
@@ -1184,7 +1262,9 @@ class OllamaLLMClient(LLMClient):
                     # LLMTemporaryError. Handled inline because a raise here
                     # cannot be caught by the sibling LLMTemporaryError clause.
                     logger.warning(
-                        "LLM returned empty response (finish_reason=%s). Treating as transient error for retry.",
+                        "LLM returned empty response (rid=%s, %s, finish_reason=%s). Treating as transient error for retry.",
+                        current_request_id() or "-",
+                        _attribution_log_fields(),
                         sig.finish_reason,
                     )
                     last_error = LLMTemporaryError(
@@ -1203,8 +1283,10 @@ class OllamaLLMClient(LLMClient):
                 )
                 if new_think is not None:
                     logger.warning(
-                        "LLM produced no assistant content (finish=%s, has_reasoning=%s, attempt %d); "
+                        "LLM produced no assistant content (rid=%s, %s, finish=%s, has_reasoning=%s, attempt %d); "
                         "proof-of-change retry with thinking %r -> %r",
+                        current_request_id() or "-",
+                        _attribution_log_fields(),
                         sig.finish_reason,
                         sig.has_reasoning,
                         attempt + 1,
@@ -1222,9 +1304,11 @@ class OllamaLLMClient(LLMClient):
                 )
                 retry_level = active_think if semantic_attempt else None
                 logger.error(
-                    "LLM semantic exhaustion: failure_class=semantic_exhaustion attempts_used=%d "
+                    "LLM semantic exhaustion: rid=%s %s failure_class=semantic_exhaustion attempts_used=%d "
                     "original_thinking_level=%r retry_thinking_level=%r content_bytes_seen=%s "
                     "finish_reason=%s payload_fingerprint=%s",
+                    current_request_id() or "-",
+                    _attribution_log_fields(),
                     attempt + 1,
                     resolved_think,
                     retry_level,
@@ -1321,7 +1405,9 @@ class OllamaLLMClient(LLMClient):
                         "(e.g. 900–1200) for slow cloud models or very long prompts."
                     )
                 logger.error(
-                    "LLM connection/timeout failed after all retries. model=%s base_url=%s attempt=%s error=%s%s%s",
+                    "LLM connection/timeout failed after all retries. rid=%s %s model=%s base_url=%s attempt=%s error=%s%s%s",
+                    current_request_id() or "-",
+                    _attribution_log_fields(),
                     self.model,
                     self.base_url,
                     attempt + 1,
@@ -1343,6 +1429,7 @@ class OllamaLLMClient(LLMClient):
         self,
         prompt: str,
         *,
+        objective: str,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         think: "bool | str | None" = None,
@@ -1350,18 +1437,53 @@ class OllamaLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         """Run the model with JSON mode and return a decoded dict.
 
+        ``objective`` (required) is stamped onto every log line and telemetry
+        record for this call so it can be attributed in the logs.
+
         ``think=None`` (default) resolves to the platform default — the
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
+            return self._complete_json_impl(
+                prompt,
+                temperature=temperature,
+                system_prompt=system_prompt,
+                think=think,
+                **kwargs,
+            )
+
+    def _complete_json_impl(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        think: "bool | str | None" = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
-        self._current_caller = caller
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
+        _attr = current_attribution()
         logger.info(
-            "LLM request: caller=%s provider=ollama model=%s think=%s",
+            "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
+            current_request_id() or "-",
+            _attr.agent_key or "-",
+            _attr.team or "-",
+            _attr.objective or "-",
             caller,
             self.model,
             think,
@@ -1564,6 +1686,7 @@ class OllamaLLMClient(LLMClient):
         self,
         prompt: str,
         *,
+        objective: str,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
@@ -1572,18 +1695,55 @@ class OllamaLLMClient(LLMClient):
     ) -> str:
         """Return raw text from the model (no JSON mode). Pass tools for function/tool calling.
 
+        ``objective`` (required) is stamped onto every log line and telemetry
+        record for this call so it can be attributed in the logs.
+
         ``think=None`` (default) resolves to the platform default — the
         model's max registered thinking level when known; ``False`` disables;
         a string selects a specific level.
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
+            return self._complete_impl(
+                prompt,
+                temperature=temperature,
+                max_tokens=max_tokens,
+                system_prompt=system_prompt,
+                tools=tools,
+                think=think,
+            )
+
+    def _complete_impl(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.7,
+        max_tokens: Optional[int] = None,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+    ) -> str:
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
         caller = _caller_tag()
-        self._current_caller = caller
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
+        _attr = current_attribution()
         logger.info(
-            "LLM request (text): caller=%s provider=ollama model=%s think=%s",
+            "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
+            current_request_id() or "-",
+            _attr.agent_key or "-",
+            _attr.team or "-",
+            _attr.objective or "-",
             caller,
             self.model,
             think,
@@ -1719,6 +1879,7 @@ class OllamaLLMClient(LLMClient):
         self,
         messages: list,
         *,
+        objective: str,
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
@@ -1728,6 +1889,9 @@ class OllamaLLMClient(LLMClient):
     ) -> Any:
         """One chat completion round, parameterized by ``response_format``.
 
+        ``objective`` (required) is stamped onto every log line and telemetry
+        record for this call so it can be attributed in the logs.
+
         See ``LLMClient.chat``. JSON-only differences from the text path are
         local to the two if-statements below: the wire payload includes
         ``response_format=json_object`` when no tools are present, and the
@@ -1736,13 +1900,57 @@ class OllamaLLMClient(LLMClient):
         both modes. ``think=None`` (default) resolves to the platform default
         (max registered thinking level when known).
         """
+        if not objective or not objective.strip():
+            # DbC precondition (see LLMClient): every call must declare a
+            # non-empty objective so log/telemetry attribution is meaningful.
+            raise ValueError("objective must be a non-empty string")
+        team = current_attribution().team or _caller_team()
+        with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
+            return self._chat_impl(
+                messages,
+                response_format=response_format,
+                temperature=temperature,
+                tools=tools,
+                think=think,
+                max_tokens=max_tokens,
+                **kwargs,
+            )
+
+    def _chat_impl(
+        self,
+        messages: list,
+        *,
+        response_format: str = "json",
+        temperature: float = 0.2,
+        tools: Optional[list] = None,
+        think: "bool | str | None" = None,
+        max_tokens: Optional[int] = None,
+        **kwargs: Any,
+    ) -> Any:
         if response_format not in ("json", "text"):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         think = self._resolve_think(think)
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        self._current_caller = _caller_tag()
+        caller = _caller_tag()
+        # Reset per-call response state up front so a failed call never records a
+        # previous call's token counts / latency.
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
+        _attr = current_attribution()
+        logger.info(
+            "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",
+            current_request_id() or "-",
+            _attr.agent_key or "-",
+            _attr.team or "-",
+            _attr.objective or "-",
+            caller,
+            self.model,
+            think,
+            response_format,
+        )
         if max_tokens is None:
             env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
             if env_max:

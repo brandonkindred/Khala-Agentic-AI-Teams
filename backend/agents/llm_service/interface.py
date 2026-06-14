@@ -206,6 +206,7 @@ class LLMClient(ABC):
         self,
         prompt: str,
         *,
+        objective: str,
         temperature: float = 0.0,
         system_prompt: Optional[str] = None,
         tools: Optional[list] = None,
@@ -215,6 +216,10 @@ class LLMClient(ABC):
         """
         Run the model with the given prompt and return a JSON-decoded dict.
 
+        ``objective`` is a short, required, human-readable phrase describing *why*
+        this call is made (e.g. ``"rank job candidates"``). It is stamped onto every
+        LLM log line and telemetry record so the call can be attributed in the logs.
+
         Pass ``tools`` (OpenAI-compatible tool definitions) to enable function/tool calling.
         When the model invokes a tool, the returned dict has the key ``__tool_calls__`` whose
         value is a list of tool-call objects (id, type, function.name, function.arguments).
@@ -223,6 +228,8 @@ class LLMClient(ABC):
         ``think`` controls chain-of-thought / reasoning mode: ``None`` (default)
         resolves to the platform default — the model's max registered thinking
         level when known; ``False`` disables; a string selects a specific level.
+
+        Preconditions: ``objective`` is a non-empty string.
         """
         ...
 
@@ -230,6 +237,7 @@ class LLMClient(ABC):
         self,
         prompt: str,
         *,
+        objective: str,
         temperature: float = 0.7,
         max_tokens: Optional[int] = None,
         system_prompt: Optional[str] = None,
@@ -241,11 +249,13 @@ class LLMClient(ABC):
 
         Override in implementations that support it. Default uses complete_json and extracts text.
         Pass ``tools`` for function/tool calling; tool-call responses are returned as JSON strings.
+        ``objective`` (required) — see :meth:`complete_json`.
 
         ``think`` controls chain-of-thought / reasoning mode (see ``complete_json``).
         """
         result = self.complete_json(
             prompt,
+            objective=objective,
             temperature=temperature,
             system_prompt=system_prompt,
             tools=tools,
@@ -266,17 +276,31 @@ class LLMClient(ABC):
 
     # Alias for SE code that uses complete_text
     def complete_text(
-        self, prompt: str, *, temperature: float = 0.0, think: "bool | str | None" = None
+        self,
+        prompt: str,
+        *,
+        objective: str,
+        temperature: float = 0.0,
+        think: "bool | str | None" = None,
     ) -> str:
-        """Alias for complete() for backward compatibility with SE team."""
+        """Alias for complete() for backward compatibility with SE team.
+
+        ``objective`` (required) — see :meth:`complete_json`.
+        """
         return self.complete(
-            prompt, temperature=temperature, max_tokens=None, system_prompt=None, think=think
+            prompt,
+            objective=objective,
+            temperature=temperature,
+            max_tokens=None,
+            system_prompt=None,
+            think=think,
         )
 
     def chat(
         self,
         messages: list[Dict[str, Any]],
         *,
+        objective: str,
         response_format: str = "json",
         temperature: float = 0.2,
         tools: Optional[list] = None,
@@ -285,6 +309,8 @@ class LLMClient(ABC):
         **kwargs: Any,
     ) -> Any:
         """One chat completion round, parameterized by ``response_format``.
+
+        ``objective`` (required) — see :meth:`complete_json`.
 
         Returns one of:
 

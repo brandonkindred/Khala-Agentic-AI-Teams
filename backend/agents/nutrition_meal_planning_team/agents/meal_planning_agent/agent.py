@@ -168,6 +168,7 @@ class MealPlanningAgent:
                 client,
                 prompt,
                 schema=MealRecommendation,
+                objective="regenerate meal recommendation",
                 system_prompt=REGENERATION_SYSTEM_PROMPT,
             )
         except LLMPermanentError as e:
