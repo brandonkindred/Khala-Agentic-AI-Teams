@@ -1599,11 +1599,20 @@ def _submit_review(
 
     Postconditions:
         - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
-          if every attempt fails. Returns the inline comments that were *not*
-          posted: ``[]`` when the successful attempt carried the inline comments,
-          or the original ``comments`` when it succeeded only by dropping them.
+          if every attempt fails. The review body and every inline-comment body are
+          token-scrubbed before submission (LLM output may echo a secret from the
+          reviewed code). Returns the inline comments that were *not* posted: ``[]``
+          when the successful attempt carried the inline comments, or the original
+          ``comments`` when it succeeded only by dropping them.
     """
-    attempts = [(event, comments), ("COMMENT", comments), ("COMMENT", [])]
+    # Scrub before anything leaves for GitHub: the body (LLM summary) and each
+    # inline-comment body (LLM description/suggestion) can echo a token from the
+    # reviewed code, just like the standalone comments _safe_comment scrubs. Build
+    # scrubbed copies so the caller's ``comments`` (used for the dropped-set return
+    # and standalone re-posting) keep their original identity.
+    body = scrub_token_from_text(body)
+    scrubbed = [{**c, "body": scrub_token_from_text(c.get("body", ""))} for c in comments]
+    attempts = [(event, scrubbed), ("COMMENT", scrubbed), ("COMMENT", [])]
     last_exc: Optional[GitHubAPIError] = None
     seen: set[tuple[str, int]] = set()
     for ev, cs in attempts:
@@ -1621,9 +1630,10 @@ def _submit_review(
                 event=ev,
                 comments=cs,
             )
-            # Findings the successful submission did not carry inline are returned
-            # so the caller can re-post them as standalone comments.
-            return [c for c in comments if c not in cs]
+            # When the successful attempt carried no inline comments (the final
+            # body-only fallback), every finding was dropped and the caller re-posts
+            # them as standalone comments; otherwise none were dropped.
+            return [] if cs else list(comments)
         except GitHubAPIError as e:
             logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(cs), e)
             last_exc = e

@@ -230,6 +230,9 @@ class _FakeOutput:
 
 
 class _FakeReviewIssue:
+    """Duck-typed stand-in for a CodeReviewIssue, with the attributes the PR-review
+    flow reads (severity, category, file_path, line, description, suggestion)."""
+
     def __init__(
         self,
         severity: str,
@@ -419,6 +422,22 @@ class TestReviewEndpoint:
         assert job["github_pr_url"] == "https://example/pull/7"
         assert job["review_summary"]["inline_comments"] == 1
         assert job["review_summary"]["comment_findings"] == 1
+
+    def test_review_body_and_inline_comments_are_token_scrubbed(self, review_app) -> None:
+        # LLM output (summary + inline finding text) can echo a credential from the
+        # reviewed code; it must be scrubbed before the review is submitted, just
+        # like the standalone comments.
+        secret_url = "https://x:ghp_SECRETTOKEN@github.com/o/r.git"
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("high", line=2, description=f"leak {secret_url} here")],
+            summary=f"overall {secret_url}",
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        review = review_app["github"]["client"].reviews[0]
+        assert "ghp_SECRETTOKEN" not in review["body"]
+        assert "https://***@" in review["body"]
+        assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
 
     def test_multiple_unanchorable_findings_each_get_own_comment(self, review_app) -> None:
         # The core contract: every un-anchorable finding produces its OWN comment

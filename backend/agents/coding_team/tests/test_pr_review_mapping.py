@@ -196,10 +196,26 @@ def test_format_issue_comment_without_file_has_no_prefix() -> None:
     assert "D2" in body
 
 
+def test_format_issue_comment_with_none_file_has_no_prefix() -> None:
+    # A finding can carry file_path=None; the `... or ""` guard must treat it like
+    # an empty path (no location prefix) rather than rendering `None`.
+    body = format_issue_comment(_Issue(file_path=None, description="D3"))  # type: ignore[arg-type]
+    assert not body.startswith("`")
+    assert "None" not in body
+    assert "D3" in body
+
+
 def test_inline_comment_to_timeline_body_prefixes_path_and_line() -> None:
     comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": "**[HIGH] logic** — boom"}
     body = inline_comment_to_timeline_body(comment)
     assert body == "`a.py:12` — **[HIGH] logic** — boom"
+
+
+def test_inline_comment_to_timeline_body_drops_nonpositive_line() -> None:
+    # A non-positive line (invalid in GitHub's 1-based diff) must not render as
+    # `path:0`; it falls back to just the path.
+    comment = {"path": "a.py", "line": 0, "body": "**[HIGH] logic** — boom"}
+    assert inline_comment_to_timeline_body(comment) == "`a.py` — **[HIGH] logic** — boom"
 
 
 # ---------------------------------------------------------------------------

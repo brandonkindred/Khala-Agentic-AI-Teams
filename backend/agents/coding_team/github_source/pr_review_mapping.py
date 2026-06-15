@@ -191,13 +191,15 @@ def _location_prefix(path: str, line: Optional[int] = None) -> str:
     """Render the `` `path` — `` / `` `path:line` — `` prefix for a standalone comment.
 
     Postconditions:
-        - Returns ``"`path` — "`` (or ``"`path:line` — "`` when ``line`` is given),
-          or ``""`` when ``path`` is empty, so callers can prepend a location to a
-          finding posted away from its diff line.
+        - Returns ``"`path` — "`` (or ``"`path:line` — "`` when ``line`` is a valid
+          1-based line number), or ``""`` when ``path`` is empty, so callers can
+          prepend a location to a finding posted away from its diff line. A
+          non-positive ``line`` is treated as "no line" rather than emitted as a
+          misleading ``path:0``.
     """
     if not path:
         return ""
-    anchor = f"{path}:{line}" if line is not None else path
+    anchor = f"{path}:{line}" if line is not None and line > 0 else path
     return f"`{anchor}` — "
 
 
