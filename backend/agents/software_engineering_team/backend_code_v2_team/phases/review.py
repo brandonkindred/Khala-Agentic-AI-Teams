@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_REVIEW_CODE_CHARS = 60_000  # Generous limit; review all files, not just first 20
+# A file this many chunks deep means an unusually large review; log a warning
+# for cost/rate-limit visibility, but still review every chunk (dropping any
+# would re-introduce the tail truncation this fallback exists to avoid).
+MANY_CHUNKS_WARN_THRESHOLD = 20
 
 
 def _run_llm_review(
@@ -48,29 +52,69 @@ def _run_llm_review(
     task: Task,
     files: Dict[str, str],
 ) -> List[ReviewIssue]:
-    """LLM-based code review when no external review agent is available."""
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    prompt = REVIEW_PROMPT.format(
-        requirements=task.requirements or task.description,
-        acceptance_criteria=", ".join(task.acceptance_criteria)
-        if task.acceptance_criteria
-        else "N/A",
-        code=code_text[:MAX_REVIEW_CODE_CHARS],
-    )
-    raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-    data = parse_review_template(raw)
+    """LLM-based code review when no external review agent is available.
+
+    Preconditions:
+        - ``files`` maps file paths to their full source text.
+
+    Postconditions:
+        - Inputs that exceed the per-call budget are split into function-aware
+          chunks (cuts land between whole functions/methods, never mid-body)
+          and every chunk is reviewed; issues from all chunks are returned.
+          No file content is silently truncated away, so a large file's tail is
+          reviewed rather than dropped. Blank files contribute nothing.
+        - A chunk whose LLM call or parse fails is logged and skipped; issues
+          from the other chunks are still returned (one bad chunk never aborts
+          the whole review).
+        - Small inputs are reviewed in a single call, as before.
+    """
+    # Imported lazily, fully-qualified, to match this module's existing
+    # convention for code_review_agent imports and to avoid assuming the
+    # software_engineering_team package dir is itself on sys.path.
+    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+
+    blocks = [(path, content) for path, content in files.items() if content and content.strip()]
+    if not blocks:
+        return []
+    # Budget each prompt at the same per-call size the old code truncated to,
+    # but split at function/method boundaries so no construct is severed and no
+    # file tail is dropped.
+    chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
+    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
+        logger.warning(
+            "LLM code review: %d chunks for %d file(s) — large review, many LLM calls",
+            len(chunks),
+            len(blocks),
+        )
+    else:
+        logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
     issues: List[ReviewIssue] = []
-    for item in data.get("issues") or []:
-        if isinstance(item, dict):
-            issues.append(
-                ReviewIssue(
-                    source=item.get("source", "code_review"),
-                    severity=item.get("severity", "medium"),
-                    description=item.get("description", ""),
-                    file_path=item.get("file_path", ""),
-                    recommendation=item.get("recommendation", ""),
+    for idx, chunk in enumerate(chunks, start=1):
+        logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
+        prompt = REVIEW_PROMPT.format(
+            requirements=task.requirements or task.description,
+            acceptance_criteria=", ".join(task.acceptance_criteria)
+            if task.acceptance_criteria
+            else "N/A",
+            code=chunk.content,
+        )
+        try:
+            raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+            data = parse_review_template(raw)
+        except Exception as exc:
+            logger.warning("LLM code review: chunk %d/%d failed: %s", idx, len(chunks), exc)
+            continue
+        for item in data.get("issues") or []:
+            if isinstance(item, dict):
+                issues.append(
+                    ReviewIssue(
+                        source=item.get("source", "code_review"),
+                        severity=item.get("severity", "medium"),
+                        description=item.get("description", ""),
+                        file_path=item.get("file_path", ""),
+                        recommendation=item.get("recommendation", ""),
+                    )
                 )
-            )
     return issues
 
 
@@ -195,7 +239,7 @@ def run_review(
     # QA/security agents still take a single capped code string (their own
     # input contract); only the code review agent receives untruncated files.
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in execution_result.files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
 
     # 4. QA agent
     if qa_agent is not None:
@@ -203,7 +247,7 @@ def run_review(
             from qa_agent.models import QAInput as _QAInput
 
             qa_input = _QAInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=task.description or "",
             )
@@ -227,7 +271,7 @@ def run_review(
             from security_agent.models import SecurityInput as _SecInput
 
             sec_input = _SecInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=task.description or "",
             )
@@ -421,7 +465,7 @@ def run_microtask_review(
     # QA agent still takes a single capped code string (its own input
     # contract); only the code review agent receives untruncated files.
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
 
     if qa_agent is not None:
         if detail_callback:
@@ -430,7 +474,7 @@ def run_microtask_review(
             from qa_agent.models import QAInput as _QAInput
 
             qa_input = _QAInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
@@ -455,7 +499,7 @@ def run_microtask_review(
             from security_agent.models import SecurityInput as _SecInput
 
             sec_input = _SecInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
@@ -698,7 +742,7 @@ def run_qa_testing_phase(
     )
 
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
 
     if qa_agent is not None:
         if detail_callback:
@@ -707,7 +751,7 @@ def run_qa_testing_phase(
             from qa_agent.models import QAInput as _QAInput
 
             qa_input = _QAInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
@@ -756,7 +800,9 @@ def run_qa_testing_phase(
                 )
 
     if qa_agent is None and not (tool_agents and ToolAgentKind.TESTING_QA in tool_agents):
-        logger.warning("[%s] QA agent not available for microtask %s — QA gate skipped", task_id, microtask_id)
+        logger.warning(
+            "[%s] QA agent not available for microtask %s — QA gate skipped", task_id, microtask_id
+        )
         issues.append(
             ReviewIssue(
                 source="qa",
@@ -808,7 +854,7 @@ def run_security_testing_phase(
     )
 
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
 
     if security_agent is not None:
         if detail_callback:
@@ -817,7 +863,7 @@ def run_security_testing_phase(
             from security_agent.models import SecurityInput as _SecInput
 
             sec_input = _SecInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
@@ -868,7 +914,11 @@ def run_security_testing_phase(
                 )
 
     if security_agent is None and not (tool_agents and ToolAgentKind.SECURITY in tool_agents):
-        logger.warning("[%s] Security agent not available for microtask %s — security gate skipped", task_id, microtask_id)
+        logger.warning(
+            "[%s] Security agent not available for microtask %s — security gate skipped",
+            task_id,
+            microtask_id,
+        )
         issues.append(
             ReviewIssue(
                 source="security",
@@ -1031,7 +1081,9 @@ def run_documentation_self_review(
         )
 
         try:
-            raw = (lambda _r: str(_r))(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+            raw = (lambda _r: str(_r))(
+                Agent(model=resolve_text_mode_strands_model(llm))(prompt)
+            ).strip()
         except Exception as exc:
             logger.warning(
                 "Documentation self-review LLM call failed (iteration %d): %s",

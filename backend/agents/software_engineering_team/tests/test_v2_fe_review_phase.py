@@ -76,6 +76,86 @@ def test_fe_run_llm_review(monkeypatch):
     assert len(issues) == 1
 
 
+def test_fe_run_llm_review_chunks_large_file_without_dropping_tail(monkeypatch):
+    """The frontend fallback splits a too-large file into function-aware chunks,
+    so its tail is reviewed instead of truncated (mirrors the backend test)."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        MAX_REVIEW_CODE_CHARS,
+        _run_llm_review,
+    )
+
+    prompts: list[str] = []
+    clean = (
+        "## PASSED ##\ntrue\n## END PASSED ##\n"
+        "## ISSUES ##\n## END ISSUES ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+
+    class _RecordingAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            prompts.append(prompt)
+            return clean
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    big = "\n".join(f"function fn_{i:04d}() {{\n  return {i};\n}}" for i in range(2500))
+    assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
+
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"big.ts": big})
+
+    assert len(prompts) > 1  # chunked, not a single truncated call
+    joined = "\n".join(prompts)
+    assert "fn_0000" in joined  # head reviewed
+    assert "fn_2499" in joined  # tail reviewed — old truncation dropped this
+
+
+def test_fe_run_llm_review_skips_failing_chunk_keeps_others(monkeypatch):
+    """A failing chunk is logged and skipped; the frontend review keeps the
+    other chunks' issues (mirrors the backend resilience test)."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        MAX_REVIEW_CODE_CHARS,
+        _run_llm_review,
+    )
+
+    good = (
+        "## PASSED ##\nfalse\n## END PASSED ##\n"
+        "## ISSUES ##\n"
+        "description: real issue\nseverity: high\nfile_path: big.ts\nsource: code_review\n"
+        "## END ISSUES ##\n"
+        "## SUMMARY ##\nbad\n## END SUMMARY ##\n"
+    )
+    calls = {"n": 0}
+
+    class _FlakyAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("model unavailable")
+            return good
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _FlakyAgent())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+    monkeypatch.setattr(review_mod, "MANY_CHUNKS_WARN_THRESHOLD", 0)
+
+    big = "\n".join(f"function fn_{i:04d}() {{\n  return {i};\n}}" for i in range(2500))
+    assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
+
+    issues = _run_llm_review(llm=MagicMock(), task=_task(), files={"big.ts": big})
+
+    assert calls["n"] > 1
+    assert len(issues) >= 1
+    assert all(i.description == "real issue" for i in issues)
+
+
 def test_fe_run_review_clean(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
@@ -98,7 +178,9 @@ def test_fe_run_review_build_fails(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     out = run_review(
@@ -116,7 +198,9 @@ def test_fe_run_review_with_qa_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     qa_agent = MagicMock()
@@ -143,7 +227,9 @@ def test_fe_run_review_with_linting_failures(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     class _Issue:
@@ -172,7 +258,9 @@ def test_fe_run_review_with_security_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     sec_agent = MagicMock()
@@ -199,7 +287,9 @@ def test_fe_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     cr_agent = MagicMock()
@@ -290,7 +380,9 @@ def test_fe_run_review_with_tool_agents(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     tool_agent = MagicMock()
