@@ -1,0 +1,671 @@
+# Market Data & Trading Data Flow — Strategy Lab / Investment Team
+
+How the Strategy Lab **acquires** financial data, which **providers** it uses,
+what each provides, and how that data is **ingested / streamed into the trading
+engine** for **backtesting** and **paper trading**.
+
+This document is the data-layer companion to the existing system-design set:
+- [`architecture.md`](./architecture.md) — container view of the whole team
+- [`system_design.md`](./system_design.md) — API router + domain models
+- [`pr2_live_data_and_paper_cutover.md`](./pr2_live_data_and_paper_cutover.md) — the live-feed / paper cut-over spec
+- [`../strategy_lab/LOOK_AHEAD_DEFENCE.md`](../strategy_lab/LOOK_AHEAD_DEFENCE.md) — the four-layer look-ahead defence
+
+> **Audience:** a software engineer who needs to understand where price data
+> comes from and how it reaches the simulator. Every claim is anchored to a
+> `file.py:line` so you can jump straight to the code.
+
+---
+
+## TL;DR
+
+- The team runs **three independent data planes**, each with its own providers
+  and its own job:
+  1. **Context plane** — `market_lab_data/` → a free macro/FX/crypto *snapshot*
+     that flavours the LLM ideation prompt. **Not** price bars for trading.
+  2. **Historical-OHLCV plane** — `market_data_service.py` → the multi-source
+     OHLCV fetcher (Yahoo → Twelve Data → CoinGecko / Alpha Vantage) that
+     feeds **backtests** and **legacy paper trading**. **This is the workhorse
+     today.**
+  3. **Streaming plane** — `trading_service/providers/` → a pluggable
+     `ProviderAdapter` registry (Binance / Coinbase / Alpaca / OANDA free
+     defaults + Polygon / Databento / Twelve Data paid) for **live paper
+     trading** and provider-driven **sub-daily** backtests.
+- Everything converges on **one engine contract**: an iterable of
+  `StreamEvent`s (`BarEvent` ⨉ N + a terminal `EndOfStreamEvent`) consumed by
+  `TradingService.run(stream)`. **Backtest and paper trade share the exact same
+  engine** — only the *stream object* and its *pace* differ.
+- **Look-ahead is structurally impossible**: the strategy runs in an isolated
+  subprocess that is handed exactly one bar at a time and has no accessor for
+  future data; the fill simulator's one-bar-forward peek lives only in the
+  parent process.
+- **Implementation status matters.** Plane 2 is fully wired and is what daily
+  backtests/paper-trades use. Plane 3 is the newer streaming path; of its
+  adapters **only Binance is wired end-to-end today**, and the live path is
+  gated behind `INVESTMENT_LIVE_PAPER_ENABLED` (default **off**). See
+  [§9](#9-implementation-status--caveats).
+
+---
+
+## 1. The three data planes
+
+| Plane | Module | Providers | Produces | Consumed by | Status |
+|---|---|---|---|---|---|
+| **1 · Context snapshot** | `market_lab_data/` (`FreeTierMarketDataProvider`) | Frankfurter (FX), FRED `DGS10` (optional), Yahoo/`yfinance` (BTC/ETH spot) | `MarketLabContext` — a short text brief (`fx_rates`, `macro_snippets`, `crypto_snapshot`) | `SignalIntelligenceExpert` → LLM ideation prompt | ✅ wired |
+| **2 · Historical OHLCV** | `market_data_service.py` (`MarketDataService`) | Yahoo Finance → Twelve Data → CoinGecko (crypto) / Alpha Vantage (non-crypto, key-gated) | `List[OHLCVBar]` per symbol (daily) | **Backtests**, **legacy paper trade** (via `HistoricalReplayStream`) | ✅ wired |
+| **3 · Streaming feed** | `trading_service/providers/` (`ProviderAdapter` registry) | Binance, Coinbase (crypto) · Alpaca (equities) · OANDA (fx) · Polygon, Databento, Twelve Data (paid) | `BarEvent` (historical) / `NativeEvent` ticks+bars (live) | **Live paper trade** (`LiveStream`+`Resampler`), provider-driven **sub-daily backtest** (`CachingProviderHistoricalStream`) | ⚠️ partial — only Binance fully wired; live path flag-gated |
+
+### Container view (data-focused)
+
+```mermaid
+flowchart TB
+  subgraph ext[External data vendors]
+    YF[Yahoo Finance<br/>yfinance]
+    TD[Twelve Data REST]
+    CG[CoinGecko REST]
+    AV[Alpha Vantage REST]
+    FR[Frankfurter FX]
+    FRED[FRED DGS10]
+    BIN[Binance REST + WS]
+    CB[Coinbase WS]
+    ALP[Alpaca IEX/SIP]
+    OAN[OANDA v20]
+    POLY[Polygon · Databento · TwelveData Pro]
+  end
+
+  subgraph plane1[Plane 1 · Context snapshot — market_lab_data/]
+    FT[FreeTierMarketDataProvider<br/>fetch_context]
+    MLC[MarketLabContext]
+  end
+
+  subgraph plane2[Plane 2 · Historical OHLCV — market_data_service.py]
+    MDS[MarketDataService<br/>fetch_multi_symbol_range]
+    CACHE[(MarketDataCache<br/>Parquet + Postgres index<br/>SHA256 fingerprint)]
+  end
+
+  subgraph plane3[Plane 3 · Streaming feed — trading_service/providers/]
+    REG[Provider registry<br/>default_registry]
+    ADP[ProviderAdapter<br/>historical / live]
+  end
+
+  subgraph stream[Ingestion — trading_service/data_stream/]
+    HRS[HistoricalReplayStream]
+    CPS[CachingProviderHistoricalStream]
+    LS[LiveStream + Resampler]
+  end
+
+  subgraph engine[Engine — trading_service/]
+    SVC[TradingService.run<br/>mode-agnostic loop]
+    HARN[StrategyHarness<br/>subprocess · 1 bar at a time]
+    FILL[FillSimulator + Portfolio]
+  end
+
+  SIE[SignalIntelligenceExpert] --> FT
+  FT --> MLC --> IDEA[LLM ideation]
+
+  FR --> FT
+  FRED --> FT
+  YF --> FT
+
+  YF --> MDS
+  TD --> MDS
+  CG --> MDS
+  AV --> MDS
+  MDS <--> CACHE
+
+  BIN --> ADP
+  CB --> ADP
+  ALP --> ADP
+  OAN --> ADP
+  POLY --> ADP
+  REG --> ADP
+
+  MDS --> HRS
+  ADP --> CPS
+  CPS <--> CACHE
+  ADP --> LS
+
+  HRS --> SVC
+  CPS --> SVC
+  LS --> SVC
+  SVC <--> HARN
+  SVC --> FILL
+```
+
+---
+
+## 2. Provider inventory
+
+### 2.1 Plane 1 — context snapshot (`market_lab_data/`)
+
+`FreeTierMarketDataProvider.fetch_context()` builds one `MarketLabContext` per
+ideation, degrading gracefully under a wall-clock budget. It is **not** a
+trading feed — it produces a few lines of prompt context, never OHLCV bars.
+
+| Source | Vendor / endpoint | Provides | Key | Code |
+|---|---|---|---|---|
+| FX rates | **Frankfurter** `api.frankfurter.dev/v1/latest` | USD→EUR/GBP/JPY/CHF/CAD/AUD → `fx_rates` | none | `free_tier.py:88` |
+| Macro | **FRED** `series/observations` `DGS10` | US 10Y Treasury yield → `macro_snippets` | optional `FRED_API_KEY` (skipped if unset) | `free_tier.py:107` |
+| Crypto spot | **Yahoo Finance** via `yfinance` (`BTC-USD`, `ETH-USD` `fast_info.last_price`) → `crypto_snapshot` | none | `free_tier.py:131` |
+
+> **Doc drift to be aware of:** the README and `architecture.md` say the crypto
+> snapshot comes from *CoinGecko*; the code (`free_tier.py:131-144`,
+> `sources.append("yahoo_crypto")`) uses **`yfinance`**. The code is
+> authoritative.
+
+Tuning: `STRATEGY_LAB_MARKET_DATA_PROVIDER` (only `free_tier` exists),
+`STRATEGY_LAB_MARKET_DATA_FETCH_TIMEOUT_SEC` (8.0), `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC`
+(120.0), `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED`.
+
+### 2.2 Plane 2 — historical OHLCV (`MarketDataService`)
+
+`MarketDataService` is the OHLCV workhorse: it fetches **daily** bars with a
+multi-source fallback chain, normalises/repairs them, and persists them in a
+content-addressed cache. Public surface (all in `market_data_service.py`):
+
+| Method | Line | Purpose |
+|---|---|---|
+| `fetch_ohlcv(symbol, asset_class, days)` | `:224` | recent N days for one symbol |
+| `fetch_ohlcv_range(symbol, asset_class, start, end, *, as_of, frequency)` | `:256` | dated range; routes through the cache |
+| `fetch_multi_symbol_range(symbols, asset_class, start, end, …)` | `:432` | the method `HistoricalReplayStream.from_market_data_service` calls |
+| `avg_dollar_volume_20d(...)` | `:303` | ADV for liquidity realism |
+| `resolve_strategy_symbols(spec)` | `:354` | universe: explicit `target_symbols` else asset-class default (capped) |
+
+**Provider chain** — `_get_named_provider_chain(asset_class)` (`:519`):
+
+| Asset class | Chain (first non-empty wins) | Key |
+|---|---|---|
+| crypto | Yahoo → Twelve Data → CoinGecko | none (CoinGecko is crypto-only) |
+| everything else | Yahoo → Twelve Data → *Alpha Vantage* | Alpha Vantage only if `ALPHA_VANTAGE_API_KEY` set (`:536`) |
+
+| Vendor | Asset classes | Retries / backoff | Code |
+|---|---|---|---|
+| **Yahoo Finance** (`yfinance`, `auto_adjust=True`) | all | `max_retries=3`, `2**(attempt+1)` backoff on error/empty | `_fetch_yahoo` `:544` |
+| **Twelve Data** (REST, `1day`, `outputsize=5000`) | stocks/fx/crypto/commodities | `max_retries=2`, HTTP 429 backoff | `_fetch_twelve_data` `:622` |
+| **CoinGecko** (`/market_chart`, daily buckets) | crypto only | `max_retries=2`, 429 backoff | `_fetch_coingecko` `:695` |
+| **Alpha Vantage** (REST) | non-crypto, key-gated | single attempt | `_fetch_alphavantage` `:782` |
+
+### 2.3 Plane 3 — streaming registry (`trading_service/providers/`)
+
+All adapters implement one Protocol — `ProviderAdapter` (`providers/base.py:64`)
+— so the stream layer treats them identically. All methods are **synchronous
+iterators** (a WS or REST loop is hidden behind the generator):
+
+```python
+class ProviderAdapter(Protocol):                                # base.py:64
+    capabilities: ProviderCapabilities
+    def smallest_available(self, asset_class, *, live) -> Optional[str]: ...   # :74
+    def historical(self, *, symbols, asset_class, start, end, timeframe) -> Iterator[BarEvent]: ...  # :83
+    def live(self, *, symbols, asset_class, native_timeframe) -> Iterator[NativeEvent]: ...          # :95
+```
+
+`ProviderCapabilities` (`base.py:36`) carries `name`, `supports ⊆ {crypto,
+equities, fx}`, `is_paid`, `historical_timeframes`, `live_timeframes`, and
+`implemented` (paid stubs set `False` so a stray key can't route a user into a
+`NotImplementedError`).
+
+| Adapter | Vendor | Asset class | Paid? | Historical TFs | Live TFs | Auth env | Wired end-to-end? |
+|---|---|---|---|---|---|---|---|
+| `BinanceAdapter` `binance.py:52` | Binance public | crypto | no | 1s–1d | tick,1s,15s,1m | none (keyless) | **✅ REST klines + WS** |
+| `CoinbaseAdapter` `coinbase.py:31` | Coinbase Exchange | crypto | no | 1m–1d | tick,1m | none | ⚠️ stub (geo-failover target) |
+| `AlpacaAdapter` `alpaca.py:29` | Alpaca IEX/SIP | equities | no (IEX) | 1m–1d | tick,1m | `ALPACA_API_KEY_ID`,`ALPACA_API_SECRET_KEY`,`ALPACA_PAID_FEED` | ⚠️ auth-checked stub |
+| `OandaAdapter` `oanda.py:28` | OANDA v20 practice | fx | no | 5s–1d | tick | `OANDA_API_TOKEN`,`OANDA_ACCOUNT_ID` | ⚠️ stub |
+| `PolygonAdapter` `polygon.py:29` | Polygon.io | crypto/equities/fx | yes | 1s–1d | tick,1s,1m | `POLYGON_API_KEY` | ⚠️ `implemented=False` |
+| `DatabentoAdapter` `databento.py:28` | Databento | equities | yes | 1s–1d | tick,1s,1m | `DATABENTO_API_KEY` | ⚠️ `implemented=False` |
+| `TwelveDataAdapter` `twelve_data.py:30` | Twelve Data Pro | crypto/equities/fx | yes | 1m–1d | 1m | `TWELVE_DATA_API_KEY`,`TWELVE_DATA_PLAN=pro` | ⚠️ `implemented=False` |
+
+Binance specifics: REST `GET /api/v3/klines` paginated by 1000-row windows
+(`binance.py:107`); live WS combined stream `@trade` (tick) / `@kline_<tf>`
+(`binance_ws.py:114`), pumped on a background thread bridged to a sync generator
+via `queue.Queue` (`binance_ws.py:189`). HTTP/WS **451** raises
+`ProviderRegionBlocked` to trigger the Binance→Coinbase failover.
+
+**Symbol normalisation.** Adapters normalise inline (e.g. Binance
+`symbol.upper().replace("-","")`). A standalone helper
+`data_providers/symbol_maps.py` provides Twelve Data / Alpha Vantage ticker
+tables (e.g. `BTC → BTC/USD`, `EURUSD=X → EUR/USD`, `ES=F → ES`) but is **not**
+wired into the registry — adapters that use it call it directly.
+
+---
+
+## 3. Provider registry & selection (Plane 3)
+
+The process-wide registry is a lazy singleton, `default_registry()`
+(`providers/__init__.py:24`, `@lru_cache(maxsize=1)`). **Registration order is
+load-bearing**: paid providers register first (so a configured key wins) but
+only activate when `implemented=True`.
+
+```
+crypto    → default: binance      secondary (geo-failover): coinbase
+equities  → default: alpaca
+fx        → default: oanda
+paid      → polygon, databento, twelve_data   (key-gated, implemented=False today)
+```
+
+### Selection precedence — `_pick(asset_class, direction)` (`registry.py:210`)
+
+```mermaid
+flowchart TD
+  A[resolve / resolve_live<br/>asset_class + direction] --> NORM[canonical_asset_class<br/>stocks→equities, forex→fx, …]
+  NORM --> P1{explicit provider_id<br/>on the request?}
+  P1 -- yes --> PIN[use it · even if a stub<br/>opting into a stub is visible]
+  P1 -- no --> P2{env override?<br/>INVESTMENT_LIVE/HISTORICAL_PROVIDER_*}
+  P2 -- valid --> ENV[use override]
+  P2 -- absent/invalid --> P3{paid provider<br/>with key AND implemented<br/>AND supports class+direction?}
+  P3 -- yes --> PAID[use paid provider]
+  P3 -- no --> P4{free default<br/>for this asset class?}
+  P4 -- yes --> DEF[use free default]
+  P4 -- no --> P5[last resort:<br/>any free provider that supports it]
+```
+
+- Direction support is gated by `_has_direction` (`registry.py:315`): historical
+  needs non-empty `historical_timeframes`; live needs non-empty `live_timeframes`.
+- `resolve_live` (`registry.py:171`) returns a `LiveResolution` with an optional
+  `fallback` (the `secondary_for` registration — only **coinbase** for crypto),
+  used **only** when unpinned and only if the primary raises
+  `ProviderRegionBlocked` **before the first bar** ("one adapter per session").
+- `describe_all()` (`registry.py:125`) backs `GET /api/investment/providers`.
+
+---
+
+## 4. The engine contract — one stream, two modes
+
+Everything funnels into a single iterator contract
+(`trading_service/data_stream/protocol.py`):
+
+```python
+class BarEvent(BaseModel):      # protocol.py:18
+    bar: Bar
+    is_warmup: bool = False     # warm-up bars build indicators; fills suppressed
+
+class EndOfStreamEvent(BaseModel):  # protocol.py:30  — emitted once, last
+    reason: str = "end_of_data"
+
+StreamEvent = Union[BarEvent, EndOfStreamEvent]          # :36
+
+class MarketDataStream(Protocol):                        # :39
+    def __iter__(self) -> Iterator[StreamEvent]: ...     # synchronous generator
+```
+
+`TradingService.run(stream, *, on_trade=None)` (`service.py:1236`) consumes that
+iterator one event at a time. It is **mode-agnostic** — it never knows whether
+the stream is historical or live. The mode layer decides which stream object to
+build:
+
+| | Backtest | Paper trade |
+|---|---|---|
+| Entry | `run_backtest` `modes/backtest.py:49` | `run_paper_trade` `modes/paper_trade.py:123` |
+| Stream | `HistoricalReplayStream` (pre-fetched dict) **or** `CachingProviderHistoricalStream` (provider, sub-daily) | `LiveStream` + `Resampler` |
+| Pace | **instant** — eager in-memory generator | **real-time** — blocks on each live event |
+| Warm-up | none (`is_warmup=False`) | `warmup_bars` (default 500) tagged `is_warmup=True` |
+| Termination | `EndOfStreamEvent` | ≥ `min_fills` (20) · user stop · `max_hours` (72h) |
+| Unfilled policy | `REQUEUE_NEXT_BAR` (surface exposure) | `DROP` (mirror a real exchange) |
+| `on_trade` | not passed | `lambda: fill_counter.increment()` drives `min_fills` |
+| Engine | **identical** `FillSimulator`/`Portfolio`/`OrderBook`/subprocess | **identical** |
+
+---
+
+## 5. Ingestion & streaming architecture
+
+### 5.1 Two historical routes, one contract
+
+```mermaid
+flowchart LR
+  subgraph A[Route A · pre-fetched daily — Plane 2]
+    MDS[MarketDataService<br/>fetch_multi_symbol_range] --> DICT["{symbol: List OHLCVBar}"]
+    DICT --> HRS[HistoricalReplayStream<br/>sort by date,symbol → BarEvent…]
+  end
+  subgraph B[Route B · lazy provider — Plane 3]
+    ADP[ProviderAdapter.historical] --> CPS[CachingProviderHistoricalStream<br/>tee → cache + yield]
+  end
+  HRS --> SE[StreamEvent iterator]
+  CPS --> SE
+  SE --> SVC[TradingService.run]
+  CPS <--> CACHE[(MarketDataCache)]
+  MDS <--> CACHE
+```
+
+- **Route A** — `HistoricalReplayStream` (`historical_replay.py:24`) flattens
+  `{symbol: [OHLCVBar]}` into one timeline **sorted by `(date, symbol)`** and
+  yields one `BarEvent` per bar, then `EndOfStreamEvent` (`__iter__` `:42-67`).
+  This is the single place future-vs-past sequencing is enforced for backtests.
+- **Route B** — `CachingProviderHistoricalStream` (`market_data_cache/streaming.py:46`)
+  wraps a provider's `historical()`: on a full cache hit it replays parquet; on
+  a miss it tees each `BarEvent` into per-symbol buffers, yields them, and
+  persists a snapshot at `EndOfStreamEvent`. This is what unlocks **sub-daily**
+  backtests without touching `MarketDataService`.
+
+### 5.2 Live stream + resampler (paper trade)
+
+```mermaid
+flowchart LR
+  ADP[ProviderAdapter] -- historical bars --> WU[warm-up phase<br/>WarmupBarEvent is_warmup=True]
+  ADP -- live ticks / native bars --> RS[Resampler<br/>feed_native]
+  RS -- finalized BarEvent at strategy TF --> LV[LiveBarEvent]
+  WU --> TR[paper_trade._translate]
+  CO[CutoverEvent<br/>first live ts] --> TR
+  LV --> TR
+  TR -- BarEvent / EndOfStreamEvent --> SVC[TradingService.run]
+```
+
+- `LiveStream.events()` (`live_stream.py:132`) runs two phases:
+  `_warmup()` pulls historical bars at the strategy timeframe and tags them
+  `is_warmup=True`; `_live()` captures the **cut-over timestamp** from the first
+  live event, then pipes provider-native events through the `Resampler`.
+- The `Resampler` (`resampler.py`) builds OHLCV at the strategy timeframe from
+  ticks or smaller native bars, enforcing three invariants: **only finalized
+  bars leave** (emitted only after a later native event arrives), **monotonic
+  timestamps** (out-of-order prints dropped), and **no fabricated bars in gaps**.
+  It only *upscales* (1m→5m→1d), never downscales.
+- `paper_trade._translate` (`paper_trade.py:356`) converts `LiveStreamEvent`s
+  into engine `StreamEvent`s, **dropping any warm-up/late bar with
+  `ts < cutover_ts`** — the guardrail enforcing "live data only during the live
+  phase". Live bars are **not** cached; the warm-up window is fingerprinted and
+  snapshotted at cut-over.
+
+### 5.3 The market-data cache
+
+`MarketDataCache` (`market_data_cache/store.py`) makes fetches durable and
+backtests reproducible:
+
+- **Format:** immutable **Parquet** snapshots on disk, one per
+  `(asset_class, symbol, frequency, provider, fetch_date)` —
+  `cache_root()/asset_class/symbol/frequency/provider/{fetch_date}.parquet`
+  (`paths.py:46`). `cache_root()` resolves
+  `INVESTMENT_MARKET_DATA_CACHE_ROOT` → `${AGENT_CACHE}/investment_team/market_data`
+  → tempdir (with a "reproducibility lost" warning).
+- **Index:** a Postgres table `investment_market_data_snapshots`
+  (`market_data_cache/postgres/__init__.py`) with an in-memory fallback when
+  `POSTGRES_HOST` is unset.
+- **Key / fingerprint:** SHA-256 over chronologically sorted
+  `date|open|high|low|close|volume` (`_hash_bars` `store.py:192`);
+  `compute_dataset_fingerprint` (`:221`) is the symbol-order-independent
+  multi-symbol hash stored on `BacktestResult.dataset_fingerprint`.
+- **Entry points:** `get_or_fetch` (`:612`) and `get_or_fetch_multi` (`:668`,
+  `ThreadPoolExecutor`, `MARKET_DATA_FETCH_WORKERS`). On a hit it reads parquet,
+  reconciles the hash, trims to `[start, end]`; on a miss it calls the fetch
+  function once and writes a snapshot.
+- **Determinism detail:** non-finite volume is canonicalised to `0.0` at *every*
+  boundary (fetch, replay, parquet write/read, fingerprint, streaming tee) so a
+  first run and its cached replay are byte-identical.
+
+### 5.4 Data quality & bar safety
+
+- `execution/data_quality.py` — `validate_market_data(...)` (`:324`) is a pure
+  preflight validator: duplicate timestamps, NaN/negative prices, OHLC-invariant
+  violations (asset-class-aware epsilon), zero-volume (skipped for FX), volume
+  z-score outliers, frequency inference, and calendar gaps. `strict` raises
+  `DataIntegrityError`; backtests run it in `warn` mode and stash
+  `last_quality_report`. `LiveGapMonitor` (`:827`) is the paper-trade watchdog.
+- `execution/bar_safety.py` — `BarSafetyAssertion.check_fill(...)` (`:107`) is
+  the parent-side belt-and-suspenders guard: it raises `LookAheadError` if a
+  fill timestamp is `<=` the order's submission timestamp.
+
+---
+
+## 6. How a bar drives the engine
+
+### 6.1 The unified run loop (`service.py:1390`)
+
+Per `BarEvent` (non-warm-up), the loop:
+
+1. peeks the next same-symbol bar into `next_bar` (the one-bar-forward input);
+2. submits orders the strategy queued on the **previous** bar against the
+   **current** bar (`pending_for_prev` → `OrderBook.submit`) — *the look-ahead
+   boundary*;
+3. **turns the bar into fills**: `fill_sim.process_bar(cur_bar, next_bar)`;
+4. pushes fills back to the strategy subprocess, extends `trades`, fires
+   `on_trade` (paper-trade's fill counter);
+5. marks-to-market and records the EOD equity point (no drawdown circuit-breaker
+   — a research run must be free to lose up to 100%);
+6. appends the bar to the per-symbol `StreamingHistoryView` (indicators);
+7. **delivers the bar to the strategy**: `harness.send_bar(...)`;
+8. processes the strategy's orders + runs the engine entry/exit rule dispatchers
+   → queued into `pending_for_prev` for the next iteration.
+
+### 6.2 Fill-price-from-bar (`engine/execution_model.py` + `fill_simulator.py`)
+
+The default `RealisticExecutionModel.compute_fill_terms(req, bar, next_bar)`
+(`execution_model.py:180`) derives the reference price from the **incoming bar**:
+
+```python
+if req.order_type == OrderType.MARKET:  ref = bar.open                       # :187
+elif req.order_type == OrderType.LIMIT: ref = self._limit_reference_price(...)  # == limit price when bar covers it
+elif req.order_type == OrderType.STOP:  ref = self._stop_reference_price(...)   # gap-through honored
+```
+
+then applies a participation cap (`order_notional / (volume·close)`), a LIMIT
+adverse-selection haircut (uses `next_bar.close`), and finally slippage in
+`fill_simulator.py:567`: `fill_price = round(ref · (1 ± slippage_bps/1e4), dp)`.
+Transaction costs (`transaction_cost_bps`) are charged on entry+exit notional
+when the trade closes. Defaults: `slippage_bps=2.0`, `transaction_cost_bps=5.0`.
+
+### 6.3 Look-ahead boundary
+
+```mermaid
+flowchart LR
+  subgraph parent[Parent process — may peek t+1]
+    LOOP[run loop] --> FS[FillSimulator<br/>order on t fills on t+1]
+    FS --> BSA[BarSafetyAssertion<br/>raises LookAheadError]
+  end
+  subgraph child[Strategy subprocess — sees only ≤ t]
+    OB[on_bar ctx, bar<br/>ctx.history backward only<br/>no future accessor]
+  end
+  LOOP == send_bar t ==> OB
+  OB == orders ==> LOOP
+```
+
+The four-layer defence (subprocess isolation → runtime trap → static AST/regex
+checks → post-hoc anomaly heuristic) is detailed in
+[`../strategy_lab/LOOK_AHEAD_DEFENCE.md`](../strategy_lab/LOOK_AHEAD_DEFENCE.md).
+
+---
+
+## 7. Use cases (data-centric)
+
+```mermaid
+flowchart LR
+  Proposer((Proposer /<br/>Strategy Lab))
+  Ops((Operations))
+  MD((Market Data<br/>Providers))
+
+  subgraph sys[Investment Team — data & trading]
+    UC1([Run strategy-lab batch<br/>POST /strategy-lab/run])
+    UC2([Run backtest<br/>POST /backtests])
+    UC3([Fetch historical OHLCV<br/>MarketDataService])
+    UC4([Replay bars into engine<br/>HistoricalReplayStream])
+    UC5([Run paper-trade — legacy<br/>recent OHLCV replay])
+    UC6([Run paper-trade — live<br/>provider stream + resampler])
+    UC7([List providers<br/>GET /providers])
+    UC8([Build context snapshot<br/>FreeTierMarketDataProvider])
+    UC9([Stop live session<br/>POST …/stop])
+  end
+
+  Proposer --> UC1
+  Proposer --> UC2
+  Proposer --> UC5
+  Proposer --> UC6
+  Ops --> UC7
+  Ops --> UC9
+
+  UC1 --> UC8
+  UC1 --> UC2
+  UC2 --> UC3
+  UC3 --> UC4
+  UC5 --> UC3
+  UC6 --> MD
+  UC3 --> MD
+  UC8 --> MD
+  UC1 -->|winner only| UC5
+```
+
+| Use case | Endpoint / entry | Data path |
+|---|---|---|
+| Run strategy-lab batch | `POST /strategy-lab/run` (`api/main.py:1960`) | context snapshot → ideation → backtest → (winner) paper trade |
+| Run backtest | `POST /backtests` (`:873`) → `_run_real_data_backtest` (`:1064`) | `MarketDataService.fetch_multi_symbol_range` → `HistoricalReplayStream` → engine |
+| Run paper trade | `POST /strategy-lab/paper-trade` (`:2780`) | flag-off: recent OHLCV replay · flag-on: live `ProviderAdapter` stream |
+| Stop live session | `POST /strategy-lab/paper-trade/{id}/stop` (`:3070`) | sets `StopController` flag the run loop polls |
+| List providers | `GET /providers` (`:3120`) | `registry.describe_all()` |
+
+---
+
+## 8. End-to-end sequence diagrams
+
+### 8.1 Backtest
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant API as api/main.py
+    participant MDS as MarketDataService
+    participant Cache as MarketDataCache
+    participant Vendor as Yahoo/TwelveData/CoinGecko
+    participant Stream as HistoricalReplayStream
+    participant Svc as TradingService.run
+    participant Sub as Strategy subprocess
+    participant Fill as FillSimulator
+
+    API->>MDS: fetch_multi_symbol_range(symbols, class, start, end)
+    MDS->>Cache: get_or_fetch_multi(...)
+    alt cache hit
+        Cache-->>MDS: parquet bars (reconciled)
+    else miss
+        Cache->>Vendor: provider chain (first non-empty wins)
+        Vendor-->>Cache: raw OHLCV
+        Cache->>Cache: normalize + write snapshot + fingerprint
+        Cache-->>MDS: bars
+    end
+    MDS-->>Stream: {symbol: [OHLCVBar]}
+    API->>Svc: run(HistoricalReplayStream)
+    loop each BarEvent (chronological)
+        Svc->>Fill: process_bar(cur_bar, next_bar) — bar becomes fills
+        Fill-->>Svc: fills / closed trades
+        Svc->>Sub: send_bar(cur_bar) — one bar, no future
+        Sub-->>Svc: orders (queued for next bar)
+    end
+    Svc-->>API: trades + equity curve + diagnostics
+```
+
+### 8.2 Paper trade (live path, `INVESTMENT_LIVE_PAPER_ENABLED=true`)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant API as api/main.py
+    participant Reg as Provider registry
+    participant Prov as ProviderAdapter (e.g. Binance)
+    participant Live as LiveStream + Resampler
+    participant Svc as TradingService.run
+    participant Sub as Strategy subprocess
+    participant Counter as fill_counter
+
+    API->>Reg: resolve_live(asset_class, explicit=provider_id)
+    Reg-->>API: primary (+ coinbase fallback for crypto)
+    API->>Live: LiveStream(provider, warmup_bars=500, stop_flag)
+    Live->>Prov: historical(...) — warm-up
+    Prov-->>Live: warm-up bars (is_warmup=True)
+    Live->>Prov: live(native_timeframe)
+    Prov-->>Live: native ticks / bars
+    Live->>Live: resample native events into finalized bars, capture cutover_ts
+    API->>Svc: run(translated stream, on_trade=counter.increment)
+    loop each live BarEvent (ts >= cutover)
+        Svc->>Sub: send_bar(bar)
+        Sub-->>Svc: orders
+        Svc->>Svc: fill, mark-to-market
+        Svc->>Counter: on_trade() — ticks min_fills
+    end
+    Note over Svc,Live: stop when fills>=min_fills, user stop, or max_hours
+    Svc-->>API: PaperTradeRunResult (verdict, trades)
+```
+
+### 8.3 Paper-trade session state machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> opening
+    opening --> warming_up: provider connected
+    opening --> failed: provider error
+    warming_up --> live: warm-up delivered (cutover_ts set)
+    live --> terminating: fills >= min_fills
+    live --> terminating: user_stop
+    live --> terminating: provider_error / max_hours
+    terminating --> complete
+    failed --> [*]
+    complete --> [*]
+```
+
+---
+
+## 9. Implementation status & caveats
+
+The data layer reflects a **partly-completed migration** (the "PR 1 / PR 2"
+sequence in [`pr2_live_data_and_paper_cutover.md`](./pr2_live_data_and_paper_cutover.md)).
+Know what is live before you rely on it:
+
+| Capability | Status |
+|---|---|
+| Daily backtest via `MarketDataService` (Plane 2) | ✅ fully wired — the default path |
+| LLM context snapshot (Plane 1, `FreeTierMarketDataProvider`) | ✅ fully wired |
+| Streaming registry + `HistoricalReplayStream`/`LiveStream`/`Resampler` plumbing | ✅ implemented |
+| **Binance** adapter (crypto) — REST historical + WS live | ✅ wired end-to-end |
+| Coinbase / Alpaca / OANDA adapters | ⚠️ registered but `historical`/`live` are stubs (`NotImplementedError`) |
+| Polygon / Databento / Twelve Data (paid) | ⚠️ `implemented=False` — present but dormant until pumps land |
+| **Live** paper trade (`LiveStream`) | ⚠️ gated by `INVESTMENT_LIVE_PAPER_ENABLED` (default **off**) |
+| Default paper trade | ✅ legacy path — recent daily OHLCV via `MarketDataService`, replayed through the backtest engine (`paper_trading_agent.py`) |
+| Provider-driven **sub-daily** backtest | ⚠️ realistically crypto-only today (only Binance has a working `historical()`) |
+
+**Practical consequence:** with the default configuration, *all* price data —
+backtest and paper trade alike — flows through **Plane 2 (`MarketDataService`,
+daily Yahoo→TwelveData→CoinGecko/AlphaVantage)**. The streaming providers
+(Plane 3) only take over once `INVESTMENT_LIVE_PAPER_ENABLED=true` and the
+relevant adapter is wired (Binance) or a paid key is configured and its pump is
+implemented.
+
+---
+
+## 10. Configuration reference (data-relevant env vars)
+
+| Variable | Plane | Purpose | Default |
+|---|---|---|---|
+| `STRATEGY_LAB_MARKET_DATA_PROVIDER` | 1 | snapshot provider (only `free_tier`) | `free_tier` |
+| `STRATEGY_LAB_MARKET_DATA_FETCH_TIMEOUT_SEC` | 1 | snapshot per-fetch budget | `8.0` |
+| `STRATEGY_LAB_MARKET_DATA_CACHE_TTL_SEC` | 1 | snapshot cache TTL | `120.0` |
+| `STRATEGY_LAB_SIGNAL_EXPERT_ENABLED` | 1 | toggle signal-intelligence LLM step | `true` |
+| `FRED_API_KEY` | 1 | enables FRED `DGS10` (also `DGS3MO` risk-free rate) | unset |
+| `ALPHA_VANTAGE_API_KEY` | 2 | enables Alpha Vantage fallback (non-crypto) | unset |
+| `STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS` | 2 | cap on default asset-class universe | `20` (code; `.env.example` comment says 10 — stale) |
+| `INVESTMENT_MARKET_DATA_CACHE_ROOT` | 2 | on-disk cache root | `${AGENT_CACHE}/investment_team/market_data` |
+| `AGENT_CACHE` | 2 | cross-team cache root | unset → tempdir |
+| `MARKET_DATA_FETCH_WORKERS` | 2 | multi-symbol fetch pool size | `min(symbols, 16)` |
+| `POSTGRES_HOST` (+ friends) | 2 | enables the Postgres snapshot index | unset → in-memory |
+| `INVESTMENT_LIVE_PAPER_ENABLED` | 3 | master opt-in for live streaming paper trade | `false` |
+| `INVESTMENT_LIVE_PROVIDER_{CRYPTO,EQUITIES,FX}` | 3 | pin live provider per asset class | unset |
+| `INVESTMENT_HISTORICAL_PROVIDER_{CRYPTO,EQUITIES,FX}` | 3 | pin historical provider per asset class | unset |
+| `POLYGON_API_KEY` / `DATABENTO_API_KEY` / `TWELVE_DATA_API_KEY` (+`TWELVE_DATA_PLAN`) | 3 | activate paid adapters | unset |
+| `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` / `ALPACA_PAID_FEED` | 3 | Alpaca (equities) | unset / `iex` |
+| `OANDA_API_TOKEN` / `OANDA_ACCOUNT_ID` | 3 | OANDA (fx) | unset |
+| `BINANCE_REST_URL` / `BINANCE_WS_URL` | 3 | Binance endpoints | public defaults |
+| `COINBASE_REST_URL` / `COINBASE_WS_URL` | 3 | Coinbase endpoints | public defaults |
+| `BAR_CHUNK_SIZE` | engine | bar chunking for the subprocess protocol (paper pins 1) | `1` |
+| `KHALA_ALLOW_OPTIMISTIC_FILLS` | engine | silence optimistic-fill warning | unset |
+
+---
+
+## 11. File map
+
+| Concern | Code |
+|---|---|
+| Context snapshot provider | `market_lab_data/{provider,free_tier,models}.py` |
+| Historical OHLCV fetcher | `market_data_service.py` |
+| Market-data cache | `market_data_cache/{store,streaming,paths,postgres}.py` |
+| Streaming provider adapters | `trading_service/providers/{base,registry,binance,binance_ws,coinbase,alpaca,oanda,polygon,databento,twelve_data}.py` |
+| Symbol maps | `data_providers/symbol_maps.py` |
+| Stream contract | `trading_service/data_stream/protocol.py` |
+| Historical replay | `trading_service/data_stream/historical_replay.py` |
+| Live stream + resampler | `trading_service/data_stream/{live_stream,resampler,provider_stream}.py` |
+| Mode-agnostic engine | `trading_service/service.py` |
+| Backtest / paper modes | `trading_service/modes/{backtest,paper_trade,sandbox_compat}.py` |
+| Fill simulation | `trading_service/engine/{execution_model,fill_simulator,order_book,portfolio}.py` |
+| Strategy subprocess harness | `trading_service/strategy/streaming_harness.py` |
+| Data quality / look-ahead | `execution/{data_quality,bar_safety}.py` |
+| Backtest result cache | `strategy_lab/backtest_cache.py` |
+| HTTP surface | `api/main.py` (`/backtests`, `/strategy-lab/*`, `/providers`) |
