@@ -71,7 +71,10 @@ def _python_break_lines(content: str) -> frozenset[int]:
     """
     try:
         tree = ast.parse(content)
-    except (SyntaxError, ValueError):
+    except Exception:
+        # Honor the "never raises" postcondition: SyntaxError/ValueError on
+        # malformed source, but also RecursionError on deeply nested input,
+        # MemoryError, etc. Any parse failure degrades to "no boundaries".
         return frozenset()
     breaks: set[int] = set()
     for node in tree.body:
@@ -92,6 +95,16 @@ def _heuristic_break_lines(content: str) -> frozenset[int]:
     (``function``/``class``/``const x = () =>``/``export``/``interface``/
     ``@Component``/``def``) sit at column 0, while their bodies are indented —
     so this finds construct boundaries without parsing the language.
+
+    Known limitation: a column-0 *continuation* keyword (``else``/``elif``/
+    ``catch``/``finally`` followed by ``{`` or ``:``) is treated as a boundary,
+    so a top-level if/else or try/catch chain can be split between its arms.
+    This only yields a *suboptimal* split (a slightly different chunk edge); it
+    never severs a function/method/class, which is the guarantee callers rely
+    on. Keyword matching is intentionally avoided here because ``startswith``
+    cannot distinguish a continuation keyword from an identifier with the same
+    prefix (e.g. a top-level ``catchAll = ...``), and a missed continuation is
+    cheaper than a wrongly-skipped real declaration.
 
     Postconditions:
         - Returns 1-based line numbers in ``[1, len(content.splitlines())]``.

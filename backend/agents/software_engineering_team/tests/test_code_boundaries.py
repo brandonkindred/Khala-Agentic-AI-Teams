@@ -56,6 +56,13 @@ def test_python_syntax_error_falls_back_to_heuristic() -> None:
     assert preferred_break_lines("m.py", src) == frozenset({1})
 
 
+def test_python_no_constructs_falls_back_to_heuristic() -> None:
+    # Valid Python with no top-level def/class: ast yields no boundaries, so the
+    # column-0 heuristic takes over and treats each statement line as a break.
+    src = "print('hello')\nx = 1\n"
+    assert preferred_break_lines("m.py", src) == frozenset({1, 2})
+
+
 # ---------------------------------------------------------------------------
 # Heuristic (non-Python) detection
 # ---------------------------------------------------------------------------
