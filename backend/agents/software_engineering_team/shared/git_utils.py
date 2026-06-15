@@ -297,6 +297,15 @@ def branch_diff(repo_path: str | Path, base: str, branch: str) -> str:
 # huge binary deletion can never be loaded whole into memory and OOM the worker.
 _MAX_DELETED_BLOB_BYTES = 2_000_000
 
+# Upper bound on how many deleted blobs are fetched for pre-deletion content.
+# Each fetch spawns two git subprocesses (cat-file -s + show), so a mass
+# deletion/rename (every rename decomposes to delete-old + add-new under
+# ``--no-renames``) could otherwise fan out into thousands of process spawns on
+# the per-iteration review path. Beyond this cap the removals are still listed by
+# name in the deletion note (mirroring find_referencing_paths' scan cap); only
+# their inline pre-deletion content is omitted.
+_MAX_DELETED_BLOBS_READ = 50
+
 
 class BaselineDiffUnavailable(RuntimeError):
     """The net base→worktree diff could not be computed.
@@ -318,7 +327,10 @@ def _unambiguous_merge_base(path: Path, base: str, head: str) -> str:
           (criss-cross/octopus history) — diffing against an arbitrary one of
           several would omit changes versus the others.
     """
-    mb_code, mb_out = _run_git(path, ["git", "merge-base", "--all", base, head])
+    # stdout only — a git stderr advisory (e.g. replace-ref/grafts notes) must not
+    # be counted as an extra merge-base SHA, which would spuriously trip the >1
+    # "ambiguous" guard and force the degraded whole-repo + manual-review path.
+    mb_code, mb_out = _run_git(path, ["git", "merge-base", "--all", base, head], merge_stderr=False)
     mb_lines = [ln.strip() for ln in (mb_out or "").splitlines() if ln.strip()]
     if mb_code != 0 or not mb_lines:
         raise BaselineDiffUnavailable(f"cannot compute merge base of {base}...{head}: {mb_out!r}")
@@ -351,7 +363,10 @@ def read_paths_at_merge_base(
           byte) is omitted rather than returned as gibberish. The size is checked
           with ``git cat-file -s`` *before* the blob is read, so an arbitrarily
           large removed binary is never loaded whole (mirroring the worktree
-          reader's bounded sniff and avoiding an OOM).
+          reader's bounded sniff and avoiding an OOM). At most
+          :data:`_MAX_DELETED_BLOBS_READ` paths are fetched (two git spawns each),
+          so a mass deletion cannot fan out into thousands of subprocess spawns;
+          the caller surfaces the remainder by name in the deletion note.
         - Content is read with ``merge_stderr=False`` so a git stderr warning
           (CRLF/filter advice emitted while still exiting 0) is not spliced into
           the blob; it is then made UTF-8/JSON safe by re-deriving the
@@ -366,11 +381,18 @@ def read_paths_at_merge_base(
         return {}
     merge_base = _unambiguous_merge_base(path, base, head)
     result: Dict[str, str] = {}
-    for rel in paths:
+    # Bound the number of blobs fetched: each costs two git subprocess spawns, so
+    # a mass deletion is capped here regardless of caller. The rest are surfaced
+    # by name in the caller's deletion note, not as content.
+    for rel in list(paths)[:_MAX_DELETED_BLOBS_READ]:
         # The ``<rev>:<path>`` object syntax names the blob directly, so the path
         # is never parsed as a revision/flag (no ``--`` separator needed). Check
         # the blob size first so a huge removed binary is never read into memory.
-        sz_code, sz_out = _run_git(path, ["git", "cat-file", "-s", f"{merge_base}:{rel}"])
+        # stdout only — a git stderr warning (CRLF/filter advice emitted while
+        # still exiting 0) must not contaminate the numeric size and break int().
+        sz_code, sz_out = _run_git(
+            path, ["git", "cat-file", "-s", f"{merge_base}:{rel}"], merge_stderr=False
+        )
         if sz_code != 0:
             continue  # path absent at base, or a tree (submodule/dir): no blob
         try:
@@ -380,9 +402,7 @@ def read_paths_at_merge_base(
         if blob_size > _MAX_DELETED_BLOB_BYTES:
             continue  # too large to review inline; surfaced by name in the note
         # stdout only — a git stderr warning must not contaminate the blob.
-        code, out = _run_git(
-            path, ["git", "show", f"{merge_base}:{rel}"], merge_stderr=False
-        )
+        code, out = _run_git(path, ["git", "show", f"{merge_base}:{rel}"], merge_stderr=False)
         if code != 0:
             continue
         if "\x00" in out:
@@ -546,9 +566,7 @@ def _deleted_module_patterns(rel_path: str) -> List[str]:
         name = parts[-1]
         # Every multi-component dotted suffix (>=2 parts) is precise enough to
         # search; the single-component case is covered by the import patterns.
-        dotted_variants = {
-            ".".join(parts[i:]) for i in range(len(parts)) if len(parts) - i >= 2
-        }
+        dotted_variants = {".".join(parts[i:]) for i in range(len(parts)) if len(parts) - i >= 2}
         dotted_variants.add(".".join(parts))
         patterns: List[str] = []
         for dotted in sorted(dotted_variants):
@@ -627,9 +645,7 @@ def find_referencing_paths(
         if not patterns:
             continue
         # stdout only — a git stderr warning must not be parsed as a referrer path.
-        code, out = _run_git(
-            path, ["git", "grep", "-l", "-I", "-E", *patterns], merge_stderr=False
-        )
+        code, out = _run_git(path, ["git", "grep", "-l", "-I", "-E", *patterns], merge_stderr=False)
         # git grep exits 1 for a clean "no matches"; >=2 (or our -1) is an actual
         # error (bad pattern, grep unavailable). Don't conflate them — a silent
         # error would be presented as "nothing depends on it"; log it instead.

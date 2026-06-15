@@ -23,6 +23,7 @@ from software_engineering_team.shared.prompt_utils import (
 )
 from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
+    _disambiguated_key,
     is_secret_template_path,
     is_sensitive_path,
     read_files_as_dict,
@@ -498,19 +499,6 @@ def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str
     return read_repo_code(repo_path, extensions)
 
 
-def _read_repo_meta_files(repo_path: Path) -> str:
-    """Read .gitignore, README.md, CONTRIBUTORS.md for code review when task is repo-setup."""
-    parts: List[str] = []
-    for name in (".gitignore", "README.md", "CONTRIBUTORS.md"):
-        f = repo_path / name
-        if f.is_file():
-            try:
-                parts.append(f"### {name} ###\n{f.read_text(encoding='utf-8', errors='replace')}")
-            except (OSError, UnicodeDecodeError) as e:
-                logger.debug("Could not read %s: %s", f, e)
-    return "\n\n".join(parts) if parts else ""
-
-
 def _writer_output_keys(result: Any) -> Dict[str, str] | None:
     """Paths ``write_agent_output`` would materialize for *result* (or None).
 
@@ -545,25 +533,6 @@ _WITHHELD_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}withheld-sensitive"
 _UNREADABLE_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}unreadable-files"
 
 
-def _free_note_key(files: Dict[str, str], base: str) -> str:
-    """Return *base*, or a numerically suffixed variant absent from *files*.
-
-    Preconditions:
-        - *files* is the review mapping the note (or restored-content block) will
-          be inserted into.
-    Postconditions:
-        - The returned key is not present in *files*, so inserting never overwrites
-          (and thus never drops from review) a real file that happens to share the
-          label.
-    """
-    if base not in files:
-        return base
-    n = 1
-    while f"{base}.{n}" in files:
-        n += 1
-    return f"{base}.{n}"
-
-
 # Binary file extensions that are legitimately non-text-reviewable *assets*
 # (images, media, fonts, archives, compiled artifacts, model weights, data). A
 # change touching one of these can't be source-reviewed, so it is advisory — it
@@ -572,13 +541,60 @@ def _free_note_key(files: Dict[str, str], base: str) -> str:
 # unknown type) is treated as needing manual review.
 _BINARY_ASSET_SUFFIXES: frozenset[str] = frozenset(
     {
-        ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".ico", ".webp", ".svg", ".tiff",
-        ".pdf", ".mp3", ".mp4", ".mov", ".avi", ".wav", ".ogg", ".webm", ".flac",
-        ".woff", ".woff2", ".ttf", ".otf", ".eot",
-        ".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".7z", ".rar", ".jar",
-        ".wasm", ".so", ".dll", ".dylib", ".a", ".o", ".class", ".pyc", ".pyd",
-        ".onnx", ".pt", ".pth", ".h5", ".pb", ".tflite", ".parquet", ".npy", ".npz",
-        ".bin", ".dat", ".db", ".sqlite",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".svg",
+        ".tiff",
+        ".pdf",
+        ".mp3",
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".wav",
+        ".ogg",
+        ".webm",
+        ".flac",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".tgz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".jar",
+        ".wasm",
+        ".so",
+        ".dll",
+        ".dylib",
+        ".a",
+        ".o",
+        ".class",
+        ".pyc",
+        ".pyd",
+        ".onnx",
+        ".pt",
+        ".pth",
+        ".h5",
+        ".pb",
+        ".tflite",
+        ".parquet",
+        ".npy",
+        ".npz",
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
     }
 )
 
@@ -683,6 +699,55 @@ class ReviewInputSelection:
         blockers.update(p for p in self.unreadable if not _is_binary_asset(p))
         return tuple(sorted(blockers))
 
+    def review_gate_failure(self, approved: bool) -> str | None:
+        """Reason an approval must route to manual review instead of merging, else None.
+
+        The single, reusable never-silently-approve gate so every review caller
+        (not only the backend fix loop) applies it identically. An approval is
+        blocked when:
+
+        - :meth:`blocking_unexamined` is non-empty — a destructive/unknowable
+          omission (emptied file, withheld real secret, unreadable source, or an
+          uncomputable baseline diff); or
+        - the reviewer saw no examinable content at all while the selection still
+          carried blocks (:meth:`has_examinable_content` is False and ``files`` is
+          a non-empty map) — e.g. a change consisting solely of advisory omission
+          notes (a lone binary asset or ``.env`` template). The genuinely empty
+          repo (``files`` is None with an empty ``code``) has nothing to review
+          and is allowed, so a normal no-op never trips the gate.
+
+        Preconditions:
+            - none.
+        Postconditions:
+            - Returns None when *approved* is False or the approval may stand.
+            - Otherwise returns a human-readable reason naming the blocking
+              omissions and (advisory) the rest.
+        """
+        if not approved:
+            return None
+        blocking = self.blocking_unexamined()
+        # files is either a non-empty mapping or None in a returned selection, so
+        # ``files is not None`` distinguishes a notes-only review (block) from the
+        # genuinely empty repo (allow).
+        saw_no_content = self.files is not None and not self.has_examinable_content()
+        if not blocking and not saw_no_content:
+            return None
+        clauses: List[str] = []
+        if blocking:
+            shown = ", ".join(blocking[:20]) + (" ..." if len(blocking) > 20 else "")
+            clauses.append(
+                "destructive/unknowable omissions that require manual review before merge "
+                "(emptied files, withheld secrets, unreadable source, or a baseline diff "
+                f"that could not be computed): {shown}"
+            )
+        if saw_no_content:
+            clauses.append("the reviewer saw no examinable file content (only omission notes)")
+        advisory = self.unexamined_paths()
+        return (
+            "Code review approved, but " + "; ".join(clauses) + ". "
+            f"Also not examined (advisory): {', '.join(advisory[:20]) or 'none'}"
+        )
+
 
 def _translate_finding_paths(
     issues: List[Dict[str, Any]],
@@ -751,7 +816,10 @@ def _attach_review_notes(
     synthetic: set[str] = set()
     specs = (
         (_DELETION_NOTE_PATH, deletion_note),
-        (_WITHHELD_NOTE_PATH, _format_path_note(_WITHHELD_NOTE_HEADER, withheld) if withheld else None),
+        (
+            _WITHHELD_NOTE_PATH,
+            _format_path_note(_WITHHELD_NOTE_HEADER, withheld) if withheld else None,
+        ),
         (
             _UNREADABLE_NOTE_PATH,
             _format_path_note(_UNREADABLE_NOTE_HEADER, unreadable) if unreadable else None,
@@ -760,7 +828,7 @@ def _attach_review_notes(
     )
     for base_label, text in specs:
         if text:
-            key = _free_note_key(files, base_label)
+            key = _disambiguated_key(files, base_label)
             files[key] = text
             synthetic.add(key)
     return frozenset(synthetic)
@@ -945,6 +1013,7 @@ def _select_review_input(
           setup commit's meta files (.gitignore, README, ...) are included.
     """
     from software_engineering_team.shared.git_utils import (
+        _MAX_DELETED_BLOBS_READ,
         DEVELOPMENT_BRANCH,
         BaselineDiffUnavailable,
         find_referencing_paths,
@@ -994,17 +1063,13 @@ def _select_review_input(
     # could not be read (e.g. a generated binary). A writer-only *candidate* that
     # was never materialized (rejected by write validation, a no-op .gitignore) is
     # not on disk, so it is excluded — it must not pollute the omission notes.
-    omitted = [
-        p for p in all_omitted if p in changed_owned or (repo_path / p).is_file()
-    ]
+    omitted = [p for p in all_omitted if p in changed_owned or (repo_path / p).is_file()]
 
     # A changed file truncated to empty/whitespace yields an empty block, which the
     # coordinator drops — silently approving the content removal. Flag those paths
     # by their *real* repo path (the dict key is a display-safe, possibly suffixed
     # review key), so the manual-review message names a file that exists on disk.
-    emptied = [
-        key_to_path.get(key, key) for key, content in files.items() if not content.strip()
-    ]
+    emptied = [key_to_path.get(key, key) for key, content in files.items() if not content.strip()]
 
     # A deleted path can be restored in the worktree (a real file, or a dangling
     # symlink) in a later failed-commit iteration; treat it as present only then.
@@ -1025,14 +1090,31 @@ def _select_review_input(
     # gitlink, or a read failure) has no examinable content, so it is recorded as
     # *unreadable* — otherwise a mixed change (one readable file + an unreadable
     # deletion) would look fully examined and slip an unreviewed removal through.
+    # Fetch pre-deletion content for at most _MAX_DELETED_BLOBS_READ removals (two
+    # git spawns each) so a mass deletion can't fan out into thousands of spawns;
+    # the rest are still listed by name in the deletion note below. Only the
+    # *probed* removals that genuinely could not be read count as unreadable —
+    # paths skipped purely by the cap are not flagged unexamined (they would
+    # otherwise over-block an ordinary large deletion).
+    deleted_to_probe = deleted[:_MAX_DELETED_BLOBS_READ]
     deleted_content: Dict[str, str] = {}
-    if deleted:
+    if deleted_to_probe:
         try:
-            deleted_content = read_paths_at_merge_base(repo_path, DEVELOPMENT_BRANCH, deleted)
+            deleted_content = read_paths_at_merge_base(
+                repo_path, DEVELOPMENT_BRANCH, deleted_to_probe
+            )
         except BaselineDiffUnavailable as exc:
             logger.warning("Code review: deleted-file content unavailable (%s)", exc)
-    unreadable_deleted = [p for p in deleted if p not in deleted_content]
-    unreadable = list(omitted) + unreadable_deleted
+    unreadable_deleted = [p for p in deleted_to_probe if p not in deleted_content]
+
+    # A changed/written path that is a symlink on disk exposes only its link
+    # target to the reviewer, never the pointed-to content — and a type-change
+    # that replaced a real file with a symlink (git status ``T``, bucketed as a
+    # change, not a deletion) removes the original content from review entirely.
+    # Record such paths as unexamined so the gate routes the approval to manual
+    # review instead of trusting an unreviewed link.
+    symlinked = sorted(p for p in changed_owned if (repo_path / p).is_symlink())
+    unreadable = list(omitted) + unreadable_deleted + symlinked
 
     # Best-effort: which surviving files still import each removed module, so the
     # reviewer can check the deletion note's "nothing depends on it" instruction.
@@ -1048,7 +1130,7 @@ def _select_review_input(
     # the raw removed path so a finding still drives the fix loop to restore it.
     for p, content in deleted_content.items():
         label = f"{sanitize_path_for_text(p)} (DELETED by this task — pre-deletion content)"
-        key = _free_note_key(files, label)
+        key = _disambiguated_key(files, label)
         files[key] = content
         key_to_path[key] = p
 
@@ -1080,17 +1162,6 @@ def _select_review_input(
         "Code review: no changed or written files on disk; falling back to whole-repo review input"
     )
     return _whole_repo_review_input(repo_path)
-
-
-def _is_repo_setup_task(task: Any) -> bool:
-    """True if task description suggests repo setup / initial commit / branching."""
-    desc = (getattr(task, "description", None) or "").lower()
-    return (
-        "git" in desc
-        and ("setup" in desc or "initial" in desc or "branch" in desc)
-        or "initial commit" in desc
-        or "branching strategy" in desc
-    )
 
 
 def _is_openapi_spec_task(task: Any) -> bool:
@@ -1167,6 +1238,7 @@ class BackendExpertAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -2114,24 +2186,16 @@ class BackendExpertAgent:
                     _read_repo_code(repo_path), compute_existing_code_chars(self.llm)
                 ),
             )
-            # Fail closed on the *suspicious* omissions only. A file truncated to
-            # empty (destructive removal) or a baseline diff we couldn't compute
-            # (a deletion may exist that we can't even enumerate) must not merge on
-            # an approval — re-running wouldn't change the set deterministically and
-            # exhaustion would fall through to merge, so return a terminal
-            # manual-review result. Binary assets and sensitive-named templates are
-            # legitimately non-text-reviewable and stay advisory (surfaced as notes
-            # via unexamined_paths) rather than blocking every such change forever.
-            blocking = review_selection.blocking_unexamined()
-            if review_result.approved and blocking:
-                advisory = review_selection.unexamined_paths()
-                shown = ", ".join(blocking[:20]) + (" ..." if len(blocking) > 20 else "")
-                failure_reason = (
-                    "Code review approved, but the change includes destructive/unknowable "
-                    "omissions that require manual review before merge (emptied files, or a "
-                    f"baseline diff that could not be computed): {shown}. "
-                    f"Also not examined (advisory): {', '.join(advisory[:20]) or 'none'}"
-                )
+            # Fail closed on an approval that coincides with a destructive/unknowable
+            # omission (an emptied file, a baseline diff we couldn't compute, a
+            # withheld real secret, unreadable source) or that saw no examinable
+            # content at all — re-running wouldn't change the set deterministically
+            # and exhaustion would fall through to merge, so return a terminal
+            # manual-review result. Binary assets and sensitive-named templates stay
+            # advisory. The decision lives on ReviewInputSelection so every review
+            # caller applies it identically (see review_gate_failure).
+            failure_reason = review_selection.review_gate_failure(review_result.approved)
+            if failure_reason:
                 logger.warning("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
                 record.code_review_approved = False
                 review_history.append(record)

@@ -110,7 +110,10 @@ def test_list_changed_and_deleted_ambiguous_merge_base_raises(tmp_path: Path, mo
 
     def fake_run_git(path, cmd, timeout=30, **kwargs):
         if cmd[:2] == ["git", "merge-base"]:
-            return 0, "1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n"
+            return (
+                0,
+                "1111111111111111111111111111111111111111\n2222222222222222222222222222222222222222\n",
+            )
         # Any further git call (e.g. the diff) means the ambiguity guard did NOT
         # fire — fail loudly so the test can't pass for the wrong reason.
         raise AssertionError(f"unexpected git command after ambiguous merge base: {cmd}")
@@ -493,7 +496,9 @@ def test_select_review_input_includes_non_source_changed_files(tmp_path: Path) -
     _git(tmp_path, "checkout", "-b", "feature/x")
     (tmp_path / "requirements.txt").write_text("fastapi\n", encoding="utf-8")
     (tmp_path / "migrations").mkdir()
-    (tmp_path / "migrations" / "001_init.sql").write_text("CREATE TABLE t (id int);\n", encoding="utf-8")
+    (tmp_path / "migrations" / "001_init.sql").write_text(
+        "CREATE TABLE t (id int);\n", encoding="utf-8"
+    )
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "deps + migration")
 
@@ -772,7 +777,9 @@ def test_select_review_input_reads_written_paths_when_no_diff(tmp_path: Path) ->
     (tmp_path / "app").mkdir()
     (tmp_path / "app" / "main.py").write_text("print('x')\n", encoding="utf-8")
     task = SimpleNamespace(description="add feature")
-    files, code, _note = _select_review_input(tmp_path, task, written_files={"app/main.py": "ignored"})
+    files, code, _note = _select_review_input(
+        tmp_path, task, written_files={"app/main.py": "ignored"}
+    )
 
     assert code is None
     assert files == {"app/main.py": "print('x')\n"}  # read from worktree
@@ -1454,7 +1461,9 @@ def test_find_referencing_paths_strips_source_root(tmp_path: Path) -> None:
     _init_repo(tmp_path)
     (tmp_path / "src" / "pkg").mkdir(parents=True)
     (tmp_path / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
-    (tmp_path / "src" / "pkg" / "helper.py").write_text("def h():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "src" / "pkg" / "helper.py").write_text(
+        "def h():\n    return 1\n", encoding="utf-8"
+    )
     (tmp_path / "consumer.py").write_text("from pkg.helper import h\n", encoding="utf-8")
     _git(tmp_path, "add", "-A")
     _git(tmp_path, "commit", "-m", "base")
@@ -1538,7 +1547,10 @@ def test_whole_repo_review_input_surfaces_omissions(tmp_path: Path) -> None:
     sel = _whole_repo_review_input(tmp_path)
 
     assert "main.py" in sel.files
-    assert ".env" in sel.files[_WITHHELD_NOTE_PATH] and "SECRET=v" not in sel.files[_WITHHELD_NOTE_PATH]
+    assert (
+        ".env" in sel.files[_WITHHELD_NOTE_PATH]
+        and "SECRET=v" not in sel.files[_WITHHELD_NOTE_PATH]
+    )
     assert "blob.bin" in sel.files[_UNREADABLE_NOTE_PATH]
     assert ".env" in sel.unexamined_paths() and "blob.bin" in sel.unexamined_paths()
 
@@ -1840,13 +1852,21 @@ def test_run_code_review_rejects_neither_or_both() -> None:
     task = SimpleNamespace(description="t", acceptance_criteria=[])
     with pytest.raises(ValueError):
         BackendExpertAgent._run_code_review(
-            code_review_agent=object(), files=None, code=None,
-            spec_content="", task=task, architecture=None,
+            code_review_agent=object(),
+            files=None,
+            code=None,
+            spec_content="",
+            task=task,
+            architecture=None,
         )
     with pytest.raises(ValueError):
         BackendExpertAgent._run_code_review(
-            code_review_agent=object(), files={"a.py": "x"}, code="blob",
-            spec_content="", task=task, architecture=None,
+            code_review_agent=object(),
+            files={"a.py": "x"},
+            code="blob",
+            spec_content="",
+            task=task,
+            architecture=None,
         )
 
 
@@ -1914,10 +1934,10 @@ def test_list_changed_and_deleted_odd_fields_guarded(tmp_path: Path, monkeypatch
 
     real_run = git_utils._run_git
 
-    def fake_run(path, cmd, timeout=30):
+    def fake_run(path, cmd, timeout=30, **kwargs):
         if cmd[:3] == ["git", "diff", "--name-status"]:
             return 0, "M\x00a.py\x00D"  # dangling trailing status, no path
-        return real_run(path, cmd, timeout)
+        return real_run(path, cmd, timeout, **kwargs)
 
     monkeypatch.setattr(git_utils, "_run_git", fake_run)
     changed, deleted = git_utils.list_changed_and_deleted(tmp_path, "development")
@@ -2145,7 +2165,9 @@ def test_read_files_as_dict_binary_without_early_nul(tmp_path: Path) -> None:
     data = b"x" * (repo_utils._READ_CHUNK_BYTES + 10) + b"\x00tail"
     (tmp_path / "weird.bin").write_bytes(data)
     omitted: list[str] = []
-    result = repo_utils.read_files_as_dict(tmp_path, ["weird.bin"], extensions=None, omitted=omitted)
+    result = repo_utils.read_files_as_dict(
+        tmp_path, ["weird.bin"], extensions=None, omitted=omitted
+    )
 
     assert result == {}  # detected binary despite the late NUL
     assert "weird.bin" in omitted
@@ -2197,9 +2219,17 @@ def test_is_secret_template_path_only_env_family() -> None:
     assert is_secret_template_path("secrets/config.sample") is False  # secret dir
     assert is_secret_template_path("credentials.template") is False  # credentials stem
     assert is_secret_template_path("secret.dist") is False  # secret stem
+    # NOT advisory: a strong-secret keyword/suffix embedded BETWEEN .env and the
+    # template suffix must not be downgraded (the guard inspects every token).
+    assert is_secret_template_path(".env.pem.sample") is False  # embedded key suffix
+    assert is_secret_template_path(".env.key.example") is False  # embedded key suffix
+    assert is_secret_template_path(".env.credentials.template") is False  # embedded stem
     # NOT a template at all:
     assert is_secret_template_path(".env") is False
     assert is_secret_template_path("app/main.py") is False
+    # Anchored on '.env.' — a non-env name that merely starts with '.env' is not
+    # matched (consistent with is_sensitive_path).
+    assert is_secret_template_path(".environment.sample") is False
 
 
 def test_blocking_secret_template_overlap() -> None:
@@ -2217,6 +2247,88 @@ def test_blocking_secret_template_overlap() -> None:
     assert ".env.example" not in blocking  # genuine env template: advisory
     assert "secrets/api.sample" in blocking  # secret dir: blocks
     assert "credentials.template" in blocking  # credentials stem: blocks
+
+
+def test_review_gate_failure_blocks_emptied_on_approval() -> None:
+    """An approval coinciding with a blocking omission returns a manual-review reason."""
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection({"a.py": "x = 1\n"}, None, None, emptied=("wiped.py",))
+    reason = sel.review_gate_failure(approved=True)
+    assert reason is not None
+    assert "wiped.py" in reason
+    # A rejection (not approved) never trips the gate — the fix loop handles it.
+    assert sel.review_gate_failure(approved=False) is None
+
+
+def test_review_gate_failure_none_for_clean_examined_approval() -> None:
+    """A clean approval over real, examined content is allowed to stand."""
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection({"a.py": "x = 1\n"}, None, None)
+    assert sel.review_gate_failure(approved=True) is None
+
+
+def test_review_gate_failure_blocks_notes_only_approval() -> None:
+    """An approval where the reviewer saw ONLY advisory notes (no examinable
+    content) is routed to manual review, even though nothing hard-blocks."""
+    from software_engineering_team.backend_agent.agent import (
+        _WITHHELD_NOTE_PATH,
+        ReviewInputSelection,
+    )
+
+    # Only a withheld .env template note — advisory (blocking_unexamined empty) but
+    # no real content was examined.
+    sel = ReviewInputSelection(
+        {_WITHHELD_NOTE_PATH: "withheld: .env.example\n"},
+        None,
+        None,
+        synthetic_keys=frozenset({_WITHHELD_NOTE_PATH}),
+        withheld=(".env.example",),
+    )
+    assert sel.blocking_unexamined() == ()  # template is advisory
+    assert sel.has_examinable_content() is False
+    reason = sel.review_gate_failure(approved=True)
+    assert reason is not None
+    assert "no examinable file content" in reason
+
+
+def test_review_gate_failure_allows_empty_repo_approval() -> None:
+    """The genuinely empty repo (files=None, code="") has nothing to review, so an
+    approval is allowed — a normal no-op must not trip the gate."""
+    from software_engineering_team.backend_agent.agent import ReviewInputSelection
+
+    sel = ReviewInputSelection(None, "", None)
+    assert sel.has_examinable_content() is False
+    assert sel.review_gate_failure(approved=True) is None
+
+
+def test_select_review_input_flags_changed_symlink_as_unexamined(tmp_path: Path) -> None:
+    """A tracked source file replaced by a symlink (git type-change) has its
+    original content removed from review, so it is surfaced as unexamined and
+    blocks an approval."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "mod.py").write_text("def real():\n    return 1\n", encoding="utf-8")
+    (tmp_path / "target.py").write_text("def t():\n    return 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "mod.py").unlink()
+    try:
+        (tmp_path / "mod.py").symlink_to(tmp_path / "target.py")  # file -> symlink (type change)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "replace mod.py with a symlink")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files=None)
+
+    assert "mod.py" in sel.unreadable  # the type-changed path is recorded unexamined
+    assert "mod.py" in sel.blocking_unexamined()  # .py symlink is not an asset → blocks
 
 
 def test_find_referencing_paths_nonpython_bare_keyword_import(tmp_path: Path) -> None:

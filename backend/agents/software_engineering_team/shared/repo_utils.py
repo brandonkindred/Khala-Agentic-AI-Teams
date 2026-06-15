@@ -173,24 +173,36 @@ def is_secret_template_path(path: str) -> bool:
     ``.env`` family qualifies, because it is flagged sensitive solely by the
     deliberately over-broad ``.env.<x>`` rule (placeholder env files). A file that
     is sensitive for a *strong* reason — sitting under a secret directory
-    (``secrets/``/``.ssh/`` ...), a ``credentials``/``secret`` stem, or a key/cert
-    suffix — is NOT downgraded to a template even when it carries a template
-    suffix (so ``secrets/config.sample``, ``credentials.template``, ``key.pem.dist``
-    are not treated as harmless).
+    (``secrets/``/``.ssh/`` ...), a ``credentials``/``secret`` token, or a key/cert
+    suffix *anywhere in the name* — is NOT downgraded to a template even when it
+    carries a template suffix (so ``secrets/config.sample``,
+    ``credentials.template``, ``key.pem.dist``, and ``.env.pem.sample`` /
+    ``.env.credentials.template`` are not treated as harmless).
+
+    The ``.env`` match is anchored on ``.env.`` (consistent with
+    :func:`is_sensitive_path`), so a non-env name like ``.environment.sample`` is
+    not matched. Every dot-delimited token of the filename is inspected for a
+    strong-secret signal, not just the final suffix/stem, so a secret keyword
+    embedded *between* ``.env`` and the template suffix cannot slip the check.
 
     Preconditions:
         - none. Returns False for any non-``.env`` path.
     """
     candidate = Path(path)
     name = candidate.name.lower()
-    if not (name.startswith(".env") and name.endswith(_TEMPLATE_SUFFIXES)):
+    # Anchored ``.env.`` prefix + a template suffix; nothing else is a template.
+    if not (name.startswith(".env.") and name.endswith(_TEMPLATE_SUFFIXES)):
         return False
     # Reject if any *strong* secret signal is present.
     if _SENSITIVE_DIR_PARTS.intersection(p.lower() for p in candidate.parts[:-1]):
         return False
-    if candidate.stem.lower() in _SENSITIVE_STEMS:
+    # Inspect every dot-delimited token of the filename (not just the final
+    # suffix/stem) so an embedded key/cert suffix (``.env.pem.sample``) or secret
+    # keyword (``.env.credentials.template``) is caught.
+    tokens = name.split(".")
+    if any(tok in _SENSITIVE_STEMS for tok in tokens):
         return False
-    return candidate.suffix.lower() not in _SENSITIVE_SUFFIXES
+    return not any(f".{tok}" in _SENSITIVE_SUFFIXES for tok in tokens)
 
 
 def strip_surrogates(text: str) -> str:
