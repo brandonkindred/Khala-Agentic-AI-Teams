@@ -230,17 +230,38 @@ class _FakeOutput:
 
 
 class _FakeReviewIssue:
-    def __init__(self, severity: str, line: Optional[int], file_path: str = "a.py") -> None:
+    """Duck-typed stand-in for a CodeReviewIssue, with the attributes the PR-review
+    flow reads (severity, category, file_path, line, description, suggestion)."""
+
+    def __init__(
+        self,
+        severity: str,
+        line: Optional[int],
+        file_path: str = "a.py",
+        description: str = "desc",
+    ) -> None:
         self.severity = severity
         self.category = "logic"
         self.file_path = file_path
         self.line = line
-        self.description = "desc"
+        self.description = description
         self.suggestion = "fix"
 
 
 class _FakeReviewClient:
-    """Fake GitHubClient surface the review endpoint + hook touch."""
+    """Fake GitHubClient surface the review endpoint + hook touch.
+
+    Configurable failure knobs (all default to "never fail"):
+        - ``fail_get_pr``: ``get_pull_request`` raises a 404 ``GitHubAPIError``.
+        - ``review_fail_times``: the first N ``create_pull_request_review`` calls
+          raise a 422, exercising the submit-degradation retry ladder.
+        - ``review_exc``: a non-API exception raised on every review submit (to
+          test the broad outer error handler).
+        - ``comment_fail_times``: the first N ``add_issue_comment`` calls raise a
+          403, exercising the per-finding comment failure path.
+    Captured side effects: ``reviews`` (each submitted review's kwargs) and
+    ``comments`` (each posted ``(issue_number, body)``).
+    """
 
     def __init__(self) -> None:
         self.files: list[PullRequestFile] = [
@@ -260,6 +281,8 @@ class _FakeReviewClient:
         self.fail_get_pr = False
         self.review_fail_times = 0  # number of leading create_review calls that 422
         self.review_exc: Optional[Exception] = None  # non-API error to raise on submit
+        self.comment_fail_times = 0  # number of leading add_issue_comment calls that 422
+        self._comment_calls = 0
 
     def __enter__(self) -> "_FakeReviewClient":
         return self
@@ -292,6 +315,9 @@ class _FakeReviewClient:
         return self.login
 
     def add_issue_comment(self, _o: str, _r: str, n: int, body: str) -> None:
+        self._comment_calls += 1
+        if self._comment_calls <= self.comment_fail_times:
+            raise GitHubAPIError(403, "rate limited")
         self.comments.append((n, body))
 
     def create_pull_request_review(self, **kwargs: Any) -> dict[str, Any]:
@@ -380,11 +406,63 @@ class TestReviewEndpoint:
         # The in-diff line (2) is an inline comment; the out-of-diff line (999) is not.
         assert review["comments"] == [c for c in review["comments"] if c["line"] == 2]
         assert len(review["comments"]) == 1
+        # The body is summary-only — no finding is batched into it.
+        assert "General findings" not in review["body"]
+        # The out-of-diff finding (line 999) is posted as its own conversation
+        # comment carrying the finding's formatted content (severity + file + desc).
+        assert len(gh.comments) == 1
+        assert gh.comments[0][0] == 7
+        leftover_body = gh.comments[0][1]
+        assert "desc" in leftover_body
+        assert "[LOW]" in leftover_body  # severity label from format_comment_body
+        assert "a.py" in leftover_body  # location prefix
         # Job completed with the PR url + review summary.
         job = review_app["jobs"].get_job(data["job_id"])
         assert job["status"] == "completed"
         assert job["github_pr_url"] == "https://example/pull/7"
         assert job["review_summary"]["inline_comments"] == 1
+        assert job["review_summary"]["comment_findings"] == 1
+
+    def test_review_body_and_inline_comments_are_token_scrubbed(self, review_app) -> None:
+        # LLM output (summary + inline finding text) can echo a credential from the
+        # reviewed code; it must be scrubbed before the review is submitted, just
+        # like the standalone comments.
+        secret_url = "https://x:ghp_SECRETTOKEN@github.com/o/r.git"
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[_FakeReviewIssue("high", line=2, description=f"leak {secret_url} here")],
+            summary=f"overall {secret_url}",
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        review = review_app["github"]["client"].reviews[0]
+        assert "ghp_SECRETTOKEN" not in review["body"]
+        assert "https://***@" in review["body"]
+        assert "ghp_SECRETTOKEN" not in review["comments"][0]["body"]
+
+    def test_multiple_unanchorable_findings_each_get_own_comment(self, review_app) -> None:
+        # The core contract: every un-anchorable finding produces its OWN comment
+        # and no comment lists more than one finding (never batched).
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=999, description="first leftover"),
+                _FakeReviewIssue("low", line=1000, description="second leftover"),
+            ]
+        )
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        gh = review_app["github"]["client"]
+        # No inline comments (both lines are out of diff); two separate comments.
+        assert len(gh.reviews) == 1
+        assert gh.reviews[0]["comments"] == []
+        assert len(gh.comments) == 2
+        bodies = [body for _n, body in gh.comments]
+        # Each comment carries exactly one finding (the two never share a comment).
+        assert sum("first leftover" in b for b in bodies) == 1
+        assert sum("second leftover" in b for b in bodies) == 1
+        for b in bodies:
+            assert not ("first leftover" in b and "second leftover" in b)
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["review_summary"]["comment_findings"] == 2
 
     def test_missing_token_returns_400(self, review_app, monkeypatch) -> None:
         monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -429,6 +507,95 @@ class TestReviewEndpoint:
         assert job["status"] == "completed"
         assert len(gh.reviews) == 2
         assert gh.reviews[-1]["event"] == "COMMENT"
+        # The retry kept the inline comment, so only the out-of-diff finding is a
+        # standalone comment — the inline finding is not re-posted.
+        assert len(gh.comments) == 1
+
+    def test_dropped_inline_findings_reposted_as_comments(self, review_app) -> None:
+        # When every attempt that carries inline comments 422s, the review
+        # degrades to a body-only COMMENT and the dropped inline finding must be
+        # re-posted as its own conversation comment so nothing is lost.
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 2  # both comment-carrying attempts 422; body-only wins
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert len(gh.reviews) == 3
+        assert gh.reviews[-1]["event"] == "COMMENT"
+        assert gh.reviews[-1]["comments"] == []
+        # Two standalone comments: the out-of-diff finding + the dropped inline one.
+        assert len(gh.comments) == 2
+        # The dropped inline finding carries its `path:line` location.
+        assert any("a.py:2" in body for _n, body in gh.comments)
+        assert job["review_summary"]["inline_comments"] == 0
+        assert job["review_summary"]["comment_findings"] == 2
+
+    def test_multiple_dropped_inline_findings_each_reposted(self, review_app) -> None:
+        # Several inline findings dropped by the body-only fallback must each be
+        # reposted as their own comment (one per finding, never batched).
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=2, description="inline one"),
+                _FakeReviewIssue("high", line=3, description="inline two"),
+            ]
+        )
+        gh = review_app["github"]["client"]
+        gh.review_fail_times = 2  # both comment-carrying attempts 422; body-only wins
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert gh.reviews[-1]["comments"] == []
+        # Two distinct reposted comments, each anchored to its own `path:line`.
+        assert len(gh.comments) == 2
+        bodies = [body for _n, body in gh.comments]
+        assert any("a.py:2" in b for b in bodies)
+        assert any("a.py:3" in b for b in bodies)
+        assert job["review_summary"]["inline_comments"] == 0
+        assert job["review_summary"]["comment_findings"] == 2
+
+    def test_failed_finding_comment_marks_job_failed(self, review_app) -> None:
+        # A finding posted as its own comment no longer lives in the review body,
+        # so a rejected comment would drop the finding. The job must report failure
+        # (with a count) rather than claiming every finding was posted.
+        gh = review_app["github"]["client"]
+        gh.comment_fail_times = 1  # the out-of-diff finding's standalone comment 422s
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "could not be posted" in (job["error"] or "")
+        assert job["review_summary"]["comments_failed"] == 1
+        # The review itself was still submitted (inline comment for the in-diff line).
+        assert len(gh.reviews) == 1
+        # The author is notified on the PR that part of the review is missing
+        # (the finding comment failed, but the follow-up notification succeeds).
+        assert any("could not be posted" in body for _n, body in gh.comments)
+
+    def test_partial_finding_comment_failures_counted(self, review_app) -> None:
+        # With several standalone findings where only a subset fail to post, the
+        # job is still failed and comments_failed reflects the exact failure count
+        # while the successful comments are kept.
+        review_app["github"]["agent_output"] = _FakeOutput(
+            issues=[
+                _FakeReviewIssue("high", line=999, description="leftover one"),
+                _FakeReviewIssue("high", line=1000, description="leftover two"),
+                _FakeReviewIssue("low", line=1001, description="leftover three"),
+            ]
+        )
+        gh = review_app["github"]["client"]
+        gh.comment_fail_times = 2  # first two finding comments 422; the third succeeds
+        resp = review_app["client"].post("/review-pr", json=_review_body())
+        assert resp.status_code == 200
+        job = review_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert job["review_summary"]["comment_findings"] == 3
+        assert job["review_summary"]["comments_failed"] == 2
+        # The surviving finding comment + the partial-failure notification posted.
+        bodies = [body for _n, body in gh.comments]
+        assert any("leftover three" in b for b in bodies)
+        assert any("could not be posted" in b for b in bodies)
 
     def test_non_api_error_marks_job_failed_not_stuck(self, review_app) -> None:
         # A non-GitHubAPIError during submit must be caught by the broad outer
@@ -516,7 +683,7 @@ class TestReviewPersistence:
                 "review_summary": {
                     "total_issues": 1,
                     "inline_comments": 1,
-                    "body_findings": 0,
+                    "comment_findings": 0,
                     "event": "COMMENT",
                 },
                 "error": None,

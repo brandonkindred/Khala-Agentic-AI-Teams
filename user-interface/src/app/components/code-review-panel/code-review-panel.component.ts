@@ -364,6 +364,15 @@ export class CodeReviewPanelComponent implements OnInit, OnDestroy {
     return isCodingTeamTerminalStatus(record.status);
   }
 
+  /**
+   * Findings posted as standalone comments, normalized across the field rename.
+   * Rows persisted before `body_findings` became `comment_findings` only carry the
+   * legacy key, so fall back to it (then 0) rather than rendering a blank count.
+   */
+  commentFindings(summary: CodeReviewSummary): number {
+    return summary.comment_findings ?? summary.body_findings ?? 0;
+  }
+
   /** Row status badge text derived from the latest review, or null when none. */
   badgeLabel(prNumber: number): string | null {
     const latest = this.latestReview(prNumber);
