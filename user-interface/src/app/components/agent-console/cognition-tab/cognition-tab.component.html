@@ -1,0 +1,348 @@
+<div class="cognition-tab">
+  <header class="cognition-tab__header">
+    <h2>Cognition</h2>
+    <p>Decide which rules this agent adopts. Review the memory and rules behind each proposal.</p>
+  </header>
+
+  <div class="cognition-tab__picker">
+    <mat-form-field appearance="outline" subscriptSizing="dynamic">
+      <mat-label>Agent</mat-label>
+      <mat-select
+        [value]="selectedAgentId()"
+        (selectionChange)="selectAgent($event.value)"
+        [disabled]="loadingAgents() || agents().length === 0"
+      >
+        @for (a of agents(); track a.id) {
+          <mat-option [value]="a.id">{{ a.name }} ({{ a.team }})</mat-option>
+        }
+      </mat-select>
+    </mat-form-field>
+    <button
+      mat-icon-button
+      type="button"
+      aria-label="Refresh cognition data"
+      (click)="refreshAll()"
+      [disabled]="!selectedAgentId()"
+    >
+      <mat-icon>refresh</mat-icon>
+    </button>
+  </div>
+
+  @if (agentsError(); as error) {
+    <app-error-message [message]="error"></app-error-message>
+  }
+
+  @if (storageUnavailable()) {
+    <app-error-message
+      title="Cognition unavailable"
+      [message]="STORAGE_UNAVAILABLE_MESSAGE"
+    ></app-error-message>
+  } @else if (!selectedAgentId()) {
+    <!-- No agent in scope yet: the sections are agent-scoped, so render a
+         picker-level state instead of three misleading "nothing here" cards. -->
+    @if (loadingAgents()) {
+      <app-loading-spinner></app-loading-spinner>
+    } @else if (!agentsError()) {
+      @if (agents().length === 0) {
+        <app-empty-state
+          icon="smart_toy"
+          title="No agents available"
+          description="No agents are registered to review yet."
+        ></app-empty-state>
+      } @else {
+        <app-empty-state
+          icon="smart_toy"
+          title="Select an agent"
+          description="Choose an agent above to review its cognition."
+        ></app-empty-state>
+      }
+    }
+  } @else {
+    <!-- Proposals (first — the HITL gate) -->
+    <section class="cognition-section" aria-label="Rule proposals">
+      <header class="cognition-section__head">
+        <h3>Rule proposals</h3>
+        <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
+          <mat-label>Status</mat-label>
+          <mat-select [value]="proposalStatusFilter()" (selectionChange)="setProposalFilter($event.value)">
+            @for (f of proposalFilters; track f.value) {
+              <mat-option [value]="f.value">{{ f.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </header>
+
+      @if (proposalsError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
+      }
+
+      @if (loadingProposals() && proposals().length === 0) {
+        <app-loading-spinner></app-loading-spinner>
+      } @else if (proposals().length === 0 && !proposalsError()) {
+        <app-empty-state
+          icon="rule"
+          title="Nothing to review"
+          description="This agent hasn't proposed any rule changes yet."
+        ></app-empty-state>
+      } @else {
+        <ul class="cognition-list">
+          @for (p of proposals(); track p.id) {
+            @let actionLabel = proposalActionLabel(p.action);
+            @let summary = proposalSummary(p);
+            <li class="proposal-card" [class.is-stale]="p.stale_evidence">
+              <header class="proposal-card__head">
+                <mat-chip-set>
+                  <mat-chip class="is-action">{{ actionLabel }}</mat-chip>
+                  <mat-chip class="is-status is-dot">{{ p.status }}</mat-chip>
+                  @if (p.stale_evidence) {
+                    <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
+                  }
+                </mat-chip-set>
+                <time class="proposal-card__time" [attr.datetime]="p.created_at">{{ p.created_at | date: 'medium' }}</time>
+              </header>
+
+              <div class="proposal-card__body">
+                @if (p.action === 'add') {
+                  <div class="proposal-card__lead">New {{ proposedRuleMode(p) }} rule:</div>
+                  <div class="proposal-card__text">"{{ proposedRuleText(p) }}"</div>
+                } @else if (p.action === 'amend') {
+                  @if (targetRule(p.target_rule_id); as tr) {
+                    <div class="proposal-card__lead">Replaces: "{{ tr.text }}"</div>
+                  } @else {
+                    <div class="proposal-card__lead">Replaces an existing rule:</div>
+                  }
+                  <div class="proposal-card__text">With: "{{ proposedRuleText(p) }}"</div>
+                } @else {
+                  <div class="proposal-card__lead">Retire rule:</div>
+                  @if (targetRule(p.target_rule_id); as tr) {
+                    <button type="button" class="proposal-card__link" (click)="scrollToRule(tr.id)">
+                      "{{ tr.text }}"
+                    </button>
+                  } @else {
+                    <div class="proposal-card__text">an existing rule</div>
+                  }
+                }
+
+                @if (p.stale_evidence) {
+                  <div class="proposal-card__evidence is-stale" [id]="'stale-msg-' + p.id">
+                    Evidence is out of date. Approval is paused until the agent re-checks it.
+                  </div>
+                } @else {
+                  <div class="proposal-card__evidence">Evidence: {{ evidenceCount(p) }} observations</div>
+                }
+
+                @if (p.status !== 'pending' && p.decided_by) {
+                  <div class="proposal-card__decision">
+                    Decided by {{ p.decided_by }}@if (p.decided_at) { on {{ p.decided_at | date: 'medium' }} }
+                  </div>
+                }
+              </div>
+
+              @if (p.status === 'pending') {
+                <footer class="proposal-card__actions">
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    color="warn"
+                    [attr.aria-label]="'Reject ' + actionLabel + ': ' + summary"
+                    [disabled]="actingProposalId() !== null"
+                    (click)="reject(p)"
+                  >
+                    Reject
+                  </button>
+                  <!-- The tooltip lives on the wrapper so it's discoverable even
+                       when the button itself is disabled (disabled controls can't
+                       be focused or long-pressed). -->
+                  <span
+                    class="proposal-card__approve-wrap"
+                    [matTooltip]="'Can\'t approve while evidence is outdated.'"
+                    [matTooltipDisabled]="!p.stale_evidence"
+                    [attr.tabindex]="p.stale_evidence ? 0 : null"
+                  >
+                    <button
+                      mat-flat-button
+                      type="button"
+                      color="primary"
+                      [attr.aria-label]="'Approve ' + actionLabel + ': ' + summary"
+                      [attr.aria-describedby]="p.stale_evidence ? 'approve-tip-' + p.id : null"
+                      [disabled]="p.stale_evidence || actingProposalId() !== null"
+                      (click)="approve(p)"
+                    >
+                      Approve
+                    </button>
+                  </span>
+                  @if (p.stale_evidence) {
+                    <span [id]="'approve-tip-' + p.id" class="visually-hidden">
+                      Can't approve while evidence is outdated.
+                    </span>
+                  }
+                </footer>
+              }
+            </li>
+          }
+        </ul>
+        @if (proposalsHasMore()) {
+          <button
+            mat-stroked-button
+            type="button"
+            class="cognition-list__more"
+            aria-label="Load more proposals"
+            [disabled]="loadingProposals()"
+            (click)="loadMoreProposals()"
+          >
+            Load more
+          </button>
+        }
+      }
+    </section>
+
+    <!-- Memory -->
+    <section class="cognition-section" aria-label="Memory timeline">
+      <header class="cognition-section__head">
+        <h3>Memory</h3>
+        <div class="cognition-section__controls">
+          <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
+            <mat-label>Order</mat-label>
+            <mat-select [value]="memoryBySalience()" (selectionChange)="setMemoryOrder($event.value)">
+              @for (o of memoryOrders; track o.value) {
+                <mat-option [value]="o.value">{{ o.label }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
+            <mat-label>Show</mat-label>
+            <mat-select [value]="memoryTopN()" (selectionChange)="setMemoryTopN($event.value)">
+              @for (n of topNOptions; track n) {
+                <mat-option [value]="n">{{ n }}</mat-option>
+              }
+            </mat-select>
+          </mat-form-field>
+        </div>
+      </header>
+
+      @if (memoryError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
+      }
+
+      @if (loadingEvents()) {
+        <app-loading-spinner></app-loading-spinner>
+      } @else if (events().length === 0 && !memoryError()) {
+        <app-empty-state
+          icon="history"
+          title="No activity yet"
+          description="No activity recorded for this agent yet."
+        ></app-empty-state>
+      } @else {
+        <ul class="cognition-list">
+          @for (e of events(); track e.id) {
+            <li class="memory-event">
+              <header class="memory-event__head">
+                <mat-chip-set>
+                  <mat-chip class="is-kind is-kind-{{ e.kind }}"
+                    ><span aria-hidden="true">{{ eventKindIcon(e.kind) }}</span> {{ eventKindLabel(e.kind) }}</mat-chip
+                  >
+                </mat-chip-set>
+                <span class="memory-event__relevance">{{ relevanceLabel(e.salience) }}</span>
+                <time class="memory-event__time" [attr.datetime]="e.occurred_at">{{ e.occurred_at | date: 'medium' }}</time>
+              </header>
+              <div class="memory-event__content" [title]="e.content">{{ e.content }}</div>
+              @if (hasData(e)) {
+                <button
+                  mat-button
+                  type="button"
+                  class="memory-event__toggle"
+                  [attr.aria-expanded]="isEventExpanded(e.id)"
+                  (click)="toggleEventData(e.id)"
+                >
+                  {{ isEventExpanded(e.id) ? 'Hide details' : 'Show details' }}
+                </button>
+                @if (isEventExpanded(e.id)) {
+                  <pre class="memory-event__data">{{ formatData(e) }}</pre>
+                }
+              }
+            </li>
+          }
+        </ul>
+      }
+    </section>
+
+    <!-- Rules -->
+    <section class="cognition-section" aria-label="Rules">
+      <header class="cognition-section__head">
+        <h3>Rules</h3>
+        <mat-form-field appearance="outline" class="cognition-section__filter" subscriptSizing="dynamic">
+          <mat-label>Status</mat-label>
+          <mat-select [value]="ruleStatusFilter()" (selectionChange)="setRuleFilter($event.value)">
+            @for (f of ruleFilters; track f.value) {
+              <mat-option [value]="f.value">{{ f.label }}</mat-option>
+            }
+          </mat-select>
+        </mat-form-field>
+      </header>
+
+      @if (rulesError(); as error) {
+        <app-error-message [message]="error"></app-error-message>
+      }
+
+      @if (loadingRules() && rules().length === 0) {
+        <app-loading-spinner></app-loading-spinner>
+      } @else if (rules().length === 0 && !rulesError()) {
+        <app-empty-state
+          icon="gavel"
+          title="No rules yet"
+          description="This agent has no rules yet."
+        ></app-empty-state>
+      } @else {
+        <ul class="cognition-list">
+          @for (r of rules(); track r.id) {
+            <li
+              class="rule-row"
+              [id]="'rule-' + r.id"
+              [class.is-retired]="r.status === 'retired'"
+              [class.is-highlighted]="highlightedRuleId() === r.id"
+            >
+              <header class="rule-row__head">
+                <mat-chip-set>
+                  <mat-chip
+                    class="is-mode"
+                    tabindex="0"
+                    [matTooltip]="ruleModeTooltip(r.mode)"
+                    [attr.aria-describedby]="'mode-tip-' + r.id"
+                  >
+                    {{ r.mode === 'enforced' ? '⚖' : '💬' }} {{ r.mode }}
+                  </mat-chip>
+                  <mat-chip class="is-status">{{ r.status }}</mat-chip>
+                </mat-chip-set>
+                <span [id]="'mode-tip-' + r.id" class="visually-hidden">{{ ruleModeTooltip(r.mode) }}</span>
+                <span class="rule-row__meta">{{ rulePriorityLabel(r.priority) }}</span>
+                <span class="rule-row__meta">{{ ruleSourceLabel(r.source) }}</span>
+                <span class="rule-row__spacer"></span>
+                @if (r.needs_review) {
+                  <mat-chip-set>
+                    <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
+                  </mat-chip-set>
+                }
+              </header>
+              <div class="rule-row__text">{{ r.text }}</div>
+              @if (r.rationale) {
+                <div class="rule-row__why">why: {{ r.rationale }}</div>
+              }
+            </li>
+          }
+        </ul>
+        @if (rulesHasMore()) {
+          <button
+            mat-stroked-button
+            type="button"
+            class="cognition-list__more"
+            aria-label="Load more rules"
+            [disabled]="loadingRules()"
+            (click)="loadMoreRules()"
+          >
+            Load more
+          </button>
+        }
+      }
+    </section>
+  }
+</div>

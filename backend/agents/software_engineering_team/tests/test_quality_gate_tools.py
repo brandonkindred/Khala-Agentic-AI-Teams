@@ -498,3 +498,66 @@ def test_run_code_review_forwards_progress_callback(monkeypatch) -> None:
         llm_getter=lambda k: MagicMock(),
     )
     assert captured["progress_callback"] is None
+
+
+def test_run_code_review_forwards_files_dict(monkeypatch) -> None:
+    """When ``files`` is supplied it reaches CodeReviewInput.files and the legacy
+    ``code`` string is ignored (the agent bounds its own per-call prompts)."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured: dict = {}
+
+    class _CapturingAgent:
+        def __init__(self, llm) -> None:
+            pass
+
+        def run(self, inp, progress_callback=None):
+            captured["files"] = inp.files
+            captured["code"] = inp.code
+            return _ReviewResult()
+
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _CapturingAgent)
+
+    files = {"app/main.py": "print('hi')", "app/util.py": "x = 1"}
+    result = q.run_code_review(
+        code="ignored whole-repo blob",
+        spec_content="",
+        task_description="t",
+        language="python",
+        task_requirements="reqs",
+        files=files,
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert result.approved is True
+    assert captured["files"] == files
+    # ``code`` was not passed through; CodeReviewInput leaves it at its default.
+    assert captured["code"] == ""
+
+
+def test_run_code_review_uses_code_when_no_files(monkeypatch) -> None:
+    """Without ``files`` the legacy ``code`` string is passed as the review input."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured: dict = {}
+
+    class _CapturingAgent:
+        def __init__(self, llm) -> None:
+            pass
+
+        def run(self, inp, progress_callback=None):
+            captured["files"] = inp.files
+            captured["code"] = inp.code
+            return _ReviewResult()
+
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", _CapturingAgent)
+
+    q.run_code_review(
+        code="### a.py ###\nx = 1",
+        spec_content="",
+        task_description="t",
+        language="python",
+        task_requirements="reqs",
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert captured["files"] is None
+    assert captured["code"] == "### a.py ###\nx = 1"

@@ -33,6 +33,34 @@ def test_run_git_returns_output(monkeypatch, tmp_path) -> None:
     assert out == "outerr"
 
 
+def test_run_git_stderr_suppressed_on_success_but_kept_on_failure(monkeypatch, tmp_path) -> None:
+    """merge_stderr=False keeps stdout clean on success, but a non-zero exit still
+    surfaces stderr so the failure cause is never lost from the diagnostic."""
+    import subprocess
+
+    from software_engineering_team.shared import git_utils
+
+    class _Ok:
+        returncode = 0
+        stdout = "data"
+        stderr = "warning: CRLF\n"
+
+    class _Fail:
+        returncode = 128
+        stdout = ""
+        stderr = "fatal: bad object deadbeef\n"
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Ok())
+    # Success: stderr warning must not pollute the stdout data channel.
+    assert git_utils._run_git(tmp_path, ["git", "show"], merge_stderr=False) == (0, "data")
+
+    monkeypatch.setattr(subprocess, "run", lambda *a, **kw: _Fail())
+    # Failure: stderr is appended even with merge_stderr=False (no data to protect).
+    code, out = git_utils._run_git(tmp_path, ["git", "show"], merge_stderr=False)
+    assert code == 128
+    assert "fatal: bad object deadbeef" in out
+
+
 def test_run_git_timeout(monkeypatch, tmp_path) -> None:
     import subprocess
 
@@ -141,9 +169,7 @@ def test_create_feature_branch_stash_path(monkeypatch, _fake_git_repo) -> None:
         return 0, ""
 
     # No disposable files to clear → falls through to stash
-    monkeypatch.setattr(
-        git_utils, "_clear_disposable_files_if_blocking", lambda *_: False
-    )
+    monkeypatch.setattr(git_utils, "_clear_disposable_files_if_blocking", lambda *_: False)
     monkeypatch.setattr(git_utils, "_run_git", fake_git)
     ok, _ = git_utils.create_feature_branch(_fake_git_repo, "main", "x")
     assert ok is True
@@ -283,18 +309,14 @@ def test_branch_has_commits_ahead_of_true(monkeypatch, _fake_git_repo) -> None:
     from software_engineering_team.shared import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, "abc commit\n"))
-    assert (
-        git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is True
-    )
+    assert git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is True
 
 
 def test_branch_has_commits_ahead_of_false(monkeypatch, _fake_git_repo) -> None:
     from software_engineering_team.shared import git_utils
 
     monkeypatch.setattr(git_utils, "_run_git", lambda *a, **kw: (0, ""))
-    assert (
-        git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is False
-    )
+    assert git_utils.branch_has_commits_ahead_of(_fake_git_repo, "feature/x", "main") is False
 
 
 def test_merge_branch_success(monkeypatch, _fake_git_repo) -> None:
@@ -430,9 +452,7 @@ def test_ensure_development_branch_no_base(monkeypatch, _fake_git_repo) -> None:
 def test_initialize_new_repo_already_a_repo(monkeypatch, _fake_git_repo) -> None:
     from software_engineering_team.shared import git_utils
 
-    monkeypatch.setattr(
-        git_utils, "ensure_development_branch", lambda p: (True, "Created")
-    )
+    monkeypatch.setattr(git_utils, "ensure_development_branch", lambda p: (True, "Created"))
     ok, msg = git_utils.initialize_new_repo(_fake_git_repo)
     assert ok is True
     assert "Already a git repo" in msg
