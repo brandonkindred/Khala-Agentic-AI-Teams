@@ -20,9 +20,9 @@ import os
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
 
 # A heuristic break line must not *start* with one of these tokens: a bare
-# closing bracket, a block-comment close, or a line comment would otherwise be
-# cut away from the block it belongs to.
-_HEURISTIC_SKIP_PREFIXES = ("}", ")", "]", "*/", "//", "#")
+# closing bracket, a block-comment open/close, or a line comment would
+# otherwise be cut away from the block it belongs to.
+_HEURISTIC_SKIP_PREFIXES = ("}", ")", "]", "*/", "/*", "//", "#")
 
 
 def preferred_break_lines(path: str, content: str) -> frozenset[int]:
@@ -53,10 +53,11 @@ def preferred_break_lines(path: str, content: str) -> frozenset[int]:
         breaks = _python_break_lines(content)
         if breaks:
             return breaks
-        # An empty Python result means the source did not parse (e.g. a partial
-        # snippet under review); fall through to the language-agnostic heuristic
-        # rather than giving up, since column-0 ``def``/``class`` lines are still
-        # good cut points.
+        # An empty Python result means either the source did not parse (e.g. a
+        # partial snippet under review) or it has no top-level functions/classes
+        # (a script of bare statements). In both cases fall through to the
+        # language-agnostic heuristic rather than giving up, since column-0
+        # ``def``/``class`` lines are still good cut points.
     return _heuristic_break_lines(content)
 
 

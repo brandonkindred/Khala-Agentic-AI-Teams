@@ -11,7 +11,6 @@ import logging
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from code_review_agent.coordinator import build_review_chunks
 from strands import Agent
 
 from llm_service import LLMClient
@@ -39,6 +38,10 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 MAX_REVIEW_CODE_CHARS = 60_000  # Generous limit; review all files, not just first 20
+# A file this many chunks deep means an unusually large review; log a warning
+# for cost/rate-limit visibility, but still review every chunk (dropping any
+# would re-introduce the tail truncation this fallback exists to avoid).
+MANY_CHUNKS_WARN_THRESHOLD = 20
 
 
 def _run_llm_review(
@@ -58,8 +61,16 @@ def _run_llm_review(
           and every chunk is reviewed; issues from all chunks are returned.
           No file content is silently truncated away, so a large file's tail is
           reviewed rather than dropped. Blank files contribute nothing.
+        - A chunk whose LLM call or parse fails is logged and skipped; issues
+          from the other chunks are still returned (one bad chunk never aborts
+          the whole review).
         - Small inputs are reviewed in a single call, as before.
     """
+    # Imported lazily, fully-qualified, to match this module's existing
+    # convention for code_review_agent imports and to avoid assuming the
+    # software_engineering_team package dir is itself on sys.path.
+    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
     if not blocks:
         return []
@@ -67,7 +78,14 @@ def _run_llm_review(
     # but split at function/method boundaries so no construct is severed and no
     # file tail is dropped.
     chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
-    logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
+    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
+        logger.warning(
+            "LLM code review: %d chunks for %d file(s) — large review, many LLM calls",
+            len(chunks),
+            len(blocks),
+        )
+    else:
+        logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
     issues: List[ReviewIssue] = []
     for idx, chunk in enumerate(chunks, start=1):
         logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
@@ -78,8 +96,12 @@ def _run_llm_review(
             else "N/A",
             code=chunk.content,
         )
-        raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-        data = parse_review_template(raw)
+        try:
+            raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+            data = parse_review_template(raw)
+        except Exception as exc:
+            logger.warning("LLM code review: chunk %d/%d failed: %s", idx, len(chunks), exc)
+            continue
         for item in data.get("issues") or []:
             if isinstance(item, dict):
                 issues.append(

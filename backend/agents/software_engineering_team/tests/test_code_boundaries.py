@@ -98,16 +98,22 @@ def test_heuristic_skips_closing_and_comment_lines() -> None:
             "  body();",  # 2
             "}",  # 3 skipped: closing brace
             "// a comment",  # 4 skipped: line comment
-            "*/",  # 5 skipped: block-comment close
-            "function b() {}",  # 6
+            "/* block open",  # 5 skipped: block-comment open
+            "*/",  # 6 skipped: block-comment close
+            "function b() {}",  # 7
         ]
     )
-    assert preferred_break_lines("m.js", src) == frozenset({1, 6})
+    assert preferred_break_lines("m.js", src) == frozenset({1, 7})
 
 
 def test_unknown_extension_uses_heuristic() -> None:
     src = "rule one\n    indented\nrule two\n"
     assert preferred_break_lines("config.unknown", src) == frozenset({1, 3})
+
+
+def test_empty_path_uses_heuristic() -> None:
+    # An empty path has no extension, so detection falls to the heuristic.
+    assert preferred_break_lines("", "def f(): pass") == frozenset({1})
 
 
 # ---------------------------------------------------------------------------
