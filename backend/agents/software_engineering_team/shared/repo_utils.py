@@ -303,6 +303,10 @@ def read_files_as_dict(
         extension-filtered paths are *not* reported as omissions.
 
     Preconditions:
+        - *repo_path* is an existing directory (the task's working tree). On
+          Python 3.6+ ``resolve()`` is non-strict so a missing root does not
+          raise, but a non-existent root yields an empty mapping rather than
+          meaningful review input.
         - *paths* are repo-relative; the caller has already scoped them.
     Postconditions:
         - Returns a mapping in the iteration order of *paths*, skipping any path

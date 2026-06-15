@@ -878,7 +878,8 @@ def _format_deletion_note(
     lines = [
         f"Files DELETED by this task ({len(deleted)} total; verify each removal is "
         "intentional and that nothing still depends on them). Pre-deletion content "
-        "for readable files is provided for review under its original path:"
+        "for readable files is provided for review under a separate "
+        "'<path> (DELETED by this task — pre-deletion content)' label:"
     ]
     for path in deleted:
         lines.append(f"- {sanitize_path_for_text(path)}")
@@ -2246,7 +2247,12 @@ class BackendExpertAgent:
                 review_history.append(record)
                 cr_issues = _translate_finding_paths(
                     [
-                        i.model_dump() if hasattr(i, "model_dump") else i.dict()
+                        # An issue is normally a Pydantic model, but tolerate a
+                        # plain dict (e.g. a differently-versioned agent) instead
+                        # of crashing the fix loop on a missing .dict()/.model_dump().
+                        i
+                        if isinstance(i, dict)
+                        else (i.model_dump() if hasattr(i, "model_dump") else i.dict())
                         for i in review_result.issues
                     ],
                     review_selection.key_to_path,
@@ -3160,6 +3166,9 @@ class BackendExpertAgent:
               full input. Any deletion note is already folded into that channel
               by ``_select_review_input`` (so the coordinator segments it),
               never into the task description.
+            - ``existing_code`` (optional) is the pre-change repository context
+              passed through as ``CodeReviewInput.existing_codebase`` — already
+              truncated by the caller; ``None`` omits it.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:

@@ -445,7 +445,14 @@ def list_changed_and_deleted(
     if not (path / ".git").exists():
         return [], []
     merge_base = _unambiguous_merge_base(path, base, head)
-    code, out = _run_git(path, ["git", "diff", "--name-status", "--no-renames", "-z", merge_base])
+    # stdout only — the NUL-delimited name-status pairs are data; a git stderr
+    # warning emitted on success would otherwise be appended and corrupt the
+    # status/path pairing (the odd-field guard only catches a subset of that).
+    code, out = _run_git(
+        path,
+        ["git", "diff", "--name-status", "--no-renames", "-z", merge_base],
+        merge_stderr=False,
+    )
     if code != 0:
         raise BaselineDiffUnavailable(f"net diff vs {merge_base} failed: {out!r}")
     changed: List[str] = []
