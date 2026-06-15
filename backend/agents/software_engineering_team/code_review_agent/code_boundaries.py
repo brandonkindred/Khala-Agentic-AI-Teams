@@ -39,9 +39,11 @@ def preferred_break_lines(path: str, content: str) -> frozenset[int]:
 
     Postconditions:
         - Every returned number is in ``[1, len(content.splitlines())]``.
-        - Never raises: on a parse error, minified/single-line input, unknown
-          language, or empty content it returns ``frozenset()``, which the
-          caller treats as "no preferred breaks → split on line boundaries".
+        - Never raises. On a parse error, unknown language, or empty/blank
+          content it returns ``frozenset()``; for minified/single-line input it
+          may return ``frozenset({1})``. Either way the caller falls back to
+          line-boundary splitting, because the splitter never cuts before line 1
+          and treats the absence of *interior* breaks as "no preferred breaks".
         - Pure: no I/O, no mutation of the arguments or module state.
     """
     if not content or not content.strip():
@@ -108,8 +110,10 @@ def _heuristic_break_lines(content: str) -> frozenset[int]:
 
     Postconditions:
         - Returns 1-based line numbers in ``[1, len(content.splitlines())]``.
-        - Returns ``frozenset()`` for minified/single-construct input with no
-          interior column-0 lines, so the caller falls back to line boundaries.
+        - Returns ``frozenset()`` only for truly empty/blank content. Single-line
+          input returns ``frozenset({1})`` (line 1 is column-0 and not skipped);
+          since the splitter never cuts before line 1, this still degrades to
+          line-boundary splitting — there are no *interior* breaks to use.
     """
     breaks: set[int] = set()
     for i, line in enumerate(content.splitlines(), start=1):
