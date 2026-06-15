@@ -28,4 +28,5 @@ export const environment = {
   deepthoughtApiUrl: `${apiBase}/api/deepthought`,
   roadTripPlanningApiUrl: `${apiBase}/api/road-trip-planning`,
   productDeliveryApiUrl: `${apiBase}/api/product-delivery`,
+  agentCognitionApiUrl: `${apiBase}/api/cognition`,
 };
