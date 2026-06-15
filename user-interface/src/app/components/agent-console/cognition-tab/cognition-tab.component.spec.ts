@@ -691,6 +691,8 @@ describe('CognitionTabComponent', () => {
     expect(c.proposalSummary({ ...staleProposal, proposed_rule: null })).toBe(
       'Cap writeback at 8 KB',
     );
+    // No proposed text and no resolvable target → empty string (never a raw id).
+    expect(c.proposalSummary({ ...addProposal, proposed_rule: null, target_rule_id: null })).toBe('');
   });
 
   it('pages the rule index past the first page to resolve a later target', () => {

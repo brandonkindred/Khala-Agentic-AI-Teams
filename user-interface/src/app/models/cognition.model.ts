@@ -101,24 +101,28 @@ export interface RuleProposal {
 // Query option bags (mapped to query params by `CognitionApiService`)
 // ---------------------------------------------------------------------------
 
+/** Query options for listing an agent's memory events. */
 export interface MemoryEventsQuery {
   topN?: number;
   bySalience?: boolean;
   since?: string;
 }
 
+/** Query options for listing an agent's period summaries. */
 export interface SummariesQuery {
   limit?: number;
   offset?: number;
   excludeStale?: boolean;
 }
 
+/** Query options for listing an agent's rule proposals. */
 export interface ProposalsQuery {
   status?: ProposalStatus;
   limit?: number;
   offset?: number;
 }
 
+/** Query options for listing an agent's rules. */
 export interface RulesQuery {
   status?: RuleStatus;
   limit?: number;

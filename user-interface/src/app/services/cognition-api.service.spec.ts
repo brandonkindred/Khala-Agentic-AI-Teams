@@ -80,6 +80,7 @@ describe('CognitionApiService', () => {
     service.rejectProposal('a1', 'p1').subscribe((r) => expect(r).toEqual(updated));
     const req = httpMock.expectOne(`${base}/proposals/p1/reject`);
     expect(req.request.method).toBe('POST');
+    expect(req.request.body).toEqual({});
     req.flush(updated);
   });
 
@@ -141,6 +142,14 @@ describe('CognitionApiService', () => {
     req.flush([]);
   });
 
+  it('lists memory events with no query params', () => {
+    service.listMemoryEvents('a1').subscribe((r) => expect(r).toEqual([]));
+    const req = httpMock.expectOne(`${base}/memory/events`);
+    expect(req.request.method).toBe('GET');
+    expect(req.request.params.keys().length).toBe(0);
+    req.flush([]);
+  });
+
   it('lists summaries for a scale', () => {
     const stub = [{ id: 's1' }];
     service
@@ -156,6 +165,17 @@ describe('CognitionApiService', () => {
     );
     expect(req.request.method).toBe('GET');
     req.flush(stub);
+  });
+
+  it('lists summaries with only the required scale param', () => {
+    service.listSummaries('a1', 'week').subscribe((r) => expect(r).toEqual([]));
+    const req = httpMock.expectOne(
+      (r) => r.url === `${base}/memory/summaries` && r.params.get('scale') === 'week',
+    );
+    expect(req.request.method).toBe('GET');
+    // Only `scale` is sent — optional limit/offset/exclude_stale are omitted.
+    expect(req.request.params.keys()).toEqual(['scale']);
+    req.flush([]);
   });
 
   // Rules ---------------------------------------------------------------------

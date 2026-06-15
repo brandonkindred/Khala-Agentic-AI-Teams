@@ -98,7 +98,7 @@
                     <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
                   }
                 </mat-chip-set>
-                <time class="proposal-card__time">{{ p.created_at | date: 'medium' }}</time>
+                <time class="proposal-card__time" [attr.datetime]="p.created_at">{{ p.created_at | date: 'medium' }}</time>
               </header>
 
               <div class="proposal-card__body">
@@ -243,7 +243,7 @@
                   >
                 </mat-chip-set>
                 <span class="memory-event__relevance">{{ relevanceLabel(e.salience) }}</span>
-                <time class="memory-event__time">{{ e.occurred_at | date: 'medium' }}</time>
+                <time class="memory-event__time" [attr.datetime]="e.occurred_at">{{ e.occurred_at | date: 'medium' }}</time>
               </header>
               <div class="memory-event__content" [title]="e.content">{{ e.content }}</div>
               @if (hasData(e)) {
