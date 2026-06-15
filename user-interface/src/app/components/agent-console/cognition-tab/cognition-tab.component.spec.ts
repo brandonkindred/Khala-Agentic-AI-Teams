@@ -126,6 +126,12 @@ describe('CognitionTabComponent', () => {
     dialog = { open: vi.fn().mockReturnValue({ afterClosed: () => of(true) }) };
   });
 
+  // Safety net: if a fake-timer test fails before its own useRealTimers(), make
+  // sure real timers are restored so later tests aren't affected.
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('loads agents, auto-selects the first, and loads all three sections', () => {
     const f = build();
     f.detectChanges();

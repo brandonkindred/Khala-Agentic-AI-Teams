@@ -1,6 +1,7 @@
 import {
   EVIDENCE_OUTDATED,
   eventKindLabel,
+  eventKindIcon,
   memoryOrderLabel,
   proposalActionLabel,
   relevanceLabel,
@@ -77,6 +78,21 @@ describe('cognition-labels', () => {
   it('rounds priority to an integer', () => {
     expect(rulePriorityLabel(90.6)).toBe('priority 91');
     expect(rulePriorityLabel(10.2)).toBe('priority 10');
+  });
+
+  it('guards priority against non-finite values', () => {
+    expect(rulePriorityLabel(Number.NaN)).toBe('priority N/A');
+    expect(rulePriorityLabel(Number.POSITIVE_INFINITY)).toBe('priority N/A');
+  });
+
+  it('gives every event kind a decorative icon, with a fallback for unknown kinds', () => {
+    const kinds: EventKind[] = ['observation', 'action', 'tool_call', 'outcome', 'error', 'feedback'];
+    for (const k of kinds) {
+      expect(eventKindIcon(k)).toBeTruthy();
+    }
+    // Distinct glyph per kind so colour isn't the sole differentiator.
+    expect(new Set(kinds.map(eventKindIcon)).size).toBe(kinds.length);
+    expect(eventKindIcon('mystery' as EventKind)).toBe('•');
   });
 
   it('labels memory order from the by_salience flag', () => {

@@ -29,6 +29,20 @@ const EVENT_KIND_LABELS: Record<EventKind, string> = {
   feedback: 'feedback',
 };
 
+/**
+ * Decorative glyph paired with each event-kind label so the kind is conveyed by
+ * shape + text, not colour alone (WCAG 1.4.1), matching the icon+text treatment
+ * of the action / mode / warn chips.
+ */
+const EVENT_KIND_ICONS: Record<EventKind, string> = {
+  observation: '👁',
+  action: '⚡',
+  tool_call: '🔧',
+  outcome: '✅',
+  error: '⛔',
+  feedback: '💬',
+};
+
 const PROPOSAL_ACTION_LABELS: Record<ProposalAction, string> = {
   add: 'new rule',
   amend: 'amend rule',
@@ -49,6 +63,11 @@ const RULE_MODE_TOOLTIPS: Record<RuleMode, string> = {
 /** `tool_call` → `tool call`; never the raw snake_case enum. */
 export function eventKindLabel(kind: EventKind): string {
   return EVENT_KIND_LABELS[kind] ?? kind;
+}
+
+/** Decorative glyph for an event kind (paired with `eventKindLabel`); `•` for unknown kinds. */
+export function eventKindIcon(kind: EventKind): string {
+  return EVENT_KIND_ICONS[kind] ?? '•';
 }
 
 /** Memory `salience` surfaced as `relevance 0.82`; non-finite → `relevance N/A`. */
@@ -72,8 +91,9 @@ export function ruleSourceLabel(source: RuleSource): string {
   return RULE_SOURCE_LABELS[source] ?? source;
 }
 
-/** Spelled out, not `prio`, and rounded to an integer: `priority 90`. */
+/** Spelled out, not `prio`, and rounded to an integer: `priority 90`; non-finite → `priority N/A`. */
 export function rulePriorityLabel(priority: number): string {
+  if (!Number.isFinite(priority)) return 'priority N/A';
   return `priority ${Math.round(priority)}`;
 }
 

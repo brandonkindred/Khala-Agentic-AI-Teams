@@ -87,7 +87,7 @@ The actionable core, placed first: pending `RuleProposal`s with **Approve** /
 │ │ With:     "Cap writeback at 16 KB."                                     ││
 │ │ Evidence is out of date. Approval is paused until the agent re-checks   ││
 │ │ it.                                                                     ││
-│ │                                          [ Reject ]   [ Approve ]✗       ││
+│ │                                          [ Reject ]   [ Approve ]        ││
 │ └─────────────────────────────────────────────────────────────────────────┘│
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -111,9 +111,9 @@ Per-proposal card:
 - **Decision provenance** — once decided, show `decided_by` + `decided_at`
   (both server-derived; the UI never sends an author).
 - **Actions** — `Approve` (primary) and `Reject` (stroked), shown only while
-  `status === 'pending'`. Approve is **disabled** (greyed, no icon) when
-  `stale_evidence` is true, with tooltip **"Can't approve while evidence is
-  outdated."**
+  `status === 'pending'`. Approve is **disabled** (greyed, no icon — the
+  wireframe above intentionally shows no marker on it) when `stale_evidence` is
+  true, with tooltip **"Can't approve while evidence is outdated."**
 
 Filter: status `pending / approved / rejected / superseded` (default
 `pending`).

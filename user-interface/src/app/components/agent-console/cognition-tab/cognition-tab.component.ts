@@ -31,6 +31,7 @@ import { ErrorMessageComponent } from '../../../shared/error-message/error-messa
 import {
   EVIDENCE_OUTDATED,
   eventKindLabel,
+  eventKindIcon,
   memoryOrderLabel,
   proposalActionLabel,
   relevanceLabel,
@@ -187,6 +188,7 @@ export class CognitionTabComponent implements OnInit {
   readonly EVIDENCE_OUTDATED = EVIDENCE_OUTDATED;
   readonly proposalActionLabel = proposalActionLabel;
   readonly eventKindLabel = eventKindLabel;
+  readonly eventKindIcon = eventKindIcon;
   readonly relevanceLabel = relevanceLabel;
   readonly ruleSourceLabel = ruleSourceLabel;
   readonly rulePriorityLabel = rulePriorityLabel;

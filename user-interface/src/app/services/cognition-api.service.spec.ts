@@ -68,6 +68,7 @@ describe('CognitionApiService', () => {
     let captured: unknown;
     service.approveProposal('a1', 'p1').subscribe({ error: (e) => (captured = e) });
     const req = httpMock.expectOne(`${base}/proposals/p1/approve`);
+    expect(req.request.method).toBe('POST');
     req.flush({ detail: 'stale evidence' }, { status: 409, statusText: 'Conflict' });
     const err = captured as HttpErrorResponse;
     expect(err.status).toBe(409);
@@ -88,6 +89,7 @@ describe('CognitionApiService', () => {
     const req = httpMock.expectOne(
       `${environment.agentCognitionApiUrl}/agents/team%2Fagent/proposals/p%201/approve`,
     );
+    expect(req.request.method).toBe('POST');
     req.flush(rule);
   });
 
@@ -97,6 +99,7 @@ describe('CognitionApiService', () => {
     const req = httpMock.expectOne(
       `${environment.agentCognitionApiUrl}/agents/team%2Fagent/proposals/p%201/reject`,
     );
+    expect(req.request.method).toBe('POST');
     req.flush(updated);
   });
 
@@ -134,6 +137,7 @@ describe('CognitionApiService', () => {
     const req = httpMock.expectOne(
       (r) => r.url === `${base}/memory/events` && r.params.get('since') === '2026-06-01T00:00:00Z',
     );
+    expect(req.request.method).toBe('GET');
     req.flush([]);
   });
 
@@ -170,6 +174,7 @@ describe('CognitionApiService', () => {
     let captured: unknown;
     service.listRules('a1').subscribe({ error: (e) => (captured = e) });
     const req = httpMock.expectOne(`${base}/rules`);
+    expect(req.request.method).toBe('GET');
     req.flush({ detail: 'unavailable' }, { status: 503, statusText: 'Service Unavailable' });
     const err = captured as HttpErrorResponse;
     expect(err.status).toBe(503);

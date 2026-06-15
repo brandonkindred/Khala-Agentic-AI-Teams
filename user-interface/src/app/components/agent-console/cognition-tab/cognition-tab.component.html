@@ -238,7 +238,9 @@
             <li class="memory-event">
               <header class="memory-event__head">
                 <mat-chip-set>
-                  <mat-chip class="is-kind is-kind-{{ e.kind }}">{{ eventKindLabel(e.kind) }}</mat-chip>
+                  <mat-chip class="is-kind is-kind-{{ e.kind }}"
+                    ><span aria-hidden="true">{{ eventKindIcon(e.kind) }}</span> {{ eventKindLabel(e.kind) }}</mat-chip
+                  >
                 </mat-chip-set>
                 <span class="memory-event__relevance">{{ relevanceLabel(e.salience) }}</span>
                 <time class="memory-event__time">{{ e.occurred_at | date: 'medium' }}</time>
