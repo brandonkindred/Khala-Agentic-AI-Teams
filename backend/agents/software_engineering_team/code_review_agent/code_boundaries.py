@@ -104,7 +104,9 @@ def _heuristic_break_lines(content: str) -> frozenset[int]:
             continue
         if line[0].isspace():
             continue
-        if line.lstrip().startswith(_HEURISTIC_SKIP_PREFIXES):
+        # Leading whitespace is already ruled out above, so the line starts at
+        # column 0 — no lstrip needed before checking the skip prefixes.
+        if line.startswith(_HEURISTIC_SKIP_PREFIXES):
             continue
         breaks.add(i)
     return frozenset(breaks)

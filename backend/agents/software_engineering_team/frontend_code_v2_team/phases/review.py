@@ -66,8 +66,11 @@ def _run_llm_review(
     # Budget each prompt at the same per-call size the old code truncated to,
     # but split at function/method boundaries so no construct is severed and no
     # file tail is dropped.
+    chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
+    logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
     issues: List[ReviewIssue] = []
-    for chunk in build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS):
+    for idx, chunk in enumerate(chunks, start=1):
+        logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
         prompt = REVIEW_PROMPT.format(
             requirements=task.requirements or task.description,
             acceptance_criteria=", ".join(task.acceptance_criteria)
@@ -75,9 +78,7 @@ def _run_llm_review(
             else "N/A",
             code=chunk.content,
         )
-        raw = (lambda _r: str(_r))(
-            Agent(model=resolve_text_mode_strands_model(llm))(prompt)
-        ).strip()
+        raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
         data = parse_review_template(raw)
         for item in data.get("issues") or []:
             if isinstance(item, dict):
@@ -167,7 +168,7 @@ def run_review(
             logger.warning("[%s] Linting tool agent failed: %s", task_id, exc)
 
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(execution_result.files.items()))
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
     if code_review_agent is not None:
         try:
             from code_review_agent.models import CodeReviewInput as _CRInput
@@ -207,7 +208,7 @@ def run_review(
             from qa_agent.models import QAInput as _QAInput
 
             qa_input = _QAInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=task.description or "",
             )
@@ -230,7 +231,7 @@ def run_review(
             from security_agent.models import SecurityInput as _SecInput
 
             sec_input = _SecInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=task.description or "",
             )
@@ -371,7 +372,7 @@ def run_microtask_review(
             )
 
     code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in list(files.items()))
-    code_text_12k = code_text[:MAX_REVIEW_CODE_CHARS]
+    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
 
     if code_review_agent is not None:
         if detail_callback:
@@ -419,7 +420,7 @@ def run_microtask_review(
             from qa_agent.models import QAInput as _QAInput
 
             qa_input = _QAInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
@@ -444,7 +445,7 @@ def run_microtask_review(
             from security_agent.models import SecurityInput as _SecInput
 
             sec_input = _SecInput(
-                code=code_text_12k,
+                code=code_text_capped,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
             )
