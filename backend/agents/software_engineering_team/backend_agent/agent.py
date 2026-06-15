@@ -1068,8 +1068,14 @@ def _select_review_input(
 
     all_omitted: List[str] = []
     key_to_path: Dict[str, str] = {}
+    symlinked_paths: List[str] = []
     files = read_files_as_dict(
-        repo_path, readable, extensions=None, omitted=all_omitted, key_to_path=key_to_path
+        repo_path,
+        readable,
+        extensions=None,
+        omitted=all_omitted,
+        key_to_path=key_to_path,
+        symlinked=symlinked_paths,
     )
     # An omission is a genuine unexamined task artifact when it is either a
     # confirmed git-diff change, or a writer-emitted file that *exists on disk* but
@@ -1125,10 +1131,10 @@ def _select_review_input(
     # that replaced a real file with a symlink (git status ``T``, bucketed as a
     # change, not a deletion) removes the original content from review entirely.
     # Record such paths as unexamined so the gate routes the approval to manual
-    # review instead of trusting an unreviewed link. Scan ``readable`` (the
-    # changed ∪ writer-output union, sensitive paths already withheld) so a
-    # writer-emitted untracked symlink is covered too, not just diff-reported ones.
-    symlinked = sorted(p for p in readable if (repo_path / p).is_symlink())
+    # review instead of trusting an unreviewed link. ``read_files_as_dict`` already
+    # detected these while reading ``readable`` (single source of truth, no second
+    # stat pass), reporting them via ``symlinked_paths``.
+    symlinked = sorted(symlinked_paths)
     unreadable = list(omitted) + unreadable_deleted + symlinked
 
     # Best-effort: which surviving files still import each removed module, so the

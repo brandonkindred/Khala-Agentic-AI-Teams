@@ -216,6 +216,23 @@ def test_read_files_as_dict_represents_symlink_by_target(tmp_path: Path) -> None
     assert "SECRET" not in result["link.py"]  # target content not dereferenced
 
 
+def test_read_files_as_dict_reports_symlinks_via_out_param(tmp_path: Path) -> None:
+    """The optional ``symlinked`` list collects every detected symlink path, so a
+    caller need not re-stat to find them (single source of symlink detection)."""
+    (tmp_path / "real.py").write_text("x = 1\n", encoding="utf-8")
+    try:
+        (tmp_path / "link.py").symlink_to(tmp_path / "real.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+
+    symlinked: list[str] = []
+    result = read_files_as_dict(tmp_path, ["real.py", "link.py"], symlinked=symlinked)
+
+    assert result["link.py"].startswith("# symlink ->")  # marker still emitted
+    assert symlinked == ["link.py"]  # and reported via the out-param
+    assert "real.py" not in symlinked  # a regular file is not reported
+
+
 def test_read_files_as_dict_skips_binary(tmp_path: Path) -> None:
     """Binary content (NUL byte) is omitted rather than decoded into gibberish."""
     (tmp_path / "a.py").write_text("A", encoding="utf-8")
@@ -2233,6 +2250,20 @@ def test_is_secret_template_path_only_env_family() -> None:
     # Anchored on '.env.' — a non-env name that merely starts with '.env' is not
     # matched (consistent with is_sensitive_path).
     assert is_secret_template_path(".environment.sample") is False
+
+
+def test_token_is_strong_secret() -> None:
+    """The shared per-token predicate matches secret stems, bare and dotted
+    basenames, and key/cert suffixes, but not innocuous template tokens."""
+    from software_engineering_team.shared.repo_utils import _token_is_strong_secret
+
+    assert _token_is_strong_secret("secrets") is True  # stem
+    assert _token_is_strong_secret("id_rsa") is True  # bare _SENSITIVE_NAMES entry
+    assert _token_is_strong_secret("npmrc") is True  # dotted entry (.npmrc) via .<tok>
+    assert _token_is_strong_secret("pem") is True  # key/cert suffix (.pem) via .<tok>
+    assert _token_is_strong_secret("env") is False  # the .env anchor token is innocuous
+    assert _token_is_strong_secret("example") is False
+    assert _token_is_strong_secret("config") is False
 
 
 def test_blocking_secret_template_overlap() -> None:

@@ -165,6 +165,27 @@ def is_sensitive_path(path: str) -> bool:
 _TEMPLATE_SUFFIXES: tuple[str, ...] = (".example", ".sample", ".template", ".dist", ".tmpl")
 
 
+def _token_is_strong_secret(tok: str) -> bool:
+    """True when a single dot-delimited filename token is itself a strong secret signal.
+
+    The per-token counterpart of :func:`is_sensitive_path`'s whole-name checks,
+    used to scan *inside* a multi-token name (``.env.id_rsa.example``). A token is
+    strong when it is a secret stem (``secrets``), or a known secret basename held
+    in :data:`_SENSITIVE_NAMES` either bare (``id_rsa``) or dotted (``.npmrc`` →
+    token ``npmrc``), or a key/cert suffix (``.pem`` → token ``pem``).
+
+    Preconditions:
+        - none. *tok* is a single token (no ``.``); a multi-token string never
+          matches the dotted forms.
+    """
+    return (
+        tok in _SENSITIVE_STEMS
+        or tok in _SENSITIVE_NAMES
+        or f".{tok}" in _SENSITIVE_NAMES
+        or f".{tok}" in _SENSITIVE_SUFFIXES
+    )
+
+
 def is_secret_template_path(path: str) -> bool:
     """True for a placeholder ``.env`` template (``.env.example``/``.env.sample`` ...).
 
@@ -200,15 +221,8 @@ def is_secret_template_path(path: str) -> bool:
     # Inspect every dot-delimited token of the filename (not just the final
     # suffix/stem) so an embedded key/cert suffix (``.env.pem.sample``), secret
     # stem (``.env.credentials.template``), or known secret basename
-    # (``.env.id_rsa.example``, ``.env.npmrc.sample``) is caught. _SENSITIVE_NAMES
-    # holds both bare (``id_rsa``) and dotted (``.npmrc``) basenames, so each token
-    # is matched against the name itself and against ``.<token>``.
-    tokens = name.split(".")
-    if any(tok in _SENSITIVE_STEMS or tok in _SENSITIVE_NAMES for tok in tokens):
-        return False
-    return not any(
-        f".{tok}" in _SENSITIVE_SUFFIXES or f".{tok}" in _SENSITIVE_NAMES for tok in tokens
-    )
+    # (``.env.id_rsa.example``, ``.env.npmrc.sample``) is caught.
+    return not any(_token_is_strong_secret(tok) for tok in name.split("."))
 
 
 def strip_surrogates(text: str) -> str:
@@ -278,6 +292,7 @@ def read_files_as_dict(
     *,
     omitted: Optional[List[str]] = None,
     key_to_path: Optional[Dict[str, str]] = None,
+    symlinked: Optional[List[str]] = None,
 ) -> Dict[str, str]:
     """Read *paths* under *repo_path* into a ``{path: content}`` mapping.
 
@@ -301,6 +316,13 @@ def read_files_as_dict(
         change set with a task-owned file that was never examined. The
         ``extensions`` filter is a deliberate caller scoping choice, so
         extension-filtered paths are *not* reported as omissions.
+    symlinked:
+        Optional list the function appends to. Every requested path detected as a
+        symlink on disk (the same paths represented by the ``# symlink -> ...``
+        marker) is appended (its original repo-relative string), making this the
+        single place symlinks are detected. A caller that must route symlinks to
+        manual review (their pointed-to content is never examined) can reuse this
+        instead of re-statting every path itself.
 
     Preconditions:
         - *repo_path* is an existing directory (the task's working tree). On
@@ -322,7 +344,8 @@ def read_files_as_dict(
         - A symlink is represented by its link target text (``# symlink -> ...``)
           and never dereferenced, so the target's unrelated content is not
           mislabeled under the link path and a link pointing outside the repo
-          cannot leak content.
+          cannot leak content. When *symlinked* is provided, the link's original
+          path is also appended to it, so a caller need not re-stat to find them.
         - A text file is read in full and passed untruncated (the review
           coordinator segments oversized inputs itself); only a binary *sniff*
           prefix is bounded, so a huge binary artifact is detected and skipped
@@ -368,6 +391,8 @@ def read_files_as_dict(
                 result[key] = f"# symlink -> {sanitize_path_for_text(os.readlink(full_path))}\n"
                 if key_to_path is not None:
                     key_to_path[key] = rel_path
+                if symlinked is not None:
+                    symlinked.append(rel_path)
                 continue
             # Non-symlink: resolve (following any intra-repo parent links) and
             # re-check containment before reading.
