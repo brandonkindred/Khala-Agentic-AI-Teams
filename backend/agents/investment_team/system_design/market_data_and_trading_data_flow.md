@@ -414,6 +414,73 @@ flowchart LR
   phase". Live bars are **not** cached; the warm-up window is fingerprinted and
   snapshotted at cut-over.
 
+#### Resampler internals — tick → candle (`resampler.py`)
+
+The resampler turns a provider's *native* feed into clean `BarEvent`s at the
+strategy's timeframe. Native events are a small union — `NativeTick` (`:39`;
+carries `ts` / `price` / `size`) and `NativeBar` (`:48`; carries OHLCV) — fed in
+one at a time through `feed_native(event) -> Iterator[BarEvent]` (`:174`).
+Per symbol it keeps one `_partial` bar under construction (`:157`) and a
+`_watermark` = the highest bar-end epoch already emitted (`:161`);
+`ResamplerStats` (`:131`) counts `bars_emitted` and `out_of_order_dropped`.
+
+**Interval alignment.** Every timestamp is snapped to a clock-aligned bucket:
+`bar_start = (ts // target_seconds) · target_seconds` (`_interval_for`
+`:328-337`), so a 5m bar always closes on `:00 / :05 / :10 / …`.
+`target_seconds` comes from `_TIMEFRAME_SECONDS` / `timeframe_to_seconds()`
+(`:69`, `:84`).
+
+**Tick → candle** (`_feed_tick` `:197-231`) aggregates ticks into the enclosing
+interval:
+
+| Field | Rule |
+|---|---|
+| `open` | price of the **first** tick in `[bar_start, bar_end)` |
+| `high` / `low` | running `max` / `min` of tick prices in the interval |
+| `close` | price of the **last** tick in the interval |
+| `volume` | `Σ size` of the ticks in the interval |
+
+**Native bar → candle** (`_feed_native_bar` `:237-322`) only ever **upscales**:
+it asserts the native timeframe is `<=` the target **and evenly divides** it
+(raises otherwise, `:246-256`) — `1m → 5m → 1d` is allowed, the reverse is not
+(downscaling would require intrabar data the engine refuses to fabricate). If
+native `==` target it is a direct passthrough (`:272-295`); otherwise the native
+bar is folded into the target partial and finalized when it lands on a target
+boundary (`:298-322`).
+
+**Finalization & the no-look-ahead guarantee** (`_finalize` `:339-362`). A bar
+is emitted **only after a later native event proves its interval has closed** —
+the resampler never emits a partial/in-progress candle, so neither the engine
+nor the strategy can ever see an unfinished bar. On emit it advances the
+`_watermark` (`:353`), clears the partial, and bumps stats. Two corollaries:
+
+- **Out-of-order is dropped, not merged.** A native event whose interval already
+  closed (`bar_end <= watermark`) is discarded and counted (`:202-205`) — a late
+  print can never rewrite an emitted bar.
+- **Gaps stay gaps.** An interval with no ticks yields **no bar** (not a
+  zero-volume placeholder), so a halt / illiquid window surfaces as a missing
+  bar rather than a fake one. And `flush_on_end()` (`:183-191`) emits nothing — a
+  still-open partial at end-of-stream is discarded, preserving "only finalized
+  bars leave."
+
+```mermaid
+flowchart TD
+  EV[native tick / bar] --> AL[snap to interval<br/>bar_start = ts // tf × tf]
+  AL --> OOO{bar_end &lt;= watermark?}
+  OOO -- yes --> DROP[drop · out_of_order_dropped++]
+  OOO -- no --> NEW{new interval vs<br/>current partial?}
+  NEW -- yes --> FIN[finalize previous partial<br/>emit BarEvent · advance watermark]
+  FIN --> OPEN[open new partial]
+  NEW -- no --> EXT[extend partial<br/>high=max · low=min · close=last · volume+=size]
+```
+
+> **Worked tick example** — target `1m`; ticks `10:00:05 @100 size 3`,
+> `10:00:40 @101 size 1`, `10:00:55 @99 size 2`, then `10:01:10 @100`. The first
+> three share the `10:00` bucket; the `10:01:10` tick opens a new bucket and so
+> **finalizes** the `10:00` bar as `open=100, high=101, low=99, close=99,
+> volume=6`, advancing the watermark past `10:01:00`. The `10:00` bar is emitted
+> only at that point — never before its minute is provably complete.
+
 ### 5.3 The market-data cache
 
 `MarketDataCache` (`market_data_cache/store.py`) makes fetches durable and

@@ -173,6 +173,8 @@ The Investment Team API includes first-class backtesting endpoints so trading ag
 
 Stored `BacktestRecord` objects include strategy details, run configuration, and performance metrics (`total_return_pct`, `annualized_return_pct`, `volatility_pct`, `sharpe_ratio`, `max_drawdown_pct`, `win_rate_pct`, and `profit_factor`) so agents can compare what has been tried over time.
 
+For how a backtest actually gets its data — the provider chain, the content-addressed OHLCV cache, how bars are streamed into the engine one at a time, and the fill-price-from-bar logic shared with paper trading — see [`system_design/market_data_and_trading_data_flow.md`](./system_design/market_data_and_trading_data_flow.md).
+
 ## System design docs
 
 Engineer-facing architecture details live under [`system_design/`](./system_design/README.md):
