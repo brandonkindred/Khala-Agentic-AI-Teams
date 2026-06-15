@@ -167,6 +167,26 @@ bisection; a chunk then gets only the single same-input retry).
 
 ---
 
+## Coding Team Radon (CRAP / complexity gate)
+
+The coding team runs Radon CRAP/complexity analysis on **every backend build**
+(cyclomatic complexity via `radon cc` plus maintainability index via
+`radon mi`). It is a no-op for frontend tasks and degrades gracefully (never
+blocks) if the `radon` tool is missing or its output is unparseable. Both knobs
+parse defensively: unset/garbage falls back to the documented default.
+
+### RADON_MAX_CC
+Maximum allowed cyclomatic complexity for any single code block. A task whose
+worst block exceeds this is returned for revision. Default `15`; non-positive or
+garbage values fall back to `15`.
+
+### RADON_MIN_MI
+Opt-in maintainability-index floor. When `> 0`, a task with any file below this
+MI is returned for revision. Default `0.0` (MI is measured and reported but not
+blocking); negative/non-finite/garbage values fall back to `0.0`.
+
+---
+
 ## Shared Infrastructure and Storage
 
 ### SE_WORKSPACE_DIR

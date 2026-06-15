@@ -561,3 +561,69 @@ def test_run_code_review_uses_code_when_no_files(monkeypatch) -> None:
     )
     assert captured["files"] is None
     assert captured["code"] == "### a.py ###\nx = 1"
+
+
+# ---------------------------------------------------------------------------
+# run_radon
+# ---------------------------------------------------------------------------
+
+
+def test_run_radon_skips_non_backend(tmp_path) -> None:
+    from software_engineering_team import quality_gate_tools as q
+
+    result = q.run_radon(tmp_path, "frontend", "t1")
+    assert result.passed is True
+    assert result.violations == []
+
+
+def test_run_radon_skips_when_no_python_files(tmp_path) -> None:
+    from software_engineering_team import quality_gate_tools as q
+
+    result = q.run_radon(tmp_path, "backend", "t1")
+    assert result.passed is True
+
+
+def test_run_radon_passes_clean_report(monkeypatch, tmp_path) -> None:
+    from software_engineering_team import quality_gate_tools as q
+    from software_engineering_team.shared.command_runner import RadonReport
+
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "software_engineering_team.shared.command_runner.run_radon_analysis",
+        lambda path, *, max_cc, min_mi: RadonReport(passed=True, worst_cc=4),
+    )
+    result = q.run_radon(tmp_path, "backend", "t1", max_cc=15)
+    assert result.passed is True
+
+
+def test_run_radon_blocks_on_violation(monkeypatch, tmp_path) -> None:
+    from software_engineering_team import quality_gate_tools as q
+    from software_engineering_team.shared.command_runner import RadonReport
+
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+    violation = {"metric": "cc", "file": "mod.py", "name": "f", "complexity": 30}
+    monkeypatch.setattr(
+        "software_engineering_team.shared.command_runner.run_radon_analysis",
+        lambda path, *, max_cc, min_mi: RadonReport(
+            passed=False, worst_cc=30, violations=[violation], summary="too complex"
+        ),
+    )
+    result = q.run_radon(tmp_path, "backend", "t1", max_cc=15)
+    assert result.passed is False
+    assert result.summary == "too complex"
+    assert result.violations == [violation]
+
+
+def test_run_radon_exception_non_blocking(monkeypatch, tmp_path) -> None:
+    from software_engineering_team import quality_gate_tools as q
+
+    (tmp_path / "mod.py").write_text("x = 1\n", encoding="utf-8")
+
+    def boom(*a, **kw):
+        raise RuntimeError("radon exploded")
+
+    monkeypatch.setattr(
+        "software_engineering_team.shared.command_runner.run_radon_analysis", boom
+    )
+    result = q.run_radon(tmp_path, "backend", "t1")
+    assert result.passed is True

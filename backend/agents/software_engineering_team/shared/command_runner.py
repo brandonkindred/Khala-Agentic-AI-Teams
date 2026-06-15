@@ -8,6 +8,7 @@ output for feedback to coding agents.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ import shlex
 import signal
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
@@ -540,7 +541,9 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  
     return CommandResult(success=False, exit_code=-1, stdout="", stderr=msg)
 
 
-def _ensure_angular_common_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
+def _ensure_angular_common_in_package_json(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/common (provides @angular/common/http).
     Repairs projects where package.json was overwritten or is missing this dep.
@@ -561,7 +564,9 @@ def _ensure_angular_common_in_package_json(cwd: Path) -> None:  # pragma: no cov
         logger.warning("Could not repair package.json for @angular/common: %s", e)
 
 
-def _ensure_angular_material_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
+def _ensure_angular_material_in_package_json(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/material and @angular/cdk.
     Repairs projects where package.json was overwritten or is missing these deps.
@@ -588,7 +593,9 @@ def _ensure_angular_material_in_package_json(cwd: Path) -> None:  # pragma: no c
         logger.warning("Could not repair package.json for @angular/material: %s", e)
 
 
-def _ensure_tsconfig_module_resolution(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real tsconfig on disk
+def _ensure_tsconfig_module_resolution(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real tsconfig on disk
     """
     Ensure tsconfig.json uses moduleResolution 'bundler' for Angular 17+.
     Fixes 'Cannot find module @angular/common/http' when resolution was 'node'.
@@ -612,7 +619,9 @@ def _ensure_tsconfig_module_resolution(cwd: Path) -> None:  # pragma: no cover  
         logger.warning("Could not repair tsconfig.json: %s", e)
 
 
-def _ensure_material_theme_in_styles(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular styles on disk
+def _ensure_material_theme_in_styles(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular styles on disk
     """
     Ensure styles.scss (or styles.css) has a Material prebuilt theme import.
     Appends it at the top if missing. Required for Angular Material components.
@@ -636,7 +645,9 @@ def _ensure_material_theme_in_styles(cwd: Path) -> None:  # pragma: no cover  # 
         return
 
 
-def _ensure_provide_animations_in_config(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
+def _ensure_provide_animations_in_config(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts has provideAnimations in providers.
     Adds import and provider if missing. Required for Angular Material components.
@@ -684,7 +695,9 @@ _APP_CONFIG_TOKEN_IMPORTS: dict[str, str] = {
 }
 
 
-def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
+def _ensure_app_config_di_token_imports(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts imports any DI tokens it uses in providers.
     E.g. HTTP_INTERCEPTORS must be imported from @angular/common/http when
@@ -745,7 +758,9 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover 
         logger.warning("Could not repair app.config.ts for DI token imports: %s", e)
 
 
-def _normalize_double_at_angular(cwd: Path) -> None:  # pragma: no cover  # integration-only: scans real Angular tree
+def _normalize_double_at_angular(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: scans real Angular tree
     """
     Fix @@angular typo (double @) in frontend .ts and .html files.
     Replaces '@@angular with '@angular and \"@@angular with \"@angular.
@@ -778,7 +793,9 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
     src = cwd / "src"
     if not src.exists():
         return
-    for html_path in src.rglob("*.component.html"):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
+    for html_path in src.rglob(
+        "*.component.html"
+    ):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
         try:
             html_content = html_path.read_text(encoding="utf-8")
             if (
@@ -880,7 +897,11 @@ def run_frontend_serve_smoke_test(  # pragma: no cover  # integration-only: star
         return run_npm_start_smoke_test(cwd, port)
 
 
-def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> CommandResult:  # pragma: no cover  # integration-only: starts `npm start` subprocess with timeout/kill
+def run_npm_start_smoke_test(
+    project_path: str | Path, port: int = 3000
+) -> (
+    CommandResult
+):  # pragma: no cover  # integration-only: starts `npm start` subprocess with timeout/kill
     """
     Start `npm start` or `npm run dev` briefly to confirm the app starts.
     For React/Vue projects using Vite, CRA, or similar.
@@ -964,7 +985,11 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
         )
 
 
-def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:  # pragma: no cover  # integration-only: starts `ng serve` subprocess with timeout/kill
+def run_ng_serve_smoke_test(
+    project_path: str | Path, port: int = 4299
+) -> (
+    CommandResult
+):  # pragma: no cover  # integration-only: starts `ng serve` subprocess with timeout/kill
     """
     Start `ng serve` briefly to confirm the app compiles and starts.
     Runs for SERVE_TIMEOUT seconds, then kills the process.
@@ -1189,6 +1214,177 @@ def run_linter(project_path: str | Path, agent_type: str) -> CommandResult:  # p
     if angular_json.exists():
         return run_command_with_nvm(["npx", "ng", "lint"], cwd=cwd)
     return run_command_with_nvm(["npx", "eslint", "."], cwd=cwd)
+
+
+# ---------------------------------------------------------------------------
+# Radon — CRAP / complexity analysis (Python only)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RadonReport:
+    """Outcome of a Radon cyclomatic-complexity + maintainability analysis.
+
+    Invariants:
+        ``passed`` is False if and only if ``violations`` is non-empty.
+    """
+
+    passed: bool = True
+    worst_cc: int = 0
+    worst_mi: float = 100.0
+    violations: list[dict] = field(default_factory=list)
+    summary: str = ""
+
+
+def evaluate_radon_cc(cc_json: dict, max_cc: int) -> tuple[int, list[dict]]:
+    """Find cyclomatic-complexity blocks that exceed ``max_cc``.
+
+    Preconditions:
+        ``cc_json`` is the parsed output of ``radon cc -j`` — a mapping of
+        ``{file_path: [block, ...]}`` where each block has at least
+        ``complexity`` and ``name``. ``max_cc`` is a positive int.
+    Postconditions:
+        Returns ``(worst_cc, violations)`` where ``worst_cc`` is the highest
+        complexity observed (0 if none) and ``violations`` lists every block
+        whose ``complexity`` strictly exceeds ``max_cc``. Malformed entries are
+        skipped, never raised.
+    """
+    assert max_cc > 0, "max_cc must be positive"
+    worst = 0
+    violations: list[dict] = []
+    for file_path, blocks in (cc_json or {}).items():
+        if not isinstance(blocks, list):
+            continue
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            complexity = block.get("complexity")
+            if not isinstance(complexity, int):
+                continue
+            worst = max(worst, complexity)
+            if complexity > max_cc:
+                violations.append(
+                    {
+                        "metric": "cc",
+                        "file": file_path,
+                        "name": block.get("name", "?"),
+                        "lineno": block.get("lineno"),
+                        "complexity": complexity,
+                        "rank": block.get("rank", ""),
+                        "limit": max_cc,
+                    }
+                )
+    return worst, violations
+
+
+def evaluate_radon_mi(mi_json: dict, min_mi: float) -> tuple[float, list[dict]]:
+    """Find files whose maintainability index falls below ``min_mi``.
+
+    Preconditions:
+        ``mi_json`` is the parsed output of ``radon mi -j`` — a mapping of
+        ``{file_path: {"mi": float, "rank": str}}``. ``min_mi`` is the floor;
+        when ``min_mi <= 0`` the check is disabled.
+    Postconditions:
+        Returns ``(worst_mi, violations)`` where ``worst_mi`` is the lowest MI
+        observed (100.0 if none) and ``violations`` lists every file below the
+        floor. When the check is disabled, ``violations`` is always empty.
+        Malformed entries are skipped, never raised.
+    """
+    worst = 100.0
+    violations: list[dict] = []
+    for file_path, info in (mi_json or {}).items():
+        if not isinstance(info, dict):
+            continue
+        mi = info.get("mi")
+        if not isinstance(mi, (int, float)):
+            continue
+        worst = min(worst, float(mi))
+        if min_mi > 0 and mi < min_mi:
+            violations.append(
+                {
+                    "metric": "mi",
+                    "file": file_path,
+                    "mi": round(float(mi), 2),
+                    "rank": info.get("rank", ""),
+                    "limit": min_mi,
+                }
+            )
+    return worst, violations
+
+
+def _summarize_radon(violations: list[dict]) -> str:
+    """Render a short, human-readable description of Radon violations.
+
+    Postconditions: returns "" when there are no violations.
+    """
+    if not violations:
+        return ""
+    lines = []
+    for v in violations:
+        if v.get("metric") == "cc":
+            loc = f"{v['file']}:{v.get('lineno', '?')}"
+            lines.append(
+                f"- {loc} `{v['name']}` cyclomatic complexity "
+                f"{v['complexity']} (rank {v['rank']}) exceeds limit {v['limit']}"
+            )
+        else:
+            lines.append(
+                f"- {v['file']} maintainability index "
+                f"{v['mi']} (rank {v['rank']}) below floor {v['limit']}"
+            )
+    return "Radon CRAP/complexity gate failed:\n" + "\n".join(lines)
+
+
+def run_radon_analysis(  # pragma: no cover  # integration-only: shells out to `radon`
+    project_path: str | Path,
+    *,
+    max_cc: int = 15,
+    min_mi: float = 0.0,
+) -> RadonReport:
+    """Run ``radon cc`` and ``radon mi`` over a project and evaluate thresholds.
+
+    Preconditions:
+        ``project_path`` exists and contains the Python sources to analyze.
+        ``max_cc`` is a positive int; ``min_mi`` is the MI floor (<=0 disables).
+    Postconditions:
+        Returns a ``RadonReport``. ``passed`` is True when no block exceeds
+        ``max_cc`` and (when enabled) no file falls below ``min_mi``. A Radon
+        tooling failure (binary missing, crash) yields ``passed=True`` with an
+        explanatory ``summary`` so the gate degrades gracefully rather than
+        blocking on its own infrastructure.
+    """
+    cwd = Path(project_path).resolve()
+
+    cc_result = run_command(["radon", "cc", "-s", "-j", "."], cwd=cwd, timeout=BUILD_TIMEOUT)
+    if cc_result.timed_out or (cc_result.exit_code != 0 and not cc_result.stdout.strip()):
+        logger.warning("radon cc did not produce output (non-fatal): %s", cc_result.output[:200])
+        return RadonReport(passed=True, summary="Radon unavailable; skipped")
+    try:
+        cc_json = json.loads(cc_result.stdout or "{}")
+    except (ValueError, json.JSONDecodeError) as e:
+        logger.warning("radon cc output not parseable (non-fatal): %s", e)
+        return RadonReport(passed=True, summary="Radon output unparseable; skipped")
+
+    worst_cc, cc_violations = evaluate_radon_cc(cc_json, max_cc)
+
+    mi_violations: list[dict] = []
+    worst_mi = 100.0
+    mi_result = run_command(["radon", "mi", "-s", "-j", "."], cwd=cwd, timeout=BUILD_TIMEOUT)
+    if mi_result.stdout.strip():
+        try:
+            mi_json = json.loads(mi_result.stdout)
+            worst_mi, mi_violations = evaluate_radon_mi(mi_json, min_mi)
+        except (ValueError, json.JSONDecodeError) as e:
+            logger.warning("radon mi output not parseable (non-fatal): %s", e)
+
+    violations = cc_violations + mi_violations
+    return RadonReport(
+        passed=not violations,
+        worst_cc=worst_cc,
+        worst_mi=worst_mi,
+        violations=violations,
+        summary=_summarize_radon(violations),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1747,7 +1943,9 @@ def ensure_frontend_project_initialized(  # pragma: no cover  # integration-only
         return _scaffold_react_project(cwd)
 
 
-def _scaffold_angular_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `ng new` scaffolding
+def _scaffold_angular_project(
+    cwd: Path,
+) -> CommandResult:  # pragma: no cover  # integration-only: runs real `ng new` scaffolding
     """Write Angular-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "angular.json", _MINIMAL_ANGULAR_JSON)
@@ -1830,7 +2028,9 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     )
 
 
-def _scaffold_react_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `npm create vite` scaffolding
+def _scaffold_react_project(
+    cwd: Path,
+) -> CommandResult:  # pragma: no cover  # integration-only: runs real `npm create vite` scaffolding
     """Write React-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "vite.config.ts", _MINIMAL_REACT_VITE_CONFIG)

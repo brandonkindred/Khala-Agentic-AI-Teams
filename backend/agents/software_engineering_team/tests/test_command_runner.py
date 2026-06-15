@@ -554,3 +554,106 @@ def test_ensure_frontend_project_initialized_produces_material_theme_fonts_provi
     app_config = tmp_path / "src" / "app" / "app.config.ts"
     assert app_config.exists()
     assert "provideAnimations" in app_config.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Radon CRAP/complexity evaluators
+# ---------------------------------------------------------------------------
+
+from software_engineering_team.shared.command_runner import (  # noqa: E402
+    RadonReport,
+    _summarize_radon,
+    evaluate_radon_cc,
+    evaluate_radon_mi,
+)
+
+
+def test_evaluate_radon_cc_under_threshold_passes() -> None:
+    cc_json = {"a.py": [{"name": "f", "lineno": 1, "complexity": 5, "rank": "A"}]}
+    worst, violations = evaluate_radon_cc(cc_json, max_cc=15)
+    assert worst == 5
+    assert violations == []
+
+
+def test_evaluate_radon_cc_over_threshold_reports_violation() -> None:
+    cc_json = {
+        "a.py": [
+            {"name": "ok", "lineno": 1, "complexity": 3, "rank": "A"},
+            {"name": "hot", "lineno": 9, "complexity": 22, "rank": "D"},
+        ]
+    }
+    worst, violations = evaluate_radon_cc(cc_json, max_cc=15)
+    assert worst == 22
+    assert len(violations) == 1
+    assert violations[0]["name"] == "hot"
+    assert violations[0]["complexity"] == 22
+    assert violations[0]["limit"] == 15
+
+
+def test_evaluate_radon_cc_handles_empty_and_malformed() -> None:
+    assert evaluate_radon_cc({}, max_cc=15) == (0, [])
+    # Non-list blocks, non-dict block, missing/str complexity are all skipped.
+    cc_json = {
+        "bad.py": "oops",
+        "b.py": ["nope", {"name": "x"}, {"name": "y", "complexity": "high"}],
+    }
+    worst, violations = evaluate_radon_cc(cc_json, max_cc=15)
+    assert worst == 0
+    assert violations == []
+
+
+def test_evaluate_radon_mi_disabled_when_floor_not_positive() -> None:
+    mi_json = {"a.py": {"mi": 5.0, "rank": "C"}}
+    worst, violations = evaluate_radon_mi(mi_json, min_mi=0.0)
+    assert worst == 5.0
+    assert violations == []
+
+
+def test_evaluate_radon_mi_below_floor_reports_violation() -> None:
+    mi_json = {
+        "good.py": {"mi": 80.0, "rank": "A"},
+        "bad.py": {"mi": 12.5, "rank": "C"},
+    }
+    worst, violations = evaluate_radon_mi(mi_json, min_mi=20.0)
+    assert worst == 12.5
+    assert len(violations) == 1
+    assert violations[0]["file"] == "bad.py"
+    assert violations[0]["mi"] == 12.5
+
+
+def test_evaluate_radon_mi_handles_malformed() -> None:
+    mi_json = {"a.py": "nope", "b.py": {"rank": "C"}, "c.py": {"mi": "low"}}
+    worst, violations = evaluate_radon_mi(mi_json, min_mi=20.0)
+    assert worst == 100.0
+    assert violations == []
+
+
+def test_summarize_radon_empty_is_blank() -> None:
+    assert _summarize_radon([]) == ""
+
+
+def test_summarize_radon_renders_cc_and_mi() -> None:
+    text = _summarize_radon(
+        [
+            {
+                "metric": "cc",
+                "file": "a.py",
+                "name": "hot",
+                "lineno": 9,
+                "complexity": 22,
+                "rank": "D",
+                "limit": 15,
+            },
+            {"metric": "mi", "file": "b.py", "mi": 12.5, "rank": "C", "limit": 20.0},
+        ]
+    )
+    assert "a.py:9" in text
+    assert "cyclomatic complexity 22" in text
+    assert "maintainability index 12.5" in text
+
+
+def test_radon_report_defaults() -> None:
+    report = RadonReport()
+    assert report.passed is True
+    assert report.worst_cc == 0
+    assert report.violations == []

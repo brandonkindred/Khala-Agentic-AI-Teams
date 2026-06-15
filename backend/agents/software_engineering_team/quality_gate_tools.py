@@ -59,6 +59,14 @@ class LintResult:
 
 
 @dataclass
+class RadonResult:
+    passed: bool = True
+    error: str = ""
+    violations: List[Dict[str, Any]] = field(default_factory=list)
+    summary: str = ""
+
+
+@dataclass
 class DbcResult:
     compliant: bool = True
     comments_added: int = 0
@@ -172,6 +180,46 @@ def run_build_verification(
         return BuildResult(success=False, error=str(e))
 
 
+def run_radon(
+    repo_path: Path,
+    agent_type: str,
+    task_id: str,
+    *,
+    max_cc: int = 15,
+    min_mi: float = 0.0,
+) -> RadonResult:
+    """Run Radon CRAP/complexity analysis (cyclomatic complexity + MI).
+
+    Radon is Python-only, so non-backend repos (or repos with no ``.py`` files)
+    are a no-op and pass. A Radon tooling error never blocks the gate.
+
+    Preconditions:
+        ``max_cc`` is a positive int; ``min_mi`` is the MI floor (<=0 disables).
+    Postconditions:
+        Returns a ``RadonResult`` whose ``passed`` is False only when at least
+        one block exceeds ``max_cc`` or (when enabled) a file falls below
+        ``min_mi``. Tooling/IO failures yield ``passed=True``.
+    """
+    try:
+        from software_engineering_team.shared.command_runner import run_radon_analysis
+
+        if agent_type != "backend":
+            return RadonResult(passed=True)
+        backend_dir = repo_path if any(repo_path.rglob("*.py")) else (repo_path / "backend")
+        if not backend_dir.exists() or not any(backend_dir.rglob("*.py")):
+            return RadonResult(passed=True)
+        report = run_radon_analysis(backend_dir, max_cc=max_cc, min_mi=min_mi)
+        return RadonResult(
+            passed=report.passed,
+            error=report.summary,
+            violations=report.violations,
+            summary=report.summary,
+        )
+    except Exception as e:
+        logger.warning("[%s] Radon analysis failed (non-blocking): %s", task_id, e)
+        return RadonResult(passed=True)
+
+
 def run_linting(
     repo_path: Path,
     task_id: str,
@@ -270,10 +318,17 @@ def run_qa_check(
 
         llm = llm_getter("qa")
         agent = QAExpertAgent(llm)
-        result = agent.run(code=code, task_description=task_description, language=language, architecture=architecture)
+        result = agent.run(
+            code=code,
+            task_description=task_description,
+            language=language,
+            architecture=architecture,
+        )
         bugs = []
         if hasattr(result, "bugs"):
-            bugs = [b.model_dump() if hasattr(b, "model_dump") else vars(b) for b in (result.bugs or [])]
+            bugs = [
+                b.model_dump() if hasattr(b, "model_dump") else vars(b) for b in (result.bugs or [])
+            ]
         passed = not bugs
         return QAResult(passed=passed, bugs=bugs)
     except Exception as e:
@@ -295,7 +350,12 @@ def run_security_scan(
 
         llm = llm_getter("security")
         agent = CybersecurityExpertAgent(llm)
-        result = agent.run(code=code, task_description=task_description, language=language, architecture=architecture)
+        result = agent.run(
+            code=code,
+            task_description=task_description,
+            language=language,
+            architecture=architecture,
+        )
         vulns = []
         if hasattr(result, "vulnerabilities"):
             vulns = [

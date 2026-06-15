@@ -105,6 +105,52 @@ def _thinking_flush_interval_s() -> float:
     return value
 
 
+# Radon CRAP/complexity gate thresholds. Radon runs on every backend build; a task
+# whose cyclomatic complexity exceeds RADON_MAX_CC is returned for revision.
+# RADON_MIN_MI is an opt-in maintainability-index floor (disabled at <= 0).
+_ENV_RADON_MAX_CC = "RADON_MAX_CC"
+_DEFAULT_RADON_MAX_CC = 15
+_ENV_RADON_MIN_MI = "RADON_MIN_MI"
+_DEFAULT_RADON_MIN_MI = 0.0
+
+
+def _radon_max_cc() -> int:
+    """Resolve the max cyclomatic-complexity threshold from env, defensively.
+
+    Preconditions: none.
+    Postconditions: returns a positive int; missing/garbage/non-positive yields
+        ``_DEFAULT_RADON_MAX_CC``. Never raises.
+    """
+    raw = os.environ.get(_ENV_RADON_MAX_CC)
+    if not raw:
+        return _DEFAULT_RADON_MAX_CC
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_RADON_MAX_CC
+    return value if value > 0 else _DEFAULT_RADON_MAX_CC
+
+
+def _radon_min_mi() -> float:
+    """Resolve the maintainability-index floor from env, defensively.
+
+    Preconditions: none.
+    Postconditions: returns a finite float >= 0 (0 disables the MI check);
+        missing/garbage/non-finite/negative yields ``_DEFAULT_RADON_MIN_MI``.
+        Never raises.
+    """
+    raw = os.environ.get(_ENV_RADON_MIN_MI)
+    if not raw:
+        return _DEFAULT_RADON_MIN_MI
+    try:
+        value = float(raw)
+    except ValueError:
+        return _DEFAULT_RADON_MIN_MI
+    if not math.isfinite(value) or value < 0:
+        return _DEFAULT_RADON_MIN_MI
+    return value
+
+
 class _ThinkingBuffer:
     """Thread-safe, capped accumulator for streamed reasoning ("thinking") tokens.
 
@@ -1014,6 +1060,7 @@ class CodingTeamSwarm:
                 run_build_verification,
                 run_code_review,
                 run_linting,
+                run_radon,
             )
 
             agent_type = swe.stack_spec.name or "backend"
@@ -1026,6 +1073,26 @@ class CodingTeamSwarm:
                     "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error
                 )
                 return self._return_for_revision(task, [{"type": "build", "error": build.error}])
+
+            # Radon CRAP/complexity gate — runs on every build (Python only).
+            update_fn(status_text=f"Radon CRAP analysis: {task.title}")
+            radon = run_radon(
+                self.path,
+                agent_type,
+                task.id,
+                max_cc=_radon_max_cc(),
+                min_mi=_radon_min_mi(),
+            )
+            if not radon.passed:
+                logger.warning(
+                    "[%s] Radon gate failed for task %s: %s",
+                    swe.agent_id,
+                    task.id,
+                    radon.summary,
+                )
+                return self._return_for_revision(
+                    task, [{"type": "complexity", "error": radon.summary}]
+                )
 
             # Linting
             update_fn(status_text=f"Linting: {task.title}")

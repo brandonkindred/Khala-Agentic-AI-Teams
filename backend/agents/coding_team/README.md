@@ -80,6 +80,21 @@ flowchart LR
   loop --> done
 ```
 
+### Per-task quality gates
+
+After a Senior SWE implements a task, `_run_quality_gates` runs in order:
+**build verification → Radon CRAP/complexity → linting → code review**. Any
+gate that fails returns the task for revision (bounded by `MAX_TASK_REVISIONS`).
+
+The **Radon CRAP/complexity gate** runs on every backend build. It runs
+`radon cc` (cyclomatic complexity — the CRAP-relevant metric) plus `radon mi`
+(maintainability index); a task whose worst block exceeds `RADON_MAX_CC`
+(default `15`) is returned for revision. An optional maintainability floor is
+available via `RADON_MIN_MI` (default `0` = report-only). The gate is a no-op
+for frontend tasks and degrades gracefully (never blocks) if `radon` is missing
+or its output is unparseable. See [`docs/ENV_VARS.md`](../../../docs/ENV_VARS.md)
+for the knobs.
+
 ## Structure
 
 | Component | Role |
