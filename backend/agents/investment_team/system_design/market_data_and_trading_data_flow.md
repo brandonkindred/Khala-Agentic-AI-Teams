@@ -257,13 +257,65 @@ flowchart TD
   P4 -- no --> P5[last resort:<br/>any free provider that supports it]
 ```
 
-- Direction support is gated by `_has_direction` (`registry.py:315`): historical
-  needs non-empty `historical_timeframes`; live needs non-empty `live_timeframes`.
-- `resolve_live` (`registry.py:171`) returns a `LiveResolution` with an optional
-  `fallback` (the `secondary_for` registration — only **coinbase** for crypto),
-  used **only** when unpinned and only if the primary raises
-  `ProviderRegionBlocked` **before the first bar** ("one adapter per session").
-- `describe_all()` (`registry.py:125`) backs `GET /api/investment/providers`.
+**The five precedence levels** (`_pick`, `registry.py:210-278`), highest first:
+
+| # | Level | Condition | Code |
+|---|---|---|---|
+| 1 | **Explicit pin** | the request carries `provider_id` (e.g. `RunPaperTradeRequest.provider_id`) → used unconditionally, *even if it is an unimplemented stub* (so opting into a stub is visible, never silently swapped) | `_resolve_pinned` `:280` |
+| 2 | **Env override** | `INVESTMENT_LIVE_PROVIDER_{CRYPTO,EQUITIES,FX}` (live) / `INVESTMENT_HISTORICAL_PROVIDER_{…}` (historical) names a registered provider; a misconfigured value logs a warning and falls through | `:222-239`, name built by `_env_var_name` `:298` |
+| 3 | **Paid + key** | a provider that is `is_paid` **and** `implemented` **and** `supports` the class **and** has the direction **and** has `os.environ[api_key_env]` set | `:248-264` |
+| 4 | **Free default** | the registration whose `default_for` includes the asset class | `:267-269` |
+| 5 | **Last resort** | any free provider that supports the class + direction | `:272-276` |
+
+- **Direction gating** — `_has_direction` (`:315`): *historical* requires a
+  non-empty `historical_timeframes`; *live* requires a non-empty
+  `live_timeframes`. A provider that can't serve the requested direction is
+  skipped at every level.
+- **Asset-class normalisation** — `canonical_asset_class` / `_ASSET_CLASS_ALIASES`
+  (`:37-59`) maps caller labels to the canonical `{crypto, equities, fx}`
+  vocabulary *before* selection: `stock/stocks/equity/equities → equities`,
+  `forex/fx → fx`, `crypto/cryptocurrency/… → crypto`; unknown values pass
+  through unchanged.
+- Because **paid providers register first** (`__init__.py:24-77`) and are gated on
+  `implemented`, today — with Polygon/Databento/Twelve Data at
+  `implemented=False` — level 3 is dormant and selection falls to the free
+  defaults: `binance.build` (`default_for=["crypto"]`), `coinbase.build`
+  (`secondary_for=["crypto"]`), `alpaca.build` (`default_for=["equities"]`,
+  `api_key_env="ALPACA_API_KEY_ID"`), `oanda.build` (`default_for=["fx"]`,
+  `api_key_env="OANDA_API_TOKEN"`).
+- `describe_all()` (`:125`) serialises the whole registry (name, supports,
+  is_paid, has_key, implemented, is_default_for, timeframes) for
+  `GET /api/investment/providers`.
+
+### Geo-failover (crypto live, open-time only)
+
+`resolve_live` (`:171-206`) returns a `LiveResolution` (`:321`) carrying a
+`primary` plus an optional `fallback` — the registration whose `secondary_for`
+includes the class (**only coinbase**, for crypto). The fallback is used **only**
+when the request is unpinned and **only** if the primary raises
+`ProviderRegionBlocked` *before the first bar is accepted*. After the first live
+bar there is no failover — a disconnect terminates the session
+("one adapter per session").
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant PT as run_paper_trade
+    participant Reg as registry.resolve_live
+    participant Bin as Binance (primary)
+    participant CB as Coinbase (fallback)
+    PT->>Reg: resolve_live(crypto, explicit=None)
+    Reg-->>PT: LiveResolution(primary=binance, fallback=coinbase)
+    PT->>Bin: open live stream
+    alt region block at open (HTTP 451, before first bar)
+        Bin-->>PT: ProviderRegionBlocked
+        PT->>CB: re-open on fallback (provider_id="coinbase")
+        CB-->>PT: live bars
+    else connected
+        Bin-->>PT: live bars (provider_id="binance")
+    end
+    Note over PT,CB: no mid-session failover once the first bar is accepted
+```
 
 ---
 
@@ -380,10 +432,17 @@ backtests reproducible:
   `date|open|high|low|close|volume` (`_hash_bars` `store.py:192`);
   `compute_dataset_fingerprint` (`:221`) is the symbol-order-independent
   multi-symbol hash stored on `BacktestResult.dataset_fingerprint`.
-- **Entry points:** `get_or_fetch` (`:612`) and `get_or_fetch_multi` (`:668`,
-  `ThreadPoolExecutor`, `MARKET_DATA_FETCH_WORKERS`). On a hit it reads parquet,
-  reconciles the hash, trims to `[start, end]`; on a miss it calls the fetch
-  function once and writes a snapshot.
+- **Retrieval (hit/miss):** `get_or_fetch` (`:612`) and the parallel
+  `get_or_fetch_multi` (`:668`, `ThreadPoolExecutor` sized by
+  `MARKET_DATA_FETCH_WORKERS`). It first asks `_find_covering_snapshot` (`:445`)
+  for a snapshot whose `[start, end]` brackets the request and whose
+  `fetch_ts <= as_of` (Postgres `SELECT … ORDER BY fetch_ts DESC LIMIT 1`, with
+  the in-memory index as fallback). **Hit** → read the parquet, reconcile the
+  SHA-256, trim to `[start, end]`, return. **Miss** → call `fetch_fn`
+  (= `MarketDataService._fetch_with_providers`, i.e. the vendor chain) exactly
+  once, skip if empty, canonicalise volumes, then write the immutable snapshot +
+  index row. `as_of` makes this a point-in-time fetch (no future-dated snapshot
+  can satisfy an older `as_of`).
 - **Determinism detail:** non-finite volume is canonicalised to `0.0` at *every*
   boundary (fetch, replay, parquet write/read, fingerprint, streaming tee) so a
   first run and its cached replay are byte-identical.
@@ -399,6 +458,54 @@ backtests reproducible:
 - `execution/bar_safety.py` — `BarSafetyAssertion.check_fill(...)` (`:107`) is
   the parent-side belt-and-suspenders guard: it raises `LookAheadError` if a
   fill timestamp is `<=` the order's submission timestamp.
+
+### 5.5 End-to-end: how a source is retrieved and streamed into the engine
+
+Putting retrieval, streaming, and the engine pull together — this is the spine
+of the whole document:
+
+1. **Resolve symbols** — `MarketDataService.resolve_strategy_symbols(spec)`
+   (`market_data_service.py:354`): explicit `spec.target_symbols`, else the
+   asset-class default universe (capped by `STRATEGY_LAB_MAX_UNIVERSE_SYMBOLS`).
+2. **Retrieve OHLCV** — `fetch_multi_symbol_range(...)` →
+   `cache.get_or_fetch_multi`. Per symbol: a cache hit replays parquet; a miss
+   runs the **vendor fallback chain** (`_get_named_provider_chain`, §2.2) where
+   the first non-empty result wins, then the bars are normalised/repaired and
+   snapshotted (§5.3).
+3. **Wrap as a stream** — the mode layer builds a `MarketDataStream`:
+   `HistoricalReplayStream` from the pre-fetched dict (backtest, daily),
+   `CachingProviderHistoricalStream` from a provider (sub-daily backtest), or
+   `LiveStream` + `Resampler` from a live adapter (paper). All three emit the
+   same `BarEvent … EndOfStreamEvent` sequence.
+4. **Pull into the engine** — `TradingService.run` drives a `while True` loop
+   (`service.py:1390`) that calls `event = next(event_iter, None)` (`:1395`)
+   **once per iteration, one bar at a time**, breaking on
+   `None`/`EndOfStreamEvent` (`:1396`). The engine never holds the whole series —
+   it only ever sees the current bar (plus a parent-side `next_bar` peek used by
+   fills, never by the strategy).
+5. **Per bar** → submit prior-bar orders, simulate fills (§6), mark-to-market,
+   deliver the bar to the strategy subprocess (§6.3).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Svc as TradingService.run
+    participant It as stream iterator
+    participant Src as cache / provider / live feed
+    loop until EndOfStreamEvent
+        Svc->>It: next(event_iter)
+        It->>Src: pull next bar (parquet replay / REST page / live tick then resample)
+        Src-->>It: BarEvent (or EndOfStreamEvent)
+        It-->>Svc: event
+        Svc->>Svc: submit prev-bar orders, fill, mark-to-market, send_bar
+    end
+```
+
+The key property: **retrieval is eager for backtests** (the whole dataset is
+fetched and cached up front, then replayed from memory) but **lazy for live
+paper trading** (each bar is pulled from the websocket/REST feed as it arrives
+and resampled on the fly) — yet the engine loop is identical, because both sides
+honour the same `StreamEvent` iterator contract.
 
 ---
 
@@ -424,20 +531,79 @@ Per `BarEvent` (non-warm-up), the loop:
 
 ### 6.2 Fill-price-from-bar (`engine/execution_model.py` + `fill_simulator.py`)
 
-The default `RealisticExecutionModel.compute_fill_terms(req, bar, next_bar)`
-(`execution_model.py:180`) derives the reference price from the **incoming bar**:
+The default execution model is `RealisticExecutionModel`
+(`build_execution_model(name="realistic", participation_cap=0.10)`,
+`execution_model.py:350`). Each bar, for every working order,
+`compute_fill_terms(req, bar, next_bar)` (`:180`) returns a
+`FillTerms(reference_price, qty_fraction, extra_slip_bps)` (`:222`) in four steps,
+which the fill simulator then turns into money.
 
-```python
-if req.order_type == OrderType.MARKET:  ref = bar.open                       # :187
-elif req.order_type == OrderType.LIMIT: ref = self._limit_reference_price(...)  # == limit price when bar covers it
-elif req.order_type == OrderType.STOP:  ref = self._stop_reference_price(...)   # gap-through honored
+```mermaid
+flowchart LR
+  REQ[working order<br/>+ cur_bar + next_bar] --> S1[1 · reference price<br/>MARKET→open · LIMIT→limit · STOP→gap]
+  S1 --> S2[2 · participation cap<br/>qty_fraction]
+  S2 --> S3[3 · LIMIT adverse-selection<br/>extra_slip_bps]
+  S3 --> S4[4 · slippage<br/>fill_price = ref × 1±s]
+  S4 --> MONEY[filled_qty → risk gate → capital check<br/>portfolio.open / partial_close + tx costs]
 ```
 
-then applies a participation cap (`order_notional / (volume·close)`), a LIMIT
-adverse-selection haircut (uses `next_bar.close`), and finally slippage in
-`fill_simulator.py:567`: `fill_price = round(ref · (1 ± slippage_bps/1e4), dp)`.
-Transaction costs (`transaction_cost_bps`) are charged on entry+exit notional
-when the trade closes. Defaults: `slippage_bps=2.0`, `transaction_cost_bps=5.0`.
+**Step 1 — reference price from the incoming bar** (`:186-195`). The price comes
+from the *current* bar; the close is never used as a decision-time fill price:
+
+| Order type | Fills on this bar when | Reference price | Code |
+|---|---|---|---|
+| **MARKET** | always | `bar.open` | `:187` |
+| **LIMIT** | long: `bar.low <= limit`; short: `bar.high >= limit` | `req.limit_price` exactly (the realistic model drops the legacy `min(bar.open, limit)` "free alpha") | `_limit_reference_price` `:232-245` |
+| **STOP** | long: `bar.high >= stop`; short: `bar.low <= stop` | long `max(bar.open, stop)`, short `min(bar.open, stop)` — gap-through honoured | `_stop_reference_price` `:247-260` |
+
+**Step 2 — participation cap** (`_raw_participation` `:266-285`,
+`_qty_fraction_from_participation` `:287-296`). A single bar can't absorb an
+unbounded order: `raw_participation = order_notional / (bar.volume · bar.close)`;
+`qty_fraction = 1.0` if within `participation_cap` (default 10%) else
+`participation_cap / raw_participation` (missing volume → 0). The unfilled
+remainder follows the run's `default_unfilled_policy` (backtest
+`REQUEUE_NEXT_BAR`, paper `DROP`).
+
+**Step 3 — LIMIT adverse-selection haircut** (`_adverse_selection_bps`
+`:308-342`; LIMIT only, requires `next_bar`). Models being picked off:
+`signed_move_pct = (next_bar.close − bar.close) / bar.close`, scaled by the
+participation rate and capped at `adverse_selection_max_bps` (default 50).
+Returned as `extra_slip_bps`.
+
+**Step 4 — slippage → actual fill price** (`fill_simulator.py`).
+`_slippage_multipliers(extra_slip_bps)` (`:451-466`) builds
+`s = (slippage_bps + extra_slip_bps) / 10_000` and four multipliers —
+`long_entry = 1+s`, `long_exit = 1−s`, `short_entry = 1−s`, `short_exit = 1+s`
+(you always pay the spread). Then:
+
+- `_fill_entry` (`:472`): `filled_qty = target_qty · qty_fraction` (`:507`), risk
+  gate `risk.can_enter(...)` (`:546`) + capital check (`:557`),
+  `fill_price = round(ref_price · slip_entry, dp)` (`:567-571`),
+  `portfolio.open(...)` (`:574`).
+- `_fill_exit` (`:913`): `fill_price = round(ref_price · slip_exit, dp)`
+  (`:936-940`), `filled_qty = min(target_qty, pos.qty) · qty_fraction` (`:954`),
+  `portfolio.partial_close(...)` (`:988`); on full close it builds the
+  `TradeRecord` with `tx_costs = (entry_notional + exit_notional) ·
+  transaction_cost_bps/10_000`, `net = gross − tx_costs` (`:1054-1062`), then
+  `portfolio.record_pnl(net)` (`:1065`).
+
+`FillSimulatorConfig` defaults: `slippage_bps=2.0`, `transaction_cost_bps=5.0`
+(`fill_simulator.py:44`).
+
+> **Worked example** — long MARKET buy of 10 shares, `bar.open=100`,
+> `slippage_bps=2`, within the participation cap, no adverse haircut:
+> `s = 2/10_000 = 0.0002` → entry `fill_price = 100 × 1.0002 = 100.02`. Exiting on
+> a bar that opens at 110 → `110 × 0.9998 = 109.978`. Transaction cost on the
+> round trip: `(1000.20 + 1099.78) × 5/10_000 ≈ 1.05`.
+
+> **Legacy `OptimisticExecutionModel`** (`:93`) keeps the old MARKET→`bar.open`,
+> LIMIT-buy→`min(bar.open, limit)` "free alpha" rule for golden parity tests
+> only; it warns unless `KHALA_ALLOW_OPTIMISTIC_FILLS=1`.
+
+The parent-side `BarSafetyAssertion.check_fill(...)` (`bar_safety.py:107`)
+backstops all of this — it raises `LookAheadError` if a fill timestamp is `<=`
+the order's submission timestamp, so an order can never fill on the bar that
+produced its signal.
 
 ### 6.3 Look-ahead boundary
 
