@@ -228,7 +228,7 @@ class StatusResponse(BaseModel):
         default=None,
         description=(
             "Set by the PR-review flow: total_issues, inline_comments, "
-            "comment_findings, comments_failed, event."
+            "comment_findings, comments_failed, files_reviewed, event."
         ),
     )
     pending_questions: List[PendingQuestion] = Field(

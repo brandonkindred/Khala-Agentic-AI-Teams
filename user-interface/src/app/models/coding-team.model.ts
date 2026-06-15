@@ -57,8 +57,10 @@ export interface CodingTeamJobListItem {
 export interface CodeReviewSummary {
   total_issues: number;
   inline_comments: number;
-  /** Findings posted as their own standalone PR conversation comments. */
-  comment_findings: number;
+  /** Findings posted as their own standalone PR conversation comments. Optional:
+   * review rows persisted before the rename carry `body_findings` instead, so
+   * read this through `commentFindings()` rather than directly. */
+  comment_findings?: number;
   /** Legacy name for `comment_findings`, kept so review rows persisted before the
    * rename still render a count. Prefer `comment_findings`. */
   body_findings?: number;

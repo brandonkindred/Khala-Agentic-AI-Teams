@@ -434,11 +434,11 @@ describe('CodeReviewPanelComponent', () => {
         inline_comments: 1,
         body_findings: 2,
         event: 'COMMENT',
-      } as never),
+      }),
     ).toBe(2);
     // Neither present → 0 rather than a blank count.
     expect(
-      component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' } as never),
+      component.commentFindings({ total_issues: 0, inline_comments: 0, event: 'COMMENT' }),
     ).toBe(0);
   });
 

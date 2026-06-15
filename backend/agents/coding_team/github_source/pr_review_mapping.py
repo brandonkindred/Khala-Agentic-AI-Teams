@@ -244,9 +244,9 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
     Postconditions:
         - Returns markdown combining the review summary and spec-compliance notes.
           Never empty — when both are blank it falls back to a line that reflects
-          ``issue_count``: a "N finding(s) posted as comment(s)" line when findings
-          exist (so an empty summary never claims "no blocking issues" while
-          change-requesting comments sit on the PR), otherwise a "no issues" line.
+          ``issue_count``: a "N finding(s) reported" line when findings exist (so an
+          empty summary never claims "no blocking issues" while change-requesting
+          comments sit on the PR), otherwise a "no issues" line.
     """
     parts: list[str] = []
     if summary and summary.strip():
@@ -257,7 +257,8 @@ def build_review_body(summary: str, spec_compliance_notes: str, issue_count: int
     if body:
         return body
     if issue_count > 0:
-        return f"Automated code review completed: {issue_count} finding(s) posted as comment(s)."
+        noun = "finding" if issue_count == 1 else "findings"
+        return f"Automated code review completed: {issue_count} {noun} reported."
     return "Automated code review completed. No blocking issues found."
 
 
