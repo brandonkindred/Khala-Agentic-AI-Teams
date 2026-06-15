@@ -1009,6 +1009,13 @@ class CodingTeamSwarm:
         self, swe: SeniorSWEAgent, task: Task, result: Dict[str, Any], update_fn: Callable
     ) -> bool:
         """Run build, lint, code review. Returns True if passed, False if returned for revision."""
+        # The gate *tools* (build/lint/review) run inside the try so a tool crash
+        # never aborts the swarm. The revision bookkeeping (_return_for_revision,
+        # which mutates the task graph) is deliberately kept OUT of that try: if it
+        # raised inside the broad except, a build/review REJECTION would be
+        # swallowed and reported as a gate PASS, merging unreviewed code. We only
+        # record the verdict here and act on it after the try/except.
+        revision_feedback: Optional[List[Dict[str, Any]]] = None
         try:
             from software_engineering_team.quality_gate_tools import (
                 run_build_verification,
@@ -1025,45 +1032,45 @@ class CodingTeamSwarm:
                 logger.warning(
                     "[%s] Build failed for task %s: %s", swe.agent_id, task.id, build.error
                 )
-                return self._return_for_revision(task, [{"type": "build", "error": build.error}])
+                revision_feedback = [{"type": "build", "error": build.error}]
+            else:
+                # Linting
+                update_fn(status_text=f"Linting: {task.title}")
+                run_linting(self.path, task.id, llm_getter=self.llm_getter)
 
-            # Linting
-            update_fn(status_text=f"Linting: {task.title}")
-            run_linting(self.path, task.id, llm_getter=self.llm_getter)
-
-            # Code review — bridge the agent's sub-step reports into the job record so
-            # the UI shows live review progress instead of a frozen "Code review: ..." line.
-            cr_bridge = ActivityBridge(
-                update_fn,
-                agent="code_review",
-                label="Code review",
-                task_id=task.id,
-                task_title=task.title,
-            )
-            try:
-                cr_bridge("preparing", "starting code review", 0.0)
-                review = run_code_review(
-                    code=result.get("changes_summary", ""),
-                    spec_content="",
-                    task_description=task.description or task.title,
-                    language="python" if agent_type == "backend" else "typescript",
-                    acceptance_criteria=task.acceptance_criteria or [],
-                    llm_getter=self.llm_getter,
-                    progress_callback=cr_bridge,
+                # Code review — bridge the agent's sub-step reports into the job record so
+                # the UI shows live review progress instead of a frozen "Code review: ..." line.
+                cr_bridge = ActivityBridge(
+                    update_fn,
+                    agent="code_review",
+                    label="Code review",
+                    task_id=task.id,
+                    task_title=task.title,
                 )
-            finally:
-                # Clear on every exit path so a stale sub-progress bar never lingers
-                # into the next gate — a frozen bar masquerading as progress is the
-                # exact failure mode this reporting exists to fix.
-                cr_bridge.clear()
-            if not review.approved:
-                logger.info(
-                    "[%s] Code review rejected task %s (%d issues); returning for revision",
-                    swe.agent_id,
-                    task.id,
-                    len(review.issues),
-                )
-                return self._return_for_revision(task, review.issues)
+                try:
+                    cr_bridge("preparing", "starting code review", 0.0)
+                    review = run_code_review(
+                        code=result.get("changes_summary", ""),
+                        spec_content="",
+                        task_description=task.description or task.title,
+                        language="python" if agent_type == "backend" else "typescript",
+                        acceptance_criteria=task.acceptance_criteria or [],
+                        llm_getter=self.llm_getter,
+                        progress_callback=cr_bridge,
+                    )
+                finally:
+                    # Clear on every exit path so a stale sub-progress bar never lingers
+                    # into the next gate — a frozen bar masquerading as progress is the
+                    # exact failure mode this reporting exists to fix.
+                    cr_bridge.clear()
+                if not review.approved:
+                    logger.info(
+                        "[%s] Code review rejected task %s (%d issues); returning for revision",
+                        swe.agent_id,
+                        task.id,
+                        len(review.issues),
+                    )
+                    revision_feedback = review.issues
 
         except ImportError:
             logger.debug("Quality gate tools not available; skipping")
@@ -1074,6 +1081,8 @@ class CodingTeamSwarm:
             # never abort the whole run — but the stack is now in the logs.
             logger.exception("Quality gate tools error for task %s; proceeding", task.id)
 
+        if revision_feedback is not None:
+            return self._return_for_revision(task, revision_feedback)
         return True
 
     def _return_for_revision(self, task: Task, feedback: List[Dict[str, Any]]) -> bool:

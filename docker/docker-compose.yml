@@ -587,6 +587,14 @@ services:
     networks:
       stack: { ipv4_address: 172.28.0.21, aliases: [coding-team-service] }
     restart: unless-stopped
+    # The code-review path loads full diffs + repo context into memory; cap it so
+    # a runaway worker is OOM-killed predictably (docker records OOMKilled=true)
+    # instead of the host kernel picking a victim. This cgroup limit is also what
+    # the team-service memory watchdog samples to warn before the kill.
+    deploy:
+      resources:
+        limits: { memory: 2G }
+        reservations: { memory: 1G }
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
       interval: 15s

@@ -140,25 +140,38 @@ def _resolve_app() -> str:
 
     wrapper_path = pathlib.Path("/app/_team_wrapper.py")
 
-    # Every worker re-runs this wrapper on fork, so re-initialise OTel and
-    # re-instrument the app on each import.
+    # Every worker re-runs this wrapper on import, so re-initialise OTel and
+    # re-instrument the app each time. The import and the init() call are split
+    # into separate try blocks on purpose: a transient init_otel() failure (e.g.
+    # an exporter that throws) must NOT discard the successfully-imported
+    # instrument_fastapi_app and leave the worker serving untraced requests.
     body = (
         "try:\n"
         "    from shared_observability import init_otel, instrument_fastapi_app\n"
+        "except Exception:\n"
+        "    import logging\n"
+        "    logging.getLogger('team_service').warning(\n"
+        "        'shared_observability import failed', exc_info=True\n"
+        "    )\n"
+        "    def init_otel(*_a, **_k):\n"
+        "        return None\n"
+        "    def instrument_fastapi_app(*_a, **_k):\n"
+        "        return None\n"
+        "try:\n"
         f"    init_otel(service_name='{TEAM_NAME}', team_key='{TEAM_NAME}')\n"
         "except Exception:\n"
         "    import logging\n"
         "    logging.getLogger('team_service').warning(\n"
         "        'shared_observability init_otel failed', exc_info=True\n"
         "    )\n"
-        "    def instrument_fastapi_app(*_a, **_k):\n"
-        "        return None\n"
     )
 
-    # Each worker is its own process: re-arm fault diagnostics (the excepthooks
-    # are not inherited across a 'spawn' start-method) and start a per-worker
-    # memory watchdog, so an impending OOM kill is logged before the worker
-    # vanishes and a native fault dumps a stack instead of dying silently.
+    # Each worker is its own process. Under fork (uvicorn's default on Linux) the
+    # supervisor's faulthandler + excepthooks are inherited, so this re-arm is a
+    # cheap no-op; under a spawn/forkserver start-method the worker is a fresh
+    # interpreter and this is what arms them. Either way the memory watchdog must
+    # be (re)started here — threads do not survive fork — so an impending OOM
+    # kill is logged before the worker vanishes and a native fault dumps a stack.
     body += (
         "try:\n"
         "    from shared_observability import install_fault_diagnostics, start_memory_watchdog\n"

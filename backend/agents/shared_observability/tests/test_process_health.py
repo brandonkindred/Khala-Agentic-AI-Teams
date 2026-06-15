@@ -63,6 +63,32 @@ def test_read_rss_bytes_missing_file_and_no_vmrss(tmp_path) -> None:
     assert ph.read_rss_bytes(str(no_rss)) is None
 
 
+def test_read_memory_usage_prefers_cgroup_v2_current(monkeypatch, tmp_path) -> None:
+    cur = tmp_path / "memory.current"
+    cur.write_text(str(300 * 1024 * 1024))
+    monkeypatch.setattr(ph, "_CGROUP_V2_CURRENT", str(cur))
+    monkeypatch.setattr(ph, "_CGROUP_V1_USAGE", str(tmp_path / "absent_v1"))
+    # RSS fallback must NOT be consulted when a cgroup counter is present.
+    monkeypatch.setattr(ph, "read_rss_bytes", lambda *a, **k: 1)
+    assert ph.read_memory_usage_bytes() == 300 * 1024 * 1024
+
+
+def test_read_memory_usage_reads_cgroup_v1_usage(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(ph, "_CGROUP_V2_CURRENT", str(tmp_path / "absent_v2"))
+    v1 = tmp_path / "usage_in_bytes"
+    v1.write_text(str(64 * 1024 * 1024))
+    monkeypatch.setattr(ph, "_CGROUP_V1_USAGE", str(v1))
+    assert ph.read_memory_usage_bytes() == 64 * 1024 * 1024
+
+
+def test_read_memory_usage_falls_back_to_rss(monkeypatch, tmp_path) -> None:
+    """Off-cgroup (no usage counters): fall back to this process's RSS."""
+    monkeypatch.setattr(ph, "_CGROUP_V2_CURRENT", str(tmp_path / "absent_v2"))
+    monkeypatch.setattr(ph, "_CGROUP_V1_USAGE", str(tmp_path / "absent_v1"))
+    monkeypatch.setattr(ph, "read_rss_bytes", lambda *a, **k: 7 * 1024 * 1024)
+    assert ph.read_memory_usage_bytes() == 7 * 1024 * 1024
+
+
 def test_read_int_file_variants(tmp_path) -> None:
     good = tmp_path / "g"
     good.write_text("12345\n")
@@ -138,22 +164,22 @@ def test_evaluate_memory_pressure_precondition_violations(rss, limit, thr) -> No
 def test_watchdog_tick_warns_once_then_recovers() -> None:
     limit = 100
     warned, msg = ph._watchdog_tick(
-        limit_bytes=limit, threshold=0.85, warned=False, rss_reader=lambda: 90
+        limit_bytes=limit, threshold=0.85, warned=False, usage_reader=lambda: 90
     )
     assert warned is True and msg is not None and "OOM" in msg  # first crossing warns
     warned, msg = ph._watchdog_tick(
-        limit_bytes=limit, threshold=0.85, warned=True, rss_reader=lambda: 95
+        limit_bytes=limit, threshold=0.85, warned=True, usage_reader=lambda: 95
     )
     assert warned is True and msg is None  # sustained pressure does not repeat
     warned, msg = ph._watchdog_tick(
-        limit_bytes=limit, threshold=0.85, warned=True, rss_reader=lambda: 10
+        limit_bytes=limit, threshold=0.85, warned=True, usage_reader=lambda: 10
     )
     assert warned is False and msg is None  # recovery re-arms the warning
 
 
-def test_watchdog_tick_no_rss_is_noop() -> None:
+def test_watchdog_tick_no_usage_is_noop() -> None:
     warned, msg = ph._watchdog_tick(
-        limit_bytes=100, threshold=0.85, warned=False, rss_reader=lambda: None
+        limit_bytes=100, threshold=0.85, warned=False, usage_reader=lambda: None
     )
     assert warned is False and msg is None
 
@@ -166,11 +192,11 @@ def test_watchdog_loop_logs_once_then_exits_on_stop(monkeypatch, caplog) -> None
     """
     stop = threading.Event()
 
-    def fake_rss(*_a, **_k):
+    def fake_usage(*_a, **_k):
         stop.set()  # request shutdown so the loop exits after this iteration
         return 1024 * 1024 * 1024
 
-    monkeypatch.setattr(ph, "read_rss_bytes", fake_rss)
+    monkeypatch.setattr(ph, "read_memory_usage_bytes", fake_usage)
     logger = logging.getLogger("test.ph.loop")
     with caplog.at_level(logging.WARNING, logger="test.ph.loop"):
         ph._watchdog_loop(
@@ -192,7 +218,7 @@ def test_watchdog_loop_survives_tick_errors(monkeypatch, caplog) -> None:
         stop.set()
         raise RuntimeError("proc read failed")
 
-    monkeypatch.setattr(ph, "read_rss_bytes", boom)
+    monkeypatch.setattr(ph, "read_memory_usage_bytes", boom)
     logger = logging.getLogger("test.ph.loop_err")
     # Should not raise out of the loop.
     ph._watchdog_loop(

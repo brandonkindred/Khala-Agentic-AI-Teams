@@ -7,7 +7,8 @@ Turns "the worker just died with no traceback" into something debuggable:
   stderr instead of vanishing) and routes uncaught exceptions from the main
   thread *and* worker threads through :mod:`logging` with a full traceback.
 * :func:`start_memory_watchdog` runs a tiny daemon thread that samples the
-  process RSS and logs a WARNING as it approaches the cgroup / env memory
+  container's cgroup memory usage (falling back to this process's RSS when not
+  in a cgroup) and logs a WARNING as it approaches the cgroup / env memory
   budget, so the last line before an OOM-kill names the cause — the kernel's
   SIGKILL itself is uncatchable and otherwise leaves no trace at all.
 
@@ -36,6 +37,9 @@ from typing import Callable, Optional
 # point them at temp files without monkeypatching ``open``.
 _CGROUP_V2_MAX = "/sys/fs/cgroup/memory.max"
 _CGROUP_V1_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
+# Current usage counters — the value the kernel OOM killer actually watches.
+_CGROUP_V2_CURRENT = "/sys/fs/cgroup/memory.current"
+_CGROUP_V1_USAGE = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
 _PROC_STATUS = "/proc/self/status"
 
 # Values at/above this are the kernel's "no limit" sentinels (cgroup v1 reports
@@ -139,6 +143,27 @@ def read_rss_bytes(status_path: str = _PROC_STATUS) -> Optional[int]:
     return None
 
 
+def read_memory_usage_bytes() -> Optional[int]:
+    """Return current memory usage in bytes — container-wide, else this process's RSS.
+
+    The kernel OOM killer fires on the *cgroup's* total usage (every process in
+    the container) crossing ``memory.max``, so the watchdog must compare that
+    same number against the budget — not a single worker's RSS, which under
+    ``workers=2`` would stay well under the shared limit and never warn. Reads
+    cgroup v2 ``memory.current`` → v1 ``memory.usage_in_bytes`` → per-process RSS
+    (the last for local/non-cgroup runs).
+
+    Postconditions:
+        - Returns a non-negative byte count, or None when neither a cgroup usage
+          counter nor ``/proc`` RSS is readable. Never raises.
+    """
+    for path in (_CGROUP_V2_CURRENT, _CGROUP_V1_USAGE):
+        value = _read_int_file(path)
+        if value is not None and value >= 0:
+            return value
+    return read_rss_bytes()
+
+
 def detect_memory_limit_bytes() -> Optional[int]:
     """Return the process memory budget in bytes, or None when there is no limit.
 
@@ -186,7 +211,7 @@ def _watchdog_tick(
     limit_bytes: int,
     threshold: float,
     warned: bool,
-    rss_reader: Optional[Callable[[], Optional[int]]] = None,
+    usage_reader: Optional[Callable[[], Optional[int]]] = None,
 ) -> tuple[bool, Optional[str]]:
     """Evaluate one watchdog sample.
 
@@ -201,16 +226,16 @@ def _watchdog_tick(
           previous state was un-warned.
     """
     # Resolve at call time (not as a default arg) so the module-level
-    # ``read_rss_bytes`` can be monkeypatched in tests.
-    reader = rss_reader if rss_reader is not None else read_rss_bytes
-    rss = reader()
-    if rss is None:
+    # ``read_memory_usage_bytes`` can be monkeypatched in tests.
+    reader = usage_reader if usage_reader is not None else read_memory_usage_bytes
+    usage = reader()
+    if usage is None:
         return warned, None
-    pressured = evaluate_memory_pressure(rss, limit_bytes, threshold)
+    pressured = evaluate_memory_pressure(usage, limit_bytes, threshold)
     if pressured and not warned:
-        pct = rss / limit_bytes * 100.0
+        pct = usage / limit_bytes * 100.0
         message = (
-            f"High memory: RSS {_mb(rss)}MB / {_mb(limit_bytes)}MB "
+            f"High memory: {_mb(usage)}MB / {_mb(limit_bytes)}MB "
             f"({pct:.0f}%, warn at {threshold * 100:.0f}%) — approaching the "
             f"container memory limit; an OOM kill (SIGKILL, no traceback) is imminent"
         )
@@ -250,7 +275,7 @@ def start_memory_watchdog(
     threshold: Optional[float] = None,
     limit_bytes: Optional[int] = None,
 ) -> Optional[threading.Thread]:
-    """Start a daemon thread that warns as RSS approaches the memory budget.
+    """Start a daemon thread that warns as memory usage approaches the budget.
 
     The thread is the only early signal of an impending OOM kill: the kernel's
     SIGKILL cannot be caught, so without this the worker simply vanishes. The
