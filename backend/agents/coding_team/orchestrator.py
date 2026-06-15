@@ -1067,8 +1067,12 @@ class CodingTeamSwarm:
 
         except ImportError:
             logger.debug("Quality gate tools not available; skipping")
-        except Exception as e:
-            logger.warning("Quality gate tools error for task %s: %s; proceeding", task.id, e)
+        except Exception:
+            # Log the full traceback, not a one-line summary: a real bug in the
+            # review path (e.g. an OOM-precursor or a malformed evidence payload)
+            # must be debuggable. The swarm still proceeds — a failed gate must
+            # never abort the whole run — but the stack is now in the logs.
+            logger.exception("Quality gate tools error for task %s; proceeding", task.id)
 
         return True
 

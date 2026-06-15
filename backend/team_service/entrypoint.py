@@ -155,6 +155,22 @@ def _resolve_app() -> str:
         "        return None\n"
     )
 
+    # Each worker is its own process: re-arm fault diagnostics (the excepthooks
+    # are not inherited across a 'spawn' start-method) and start a per-worker
+    # memory watchdog, so an impending OOM kill is logged before the worker
+    # vanishes and a native fault dumps a stack instead of dying silently.
+    body += (
+        "try:\n"
+        "    from shared_observability import install_fault_diagnostics, start_memory_watchdog\n"
+        "    install_fault_diagnostics()\n"
+        f"    start_memory_watchdog('{TEAM_NAME}')\n"
+        "except Exception:\n"
+        "    import logging\n"
+        "    logging.getLogger('team_service').warning(\n"
+        "        'fault diagnostics / memory watchdog unavailable', exc_info=True\n"
+        "    )\n"
+    )
+
     if TEAM_APP_ATTR == "router":
         body += (
             "from fastapi import FastAPI\n"
@@ -221,6 +237,14 @@ def _startup_recovery() -> None:
 
 if __name__ == "__main__":
     logger.info("Starting %s on port %d (module=%s)", TEAM_NAME, TEAM_PORT, TEAM_MODULE)
+    # Arm fault diagnostics in the supervisor process first; forked workers
+    # inherit faulthandler, and the generated wrapper re-arms it per worker.
+    try:
+        from shared_observability import install_fault_diagnostics
+
+        install_fault_diagnostics(logger)
+    except Exception:
+        logger.warning("fault diagnostics unavailable", exc_info=True)
     _startup_recovery()
     _start_temporal_worker()
     atexit.register(_shutdown_hook)

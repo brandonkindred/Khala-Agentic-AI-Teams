@@ -680,6 +680,26 @@ def test_quality_gate_tool_exception_proceeds_to_review(tmp_path, monkeypatch):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW  # proceeded despite the tool error
 
 
+def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, monkeypatch, caplog):
+    """An unexpected quality-gate tool error must be logged WITH a full traceback
+    (logger.exception → ERROR + exc_info), not a one-line WARNING — a silent
+    summary is exactly what made the review-phase crash undebuggable."""
+    import logging as _logging
+
+    _patch_gates(monkeypatch, build_raises=True)  # build() raises RuntimeError("tool crashed")
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    with caplog.at_level(_logging.ERROR, logger="coding_team.orchestrator"):
+        swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    gate_errors = [r for r in caplog.records if "Quality gate tools error" in r.getMessage()]
+    assert gate_errors, "the quality-gate tool error must be logged"
+    record = gate_errors[0]
+    assert record.levelno == _logging.ERROR  # logger.exception logs at ERROR
+    assert record.exc_info is not None  # full traceback attached, not a bare string
+    assert "tool crashed" in _logging.Formatter().format(record)  # the cause is in the trace
+
+
 # ----------------------------------------------------- un-assignment / double-assignment guard
 
 
