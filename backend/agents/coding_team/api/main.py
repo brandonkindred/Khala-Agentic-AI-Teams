@@ -33,6 +33,8 @@ from coding_team.github_source import (  # noqa: E402
     NotAnIssueError,
     build_review_body,
     choose_event,
+    format_issue_comment,
+    inline_comment_to_timeline_body,
     is_ready,
     issue_to_plan_input,
     map_issues_to_comments,
@@ -224,7 +226,10 @@ class StatusResponse(BaseModel):
     github_pr_url: Optional[str] = None
     review_summary: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Set by the PR-review flow: total_issues, inline_comments, body_findings, event.",
+        description=(
+            "Set by the PR-review flow: total_issues, inline_comments, "
+            "comment_findings, comments_failed, files_reviewed, event."
+        ),
     )
     pending_questions: List[PendingQuestion] = Field(
         default_factory=list,
@@ -1363,13 +1368,15 @@ def get_reviews(
 
 
 def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
-    """Background hook: review the PR and post one review with inline comments.
+    """Background hook: review the PR, posting exactly one comment per finding.
 
     Postconditions:
-        - On success the job is ``completed`` with ``github_pr_url`` set and exactly
-          one PR review submitted (REQUEST_CHANGES on critical/high findings from a
-          PR the bot did not author, else COMMENT). Findings tied to a diff line
-          become inline comments; the rest are folded into the review body, so no
+        - On success the job is ``completed`` with ``github_pr_url`` set and one PR
+          review submitted (REQUEST_CHANGES on critical/high findings from a PR the
+          bot did not author, else COMMENT) whose body carries only the summary.
+          Every finding produces exactly one comment and no comment lists more than
+          one finding: findings tied to a diff line become individual inline
+          comments; the rest are posted as individual conversation comments, so no
           finding is dropped. Any failure marks the job ``failed`` and posts a
           (token-scrubbed) PR comment — never raises.
     """
@@ -1461,21 +1468,77 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 pr_bridge.clear()
 
             comments, leftovers = map_issues_to_comments(output.issues, valid_by_path)
-            body = build_review_body(output.summary, output.spec_compliance_notes, leftovers)
+            body = build_review_body(
+                output.summary, output.spec_compliance_notes, issue_count=len(output.issues)
+            )
             event = choose_event(output.issues, author=pr.author, reviewer=reviewer_login)
 
-            _submit_review(client, owner, repo, pr_number, pr.head_sha, body, event, comments)
+            dropped = _submit_review(
+                client, owner, repo, pr_number, pr.head_sha, body, event, comments
+            )
 
+            # One comment per finding: post each un-anchorable finding as its own
+            # conversation comment, plus any inline comments the review had to drop
+            # (rare 422 fallback) so no finding is lost and none is batched. These
+            # findings no longer live in the review body, so a failed post would
+            # drop the finding silently — count failures and fail the job instead
+            # of falsely reporting every finding as posted.
+            standalone_bodies = [format_issue_comment(issue) for issue in leftovers]
+            standalone_bodies += [inline_comment_to_timeline_body(c) for c in dropped]
+            comments_failed = sum(
+                0 if _safe_comment(client, owner, repo, pr_number, body) else 1
+                for body in standalone_bodies
+            )
+
+            inline_count = len(comments) - len(dropped)
+            comment_findings = len(leftovers) + len(dropped)
             review_summary = {
                 "total_issues": len(output.issues),
-                "inline_comments": len(comments),
-                "body_findings": len(leftovers),
+                "inline_comments": inline_count,
+                "comment_findings": comment_findings,
+                "comments_failed": comments_failed,
                 "event": event,
                 "files_reviewed": files_reviewed,
             }
+            if comments_failed:
+                # Some findings could not be posted as their own comment; the
+                # review (inline comments + body) is already submitted, but the
+                # contract "one comment per finding" is broken — surface it as a
+                # failure rather than reporting completion.
+                err = (
+                    f"{comments_failed} of {comment_findings} finding comment(s) "
+                    "could not be posted"
+                )
+                # Notify on the PR itself: the dropped findings no longer live in
+                # the review body, so without this the author has no signal on
+                # GitHub that part of the review is missing.
+                _safe_comment(
+                    client,
+                    owner,
+                    repo,
+                    pr_number,
+                    f"Code review incomplete: {err}. See the coding team job for details.",
+                )
+                update_job(
+                    job_id,
+                    status="failed",
+                    status_text=err,
+                    github_pr_url=pr.html_url,
+                    review_summary=review_summary,
+                    error=err,
+                )
+                update_review(
+                    job_id,
+                    status="failed",
+                    status_text=err,
+                    review_summary=review_summary,
+                    error=err,
+                    completed=True,
+                )
+                return
             status_text = (
                 f"Review posted: {len(output.issues)} finding(s), "
-                f"{len(comments)} inline, event={event}"
+                f"{inline_count} inline, {comment_findings} comment(s), event={event}"
             )
             update_job(
                 job_id,
@@ -1524,21 +1587,32 @@ def _submit_review(
     body: str,
     event: str,
     comments: List[Dict[str, Any]],
-) -> None:
+) -> List[Dict[str, Any]]:
     """Submit the PR review, degrading gracefully on GitHub rejections.
 
     GitHub rejects the whole review (422) if it requests changes on the bot's own
     PR, or if any single inline comment lands off the diff. So: try the chosen
     event with inline comments; on failure retry as COMMENT keeping the comments
     (handles the self-PR case without losing inline feedback); on a further failure
-    retry as COMMENT with no inline comments (handles a stray bad line — all
-    findings already live in the body).
+    retry as COMMENT with no inline comments (handles a stray bad line — the caller
+    re-posts the dropped findings as standalone comments).
 
     Postconditions:
         - Exactly one review is submitted on success; raises ``GitHubAPIError`` only
-          if every attempt fails.
+          if every attempt fails. The review body and every inline-comment body are
+          token-scrubbed before submission (LLM output may echo a secret from the
+          reviewed code). Returns the inline comments that were *not* posted: ``[]``
+          when the successful attempt carried the inline comments, or the original
+          ``comments`` when it succeeded only by dropping them.
     """
-    attempts = [(event, comments), ("COMMENT", comments), ("COMMENT", [])]
+    # Scrub before anything leaves for GitHub: the body (LLM summary) and each
+    # inline-comment body (LLM description/suggestion) can echo a token from the
+    # reviewed code, just like the standalone comments _safe_comment scrubs. Build
+    # scrubbed copies so the caller's ``comments`` (used for the dropped-set return
+    # and standalone re-posting) keep their original identity.
+    body = scrub_token_from_text(body)
+    scrubbed = [{**c, "body": scrub_token_from_text(c.get("body", ""))} for c in comments]
+    attempts = [(event, scrubbed), ("COMMENT", scrubbed), ("COMMENT", [])]
     last_exc: Optional[GitHubAPIError] = None
     seen: set[tuple[str, int]] = set()
     for ev, cs in attempts:
@@ -1556,7 +1630,10 @@ def _submit_review(
                 event=ev,
                 comments=cs,
             )
-            return
+            # When the successful attempt carried no inline comments (the final
+            # body-only fallback), every finding was dropped and the caller re-posts
+            # them as standalone comments; otherwise none were dropped.
+            return [] if cs else list(comments)
         except GitHubAPIError as e:
             logger.warning("PR review submit failed (event=%s, comments=%d): %s", ev, len(cs), e)
             last_exc = e
@@ -1569,15 +1646,21 @@ def _submit_review(
 # ---------------------------------------------------------------------------
 
 
-def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body: str) -> None:
+def _safe_comment(client: GitHubClient, owner: str, repo: str, number: int, body: str) -> bool:
     """Best-effort issue comment; never blocks the job on a failed comment.
 
     Body is scrubbed to redact tokens that might have leaked from git stderr.
+
+    Postconditions:
+        - Returns True when the comment was posted, False when GitHub rejected it.
+          Never raises — callers that must not drop a finding inspect the result.
     """
     try:
         client.add_issue_comment(owner, repo, number, scrub_token_from_text(body))
+        return True
     except GitHubAPIError as e:
         logger.warning("Failed to comment on issue #%s: %s", number, e)
+        return False
 
 
 def _format_questions_comment(questions: List[Dict[str, Any]], job_id: str) -> str:
