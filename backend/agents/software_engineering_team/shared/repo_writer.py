@@ -169,6 +169,17 @@ def _validate_paths(files: Dict[str, str], subdir: str = "") -> Tuple[Dict[str, 
     return validated, warnings
 
 
+def output_to_files_dict(output: Any, subdir: str = "") -> Dict[str, str]:
+    """Return the ``{path: content}`` mapping ``write_agent_output`` would produce
+    for *output*, excluding the post-merge root ``.gitignore`` (which is added
+    separately from ``gitignore_entries``).
+
+    A stable public surface for cross-module callers that need the writer's path
+    normalization without depending on the private ``_output_to_files_dict``.
+    """
+    return _output_to_files_dict(output, subdir)
+
+
 def _output_to_files_dict(output: Any, subdir: str = "") -> Dict[str, str]:
     """
     Convert agent output to { path: content } dict.
