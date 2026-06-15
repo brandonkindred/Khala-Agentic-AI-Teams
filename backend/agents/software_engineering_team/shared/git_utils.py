@@ -76,9 +76,13 @@ def _run_git(
     merge_stderr:
         When True (default) the returned text is ``stdout + stderr`` — convenient
         for surfacing error detail in failure messages. When False, only
-        ``stdout`` is returned, so a command whose stdout is *data* (e.g.
-        ``git show <rev>:<path>`` reading a file blob) is not polluted by warnings
-        git may emit to stderr while still exiting 0 (CRLF/filter-driver advice).
+        ``stdout`` is returned *on success*, so a command whose stdout is *data*
+        (e.g. ``git show <rev>:<path>`` reading a file blob) is not polluted by
+        warnings git may emit to stderr while still exiting 0 (CRLF/filter-driver
+        advice). On a non-zero exit there is no valid stdout *data* to protect —
+        the caller either raises with this text or discards it — so stderr is
+        appended regardless of *merge_stderr*, keeping the failure cause
+        (``fatal: ...``) out of an otherwise-empty diagnostic.
 
     Postconditions:
         - The spawned git process observes a complete author/committer
@@ -98,7 +102,9 @@ def _run_git(
             env=git_identity_env(),
         )
         out = result.stdout or ""
-        if merge_stderr:
+        # Merge stderr when asked, or unconditionally on failure: a non-zero exit
+        # carries its cause on stderr and has no stdout data worth keeping clean.
+        if merge_stderr or result.returncode != 0:
             out += result.stderr or ""
         return result.returncode, out
     except subprocess.TimeoutExpired:
