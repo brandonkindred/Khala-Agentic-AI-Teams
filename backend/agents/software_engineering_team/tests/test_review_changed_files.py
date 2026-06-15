@@ -2224,6 +2224,9 @@ def test_is_secret_template_path_only_env_family() -> None:
     assert is_secret_template_path(".env.pem.sample") is False  # embedded key suffix
     assert is_secret_template_path(".env.key.example") is False  # embedded key suffix
     assert is_secret_template_path(".env.credentials.template") is False  # embedded stem
+    # ...including a known secret BASENAME embedded mid-name (_SENSITIVE_NAMES):
+    assert is_secret_template_path(".env.id_rsa.example") is False  # bare secret name
+    assert is_secret_template_path(".env.npmrc.sample") is False  # dotted secret name
     # NOT a template at all:
     assert is_secret_template_path(".env") is False
     assert is_secret_template_path("app/main.py") is False
@@ -2253,10 +2256,17 @@ def test_review_gate_failure_blocks_emptied_on_approval() -> None:
     """An approval coinciding with a blocking omission returns a manual-review reason."""
     from software_engineering_team.backend_agent.agent import ReviewInputSelection
 
-    sel = ReviewInputSelection({"a.py": "x = 1\n"}, None, None, emptied=("wiped.py",))
+    # An emptied file (blocks) plus an advisory binary asset (does not block).
+    sel = ReviewInputSelection(
+        {"a.py": "x = 1\n"}, None, None, emptied=("wiped.py",), unreadable=("logo.png",)
+    )
     reason = sel.review_gate_failure(approved=True)
     assert reason is not None
-    assert "wiped.py" in reason
+    assert "wiped.py" in reason  # the blocker is named
+    # The advisory tail lists only the non-blocking remainder; a blocking path is
+    # named once (in the blockers clause), not duplicated in the advisory tail.
+    assert reason.count("wiped.py") == 1
+    assert "logo.png" in reason  # the advisory asset is still surfaced
     # A rejection (not approved) never trips the gate — the fix loop handles it.
     assert sel.review_gate_failure(approved=False) is None
 
@@ -2329,6 +2339,36 @@ def test_select_review_input_flags_changed_symlink_as_unexamined(tmp_path: Path)
 
     assert "mod.py" in sel.unreadable  # the type-changed path is recorded unexamined
     assert "mod.py" in sel.blocking_unexamined()  # .py symlink is not an asset → blocks
+
+
+def test_select_review_input_flags_written_only_symlink_as_unexamined(tmp_path: Path) -> None:
+    """A writer-emitted untracked symlink (in written_files, not in the git diff)
+    is still surfaced as unexamined — only its link target, not the pointed-to
+    content, ever reaches the reviewer."""
+    from software_engineering_team.backend_agent.agent import _select_review_input
+
+    _init_repo(tmp_path)
+    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "target.py").write_text("def t():\n    return 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "base")
+    _git(tmp_path, "branch", "-M", "development")
+    _git(tmp_path, "checkout", "-b", "feature/x")
+    (tmp_path / "a.py").write_text("x = 2\n", encoding="utf-8")
+    _git(tmp_path, "add", "-A")
+    _git(tmp_path, "commit", "-m", "committed change")  # non-empty diff (a.py)
+    # An untracked, never-committed symlink the writer dropped on disk:
+    try:
+        (tmp_path / "link.py").symlink_to(tmp_path / "target.py")
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation not supported on this platform")
+
+    task = SimpleNamespace(description="x")
+    sel = _select_review_input(tmp_path, task, written_files={"link.py": "ignored"})
+
+    assert "a.py" in sel.files  # committed change reviewed
+    assert "link.py" in sel.unreadable  # the written-only symlink is flagged
+    assert "link.py" in sel.blocking_unexamined()  # .py symlink is not an asset → blocks
 
 
 def test_find_referencing_paths_nonpython_bare_keyword_import(tmp_path: Path) -> None:

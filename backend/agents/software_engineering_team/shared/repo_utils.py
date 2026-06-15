@@ -173,11 +173,12 @@ def is_secret_template_path(path: str) -> bool:
     ``.env`` family qualifies, because it is flagged sensitive solely by the
     deliberately over-broad ``.env.<x>`` rule (placeholder env files). A file that
     is sensitive for a *strong* reason — sitting under a secret directory
-    (``secrets/``/``.ssh/`` ...), a ``credentials``/``secret`` token, or a key/cert
-    suffix *anywhere in the name* — is NOT downgraded to a template even when it
-    carries a template suffix (so ``secrets/config.sample``,
-    ``credentials.template``, ``key.pem.dist``, and ``.env.pem.sample`` /
-    ``.env.credentials.template`` are not treated as harmless).
+    (``secrets/``/``.ssh/`` ...), a ``credentials``/``secret`` token, a known
+    secret basename (``id_rsa``, ``.npmrc`` ...), or a key/cert suffix *anywhere
+    in the name* — is NOT downgraded to a template even when it carries a template
+    suffix (so ``secrets/config.sample``, ``credentials.template``,
+    ``key.pem.dist``, ``.env.pem.sample``, ``.env.credentials.template`` and
+    ``.env.id_rsa.example`` are not treated as harmless).
 
     The ``.env`` match is anchored on ``.env.`` (consistent with
     :func:`is_sensitive_path`), so a non-env name like ``.environment.sample`` is
@@ -197,12 +198,17 @@ def is_secret_template_path(path: str) -> bool:
     if _SENSITIVE_DIR_PARTS.intersection(p.lower() for p in candidate.parts[:-1]):
         return False
     # Inspect every dot-delimited token of the filename (not just the final
-    # suffix/stem) so an embedded key/cert suffix (``.env.pem.sample``) or secret
-    # keyword (``.env.credentials.template``) is caught.
+    # suffix/stem) so an embedded key/cert suffix (``.env.pem.sample``), secret
+    # stem (``.env.credentials.template``), or known secret basename
+    # (``.env.id_rsa.example``, ``.env.npmrc.sample``) is caught. _SENSITIVE_NAMES
+    # holds both bare (``id_rsa``) and dotted (``.npmrc``) basenames, so each token
+    # is matched against the name itself and against ``.<token>``.
     tokens = name.split(".")
-    if any(tok in _SENSITIVE_STEMS for tok in tokens):
+    if any(tok in _SENSITIVE_STEMS or tok in _SENSITIVE_NAMES for tok in tokens):
         return False
-    return not any(f".{tok}" in _SENSITIVE_SUFFIXES for tok in tokens)
+    return not any(
+        f".{tok}" in _SENSITIVE_SUFFIXES or f".{tok}" in _SENSITIVE_NAMES for tok in tokens
+    )
 
 
 def strip_surrogates(text: str) -> str:

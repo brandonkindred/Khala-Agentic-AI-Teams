@@ -669,10 +669,14 @@ class ReviewInputSelection:
         """The omissions that MUST force manual review on an approval.
 
         Not every unexamined path should block a merge, but most should. The only
-        omissions that stay *advisory* (surfaced as notes via
-        :meth:`unexamined_paths`, never blocking) are the ones that are
-        legitimately non-text-reviewable, so blocking them would make every such
-        change permanently un-mergeable:
+        omissions that stay *advisory* here (surfaced as notes via
+        :meth:`unexamined_paths`, never returned by this method) are the ones that
+        are legitimately non-text-reviewable, so blocking *a change that also
+        carries reviewed source* on them would make every such change
+        permanently un-mergeable. (A change consisting *solely* of advisory items,
+        with nothing examinable, is still routed to manual review by
+        :meth:`review_gate_failure` — this method only governs the per-path block
+        set, not the no-content-at-all case.) The advisory paths are:
 
         - a recognized **binary asset** (``logo.png``, a font, an archive, model
           weights) — see :func:`_is_binary_asset`;
@@ -702,9 +706,9 @@ class ReviewInputSelection:
     def review_gate_failure(self, approved: bool) -> str | None:
         """Reason an approval must route to manual review instead of merging, else None.
 
-        The single, reusable never-silently-approve gate so every review caller
-        (not only the backend fix loop) applies it identically. An approval is
-        blocked when:
+        The reusable never-silently-approve gate, applied by the backend fix loop
+        (and available to any other review caller that builds a
+        :class:`ReviewInputSelection`). An approval is blocked when:
 
         - :meth:`blocking_unexamined` is non-empty — a destructive/unknowable
           omission (emptied file, withheld real secret, unreadable source, or an
@@ -712,16 +716,20 @@ class ReviewInputSelection:
         - the reviewer saw no examinable content at all while the selection still
           carried blocks (:meth:`has_examinable_content` is False and ``files`` is
           a non-empty map) — e.g. a change consisting solely of advisory omission
-          notes (a lone binary asset or ``.env`` template). The genuinely empty
-          repo (``files`` is None with an empty ``code``) has nothing to review
-          and is allowed, so a normal no-op never trips the gate.
+          notes (a lone binary asset or ``.env`` template). Such items never block
+          *on their own* via :meth:`blocking_unexamined` (so a change that *also*
+          carries reviewed source is not held up by an advisory asset), but a
+          change with *nothing* examinable still routes to manual review here,
+          since the approval rests on content the reviewer never saw. The
+          genuinely empty repo (``files`` is None with an empty ``code``) has
+          nothing to review and is allowed, so a normal no-op never trips the gate.
 
         Preconditions:
             - none.
         Postconditions:
             - Returns None when *approved* is False or the approval may stand.
             - Otherwise returns a human-readable reason naming the blocking
-              omissions and (advisory) the rest.
+              omissions and (advisory) only the *non-blocking* remainder.
         """
         if not approved:
             return None
@@ -742,7 +750,11 @@ class ReviewInputSelection:
             )
         if saw_no_content:
             clauses.append("the reviewer saw no examinable file content (only omission notes)")
-        advisory = self.unexamined_paths()
+        # The advisory tail is the *non-blocking* remainder only (binary assets,
+        # .env templates) — blocking paths are already named in the clause above,
+        # so listing them again would blur which omissions actually hold the merge.
+        blocking_set = set(blocking)
+        advisory = tuple(p for p in self.unexamined_paths() if p not in blocking_set)
         return (
             "Code review approved, but " + "; ".join(clauses) + ". "
             f"Also not examined (advisory): {', '.join(advisory[:20]) or 'none'}"
@@ -1112,8 +1124,10 @@ def _select_review_input(
     # that replaced a real file with a symlink (git status ``T``, bucketed as a
     # change, not a deletion) removes the original content from review entirely.
     # Record such paths as unexamined so the gate routes the approval to manual
-    # review instead of trusting an unreviewed link.
-    symlinked = sorted(p for p in changed_owned if (repo_path / p).is_symlink())
+    # review instead of trusting an unreviewed link. Scan ``readable`` (the
+    # changed ∪ writer-output union, sensitive paths already withheld) so a
+    # writer-emitted untracked symlink is covered too, not just diff-reported ones.
+    symlinked = sorted(p for p in readable if (repo_path / p).is_symlink())
     unreadable = list(omitted) + unreadable_deleted + symlinked
 
     # Best-effort: which surviving files still import each removed module, so the
