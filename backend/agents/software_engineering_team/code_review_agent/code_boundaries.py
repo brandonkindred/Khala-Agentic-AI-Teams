@@ -14,7 +14,10 @@ from ``(path, content)`` (or ``content``) to a set of 1-based line numbers.
 from __future__ import annotations
 
 import ast
+import logging
 import os
+
+logger = logging.getLogger(__name__)
 
 # Extensions parsed with Python's ``ast`` for exact, decorator-aware ranges.
 _PYTHON_EXTS = frozenset({".py", ".pyi"})
@@ -74,10 +77,12 @@ def _python_break_lines(content: str) -> frozenset[int]:
     """
     try:
         tree = ast.parse(content)
-    except Exception:
+    except Exception as exc:
         # Honor the "never raises" postcondition: SyntaxError/ValueError on
         # malformed source, but also RecursionError on deeply nested input,
         # MemoryError, etc. Any parse failure degrades to "no boundaries".
+        # Log at debug so unexpected failures are still diagnosable.
+        logger.debug("ast parse failed during break-line detection: %s", exc)
         return frozenset()
     breaks: set[int] = set()
     for node in tree.body:

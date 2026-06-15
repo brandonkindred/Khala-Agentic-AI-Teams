@@ -422,6 +422,7 @@ def _ts_functions(n_funcs: int, body_lines: int = 8) -> str:
 
 
 def test_split_breaks_at_function_boundary_python() -> None:
+    """An oversized .py file splits at top-level def boundaries, never mid-function."""
     content = _python_functions(12)  # ~12 functions, each well under the budget
     segments = split_block_into_segments("svc.py", content, max_chars=1_500)
     assert len(segments) > 1
@@ -435,6 +436,7 @@ def test_split_breaks_at_function_boundary_python() -> None:
 
 
 def test_split_breaks_at_function_boundary_typescript() -> None:
+    """An oversized .ts file splits at top-level function boundaries via the heuristic."""
     content = _ts_functions(12)
     segments = split_block_into_segments("widget.ts", content, max_chars=1_500)
     assert len(segments) > 1
@@ -446,6 +448,7 @@ def test_split_breaks_at_function_boundary_typescript() -> None:
 
 
 def test_split_falls_back_to_line_boundary_when_no_constructs() -> None:
+    """A single oversized function with no interior boundary degrades to line splitting."""
     # One giant function larger than the budget: its only construct boundary is
     # line 1, which the splitter never cuts before, so it degrades to splitting
     # on line boundaries within the function body.
@@ -458,6 +461,7 @@ def test_split_falls_back_to_line_boundary_when_no_constructs() -> None:
 
 
 def test_split_function_aware_keeps_contiguous_line_bookkeeping() -> None:
+    """Function-aware cuts keep start/end line bookkeeping contiguous and exact."""
     content = _python_functions(10)
     segments = split_block_into_segments("svc.py", content, max_chars=1_200)
     assert len(segments) > 1

@@ -15,6 +15,7 @@ from code_review_agent.code_boundaries import preferred_break_lines
 
 
 def test_python_returns_each_top_level_construct_start() -> None:
+    """Top-level def/class/async-def start lines are returned; nested methods are not."""
     src = "\n".join(
         [
             "import os",  # 1
@@ -35,6 +36,7 @@ def test_python_returns_each_top_level_construct_start() -> None:
 
 
 def test_python_decorated_construct_breaks_above_the_decorator() -> None:
+    """A decorated def reports its first decorator line, so a cut keeps decorators attached."""
     src = "\n".join(
         [
             "import functools",  # 1
@@ -51,12 +53,14 @@ def test_python_decorated_construct_breaks_above_the_decorator() -> None:
 
 
 def test_python_syntax_error_falls_back_to_heuristic() -> None:
+    """When ast cannot parse the source, detection falls back to the column-0 heuristic."""
     # Unbalanced paren -> ast fails; the column-0 heuristic still finds the def.
     src = "def broken(:\n    pass\n"
     assert preferred_break_lines("m.py", src) == frozenset({1})
 
 
 def test_python_no_constructs_falls_back_to_heuristic() -> None:
+    """Valid Python with no top-level def/class falls through to the heuristic."""
     # Valid Python with no top-level def/class: ast yields no boundaries, so the
     # column-0 heuristic takes over and treats each statement line as a break.
     src = "print('hello')\nx = 1\n"
@@ -69,6 +73,7 @@ def test_python_no_constructs_falls_back_to_heuristic() -> None:
 
 
 def test_typescript_column_zero_declarations_are_breaks() -> None:
+    """Column-0 TS declarations are breaks; indented members and closers are not."""
     src = "\n".join(
         [
             "import { x } from './x';",  # 1
@@ -92,6 +97,7 @@ def test_typescript_column_zero_declarations_are_breaks() -> None:
 
 
 def test_heuristic_skips_closing_and_comment_lines() -> None:
+    """Column-0 closing braces and comment-open/close lines are not treated as breaks."""
     src = "\n".join(
         [
             "function a() {",  # 1
@@ -107,11 +113,13 @@ def test_heuristic_skips_closing_and_comment_lines() -> None:
 
 
 def test_unknown_extension_uses_heuristic() -> None:
+    """An unknown extension routes detection through the column-0 heuristic."""
     src = "rule one\n    indented\nrule two\n"
     assert preferred_break_lines("config.unknown", src) == frozenset({1, 3})
 
 
 def test_empty_path_uses_heuristic() -> None:
+    """An empty path (no extension) routes detection through the heuristic."""
     # An empty path has no extension, so detection falls to the heuristic.
     assert preferred_break_lines("", "def f(): pass") == frozenset({1})
 
@@ -122,6 +130,7 @@ def test_empty_path_uses_heuristic() -> None:
 
 
 def test_minified_single_line_has_no_interior_breaks() -> None:
+    """A one-line minified file yields only line 1, so the splitter degrades to line boundaries."""
     src = "function a(){return 1};function b(){return 2};function c(){return 3}"
     # One physical line -> only line 1, which the splitter never breaks before,
     # so this degrades to line-boundary splitting.
@@ -129,11 +138,13 @@ def test_minified_single_line_has_no_interior_breaks() -> None:
 
 
 def test_empty_and_whitespace_content_return_empty() -> None:
+    """Empty or whitespace-only content returns an empty set (no breaks)."""
     assert preferred_break_lines("m.py", "") == frozenset()
     assert preferred_break_lines("m.ts", "   \n\n\t\n") == frozenset()
 
 
 def test_pure_function_no_io_does_not_mutate_inputs() -> None:
+    """preferred_break_lines is pure: it does not mutate its content argument."""
     src = "def f():\n    return 1\n"
     before = src
     preferred_break_lines("m.py", src)
