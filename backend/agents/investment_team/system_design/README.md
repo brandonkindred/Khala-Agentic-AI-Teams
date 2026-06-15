@@ -38,6 +38,11 @@ that client's IPS.
 The per-feature design docs below supplement the diagram-first overview above
 with implementation detail for individual Strategy Lab capabilities:
 
+- **[`market_data_and_trading_data_flow.md`](./market_data_and_trading_data_flow.md)**
+  — the data layer end to end: the three data planes and their providers
+  (context snapshot, historical OHLCV, streaming registry), provider-selection
+  precedence + geo-failover, how a source is retrieved and streamed into the
+  engine, and the four-step fill-price-from-bar derivation.
 - **[`strategy_lab_pipeline.md`](./strategy_lab_pipeline.md)** — full per-cycle
   pipeline shape (`ideating → fetching_data → analyzing → paper_trading? →
   complete`), the complete list of SSE phase events, the winner gate, and the
@@ -65,7 +70,9 @@ with implementation detail for individual Strategy Lab capabilities:
 | SSE fan-out for run progress | [`api/job_event_bus.py`](../api/job_event_bus.py) |
 | Persistence wrapper over Khala job service | [`api/main.py`](../api/main.py) `_PersistentDict` (line 85) |
 | Multi-provider OHLCV fetcher | [`market_data_service.py`](../market_data_service.py) |
-| Strategy Lab market snapshot (Frankfurter / FRED / CoinGecko) | [`market_lab_data/free_tier.py`](../market_lab_data/free_tier.py) |
+| Strategy Lab market snapshot (Frankfurter / FRED / yfinance) | [`market_lab_data/free_tier.py`](../market_lab_data/free_tier.py) |
+| Streaming provider registry (Binance / Coinbase / Alpaca / OANDA + paid) | [`trading_service/providers/`](../trading_service/providers/) |
+| Mode-agnostic trading engine + fill simulator | [`trading_service/service.py`](../trading_service/service.py), [`trading_service/engine/`](../trading_service/engine/) |
 | QuantConnect / TradingView browser automation | [`tool_agents/web_interfaces/coordinator.py`](../tool_agents/web_interfaces/coordinator.py) |
 | Catalog of core + specialist desk agents | [`agent_catalog.py`](../agent_catalog.py) |
 | Unified-API mount point | [`backend/unified_api/config.py`](../../../unified_api/config.py) |
