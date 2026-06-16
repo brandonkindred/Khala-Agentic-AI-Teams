@@ -115,6 +115,22 @@ def test_existing_file_at_segment_path_raises_400(cache):
     assert exc.value.status_code == 400
 
 
+def test_symlink_segment_escaping_root_raises_400(cache):
+    # Defense-in-depth: a pre-existing symlink at the user-derived segment that
+    # points outside the root must be rejected (not followed), since resolve()
+    # would otherwise escape AGENT_CACHE/planning_v3.
+    base = cache / "planning_v3"
+    base.mkdir(parents=True, exist_ok=True)
+    outside = cache / "outside"
+    outside.mkdir()
+    (base / "escape").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(HTTPException) as exc:
+        resolve_workspace("escape", None, "js")
+    assert exc.value.status_code == 400
+    # The escaping directory must not have been created.
+    assert not (outside / "js").exists()
+
+
 def test_slug_rejects_traversal_and_separators():
     assert _slug("../../etc") not in ("..", ".", "")
     assert "/" not in _slug("a/b/c")

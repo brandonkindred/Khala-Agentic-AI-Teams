@@ -138,8 +138,10 @@ def resolve_workspace(
         - Filesystem ``repo_path`` -> ``<root>/<safe basename>/<job_id>``; the
           supplied path is confined to its sanitized final component and can
           never write outside the root.
-        - Raises ``HTTPException(400)`` only when the directory cannot be
-          created (e.g. ``AGENT_CACHE`` points at a non-directory).
+        - Raises ``HTTPException(400)`` when the directory cannot be created
+          (e.g. ``AGENT_CACHE`` points at a non-directory) or when the fully
+          resolved path would escape the base root (e.g. a pre-existing symlink
+          among the path components).
     """
     base = _base_root()
 
@@ -150,8 +152,21 @@ def resolve_workspace(
     else:
         candidate = base / _safe_segment_from_path(repo_path) / job_id
 
+    # Defense-in-depth: ``resolve()`` follows symlinks, so a pre-existing symlink
+    # at a path component (a deployment-level concern, not reachable through the
+    # sanitized segments) could redirect outside the root. Reject anything that
+    # does not land under the resolved base — checked before mkdir so an escaping
+    # directory is never created.
+    base_resolved = base.resolve()
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(base_resolved):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Resolved workspace escapes the cache root for repo_path={repo_path!r}",
+        )
+
     try:
-        candidate.mkdir(parents=True, exist_ok=True)
+        resolved.mkdir(parents=True, exist_ok=True)
     except (OSError, ValueError) as exc:
         # OSError covers an unwritable root / a non-directory in the path;
         # ValueError covers non-encodable inputs. Map both to a clean 400.
@@ -159,4 +174,4 @@ def resolve_workspace(
             status_code=400,
             detail=f"Could not create workspace for repo_path={repo_path!r}: {exc}",
         ) from exc
-    return str(candidate.resolve())
+    return str(resolved)
