@@ -58,7 +58,7 @@
         color="primary"
         class="run-btn"
         (click)="runNewStrategy()"
-        [disabled]="running || loading || clearingAll"
+        [disabled]="running || loading || clearingAll || !categoriesValid"
       >
         @if (running) {
           <mat-spinner diameter="18" class="btn-spinner"></mat-spinner>
@@ -76,6 +76,36 @@
         </span>
       </button>
     </div>
+  </div>
+
+  <!-- Asset-category selector: constrains which categories the design agent
+       may generate strategies for. All selected = no constraint. -->
+  <div class="category-row">
+    <div class="category-label">
+      <mat-icon>category</mat-icon>
+      <span>Categories</span>
+    </div>
+    <mat-button-toggle-group
+      multiple
+      [ngModel]="selectedCategories"
+      (ngModelChange)="onCategoriesChanged($event)"
+      [disabled]="running || loading || clearingAll"
+      class="category-toggle-group"
+      aria-label="Asset categories to generate strategies for"
+      aria-describedby="category-hint"
+    >
+      @for (cat of categoryOptions; track cat.value) {
+        <mat-button-toggle [value]="cat.value">
+          <mat-icon>{{ cat.icon }}</mat-icon>
+          <span>{{ cat.label }}</span>
+        </mat-button-toggle>
+      }
+    </mat-button-toggle-group>
+    @if (!categoriesValid) {
+      <span id="category-hint" class="category-hint category-hint--error">Select at least one category.</span>
+    } @else {
+      <span id="category-hint" class="category-hint">Strategies are generated only for the selected categories.</span>
+    }
   </div>
 
   <!-- Error banner -->
