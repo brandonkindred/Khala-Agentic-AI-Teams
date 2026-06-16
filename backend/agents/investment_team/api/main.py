@@ -1569,6 +1569,9 @@ def _strategy_lab_worker(
         # a selection covering every class) means "no constraint".
         exclude_asset_classes: Optional[List[str]] = None
         if request.allowed_asset_classes:
+            # ``excluded_for_allowed`` returns ``[]`` when the selection covers
+            # every class; collapse that empty list to ``None`` so the downstream
+            # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
         def _compute_signal_brief() -> tuple[

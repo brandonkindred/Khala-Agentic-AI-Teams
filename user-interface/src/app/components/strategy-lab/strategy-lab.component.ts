@@ -248,8 +248,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         }
         this.applyCategoryConfig(cfg.asset_categories);
       },
-      // Keep the fallback list silently; batch controls + categories still work.
-      error: () => undefined,
+      // Keep the fallback list; batch controls + categories still work. Warn so
+      // an unreachable config endpoint is diagnosable in production.
+      error: (err) =>
+        console.warn('Failed to load strategy lab config; using fallback categories', err),
     });
   }
 
