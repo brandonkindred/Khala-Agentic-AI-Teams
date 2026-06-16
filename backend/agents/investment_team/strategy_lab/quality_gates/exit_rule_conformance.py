@@ -76,11 +76,30 @@ class ExitRuleConformanceGate(GateResultsMixin):
                     self._info("spec.exit_rules empty; engine-enforcement check skipped.")
                 ]
 
+            # Engine exit-rule firing telemetry is unavailable for this run
+            # (``diagnostics is None`` — e.g. a metrics object built without
+            # execution diagnostics attached). The per-symbol firing counters
+            # are the only signal that distinguishes a real enforcement leak
+            # from absent telemetry, so without them the deterministic leak
+            # check must NOT manufacture a critical veto on the strength of
+            # missing data. Surface it as informational and defer to the LLM
+            # alignment audit. The normal path attaches diagnostics onto
+            # ``metrics`` before this gate runs, so this branch only fires if
+            # that wiring regresses — making the failure observable instead of
+            # silently flipping every engine-stopped run to a false leak.
+            if diagnostics is None:
+                return [
+                    self._info(
+                        "engine exit-rule firing telemetry unavailable "
+                        "(diagnostics=None); deterministic enforcement check "
+                        f"skipped for {len(exit_rules)} exit rule(s) across "
+                        f"{len(trades)} trade(s)."
+                    )
+                ]
+
             results: List[QualityGateResult] = []
-            firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
-            firings_by_symbol = (
-                diagnostics.exit_rule_firings_by_symbol if diagnostics is not None else None
-            ) or {}
+            firings = diagnostics.exit_rule_firings or {}
+            firings_by_symbol = diagnostics.exit_rule_firings_by_symbol or {}
 
             # ---- StopLossRule (entry_price basis only — trailing variants need
             # bar-by-bar replay which the gate cannot reconstruct from the trade
@@ -123,15 +142,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
                     )
 
             # ---- Aggregate: engine emitted at least one exit when expected ----
-            if diagnostics is not None:
-                firings = diagnostics.exit_rule_firings or {}
-                total = sum(firings.values())
-                details = "engine_exits: " + (
-                    ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
-                )
-                results.append(
-                    self._info(details + f" (total={total}, trades={len(trades)})")
-                )
+            firings = diagnostics.exit_rule_firings or {}
+            total = sum(firings.values())
+            details = "engine_exits: " + (
+                ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
+            )
+            results.append(
+                self._info(details + f" (total={total}, trades={len(trades)})")
+            )
 
             return results
 
