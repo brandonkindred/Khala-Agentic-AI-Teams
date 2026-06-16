@@ -98,10 +98,8 @@ class ExitRuleConformanceGate(GateResultsMixin):
                 ]
 
             results: List[QualityGateResult] = []
-            firings = (diagnostics.exit_rule_firings if diagnostics is not None else None) or {}
-            firings_by_symbol = (
-                diagnostics.exit_rule_firings_by_symbol if diagnostics is not None else None
-            ) or {}
+            firings = diagnostics.exit_rule_firings or {}
+            firings_by_symbol = diagnostics.exit_rule_firings_by_symbol or {}
 
             # ---- StopLossRule (entry_price basis only — trailing variants need
             # bar-by-bar replay which the gate cannot reconstruct from the trade
@@ -144,15 +142,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
                     )
 
             # ---- Aggregate: engine emitted at least one exit when expected ----
-            if diagnostics is not None:
-                firings = diagnostics.exit_rule_firings or {}
-                total = sum(firings.values())
-                details = "engine_exits: " + (
-                    ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
-                )
-                results.append(
-                    self._info(details + f" (total={total}, trades={len(trades)})")
-                )
+            firings = diagnostics.exit_rule_firings or {}
+            total = sum(firings.values())
+            details = "engine_exits: " + (
+                ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
+            )
+            results.append(
+                self._info(details + f" (total={total}, trades={len(trades)})")
+            )
 
             return results
 
