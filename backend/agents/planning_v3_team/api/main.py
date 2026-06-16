@@ -39,7 +39,10 @@ from planning_v3_team.shared.job_store import (  # noqa: E402
     mark_job_failed,
     update_job,
 )
-from planning_v3_team.shared.workspace import resolve_workspace  # noqa: E402
+from planning_v3_team.shared.workspace import (  # noqa: E402
+    WorkspaceResolutionError,
+    resolve_workspace,
+)
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -140,8 +143,17 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
     job_id = str(uuid.uuid4())
     # repo_path is an output folder, not a source to read: resolve any input
     # (empty, git URL, or client-side path) to a writable server-side directory.
-    resolved_path = resolve_workspace(request.repo_path, request.client_name, job_id)
-    create_job(job_id, resolved_path)
+    try:
+        resolved_path = resolve_workspace(request.repo_path, request.client_name, job_id)
+    except WorkspaceResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        create_job(job_id, resolved_path)
+    except Exception as exc:
+        # Job-store failures (DB connectivity, duplicate id) should surface as a
+        # logged 500 with context rather than an opaque unhandled error.
+        logger.exception("Failed to create Planning V3 job %s", job_id)
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {exc}") from exc
     try:
         from planning_v3_team.temporal.client import is_temporal_enabled
         from planning_v3_team.temporal.start_workflow import start_planning_v3_workflow

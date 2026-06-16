@@ -31,7 +31,15 @@ import os
 import re
 from pathlib import Path
 
-from fastapi import HTTPException
+
+class WorkspaceResolutionError(Exception):
+    """Raised when the output workspace cannot be resolved or created.
+
+    Framework-agnostic on purpose: the API layer translates this into an HTTP
+    400, so this module never depends on FastAPI (or any web framework) and can
+    be reused from a CLI, a worker, or a different framework.
+    """
+
 
 # Discriminates a git URL (git@host:..., ssh://..., https?://..., git://...)
 # from a filesystem path such as ``/Users/...`` or ``C:\...`` (which have no
@@ -138,10 +146,11 @@ def resolve_workspace(
         - Filesystem ``repo_path`` -> ``<root>/<safe basename>/<job_id>``; the
           supplied path is confined to its sanitized final component and can
           never write outside the root.
-        - Raises ``HTTPException(400)`` when the directory cannot be created
-          (e.g. ``AGENT_CACHE`` points at a non-directory) or when the fully
-          resolved path would escape the base root (e.g. a pre-existing symlink
-          among the path components).
+        - Raises ``WorkspaceResolutionError`` when the directory cannot be
+          created (e.g. ``AGENT_CACHE`` points at a non-directory) or when the
+          fully resolved path would escape the base root (e.g. a pre-existing
+          symlink among the path components). The API layer maps this to HTTP
+          400.
     """
     base = _base_root()
 
@@ -160,9 +169,8 @@ def resolve_workspace(
     base_resolved = base.resolve()
     resolved = candidate.resolve()
     if not resolved.is_relative_to(base_resolved):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Resolved workspace escapes the cache root for repo_path={repo_path!r}",
+        raise WorkspaceResolutionError(
+            f"Resolved workspace escapes the cache root for repo_path={repo_path!r}"
         )
 
     try:
@@ -170,8 +178,7 @@ def resolve_workspace(
     except (OSError, ValueError) as exc:
         # OSError covers an unwritable root / a non-directory in the path;
         # ValueError covers non-encodable inputs. Map both to a clean 400.
-        raise HTTPException(
-            status_code=400,
-            detail=f"Could not create workspace for repo_path={repo_path!r}: {exc}",
+        raise WorkspaceResolutionError(
+            f"Could not create workspace for repo_path={repo_path!r}: {exc}"
         ) from exc
     return str(resolved)

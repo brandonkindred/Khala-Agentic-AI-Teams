@@ -50,7 +50,7 @@
     </div>
   </mat-card-content>
   <mat-card-actions align="end">
-    <button mat-raised-button color="primary" (click)="onSubmit()" [disabled]="!canSubmit">
+    <button mat-raised-button color="primary" (click)="onSubmit()" [disabled]="!canSubmit || submitting">
       Run Planning V3
     </button>
   </mat-card-actions>

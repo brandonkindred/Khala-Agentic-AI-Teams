@@ -1,4 +1,4 @@
-import { Component, EventEmitter, Output } from '@angular/core';
+import { Component, EventEmitter, Input, Output } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -33,6 +33,13 @@ import type { PlanningV3RunRequest } from '../../models';
 export class PlanningV3RunFormComponent {
   @Output() submitRequest = new EventEmitter<PlanningV3RunRequest>();
 
+  /**
+   * When true, the form is mid-submission: the button is disabled and
+   * `onSubmit` is a no-op. The parent drives this from its request lifecycle so
+   * a double-click / repeated Enter cannot emit duplicate requests.
+   */
+  @Input() submitting = false;
+
   repoPath = '';
   clientName = '';
   initialBrief = '';
@@ -52,11 +59,12 @@ export class PlanningV3RunFormComponent {
   /**
    * Emit the assembled `PlanningV3RunRequest` on `submitRequest`.
    *
-   * Precondition: no-op when `canSubmit` is false. Blank text fields are sent as
-   * `undefined` (so the backend applies its defaults / resolves the workspace).
+   * Precondition: no-op when `canSubmit` is false or a submission is already in
+   * flight (`submitting`). Blank text fields are sent as `undefined` (so the
+   * backend applies its defaults / resolves the workspace).
    */
   onSubmit(): void {
-    if (!this.canSubmit) return;
+    if (!this.canSubmit || this.submitting) return;
     const request: PlanningV3RunRequest = {
       repo_path: this.repoPath.trim() || undefined,
       client_name: this.clientName.trim() || undefined,

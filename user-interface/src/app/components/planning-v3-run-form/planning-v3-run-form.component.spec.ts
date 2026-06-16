@@ -55,4 +55,21 @@ describe('PlanningV3RunFormComponent', () => {
     component.onSubmit();
     expect(emitted).toBe(false);
   });
+
+  it('onSubmit does not emit while a submission is in flight', () => {
+    component.initialBrief = 'App';
+    component.submitting = true;
+    let count = 0;
+    component.submitRequest.subscribe(() => count++);
+    component.onSubmit();
+    expect(count).toBe(0);
+  });
+
+  it('submit button is disabled while submitting', () => {
+    component.initialBrief = 'App';
+    component.submitting = true;
+    fixture.detectChanges();
+    const button: HTMLButtonElement = fixture.nativeElement.querySelector('button');
+    expect(button.disabled).toBe(true);
+  });
 });

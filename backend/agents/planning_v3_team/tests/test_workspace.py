@@ -14,9 +14,8 @@ _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
 
-from fastapi import HTTPException  # noqa: E402
-
 from planning_v3_team.shared.workspace import (  # noqa: E402
+    WorkspaceResolutionError,
     _repo_name_from_git_url,
     _safe_segment_from_path,
     _slug,
@@ -81,14 +80,13 @@ def test_bare_dotdot_path_falls_back(cache):
     assert out.is_relative_to(root)
 
 
-def test_unwritable_root_raises_400(tmp_path, monkeypatch):
+def test_unwritable_root_raises_error(tmp_path, monkeypatch):
     # AGENT_CACHE pointing at a regular file makes the root uncreatable.
     blocker = tmp_path / "cachefile"
     blocker.write_text("x", encoding="utf-8")
     monkeypatch.setenv("AGENT_CACHE", str(blocker))
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(WorkspaceResolutionError):
         resolve_workspace("", None, "jm")
-    assert exc.value.status_code == 400
 
 
 def test_empty_agent_cache_env_falls_back_to_default(tmp_path, monkeypatch):
@@ -102,20 +100,19 @@ def test_empty_agent_cache_env_falls_back_to_default(tmp_path, monkeypatch):
     assert out.is_dir()
 
 
-def test_existing_file_at_segment_path_raises_400(cache):
+def test_existing_file_at_segment_path_raises_error(cache):
     # Acceptance criterion: when a regular file already occupies the spot where
-    # the workspace would be created, the resolver returns a clean 400. Here the
-    # user-derived segment ('collide') is a file, so mkdir(parents=True) of
-    # <root>/collide/<job_id> hits a non-directory -> HTTPException(400).
+    # the workspace would be created, the resolver raises (the API maps it to a
+    # clean 400). Here the user-derived segment ('collide') is a file, so
+    # mkdir(parents=True) of <root>/collide/<job_id> hits a non-directory.
     root = cache / "planning_v3"
     root.mkdir(parents=True, exist_ok=True)
     (root / "collide").write_text("x", encoding="utf-8")
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(WorkspaceResolutionError):
         resolve_workspace("/some/client/collide", None, "jf")
-    assert exc.value.status_code == 400
 
 
-def test_symlink_segment_escaping_root_raises_400(cache):
+def test_symlink_segment_escaping_root_raises_error(cache):
     # Defense-in-depth: a pre-existing symlink at the user-derived segment that
     # points outside the root must be rejected (not followed), since resolve()
     # would otherwise escape AGENT_CACHE/planning_v3.
@@ -123,10 +120,14 @@ def test_symlink_segment_escaping_root_raises_400(cache):
     base.mkdir(parents=True, exist_ok=True)
     outside = cache / "outside"
     outside.mkdir()
-    (base / "escape").symlink_to(outside, target_is_directory=True)
-    with pytest.raises(HTTPException) as exc:
+    try:
+        (base / "escape").symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        # Symlink creation can fail without privileges (e.g. Windows without
+        # developer mode); the confinement guard isn't exercisable there.
+        pytest.skip("symlinks not supported on this platform/privilege level")
+    with pytest.raises(WorkspaceResolutionError):
         resolve_workspace("escape", None, "js")
-    assert exc.value.status_code == 400
     # The escaping directory must not have been created.
     assert not (outside / "js").exists()
 
