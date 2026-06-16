@@ -91,6 +91,19 @@ def test_unwritable_root_raises_400(tmp_path, monkeypatch):
     assert exc.value.status_code == 400
 
 
+def test_existing_file_at_segment_path_raises_400(cache):
+    # Acceptance criterion: when a regular file already occupies the spot where
+    # the workspace would be created, the resolver returns a clean 400. Here the
+    # user-derived segment ('collide') is a file, so mkdir(parents=True) of
+    # <root>/collide/<job_id> hits a non-directory -> HTTPException(400).
+    root = cache / "planning_v3"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "collide").write_text("x", encoding="utf-8")
+    with pytest.raises(HTTPException) as exc:
+        resolve_workspace("/some/client/collide", None, "jf")
+    assert exc.value.status_code == 400
+
+
 def test_slug_rejects_traversal_and_separators():
     assert _slug("../../etc") not in ("..", ".", "")
     assert "/" not in _slug("a/b/c")

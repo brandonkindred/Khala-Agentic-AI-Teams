@@ -97,6 +97,25 @@ def test_run_confines_traversal_path(client, tmp_path):
     assert workspace.is_relative_to(root)
 
 
+def test_run_400_when_workspace_segment_is_file(client, tmp_path):
+    # Acceptance criterion: an existing file where the workspace would be created
+    # returns 400 from /run. Pre-create a regular file at the user-derived
+    # segment under AGENT_CACHE so the handler's synchronous workspace mkdir
+    # collides with a non-directory and surfaces a clean 400.
+    root = tmp_path / "cache" / "planning_v3"
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "collide").write_text("x", encoding="utf-8")
+    r = client.post(
+        "/run",
+        json={
+            "repo_path": "/client/path/collide",
+            "initial_brief": "x",
+            "use_product_analysis": False,
+        },
+    )
+    assert r.status_code == 400
+
+
 def test_run_with_spec_only_no_brief(client):
     r = client.post(
         "/run",
