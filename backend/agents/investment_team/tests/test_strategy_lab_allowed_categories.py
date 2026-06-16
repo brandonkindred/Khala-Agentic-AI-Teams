@@ -19,6 +19,7 @@ import uuid
 from typing import Any, List, Optional
 
 import pytest
+from pydantic import ValidationError
 
 from investment_team.api import main as lab_main  # noqa: E402
 from investment_team.api.main import (  # noqa: E402
@@ -106,9 +107,12 @@ def test_request_accepts_full_selection() -> None:
 
 
 def test_request_rejects_selection_with_no_valid_category() -> None:
-    with pytest.raises(Exception):
+    # Pydantic surfaces the field validator's ValueError as a ValidationError
+    # at model construction; catch that specific type rather than bare Exception
+    # so an unexpected error (e.g. a validator bug) fails the test loudly.
+    with pytest.raises(ValidationError):
         RunStrategyLabRequest(allowed_asset_classes=["options"])
-    with pytest.raises(Exception):
+    with pytest.raises(ValidationError):
         RunStrategyLabRequest(allowed_asset_classes=["bonds", "nonsense"])
 
 
