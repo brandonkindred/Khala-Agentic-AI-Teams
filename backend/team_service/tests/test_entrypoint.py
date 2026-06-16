@@ -1,0 +1,81 @@
+"""Tests for the generic team-service entrypoint's wrapper-code generator.
+
+These cover ``build_wrapper_body()`` — the per-worker ``_team_wrapper.py`` source
+each uvicorn worker imports — without booting uvicorn. The entrypoint reads
+``TEAM_MODULE``/``TEAM_NAME`` at import time (fail-fast in production), so they
+are set before importing it here.
+"""
+
+from __future__ import annotations
+
+import os
+
+os.environ.setdefault("TEAM_MODULE", "coding_team.api.main")
+os.environ.setdefault("TEAM_NAME", "coding_team")
+
+import pytest  # noqa: E402
+from team_service import entrypoint  # noqa: E402
+
+
+def _compile(src: str) -> None:
+    # Proves the generated wrapper is syntactically valid Python.
+    compile(src, "<wrapper>", "exec")
+
+
+def test_wrapper_body_compiles_and_defines_app() -> None:
+    body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
+    _compile(body)
+    assert "from coding_team.api.main import app as app" in body
+
+
+def test_wrapper_arms_diagnostics_watchdog_and_instrumentation() -> None:
+    body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
+    assert "install_fault_diagnostics()" in body
+    assert "start_memory_watchdog('coding_team')" in body
+    assert "instrument_fastapi_app(app, team_key='coding_team')" in body
+    assert "endpoint='/metrics'" in body  # prometheus /metrics still exposed
+
+
+def test_init_failure_does_not_stub_the_instrumentor() -> None:
+    """The OTel import and the init() call live in separate try blocks, so an
+    init_otel() failure must NOT redefine instrument_fastapi_app as a no-op (the
+    regression this split fixes: a transient init error disabling tracing)."""
+    body = entrypoint.build_wrapper_body("t", "pkg.mod", "app")
+    # Structural check (no reliance on exact log strings): the lone no-op stub
+    # lives in the *import* except block, which precedes the init_otel() call.
+    assert body.count("def instrument_fastapi_app") == 1
+    assert body.index("def instrument_fastapi_app") < body.index("init_otel(service_name=")
+
+
+def test_router_attr_wraps_router_in_fresh_app() -> None:
+    body = entrypoint.build_wrapper_body("t", "pkg.mod", "router")
+    _compile(body)
+    assert "from pkg.mod import router as _router" in body
+    assert "app = FastAPI(title='t API')" in body
+    assert "app.include_router(_router)" in body
+
+
+def test_build_wrapper_body_requires_team_identifiers() -> None:
+    with pytest.raises(ValueError):
+        entrypoint.build_wrapper_body("", "pkg.mod", "app")
+
+
+def test_team_name_with_quote_is_embedded_safely() -> None:
+    """A team_name containing a quote must not break or inject into the generated
+    code — it is embedded via repr(), so the wrapper still compiles."""
+    body = entrypoint.build_wrapper_body("ev'il", "pkg.mod", "app")
+    _compile(body)  # would SyntaxError if the quote escaped the string literal
+    assert 'start_memory_watchdog("ev\'il")' in body or "start_memory_watchdog('ev\\'il')" in body
+
+
+@pytest.mark.parametrize(
+    "team_module,app_attr",
+    [
+        ("pkg.mod; import os", "app"),  # injection via module path
+        ("pkg.mod", "app as x\nimport os"),  # injection via attr
+        ("pkg.mod", "1bad"),  # not an identifier
+    ],
+)
+def test_unsafe_module_or_attr_rejected(team_module: str, app_attr: str) -> None:
+    with pytest.raises(ValueError):
+        entrypoint.build_wrapper_body("t", team_module, app_attr)

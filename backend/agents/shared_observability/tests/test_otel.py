@@ -120,6 +120,30 @@ def test_instrument_fastapi_app_attaches_server_spans(span_exporter) -> None:
     assert resource_attrs.get("service.name")  # set, any value from first init_otel
 
 
+def test_instrument_fastapi_app_is_idempotent(span_exporter, caplog) -> None:
+    """A second instrument call is a quiet no-op — no re-instrumentation, and none
+    of opentelemetry's 'already instrumented' WARNING that muddies crash logs."""
+    import logging
+
+    pytest.importorskip("opentelemetry.instrumentation.fastapi")
+    pytest.importorskip("fastapi")
+
+    from fastapi import FastAPI
+
+    from shared_observability import instrument_fastapi_app
+
+    app = FastAPI()
+    instrument_fastapi_app(app, team_key=_TEAM_KEY)
+    assert getattr(app, "_khala_otel_instrumented", False) is True
+
+    with caplog.at_level(logging.WARNING):
+        instrument_fastapi_app(app, team_key=_TEAM_KEY)  # second call
+
+    assert not any(
+        "already instrumented" in record.getMessage().lower() for record in caplog.records
+    ), "second instrument call must not trigger the 'already instrumented' warning"
+
+
 def test_llm_service_record_call_emits_otel_span(span_exporter) -> None:
     import llm_service.telemetry as telemetry_module
 
