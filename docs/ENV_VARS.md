@@ -196,8 +196,11 @@ cause. No-op when no memory limit can be detected.
 - `TEAM_MEMORY_WATCHDOG_THRESHOLD` — warn fraction in `(0, 1]` (default `0.85`, clamped to `[0.1, 0.99]`).
 - `TEAM_MEMORY_WATCHDOG_INTERVAL_S` — sample interval in seconds (default `30`, floor `1`).
 
-`PYTHONFAULTHANDLER` is also set automatically by the entrypoint so a native
-fault (SIGSEGV/SIGABRT/…) dumps a Python stack instead of dying silently.
+`PYTHONFAULTHANDLER` is also exported by the entrypoint: `install_fault_diagnostics()`
+arms Python's `faulthandler` directly in the running process (so a native fault —
+SIGSEGV/SIGABRT/… — dumps a Python stack instead of dying silently) **and** calls
+`os.environ.setdefault("PYTHONFAULTHANDLER", "1")` so any spawned/forkserver worker
+inherits the same behaviour at interpreter startup.
 
 ---
 

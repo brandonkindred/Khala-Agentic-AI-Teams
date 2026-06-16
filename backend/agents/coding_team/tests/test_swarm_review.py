@@ -696,8 +696,11 @@ def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, monkeypatch, 
     assert gate_errors, "the quality-gate tool error must be logged"
     record = gate_errors[0]
     assert record.levelno == _logging.ERROR  # logger.exception logs at ERROR
-    assert record.exc_info is not None  # full traceback attached, not a bare string
-    assert "tool crashed" in _logging.Formatter().format(record)  # the cause is in the trace
+    # Inspect the attached exception directly rather than rely on log formatting:
+    # the full traceback must be carried so the cause is debuggable.
+    assert record.exc_info is not None
+    exc = record.exc_info[1]
+    assert isinstance(exc, RuntimeError) and exc.args[0] == "tool crashed"
 
 
 # ----------------------------------------------------- un-assignment / double-assignment guard

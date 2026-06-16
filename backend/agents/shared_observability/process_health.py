@@ -21,7 +21,8 @@ documented default, out-of-range values clamp to the floor/ceiling):
 
 * ``TEAM_MEMORY_WATCHDOG_ENABLED`` — master switch (default ``true``).
 * ``TEAM_MEMORY_WATCHDOG_LIMIT_MB`` — override the detected memory budget, in MB.
-* ``TEAM_MEMORY_WATCHDOG_THRESHOLD`` — warn fraction in ``(0, 1]`` (default 0.85).
+* ``TEAM_MEMORY_WATCHDOG_THRESHOLD`` — warn fraction (default 0.85); an env value
+  is clamped to ``[0.1, 0.99]`` (never 1.0 — warning at the limit is too late).
 * ``TEAM_MEMORY_WATCHDOG_INTERVAL_S`` — sample interval in seconds (default 30).
 """
 

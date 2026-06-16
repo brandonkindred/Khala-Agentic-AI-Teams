@@ -89,6 +89,15 @@ def test_read_memory_usage_falls_back_to_rss(monkeypatch, tmp_path) -> None:
     assert ph.read_memory_usage_bytes() == 7 * 1024 * 1024
 
 
+def test_read_memory_usage_all_sources_unavailable_is_none(monkeypatch, tmp_path) -> None:
+    """When neither a cgroup counter nor /proc RSS is readable, return None so the
+    watchdog tick treats the sample as 'unknown' rather than crashing."""
+    monkeypatch.setattr(ph, "_CGROUP_V2_CURRENT", str(tmp_path / "absent_v2"))
+    monkeypatch.setattr(ph, "_CGROUP_V1_USAGE", str(tmp_path / "absent_v1"))
+    monkeypatch.setattr(ph, "read_rss_bytes", lambda *a, **k: None)
+    assert ph.read_memory_usage_bytes() is None
+
+
 def test_read_int_file_variants(tmp_path) -> None:
     good = tmp_path / "g"
     good.write_text("12345\n")
@@ -268,7 +277,7 @@ def test_start_memory_watchdog_requires_team() -> None:
 
 
 @pytest.fixture()
-def _restore_diag_state():
+def restore_diag_state():
     """Save/restore process-global hooks the diagnostics installer mutates."""
     saved = (
         sys.excepthook,
@@ -289,7 +298,7 @@ def _restore_diag_state():
         ) = saved
 
 
-def test_install_fault_diagnostics_sets_hooks_and_is_idempotent(_restore_diag_state) -> None:
+def test_install_fault_diagnostics_sets_hooks_and_is_idempotent(restore_diag_state) -> None:
     import faulthandler
 
     ph._diagnostics_installed = False
@@ -304,7 +313,7 @@ def test_install_fault_diagnostics_sets_hooks_and_is_idempotent(_restore_diag_st
     assert sys.excepthook is ph._sys_excepthook
 
 
-def test_sys_excepthook_logs_uncaught_with_traceback(_restore_diag_state, caplog) -> None:
+def test_sys_excepthook_logs_uncaught_with_traceback(restore_diag_state, caplog) -> None:
     ph._log = logging.getLogger("test.ph.sysexc")
     try:
         raise ValueError("boom in main")
@@ -318,7 +327,7 @@ def test_sys_excepthook_logs_uncaught_with_traceback(_restore_diag_state, caplog
     assert any(r.exc_info for r in caplog.records)
 
 
-def test_sys_excepthook_delegates_keyboardinterrupt(_restore_diag_state) -> None:
+def test_sys_excepthook_delegates_keyboardinterrupt(restore_diag_state) -> None:
     captured = {}
     ph._original_sys_excepthook = lambda *a: captured.setdefault("args", a)
     try:
@@ -331,7 +340,7 @@ def test_sys_excepthook_delegates_keyboardinterrupt(_restore_diag_state) -> None
     assert "args" in captured  # Ctrl-C delegates to the original hook, not logged
 
 
-def test_thread_excepthook_logs_uncaught(_restore_diag_state, caplog) -> None:
+def test_thread_excepthook_logs_uncaught(restore_diag_state, caplog) -> None:
     ph._log = logging.getLogger("test.ph.thread")
     try:
         raise RuntimeError("boom in thread")
@@ -351,7 +360,7 @@ def test_thread_excepthook_logs_uncaught(_restore_diag_state, caplog) -> None:
     assert any(r.exc_info for r in caplog.records)
 
 
-def test_thread_excepthook_ignores_systemexit(_restore_diag_state, caplog) -> None:
+def test_thread_excepthook_ignores_systemexit(restore_diag_state, caplog) -> None:
     ph._log = logging.getLogger("test.ph.sysexit")
     args = types.SimpleNamespace(
         exc_type=SystemExit,
