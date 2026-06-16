@@ -15,6 +15,7 @@ synthesized here regardless of the persisted state.
 
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, List, NamedTuple, Optional
 
 from coding_team.models import AgentStatusEntry
@@ -60,18 +61,23 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEnt
     if not isinstance(stacks_raw, list):
         return []
     roster: List[StackRosterEntry] = []
-    seen_ids: Dict[str, int] = {}
+    used_ids: set[str] = set()
     for i, entry in enumerate(stacks_raw):
         spec = entry if isinstance(entry, dict) else {}
         name = spec.get("name") or f"stack_{i}"
         tools = spec.get("tools_services")
         tools = list(tools) if isinstance(tools, list) else []
-        # Make the agent_id unique even when two stacks share a name, so the orchestrator assigns
-        # them distinct agent_task_map entries (and the UI shows distinct cards) instead of one
-        # overwriting the other. The display name keeps the original, possibly-shared, stack name.
-        count = seen_ids.get(name, 0) + 1
-        seen_ids[name] = count
-        agent_id = name if count == 1 else f"{name}_{count}"
+        # Make the agent_id GLOBALLY unique so the orchestrator assigns each stack a distinct
+        # agent_task_map entry (and the UI shows distinct cards) instead of one overwriting the
+        # other. Bump the suffix until the id is free — this also covers a stack whose literal name
+        # collides with a suffix generated for an earlier duplicate (e.g. "backend", "backend",
+        # "backend_2" -> "backend", "backend_2", "backend_3"). The display name keeps the original.
+        agent_id = name
+        count = 1
+        while agent_id in used_ids:
+            count += 1
+            agent_id = f"{name}_{count}"
+        used_ids.add(agent_id)
         roster.append(StackRosterEntry(agent_id=agent_id, display_name=name, tools_services=tools))
     return roster
 
@@ -79,12 +85,17 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEnt
 def _coerce_fraction(value: Any) -> Optional[float]:
     """Return a float in the closed unit interval, or None for anything non-numeric.
 
-    Postconditions: bools are rejected (``True`` is not a fraction); numeric values are
-    clamped to [0.0, 1.0] so a corrupt record can never drive an out-of-range sub-bar.
+    Postconditions: bools are rejected (``True`` is not a fraction); non-finite values (NaN, ±inf)
+    are rejected — NaN in particular would survive the clamp and then fail the model's [0, 1]
+    constraint, raising on the status endpoint; finite numeric values are clamped to [0.0, 1.0] so
+    a corrupt record can never drive an out-of-range sub-bar.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return min(max(float(value), 0.0), 1.0)
+    fraction = float(value)
+    if not math.isfinite(fraction):
+        return None
+    return min(max(fraction, 0.0), 1.0)
 
 
 def build_agent_statuses(
@@ -120,7 +131,11 @@ def build_agent_statuses(
           engineer's task_id, which is still mapped while the task is in_review), otherwise the
           engineer that owns the activity's task.
     """
+    # Coerce malformed inputs so the function never raises (derive_stack_roster guards stack_specs
+    # itself). A corrupt record with e.g. task_graph_snapshot=None must degrade, not crash.
     activity = current_activity if isinstance(current_activity, dict) else None
+    agent_task_map = agent_task_map if isinstance(agent_task_map, dict) else {}
+    task_graph_snapshot = task_graph_snapshot if isinstance(task_graph_snapshot, list) else []
     tasks_by_id: Dict[Any, Dict[str, Any]] = {
         t.get("id"): t for t in task_graph_snapshot if isinstance(t, dict) and t.get("id")
     }

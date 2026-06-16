@@ -25,7 +25,20 @@ describe('CodingTeamMonitorComponent', () => {
   }
 
   function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
-    return { agent_id: 'a', role: 'senior_engineer', display_name: 'A', status: 'idle', ...over };
+    return {
+      agent_id: 'a',
+      role: 'senior_engineer',
+      display_name: 'A',
+      stack: null,
+      tools_services: [],
+      status: 'idle',
+      current_task_id: null,
+      current_task_title: null,
+      current_step: null,
+      activity_detail: null,
+      activity_fraction: null,
+      ...over,
+    };
   }
 
   it('renders nothing when status is null', async () => {
@@ -112,13 +125,13 @@ describe('CodingTeamMonitorComponent', () => {
     expect(c.progressMode()).toBe('determinate');
   });
 
-  it('uses the warn color when the job failed or was cancelled, primary otherwise', () => {
+  it('uses the warn color when the job failed, was cancelled, or completed with failures', () => {
     const c = component;
-    for (const status of ['failed', 'cancelled']) {
+    for (const status of ['failed', 'cancelled', 'completed_with_failures']) {
       c.status = { job_id: 'j', status } as CodingTeamJobStatus;
       expect(c.progressColor()).toBe('warn');
     }
-    for (const status of ['running', 'completed', 'completed_with_failures']) {
+    for (const status of ['running', 'completed', 'pending']) {
       c.status = { job_id: 'j', status } as CodingTeamJobStatus;
       expect(c.progressColor()).toBe('primary');
     }

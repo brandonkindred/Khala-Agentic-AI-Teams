@@ -61,6 +61,16 @@ def test_derive_roster_disambiguates_duplicate_names():
     assert [e.display_name for e in roster] == ["backend", "backend", "backend"]
 
 
+def test_derive_roster_avoids_cross_name_collisions():
+    # A literal stack name ("backend_2") that matches a suffix generated for an earlier duplicate of
+    # "backend" must still get a unique id — global uniqueness, not merely per-name counting. The
+    # third stack keeps suffixing from its own name, so it becomes "backend_2_2", not a reused id.
+    roster = derive_stack_roster([{"name": "backend"}, {"name": "backend"}, {"name": "backend_2"}])
+    ids = [e.agent_id for e in roster]
+    assert ids == ["backend", "backend_2", "backend_2_2"]
+    assert len(set(ids)) == len(ids)  # all unique — the key guarantee
+
+
 def test_duplicate_stack_names_yield_distinct_engineer_cards():
     # End-to-end: two same-named stacks each mapped to their own task render as two distinct cards.
     stacks = [{"name": "backend"}, {"name": "backend"}]
@@ -92,6 +102,21 @@ def test_coerce_fraction_clamps_and_rejects():
     assert _coerce_fraction(True) is None  # bool is not a fraction
     assert _coerce_fraction("0.5") is None
     assert _coerce_fraction(None) is None
+
+
+def test_coerce_fraction_rejects_non_finite():
+    # NaN/±inf must become None — a NaN would otherwise fail the model's [0, 1] constraint and
+    # crash the status endpoint when build_agent_statuses constructs the AgentStatusEntry.
+    assert _coerce_fraction(float("nan")) is None
+    assert _coerce_fraction(float("inf")) is None
+    assert _coerce_fraction(float("-inf")) is None
+
+
+def test_build_agent_statuses_tolerates_non_list_inputs():
+    # A corrupt record (non-list/non-dict fields) must degrade to a Tech-Lead-only roster, never
+    # raise — the function's "never raises on malformed input" contract.
+    entries = build_agent_statuses(None, None, None, None, None)  # type: ignore[arg-type]
+    assert [e.agent_id for e in entries] == [TECH_LEAD_AGENT_ID]
 
 
 # --------------------------------------------------------------------------- roster shape

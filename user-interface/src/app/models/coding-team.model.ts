@@ -57,26 +57,31 @@ export interface CodingTeamJobStatus {
 export interface CodingTeamAgentStatus {
   /** Stable agent id (engineer stack name, or 'tech_lead'). */
   agent_id: string;
-  /** 'tech_lead' or 'senior_engineer'. */
-  role: string;
+  /** The agent's role in the team. */
+  role: 'tech_lead' | 'senior_engineer';
   /** Human-readable label for the agent card, e.g. "Tech Lead" or "Senior Engineer — frontend". */
   display_name: string;
-  /** Stack name for engineers; null/undefined for the Tech Lead. */
-  stack?: string | null;
-  /** Tools/services the engineer specializes in (empty for the Tech Lead). */
-  tools_services?: string[];
-  /** working/in_review/idle (engineer) or planning/reviewing/idle (Tech Lead). */
+  /** Stack name for engineers; null for the Tech Lead. Always present (backend serializes null). */
+  stack: string | null;
+  /** Tools/services the engineer specializes in (empty for the Tech Lead). Always present. */
+  tools_services: string[];
+  /**
+   * working/in_review/idle (engineer) or planning/reviewing/idle (Tech Lead). Kept as `string`
+   * (not a union) because the backend types it as a free-form value and the component folds any
+   * unrecognized status via `agentStatusClass`/`agentStatusLabel`.
+   */
   status: string;
-  /** Id of the task the agent is currently working, when any. */
-  current_task_id?: string | null;
-  /** Title of the task the agent is currently working, when any. */
-  current_task_title?: string | null;
-  /** Live sub-step from current_activity, when this agent owns it. */
-  current_step?: string | null;
-  /** Human detail from current_activity, when this agent owns it. */
-  activity_detail?: string | null;
-  /** 0.0-1.0 progress of the live sub-step, when this agent owns it. */
-  activity_fraction?: number | null;
+  // The fields below are always present in the response, carrying null when not applicable.
+  /** Id of the task the agent is currently working, or null. */
+  current_task_id: string | null;
+  /** Title of the task the agent is currently working, or null. */
+  current_task_title: string | null;
+  /** Live sub-step from current_activity when this agent owns it, else null. */
+  current_step: string | null;
+  /** Human detail from current_activity when this agent owns it, else null. */
+  activity_detail: string | null;
+  /** 0.0-1.0 progress of the live sub-step when this agent owns it, else null. */
+  activity_fraction: number | null;
 }
 
 /** One row of GET /jobs — enough to spot active GitHub-issue runs without per-job status calls. */

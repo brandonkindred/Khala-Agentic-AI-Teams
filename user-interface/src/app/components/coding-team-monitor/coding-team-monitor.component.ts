@@ -90,9 +90,9 @@ export class CodingTeamMonitorComponent {
     return 'determinate';
   }
 
-  /** 'warn' once the job has failed or been cancelled so the bar reads red; 'primary' otherwise. */
+  /** 'warn' when the run failed, was cancelled, or completed with task failures; 'primary' otherwise. */
   progressColor(): 'primary' | 'warn' {
-    return this.isFailed() ? 'warn' : 'primary';
+    return this.isFailed() || this.status?.status === 'completed_with_failures' ? 'warn' : 'primary';
   }
 
   /** True once the run has finished successfully (with or without per-task failures). */
