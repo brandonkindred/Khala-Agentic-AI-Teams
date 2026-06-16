@@ -11,8 +11,12 @@ This document is the data-layer companion to the existing system-design set:
 - [`../strategy_lab/LOOK_AHEAD_DEFENCE.md`](../strategy_lab/LOOK_AHEAD_DEFENCE.md) — the four-layer look-ahead defence
 
 > **Audience:** a software engineer who needs to understand where price data
-> comes from and how it reaches the simulator. Every claim is anchored to a
-> `file.py:line` so you can jump straight to the code.
+> comes from and how it reaches the simulator.
+>
+> **Reference convention:** every claim is anchored to a `symbol` `file.py:line`
+> pair — a function, method, class, or route. The **symbol name is the durable
+> anchor**; line numbers drift as the code evolves, so if a `:line` no longer
+> matches, grep the symbol to relocate it.
 
 ---
 
@@ -143,9 +147,9 @@ trading feed — it produces a few lines of prompt context, never OHLCV bars.
 
 | Source | Vendor / endpoint | Provides | Key | Code |
 |---|---|---|---|---|
-| FX rates | **Frankfurter** `api.frankfurter.dev/v1/latest` | USD→EUR/GBP/JPY/CHF/CAD/AUD → `fx_rates` | none | `free_tier.py:88` |
-| Macro | **FRED** `series/observations` `DGS10` | US 10Y Treasury yield → `macro_snippets` | optional `FRED_API_KEY` (skipped if unset) | `free_tier.py:107` |
-| Crypto spot | **Yahoo Finance** via `yfinance` (`BTC-USD`, `ETH-USD` `fast_info.last_price`) → `crypto_snapshot` | none | `free_tier.py:131` |
+| FX rates | **Frankfurter** `api.frankfurter.dev/v1/latest` | USD→EUR/GBP/JPY/CHF/CAD/AUD → `fx_rates` | none | `fetch_context` `free_tier.py:88` |
+| Macro | **FRED** `series/observations` `DGS10` | US 10Y Treasury yield → `macro_snippets` | optional `FRED_API_KEY` (skipped if unset) | `fetch_context` `free_tier.py:107` |
+| Crypto spot | **Yahoo Finance** via `yfinance` (`BTC-USD`, `ETH-USD` `fast_info.last_price`) → `crypto_snapshot` | none | `fetch_context` `free_tier.py:131` |
 
 > **Doc drift to be aware of:** the README and `architecture.md` say the crypto
 > snapshot comes from *CoinGecko*; the code (`free_tier.py:131-144`,

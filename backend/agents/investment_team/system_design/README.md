@@ -38,7 +38,7 @@ that client's IPS.
 The per-feature design docs below supplement the diagram-first overview above
 with implementation detail for individual Strategy Lab capabilities:
 
-- **[`market_data_and_trading_data_flow.md`](./market_data_and_trading_data_flow.md)**
+- **[`market_data_flow.md`](./market_data_flow.md)**
   — the data layer end to end: the three data planes and their providers
   (context snapshot, historical OHLCV, streaming registry), provider-selection
   precedence + geo-failover, how a source is retrieved and streamed into the

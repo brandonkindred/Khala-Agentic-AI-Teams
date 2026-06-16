@@ -173,7 +173,7 @@ The Investment Team API includes first-class backtesting endpoints so trading ag
 
 Stored `BacktestRecord` objects include strategy details, run configuration, and performance metrics (`total_return_pct`, `annualized_return_pct`, `volatility_pct`, `sharpe_ratio`, `max_drawdown_pct`, `win_rate_pct`, and `profit_factor`) so agents can compare what has been tried over time.
 
-For how a backtest actually gets its data — the provider chain, the content-addressed OHLCV cache, how bars are streamed into the engine one at a time, and the fill-price-from-bar logic shared with paper trading — see [`system_design/market_data_and_trading_data_flow.md`](./system_design/market_data_and_trading_data_flow.md).
+For how a backtest actually gets its data — the provider chain, the content-addressed OHLCV cache, how bars are streamed into the engine one at a time, and the fill-price-from-bar logic shared with paper trading — see [`system_design/market_data_flow.md`](./system_design/market_data_flow.md).
 
 ## System design docs
 
@@ -183,7 +183,7 @@ Engineer-facing architecture details live under [`system_design/`](./system_desi
 - [`system_design.md`](./system_design/system_design.md) — component view + domain model class diagram.
 - [`use_cases.md`](./system_design/use_cases.md) — use-case diagram grouped by actor and track.
 - [`flow_charts.md`](./system_design/flow_charts.md) — sequence/state diagrams for advisor, Strategy Lab batch, promotion gate, orchestrator mode.
-- [`market_data_and_trading_data_flow.md`](./system_design/market_data_and_trading_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
+- [`market_data_flow.md`](./system_design/market_data_flow.md) — data providers, how data is retrieved and streamed into the engine, provider-selection precedence, and fill-price-from-bar logic for backtest + paper trade.
 - [`strategy_lab_pipeline.md`](./system_design/strategy_lab_pipeline.md) — per-cycle pipeline (`ideating → fetching_data → analyzing → paper_trading? → complete`), phase events, winner gate, skip paths.
 - [`paper_trading_integration.md`](./system_design/paper_trading_integration.md) — paper trading as an integrated cycle step: winner gate, config, failure contract, linkage to `StrategyLabRecord`.
 - [`trade_record_schema.md`](./system_design/trade_record_schema.md) — every `TradeRecord` field, including bid vs fill prices and order-type fields used for post-hoc execution analysis.
