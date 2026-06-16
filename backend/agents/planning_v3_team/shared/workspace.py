@@ -152,6 +152,13 @@ def resolve_workspace(
           symlink among the path components). The API layer maps this to HTTP
           400.
     """
+    # Precondition enforcement (DbC): job_id is server-generated and must be a
+    # single safe segment. Fail loud rather than silently coerce so a future
+    # caller passing a separator / traversal token cannot escape the leaf.
+    assert job_id and job_id not in (".", "..") and not any(
+        c in job_id for c in ("/", "\\", "\x00")
+    ), f"job_id must be a single safe path segment, got {job_id!r}"
+
     base = _base_root()
 
     if not repo_path or not repo_path.strip():

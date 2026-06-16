@@ -20,12 +20,27 @@ describe('PlanningV3RunFormComponent', () => {
     expect(component).toBeTruthy();
   });
 
-  it('canSubmit requires initialBrief, not repoPath', () => {
+  it('canSubmit requires brief or spec, not repoPath', () => {
     expect(component.canSubmit).toBe(false);
     component.repoPath = '/some/path';
     expect(component.canSubmit).toBe(false);
     component.initialBrief = 'Build a home maintenance tracker';
     expect(component.canSubmit).toBe(true);
+  });
+
+  it('canSubmit is true with only specContent (no initial brief)', () => {
+    expect(component.canSubmit).toBe(false);
+    component.specContent = '# Full spec';
+    expect(component.canSubmit).toBe(true);
+  });
+
+  it('onSubmit emits a spec-only request when no brief is given', () => {
+    component.specContent = '# Full spec';
+    let emitted: any;
+    component.submitRequest.subscribe((v) => (emitted = v));
+    component.onSubmit();
+    expect(emitted.initial_brief).toBeUndefined();
+    expect(emitted.spec_content).toBe('# Full spec');
   });
 
   it('onSubmit omits repo_path when blank', () => {

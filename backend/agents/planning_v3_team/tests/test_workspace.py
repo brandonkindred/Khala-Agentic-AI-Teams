@@ -132,6 +132,15 @@ def test_symlink_segment_escaping_root_raises_error(cache):
     assert not (outside / "js").exists()
 
 
+def test_unsafe_job_id_rejected(cache):
+    # job_id is a server-generated UUID; a value containing a path separator or
+    # traversal token violates the documented precondition and must fail loudly
+    # (DbC) rather than be silently coerced or allowed to escape the leaf.
+    for bad in ("../evil", "a/b", "..", "", "x\\y"):
+        with pytest.raises(AssertionError):
+            resolve_workspace("", None, bad)
+
+
 def test_slug_rejects_traversal_and_separators():
     assert _slug("../../etc") not in ("..", ".", "")
     assert "/" not in _slug("a/b/c")

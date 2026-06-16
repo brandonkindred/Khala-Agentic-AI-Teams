@@ -71,7 +71,7 @@ def test_run_without_repo_path_creates_workspace(client, tmp_path):
     assert workspace.is_relative_to(root)
 
 
-def test_run_with_git_url_repo_path(client):
+def test_run_with_git_url_repo_path(client, tmp_path):
     r = client.post(
         "/run",
         json={
@@ -81,7 +81,13 @@ def test_run_with_git_url_repo_path(client):
         },
     )
     assert r.status_code == 200
-    assert "job_id" in r.json()
+    job_id = r.json()["job_id"]
+    # The git URL resolves to a server-side workspace named after the repo,
+    # confined under the cache root (no clone happens).
+    workspace = Path(client.get(f"/status/{job_id}").json()["repo_path"]).resolve()
+    root = (tmp_path / "cache" / "planning_v3").resolve()
+    assert workspace.is_dir()
+    assert workspace.is_relative_to(root)
 
 
 def test_run_confines_traversal_path(client, tmp_path):

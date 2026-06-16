@@ -27,8 +27,9 @@ import type { PlanningV3RunRequest } from '../../models';
  * Collects an optional output folder, client name, initial brief, spec content,
  * and the product-analysis / planning-v2 / market-research toggles, then emits a
  * `PlanningV3RunRequest` via `submitRequest`. Submission is gated on a non-empty
- * initial brief; `repo_path` is omitted when blank so the backend resolves a
- * server-side workspace.
+ * initial brief or spec content (matching the backend's "at least one of
+ * initial_brief / spec_content" rule); `repo_path` is omitted when blank so the
+ * backend resolves a server-side workspace.
  */
 export class PlanningV3RunFormComponent {
   @Output() submitRequest = new EventEmitter<PlanningV3RunRequest>();
@@ -50,10 +51,11 @@ export class PlanningV3RunFormComponent {
 
   /**
    * Whether the form may be submitted.
-   * @returns true when `initialBrief` is non-empty after trimming.
+   * @returns true when `initialBrief` or `specContent` is non-empty after
+   * trimming (the backend requires at least one of them).
    */
   get canSubmit(): boolean {
-    return !!this.initialBrief.trim();
+    return !!(this.initialBrief.trim() || this.specContent.trim());
   }
 
   /**
