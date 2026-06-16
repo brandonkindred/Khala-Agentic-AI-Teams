@@ -275,6 +275,14 @@ def test_start_memory_watchdog_requires_team() -> None:
         ph.start_memory_watchdog("")
 
 
+def test_watchdog_dataclass_is_reexported_from_package() -> None:
+    """``Watchdog`` is the public return type of start_memory_watchdog, so it is
+    importable from the package without reaching into the private submodule."""
+    from shared_observability import Watchdog as ExportedWatchdog
+
+    assert ExportedWatchdog is ph.Watchdog
+
+
 # ------------------------------------------------------ fault / excepthook diagnostics
 
 

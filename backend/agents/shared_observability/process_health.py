@@ -60,7 +60,14 @@ _chain_thread_excepthook: Any = None
 
 
 def _get_logger() -> logging.Logger:
-    """Return the logger diagnostics should write to (set by install, else default)."""
+    """Return the logger diagnostics should write to (set by install, else default).
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns the install-supplied logger when one was set, else the module
+          logger. Never None.
+    """
     return _log if _log is not None else logging.getLogger(__name__)
 
 
@@ -70,6 +77,14 @@ def _get_logger() -> logging.Logger:
 
 
 def _env_bool(name: str, default: bool) -> bool:
+    """Parse a boolean from env var *name*, defensively.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns True for "1"/"true"/"yes"/"on" (case-insensitive), *default*
+          when the var is unset/blank, and False otherwise. Never raises.
+    """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
         return default
@@ -83,6 +98,14 @@ def _env_float(
     minimum: Optional[float] = None,
     maximum: Optional[float] = None,
 ) -> float:
+    """Parse a float from env var *name*, defensively, then clamp.
+
+    Preconditions:
+        - ``minimum <= maximum`` when both are provided.
+    Postconditions:
+        - Returns the parsed value clamped to ``[minimum, maximum]``; falls back
+          to *default* when the var is unset/blank/non-numeric. Never raises.
+    """
     raw = os.environ.get(name)
     value = default
     if raw is not None and raw.strip():
@@ -97,18 +120,52 @@ def _env_float(
     return value
 
 
+def _positive_int_or_none(raw: Optional[str]) -> Optional[int]:
+    """Parse *raw* into a positive int, defensively.
+
+    Shared by the env-override parse paths so "string → positive int" lives in
+    one place instead of being hand-rolled per call site.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a positive int, or None when *raw* is absent/blank/non-numeric
+          or not strictly positive. Never raises.
+    """
+    if not raw or not raw.strip():
+        return None
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 # ---------------------------------------------------------------------------
 # Memory accounting
 # ---------------------------------------------------------------------------
 
 
 def _mb(num_bytes: int) -> int:
-    """Render a byte count as whole megabytes for human-readable log lines."""
+    """Render a byte count as whole megabytes for human-readable log lines.
+
+    Preconditions:
+        - ``num_bytes >= 0``.
+    Postconditions:
+        - Returns ``num_bytes // (1024 * 1024)`` (floor megabytes).
+    """
     return num_bytes // (1024 * 1024)
 
 
 def _read_int_file(path: str) -> Optional[int]:
-    """Read a single integer from *path*, or None if absent / non-numeric / 'max'."""
+    """Read a single integer from *path*.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns the parsed int, or None when the file is absent/unreadable,
+          empty, the literal ``max``, or non-numeric. Never raises.
+    """
     try:
         with open(path, "r", encoding="utf-8") as fh:
             raw = fh.read().strip()
@@ -176,17 +233,14 @@ def detect_memory_limit_bytes() -> Optional[int]:
     ``memory.max`` → cgroup v1 ``memory.limit_in_bytes``. Kernel "unlimited"
     sentinels are treated as no limit.
 
+    Preconditions:
+        - None.
     Postconditions:
         - Returns a positive byte count, or None. Never raises.
     """
-    raw = os.environ.get("TEAM_MEMORY_WATCHDOG_LIMIT_MB")
-    if raw and raw.strip():
-        try:
-            mb = int(float(raw))
-            if mb > 0:
-                return mb * 1024 * 1024
-        except (TypeError, ValueError):
-            pass
+    mb = _positive_int_or_none(os.environ.get("TEAM_MEMORY_WATCHDOG_LIMIT_MB"))
+    if mb is not None:
+        return mb * 1024 * 1024
 
     for path in (_CGROUP_V2_MAX, _CGROUP_V1_LIMIT):
         value = _read_int_file(path)
@@ -263,7 +317,15 @@ def _watchdog_loop(
     stop_event: threading.Event,
     logger: logging.Logger,
 ) -> None:
-    """Sample memory on *interval_s* until *stop_event* is set, logging pressure."""
+    """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
+
+    Preconditions:
+        - ``limit_bytes > 0`` and ``0 < threshold <= 1``.
+    Postconditions:
+        - Emits a WARNING via *logger* once per transition into memory pressure;
+          returns only after *stop_event* is set. A failing sample is swallowed
+          (a diagnostic thread must never crash the worker).
+    """
     warned = False
     while not stop_event.wait(interval_s):
         try:
@@ -358,7 +420,16 @@ def start_memory_watchdog(
 
 
 def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
-    """Log an uncaught main-thread exception, then chain to any prior hook."""
+    """Log an uncaught main-thread exception, then chain to any prior hook.
+
+    Preconditions:
+        - Installed by :func:`install_fault_diagnostics`, which captures any
+          pre-existing hook in ``_chain_sys_excepthook``.
+    Postconditions:
+        - Logs at CRITICAL with the traceback (except KeyboardInterrupt), then
+          invokes the previously-installed custom hook if one exists, else the
+          stdlib default for KeyboardInterrupt. Never raises.
+    """
     if not issubclass(exc_type, KeyboardInterrupt):
         _get_logger().critical(
             "Uncaught exception in main thread; process is terminating",
@@ -376,7 +447,16 @@ def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
 
 
 def _thread_excepthook(args) -> None:
-    """Log an uncaught non-main-thread exception, then chain to any prior hook."""
+    """Log an uncaught non-main-thread exception, then chain to any prior hook.
+
+    Preconditions:
+        - ``args`` is a ``threading.ExceptHookArgs`` (exc_type / exc_value /
+          exc_traceback / thread).
+    Postconditions:
+        - Logs at CRITICAL with the traceback (except SystemExit, a normal thread
+          exit), then invokes a previously-installed custom thread hook if one
+          exists. Never raises.
+    """
     if args.exc_type is not SystemExit:  # SystemExit is a normal thread exit
         thread_name = getattr(args.thread, "name", "?")
         _get_logger().critical(

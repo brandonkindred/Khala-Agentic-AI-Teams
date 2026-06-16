@@ -49,11 +49,13 @@ from shared_observability.otel import (
     shutdown_otel,
 )
 from shared_observability.process_health import (
+    Watchdog,
     install_fault_diagnostics,
     start_memory_watchdog,
 )
 
 __all__ = [
+    "Watchdog",
     "get_meter",
     "get_tracer",
     "init_otel",

@@ -47,9 +47,23 @@ class _NoopBridge:
     """
 
     def __call__(self, *_args: Any, **_kwargs: Any) -> None:
+        """Drop a progress report.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - No-op; no side effects.
+        """
         return None
 
     def clear(self) -> None:
+        """Clear the (absent) progress activity.
+
+        Preconditions:
+            - None.
+        Postconditions:
+            - No-op; no side effects.
+        """
         return None
 
 
