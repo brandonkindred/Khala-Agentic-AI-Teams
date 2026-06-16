@@ -35,9 +35,12 @@ class PlanningV3RunRequest(BaseModel):
         None,
         max_length=4096,
         description=(
-            "Optional server-side output folder for artifacts (context doc, PRD, handoff). "
-            "If omitted or given as a git URL, a workspace is created under AGENT_CACHE. "
-            "Planning V3 never reads source code from this path."
+            "Optional label for the output workspace, not a literal path. Any value "
+            "(filesystem path, git URL, or empty) is reduced to a single sanitized "
+            "directory name; the workspace is always created server-side under "
+            "AGENT_CACHE/planning_v3/<sanitized-label>/<job_id>, never at the supplied "
+            "path. Planning V3 writes artifacts (context doc, PRD, handoff) here and "
+            "never reads source code from it."
         ),
     )
     client_name: Optional[str] = Field(

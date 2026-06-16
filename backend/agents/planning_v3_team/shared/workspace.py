@@ -105,10 +105,14 @@ def _base_root() -> Path:
 
     Postconditions:
         - Returns ``<AGENT_CACHE or '.agent_cache'>/planning_v3`` as a ``Path``,
-          read from the environment on every call (no caching). A relative
-          ``AGENT_CACHE`` is resolved against the process working directory.
+          read from the environment on every call (no caching). An unset, empty,
+          or all-whitespace ``AGENT_CACHE`` falls back to ``.agent_cache`` (so a
+          ``AGENT_CACHE=`` never collapses the root to a bare relative
+          ``planning_v3``). A relative root is resolved against the process
+          working directory.
     """
-    return Path(os.environ.get("AGENT_CACHE", ".agent_cache")) / "planning_v3"
+    cache_dir = os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
+    return Path(cache_dir) / "planning_v3"
 
 
 def resolve_workspace(

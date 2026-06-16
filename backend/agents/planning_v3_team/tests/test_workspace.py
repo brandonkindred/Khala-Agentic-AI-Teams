@@ -91,6 +91,17 @@ def test_unwritable_root_raises_400(tmp_path, monkeypatch):
     assert exc.value.status_code == 400
 
 
+def test_empty_agent_cache_env_falls_back_to_default(tmp_path, monkeypatch):
+    # A set-but-empty/whitespace AGENT_CACHE must not collapse the root to a bare
+    # relative 'planning_v3'; it falls back to the '.agent_cache' default. Run
+    # from a temp cwd so the relative default materializes there, not the repo.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AGENT_CACHE", "")
+    out = Path(resolve_workspace("", "Acme", "jE"))
+    assert out == (tmp_path / ".agent_cache" / "planning_v3" / "Acme" / "jE").resolve()
+    assert out.is_dir()
+
+
 def test_existing_file_at_segment_path_raises_400(cache):
     # Acceptance criterion: when a regular file already occupies the spot where
     # the workspace would be created, the resolver returns a clean 400. Here the
