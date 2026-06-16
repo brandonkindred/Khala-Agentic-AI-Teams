@@ -241,16 +241,34 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   /**
    * Adopt the backend's authoritative category list when present, keeping the
-   * UI in sync with the server's ideation-valid classes. Resets the selection
-   * to "all selected" (the no-constraint default). A missing/empty list leaves
-   * the fallback options untouched.
+   * UI in sync with the server's ideation-valid classes. A missing/empty list
+   * leaves the fallback options untouched.
+   *
+   * The selection is reconciled rather than blindly reset: if it was still the
+   * untouched "all selected" default, it becomes all of the new options; if the
+   * user had already narrowed it (e.g. while a slow config request was in
+   * flight), their choice is preserved, dropping only values the backend no
+   * longer offers (falling back to all when nothing valid remains, so a run is
+   * never left with zero categories).
    */
   private applyCategoryConfig(categories: string[] | undefined): void {
     if (!categories?.length) {
       return;
     }
+    const selected = new Set(this.selectedCategories);
+    const wasUntouchedDefault =
+      this.selectedCategories.length === this.categoryOptions.length &&
+      this.categoryOptions.every((c) => selected.has(c.value));
+
     this.categoryOptions = buildCategoryOptions(categories);
-    this.selectedCategories = this.categoryOptions.map((c) => c.value);
+    const available = this.categoryOptions.map((c) => c.value);
+
+    if (wasUntouchedDefault) {
+      this.selectedCategories = available;
+      return;
+    }
+    const preserved = available.filter((v) => selected.has(v));
+    this.selectedCategories = preserved.length ? preserved : available;
   }
 
   ngOnDestroy(): void {

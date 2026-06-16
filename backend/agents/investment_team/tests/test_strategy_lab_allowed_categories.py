@@ -212,6 +212,23 @@ def test_mix_hint_exclude_drops_excluded_classes_from_counts() -> None:
     assert "commodities=" not in out
 
 
+def test_mix_hint_excluded_class_priors_not_counted_as_stocks() -> None:
+    # Regression: a prior in an *excluded* but valid class (crypto, here) must be
+    # skipped — not folded into the stocks count. Folding it would inflate stocks
+    # and wrongly steer the model away from stocks even though stocks is allowed.
+    records = [_record("stocks") for _ in range(2)] + [_record("crypto") for _ in range(5)]
+    out = asset_class_mix_hint(records, exclude=["crypto", "futures", "commodities"])
+    # Only the two genuine stocks priors count; the five excluded crypto priors
+    # are outside the steering window.
+    assert "stocks=2" in out
+    assert "forex=0" in out
+    # crypto must not appear in the counts at all (neither as its own line nor
+    # absorbed into stocks → which would have read stocks=7).
+    assert "crypto" not in out
+    assert "stocks=7" not in out
+    assert "Equities are relatively heavy" not in out
+
+
 def test_mix_hint_no_exclude_matches_unconstrained() -> None:
     """An empty exclusion must reproduce the unconstrained hint verbatim."""
     records = [_record("stocks") for _ in range(4)]

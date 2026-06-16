@@ -109,6 +109,35 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(component.selectedCategories).toEqual(['forex', 'crypto']);
   });
 
+  it('preserves a user-narrowed selection when the backend list arrives late', () => {
+    // Simulate the user deselecting categories before the config response lands.
+    component.selectedCategories = ['forex'];
+    apiSpy.getStrategyLabConfig.mockReturnValue(
+      of({
+        batch_count_min: 1,
+        batch_count_max: 50,
+        asset_categories: ['stocks', 'crypto', 'forex', 'futures', 'commodities'],
+      }),
+    );
+
+    (component as unknown as { loadConfig(): void }).loadConfig();
+
+    // Their choice survives (it is not clobbered back to "all selected").
+    expect(component.selectedCategories).toEqual(['forex']);
+  });
+
+  it('falls back to all categories when a narrowed selection no longer exists', () => {
+    component.selectedCategories = ['stocks'];
+    apiSpy.getStrategyLabConfig.mockReturnValue(
+      of({ batch_count_min: 1, batch_count_max: 50, asset_categories: ['forex', 'crypto'] }),
+    );
+
+    (component as unknown as { loadConfig(): void }).loadConfig();
+
+    // 'stocks' is gone; rather than leave zero categories, default to all.
+    expect(component.selectedCategories).toEqual(['forex', 'crypto']);
+  });
+
   it('keeps the fallback categories when the backend omits the list', () => {
     apiSpy.getStrategyLabConfig.mockReturnValue(
       of({ batch_count_min: 1, batch_count_max: 50 }),

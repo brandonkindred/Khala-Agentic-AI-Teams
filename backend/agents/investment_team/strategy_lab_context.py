@@ -304,9 +304,13 @@ def asset_class_mix_hint(
         k = normalize_asset_class(r.strategy.asset_class)
         if k in counts:
             counts[k] += 1
-        elif "stocks" in counts:
-            # Unknown/coerced class folds into stocks only when stocks is still
-            # an allowed target; otherwise it is outside the steering window.
+        elif k not in PROMPT_ASSET_CLASSES and "stocks" in counts:
+            # Only a class outside the ideation-valid set (``options``, or an
+            # unknown coerced by ``normalize_asset_class``) folds into stocks,
+            # and only when stocks is still an allowed target. A class that is a
+            # valid ideation target but *excluded* this run is deliberately
+            # skipped — it is outside the steering window, so counting it (as
+            # stocks or anything else) would fabricate the diversity picture.
             counts["stocks"] += 1
 
     n_sample = len(sample)
