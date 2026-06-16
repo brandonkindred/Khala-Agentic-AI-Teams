@@ -437,11 +437,16 @@ def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
         - Installed by :func:`install_fault_diagnostics`, which captures any
           pre-existing hook in ``_chain_sys_excepthook``.
     Postconditions:
-        - Logs at CRITICAL with the traceback (except KeyboardInterrupt), then
-          invokes the previously-installed custom hook if one exists, else the
-          stdlib default for KeyboardInterrupt. Never raises.
+        - Logs at CRITICAL with the traceback, except for KeyboardInterrupt and
+          SystemExit (intentional terminations, not faults), then invokes the
+          previously-installed custom hook if one exists, else the stdlib default
+          for KeyboardInterrupt. Never raises.
     """
-    if not issubclass(exc_type, KeyboardInterrupt):
+    # KeyboardInterrupt/SystemExit are intentional terminations, not faults —
+    # don't log them at CRITICAL. (In practice the interpreter handles a
+    # main-thread SystemExit before it reaches sys.excepthook; the guard mirrors
+    # _thread_excepthook and covers a direct call.)
+    if not issubclass(exc_type, (KeyboardInterrupt, SystemExit)):
         _get_logger().critical(
             "Uncaught exception in main thread; process is terminating",
             exc_info=(exc_type, exc_value, exc_tb),

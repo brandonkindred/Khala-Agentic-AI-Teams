@@ -198,9 +198,10 @@ cause. No-op when no memory limit can be detected.
 
 `PYTHONFAULTHANDLER` is also exported by the entrypoint: `install_fault_diagnostics()`
 arms Python's `faulthandler` directly in the running process (so a native fault —
-SIGSEGV/SIGABRT/… — dumps a Python stack instead of dying silently) **and** calls
-`os.environ.setdefault("PYTHONFAULTHANDLER", "1")` so any spawned/forkserver worker
-inherits the same behaviour at interpreter startup.
+SIGSEGV/SIGABRT/… — dumps a Python stack instead of dying silently) **and** sets
+`os.environ["PYTHONFAULTHANDLER"] = "1"` when it isn't already set, so any
+spawned/forkserver worker inherits the same behaviour at interpreter startup
+(an operator-set value is preserved).
 
 ---
 

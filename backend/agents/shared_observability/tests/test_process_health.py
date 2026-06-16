@@ -410,6 +410,17 @@ def test_sys_excepthook_delegates_keyboardinterrupt(restore_diag_state) -> None:
     assert "args" in captured  # Ctrl-C chains to the previous hook, not logged
 
 
+def test_sys_excepthook_ignores_systemexit(restore_diag_state, caplog) -> None:
+    """SystemExit is an intentional termination, not a fault — it must not be
+    logged at CRITICAL (symmetry with the thread hook). In practice the
+    interpreter handles main-thread SystemExit before sys.excepthook anyway."""
+    ph._log = logging.getLogger("test.ph.sysexit_main")
+    ph._chain_sys_excepthook = None
+    with caplog.at_level(logging.CRITICAL, logger="test.ph.sysexit_main"):
+        ph._sys_excepthook(SystemExit, SystemExit(0), None)
+    assert not caplog.records  # not logged
+
+
 def test_sys_excepthook_chains_to_previous_custom_hook(restore_diag_state, caplog) -> None:
     """A non-default previous hook (e.g. Sentry) is still invoked after logging,
     so installing our diagnostics never disables another error reporter."""
