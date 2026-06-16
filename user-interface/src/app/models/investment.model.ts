@@ -696,6 +696,12 @@ export interface RunStrategyLabRequest {
 export interface StrategyLabConfigResponse {
   batch_count_min: number;
   batch_count_max: number;
+  /**
+   * Ideation-valid asset categories the design agent can generate strategies
+   * for. The UI sources its category selector from this list so it stays in
+   * sync with the backend. May be absent on older servers.
+   */
+  asset_categories?: string[];
 }
 
 export interface StrategyLabRunResponse {

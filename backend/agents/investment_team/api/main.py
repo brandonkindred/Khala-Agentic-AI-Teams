@@ -107,6 +107,7 @@ from investment_team.strategy_lab.spec_dsl import (
     SizingRule,
 )
 from investment_team.strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
     excluded_for_allowed,
     normalize_allowed_asset_classes,
 )
@@ -316,6 +317,10 @@ class StrategyLabConfigResponse(BaseModel):
 
     batch_count_min: int
     batch_count_max: int
+    # The ideation-valid asset categories the design agent can generate
+    # strategies for. Served so the UI's category selector is sourced from the
+    # backend (single source of truth) rather than a hand-maintained copy.
+    asset_categories: List[str] = Field(default_factory=list)
 
 
 def _run_state_to_response(state: Dict[str, Any]) -> StrategyLabRunStatusResponse:
@@ -1999,6 +2004,7 @@ def get_strategy_lab_config() -> StrategyLabConfigResponse:
     return StrategyLabConfigResponse(
         batch_count_min=1,
         batch_count_max=_MAX_BATCH_COUNT,
+        asset_categories=list(PROMPT_ASSET_CLASSES),
     )
 
 

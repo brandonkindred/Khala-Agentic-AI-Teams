@@ -168,7 +168,7 @@ def normalize_allowed_asset_classes(raw: Optional[Iterable[object]]) -> Optional
     return [c for c in PROMPT_ASSET_CLASSES if c in seen]
 
 
-def excluded_for_allowed(allowed: Iterable[str]) -> List[str]:
+def excluded_for_allowed(allowed: Optional[Iterable[str]]) -> List[str]:
     """Complement of an allowed-category set within the ideation-valid classes.
 
     The design pipeline constrains generation via an *exclusion* list
@@ -177,14 +177,19 @@ def excluded_for_allowed(allowed: Iterable[str]) -> List[str]:
     that the user did NOT allow.
 
     Preconditions:
-      - ``allowed`` is an iterable of canonical class labels (typically the
-        output of :func:`normalize_allowed_asset_classes`).
+      - ``allowed`` is ``None`` or an iterable of canonical class labels
+        (typically the output of :func:`normalize_allowed_asset_classes`, which
+        may itself return ``None`` for "no constraint").
 
     Postconditions:
-      - Returns the canonical-order list of :data:`PROMPT_ASSET_CLASSES` not
-        present in ``allowed``. Empty when ``allowed`` covers every class
-        (i.e. no constraint).
+      - Returns ``[]`` when ``allowed`` is ``None`` (no constraint → nothing
+        excluded).
+      - Otherwise returns the canonical-order list of
+        :data:`PROMPT_ASSET_CLASSES` not present in ``allowed``. Empty when
+        ``allowed`` covers every class (also no constraint).
     """
+    if allowed is None:
+        return []
     allowed_set = set(allowed)
     return [c for c in PROMPT_ASSET_CLASSES if c not in allowed_set]
 
@@ -231,16 +236,19 @@ def asset_class_mix_hint(
     records: List[StrategyLabRecord],
     *,
     tail: int = 24,
-    exclude: Optional[Iterable[str]] = None,
+    exclude: Optional[List[str]] = None,
 ) -> str:
     """Steer the LLM toward a balanced mix of asset classes across lab runs.
 
     ``exclude`` (optional) names asset classes the design agent is forbidden to
-    pick this run — the complement of a user's allowed-category selection. When
-    provided, the menu, recent-class counts, and underrepresented-class steering
-    are all restricted to the still-allowed classes so the hint never nudges the
-    model toward a class the run is not permitted to use. When ``exclude`` is
-    ``None`` / empty the output is identical to the unconstrained hint.
+    pick this run — the complement of a user's allowed-category selection. It is
+    typed ``List[str]`` (not ``Iterable[str]``) deliberately: ``str`` is itself
+    iterable, so an ``Iterable[str]`` annotation would silently accept a bare
+    string and iterate its characters. When provided, the menu, recent-class
+    counts, and underrepresented-class steering are all restricted to the
+    still-allowed classes so the hint never nudges the model toward a class the
+    run is not permitted to use. When ``exclude`` is ``None`` / empty the output
+    is identical to the unconstrained hint.
     """
     allowed = [c for c in PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
     if not allowed:
@@ -249,11 +257,16 @@ def asset_class_mix_hint(
         # only guards against a misuse from internal callers.
         allowed = list(PROMPT_ASSET_CLASSES)
     menu = _or_join(allowed)
+    # The anti-stocks-bias nudge only makes sense when stocks is still a valid
+    # choice; drop it when stocks has been excluded so the hint never references
+    # a class the run cannot use. Unconstrained runs keep stocks, so their
+    # output is unchanged.
+    stocks_nudge = "do **not** default to stocks; " if "stocks" in allowed else ""
     if not records:
         return (
             "No prior lab strategies. Choose **asset_class** from "
             f"{menu} with similar frequency over time — "
-            "do **not** default to stocks; pick the class that best fits your multi-signal story."
+            f"{stocks_nudge}pick the class that best fits your multi-signal story."
         )
 
     ordered = sorted(records, key=lambda x: x.created_at)
@@ -278,7 +291,7 @@ def asset_class_mix_hint(
         return (
             "No executed lab backtests yet. Choose **asset_class** from "
             f"{menu} with similar frequency over time — "
-            "do **not** default to stocks; pick the class that best fits your multi-signal story."
+            f"{stocks_nudge}pick the class that best fits your multi-signal story."
         )
     # #535: count only asset classes the LLM may still target. 'options' is
     # rejected by StrategySpecValidator, so leaving it in the count dict

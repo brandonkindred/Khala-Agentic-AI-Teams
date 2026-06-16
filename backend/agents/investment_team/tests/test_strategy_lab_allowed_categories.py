@@ -94,6 +94,12 @@ def test_excluded_empty_when_all_classes_allowed() -> None:
     assert excluded_for_allowed(list(PROMPT_ASSET_CLASSES)) == []
 
 
+def test_excluded_none_returns_empty() -> None:
+    # ``None`` (no constraint, e.g. from normalize_allowed_asset_classes) excludes
+    # nothing rather than raising — the function stays total against misuse.
+    assert excluded_for_allowed(None) == []
+
+
 # ---------------------------------------------------------------------------
 # RunStrategyLabRequest.allowed_asset_classes validation
 # ---------------------------------------------------------------------------
@@ -211,6 +217,22 @@ def test_mix_hint_no_exclude_matches_unconstrained() -> None:
     records = [_record("stocks") for _ in range(4)]
     assert asset_class_mix_hint(records, exclude=[]) == asset_class_mix_hint(records)
     assert asset_class_mix_hint([], exclude=None) == asset_class_mix_hint([])
+
+
+def test_mix_hint_drops_stocks_nudge_when_stocks_excluded() -> None:
+    # No-records menu must not tell the model "do not default to stocks" when
+    # stocks isn't even a permitted choice.
+    out = asset_class_mix_hint([], exclude=["stocks"])
+    assert "do **not** default to stocks" not in out
+    assert "stocks" not in out
+    assert "pick the class that best fits your multi-signal story" in out
+
+
+def test_mix_hint_keeps_stocks_nudge_when_stocks_allowed() -> None:
+    # When stocks is still allowed, the anti-bias nudge stays (unconstrained
+    # output is unchanged by the exclusion plumbing).
+    assert "do **not** default to stocks" in asset_class_mix_hint([])
+    assert "do **not** default to stocks" in asset_class_mix_hint([], exclude=["crypto"])
 
 
 # ---------------------------------------------------------------------------
@@ -372,3 +394,15 @@ def test_worker_passes_no_exclusion_when_unset(
     )
     seen = _run_worker_capturing_exclusions(monkeypatch, request)
     assert seen == [None]
+
+
+# ---------------------------------------------------------------------------
+# GET /strategy-lab/config — surfaces the category list to the UI
+# ---------------------------------------------------------------------------
+
+
+def test_config_endpoint_exposes_asset_categories() -> None:
+    # The UI sources its category selector from this list, so it must match the
+    # backend's ideation-valid classes exactly.
+    cfg = lab_main.get_strategy_lab_config()
+    assert cfg.asset_categories == list(PROMPT_ASSET_CLASSES)

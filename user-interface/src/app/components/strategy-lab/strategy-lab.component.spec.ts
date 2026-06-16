@@ -18,6 +18,7 @@ describe('StrategyLabComponent — asset categories', () => {
   let apiSpy: {
     runStrategyLab: ReturnType<typeof vi.fn>;
     streamRunStatus: ReturnType<typeof vi.fn>;
+    getStrategyLabConfig: ReturnType<typeof vi.fn>;
   };
 
   const startResponse: StrategyLabRunStartResponse = {
@@ -33,6 +34,9 @@ describe('StrategyLabComponent — asset categories', () => {
       // NEVER: emits nothing and never completes, so the stream-complete cascade
       // (loadResults / loadPaperTradingResults) stays out of these focused tests.
       streamRunStatus: vi.fn().mockReturnValue(NEVER),
+      getStrategyLabConfig: vi.fn().mockReturnValue(
+        of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
+      ),
     };
 
     await TestBed.configureTestingModule({
@@ -72,17 +76,13 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(component.running).toBe(true);
   });
 
-  it('sends all categories when none are deselected', () => {
+  it('omits allowed_asset_classes when every category is selected', () => {
+    // All selected == "no constraint": the field is omitted rather than sending
+    // the full list (functionally equivalent server-side, smaller payload).
     component.runNewStrategy();
 
     const payload = apiSpy.runStrategyLab.mock.calls[0][0] as RunStrategyLabRequest;
-    expect(payload.allowed_asset_classes).toEqual([
-      'stocks',
-      'crypto',
-      'forex',
-      'futures',
-      'commodities',
-    ]);
+    expect(payload.allowed_asset_classes).toBeUndefined();
   });
 
   it('does not start a run when no category is selected', () => {
@@ -93,5 +93,35 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
     expect(component.running).toBe(false);
     expect(component.error).toContain('at least one asset category');
+  });
+
+  it('adopts the backend category list and resets the selection to all', () => {
+    apiSpy.getStrategyLabConfig.mockReturnValue(
+      of({ batch_count_min: 1, batch_count_max: 50, asset_categories: ['forex', 'crypto'] }),
+    );
+
+    // loadConfig is private; invoke it directly to exercise the sync path
+    // without triggering the rest of ngOnInit.
+    (component as unknown as { loadConfig(): void }).loadConfig();
+
+    expect(component.categoryOptions.map((c) => c.value)).toEqual(['forex', 'crypto']);
+    expect(component.categoryOptions[0].label).toBe('Forex');
+    expect(component.selectedCategories).toEqual(['forex', 'crypto']);
+  });
+
+  it('keeps the fallback categories when the backend omits the list', () => {
+    apiSpy.getStrategyLabConfig.mockReturnValue(
+      of({ batch_count_min: 1, batch_count_max: 50 }),
+    );
+
+    (component as unknown as { loadConfig(): void }).loadConfig();
+
+    expect(component.categoryOptions.map((c) => c.value)).toEqual([
+      'stocks',
+      'crypto',
+      'forex',
+      'futures',
+      'commodities',
+    ]);
   });
 });

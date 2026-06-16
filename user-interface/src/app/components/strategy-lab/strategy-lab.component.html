@@ -93,7 +93,7 @@
       aria-label="Asset categories to generate strategies for"
       aria-describedby="category-hint"
     >
-      @for (cat of STRATEGY_LAB_CATEGORIES; track cat.value) {
+      @for (cat of categoryOptions; track cat.value) {
         <mat-button-toggle [value]="cat.value">
           <mat-icon>{{ cat.icon }}</mat-icon>
           <span>{{ cat.label }}</span>

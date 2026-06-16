@@ -70,19 +70,34 @@ interface AssetCategoryOption {
   icon: string;
 }
 
+/** Title-case an asset-category value for display (e.g. 'stocks' → 'Stocks'). */
+function categoryLabel(value: string): string {
+  return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+/** Build selector options from category values, deriving label + Material icon. */
+function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
+  return values.map((value) => ({
+    value,
+    label: categoryLabel(value),
+    icon: ASSET_CLASS_ICONS[value] ?? 'category',
+  }));
+}
+
 /**
- * Asset categories the user may constrain generation to. These mirror the
- * backend's ideation-valid classes (PROMPT_ASSET_CLASSES); `options` is omitted
- * because it is never a valid ideation target. The selected values are sent as
- * `allowed_asset_classes` on the run request.
+ * Fallback asset categories, used until `GET /strategy-lab/config` supplies the
+ * authoritative list (and if that fetch fails). These mirror the backend's
+ * ideation-valid classes (PROMPT_ASSET_CLASSES); `options` is omitted because it
+ * is never a valid ideation target. Module-level constants in this file use
+ * SCREAMING_SNAKE_CASE (see STRATEGY_LAB_PHASES, ASSET_CLASS_ICONS).
  */
-const STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = [
-  { value: 'stocks',      label: 'Stocks',      icon: ASSET_CLASS_ICONS['stocks'] },
-  { value: 'crypto',      label: 'Crypto',      icon: ASSET_CLASS_ICONS['crypto'] },
-  { value: 'forex',       label: 'Forex',       icon: ASSET_CLASS_ICONS['forex'] },
-  { value: 'futures',     label: 'Futures',     icon: ASSET_CLASS_ICONS['futures'] },
-  { value: 'commodities', label: 'Commodities', icon: ASSET_CLASS_ICONS['commodities'] },
-];
+const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
+  'stocks',
+  'crypto',
+  'forex',
+  'futures',
+  'commodities',
+]);
 
 @Component({
   selector: 'app-strategy-lab',
@@ -136,13 +151,15 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   batchSize = 10;
   batchCount = 1;
 
-  // Asset-category selection. Defaults to every category (equivalent to no
-  // constraint); the user narrows it to steer the design agent. At least one
-  // category must stay selected — a run with zero categories is invalid. Held
-  // as a plain array so it binds directly to the multi-select toggle group's
-  // ngModel; canonical order is reasserted when the run payload is built.
-  readonly STRATEGY_LAB_CATEGORIES = STRATEGY_LAB_CATEGORIES;
-  selectedCategories: string[] = STRATEGY_LAB_CATEGORIES.map((c) => c.value);
+  // Asset-category selection. `categoryOptions` is seeded from the fallback list
+  // and replaced by the backend's authoritative set once `loadConfig` resolves
+  // (single source of truth). Defaults to every category selected (equivalent to
+  // no constraint); the user narrows it to steer the design agent. At least one
+  // category must stay selected — a run with zero categories is invalid.
+  // `selectedCategories` is a plain array so it binds directly to the multi-
+  // select toggle group's ngModel; canonical order is reasserted at payload time.
+  categoryOptions: AssetCategoryOption[] = DEFAULT_STRATEGY_LAB_CATEGORIES;
+  selectedCategories: string[] = DEFAULT_STRATEGY_LAB_CATEGORIES.map((c) => c.value);
 
   /** A run requires at least one selected category. */
   get categoriesValid(): boolean {
@@ -215,10 +232,25 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         if (cfg.batch_count_max >= this.BATCH_COUNT_MIN) {
           this.BATCH_COUNT_MAX = cfg.batch_count_max;
         }
+        this.applyCategoryConfig(cfg.asset_categories);
       },
-      // Keep the hardcoded fallback silently; batch controls still work.
+      // Keep the fallback list silently; batch controls + categories still work.
       error: () => undefined,
     });
+  }
+
+  /**
+   * Adopt the backend's authoritative category list when present, keeping the
+   * UI in sync with the server's ideation-valid classes. Resets the selection
+   * to "all selected" (the no-constraint default). A missing/empty list leaves
+   * the fallback options untouched.
+   */
+  private applyCategoryConfig(categories: string[] | undefined): void {
+    if (!categories?.length) {
+      return;
+    }
+    this.categoryOptions = buildCategoryOptions(categories);
+    this.selectedCategories = this.categoryOptions.map((c) => c.value);
   }
 
   ngOnDestroy(): void {
@@ -452,6 +484,20 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Start a new Strategy Lab run with the current form configuration.
+   *
+   * Preconditions: at least one asset category is selected (`categoriesValid` is
+   *   true). When violated, this sets `error` and returns without calling the API.
+   * Postconditions: clamps batch size/count into range and reflects them back to
+   *   the form; sets `running = true` and clears `error`/`completionWarning`;
+   *   POSTs a `RunStrategyLabRequest`. `allowed_asset_classes` is sent in
+   *   canonical (`categoryOptions`) order only when the selection is a strict
+   *   subset — when every category is selected the field is omitted, matching the
+   *   backend's "no constraint" semantics and trimming the payload. On success it
+   *   subscribes to the run's status stream; on error it resets `running` and
+   *   surfaces the message.
+   */
   runNewStrategy(): void {
     // Guard the invalid-zero-categories case (the button is also disabled, but
     // a programmatic call must not start a run constrained to nothing).
@@ -467,9 +513,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.batchCount = batchCount;
 
     // Preserve canonical order so the payload is stable regardless of click order.
-    const allowedAssetClasses = STRATEGY_LAB_CATEGORIES
+    const allowedAssetClasses = this.categoryOptions
       .map((c) => c.value)
       .filter((v) => this.selectedCategories.includes(v));
+    // Omit the field when every category is selected — equivalent to "no
+    // constraint" server-side, and a smaller payload.
+    const allConstraintsOff = allowedAssetClasses.length === this.categoryOptions.length;
 
     this.running = true;
     this.error = null;
@@ -478,7 +527,7 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       .runStrategyLab({
         batch_size: batchSize,
         batch_count: batchCount,
-        allowed_asset_classes: allowedAssetClasses,
+        allowed_asset_classes: allConstraintsOff ? undefined : allowedAssetClasses,
       })
       .subscribe({
       next: (res) => {
