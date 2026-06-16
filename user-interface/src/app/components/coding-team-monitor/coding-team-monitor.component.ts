@@ -47,10 +47,20 @@ export class CodingTeamMonitorComponent {
   objectiveText(): string {
     const s = this.status;
     if (s?.status_text) return s.status_text;
-    if (s?.phase === 'task_graph') return 'Building the task graph';
-    if (s?.phase === 'coding') return 'Implementing the task graph';
-    if (s?.phase === 'completed') return 'Run complete';
-    return 'Coding team run';
+    switch (s?.phase) {
+      case 'task_graph':
+        return 'Building the task graph';
+      case 'coding':
+        return 'Implementing the task graph';
+      case 'publishing':
+        return 'Opening the pull request';
+      case 'reviewing':
+        return 'Reviewing the pull request';
+      case 'completed':
+        return 'Run complete';
+      default:
+        return 'Coding team run';
+    }
   }
 
   // --- Overall progress + phase stepper --------------------------------------------------
@@ -62,51 +72,90 @@ export class CodingTeamMonitorComponent {
     return Math.min(Math.max(p, 0), 100);
   }
 
-  /** Indeterminate while the job runs before any numeric progress lands; else determinate. */
+  /** Indeterminate while a started job has no numeric progress yet; else determinate. */
   progressMode(): 'determinate' | 'indeterminate' {
-    if (this.overallProgress() === null && this.status?.status === 'running') return 'indeterminate';
+    const s = this.status?.status;
+    if (this.overallProgress() === null && (s === 'running' || s === 'pending')) {
+      return 'indeterminate';
+    }
     return 'determinate';
   }
 
-  /** 'warn' once the job has failed so the bar reads red; 'primary' otherwise. */
+  /** 'warn' once the job has failed or been cancelled so the bar reads red; 'primary' otherwise. */
   progressColor(): 'primary' | 'warn' {
-    return this.status?.status === 'failed' ? 'warn' : 'primary';
+    return this.isFailed() ? 'warn' : 'primary';
   }
 
-  /** The phase that drives the stepper; folds terminal states and HITL pauses onto a real step. */
-  private effectivePhase(): string {
+  /** True once the run has finished successfully (with or without per-task failures). */
+  private isDone(): boolean {
+    const s = this.status?.status;
+    return s === 'completed' || s === 'completed_with_failures';
+  }
+
+  /** True once the run has ended unsuccessfully (hard failure or cancellation). */
+  isFailed(): boolean {
+    const s = this.status?.status;
+    return s === 'failed' || s === 'cancelled';
+  }
+
+  /**
+   * The stepper step the run is currently at (or stopped at), as a phase id in ALL_PHASES.
+   *
+   * Folds the backend's many phases/states onto the three steps so the stepper is never blank and
+   * never lies: `publishing`/`reviewing` are post-coding finishing work (Coding); a failed run
+   * stamps phase='completed' even when it died in planning, so it is located from the task graph
+   * rather than trusted as done; an unknown phase on a live run defaults to Planning.
+   */
+  private currentStepId(): string {
     const s = this.status;
     if (!s) return '';
-    if (
-      s.status === 'completed' ||
-      s.status === 'completed_with_failures' ||
-      s.phase === 'completed'
-    ) {
-      return 'completed';
+    if (this.isDone()) return 'completed';
+    const hasGraph = (s.task_graph_snapshot?.length ?? 0) > 0;
+    if (this.isFailed()) return hasGraph ? 'coding' : 'task_graph';
+    switch (s.phase) {
+      case 'task_graph':
+        return 'task_graph';
+      case 'coding':
+      case 'publishing': // coding done; pushing the branch / opening the PR
+      case 'reviewing': // reviewing a pull request
+        return 'coding';
+      case 'completed':
+        return 'completed';
+      case 'paused':
+        return hasGraph ? 'coding' : 'task_graph';
+      default:
+        // Unknown/empty phase on a live run: show at least Planning so the stepper isn't blank.
+        return 'task_graph';
     }
-    if (s.phase === 'task_graph' || s.phase === 'coding') return s.phase;
-    // A paused job keeps the step it paused in; infer it from whether a task graph exists yet.
-    if (s.phase === 'paused') {
-      return (s.task_graph_snapshot?.length ?? 0) > 0 ? 'coding' : 'task_graph';
-    }
-    return s.phase ?? '';
+  }
+
+  private currentStepIndex(): number {
+    return this.ALL_PHASES.findIndex((p) => p.id === this.currentStepId());
   }
 
   isPhaseCompleted(phaseId: string): boolean {
-    const current = this.effectivePhase();
-    if (current === 'completed') return true;
-    const order = this.ALL_PHASES.map((p) => p.id);
-    const currentIdx = order.indexOf(current);
-    const targetIdx = order.indexOf(phaseId);
-    return targetIdx >= 0 && currentIdx > targetIdx;
+    if (this.isDone()) return true;
+    const idx = this.ALL_PHASES.findIndex((p) => p.id === phaseId);
+    return idx >= 0 && idx < this.currentStepIndex();
+  }
+
+  /** The step a failed/cancelled run stopped at — rendered red, never as a green/in-progress step. */
+  isFailedPhase(phaseId: string): boolean {
+    return this.isFailed() && this.currentStepId() === phaseId;
   }
 
   isCurrentPhase(phaseId: string): boolean {
-    return this.effectivePhase() === phaseId;
+    // A failed run's reached step renders as failed, not as an in-progress "current" step.
+    if (this.isFailed()) return false;
+    return this.currentStepId() === phaseId;
   }
 
   isPhasePending(phaseId: string): boolean {
-    return !this.isPhaseCompleted(phaseId) && !this.isCurrentPhase(phaseId);
+    return (
+      !this.isPhaseCompleted(phaseId) &&
+      !this.isCurrentPhase(phaseId) &&
+      !this.isFailedPhase(phaseId)
+    );
   }
 
   // --- Job-level current activity sub-bar ------------------------------------------------

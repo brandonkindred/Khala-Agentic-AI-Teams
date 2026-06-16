@@ -133,6 +133,17 @@
     color: #fff;
     border-color: #2e7d32;
   }
+
+  &.failed &__node {
+    background: #c62828;
+    color: #fff;
+    border-color: #c62828;
+  }
+
+  &.failed &__label {
+    color: #c62828;
+    font-weight: 600;
+  }
 }
 
 // --- Live sub-agent activity ---

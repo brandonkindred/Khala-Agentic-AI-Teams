@@ -35,6 +35,7 @@
             class="ct-step"
             [class.completed]="isPhaseCompleted(phase.id)"
             [class.current]="isCurrentPhase(phase.id)"
+            [class.failed]="isFailedPhase(phase.id)"
             [class.pending]="isPhasePending(phase.id)"
             [class.has-connector]="!last"
           >
@@ -69,7 +70,7 @@
       <div class="ct-monitor__agents">
         <span class="ct-monitor__section-label">Team</span>
         <div class="ct-monitor__agent-grid">
-          @for (agent of status.agents; track agent.agent_id) {
+          @for (agent of status.agents; track $index) {
             <div
               class="ct-agent ct-agent--{{ agent.status }}"
               [class.ct-agent--active]="isAgentActive(agent)"

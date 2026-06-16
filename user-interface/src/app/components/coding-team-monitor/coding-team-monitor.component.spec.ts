@@ -49,6 +49,10 @@ describe('CodingTeamMonitorComponent', () => {
     expect(c.objectiveText()).toBe('Building the task graph');
     c.status = { ...c.status, phase: 'coding' };
     expect(c.objectiveText()).toBe('Implementing the task graph');
+    c.status = { ...c.status, phase: 'publishing' };
+    expect(c.objectiveText()).toBe('Opening the pull request');
+    c.status = { ...c.status, phase: 'reviewing' };
+    expect(c.objectiveText()).toBe('Reviewing the pull request');
     c.status = { ...c.status, phase: 'completed' };
     expect(c.objectiveText()).toBe('Run complete');
     c.status = { ...c.status, phase: 'mystery' };
@@ -92,20 +96,28 @@ describe('CodingTeamMonitorComponent', () => {
     expect(el.querySelector('.ct-monitor__progress-pct')).toBeNull();
   });
 
-  it('is indeterminate while running before any progress lands, determinate otherwise', () => {
+  it('is indeterminate while a started job has no progress yet, determinate otherwise', () => {
     const c = new CodingTeamMonitorComponent();
-    c.status = { job_id: 'j', status: 'running' } as CodingTeamJobStatus;
-    expect(c.progressMode()).toBe('indeterminate');
+    for (const status of ['running', 'pending']) {
+      c.status = { job_id: 'j', status } as CodingTeamJobStatus;
+      expect(c.progressMode()).toBe('indeterminate');
+    }
     c.status = { job_id: 'j', status: 'waiting_for_user' } as CodingTeamJobStatus;
+    expect(c.progressMode()).toBe('determinate');
+    c.status = { job_id: 'j', status: 'running', progress: 10 } as CodingTeamJobStatus;
     expect(c.progressMode()).toBe('determinate');
   });
 
-  it('uses the warn color only when the job has failed', () => {
+  it('uses the warn color when the job failed or was cancelled, primary otherwise', () => {
     const c = new CodingTeamMonitorComponent();
-    c.status = { job_id: 'j', status: 'failed' } as CodingTeamJobStatus;
-    expect(c.progressColor()).toBe('warn');
-    c.status = { job_id: 'j', status: 'running' } as CodingTeamJobStatus;
-    expect(c.progressColor()).toBe('primary');
+    for (const status of ['failed', 'cancelled']) {
+      c.status = { job_id: 'j', status } as CodingTeamJobStatus;
+      expect(c.progressColor()).toBe('warn');
+    }
+    for (const status of ['running', 'completed', 'completed_with_failures']) {
+      c.status = { job_id: 'j', status } as CodingTeamJobStatus;
+      expect(c.progressColor()).toBe('primary');
+    }
   });
 
   it('marks stepper phases completed/current/pending from the phase', () => {
@@ -113,17 +125,66 @@ describe('CodingTeamMonitorComponent', () => {
     c.status = { job_id: 'j', status: 'running', phase: 'coding' } as CodingTeamJobStatus;
     expect(c.isPhaseCompleted('task_graph')).toBe(true);
     expect(c.isCurrentPhase('coding')).toBe(true);
+    expect(c.isFailedPhase('coding')).toBe(false);
     expect(c.isPhasePending('completed')).toBe(true);
   });
 
-  it('treats a terminal job as fully completed in the stepper', () => {
+  it('treats a terminal success as fully completed in the stepper', () => {
     const c = new CodingTeamMonitorComponent();
     for (const status of ['completed', 'completed_with_failures']) {
       c.status = { job_id: 'j', status } as CodingTeamJobStatus;
       expect(c.isPhaseCompleted('task_graph')).toBe(true);
       expect(c.isPhaseCompleted('coding')).toBe(true);
       expect(c.isPhaseCompleted('completed')).toBe(true);
+      expect(c.isCurrentPhase('completed')).toBe(true); // done step is also "current" (green wins)
+      expect(c.isFailedPhase('completed')).toBe(false);
     }
+  });
+
+  it('does NOT render a failed run as all-completed; the reached step is failed, not green', () => {
+    // The orchestrator stamps phase='completed' on failure — the stepper must not read as success.
+    const c = new CodingTeamMonitorComponent();
+    c.status = {
+      job_id: 'j',
+      status: 'failed',
+      phase: 'completed',
+      task_graph_snapshot: [{ id: 't1', title: 'x', status: 'in_progress' }],
+    } as CodingTeamJobStatus;
+    expect(c.isPhaseCompleted('task_graph')).toBe(true); // planning got done
+    expect(c.isFailedPhase('coding')).toBe(true); // stopped (failed) in coding
+    expect(c.isCurrentPhase('coding')).toBe(false); // failed, not "in progress"
+    expect(c.isPhaseCompleted('completed')).toBe(false); // NOT green
+    expect(c.isPhasePending('completed')).toBe(true);
+  });
+
+  it('locates a failure during planning (no task graph) on the Planning step', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'failed', phase: 'completed' } as CodingTeamJobStatus;
+    expect(c.isFailedPhase('task_graph')).toBe(true);
+    expect(c.isPhaseCompleted('coding')).toBe(false);
+  });
+
+  it('keeps the stepper on Coding (not blank) during the publishing and reviewing phases', () => {
+    // _defer_terminal_success rewrites a finished GitHub-issue run to (running, publishing) while
+    // it pushes the branch and opens the PR; the /review-pr flow uses phase='reviewing'.
+    const c = new CodingTeamMonitorComponent();
+    for (const phase of ['publishing', 'reviewing']) {
+      c.status = { job_id: 'j', status: 'running', phase } as CodingTeamJobStatus;
+      expect(c.isPhaseCompleted('task_graph')).toBe(true);
+      expect(c.isCurrentPhase('coding')).toBe(true);
+      expect(c.isPhasePending('completed')).toBe(true);
+    }
+  });
+
+  it('maps a live task_graph phase to Planning and a live completed phase to the Completed step', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'running', phase: 'task_graph' } as CodingTeamJobStatus;
+    expect(c.isCurrentPhase('task_graph')).toBe(true);
+    // A non-terminal status that nonetheless reports phase='completed' (e.g. a transient state)
+    // still resolves the Completed step rather than falling through.
+    c.status = { job_id: 'j', status: 'running', phase: 'completed' } as CodingTeamJobStatus;
+    expect(c.isCurrentPhase('completed')).toBe(true);
+    expect(c.isPhaseCompleted('coding')).toBe(true);
   });
 
   it('infers the paused step from whether a task graph exists yet', () => {
@@ -139,13 +200,14 @@ describe('CodingTeamMonitorComponent', () => {
     expect(c.isCurrentPhase('coding')).toBe(true);
   });
 
-  it('leaves all stepper steps pending for an unknown phase and a null status', () => {
+  it('defaults an unknown phase on a live run to Planning, and pins nothing for a null status', () => {
     const c = new CodingTeamMonitorComponent();
     c.status = { job_id: 'j', status: 'running', phase: 'mystery' } as CodingTeamJobStatus;
-    expect(c.isPhasePending('task_graph')).toBe(true);
+    expect(c.isCurrentPhase('task_graph')).toBe(true); // not blank
     expect(c.isPhasePending('coding')).toBe(true);
     c.status = null;
     expect(c.isCurrentPhase('task_graph')).toBe(false);
+    expect(c.isPhasePending('task_graph')).toBe(true);
   });
 
   // --- Live sub-agent activity -------------------------------------------------
@@ -236,5 +298,19 @@ describe('CodingTeamMonitorComponent', () => {
   it('omits the roster section entirely when there are no agents', async () => {
     const el = await render({ job_id: 'j1', status: 'running', agents: [] });
     expect(el.querySelector('.ct-monitor__agents')).toBeNull();
+  });
+
+  it('renders every roster entry even when two agents share an agent_id (no duplicate-key crash)', async () => {
+    // Two stacks with the same name yield duplicate agent_ids; tracking by index keeps @for from
+    // throwing NG0955 on duplicate keys.
+    const el = await render({
+      job_id: 'j1',
+      status: 'running',
+      agents: [
+        agent({ agent_id: 'backend', display_name: 'Senior Engineer — backend', status: 'working' }),
+        agent({ agent_id: 'backend', display_name: 'Senior Engineer — backend', status: 'idle' }),
+      ],
+    });
+    expect(el.querySelectorAll('.ct-agent').length).toBe(2);
   });
 });
