@@ -64,6 +64,44 @@ const ASSET_CLASS_ICONS: Record<string, string> = {
   options: 'tune',
 };
 
+interface AssetCategoryOption {
+  value: string;
+  label: string;
+  icon: string;
+}
+
+/** Title-case an asset-category value for display (e.g. 'stocks' → 'Stocks'). */
+function categoryLabel(value: string): string {
+  return value.length ? value.charAt(0).toUpperCase() + value.slice(1) : value;
+}
+
+/** Build selector options from category values, deriving label + Material icon. */
+function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
+  return values.map((value) => ({
+    value,
+    label: categoryLabel(value),
+    icon: ASSET_CLASS_ICONS[value] ?? 'category',
+  }));
+}
+
+/**
+ * Fallback asset categories, used only until `GET /strategy-lab/config` supplies
+ * the authoritative list (and if that fetch ever fails). The backend is the
+ * source of truth — `applyCategoryConfig` overwrites this with the server's
+ * `asset_categories` on init, so a stale fallback is visible only on the first
+ * paint / on a config failure. Keep this list in sync with the backend's
+ * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
+ * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
+ * (see STRATEGY_LAB_PHASES, ASSET_CLASS_ICONS).
+ */
+const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
+  'stocks',
+  'crypto',
+  'forex',
+  'futures',
+  'commodities',
+]);
+
 @Component({
   selector: 'app-strategy-lab',
   standalone: true,
@@ -115,6 +153,32 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   BATCH_COUNT_MAX = 100;
   batchSize = 10;
   batchCount = 1;
+
+  // Asset-category selection. `categoryOptions` is seeded from the fallback list
+  // and replaced by the backend's authoritative set once `loadConfig` resolves
+  // (single source of truth). Defaults to every category selected (equivalent to
+  // no constraint); the user narrows it to steer the design agent. At least one
+  // category must stay selected — a run with zero categories is invalid.
+  // `selectedCategories` is a plain array so it binds directly to the multi-
+  // select toggle group's ngModel; canonical order is reasserted at payload time.
+  categoryOptions: AssetCategoryOption[] = DEFAULT_STRATEGY_LAB_CATEGORIES;
+  selectedCategories: string[] = DEFAULT_STRATEGY_LAB_CATEGORIES.map((c) => c.value);
+  // Set once the user touches the category toggles. Distinguishes an explicit
+  // "I want exactly these" selection (even when that happens to be all of them)
+  // from the untouched default, so a late backend category list reconciles
+  // against the user's intent rather than inferring it from selection state.
+  private userAdjustedCategories = false;
+
+  /** A run requires at least one selected category. */
+  get categoriesValid(): boolean {
+    return this.selectedCategories.length > 0;
+  }
+
+  /** Toggle-group change handler: record the user's selection and mark it explicit. */
+  onCategoriesChanged(values: string[]): void {
+    this.selectedCategories = values;
+    this.userAdjustedCategories = true;
+  }
 
   filter: FilterMode = 'all';
   results: StrategyLabResultsResponse | null = null;
@@ -182,10 +246,42 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
         if (cfg.batch_count_max >= this.BATCH_COUNT_MIN) {
           this.BATCH_COUNT_MAX = cfg.batch_count_max;
         }
+        this.applyCategoryConfig(cfg.asset_categories);
       },
-      // Keep the hardcoded fallback silently; batch controls still work.
-      error: () => undefined,
+      // Keep the fallback list; batch controls + categories still work. Warn so
+      // an unreachable config endpoint is diagnosable in production.
+      error: (err) =>
+        console.warn('Failed to load strategy lab config; using fallback categories', err),
     });
+  }
+
+  /**
+   * Adopt the backend's authoritative category list when present, keeping the
+   * UI in sync with the server's ideation-valid classes. A missing/empty list
+   * leaves the fallback options untouched.
+   *
+   * The selection is reconciled rather than blindly reset: if the user has not
+   * touched the toggles (`userAdjustedCategories` is false), it becomes all of
+   * the new options (the no-constraint default); if the user made an explicit
+   * choice — e.g. while a slow config request was in flight — that choice is
+   * preserved, dropping only values the backend no longer offers (falling back
+   * to all when nothing valid remains, so a run is never left with zero
+   * categories).
+   */
+  private applyCategoryConfig(categories: string[] | undefined): void {
+    if (!categories?.length) {
+      return;
+    }
+    const selected = new Set(this.selectedCategories);
+    this.categoryOptions = buildCategoryOptions(categories);
+    const available = this.categoryOptions.map((c) => c.value);
+
+    if (!this.userAdjustedCategories) {
+      this.selectedCategories = available;
+      return;
+    }
+    const preserved = available.filter((v) => selected.has(v));
+    this.selectedCategories = preserved.length ? preserved : available;
   }
 
   ngOnDestroy(): void {
@@ -419,17 +515,60 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     });
   }
 
+  /**
+   * Start a new Strategy Lab run with the current form configuration.
+   *
+   * Preconditions: no run is already in progress (`running` is false — a
+   *   re-entrant call is ignored) and at least one asset category is selected
+   *   (`categoriesValid` is true; when violated this sets `error` and returns
+   *   without calling the API).
+   * Postconditions: clamps batch size/count into range and reflects them back to
+   *   the form; sets `running = true` and clears `error`/`completionWarning`;
+   *   POSTs a `RunStrategyLabRequest`. `allowed_asset_classes` is sent in
+   *   canonical (`categoryOptions`) order only when the selection is a strict
+   *   subset — when every category is selected the field is omitted, matching the
+   *   backend's "no constraint" semantics and trimming the payload. On success it
+   *   subscribes to the run's status stream; on error it resets `running` and
+   *   surfaces the message.
+   */
   runNewStrategy(): void {
+    // Re-entrancy guard: the run button is disabled while a run is active, but a
+    // programmatic call or double-click must not start a second run — that would
+    // orphan the first run and open a duplicate status stream.
+    if (this.running) {
+      return;
+    }
+    // Guard the invalid-zero-categories case (the button is also disabled, but
+    // a programmatic call must not start a run constrained to nothing).
+    if (!this.categoriesValid) {
+      this.error = 'Select at least one asset category to generate strategies for.';
+      return;
+    }
+
     const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
     const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
     // Reflect any clamping back into the form so the user sees what was sent.
     this.batchSize = batchSize;
     this.batchCount = batchCount;
 
+    // Preserve canonical order so the payload is stable regardless of click order.
+    const allowedAssetClasses = this.categoryOptions
+      .map((c) => c.value)
+      .filter((v) => this.selectedCategories.includes(v));
+    // Omit the field when every category is selected — equivalent to "no
+    // constraint" server-side, and a smaller payload.
+    const allConstraintsOff = allowedAssetClasses.length === this.categoryOptions.length;
+
     this.running = true;
     this.error = null;
     this.completionWarning = null;
-    this.api.runStrategyLab({ batch_size: batchSize, batch_count: batchCount }).subscribe({
+    this.api
+      .runStrategyLab({
+        batch_size: batchSize,
+        batch_count: batchCount,
+        allowed_asset_classes: allConstraintsOff ? undefined : allowedAssetClasses,
+      })
+      .subscribe({
       next: (res) => {
         this.activeRunId = res.run_id;
         this.runStatus = {

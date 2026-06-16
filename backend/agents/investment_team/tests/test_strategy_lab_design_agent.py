@@ -252,6 +252,34 @@ def test_run_includes_exclude_directives_in_prompt(
     assert any("MANDATORY EXCLUSION" in p and "forex" in p for p in capture.calls)
 
 
+def test_run_includes_positive_menu_in_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excluding all-but-one class must surface a positive menu naming the single
+    remaining category — supplied by the (menu-restricted) mix hint, not a second
+    allow-list line in the design agent (which would duplicate the menu)."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    capture = _patch_design(monkeypatch, payload)
+
+    DesignAgent().run(
+        prior_records=[],
+        exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+    )
+
+    # The positive menu comes from asset_class_mix_hint ("Choose **asset_class**
+    # from forex ..."); the design agent no longer restates the allowed list.
+    assert any(
+        "Choose **asset_class** from forex" in p and "MANDATORY EXCLUSION" in p
+        for p in capture.calls
+    )
+    # The redundant second positive allow-list line must be gone.
+    assert all("Choose **asset_class** ONLY from:" not in p for p in capture.calls)
+
+
 # ---------------------------------------------------------------------------
 # revise() — must serialize the critique into the prompt
 # ---------------------------------------------------------------------------
