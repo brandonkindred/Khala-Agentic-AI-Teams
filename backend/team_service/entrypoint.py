@@ -131,7 +131,8 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
         - Returns valid Python source that defines a module-level ``app`` and
           always ``compile()``s.
     """
-    assert team_name and team_module, "team_name and team_module are required"
+    if not (team_name and team_module):
+        raise ValueError("team_name and team_module are required")
     # team_module/app_attr go into a `from X import Y` statement where repr()
     # can't apply, so validate them as safe identifiers to foreclose code
     # injection via a hostile TEAM_MODULE / TEAM_APP_ATTR. team_name only ever

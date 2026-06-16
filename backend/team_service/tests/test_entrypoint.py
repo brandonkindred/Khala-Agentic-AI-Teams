@@ -56,7 +56,7 @@ def test_router_attr_wraps_router_in_fresh_app() -> None:
 
 
 def test_build_wrapper_body_requires_team_identifiers() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         entrypoint.build_wrapper_body("", "pkg.mod", "app")
 
 

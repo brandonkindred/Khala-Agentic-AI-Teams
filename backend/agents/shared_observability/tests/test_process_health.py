@@ -166,7 +166,8 @@ def test_evaluate_memory_pressure_threshold() -> None:
     [(-1, 100, 0.5), (10, 0, 0.5), (10, 100, 0.0), (10, 100, 1.5)],
 )
 def test_evaluate_memory_pressure_precondition_violations(rss, limit, thr) -> None:
-    with pytest.raises(AssertionError):
+    # Raises (not asserts) so the guard holds even under `python -O`.
+    with pytest.raises(ValueError):
         ph.evaluate_memory_pressure(rss, limit, thr)
 
 

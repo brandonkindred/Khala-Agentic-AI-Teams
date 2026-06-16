@@ -192,18 +192,22 @@ def detect_memory_limit_bytes() -> Optional[int]:
 
 
 def evaluate_memory_pressure(rss_bytes: int, limit_bytes: int, threshold: float) -> bool:
-    """Return True when RSS has reached ``threshold`` of the memory limit.
+    """Return True when usage has reached ``threshold`` of the memory limit.
 
-    Preconditions:
+    Preconditions (enforced with ``raise`` rather than ``assert`` so they hold
+    even under ``python -O``, since this is a module-public function):
         - ``rss_bytes >= 0``.
         - ``limit_bytes > 0``.
         - ``0 < threshold <= 1``.
     Postconditions:
         - Returns ``rss_bytes >= limit_bytes * threshold``; no side effects.
     """
-    assert rss_bytes >= 0, "rss_bytes must be non-negative"
-    assert limit_bytes > 0, "limit_bytes must be positive"
-    assert 0 < threshold <= 1, "threshold must be in (0, 1]"
+    if rss_bytes < 0:
+        raise ValueError("rss_bytes must be non-negative")
+    if limit_bytes <= 0:
+        raise ValueError("limit_bytes must be positive")
+    if not 0 < threshold <= 1:
+        raise ValueError("threshold must be in (0, 1]")
     return rss_bytes >= limit_bytes * threshold
 
 
