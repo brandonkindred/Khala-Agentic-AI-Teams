@@ -49,6 +49,10 @@ export interface CodingTeamJobStatus {
 /**
  * Live status of one coding-team agent, for the per-agent monitor cards. Mirrors the backend
  * `AgentStatusEntry`. The roster is the Tech Lead (coordinator) plus one Senior SWE per stack.
+ *
+ * Properties are intentionally snake_case: like the other API-model interfaces in this codebase
+ * (e.g. `CodingTeamJobStatus` above, `JobStatusResponse`), this type is the direct JSON shape of
+ * the backend response, so the keys match the wire format and need no mapping layer.
  */
 export interface CodingTeamAgentStatus {
   /** Stable agent id (engineer stack name, or 'tech_lead'). */

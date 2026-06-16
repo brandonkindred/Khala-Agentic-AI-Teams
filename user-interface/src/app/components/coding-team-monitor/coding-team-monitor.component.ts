@@ -141,6 +141,7 @@ export class CodingTeamMonitorComponent {
     return this.ALL_PHASES.findIndex((p) => p.id === this.currentStepId());
   }
 
+  /** True for a step the run has already passed (and every step once the run finished). */
   isPhaseCompleted(phaseId: string): boolean {
     if (this.isDone()) return true;
     const idx = this.ALL_PHASES.findIndex((p) => p.id === phaseId);
@@ -152,13 +153,17 @@ export class CodingTeamMonitorComponent {
     return this.isFailed() && this.currentStepId() === phaseId;
   }
 
+  /**
+   * True for the step currently in progress. A finished run marks every step completed (green) and
+   * a failed run's reached step renders failed — neither is also "current", so a step never carries
+   * two conflicting state classes.
+   */
   isCurrentPhase(phaseId: string): boolean {
-    // A finished run marks every step completed (green), and a failed run's reached step renders
-    // failed — neither should also be "current", or a step would carry two conflicting classes.
     if (this.isDone() || this.isFailed()) return false;
     return this.currentStepId() === phaseId;
   }
 
+  /** True for a step that is neither completed, current, nor failed (not started yet). */
   isPhasePending(phaseId: string): boolean {
     return (
       !this.isPhaseCompleted(phaseId) &&
