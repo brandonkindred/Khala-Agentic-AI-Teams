@@ -255,22 +255,22 @@ def test_start_memory_watchdog_no_limit_returns_none(monkeypatch) -> None:
     assert ph.start_memory_watchdog("coding_team") is None
 
 
-def test_start_memory_watchdog_returns_stoppable_thread(monkeypatch) -> None:
+def test_start_memory_watchdog_returns_watchdog(monkeypatch) -> None:
     monkeypatch.setenv("TEAM_MEMORY_WATCHDOG_ENABLED", "true")
     # Long interval: the thread blocks on wait() immediately and never ticks, so
     # the test exercises only start + clean stop without any timing race.
-    thread = ph.start_memory_watchdog(
+    wd = ph.start_memory_watchdog(
         "coding_team", limit_bytes=10 * 1024 * 1024, threshold=0.9, interval_s=100.0
     )
-    assert thread is not None and thread.is_alive()
-    assert hasattr(thread, "stop_event")
-    thread.stop_event.set()  # type: ignore[attr-defined]
-    thread.join(timeout=2)
-    assert not thread.is_alive()
+    assert wd is not None and isinstance(wd, ph.Watchdog)
+    assert wd.thread.is_alive()
+    wd.stop_event.set()
+    wd.thread.join(timeout=2)
+    assert not wd.thread.is_alive()
 
 
 def test_start_memory_watchdog_requires_team() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         ph.start_memory_watchdog("")
 
 
@@ -285,7 +285,8 @@ def restore_diag_state():
         threading.excepthook,
         ph._diagnostics_installed,
         ph._log,
-        ph._original_sys_excepthook,
+        ph._chain_sys_excepthook,
+        ph._chain_thread_excepthook,
     )
     try:
         yield
@@ -295,7 +296,8 @@ def restore_diag_state():
             threading.excepthook,
             ph._diagnostics_installed,
             ph._log,
-            ph._original_sys_excepthook,
+            ph._chain_sys_excepthook,
+            ph._chain_thread_excepthook,
         ) = saved
 
 
@@ -330,7 +332,7 @@ def test_sys_excepthook_logs_uncaught_with_traceback(restore_diag_state, caplog)
 
 def test_sys_excepthook_delegates_keyboardinterrupt(restore_diag_state) -> None:
     captured = {}
-    ph._original_sys_excepthook = lambda *a: captured.setdefault("args", a)
+    ph._chain_sys_excepthook = lambda *a: captured.setdefault("args", a)
     try:
         raise KeyboardInterrupt()
     except KeyboardInterrupt:
@@ -338,7 +340,37 @@ def test_sys_excepthook_delegates_keyboardinterrupt(restore_diag_state) -> None:
 
     ph._sys_excepthook(*exc)
 
-    assert "args" in captured  # Ctrl-C delegates to the original hook, not logged
+    assert "args" in captured  # Ctrl-C chains to the previous hook, not logged
+
+
+def test_sys_excepthook_chains_to_previous_custom_hook(restore_diag_state, caplog) -> None:
+    """A non-default previous hook (e.g. Sentry) is still invoked after logging,
+    so installing our diagnostics never disables another error reporter."""
+    ph._log = logging.getLogger("test.ph.chain")
+    calls = []
+    ph._chain_sys_excepthook = lambda *a: calls.append(a)
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        exc = sys.exc_info()
+    with caplog.at_level(logging.CRITICAL, logger="test.ph.chain"):
+        ph._sys_excepthook(*exc)
+    assert any("Uncaught exception in main thread" in r.getMessage() for r in caplog.records)
+    assert len(calls) == 1  # chained to the previous reporter
+
+
+def test_thread_excepthook_chains_to_previous_custom_hook(restore_diag_state) -> None:
+    calls = []
+    ph._chain_thread_excepthook = lambda args: calls.append(args)
+    ph._log = logging.getLogger("test.ph.chain2")
+    args = types.SimpleNamespace(
+        exc_type=RuntimeError,
+        exc_value=RuntimeError("x"),
+        exc_traceback=None,
+        thread=threading.current_thread(),
+    )
+    ph._thread_excepthook(args)
+    assert len(calls) == 1
 
 
 def test_thread_excepthook_logs_uncaught(restore_diag_state, caplog) -> None:

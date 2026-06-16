@@ -32,7 +32,8 @@ import logging
 import os
 import sys
 import threading
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Any, Callable, Optional
 
 # cgroup files live at fixed paths; expose them as module constants so tests can
 # point them at temp files without monkeypatching ``open``.
@@ -52,7 +53,10 @@ _DEFAULT_THRESHOLD = 0.85
 
 _log: Optional[logging.Logger] = None
 _diagnostics_installed = False
-_original_sys_excepthook = sys.excepthook
+# Hooks present before we install ours, captured at install time so our hooks
+# can chain to other reporters (e.g. Sentry) instead of silently disabling them.
+_chain_sys_excepthook: Any = None
+_chain_thread_excepthook: Any = None
 
 
 def _get_logger() -> logging.Logger:
@@ -100,7 +104,7 @@ def _env_float(
 
 def _mb(num_bytes: int) -> int:
     """Render a byte count as whole megabytes for human-readable log lines."""
-    return int(num_bytes / (1024 * 1024))
+    return num_bytes // (1024 * 1024)
 
 
 def _read_int_file(path: str) -> Optional[int]:
@@ -272,6 +276,15 @@ def _watchdog_loop(
             logger.debug("memory watchdog tick failed", exc_info=True)
 
 
+@dataclass
+class Watchdog:
+    """A running memory watchdog: its daemon ``thread`` and the ``stop_event``
+    that shuts it down cleanly. Returned by :func:`start_memory_watchdog`."""
+
+    thread: threading.Thread
+    stop_event: threading.Event
+
+
 def start_memory_watchdog(
     team: str,
     *,
@@ -279,7 +292,7 @@ def start_memory_watchdog(
     interval_s: Optional[float] = None,
     threshold: Optional[float] = None,
     limit_bytes: Optional[int] = None,
-) -> Optional[threading.Thread]:
+) -> Optional[Watchdog]:
     """Start a daemon thread that warns as memory usage approaches the budget.
 
     The thread is the only early signal of an impending OOM kill: the kernel's
@@ -289,11 +302,12 @@ def start_memory_watchdog(
     Preconditions:
         - ``team`` is a non-empty identifier used in log lines.
     Postconditions:
-        - Returns the started daemon ``Thread`` (with a ``stop_event`` attribute
-          for shutdown), or None when disabled via env or when no memory limit
-          can be detected. Never raises.
+        - Returns a :class:`Watchdog` (its daemon thread + stop event), or None
+          when disabled via env or when no memory limit can be detected. Never
+          raises (other than the ``team`` precondition).
     """
-    assert team, "team must be a non-empty identifier"
+    if not team:
+        raise ValueError("team must be a non-empty identifier")
     log = logger or _get_logger()
 
     if not _env_bool("TEAM_MEMORY_WATCHDOG_ENABLED", True):
@@ -327,8 +341,6 @@ def start_memory_watchdog(
         name=f"mem-watchdog-{team}",
         daemon=True,
     )
-    # Expose the stop event so callers/tests can shut the thread down cleanly.
-    thread.stop_event = stop_event  # type: ignore[attr-defined]
     thread.start()
     log.info(
         "Memory watchdog armed for %s: warn at %.0f%% of %dMB (every %.0fs)",
@@ -337,7 +349,7 @@ def start_memory_watchdog(
         _mb(limit_bytes),
         interval_s,
     )
-    return thread
+    return Watchdog(thread=thread, stop_event=stop_event)
 
 
 # ---------------------------------------------------------------------------
@@ -346,26 +358,36 @@ def start_memory_watchdog(
 
 
 def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
-    """Log an uncaught main-thread exception with a full traceback before exit."""
-    if issubclass(exc_type, KeyboardInterrupt):
-        _original_sys_excepthook(exc_type, exc_value, exc_tb)
-        return
-    _get_logger().critical(
-        "Uncaught exception in main thread; process is terminating",
-        exc_info=(exc_type, exc_value, exc_tb),
-    )
+    """Log an uncaught main-thread exception, then chain to any prior hook."""
+    if not issubclass(exc_type, KeyboardInterrupt):
+        _get_logger().critical(
+            "Uncaught exception in main thread; process is terminating",
+            exc_info=(exc_type, exc_value, exc_tb),
+        )
+    # Chain to a previously-installed custom hook (e.g. Sentry) so we don't
+    # silently disable other reporters. Skip the stdlib default to avoid a
+    # duplicate stderr traceback (we already logged it) — except for
+    # KeyboardInterrupt, where the default performs normal Ctrl-C handling.
+    prev = _chain_sys_excepthook
+    if prev is not None and prev is not _sys_excepthook and prev is not sys.__excepthook__:
+        prev(exc_type, exc_value, exc_tb)
+    elif issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_tb)
 
 
 def _thread_excepthook(args) -> None:
-    """Log an uncaught exception raised in any non-main thread, with a traceback."""
-    if args.exc_type is SystemExit:
-        return
-    thread_name = getattr(args.thread, "name", "?")
-    _get_logger().critical(
-        "Uncaught exception in thread %r",
-        thread_name,
-        exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
-    )
+    """Log an uncaught non-main-thread exception, then chain to any prior hook."""
+    if args.exc_type is not SystemExit:  # SystemExit is a normal thread exit
+        thread_name = getattr(args.thread, "name", "?")
+        _get_logger().critical(
+            "Uncaught exception in thread %r",
+            thread_name,
+            exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+        )
+    prev = _chain_thread_excepthook
+    default = getattr(threading, "__excepthook__", None)
+    if prev is not None and prev is not _thread_excepthook and prev is not default:
+        prev(args)  # preserve another reporter (e.g. Sentry)
 
 
 def install_fault_diagnostics(logger: Optional[logging.Logger] = None) -> None:
@@ -377,13 +399,16 @@ def install_fault_diagnostics(logger: Optional[logging.Logger] = None) -> None:
         instead of a bare stderr dump that container log scrapers often miss.
 
     It deliberately does **not** install SIGTERM/SIGINT handlers, leaving
-    uvicorn's graceful-shutdown handling untouched.
+    uvicorn's graceful-shutdown handling untouched. Any hooks already installed
+    (e.g. Sentry) are captured and chained to, so this never disables another
+    reporter.
 
     Postconditions:
         - ``sys.excepthook`` and ``threading.excepthook`` route through the
-          module logger; faulthandler is enabled when available. Never raises.
+          module logger and then chain to whatever hook was previously
+          installed; faulthandler is enabled when available. Never raises.
     """
-    global _diagnostics_installed, _log
+    global _diagnostics_installed, _log, _chain_sys_excepthook, _chain_thread_excepthook
     if logger is not None:
         _log = logger
     if _diagnostics_installed:
@@ -400,8 +425,13 @@ def install_fault_diagnostics(logger: Optional[logging.Logger] = None) -> None:
     except Exception:  # noqa: BLE001 — diagnostics must never block startup
         _get_logger().debug("faulthandler unavailable", exc_info=True)
 
+    # Capture the hooks already in place (e.g. Sentry) so ours chain to them.
+    if sys.excepthook is not _sys_excepthook:
+        _chain_sys_excepthook = sys.excepthook
     sys.excepthook = _sys_excepthook
     try:
+        if threading.excepthook is not _thread_excepthook:
+            _chain_thread_excepthook = threading.excepthook
         threading.excepthook = _thread_excepthook  # Python 3.8+
     except Exception:  # noqa: BLE001
         _get_logger().debug("threading.excepthook not settable", exc_info=True)

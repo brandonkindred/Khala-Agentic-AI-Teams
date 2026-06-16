@@ -243,6 +243,9 @@ def _resolve_app() -> str:
         raise
 
     wrapper_path = pathlib.Path("/app/_team_wrapper.py")
+    # Guaranteed to exist in the container image, but create it for robustness
+    # (e.g. local runs) so the write below can't fail on a missing directory.
+    wrapper_path.parent.mkdir(parents=True, exist_ok=True)
     body = build_wrapper_body(TEAM_NAME, TEAM_MODULE, TEAM_APP_ATTR)
     wrapper_path.write_text(body, encoding="utf-8")
     return "_team_wrapper:app"
