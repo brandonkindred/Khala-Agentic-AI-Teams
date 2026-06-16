@@ -95,6 +95,14 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(component.error).toContain('at least one asset category');
   });
 
+  it('ignores a re-entrant call while a run is already in progress', () => {
+    component.running = true;
+
+    component.runNewStrategy();
+
+    expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
+  });
+
   it('adopts the backend category list and resets the selection to all', () => {
     apiSpy.getStrategyLabConfig.mockReturnValue(
       of({ batch_count_min: 1, batch_count_max: 50, asset_categories: ['forex', 'crypto'] }),

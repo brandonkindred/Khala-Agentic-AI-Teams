@@ -191,13 +191,11 @@ def _record(asset_class: str) -> StrategyLabRecord:
 
 def test_mix_hint_exclude_restricts_menu_when_no_records() -> None:
     out = asset_class_mix_hint([], exclude=["stocks", "crypto", "futures", "commodities"])
-    # The menu must offer only the single allowed class.
-    assert "Choose **asset_class** from forex with" in out
-    # Excluded classes must not be offered. ("stocks" is deliberately excluded
-    # from this list: the no-records boilerplate still says "do not default to
-    # stocks", so its absence is asserted via the exact menu clause above rather
-    # than blanket string absence.)
-    for excluded in ("crypto", "futures", "commodities"):
+    # Only the single allowed class is offered, and no excluded class appears
+    # anywhere in the hint (the stocks-nudge is also dropped when stocks is
+    # excluded, so this stays robust to wording rather than pinning exact text).
+    assert "forex" in out
+    for excluded in ("stocks", "crypto", "futures", "commodities"):
         assert excluded not in out
 
 

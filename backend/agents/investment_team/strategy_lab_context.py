@@ -129,7 +129,7 @@ def normalize_asset_class_strict(ac: object) -> str:
     )
 
 
-def normalize_allowed_asset_classes(raw: Optional[Iterable[object]]) -> Optional[List[str]]:
+def normalize_allowed_asset_classes(raw: Optional[Iterable[str]]) -> Optional[List[str]]:
     """Normalize a user-supplied list of asset categories to canonical, ideation-valid classes.
 
     The selector on the Strategy Lab UI lets the user constrain which asset

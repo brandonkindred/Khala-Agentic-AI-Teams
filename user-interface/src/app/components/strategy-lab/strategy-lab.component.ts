@@ -505,8 +505,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   /**
    * Start a new Strategy Lab run with the current form configuration.
    *
-   * Preconditions: at least one asset category is selected (`categoriesValid` is
-   *   true). When violated, this sets `error` and returns without calling the API.
+   * Preconditions: no run is already in progress (`running` is false — a
+   *   re-entrant call is ignored) and at least one asset category is selected
+   *   (`categoriesValid` is true; when violated this sets `error` and returns
+   *   without calling the API).
    * Postconditions: clamps batch size/count into range and reflects them back to
    *   the form; sets `running = true` and clears `error`/`completionWarning`;
    *   POSTs a `RunStrategyLabRequest`. `allowed_asset_classes` is sent in
@@ -517,6 +519,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    *   surfaces the message.
    */
   runNewStrategy(): void {
+    // Re-entrancy guard: the run button is disabled while a run is active, but a
+    // programmatic call or double-click must not start a second run — that would
+    // orphan the first run and open a duplicate status stream.
+    if (this.running) {
+      return;
+    }
     // Guard the invalid-zero-categories case (the button is also disabled, but
     // a programmatic call must not start a run constrained to nothing).
     if (!this.categoriesValid) {
