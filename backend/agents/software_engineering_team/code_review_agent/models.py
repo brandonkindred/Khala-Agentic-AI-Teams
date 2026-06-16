@@ -373,3 +373,28 @@ class CodeReviewOutput(BaseModel):
         default="",
         description="Conventional Commits format, if reviewer wants to suggest a better message",
     )
+
+
+def build_code_review_input(
+    *,
+    files: Optional[Dict[str, str]] = None,
+    code: Optional[str] = None,
+    **fields: Any,
+) -> CodeReviewInput:
+    """Construct a :class:`CodeReviewInput` passing exactly the source channel given.
+
+    ``files`` (the preferred ``{path: content}`` mapping) and ``code`` (the legacy
+    path-headered blob) are forwarded only when not None, so an explicitly-passed
+    empty ``code`` still counts as provided and ``files`` takes precedence —
+    matching the model's own ``_require_code_or_files`` validation. Callers supply
+    the remaining fields (spec_content, task_description, ...) via *fields*.
+
+    Single source of truth for the files/code selection that backend_agent,
+    orchestrator, and quality_gate_tools each used to duplicate.
+    """
+    kwargs: Dict[str, Any] = dict(fields)
+    if files is not None:
+        kwargs["files"] = files
+    if code is not None:
+        kwargs["code"] = code
+    return CodeReviewInput(**kwargs)

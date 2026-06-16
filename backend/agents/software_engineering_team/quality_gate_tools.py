@@ -94,6 +94,7 @@ def run_code_review(
     task_description: str,
     language: str,
     *,
+    files: Optional[Dict[str, str]] = None,
     task_requirements: Optional[List[str]] = None,
     acceptance_criteria: Optional[List[str]] = None,
     architecture: Any = None,
@@ -108,20 +109,24 @@ def run_code_review(
           ``(step, detail, fraction)`` (see code_review_agent.models.ReviewProgressCallback).
 
     Postconditions:
+        - When ``files`` (a ``{path: content}`` mapping of the task's changed
+          files) is provided it takes precedence over ``code``; the agent
+          bounds its own per-call prompts either way.
         - ``progress_callback`` is forwarded to the agent so review sub-steps
           (context prep, per-chunk review, parsing, approval) are reported live.
     """
     try:
         from code_review_agent import CodeReviewAgent
-        from code_review_agent.models import CodeReviewInput
+        from code_review_agent.models import build_code_review_input
 
         llm = llm_getter("code_review")
         agent = CodeReviewAgent(llm)
 
         # No pre-truncation: the coordinator bounds its own per-call prompts,
         # and its full-coverage guarantee only holds when it sees all the code.
-        review_input = CodeReviewInput(
-            code=code,
+        review_input = build_code_review_input(
+            files=files,
+            code=None if files is not None else code,
             spec_content=spec_content,
             task_description=task_description,
             task_requirements=task_requirements or [],

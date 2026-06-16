@@ -312,6 +312,37 @@ def test_fe_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
     assert any(i.source == "code_review" for i in out.issues)
 
 
+def test_fe_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
+    """The code review agent receives ``files=`` verbatim — no 60K slice, no
+    ``--- path ---`` concatenation."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import run_review
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    captured: dict = {}
+
+    def _capture(inp, **kw):
+        captured["files"] = inp.files
+        captured["code"] = inp.code
+        return MagicMock(issues=[])
+
+    cr_agent = MagicMock()
+    cr_agent.run.side_effect = _capture
+
+    files = {"big.ts": "x" * 100_000, "small.ts": "const y = 1;"}
+    run_review(
+        llm=MagicMock(),
+        task=_task(),
+        execution_result=_execution_result(files),
+        repo_path=tmp_path,
+        code_review_agent=cr_agent,
+    )
+    assert captured["files"] == files
+    assert captured["code"] == ""
+
+
 def test_fe_run_review_code_review_agent_raises_falls_back_to_llm(monkeypatch, tmp_path: Path):
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import run_review

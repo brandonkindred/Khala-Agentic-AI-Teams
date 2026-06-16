@@ -5,6 +5,7 @@ import json as _json
 import logging
 import re
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -22,7 +23,13 @@ from software_engineering_team.shared.prompt_utils import (
 )
 from software_engineering_team.shared.repo_utils import (
     BACKEND_EXTENSIONS,
+    _disambiguated_key,
+    is_secret_template_path,
+    is_sensitive_path,
+    read_files_as_dict,
     read_repo_code,
+    read_repo_files_as_dict,
+    sanitize_path_for_text,
     truncate_for_context,
 )
 from software_engineering_team.shared.repo_utils import (
@@ -492,28 +499,690 @@ def _read_repo_code(repo_path: Path, extensions: List[str] | None = None) -> str
     return read_repo_code(repo_path, extensions)
 
 
-def _read_repo_meta_files(repo_path: Path) -> str:
-    """Read .gitignore, README.md, CONTRIBUTORS.md for code review when task is repo-setup."""
-    parts: List[str] = []
-    for name in (".gitignore", "README.md", "CONTRIBUTORS.md"):
-        f = repo_path / name
-        if f.is_file():
-            try:
-                parts.append(f"### {name} ###\n{f.read_text(encoding='utf-8', errors='replace')}")
-            except (OSError, UnicodeDecodeError) as e:
-                logger.debug("Could not read %s: %s", f, e)
-    return "\n\n".join(parts) if parts else ""
+def _writer_output_keys(result: Any) -> Dict[str, str] | None:
+    """Paths ``write_agent_output`` would materialize for *result* (or None).
+
+    Reuses the writer's own normalization and additionally includes a synthesized
+    root ``.gitignore`` when the output declares ``gitignore_entries`` (the writer
+    adds it *after* the base mapping), so a brand-new, still-untracked .gitignore
+    from a failed-commit iteration is reviewed instead of slipping through. Values
+    are placeholders — only the keys widen the set of paths re-read from the
+    worktree.
+    """
+    if result is None:
+        return None
+    from software_engineering_team.shared.repo_writer import output_to_files_dict
+
+    written = dict(output_to_files_dict(result, ""))
+    if getattr(result, "gitignore_entries", None):
+        written.setdefault(".gitignore", "")
+    return written
 
 
-def _is_repo_setup_task(task: Any) -> bool:
-    """True if task description suggests repo setup / initial commit / branching."""
-    desc = (getattr(task, "description", None) or "").lower()
-    return (
-        "git" in desc
-        and ("setup" in desc or "initial" in desc or "branch" in desc)
-        or "initial commit" in desc
-        or "branching strategy" in desc
+# Synthetic block labels under which review *notes* (not real source files)
+# travel in the segmented code/files channel. The prefix keeps them visually
+# distinct from real paths; detaching a note-anchored finding from the fix loop
+# is done by tracking the *exact* keys synthesized for a review (see
+# ReviewInputSelection.synthetic_keys), not by prefix-matching — so a genuine
+# changed file that happens to live under ``[review-note]/`` is never mistaken
+# for a note.
+_REVIEW_NOTE_PREFIX = "[review-note]/"
+_DELETION_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}deleted-files"
+_EMPTIED_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}emptied-files"
+_WITHHELD_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}withheld-sensitive"
+_UNREADABLE_NOTE_PATH = f"{_REVIEW_NOTE_PREFIX}unreadable-files"
+
+
+# Binary file extensions that are legitimately non-text-reviewable *assets*
+# (images, media, fonts, archives, compiled artifacts, model weights, data). A
+# change touching one of these can't be source-reviewed, so it is advisory — it
+# must not permanently block a merge. Anything *not* in this set that read as
+# binary/unreadable (a source file with embedded NUL, a submodule gitlink, an
+# unknown type) is treated as needing manual review.
+_BINARY_ASSET_SUFFIXES: frozenset[str] = frozenset(
+    {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".gif",
+        ".bmp",
+        ".ico",
+        ".webp",
+        ".svg",
+        ".tiff",
+        ".pdf",
+        ".mp3",
+        ".mp4",
+        ".mov",
+        ".avi",
+        ".wav",
+        ".ogg",
+        ".webm",
+        ".flac",
+        ".woff",
+        ".woff2",
+        ".ttf",
+        ".otf",
+        ".eot",
+        ".zip",
+        ".tar",
+        ".gz",
+        ".tgz",
+        ".bz2",
+        ".xz",
+        ".7z",
+        ".rar",
+        ".jar",
+        ".wasm",
+        ".so",
+        ".dll",
+        ".dylib",
+        ".a",
+        ".o",
+        ".class",
+        ".pyc",
+        ".pyd",
+        ".onnx",
+        ".pt",
+        ".pth",
+        ".h5",
+        ".pb",
+        ".tflite",
+        ".parquet",
+        ".npy",
+        ".npz",
+        ".bin",
+        ".dat",
+        ".db",
+        ".sqlite",
+    }
+)
+
+
+def _is_binary_asset(path: str) -> bool:
+    """True when *path* is a recognized non-text-reviewable binary asset."""
+    return Path(path).suffix.lower() in _BINARY_ASSET_SUFFIXES
+
+
+@dataclass
+class ReviewInputSelection:
+    """Chosen code-review input plus the metadata the gate and fix loop need.
+
+    Iterable as the legacy ``(files, code, deletion_note)`` triple so existing
+    unpacking call sites keep working, while also carrying:
+
+    - ``synthetic_keys`` — the *exact* note labels this selection inserted. A
+      finding anchored on one of these is detached from the fix loop (no real
+      file to edit); tracking the precise set (rather than prefix-matching) means
+      a genuine changed file that merely lives under a ``[review-note]/`` path is
+      never mistaken for a note.
+    - ``key_to_path`` — maps each display-safe review key back to its real
+      repo-relative path, so a finding's ``file_path`` (the sanitized, possibly
+      ``~N``-suffixed key) is translated to the actual file the fixer must edit.
+    """
+
+    files: Dict[str, str] | None
+    code: str | None
+    deletion_note: str | None
+    synthetic_keys: frozenset[str] = frozenset()
+    key_to_path: Dict[str, str] = field(default_factory=dict)
+    # Task-owned paths the reviewer could NOT examine the content of: secrets
+    # (withheld), binary/submodule/unreadable, and emptied/whitespace-only files.
+    withheld: Tuple[str, ...] = ()
+    unreadable: Tuple[str, ...] = ()
+    emptied: Tuple[str, ...] = ()
+
+    def __iter__(self):
+        return iter((self.files, self.code, self.deletion_note))
+
+    def has_examinable_content(self) -> bool:
+        """True when the reviewer actually saw file content, not only notes.
+
+        A non-empty ``code`` channel (whole-repo fallback) counts; an *empty*
+        ``code`` (truly empty repo) does not. For the files-dict channel, at least
+        one block must be a real (non-synthetic) key holding non-whitespace
+        content — a restored deletion blob or a changed file. A mapping of only
+        omission notes (withheld, unreadable, emptied, deletion listing) — or only
+        emptied files — is *not* examinable.
+        """
+        if self.code:
+            return True
+        if not self.files:
+            return False
+        return any(
+            key not in self.synthetic_keys and (value or "").strip()
+            for key, value in self.files.items()
+        )
+
+    def unexamined_paths(self) -> Tuple[str, ...]:
+        """All task-owned paths whose content the reviewer never saw (advisory).
+
+        The full omission set — withheld secrets, unreadable/binary/submodule
+        files, and emptied files. Every entry is surfaced to the reviewer as a
+        note, but only :meth:`blocking_unexamined` forces manual review; see there
+        for why a binary asset or sensitive-named template is advisory rather than
+        a hard block.
+        """
+        return tuple(sorted(set(self.withheld) | set(self.unreadable) | set(self.emptied)))
+
+    def blocking_unexamined(self) -> Tuple[str, ...]:
+        """The omissions that MUST force manual review on an approval.
+
+        Not every unexamined path should block a merge, but most should. The only
+        omissions that stay *advisory* here (surfaced as notes via
+        :meth:`unexamined_paths`, never returned by this method) are the ones that
+        are legitimately non-text-reviewable, so blocking *a change that also
+        carries reviewed source* on them would make every such change
+        permanently un-mergeable. (A change consisting *solely* of advisory items,
+        with nothing examinable, is still routed to manual review by
+        :meth:`review_gate_failure` — this method only governs the per-path block
+        set, not the no-content-at-all case.) The advisory paths are:
+
+        - a recognized **binary asset** (``logo.png``, a font, an archive, model
+          weights) — see :func:`_is_binary_asset`;
+        - a placeholder ``.env`` **template** flagged only by the over-broad secret
+          denylist (``.env.example``/``.env.sample``) — see
+          :func:`is_secret_template_path`. A file that is sensitive for a *strong*
+          reason (a secret dir, a ``credentials``/``secret`` stem, a key/cert
+          suffix) is NOT downgraded even with a template suffix.
+
+        Everything else blocks, because the reviewer (and the later source-only
+        security pass) never saw the content:
+
+        - **emptied** — a changed file truncated to empty/whitespace;
+        - a **withheld real secret** — ``.env``, ``id_rsa``, ``*.pem``,
+          ``credentials``, ``secrets/...`` (changed or deleted): content withheld,
+          must be checked;
+        - an **unreadable non-asset** — a source file that read as binary, a
+          submodule/gitlink pointer change, or an unknown type;
+        - the **baseline-unavailable sentinel** — the diff couldn't be computed, so
+          a deletion may exist we cannot enumerate (not an asset → blocks here).
+        """
+        blockers = set(self.emptied)
+        blockers.update(p for p in self.withheld if not is_secret_template_path(p))
+        blockers.update(p for p in self.unreadable if not _is_binary_asset(p))
+        return tuple(sorted(blockers))
+
+    def review_gate_failure(self, approved: bool) -> str | None:
+        """Reason an approval must route to manual review instead of merging, else None.
+
+        The reusable never-silently-approve gate, applied by the backend fix loop
+        (and available to any other review caller that builds a
+        :class:`ReviewInputSelection`). An approval is blocked when:
+
+        - :meth:`blocking_unexamined` is non-empty — a destructive/unknowable
+          omission (emptied file, withheld real secret, unreadable source, or an
+          uncomputable baseline diff); or
+        - the reviewer saw no examinable content at all while the selection still
+          carried blocks (:meth:`has_examinable_content` is False and ``files`` is
+          a non-empty map) — e.g. a change consisting solely of advisory omission
+          notes (a lone binary asset or ``.env`` template). Such items never block
+          *on their own* via :meth:`blocking_unexamined` (so a change that *also*
+          carries reviewed source is not held up by an advisory asset), but a
+          change with *nothing* examinable still routes to manual review here,
+          since the approval rests on content the reviewer never saw. The
+          genuinely empty repo (``files`` is None with an empty ``code``) has
+          nothing to review and is allowed, so a normal no-op never trips the gate.
+
+        Preconditions:
+            - none.
+        Postconditions:
+            - Returns None when *approved* is False or the approval may stand.
+            - Otherwise returns a human-readable reason naming the blocking
+              omissions and (advisory) only the *non-blocking* remainder.
+        """
+        if not approved:
+            return None
+        blocking = self.blocking_unexamined()
+        # files is either a non-empty mapping or None in a returned selection, so
+        # ``files is not None`` distinguishes a notes-only review (block) from the
+        # genuinely empty repo (allow).
+        saw_no_content = self.files is not None and not self.has_examinable_content()
+        if not blocking and not saw_no_content:
+            return None
+        clauses: List[str] = []
+        if blocking:
+            shown = ", ".join(blocking[:20]) + (" ..." if len(blocking) > 20 else "")
+            clauses.append(
+                "destructive/unknowable omissions that require manual review before merge "
+                "(emptied files, withheld secrets, unreadable source, or a baseline diff "
+                f"that could not be computed): {shown}"
+            )
+        if saw_no_content:
+            clauses.append("the reviewer saw no examinable file content (only omission notes)")
+        # The advisory tail is the *non-blocking* remainder only (binary assets,
+        # .env templates) — blocking paths are already named in the clause above,
+        # so listing them again would blur which omissions actually hold the merge.
+        blocking_set = set(blocking)
+        advisory = tuple(p for p in self.unexamined_paths() if p not in blocking_set)
+        return (
+            "Code review approved, but " + "; ".join(clauses) + ". "
+            f"Also not examined (advisory): {', '.join(advisory[:20]) or 'none'}"
+        )
+
+
+def _translate_finding_paths(
+    issues: List[Dict[str, Any]],
+    key_to_path: Dict[str, str],
+    synthetic_keys: frozenset[str],
+) -> List[Dict[str, Any]]:
+    """Map each finding's ``file_path`` (a review key) back to a real repo path.
+
+    Review-map keys are display-safe (surrogate/control-char escaped) and may be
+    disambiguated with a ``~N`` suffix, so a finding's ``file_path`` is the *key*,
+    not necessarily the on-disk path. Translating restores the path the reviewer
+    meant so ``_regenerate_with_issues`` edits the right file. A finding on one of
+    the *exact* synthetic note keys (which has no real file) is cleared to "" so
+    the fixer treats it as a file-wide instruction instead of creating the note
+    artifact — but a real changed file under a ``[review-note]/`` path keeps its
+    target, because only keys actually synthesized for this review are stripped.
+
+    Postconditions:
+        - Returns a new list. Per issue: a ``file_path`` in *synthetic_keys* → "";
+          one present in *key_to_path* → its original path; anything else
+          unchanged (already a real path, or empty).
+    """
+    out: List[Dict[str, Any]] = []
+    for issue in issues:
+        fp = str(issue.get("file_path", ""))
+        if fp in synthetic_keys:
+            issue = {**issue, "file_path": ""}
+        elif fp in key_to_path:
+            issue = {**issue, "file_path": key_to_path[fp]}
+        out.append(issue)
+    return out
+
+
+_WITHHELD_NOTE_HEADER = (
+    "Files CHANGED or DELETED by this task but WITHHELD from review (path matches the "
+    "secret denylist); content is NOT shown — review these manually:"
+)
+_UNREADABLE_NOTE_HEADER = (
+    "Files CHANGED by this task that could NOT be read (binary, a submodule/gitlink, "
+    "or vanished mid-scan) and so were not reviewed — verify each manually:"
+)
+_EMPTIED_NOTE_HEADER = (
+    "Files reduced to EMPTY/whitespace-only by this task — confirm the content removal "
+    "is intentional:"
+)
+
+
+def _attach_review_notes(
+    files: Dict[str, str],
+    *,
+    deletion_note: str | None = None,
+    withheld: List[str] | None = None,
+    unreadable: List[str] | None = None,
+    emptied: List[str] | None = None,
+) -> frozenset[str]:
+    """Insert each non-empty omission note into *files* (mutated); return its keys.
+
+    Used by both the task-scoped selection and the whole-repo fallback so the two
+    surface omissions identically. Each note rides the segmented code/files channel
+    under a free synthetic key (so a real file sharing the label is never dropped).
+
+    Postconditions:
+        - *files* gains one block per non-empty note; the returned frozenset is the
+          exact set of keys inserted (for precise finding detachment).
+    """
+    synthetic: set[str] = set()
+    specs = (
+        (_DELETION_NOTE_PATH, deletion_note),
+        (
+            _WITHHELD_NOTE_PATH,
+            _format_path_note(_WITHHELD_NOTE_HEADER, withheld) if withheld else None,
+        ),
+        (
+            _UNREADABLE_NOTE_PATH,
+            _format_path_note(_UNREADABLE_NOTE_HEADER, unreadable) if unreadable else None,
+        ),
+        (_EMPTIED_NOTE_PATH, _format_path_note(_EMPTIED_NOTE_HEADER, emptied) if emptied else None),
     )
+    for base_label, text in specs:
+        if text:
+            key = _disambiguated_key(files, base_label)
+            files[key] = text
+            synthetic.add(key)
+    return frozenset(synthetic)
+
+
+def _format_path_note(header: str, paths: List[str]) -> str:
+    """Render *paths* as a single-line-safe bulleted note under *header*.
+
+    Each path is escaped with :func:`sanitize_path_for_text` so a filename
+    containing a newline or other control byte — which git permits and the diff
+    preserves verbatim — cannot inject extra bullets, fake the count, or smuggle
+    reviewer instructions into the model input. The note rides the segmented
+    code/files channel (never the per-chunk-repeated task description), so a long
+    list is split across review chunks rather than blowing every sub-review's
+    context.
+    """
+    listing = "\n".join(f"- {sanitize_path_for_text(p)}" for p in paths)
+    return f"{header}\n{listing}\n"
+
+
+def _format_deletion_note(
+    deleted: List[str], references: Dict[str, List[str]] | None = None
+) -> str:
+    """Render *every* removed path as a reviewer note, with surviving referrers.
+
+    Lists all deletions, not a capped sample: the reviewer must be able to check
+    whether anything still depends on each removed path, so hiding identities
+    behind a count would leave deletions silently unreviewed (fail-open). When
+    *references* maps a deleted path to surviving files that still import it, those
+    are listed inline so the reviewer can verify the "nothing depends on it"
+    claim against concrete dependents (best-effort; absence is not a guarantee).
+    Every path is control-char escaped via :func:`sanitize_path_for_text`.
+    """
+    references = references or {}
+    lines = [
+        f"Files DELETED by this task ({len(deleted)} total; verify each removal is "
+        "intentional and that nothing still depends on them). Pre-deletion content "
+        "for readable files is provided for review under a separate "
+        "'<path> (DELETED by this task — pre-deletion content)' label:"
+    ]
+    for path in deleted:
+        lines.append(f"- {sanitize_path_for_text(path)}")
+        for referrer in references.get(path, []):
+            lines.append(f"    still referenced by: {sanitize_path_for_text(referrer)}")
+    return "\n".join(lines) + "\n"
+
+
+# Sentinel recorded as "unreadable" when the baseline diff is unavailable: the
+# whole-repo fallback scans only the current worktree, so a file *deleted* by the
+# task cannot be enumerated and is invisible. It forces the gate to manual review
+# rather than certifying a current-tree scan that may hide an unreviewed deletion.
+_DELETIONS_UNKNOWN_SENTINEL = "<deletions not enumerable: baseline diff unavailable>"
+
+
+def _whole_repo_review_input(
+    repo_path: Path, *, baseline_unavailable: bool = False
+) -> ReviewInputSelection:
+    """Complete, fail-safe review input: every reviewable file in the repo.
+
+    Used when no task-scoped change set is available (empty diff) or cannot be
+    trusted (baseline diff unavailable). Reviews all file types (config,
+    migrations, JS, docs, ...) — not just ``.py``/``.java``.
+
+    The files it cannot show the model — sensitive (withheld) and binary/unreadable
+    — are not discarded silently: they are surfaced as omission notes and recorded
+    on the selection's ``withheld``/``unreadable`` fields, so the gate treats an
+    approval on this fallback as incomplete (manual review) rather than certifying
+    a "whole-repo" review that quietly excluded files. The omission notes/metadata
+    are attached even when *no* readable file remains (a repo of only
+    sensitive/binary files), so the reviewer still gets the evidence and the gate
+    still blocks; only a genuinely empty repo yields an empty ``code`` whose
+    ``has_examinable_content()`` is False.
+
+    When *baseline_unavailable* is set, a sentinel is recorded as unexamined
+    because deletions cannot be enumerated from the current tree — so an approval
+    on this degraded path always routes to manual review.
+    """
+    key_to_path: Dict[str, str] = {}
+    omitted: List[str] = []
+    sensitive_skipped: List[str] = []
+    files = read_repo_files_as_dict(
+        repo_path,
+        key_to_path=key_to_path,
+        omitted=omitted,
+        sensitive_skipped=sensitive_skipped,
+    )
+    unreadable = list(omitted)
+    if baseline_unavailable:
+        unreadable.append(_DELETIONS_UNKNOWN_SENTINEL)
+    # Truly empty repo (nothing readable, nothing omitted): an empty code channel
+    # whose has_examinable_content() is False.
+    if not files and not sensitive_skipped and not unreadable:
+        return ReviewInputSelection(None, "", None)
+    files = files or {}
+    synthetic = _attach_review_notes(
+        files, withheld=sensitive_skipped or None, unreadable=unreadable or None
+    )
+    return ReviewInputSelection(
+        files,
+        None,
+        None,
+        synthetic,
+        key_to_path,
+        withheld=tuple(sensitive_skipped),
+        unreadable=tuple(unreadable),
+    )
+
+
+def _select_review_input(
+    repo_path: Path,
+    current_task: Any,
+    written_files: Dict[str, str] | None,
+) -> ReviewInputSelection:
+    """Choose the code-review input: the task's changed files, read from disk.
+
+    The path set is the union of the net base→worktree diff
+    (``list_changed_and_deleted`` runs ``git diff <merge-base>`` with no ``HEAD``,
+    so it compares the merge base to the **working tree** — every committed *and*
+    uncommitted *tracked* change is captured; only untracked new files are not,
+    which the writer's output keys cover) and the writer's normalized output keys.
+    Every path's content is read from the **worktree**, never from the in-memory
+    output dict, so review reflects exactly what is on the branch: paths that write
+    validation rejected — or that a failed write never created — are absent from
+    disk and therefore correctly excluded, and no extension filter is applied so
+    non-source task changes (requirements.txt, migrations, YAML/JSON, ...) are
+    reviewed too.
+
+    Fallback ordering on this path is fail-closed: when the baseline diff *cannot*
+    be computed (``BaselineDiffUnavailable``), it reviews the whole repo rather
+    than the writer's just-written set, since that partial set could approve while
+    silently omitting committed task changes.
+
+    Deletions are surfaced two ways: the pre-deletion content of each removed
+    path is read from the merge-base blob and added *byte-for-byte* (line numbers
+    and non-Python syntax intact) under a DELETED-marked display *label* — the
+    marker lives in the key, which the coordinator carries as every segment's file
+    label, so even a large blob split across chunks is never mistaken for current
+    source; ``key_to_path`` maps the label back to the real removed path so a
+    finding ("this module is still imported") drives the fix loop to restore it. A
+    separate *note* lists every removed path — including binary/unreadable ones
+    whose content could not be fetched, and any surviving files that still import a
+    removed module (a best-effort reverse-reference scan) so the "nothing depends
+    on it" claim can be checked. Pure file-metadata changes (e.g. a mode/chmod-only
+    change) are not separately surfaced: this pipeline writes file *content* via
+    ``write_agent_output``.
+
+    Never-silently-skip notes ride the same segmented channel:
+        - **withheld-sensitive** — a changed *or deleted* path matching the secret
+          denylist is not forwarded as content, but it is task-owned, so its
+          *path* is listed for manual review rather than dropped (a ``secrets.py``
+          / a removed ``.env`` must not bypass the gate by looking unchanged).
+        - **unreadable-files** — a changed path that could not be read (binary, a
+          submodule/gitlink directory, vanished mid-scan) is listed so a partial
+          read never approves with a task-owned file unexamined.
+        - **emptied-files** — a changed file reduced to empty/whitespace produces
+          an empty block the coordinator drops; listing it keeps a destructive
+          truncation from sailing through on an auto-approve.
+
+    Preconditions:
+        - *repo_path* is the task's working tree; *written_files* is the writer's
+          normalized output mapping (or None) — only its keys are used, to widen
+          the set of paths re-read from disk.
+        - *current_task* is the active task. It is accepted to keep this helper's
+          signature aligned with the call site and is reserved for task-aware
+          selection; it is not consulted by the current implementation.
+    Postconditions:
+        - Returns a :class:`ReviewInputSelection` (unpackable as the legacy
+          ``(files, code, deletion_note)`` triple). Exactly one of ``files`` /
+          ``code`` is populated so review is never silently skipped: the worktree
+          content of every committed/uncommitted/just-written path that exists on
+          disk plus the deletion/withheld/unreadable/emptied notes and restored
+          deletion content, else (the fail-closed fallback) a *whole-repo files
+          dict* via :func:`_whole_repo_review_input` (logged) — ``code`` is then
+          ``None``; only a genuinely empty repo yields an empty ``code`` string.
+          ``synthetic_keys`` is the exact set of note labels inserted, and
+          ``key_to_path`` maps every real review key back to its on-disk path, so
+          the caller can translate a finding's key and detach note-anchored
+          findings precisely.
+        - ``has_examinable_content()`` is False when the only blocks are omission
+          notes/emptied files, so the caller can refuse to let an auto-approval
+          stand on content the reviewer never saw.
+        - The whole-repo fallback reviews every file type, so an initial repo-
+          setup commit's meta files (.gitignore, README, ...) are included.
+    """
+    from software_engineering_team.shared.git_utils import (
+        _MAX_DELETED_BLOBS_READ,
+        DEVELOPMENT_BRANCH,
+        BaselineDiffUnavailable,
+        find_referencing_paths,
+        list_changed_and_deleted,
+        read_paths_at_merge_base,
+    )
+
+    try:
+        changed, deleted_all = list_changed_and_deleted(repo_path, DEVELOPMENT_BRANCH)
+    except BaselineDiffUnavailable as exc:
+        # Fail closed: if the net base→worktree diff can't be computed (missing
+        # base ref, shallow/ambiguous history, timeout), review the whole repo.
+        # Deletions can't be enumerated from the current tree, so the fallback is
+        # flagged to force manual review rather than certify a current-tree scan.
+        logger.warning("Code review: baseline diff unavailable (%s); reviewing whole repo", exc)
+        return _whole_repo_review_input(repo_path, baseline_unavailable=True)
+
+    # Order-preserving union of committed diff + writer output keys. The git-diff
+    # ``changed`` set is the authoritative set of task-owned changes that MUST be
+    # reviewed; the writer's output keys only *widen* the read set (so an uncommitted
+    # or untracked just-written file is reviewed too). A writer key that is a mere
+    # candidate — rejected by write validation, or a no-op — is therefore not on
+    # disk; it must not be counted as an "unexamined" omission (that would fail the
+    # manual-review gate for an otherwise-clean workflow), so only ``changed`` paths
+    # feed the omission accumulator.
+    changed_owned = {p for p in changed if not is_sensitive_path(p)}
+    ordered: List[str] = []
+    seen: set[str] = set()
+    for source in (changed, list(written_files or ())):
+        for p in source:
+            if p not in seen:
+                seen.add(p)
+                ordered.append(p)
+    # A likely-secret path is not forwarded as content to the external review
+    # model, but it is task-owned: surface it as a "withheld" note (path only) so
+    # a sensitive-named code file cannot bypass the gate by looking unchanged.
+    sensitive = [p for p in ordered if is_sensitive_path(p)]
+    readable = [p for p in ordered if not is_sensitive_path(p)]
+
+    all_omitted: List[str] = []
+    key_to_path: Dict[str, str] = {}
+    symlinked_paths: List[str] = []
+    files = read_files_as_dict(
+        repo_path,
+        readable,
+        extensions=None,
+        omitted=all_omitted,
+        key_to_path=key_to_path,
+        symlinked=symlinked_paths,
+    )
+    # An omission is a genuine unexamined task artifact when it is either a
+    # confirmed git-diff change, or a writer-emitted file that *exists on disk* but
+    # could not be read (e.g. a generated binary). A writer-only *candidate* that
+    # was never materialized (rejected by write validation, a no-op .gitignore) is
+    # not on disk, so it is excluded — it must not pollute the omission notes.
+    omitted = [p for p in all_omitted if p in changed_owned or (repo_path / p).is_file()]
+
+    # A changed file truncated to empty/whitespace yields an empty block, which the
+    # coordinator drops — silently approving the content removal. Flag those paths
+    # by their *real* repo path (the dict key is a display-safe, possibly suffixed
+    # review key), so the manual-review message names a file that exists on disk.
+    emptied = [key_to_path.get(key, key) for key, content in files.items() if not content.strip()]
+
+    # A deleted path can be restored in the worktree (a real file, or a dangling
+    # symlink) in a later failed-commit iteration; treat it as present only then.
+    # A directory now occupying the path (a file replaced by a dir) does *not*
+    # count as present. A deleted *secret* is withheld (content never shown) but
+    # its path is still surfaced below, so a deletion-only secret change is not
+    # silently approved.
+    deleted: List[str] = []
+    deleted_sensitive: List[str] = []
+    for p in deleted_all:
+        full = repo_path / p
+        if full.is_file() or full.is_symlink():
+            continue  # restored on disk → not a net deletion to surface
+        (deleted_sensitive if is_sensitive_path(p) else deleted).append(p)
+
+    # Read what each deletion removed from the merge-base blob (the content is gone
+    # from the worktree). A deletion whose blob could not be fetched (binary,
+    # gitlink, or a read failure) has no examinable content, so it is recorded as
+    # *unreadable* — otherwise a mixed change (one readable file + an unreadable
+    # deletion) would look fully examined and slip an unreviewed removal through.
+    # Fetch pre-deletion content for at most _MAX_DELETED_BLOBS_READ removals (two
+    # git spawns each) so a mass deletion can't fan out into thousands of spawns;
+    # the rest are still listed by name in the deletion note below. Only the
+    # *probed* removals that genuinely could not be read count as unreadable —
+    # paths skipped purely by the cap are not flagged unexamined (they would
+    # otherwise over-block an ordinary large deletion).
+    deleted_to_probe = deleted[:_MAX_DELETED_BLOBS_READ]
+    deleted_content: Dict[str, str] = {}
+    if deleted_to_probe:
+        try:
+            deleted_content = read_paths_at_merge_base(
+                repo_path, DEVELOPMENT_BRANCH, deleted_to_probe
+            )
+        except BaselineDiffUnavailable as exc:
+            logger.warning("Code review: deleted-file content unavailable (%s)", exc)
+    unreadable_deleted = [p for p in deleted_to_probe if p not in deleted_content]
+
+    # A changed/written path that is a symlink on disk exposes only its link
+    # target to the reviewer, never the pointed-to content — and a type-change
+    # that replaced a real file with a symlink (git status ``T``, bucketed as a
+    # change, not a deletion) removes the original content from review entirely.
+    # Record such paths as unexamined so the gate routes the approval to manual
+    # review instead of trusting an unreviewed link. ``read_files_as_dict`` already
+    # detected these while reading ``readable`` (single source of truth, no second
+    # stat pass), reporting them via ``symlinked_paths``.
+    symlinked = sorted(symlinked_paths)
+    unreadable = list(omitted) + unreadable_deleted + symlinked
+
+    # Best-effort: which surviving files still import each removed module, so the
+    # reviewer can check the deletion note's "nothing depends on it" instruction.
+    references = find_referencing_paths(repo_path, deleted) if deleted else {}
+    note = _format_deletion_note(deleted, references) if deleted else None
+
+    # Restored pre-deletion content rides byte-for-byte (no header prepended, so
+    # line numbers and non-Python syntax are preserved) under a *display label*
+    # that marks it DELETED. The marker lives in the key — which the coordinator
+    # carries as every segment's file label — so even a large blob split across
+    # chunks is never mistaken for current source. The label is sanitized (a raw
+    # git path may carry control/invalid-UTF-8 bytes); key_to_path maps it back to
+    # the raw removed path so a finding still drives the fix loop to restore it.
+    for p, content in deleted_content.items():
+        label = f"{sanitize_path_for_text(p)} (DELETED by this task — pre-deletion content)"
+        key = _disambiguated_key(files, label)
+        files[key] = content
+        key_to_path[key] = p
+
+    # Attach each non-empty omission note as a real (segmentable) block; the exact
+    # inserted keys are tracked so a finding on one (and only one) is detached from
+    # the fix loop without catching a real ``[review-note]/`` file.
+    withheld = sorted(set(sensitive) | set(deleted_sensitive))
+    synthetic_keys = _attach_review_notes(
+        files,
+        deletion_note=note,
+        withheld=withheld or None,
+        unreadable=unreadable or None,
+        emptied=emptied or None,
+    )
+
+    if files:
+        return ReviewInputSelection(
+            files,
+            None,
+            note,
+            synthetic_keys,
+            key_to_path,
+            withheld=tuple(withheld),
+            unreadable=tuple(unreadable),
+            emptied=tuple(emptied),
+        )
+
+    logger.warning(
+        "Code review: no changed or written files on disk; falling back to whole-repo review input"
+    )
+    return _whole_repo_review_input(repo_path)
 
 
 def _is_openapi_spec_task(task: Any) -> bool:
@@ -590,6 +1259,7 @@ class BackendExpertAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -1518,14 +2188,18 @@ class BackendExpertAgent:
                 task_id,
                 iteration,
             )
-            code_on_branch = _read_repo_code(repo_path)
-            if _is_repo_setup_task(current_task):
-                meta = _read_repo_meta_files(repo_path)
-                if meta:
-                    code_on_branch = code_on_branch + "\n\n" + meta
+            # Use the writer's own materialized path set (including a synthesized
+            # .gitignore) so derived/uncommitted paths are reviewed when their
+            # commit didn't land.
+            written = _writer_output_keys(result)
+            # The deletion note is already folded into the review files/code by
+            # _select_review_input; the selection also carries the key→path map and
+            # the exact synthetic note keys for finding translation below.
+            review_selection = _select_review_input(repo_path, current_task, written)
             review_result = self._run_code_review(
                 code_review_agent=code_review_agent,
-                code=code_on_branch,
+                files=review_selection.files,
+                code=review_selection.code,
                 spec_content=spec_content,
                 task=current_task,
                 architecture=architecture,
@@ -1533,6 +2207,30 @@ class BackendExpertAgent:
                     _read_repo_code(repo_path), compute_existing_code_chars(self.llm)
                 ),
             )
+            # Fail closed on an approval that coincides with a destructive/unknowable
+            # omission (an emptied file, a baseline diff we couldn't compute, a
+            # withheld real secret, unreadable source) or that saw no examinable
+            # content at all — re-running wouldn't change the set deterministically
+            # and exhaustion would fall through to merge, so return a terminal
+            # manual-review result. Binary assets and sensitive-named templates stay
+            # advisory. The decision lives on ReviewInputSelection so every review
+            # caller applies it identically (see review_gate_failure).
+            failure_reason = review_selection.review_gate_failure(review_result.approved)
+            if failure_reason:
+                logger.warning("[%s] WORKFLOW   [%d] %s", task_id, iteration, failure_reason)
+                record.code_review_approved = False
+                review_history.append(record)
+                checkout_branch(repo_path, DEVELOPMENT_BRANCH)
+                return BackendWorkflowResult(
+                    task_id=task_id,
+                    success=False,
+                    branch_name=branch_name,
+                    iterations_used=len(review_history),
+                    review_history=review_history,
+                    summary=result.summary if result else "",
+                    failure_reason=failure_reason,
+                    needs_followup=True,
+                )
             record.code_review_approved = review_result.approved
             record.code_review_issue_count = len(review_result.issues)
             if not review_result.approved:
@@ -1553,10 +2251,19 @@ class BackendExpertAgent:
                     )
                 record.action_taken = "fixed_review_issues"
                 review_history.append(record)
-                cr_issues = [
-                    i.model_dump() if hasattr(i, "model_dump") else i.dict()
-                    for i in review_result.issues
-                ]
+                cr_issues = _translate_finding_paths(
+                    [
+                        # An issue is normally a Pydantic model, but tolerate a
+                        # plain dict (e.g. a differently-versioned agent) instead
+                        # of crashing the fix loop on a missing .dict()/.model_dump().
+                        i
+                        if isinstance(i, dict)
+                        else (i.model_dump() if hasattr(i, "model_dump") else i.dict())
+                        for i in review_result.issues
+                    ],
+                    review_selection.key_to_path,
+                    review_selection.synthetic_keys,
+                )
                 task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
@@ -2447,7 +3154,8 @@ class BackendExpertAgent:
     def _run_code_review(
         *,
         code_review_agent: Any,
-        code: str,
+        files: Dict[str, str] | None = None,
+        code: str | None = None,
         spec_content: str,
         task: Task,
         architecture: Optional[SystemArchitecture],
@@ -2457,21 +3165,35 @@ class BackendExpertAgent:
         Invoke the code review agent.
         Preconditions:
             - ``code_review_agent`` is initialised.
-            - ``code`` contains the files on the feature branch, untruncated:
-              the coordinator bounds its own per-call prompts and its coverage
-              guarantee only holds when it sees the full input.
+            - Exactly one of ``files`` (the task's changed files as a
+              ``{path: content}`` dict) or ``code`` (a path-headered blob) is
+              provided, untruncated: the coordinator bounds its own per-call
+              prompts and its coverage guarantee only holds when it sees the
+              full input. Any deletion note is already folded into that channel
+              by ``_select_review_input`` (so the coordinator segments it),
+              never into the task description.
+            - ``existing_code`` (optional) is the pre-change repository context
+              passed through as ``CodeReviewInput.existing_codebase`` — already
+              truncated by the caller; ``None`` omits it.
         Postconditions:
             - Returns a ``CodeReviewOutput`` with ``approved`` and ``issues``.
         Raises:
             CodeReviewUnavailableError: when the review could not be completed.
+            ValueError: when neither or both of ``files``/``code`` are provided
+                (a caller-contract violation surfaced at the boundary rather than
+                silently mis-reviewed).
         """
-        from code_review_agent.models import CodeReviewInput
+        from code_review_agent.models import build_code_review_input
 
+        if (files is None) == (code is None):
+            raise ValueError("_run_code_review requires exactly one of 'files' or 'code'")
+        task_description = task.description or ""
         return code_review_agent.run(
-            CodeReviewInput(
+            build_code_review_input(
+                files=files,
                 code=code,
                 spec_content=spec_content,
-                task_description=task.description,
+                task_description=task_description,
                 task_requirements=_task_requirements(task),
                 acceptance_criteria=getattr(task, "acceptance_criteria", []) or [],
                 language="python",
