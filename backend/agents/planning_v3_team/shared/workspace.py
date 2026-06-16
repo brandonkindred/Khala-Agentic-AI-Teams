@@ -146,18 +146,21 @@ def resolve_workspace(
         - Filesystem ``repo_path`` -> ``<root>/<safe basename>/<job_id>``; the
           supplied path is confined to its sanitized final component and can
           never write outside the root.
-        - Raises ``WorkspaceResolutionError`` when the directory cannot be
-          created (e.g. ``AGENT_CACHE`` points at a non-directory) or when the
-          fully resolved path would escape the base root (e.g. a pre-existing
-          symlink among the path components). The API layer maps this to HTTP
-          400.
+        - Raises ``WorkspaceResolutionError`` for an unsafe ``job_id``, when the
+          directory cannot be created (e.g. ``AGENT_CACHE`` points at a
+          non-directory), or when the resolved path would escape the base root
+          (a pre-existing or race-swapped symlink among the path components,
+          checked both before and after ``mkdir``). The API layer maps this to
+          HTTP 400.
     """
     # Precondition enforcement (DbC): job_id is server-generated and must be a
-    # single safe segment. Fail loud rather than silently coerce so a future
-    # caller passing a separator / traversal token cannot escape the leaf.
-    assert job_id and job_id not in (".", "..") and not any(
-        c in job_id for c in ("/", "\\", "\x00")
-    ), f"job_id must be a single safe path segment, got {job_id!r}"
+    # single safe segment. Enforced with an explicit raise (not ``assert``, which
+    # ``python -O`` would strip) so a future caller passing a separator /
+    # traversal token fails loud rather than escaping the leaf.
+    if not job_id or job_id in (".", "..") or any(c in job_id for c in ("/", "\\", "\x00")):
+        raise WorkspaceResolutionError(
+            f"job_id must be a single safe path segment, got {job_id!r}"
+        )
 
     base = _base_root()
 
@@ -188,4 +191,15 @@ def resolve_workspace(
         raise WorkspaceResolutionError(
             f"Could not create workspace for repo_path={repo_path!r}: {exc}"
         ) from exc
-    return str(resolved)
+
+    # TOCTOU re-check: a symlink swapped into a path component between the check
+    # above and this mkdir could have redirected the new directory outside the
+    # root. Re-resolve the created path and reject if it escaped. (We deliberately
+    # do not delete the stray directory — it may resolve to an attacker-chosen
+    # location, so removal is left to the operator.)
+    final = resolved.resolve()
+    if not final.is_relative_to(base_resolved):
+        raise WorkspaceResolutionError(
+            f"Resolved workspace escaped the cache root after creation for repo_path={repo_path!r}"
+        )
+    return str(final)

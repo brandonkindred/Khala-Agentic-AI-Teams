@@ -135,10 +135,43 @@ def test_symlink_segment_escaping_root_raises_error(cache):
 def test_unsafe_job_id_rejected(cache):
     # job_id is a server-generated UUID; a value containing a path separator or
     # traversal token violates the documented precondition and must fail loudly
-    # (DbC) rather than be silently coerced or allowed to escape the leaf.
-    for bad in ("../evil", "a/b", "..", "", "x\\y"):
-        with pytest.raises(AssertionError):
+    # (DbC) rather than be silently coerced or allowed to escape the leaf. Use an
+    # explicit raise (not assert) so the check survives `python -O`.
+    for bad in ("../evil", "a/b", "..", "", "x\\y", "a\x00b"):
+        with pytest.raises(WorkspaceResolutionError):
             resolve_workspace("", None, bad)
+
+
+def test_slug_strips_leading_dots_no_hidden_dir(cache):
+    # A leading-dot input must not create a hidden directory: _slug strips
+    # leading '.', so '.hidden' resolves to a visible 'hidden' segment.
+    out = Path(resolve_workspace("/x/.hidden", None, "jh"))
+    assert out == (cache / "planning_v3" / "hidden" / "jh").resolve()
+    assert not out.parent.name.startswith(".")
+
+
+def test_toctou_symlink_swap_after_check_raises(cache, monkeypatch):
+    # Simulate a race: the pre-mkdir check passes, then a symlink is swapped into
+    # the segment just before mkdir runs. The post-mkdir re-check must catch the
+    # escape and raise.
+    base = cache / "planning_v3"
+    outside = cache / "outside"
+    outside.mkdir(parents=True)
+    real_mkdir = Path.mkdir
+
+    def racy_mkdir(self, *args, **kwargs):
+        seg = base / "race"
+        if not seg.is_symlink() and not seg.exists():
+            real_mkdir(base, parents=True, exist_ok=True)
+            try:
+                seg.symlink_to(outside, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip("symlinks not supported on this platform/privilege level")
+        return real_mkdir(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", racy_mkdir)
+    with pytest.raises(WorkspaceResolutionError):
+        resolve_workspace("race", None, "jr")
 
 
 def test_slug_rejects_traversal_and_separators():

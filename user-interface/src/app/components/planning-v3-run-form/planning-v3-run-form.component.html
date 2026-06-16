@@ -9,6 +9,7 @@
       <input
         matInput
         [(ngModel)]="repoPath"
+        maxlength="4096"
         placeholder="Leave blank — a server workspace is created automatically"
       />
       <mat-hint>Optional server-side folder for the generated plan, not your source code.</mat-hint>
@@ -24,6 +25,7 @@
       <textarea
         matInput
         [(ngModel)]="initialBrief"
+        maxlength="100000"
         rows="4"
         placeholder="Problem statement or brief from the client..."
       ></textarea>
@@ -34,6 +36,7 @@
       <textarea
         matInput
         [(ngModel)]="specContent"
+        maxlength="500000"
         rows="6"
         placeholder="Full spec content if available..."
       ></textarea>
