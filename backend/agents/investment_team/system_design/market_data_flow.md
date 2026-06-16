@@ -46,7 +46,7 @@ This document is the data-layer companion to the existing system-design set:
   backtests/paper-trades use. Plane 3 is the newer streaming path; of its
   adapters **only Binance is wired end-to-end today**, and the live path is
   gated behind `INVESTMENT_LIVE_PAPER_ENABLED` (default **off**). See
-  [§9](#9-implementation-status--caveats).
+  [§9](#9-implementation-status-and-caveats).
 
 ---
 
@@ -832,7 +832,7 @@ stateDiagram-v2
 
 ---
 
-## 9. Implementation status & caveats
+## 9. Implementation status and caveats
 
 The data layer reflects a **partly-completed migration** (the "PR 1 / PR 2"
 sequence in [`pr2_live_data_and_paper_cutover.md`](./pr2_live_data_and_paper_cutover.md)).
