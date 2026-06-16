@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Observable, of } from 'rxjs';
+import { NEVER, of } from 'rxjs';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { vi } from 'vitest';
 import { InvestmentApiService } from '../../services/investment-api.service';
@@ -30,8 +30,9 @@ describe('StrategyLabComponent — asset categories', () => {
   beforeEach(async () => {
     apiSpy = {
       runStrategyLab: vi.fn().mockReturnValue(of(startResponse)),
-      // Never emits/completes so the stream-complete cascade stays out of these tests.
-      streamRunStatus: vi.fn().mockReturnValue(new Observable<never>(() => undefined)),
+      // NEVER: emits nothing and never completes, so the stream-complete cascade
+      // (loadResults / loadPaperTradingResults) stays out of these focused tests.
+      streamRunStatus: vi.fn().mockReturnValue(NEVER),
     };
 
     await TestBed.configureTestingModule({

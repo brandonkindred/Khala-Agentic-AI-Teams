@@ -106,6 +106,10 @@ from investment_team.strategy_lab.spec_dsl import (
     ExitRule,
     SizingRule,
 )
+from investment_team.strategy_lab_context import (
+    excluded_for_allowed,
+    normalize_allowed_asset_classes,
+)
 from job_service_client import RESTARTABLE_STATUSES, RESUMABLE_STATUSES, validate_job_for_action
 from shared_observability import init_otel, instrument_fastapi_app
 
@@ -1279,8 +1283,6 @@ class RunStrategyLabRequest(BaseModel):
         FastAPI as HTTP 422) when a non-null selection contains no valid
         category, so the lab never starts a run constrained to zero categories.
         """
-        from investment_team.strategy_lab_context import normalize_allowed_asset_classes
-
         normalized = normalize_allowed_asset_classes(value)
         if normalized is None:
             return None
@@ -1562,8 +1564,6 @@ def _strategy_lab_worker(
         # a selection covering every class) means "no constraint".
         exclude_asset_classes: Optional[List[str]] = None
         if request.allowed_asset_classes:
-            from investment_team.strategy_lab_context import excluded_for_allowed
-
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
         def _compute_signal_brief() -> tuple[

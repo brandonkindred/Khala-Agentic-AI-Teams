@@ -91,6 +91,7 @@
       [disabled]="running || loading || clearingAll"
       class="category-toggle-group"
       aria-label="Asset categories to generate strategies for"
+      aria-describedby="category-hint"
     >
       @for (cat of STRATEGY_LAB_CATEGORIES; track cat.value) {
         <mat-button-toggle [value]="cat.value">
@@ -100,9 +101,9 @@
       }
     </mat-button-toggle-group>
     @if (!categoriesValid) {
-      <span class="category-hint category-hint--error">Select at least one category.</span>
+      <span id="category-hint" class="category-hint category-hint--error">Select at least one category.</span>
     } @else {
-      <span class="category-hint">Strategies are generated only for the selected categories.</span>
+      <span id="category-hint" class="category-hint">Strategies are generated only for the selected categories.</span>
     }
   </div>
 

@@ -74,6 +74,13 @@ def test_normalize_all_invalid_returns_empty_list() -> None:
     assert normalize_allowed_asset_classes(["options", "bonds"]) == []
 
 
+def test_normalize_empty_list_returns_empty_list() -> None:
+    # An explicit empty list (distinct from None) is a non-None "selection" that
+    # yields no allowed classes — the helper returns [] (not None); the request
+    # validator turns that into a 422.
+    assert normalize_allowed_asset_classes([]) == []
+
+
 # ---------------------------------------------------------------------------
 # excluded_for_allowed
 # ---------------------------------------------------------------------------
@@ -178,11 +185,14 @@ def _record(asset_class: str) -> StrategyLabRecord:
 
 def test_mix_hint_exclude_restricts_menu_when_no_records() -> None:
     out = asset_class_mix_hint([], exclude=["stocks", "crypto", "futures", "commodities"])
-    # Only forex remains; excluded classes must not be offered as a choice.
-    assert "forex" in out
-    for excluded in ("stocks=", "crypto=", "futures=", "commodities="):
+    # The menu must offer only the single allowed class.
+    assert "Choose **asset_class** from forex with" in out
+    # Excluded classes must not be offered. ("stocks" is deliberately excluded
+    # from this list: the no-records boilerplate still says "do not default to
+    # stocks", so its absence is asserted via the exact menu clause above rather
+    # than blanket string absence.)
+    for excluded in ("crypto", "futures", "commodities"):
         assert excluded not in out
-    assert "crypto" not in out.split("do **not**")[0]
 
 
 def test_mix_hint_exclude_drops_excluded_classes_from_counts() -> None:

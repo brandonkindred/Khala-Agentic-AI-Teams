@@ -242,12 +242,12 @@ def asset_class_mix_hint(
     model toward a class the run is not permitted to use. When ``exclude`` is
     ``None`` / empty the output is identical to the unconstrained hint.
     """
-    allowed = [c for c in _PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
+    allowed = [c for c in PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
     if not allowed:
         # Defensive: an exclusion covering every class would leave nothing to
         # steer toward. The API boundary rejects an empty allowed set, so this
         # only guards against a misuse from internal callers.
-        allowed = list(_PROMPT_ASSET_CLASSES)
+        allowed = list(PROMPT_ASSET_CLASSES)
     menu = _or_join(allowed)
     if not records:
         return (
