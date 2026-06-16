@@ -46,6 +46,11 @@ def test_env_float_default_garbage_and_clamp(monkeypatch) -> None:
     assert ph._env_float("X_F", 0.85, minimum=0.1) == 0.1  # clamped to floor
     monkeypatch.setenv("X_F", "5")
     assert ph._env_float("X_F", 0.85, maximum=0.99) == 0.99  # clamped to ceiling
+    # Non-finite parses must fall back to the (finite) default — a nan interval
+    # busy-loops the watchdog and inf crashes it; clamp via </> can't catch nan.
+    for bad in ("inf", "-inf", "nan", "1e400"):
+        monkeypatch.setenv("X_F", bad)
+        assert ph._env_float("X_F", 30.0, minimum=1.0) == 30.0
 
 
 # --------------------------------------------------------------------- memory reads

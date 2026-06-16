@@ -29,6 +29,7 @@ documented default, out-of-range values clamp to the floor/ceiling):
 from __future__ import annotations
 
 import logging
+import math
 import os
 import sys
 import threading
@@ -101,10 +102,11 @@ def _env_float(
     """Parse a float from env var *name*, defensively, then clamp.
 
     Preconditions:
-        - ``minimum <= maximum`` when both are provided.
+        - ``minimum <= maximum`` when both are provided; *default* is finite.
     Postconditions:
-        - Returns the parsed value clamped to ``[minimum, maximum]``; falls back
-          to *default* when the var is unset/blank/non-numeric. Never raises.
+        - Returns a finite float clamped to ``[minimum, maximum]``; falls back to
+          *default* when the var is unset/blank/non-numeric or parses to a
+          non-finite value (``inf``/``nan``). Never raises.
     """
     raw = os.environ.get(name)
     value = default
@@ -113,6 +115,10 @@ def _env_float(
             value = float(raw)
         except (TypeError, ValueError):
             value = default
+    # Reject inf/nan: a non-finite interval busy-loops or crashes the watchdog,
+    # and clamp comparisons (</>) are always False for nan so they can't catch it.
+    if not math.isfinite(value):
+        value = default
     if minimum is not None and value < minimum:
         value = minimum
     if maximum is not None and value > maximum:
