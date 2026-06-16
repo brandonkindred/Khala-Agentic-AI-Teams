@@ -1,4 +1,4 @@
-import { Component, Input } from '@angular/core';
+import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
@@ -31,6 +31,9 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
   imports: [CommonModule, MatIconModule, MatProgressBarModule],
   templateUrl: './coding-team-monitor.component.html',
   styleUrl: './coding-team-monitor.component.scss',
+  // Purely @Input()-driven; the parent re-feeds a fresh `status` object on each poll, so OnPush
+  // re-renders on that reference change and skips redundant change-detection cycles in between.
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class CodingTeamMonitorComponent {
   /** Latest polled job status; null until the first poll lands. */

@@ -15,7 +15,7 @@ synthesized here regardless of the persisted state.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from coding_team.models import AgentStatusEntry
 
@@ -27,7 +27,16 @@ TECH_LEAD_AGENT_ID = "tech_lead"
 _TECH_LEAD_ACTIVITY_AGENT = "tech_lead_review"
 
 
-def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[Tuple[str, str, List[str]]]:
+class StackRosterEntry(NamedTuple):
+    """One Senior SWE slot derived from a stack spec. ``agent_id == display_name`` (the
+    agent_task_map key the orchestrator writes); ``tools_services`` is the stack's tool list."""
+
+    agent_id: str
+    display_name: str
+    tools_services: List[str]
+
+
+def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEntry]:
     """Map raw stack specs to ``(agent_id, display_name, tools_services)``, one per stack.
 
     This MUST stay faithful to how the orchestrator names Senior SWE agents (the
@@ -48,13 +57,13 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[Tuple[str, str
     """
     if not isinstance(stacks_raw, list):
         return []
-    roster: List[Tuple[str, str, List[str]]] = []
+    roster: List[StackRosterEntry] = []
     for i, entry in enumerate(stacks_raw):
         spec = entry if isinstance(entry, dict) else {}
         name = spec.get("name") or f"stack_{i}"
         tools = spec.get("tools_services")
         tools = list(tools) if isinstance(tools, list) else []
-        roster.append((name, name, tools))
+        roster.append(StackRosterEntry(agent_id=name, display_name=name, tools_services=tools))
     return roster
 
 
@@ -167,9 +176,8 @@ def build_agent_statuses(
         )
 
     # --- Tech Lead card (coordinator) --------------------------------------------------
-    any_in_review = any(
-        isinstance(t, dict) and t.get("status") == "in_review" for t in task_graph_snapshot
-    )
+    # Reuse the already-filtered/indexed tasks rather than re-scanning the raw snapshot.
+    any_in_review = any(t.get("status") == "in_review" for t in tasks_by_id.values())
     if phase == "task_graph":
         tl_status = "planning"
     elif activity_agent == _TECH_LEAD_ACTIVITY_AGENT or any_in_review:

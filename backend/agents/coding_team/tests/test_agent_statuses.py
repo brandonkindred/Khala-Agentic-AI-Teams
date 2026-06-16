@@ -206,6 +206,23 @@ def test_tech_lead_review_overlay_lands_on_tech_lead_not_engineer():
     assert eng.activity_fraction is None
 
 
+def test_activity_without_agent_key_overlays_engineer_and_leaves_tech_lead_idle():
+    # A current_activity dict with no 'agent' key: activity_agent becomes None, so the overlay is
+    # treated as engineer activity (lands on the task's owner) and the Tech Lead stays idle when no
+    # task is in review.
+    snap = [{"id": "t1", "title": "UI", "status": "in_progress"}]
+    activity = {"step": "reviewing", "detail": "src/app.py", "fraction": 0.3, "task_id": "t1"}
+    entries = _by_id(
+        build_agent_statuses([{"name": "frontend"}], {"frontend": "t1"}, snap, activity, "coding")
+    )
+    eng = entries["frontend"]
+    assert eng.current_step == "reviewing"
+    assert eng.activity_detail == "src/app.py"
+    assert eng.activity_fraction == 0.3
+    assert entries[TECH_LEAD_AGENT_ID].status == "idle"
+    assert entries[TECH_LEAD_AGENT_ID].current_step is None
+
+
 def test_code_review_overlay_lands_on_owning_engineer_and_clamps_fraction():
     snap = [{"id": "t1", "title": "UI", "status": "in_progress"}]
     activity = {

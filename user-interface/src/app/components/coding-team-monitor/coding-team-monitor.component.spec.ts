@@ -15,9 +15,10 @@ describe('CodingTeamMonitorComponent', () => {
     component = fixture.componentInstance;
   });
 
-  /** Set the @Input status, run change detection, and return the rendered host element. */
+  /** Set the @Input status, run change detection, and return the rendered host element. Uses
+   *  setInput so an OnPush component re-renders when the status changes between renders. */
   async function render(status: Partial<CodingTeamJobStatus> | null): Promise<HTMLElement> {
-    component.status = status as CodingTeamJobStatus | null;
+    fixture.componentRef.setInput('status', status as CodingTeamJobStatus | null);
     fixture.detectChanges();
     await fixture.whenStable();
     return fixture.nativeElement as HTMLElement;
