@@ -246,12 +246,28 @@ def _install_global_instrumentors() -> None:
 
 
 def instrument_fastapi_app(app: Any, *, team_key: Optional[str] = None) -> None:
-    """Attach the FastAPI instrumentor to a team's app.
+    """Attach the FastAPI instrumentor to a team's app — idempotently.
 
-    Must be called after the app is created. No-ops if OpenTelemetry is
-    not initialized or the instrumentor package is missing.
+    Teams that own their FastAPI app self-instrument at import time, and the
+    generic team-service wrapper instruments again on every worker boot. The
+    underlying ``FastAPIInstrumentor`` is *not* idempotent: a second call emits a
+    confusing ``Attempting to instrument FastAPI app while already instrumented``
+    WARNING that muddies crash debugging. A sentinel attribute makes the repeat
+    call a quiet no-op instead.
+
+    Preconditions:
+        - ``app`` accepts attribute assignment (a FastAPI instance does).
+    Postconditions:
+        - When OpenTelemetry is enabled, ``app`` is instrumented exactly once
+          across any number of calls and ``app._khala_otel_instrumented`` is True.
+        - No-ops (returns without raising) when OpenTelemetry is not initialized,
+          the instrumentor package is missing, or the app was already
+          instrumented by a prior call.
     """
     if not _enabled:
+        return
+    if getattr(app, "_khala_otel_instrumented", False):
+        logger.debug("FastAPI already instrumented for team=%s; skipping", team_key or _team_key)
         return
     try:
         from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
@@ -260,6 +276,7 @@ def instrument_fastapi_app(app: Any, *, team_key: Optional[str] = None) -> None:
             app,
             excluded_urls="health,healthz,ready,metrics",
         )
+        app._khala_otel_instrumented = True
         logger.debug("FastAPI instrumented for team=%s", team_key or _team_key)
     except Exception as exc:
         logger.warning("FastAPI instrumentation failed: %s", exc)

@@ -183,6 +183,26 @@ Required for migrated teams (blogging, branding, team_assistant, startup_advisor
 user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed
 stores via `shared_postgres`; no SQLite fallback.
 
+### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
+Per-worker memory watchdog used by every `team_service` microservice
+(`shared_observability.process_health`). A daemon thread samples the container's
+cgroup memory usage (cgroup v2 `memory.current` → v1 `memory.usage_in_bytes` →
+per-process RSS off-cgroup) and logs a single WARNING as it approaches the
+budget, so the last log line before an OOM-kill (SIGKILL, no traceback) names the
+cause. No-op when no memory limit can be detected.
+- `TEAM_MEMORY_WATCHDOG_ENABLED` — master switch (default `true`).
+- `TEAM_MEMORY_WATCHDOG_LIMIT_MB` — override the detected budget, in MB (default:
+  the cgroup limit, i.e. the container's `mem_limit` / `deploy.resources.limits.memory`).
+- `TEAM_MEMORY_WATCHDOG_THRESHOLD` — warn fraction in `(0, 1]` (default `0.85`, clamped to `[0.1, 0.99]`).
+- `TEAM_MEMORY_WATCHDOG_INTERVAL_S` — sample interval in seconds (default `30`, floor `1`).
+
+`PYTHONFAULTHANDLER` is also exported by the entrypoint: `install_fault_diagnostics()`
+arms Python's `faulthandler` directly in the running process (so a native fault —
+SIGSEGV/SIGABRT/… — dumps a Python stack instead of dying silently) **and** sets
+`os.environ["PYTHONFAULTHANDLER"] = "1"` when it isn't already set, so any
+spawned/forkserver worker inherits the same behaviour at interpreter startup
+(an operator-set value is preserved).
+
 ---
 
 ## AI Systems
