@@ -37,6 +37,22 @@ logger = logging.getLogger(__name__)
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
 
+
+class _NoopBridge:
+    """Stand-in progress bridge used when a real ActivityBridge can't be built.
+
+    Progress reporting is observability only: if the bridge fails to construct,
+    the code review must still run (without live progress) rather than be
+    silently skipped. ``__call__`` and ``clear`` are no-ops.
+    """
+
+    def __call__(self, *_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    def clear(self) -> None:
+        return None
+
+
 # Default job-level progress band for the coding phase. The caller owns the band
 # allocation: the parent pipeline (software_engineering_team) maps its earlier phases
 # onto lower sub-ranges and passes the coding team its slice via the
@@ -1040,13 +1056,24 @@ class CodingTeamSwarm:
 
                 # Code review — bridge the agent's sub-step reports into the job record so
                 # the UI shows live review progress instead of a frozen "Code review: ..." line.
-                cr_bridge = ActivityBridge(
-                    update_fn,
-                    agent="code_review",
-                    label="Code review",
-                    task_id=task.id,
-                    task_title=task.title,
-                )
+                # Progress reporting is observability only: build the bridge defensively so a
+                # construction failure degrades to "no live progress" and can never skip the
+                # review (which would let unreviewed code through the gate).
+                try:
+                    cr_bridge: Any = ActivityBridge(
+                        update_fn,
+                        agent="code_review",
+                        label="Code review",
+                        task_id=task.id,
+                        task_title=task.title,
+                    )
+                except Exception:
+                    logger.exception(
+                        "code-review progress bridge unavailable for task %s; "
+                        "reviewing without live progress",
+                        task.id,
+                    )
+                    cr_bridge = _NoopBridge()
                 try:
                     cr_bridge("preparing", "starting code review", 0.0)
                     review = run_code_review(

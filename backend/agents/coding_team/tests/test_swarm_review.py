@@ -703,6 +703,25 @@ def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, monkeypatch, 
     assert isinstance(exc, RuntimeError) and exc.args[0] == "tool crashed"
 
 
+def test_code_review_runs_even_if_progress_bridge_fails(tmp_path, monkeypatch):
+    """A failure constructing the ActivityBridge (observability only) must NOT skip
+    the code review and silently pass the gate. The review still runs: a rejecting
+    review returns the task for revision (TO_DO), not IN_REVIEW."""
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("bridge down")
+
+    _patch_gates(monkeypatch, build_ok=True, review_ok=False)  # review rejects
+    monkeypatch.setattr(orch_mod, "ActivityBridge", _boom)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    # Review ran (and rejected) despite the bridge failure → returned for revision.
+    # Before the fix the bridge error was swallowed and the gate passed (IN_REVIEW).
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
 # ----------------------------------------------------- un-assignment / double-assignment guard
 
 

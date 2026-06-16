@@ -41,11 +41,10 @@ def test_init_failure_does_not_stub_the_instrumentor() -> None:
     init_otel() failure must NOT redefine instrument_fastapi_app as a no-op (the
     regression this split fixes: a transient init error disabling tracing)."""
     body = entrypoint.build_wrapper_body("t", "pkg.mod", "app")
-    # The lone no-op stub lives in the *import* except block; everything after
-    # the init-failure log line must not define another.
-    after_init_except = body.split("'shared_observability init_otel failed'", 1)[1]
-    assert "def instrument_fastapi_app" not in after_init_except
+    # Structural check (no reliance on exact log strings): the lone no-op stub
+    # lives in the *import* except block, which precedes the init_otel() call.
     assert body.count("def instrument_fastapi_app") == 1
+    assert body.index("def instrument_fastapi_app") < body.index("init_otel(service_name=")
 
 
 def test_router_attr_wraps_router_in_fresh_app() -> None:
@@ -59,3 +58,24 @@ def test_router_attr_wraps_router_in_fresh_app() -> None:
 def test_build_wrapper_body_requires_team_identifiers() -> None:
     with pytest.raises(AssertionError):
         entrypoint.build_wrapper_body("", "pkg.mod", "app")
+
+
+def test_team_name_with_quote_is_embedded_safely() -> None:
+    """A team_name containing a quote must not break or inject into the generated
+    code — it is embedded via repr(), so the wrapper still compiles."""
+    body = entrypoint.build_wrapper_body("ev'il", "pkg.mod", "app")
+    _compile(body)  # would SyntaxError if the quote escaped the string literal
+    assert 'start_memory_watchdog("ev\'il")' in body or "start_memory_watchdog('ev\\'il')" in body
+
+
+@pytest.mark.parametrize(
+    "team_module,app_attr",
+    [
+        ("pkg.mod; import os", "app"),  # injection via module path
+        ("pkg.mod", "app as x\nimport os"),  # injection via attr
+        ("pkg.mod", "1bad"),  # not an identifier
+    ],
+)
+def test_unsafe_module_or_attr_rejected(team_module: str, app_attr: str) -> None:
+    with pytest.raises(ValueError):
+        entrypoint.build_wrapper_body("t", team_module, app_attr)

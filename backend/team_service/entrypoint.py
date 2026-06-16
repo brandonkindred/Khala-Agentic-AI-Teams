@@ -125,33 +125,40 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
           the attribute imported from the team module — ``"router"`` wraps a
           router in a fresh FastAPI app, anything else re-exports the team's own
           FastAPI ``app``.
+        - ``team_module``/``app_attr`` are valid dotted Python identifiers (they
+          land in a ``from X import Y`` statement that ``repr()`` can't guard).
     Postconditions:
         - Returns valid Python source that defines a module-level ``app`` and
           always ``compile()``s.
     """
     assert team_name and team_module, "team_name and team_module are required"
+    # team_module/app_attr go into a `from X import Y` statement where repr()
+    # can't apply, so validate them as safe identifiers to foreclose code
+    # injection via a hostile TEAM_MODULE / TEAM_APP_ATTR. team_name only ever
+    # appears inside string literals and is embedded with repr() (``!r``) below.
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*", team_module):
+        raise ValueError(f"unsafe team_module for wrapper generation: {team_module!r}")
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", app_attr):
+        raise ValueError(f"unsafe app_attr for wrapper generation: {app_attr!r}")
 
+    # A single logger up top (DRY) instead of `import logging` in each except.
     # Every worker re-runs this wrapper on import, so re-initialise OTel and
     # re-instrument the app each time.
     body = (
+        "import logging\n"
+        "_log = logging.getLogger('team_service')\n"
         "try:\n"
         "    from shared_observability import init_otel, instrument_fastapi_app\n"
         "except Exception:\n"
-        "    import logging\n"
-        "    logging.getLogger('team_service').warning(\n"
-        "        'shared_observability import failed', exc_info=True\n"
-        "    )\n"
+        "    _log.warning('shared_observability import failed', exc_info=True)\n"
         "    def init_otel(*_a, **_k):\n"
         "        return None\n"
         "    def instrument_fastapi_app(*_a, **_k):\n"
         "        return None\n"
         "try:\n"
-        f"    init_otel(service_name='{team_name}', team_key='{team_name}')\n"
+        f"    init_otel(service_name={team_name!r}, team_key={team_name!r})\n"
         "except Exception:\n"
-        "    import logging\n"
-        "    logging.getLogger('team_service').warning(\n"
-        "        'shared_observability init_otel failed', exc_info=True\n"
-        "    )\n"
+        "    _log.warning('shared_observability init_otel failed', exc_info=True)\n"
     )
 
     # Each worker is its own process. Under fork (uvicorn's default on Linux) the
@@ -164,19 +171,16 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
         "try:\n"
         "    from shared_observability import install_fault_diagnostics, start_memory_watchdog\n"
         "    install_fault_diagnostics()\n"
-        f"    start_memory_watchdog('{team_name}')\n"
+        f"    start_memory_watchdog({team_name!r})\n"
         "except Exception:\n"
-        "    import logging\n"
-        "    logging.getLogger('team_service').warning(\n"
-        "        'fault diagnostics / memory watchdog unavailable', exc_info=True\n"
-        "    )\n"
+        "    _log.warning('fault diagnostics / memory watchdog unavailable', exc_info=True)\n"
     )
 
     if app_attr == "router":
         body += (
             "from fastapi import FastAPI\n"
             f"from {team_module} import {app_attr} as _router\n"
-            f"app = FastAPI(title='{team_name} API')\n"
+            f"app = FastAPI(title={(team_name + ' API')!r})\n"
             "app.include_router(_router)\n"
         )
     else:
@@ -184,12 +188,9 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
 
     body += (
         "try:\n"
-        f"    instrument_fastapi_app(app, team_key='{team_name}')\n"
+        f"    instrument_fastapi_app(app, team_key={team_name!r})\n"
         "except Exception:\n"
-        "    import logging\n"
-        "    logging.getLogger('team_service').warning(\n"
-        "        'instrument_fastapi_app failed', exc_info=True\n"
-        "    )\n"
+        "    _log.warning('instrument_fastapi_app failed', exc_info=True)\n"
     )
 
     body += (
@@ -203,10 +204,7 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
         "        app, endpoint='/metrics', include_in_schema=False\n"
         "    )\n"
         "except Exception:\n"
-        "    import logging\n"
-        "    logging.getLogger('team_service').warning(\n"
-        "        'prometheus instrumentator unavailable', exc_info=True\n"
-        "    )\n"
+        "    _log.warning('prometheus instrumentator unavailable', exc_info=True)\n"
     )
     return body
 
@@ -244,9 +242,8 @@ def _resolve_app() -> str:
         raise
 
     wrapper_path = pathlib.Path("/app/_team_wrapper.py")
-    wrapper_path.write_text(
-        build_wrapper_body(TEAM_NAME, TEAM_MODULE, TEAM_APP_ATTR), encoding="utf-8"
-    )
+    body = build_wrapper_body(TEAM_NAME, TEAM_MODULE, TEAM_APP_ATTR)
+    wrapper_path.write_text(body, encoding="utf-8")
     return "_team_wrapper:app"
 
 
