@@ -29,7 +29,22 @@ class Phase(str, Enum):
 
 
 class PlanningV3RunRequest(BaseModel):
-    """Request body for POST /planning-v3/run."""
+    """Request body for ``POST /planning-v3/run``.
+
+    Fields:
+        - ``repo_path``: optional output-folder *label* (see the field
+          description); reduced to a sanitized workspace name, never read as
+          source.
+        - ``client_name``: optional client/organization name.
+        - ``initial_brief`` / ``spec_content``: the work to plan; **at least one**
+          must be non-blank (enforced by ``_require_brief_or_spec``).
+        - ``use_product_analysis`` / ``use_planning_v2`` / ``use_market_research``:
+          optional pipeline toggles.
+
+    Invariant:
+        - A validated instance always has a non-blank ``initial_brief`` or
+          ``spec_content``.
+    """
 
     repo_path: Optional[str] = Field(
         None,

@@ -31,6 +31,10 @@ import os
 import re
 from pathlib import Path
 
+# The confinement checks use ``Path.is_relative_to`` (Python >= 3.9). The project
+# targets Python 3.10+ (see CLAUDE.md), so this is always available; no fallback
+# is needed.
+
 
 class WorkspaceResolutionError(Exception):
     """Raised when the output workspace cannot be resolved or created.

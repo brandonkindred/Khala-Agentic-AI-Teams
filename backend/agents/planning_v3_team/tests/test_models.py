@@ -3,6 +3,9 @@
 import sys
 from pathlib import Path
 
+import pytest
+from pydantic import ValidationError
+
 _agents_dir = Path(__file__).resolve().parent.parent.parent
 if str(_agents_dir) not in sys.path:
     sys.path.insert(0, str(_agents_dir))
@@ -50,9 +53,6 @@ def test_planning_v3_run_request_spec_only_is_valid():
 
 
 def test_planning_v3_run_request_requires_brief_or_spec():
-    import pytest
-    from pydantic import ValidationError
-
     with pytest.raises(ValidationError):
         PlanningV3RunRequest(repo_path="/x")
     with pytest.raises(ValidationError):

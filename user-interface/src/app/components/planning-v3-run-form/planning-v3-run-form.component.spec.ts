@@ -49,8 +49,22 @@ describe('PlanningV3RunFormComponent', () => {
     component.submitRequest.subscribe((v) => (emitted = v));
     component.onSubmit();
     expect(emitted.repo_path).toBeUndefined();
+    expect(emitted.client_name).toBeUndefined();
     expect(emitted.initial_brief).toBe('Greenfield app');
     expect(emitted.use_product_analysis).toBe(true);
+  });
+
+  it('onSubmit emits the toggle fields with their set values', () => {
+    component.initialBrief = 'App';
+    component.useProductAnalysis = false;
+    component.usePlanningV2 = true;
+    component.useMarketResearch = true;
+    let emitted: any;
+    component.submitRequest.subscribe((v) => (emitted = v));
+    component.onSubmit();
+    expect(emitted.use_product_analysis).toBe(false);
+    expect(emitted.use_planning_v2).toBe(true);
+    expect(emitted.use_market_research).toBe(true);
   });
 
   it('onSubmit forwards a provided output folder', () => {

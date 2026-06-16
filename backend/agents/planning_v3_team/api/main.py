@@ -141,6 +141,22 @@ def _run_workflow_background(
     description="Start client-facing discovery and requirements workflow. Returns job_id; poll GET /status/{job_id}.",
 )
 def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
+    """Start a Planning V3 run: resolve the output workspace and dispatch the workflow.
+
+    Preconditions:
+        - ``request`` has passed Pydantic validation, so at least one of
+          ``initial_brief`` / ``spec_content`` is non-blank.
+    Postconditions:
+        - A job is recorded and its workspace exists under
+          ``AGENT_CACHE/planning_v3``; returns the new ``job_id`` with status
+          ``running``. Dispatch is via Temporal when enabled, else a background
+          thread.
+    Raises:
+        - ``HTTPException(400)`` when the workspace cannot be resolved
+          (``WorkspaceResolutionError``).
+        - ``HTTPException(500)`` when job creation or Temporal dispatch fails (the
+          job is marked failed and the workspace cleaned up first, respectively).
+    """
     job_id = str(uuid.uuid4())
     # repo_path is an output folder, not a source to read: resolve any input
     # (empty, git URL, or client-side path) to a writable server-side directory.
