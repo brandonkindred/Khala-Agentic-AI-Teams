@@ -70,6 +70,8 @@ describe('CodingTeamMonitorComponent', () => {
     expect(c.objectiveText()).toBe('Opening the pull request');
     c.status = { ...c.status, phase: 'reviewing' };
     expect(c.objectiveText()).toBe('Reviewing the pull request');
+    c.status = { ...c.status, phase: 'paused' };
+    expect(c.objectiveText()).toBe('Paused — waiting for input');
     c.status = { ...c.status, phase: 'completed' };
     expect(c.objectiveText()).toBe('Run complete');
     c.status = { ...c.status, phase: 'mystery' };

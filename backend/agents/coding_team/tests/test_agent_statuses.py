@@ -119,6 +119,19 @@ def test_build_agent_statuses_tolerates_non_list_inputs():
     assert [e.agent_id for e in entries] == [TECH_LEAD_AGENT_ID]
 
 
+def test_build_agent_statuses_tolerates_non_hashable_task_id():
+    # A corrupt task whose id is non-hashable (a list) must be skipped, not raise a TypeError while
+    # building the id->task index.
+    snap = [
+        {"id": ["weird"], "title": "Bad", "status": "in_progress"},
+        {"id": "t1", "title": "OK", "status": "in_progress"},
+    ]
+    entries = _by_id(
+        build_agent_statuses([{"name": "frontend"}], {"frontend": "t1"}, snap, None, "coding")
+    )
+    assert entries["frontend"].current_task_title == "OK"
+
+
 # --------------------------------------------------------------------------- roster shape
 
 

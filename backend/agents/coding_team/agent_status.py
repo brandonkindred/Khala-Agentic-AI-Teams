@@ -108,7 +108,9 @@ def build_agent_statuses(
     """Derive the per-agent status roster for a coding-team job.
 
     Pure: reads only its arguments, performs no I/O, and never raises on malformed input — a
-    corrupt job record must degrade the cards, not break the status endpoint. The roster is
+    corrupt job record must degrade the cards, not break the status endpoint. The parameter type
+    hints describe the expected/normal shapes; non-list/non-dict/None inputs (and non-hashable
+    task ids) are coerced or skipped defensively rather than rejected. The roster is
     the Tech Lead (always, first) followed by one Senior SWE per entry in ``stack_specs``.
 
     Preconditions:
@@ -136,8 +138,12 @@ def build_agent_statuses(
     activity = current_activity if isinstance(current_activity, dict) else None
     agent_task_map = agent_task_map if isinstance(agent_task_map, dict) else {}
     task_graph_snapshot = task_graph_snapshot if isinstance(task_graph_snapshot, list) else []
-    tasks_by_id: Dict[Any, Dict[str, Any]] = {
-        t.get("id"): t for t in task_graph_snapshot if isinstance(t, dict) and t.get("id")
+    # Key only on non-empty string ids: real task ids are strings, and restricting the key type
+    # keeps a corrupt record with a non-hashable id (e.g. a list) from raising in the comprehension.
+    tasks_by_id: Dict[str, Dict[str, Any]] = {
+        t["id"]: t
+        for t in task_graph_snapshot
+        if isinstance(t, dict) and isinstance(t.get("id"), str) and t["id"]
     }
     activity_agent = activity.get("agent") if activity else None
     activity_task_id = activity.get("task_id") if activity else None

@@ -1,5 +1,4 @@
 import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
-import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
@@ -28,7 +27,7 @@ const CODING_TEAM_PHASES: PhaseDefinition[] = [
 @Component({
   selector: 'app-coding-team-monitor',
   standalone: true,
-  imports: [CommonModule, MatIconModule, MatProgressBarModule],
+  imports: [MatIconModule, MatProgressBarModule],
   templateUrl: './coding-team-monitor.component.html',
   styleUrl: './coding-team-monitor.component.scss',
   // Purely @Input()-driven; the parent re-feeds a fresh `status` object on each poll, so OnPush
@@ -65,6 +64,8 @@ export class CodingTeamMonitorComponent {
         return 'Opening the pull request';
       case 'reviewing':
         return 'Reviewing the pull request';
+      case 'paused':
+        return 'Paused — waiting for input';
       case 'completed':
         return 'Run complete';
       default:
