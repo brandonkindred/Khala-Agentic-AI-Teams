@@ -327,16 +327,17 @@ def _watchdog_loop(
 ) -> None:
     """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
 
-    Preconditions:
+    Preconditions (enforced):
         - ``interval_s > 0`` — a non-positive interval would tight-loop this
-          thread. Callers via :func:`start_memory_watchdog` get a ``>= 1.0``
-          floor; tests may pass ``0`` to drive a single deterministic iteration.
+          thread (``start_memory_watchdog`` already floors it at 1.0).
         - ``limit_bytes > 0`` and ``0 < threshold <= 1``.
     Postconditions:
         - Emits a WARNING via *logger* once per transition into memory pressure;
           returns only after *stop_event* is set. A failing sample is swallowed
           (a diagnostic thread must never crash the worker).
     """
+    if interval_s <= 0:
+        raise ValueError("interval_s must be > 0")
     warned = False
     while not stop_event.wait(interval_s):
         try:

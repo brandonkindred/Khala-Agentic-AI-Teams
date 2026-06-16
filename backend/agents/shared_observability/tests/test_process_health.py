@@ -213,8 +213,9 @@ def test_watchdog_tick_no_usage_is_noop() -> None:
 def test_watchdog_loop_logs_once_then_exits_on_stop(monkeypatch, caplog) -> None:
     """One pressured sample logs a WARNING; the loop then exits when stop is set.
 
-    Deterministic: the fake RSS reader sets the stop event during the first tick,
-    so the loop runs exactly one body iteration and exits on the next ``wait``.
+    Deterministic: the fake reader sets the stop event during the first tick, so
+    the loop runs exactly one body iteration and exits on the next ``wait`` (a
+    tiny positive interval is used since the loop now rejects ``interval_s <= 0``).
     """
     stop = threading.Event()
 
@@ -229,11 +230,24 @@ def test_watchdog_loop_logs_once_then_exits_on_stop(monkeypatch, caplog) -> None
             team="coding_team",
             limit_bytes=1024 * 1024 * 1024,
             threshold=0.5,
-            interval_s=0.0,
+            interval_s=0.01,
             stop_event=stop,
             logger=logger,
         )
     assert any("High memory" in r.getMessage() for r in caplog.records)
+
+
+def test_watchdog_loop_rejects_nonpositive_interval() -> None:
+    """interval_s <= 0 would tight-loop; the loop enforces its precondition."""
+    with pytest.raises(ValueError):
+        ph._watchdog_loop(
+            team="t",
+            limit_bytes=100,
+            threshold=0.5,
+            interval_s=0.0,
+            stop_event=threading.Event(),
+            logger=logging.getLogger("test.ph.loop_guard"),
+        )
 
 
 def test_watchdog_loop_survives_tick_errors(monkeypatch, caplog) -> None:
@@ -251,7 +265,7 @@ def test_watchdog_loop_survives_tick_errors(monkeypatch, caplog) -> None:
         team="coding_team",
         limit_bytes=100,
         threshold=0.5,
-        interval_s=0.0,
+        interval_s=0.01,
         stop_event=stop,
         logger=logger,
     )
@@ -326,7 +340,7 @@ def restore_diag_state():
 
 
 def test_install_fault_diagnostics_sets_hooks_and_is_idempotent(restore_diag_state) -> None:
-    import faulthandler
+    faulthandler = pytest.importorskip("faulthandler")  # skip if unavailable on the platform
 
     ph._diagnostics_installed = False
     ph.install_fault_diagnostics(logging.getLogger("test.ph.install"))
