@@ -426,6 +426,22 @@ def test_sys_excepthook_chains_to_previous_custom_hook(restore_diag_state, caplo
     assert len(calls) == 1  # chained to the previous reporter
 
 
+def test_sys_excepthook_swallows_raising_chained_hook(restore_diag_state) -> None:
+    """A chained hook (e.g. a broken Sentry) that raises must not propagate out of
+    our excepthook (which would mask our log / disrupt interpreter teardown)."""
+    ph._log = logging.getLogger("test.ph.chain_raise")
+
+    def _boom(*_a):
+        raise RuntimeError("sentry down")
+
+    ph._chain_sys_excepthook = _boom
+    try:
+        raise ValueError("boom")
+    except ValueError:
+        exc = sys.exc_info()
+    ph._sys_excepthook(*exc)  # must not raise
+
+
 def test_thread_excepthook_chains_to_previous_custom_hook(restore_diag_state) -> None:
     calls = []
     ph._chain_thread_excepthook = lambda args: calls.append(args)
@@ -438,6 +454,23 @@ def test_thread_excepthook_chains_to_previous_custom_hook(restore_diag_state) ->
     )
     ph._thread_excepthook(args)
     assert len(calls) == 1
+
+
+def test_thread_excepthook_swallows_raising_chained_hook(restore_diag_state) -> None:
+    """A raising chained thread hook must be swallowed, not propagated."""
+    ph._log = logging.getLogger("test.ph.chain2_raise")
+
+    def _boom(_args):
+        raise RuntimeError("sentry down")
+
+    ph._chain_thread_excepthook = _boom
+    args = types.SimpleNamespace(
+        exc_type=RuntimeError,
+        exc_value=RuntimeError("x"),
+        exc_traceback=None,
+        thread=threading.current_thread(),
+    )
+    ph._thread_excepthook(args)  # must not raise
 
 
 def test_thread_excepthook_logs_uncaught(restore_diag_state, caplog) -> None:

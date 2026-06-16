@@ -328,6 +328,9 @@ def _watchdog_loop(
     """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
 
     Preconditions:
+        - ``interval_s > 0`` — a non-positive interval would tight-loop this
+          thread. Callers via :func:`start_memory_watchdog` get a ``>= 1.0``
+          floor; tests may pass ``0`` to drive a single deterministic iteration.
         - ``limit_bytes > 0`` and ``0 < threshold <= 1``.
     Postconditions:
         - Emits a WARNING via *logger* once per transition into memory pressure;
@@ -448,10 +451,16 @@ def _sys_excepthook(exc_type, exc_value, exc_tb) -> None:
     # duplicate stderr traceback (we already logged it) — except for
     # KeyboardInterrupt, where the default performs normal Ctrl-C handling.
     prev = _chain_sys_excepthook
+    target = None
     if prev is not None and prev is not _sys_excepthook and prev is not sys.__excepthook__:
-        prev(exc_type, exc_value, exc_tb)
+        target = prev
     elif issubclass(exc_type, KeyboardInterrupt):
-        sys.__excepthook__(exc_type, exc_value, exc_tb)
+        target = sys.__excepthook__
+    if target is not None:
+        try:
+            target(exc_type, exc_value, exc_tb)
+        except Exception:  # noqa: BLE001 — a failing downstream hook must not mask our log
+            _get_logger().debug("chained sys excepthook raised", exc_info=True)
 
 
 def _thread_excepthook(args) -> None:
@@ -475,7 +484,10 @@ def _thread_excepthook(args) -> None:
     prev = _chain_thread_excepthook
     default = getattr(threading, "__excepthook__", None)
     if prev is not None and prev is not _thread_excepthook and prev is not default:
-        prev(args)  # preserve another reporter (e.g. Sentry)
+        try:
+            prev(args)  # preserve another reporter (e.g. Sentry)
+        except Exception:  # noqa: BLE001 — a failing downstream hook must not mask our log
+            _get_logger().debug("chained thread excepthook raised", exc_info=True)
 
 
 def install_fault_diagnostics(logger: Optional[logging.Logger] = None) -> None:

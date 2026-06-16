@@ -590,11 +590,16 @@ services:
     # The code-review path loads full diffs + repo context into memory; cap it so
     # a runaway worker is OOM-killed predictably (docker records OOMKilled=true)
     # instead of the host kernel picking a victim. This cgroup limit is also what
-    # the team-service memory watchdog samples to warn before the kill.
+    # the team-service memory watchdog samples to warn before the kill. The
+    # top-level mem_limit/mem_reservation mirror the deploy.resources values so
+    # the cap is enforced under plain `docker compose up` (non-swarm) too — the
+    # same pairing the unified-api service uses.
     deploy:
       resources:
         limits: { memory: 2G }
         reservations: { memory: 1G }
+    mem_limit: 2g
+    mem_reservation: 1g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
       interval: 15s
