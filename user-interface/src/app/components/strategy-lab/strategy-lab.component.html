@@ -87,7 +87,8 @@
     </div>
     <mat-button-toggle-group
       multiple
-      [(ngModel)]="selectedCategories"
+      [ngModel]="selectedCategories"
+      (ngModelChange)="onCategoriesChanged($event)"
       [disabled]="running || loading || clearingAll"
       class="category-toggle-group"
       aria-label="Asset categories to generate strategies for"

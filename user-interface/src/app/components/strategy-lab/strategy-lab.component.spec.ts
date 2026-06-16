@@ -19,6 +19,9 @@ describe('StrategyLabComponent — asset categories', () => {
     runStrategyLab: ReturnType<typeof vi.fn>;
     streamRunStatus: ReturnType<typeof vi.fn>;
     getStrategyLabConfig: ReturnType<typeof vi.fn>;
+    getStrategyLabResults: ReturnType<typeof vi.fn>;
+    getPaperTradingResults: ReturnType<typeof vi.fn>;
+    getActiveRuns: ReturnType<typeof vi.fn>;
   };
 
   const startResponse: StrategyLabRunStartResponse = {
@@ -37,6 +40,12 @@ describe('StrategyLabComponent — asset categories', () => {
       getStrategyLabConfig: vi.fn().mockReturnValue(
         of({ batch_count_min: 1, batch_count_max: 100, asset_categories: [] }),
       ),
+      // ngOnInit also loads results / paper-trading / active-runs; safe empties.
+      getStrategyLabResults: vi.fn().mockReturnValue(
+        of({ items: [], count: 0, winning_count: 0, losing_count: 0 }),
+      ),
+      getPaperTradingResults: vi.fn().mockReturnValue(of({ items: [] })),
+      getActiveRuns: vi.fn().mockReturnValue(of({ runs: [] })),
     };
 
     await TestBed.configureTestingModule({
@@ -103,23 +112,30 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(apiSpy.runStrategyLab).not.toHaveBeenCalled();
   });
 
+  // The config tests drive the behavior through the public `ngOnInit` (config is
+  // applied synchronously via `of(...)`), then tear down to cancel the
+  // active-run polling timer `ngOnInit` schedules — no private-method access.
+  const initAndDestroy = (): void => {
+    component.ngOnInit();
+    component.ngOnDestroy();
+  };
+
   it('adopts the backend category list and resets the selection to all', () => {
     apiSpy.getStrategyLabConfig.mockReturnValue(
       of({ batch_count_min: 1, batch_count_max: 50, asset_categories: ['forex', 'crypto'] }),
     );
 
-    // loadConfig is private; invoke it directly to exercise the sync path
-    // without triggering the rest of ngOnInit.
-    (component as unknown as { loadConfig(): void }).loadConfig();
+    initAndDestroy();
 
     expect(component.categoryOptions.map((c) => c.value)).toEqual(['forex', 'crypto']);
     expect(component.categoryOptions[0].label).toBe('Forex');
     expect(component.selectedCategories).toEqual(['forex', 'crypto']);
   });
 
-  it('preserves a user-narrowed selection when the backend list arrives late', () => {
-    // Simulate the user deselecting categories before the config response lands.
-    component.selectedCategories = ['forex'];
+  it('preserves an explicit user selection when the backend list arrives late', () => {
+    // Simulate the user narrowing the selection (sets the userAdjusted flag)
+    // before the config response lands.
+    component.onCategoriesChanged(['forex']);
     apiSpy.getStrategyLabConfig.mockReturnValue(
       of({
         batch_count_min: 1,
@@ -128,19 +144,19 @@ describe('StrategyLabComponent — asset categories', () => {
       }),
     );
 
-    (component as unknown as { loadConfig(): void }).loadConfig();
+    initAndDestroy();
 
-    // Their choice survives (it is not clobbered back to "all selected").
+    // Their explicit choice survives (it is not clobbered back to "all selected").
     expect(component.selectedCategories).toEqual(['forex']);
   });
 
-  it('falls back to all categories when a narrowed selection no longer exists', () => {
-    component.selectedCategories = ['stocks'];
+  it('falls back to all categories when an explicit selection no longer exists', () => {
+    component.onCategoriesChanged(['stocks']);
     apiSpy.getStrategyLabConfig.mockReturnValue(
       of({ batch_count_min: 1, batch_count_max: 50, asset_categories: ['forex', 'crypto'] }),
     );
 
-    (component as unknown as { loadConfig(): void }).loadConfig();
+    initAndDestroy();
 
     // 'stocks' is gone; rather than leave zero categories, default to all.
     expect(component.selectedCategories).toEqual(['forex', 'crypto']);
@@ -151,7 +167,7 @@ describe('StrategyLabComponent — asset categories', () => {
       of({ batch_count_min: 1, batch_count_max: 50 }),
     );
 
-    (component as unknown as { loadConfig(): void }).loadConfig();
+    initAndDestroy();
 
     expect(component.categoryOptions.map((c) => c.value)).toEqual([
       'stocks',

@@ -85,11 +85,14 @@ function buildCategoryOptions(values: string[]): AssetCategoryOption[] {
 }
 
 /**
- * Fallback asset categories, used until `GET /strategy-lab/config` supplies the
- * authoritative list (and if that fetch fails). These mirror the backend's
- * ideation-valid classes (PROMPT_ASSET_CLASSES); `options` is omitted because it
- * is never a valid ideation target. Module-level constants in this file use
- * SCREAMING_SNAKE_CASE (see STRATEGY_LAB_PHASES, ASSET_CLASS_ICONS).
+ * Fallback asset categories, used only until `GET /strategy-lab/config` supplies
+ * the authoritative list (and if that fetch ever fails). The backend is the
+ * source of truth — `applyCategoryConfig` overwrites this with the server's
+ * `asset_categories` on init, so a stale fallback is visible only on the first
+ * paint / on a config failure. Keep this list in sync with the backend's
+ * `PROMPT_ASSET_CLASSES`; `options` is omitted because it is never a valid
+ * ideation target. Module-level constants in this file use SCREAMING_SNAKE_CASE
+ * (see STRATEGY_LAB_PHASES, ASSET_CLASS_ICONS).
  */
 const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOptions([
   'stocks',
@@ -160,10 +163,21 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // select toggle group's ngModel; canonical order is reasserted at payload time.
   categoryOptions: AssetCategoryOption[] = DEFAULT_STRATEGY_LAB_CATEGORIES;
   selectedCategories: string[] = DEFAULT_STRATEGY_LAB_CATEGORIES.map((c) => c.value);
+  // Set once the user touches the category toggles. Distinguishes an explicit
+  // "I want exactly these" selection (even when that happens to be all of them)
+  // from the untouched default, so a late backend category list reconciles
+  // against the user's intent rather than inferring it from selection state.
+  private userAdjustedCategories = false;
 
   /** A run requires at least one selected category. */
   get categoriesValid(): boolean {
     return this.selectedCategories.length > 0;
+  }
+
+  /** Toggle-group change handler: record the user's selection and mark it explicit. */
+  onCategoriesChanged(values: string[]): void {
+    this.selectedCategories = values;
+    this.userAdjustedCategories = true;
   }
 
   filter: FilterMode = 'all';
@@ -244,26 +258,23 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
    * UI in sync with the server's ideation-valid classes. A missing/empty list
    * leaves the fallback options untouched.
    *
-   * The selection is reconciled rather than blindly reset: if it was still the
-   * untouched "all selected" default, it becomes all of the new options; if the
-   * user had already narrowed it (e.g. while a slow config request was in
-   * flight), their choice is preserved, dropping only values the backend no
-   * longer offers (falling back to all when nothing valid remains, so a run is
-   * never left with zero categories).
+   * The selection is reconciled rather than blindly reset: if the user has not
+   * touched the toggles (`userAdjustedCategories` is false), it becomes all of
+   * the new options (the no-constraint default); if the user made an explicit
+   * choice — e.g. while a slow config request was in flight — that choice is
+   * preserved, dropping only values the backend no longer offers (falling back
+   * to all when nothing valid remains, so a run is never left with zero
+   * categories).
    */
   private applyCategoryConfig(categories: string[] | undefined): void {
     if (!categories?.length) {
       return;
     }
     const selected = new Set(this.selectedCategories);
-    const wasUntouchedDefault =
-      this.selectedCategories.length === this.categoryOptions.length &&
-      this.categoryOptions.every((c) => selected.has(c.value));
-
     this.categoryOptions = buildCategoryOptions(categories);
     const available = this.categoryOptions.map((c) => c.value);
 
-    if (wasUntouchedDefault) {
+    if (!this.userAdjustedCategories) {
       this.selectedCategories = available;
       return;
     }
