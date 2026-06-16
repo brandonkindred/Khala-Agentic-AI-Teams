@@ -1859,6 +1859,11 @@ class StrategyLabOrchestrator:
             metrics = compute_metrics(
                 trades, config.initial_capital, config.start_date, config.end_date
             )
+            # ``compute_metrics`` builds from the trade ledger alone; carry the
+            # engine's exit-rule firing counters from this run onto ``metrics``
+            # so the downstream ``ExitRuleConformanceGate`` can reconcile
+            # engine-attributed closes against recorded firings.
+            _attach_execution_diagnostics(metrics=metrics, exec_result=exec_result)
 
             _maybe_attach_coverage_report(
                 metrics=metrics,
@@ -2451,6 +2456,10 @@ class StrategyLabOrchestrator:
         new_metrics = compute_metrics(
             new_trades, config.initial_capital, config.start_date, config.end_date
         )
+        # Carry this re-execution's engine exit-rule firing counters onto the
+        # committed metrics so the verification-phase conformance gate sees the
+        # firings that match ``new_trades`` (not the ``None`` default).
+        _attach_execution_diagnostics(metrics=new_metrics, exec_result=align_exec)
 
         # Alignment re-backtest path attaches a CoverageReport when the
         # fix produced zero/low trades. Pass ``proposed_spec`` (which
@@ -4313,6 +4322,7 @@ from ._orchestrator_helpers import (  # noqa: E402  — keep at file end
     _AlignmentRoundOutcome,
     _AnomalyRecoveryOutcome,
     _apply_veto_to_acceptance_reason,
+    _attach_execution_diagnostics,
     _build_rule_implementation_map,
     _closes_to_equity,
     _daily_returns_from_trades,
