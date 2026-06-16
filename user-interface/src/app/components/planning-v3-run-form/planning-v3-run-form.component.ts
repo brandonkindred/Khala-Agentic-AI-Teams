@@ -21,6 +21,15 @@ import type { PlanningV3RunRequest } from '../../models';
   templateUrl: './planning-v3-run-form.component.html',
   styleUrl: './planning-v3-run-form.component.scss',
 })
+/**
+ * Form for launching a Planning V3 workflow.
+ *
+ * Collects an optional output folder, client name, initial brief, spec content,
+ * and the product-analysis / planning-v2 / market-research toggles, then emits a
+ * `PlanningV3RunRequest` via `submitRequest`. Submission is gated on a non-empty
+ * initial brief; `repo_path` is omitted when blank so the backend resolves a
+ * server-side workspace.
+ */
 export class PlanningV3RunFormComponent {
   @Output() submitRequest = new EventEmitter<PlanningV3RunRequest>();
 
@@ -32,10 +41,20 @@ export class PlanningV3RunFormComponent {
   usePlanningV2 = false;
   useMarketResearch = false;
 
+  /**
+   * Whether the form may be submitted.
+   * @returns true when `initialBrief` is non-empty after trimming.
+   */
   get canSubmit(): boolean {
     return !!this.initialBrief.trim();
   }
 
+  /**
+   * Emit the assembled `PlanningV3RunRequest` on `submitRequest`.
+   *
+   * Precondition: no-op when `canSubmit` is false. Blank text fields are sent as
+   * `undefined` (so the backend applies its defaults / resolves the workspace).
+   */
   onSubmit(): void {
     if (!this.canSubmit) return;
     const request: PlanningV3RunRequest = {

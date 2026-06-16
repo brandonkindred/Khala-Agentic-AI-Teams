@@ -129,16 +129,19 @@ def resolve_workspace(
     else:
         candidate = Path(repo_path).expanduser()
 
-    if candidate.exists() and not candidate.is_dir():
-        raise HTTPException(
-            status_code=400,
-            detail=f"Workspace path {candidate} exists but is not a directory (input: {repo_path!r})",
-        )
+    # Keep every filesystem probe inside one guard. ``mkdir`` raises ValueError
+    # (not OSError) on non-encodable inputs such as an embedded NUL byte; some
+    # Python builds can raise it from ``exists``/``is_dir`` too. Mapping both
+    # OSError and ValueError here guarantees a clean 400 regardless of which
+    # call rejects the path, instead of a 500 escaping.
     try:
+        if candidate.exists() and not candidate.is_dir():
+            raise HTTPException(
+                status_code=400,
+                detail=f"Workspace path {candidate} exists but is not a directory (input: {repo_path!r})",
+            )
         candidate.mkdir(parents=True, exist_ok=True)
     except (OSError, ValueError) as exc:
-        # ValueError covers non-encodable inputs (e.g. an embedded NUL byte),
-        # which os.mkdir raises rather than OSError; map both to a clean 400.
         raise HTTPException(
             status_code=400,
             detail=f"Could not create workspace for repo_path={repo_path!r}: {exc}",
