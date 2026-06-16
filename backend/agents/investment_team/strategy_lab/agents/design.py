@@ -164,13 +164,22 @@ class DesignAgent:
             if prior_records
             else "No prior strategies tested yet."
         )
-        mix_hint = (
-            asset_class_mix_hint(prior_records) if prior_records else "No history — choose freely."
-        )
         if exclude_asset_classes:
+            # The menu-restricted mix hint already supplies the positive
+            # allowed-class menu — even with no priors, since asset_class_mix_hint
+            # handles the empty-records case — so the only thing to add here is the
+            # hard negative rule. Re-listing the allowed classes would just
+            # duplicate the mix-hint menu.
+            mix_hint = asset_class_mix_hint(prior_records, exclude=exclude_asset_classes)
             mix_hint += (
-                f"\nMANDATORY EXCLUSION: Do NOT use these asset classes: "
+                "\nMANDATORY EXCLUSION: Do NOT use these asset classes: "
                 f"{', '.join(exclude_asset_classes)}."
+            )
+        else:
+            mix_hint = (
+                asset_class_mix_hint(prior_records)
+                if prior_records
+                else "No history — choose freely."
             )
 
         signal_section = ""

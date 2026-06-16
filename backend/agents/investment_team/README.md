@@ -70,6 +70,7 @@ flowchart LR
 - `POST /strategies`, `POST /strategies/{strategy_id}/validate`
 - `POST /backtests`, `GET /backtests`
 - `POST /strategy-lab/run`, `GET /strategy-lab/results`
+  - `allowed_asset_classes` (optional) constrains which asset categories the design agent may generate strategies for — a subset of `stocks, crypto, forex, futures, commodities` (aliases like `stock`/`equity`/`fx` are normalized; `options` is not a valid ideation target). Omitted/null, or a selection covering every category, means "no constraint". The selection is translated into the design pipeline's `exclude_asset_classes` complement per cycle.
 - `DELETE /strategy-lab/records/{lab_record_id}` — remove one lab run (record, linked `strat-lab-*` / `bt-lab-*` jobs, paper sessions for that lab id)
 - `DELETE /strategy-lab/storage` — purge strategy lab rows from the job service (lab records, `strat-lab-*` / `bt-lab-*` strategies and backtests, and all paper-trading sessions)
 - `GET /workflow/status`, `GET /workflow/queues`
