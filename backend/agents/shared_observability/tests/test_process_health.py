@@ -117,11 +117,21 @@ def test_detect_memory_limit_env_override(monkeypatch) -> None:
     assert ph.detect_memory_limit_bytes() == 512 * 1024 * 1024
 
 
-def test_detect_memory_limit_env_garbage_falls_through(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("TEAM_MEMORY_WATCHDOG_LIMIT_MB", "garbage")
+@pytest.mark.parametrize("bad", ["garbage", "0", "-5", "inf", "1e400", "-inf", "nan", "  "])
+def test_detect_memory_limit_env_bad_value_falls_through(monkeypatch, tmp_path, bad) -> None:
+    # Includes 'inf'/'1e400' which make int(float(...)) raise OverflowError — the
+    # parse must swallow it (never raise) and fall through to cgroup detection.
+    monkeypatch.setenv("TEAM_MEMORY_WATCHDOG_LIMIT_MB", bad)
     monkeypatch.setattr(ph, "_CGROUP_V2_MAX", str(tmp_path / "absent_v2"))
     monkeypatch.setattr(ph, "_CGROUP_V1_LIMIT", str(tmp_path / "absent_v1"))
     assert ph.detect_memory_limit_bytes() is None
+
+
+def test_positive_int_or_none_never_raises_on_overflow() -> None:
+    assert ph._positive_int_or_none("inf") is None
+    assert ph._positive_int_or_none("1e400") is None
+    assert ph._positive_int_or_none("-inf") is None
+    assert ph._positive_int_or_none("512") == 512
 
 
 def test_detect_memory_limit_reads_cgroup_v2(monkeypatch, tmp_path) -> None:

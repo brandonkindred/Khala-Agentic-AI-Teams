@@ -136,7 +136,9 @@ def _positive_int_or_none(raw: Optional[str]) -> Optional[int]:
         return None
     try:
         value = int(float(raw))
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
+        # OverflowError: int(float("inf"))/int(float("1e400")) — must stay caught
+        # so this helper honours its "Never raises" postcondition.
         return None
     return value if value > 0 else None
 
