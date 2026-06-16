@@ -64,6 +64,26 @@ const ASSET_CLASS_ICONS: Record<string, string> = {
   options: 'tune',
 };
 
+interface AssetCategoryOption {
+  value: string;
+  label: string;
+  icon: string;
+}
+
+/**
+ * Asset categories the user may constrain generation to. These mirror the
+ * backend's ideation-valid classes (PROMPT_ASSET_CLASSES); `options` is omitted
+ * because it is never a valid ideation target. The selected values are sent as
+ * `allowed_asset_classes` on the run request.
+ */
+const STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = [
+  { value: 'stocks',      label: 'Stocks',      icon: ASSET_CLASS_ICONS['stocks'] },
+  { value: 'crypto',      label: 'Crypto',      icon: ASSET_CLASS_ICONS['crypto'] },
+  { value: 'forex',       label: 'Forex',       icon: ASSET_CLASS_ICONS['forex'] },
+  { value: 'futures',     label: 'Futures',     icon: ASSET_CLASS_ICONS['futures'] },
+  { value: 'commodities', label: 'Commodities', icon: ASSET_CLASS_ICONS['commodities'] },
+];
+
 @Component({
   selector: 'app-strategy-lab',
   standalone: true,
@@ -115,6 +135,19 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   BATCH_COUNT_MAX = 100;
   batchSize = 10;
   batchCount = 1;
+
+  // Asset-category selection. Defaults to every category (equivalent to no
+  // constraint); the user narrows it to steer the design agent. At least one
+  // category must stay selected — a run with zero categories is invalid. Held
+  // as a plain array so it binds directly to the multi-select toggle group's
+  // ngModel; canonical order is reasserted when the run payload is built.
+  readonly STRATEGY_LAB_CATEGORIES = STRATEGY_LAB_CATEGORIES;
+  selectedCategories: string[] = STRATEGY_LAB_CATEGORIES.map((c) => c.value);
+
+  /** A run requires at least one selected category. */
+  get categoriesValid(): boolean {
+    return this.selectedCategories.length > 0;
+  }
 
   filter: FilterMode = 'all';
   results: StrategyLabResultsResponse | null = null;
@@ -420,16 +453,34 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   runNewStrategy(): void {
+    // Guard the invalid-zero-categories case (the button is also disabled, but
+    // a programmatic call must not start a run constrained to nothing).
+    if (!this.categoriesValid) {
+      this.error = 'Select at least one asset category to generate strategies for.';
+      return;
+    }
+
     const batchSize = this.clamp(this.batchSize, this.BATCH_SIZE_MIN, this.BATCH_SIZE_MAX);
     const batchCount = this.clamp(this.batchCount, this.BATCH_COUNT_MIN, this.BATCH_COUNT_MAX);
     // Reflect any clamping back into the form so the user sees what was sent.
     this.batchSize = batchSize;
     this.batchCount = batchCount;
 
+    // Preserve canonical order so the payload is stable regardless of click order.
+    const allowedAssetClasses = STRATEGY_LAB_CATEGORIES
+      .map((c) => c.value)
+      .filter((v) => this.selectedCategories.includes(v));
+
     this.running = true;
     this.error = null;
     this.completionWarning = null;
-    this.api.runStrategyLab({ batch_size: batchSize, batch_count: batchCount }).subscribe({
+    this.api
+      .runStrategyLab({
+        batch_size: batchSize,
+        batch_count: batchCount,
+        allowed_asset_classes: allowedAssetClasses,
+      })
+      .subscribe({
       next: (res) => {
         this.activeRunId = res.run_id;
         this.runStatus = {

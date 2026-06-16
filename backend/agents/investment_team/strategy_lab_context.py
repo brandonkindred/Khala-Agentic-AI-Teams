@@ -6,7 +6,7 @@ Used by strategy ideation and signal intelligence to avoid circular imports.
 
 from __future__ import annotations
 
-from typing import List
+from typing import Iterable, List, Optional
 
 from .models import StrategyLabRecord
 
@@ -26,6 +26,11 @@ _CANONICAL_ASSET_CLASSES: tuple[str, ...] = (
 _PROMPT_ASSET_CLASSES: tuple[str, ...] = tuple(
     c for c in _CANONICAL_ASSET_CLASSES if c != "options"
 )
+
+# Public alias of the ideation-valid asset classes. Callers that need to
+# validate user-supplied category selections or compute exclusion complements
+# import this rather than the underscore-prefixed internal tuple.
+PROMPT_ASSET_CLASSES: tuple[str, ...] = _PROMPT_ASSET_CLASSES
 
 # Backtest statuses for cycles that short-circuited *before* running a backtest.
 # Their persisted ``strategy.asset_class`` may be a coerced placeholder (an
@@ -124,6 +129,66 @@ def normalize_asset_class_strict(ac: object) -> str:
     )
 
 
+def normalize_allowed_asset_classes(raw: Optional[Iterable[object]]) -> Optional[List[str]]:
+    """Normalize a user-supplied list of asset categories to canonical, ideation-valid classes.
+
+    The selector on the Strategy Lab UI lets the user constrain which asset
+    categories the design agent may generate strategies for. This maps that
+    raw selection (canonical names or known aliases such as ``stock`` /
+    ``equity`` / ``fx``) to the canonical, ideation-valid labels in
+    :data:`PROMPT_ASSET_CLASSES`, deduplicated and returned in canonical order.
+
+    Preconditions:
+      - ``raw`` is ``None`` or an iterable of scalar values (each a class name
+        or known alias). Items that do not resolve to a known canonical class
+        (via :func:`normalize_asset_class_strict`) are silently dropped, as is
+        ``options`` — it is canonical but never a valid ideation target, so it
+        cannot be a generation category.
+
+    Postconditions:
+      - Returns ``None`` when ``raw`` is ``None`` (no constraint — the caller
+        treats this as "all categories allowed").
+      - Otherwise returns a list that is a subset of :data:`PROMPT_ASSET_CLASSES`
+        in canonical order with no duplicates. The list MAY be empty when
+        ``raw`` was non-empty but contained nothing valid; the API boundary
+        rejects that case rather than running with zero categories.
+    """
+    if raw is None:
+        return None
+    seen: set[str] = set()
+    for item in raw:
+        try:
+            canonical = normalize_asset_class_strict(item)
+        except ValueError:
+            # Unrecognized token (e.g. "bonds", a typo) — drop it rather than
+            # coercing to stocks, so the user's intent is never silently widened.
+            continue
+        if canonical in PROMPT_ASSET_CLASSES:
+            seen.add(canonical)
+    return [c for c in PROMPT_ASSET_CLASSES if c in seen]
+
+
+def excluded_for_allowed(allowed: Iterable[str]) -> List[str]:
+    """Complement of an allowed-category set within the ideation-valid classes.
+
+    The design pipeline constrains generation via an *exclusion* list
+    (``exclude_asset_classes``). A positive "allowed categories" selection is
+    therefore expressed downstream as everything in :data:`PROMPT_ASSET_CLASSES`
+    that the user did NOT allow.
+
+    Preconditions:
+      - ``allowed`` is an iterable of canonical class labels (typically the
+        output of :func:`normalize_allowed_asset_classes`).
+
+    Postconditions:
+      - Returns the canonical-order list of :data:`PROMPT_ASSET_CLASSES` not
+        present in ``allowed``. Empty when ``allowed`` covers every class
+        (i.e. no constraint).
+    """
+    allowed_set = set(allowed)
+    return [c for c in PROMPT_ASSET_CLASSES if c not in allowed_set]
+
+
 def format_prior_results(records: List[StrategyLabRecord], *, max_records: int = 50) -> str:
     if not records:
         return "None yet — this is the first strategy."
@@ -153,12 +218,41 @@ def format_prior_results(records: List[StrategyLabRecord], *, max_records: int =
     return "\n\n".join(lines)
 
 
-def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) -> str:
-    """Steer the LLM toward a balanced mix of asset classes across lab runs."""
+def _or_join(items: List[str]) -> str:
+    """Render a list as an Oxford-style ``a, b, or c`` menu (single item → itself)."""
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    return ", ".join(items[:-1]) + ", or " + items[-1]
+
+
+def asset_class_mix_hint(
+    records: List[StrategyLabRecord],
+    *,
+    tail: int = 24,
+    exclude: Optional[Iterable[str]] = None,
+) -> str:
+    """Steer the LLM toward a balanced mix of asset classes across lab runs.
+
+    ``exclude`` (optional) names asset classes the design agent is forbidden to
+    pick this run — the complement of a user's allowed-category selection. When
+    provided, the menu, recent-class counts, and underrepresented-class steering
+    are all restricted to the still-allowed classes so the hint never nudges the
+    model toward a class the run is not permitted to use. When ``exclude`` is
+    ``None`` / empty the output is identical to the unconstrained hint.
+    """
+    allowed = [c for c in _PROMPT_ASSET_CLASSES if c not in set(exclude or ())]
+    if not allowed:
+        # Defensive: an exclusion covering every class would leave nothing to
+        # steer toward. The API boundary rejects an empty allowed set, so this
+        # only guards against a misuse from internal callers.
+        allowed = list(_PROMPT_ASSET_CLASSES)
+    menu = _or_join(allowed)
     if not records:
         return (
             "No prior lab strategies. Choose **asset_class** from "
-            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
+            f"{menu} with similar frequency over time — "
             "do **not** default to stocks; pick the class that best fits your multi-signal story."
         )
 
@@ -183,23 +277,27 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
     if not sample:
         return (
             "No executed lab backtests yet. Choose **asset_class** from "
-            "stocks, crypto, forex, futures, or commodities with similar frequency over time — "
+            f"{menu} with similar frequency over time — "
             "do **not** default to stocks; pick the class that best fits your multi-signal story."
         )
     # #535: count only asset classes the LLM may still target. 'options' is
     # rejected by StrategySpecValidator, so leaving it in the count dict
     # would push it into ``underrep`` whenever no options strategies have
-    # run and steer the LLM toward a guaranteed-failure choice.
-    counts = {c: 0 for c in _PROMPT_ASSET_CLASSES}
+    # run and steer the LLM toward a guaranteed-failure choice. Excluded
+    # classes are likewise dropped so the counts/steering only span the
+    # categories this run is allowed to generate.
+    counts = {c: 0 for c in allowed}
     for r in sample:
         k = normalize_asset_class(r.strategy.asset_class)
         if k in counts:
             counts[k] += 1
-        else:
+        elif "stocks" in counts:
+            # Unknown/coerced class folds into stocks only when stocks is still
+            # an allowed target; otherwise it is outside the steering window.
             counts["stocks"] += 1
 
     n_sample = len(sample)
-    stock_share = counts["stocks"] / n_sample if n_sample else 0.0
+    stock_share = counts.get("stocks", 0) / n_sample if n_sample else 0.0
     min_n = min(counts.values())
     underrep = [c for c, n in counts.items() if n == min_n]
 
@@ -207,11 +305,13 @@ def asset_class_mix_hint(records: List[StrategyLabRecord], *, tail: int = 24) ->
         "Recent asset-class counts (last "
         f"{n_sample} strategies): " + ", ".join(f"{k}={v}" for k, v in counts.items()) + "."
     ]
-    if stock_share > 0.35 and n_sample >= 2:
-        parts.append(
-            "Equities are relatively heavy in this window — **strongly prefer** "
-            "crypto, forex, futures, or commodities for this run if you can state coherent rules."
-        )
+    if "stocks" in counts and stock_share > 0.35 and n_sample >= 2:
+        non_stock = [c for c in allowed if c != "stocks"]
+        if non_stock:
+            parts.append(
+                "Equities are relatively heavy in this window — **strongly prefer** "
+                f"{_or_join(non_stock)} for this run if you can state coherent rules."
+            )
     parts.append(
         "Underrepresented line(s) to favor when ties: "
         f"{', '.join(underrep)} — use one of these **unless** your thesis clearly requires a different class."

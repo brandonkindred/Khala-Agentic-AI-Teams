@@ -252,6 +252,26 @@ def test_run_includes_exclude_directives_in_prompt(
     assert any("MANDATORY EXCLUSION" in p and "forex" in p for p in capture.calls)
 
 
+def test_run_includes_positive_allow_list_in_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Excluding all-but-one class must surface a positive allow-list naming the
+    single remaining category, not only the (long) exclusion enumeration."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    capture = _patch_design(monkeypatch, payload)
+
+    DesignAgent().run(
+        prior_records=[],
+        exclude_asset_classes=["stocks", "crypto", "futures", "commodities"],
+    )
+
+    assert any("Choose **asset_class** ONLY from:" in p and "forex" in p for p in capture.calls)
+
+
 # ---------------------------------------------------------------------------
 # revise() — must serialize the critique into the prompt
 # ---------------------------------------------------------------------------

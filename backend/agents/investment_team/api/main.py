@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from investment_team.agents import (
     AgentIdentity,
@@ -1255,6 +1255,41 @@ class RunStrategyLabRequest(BaseModel):
         ge=30,
         description="Days of recent market data to fetch for paper trading.",
     )
+    allowed_asset_classes: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Asset categories the design agent is allowed to generate strategies for — "
+            "a subset of: stocks, crypto, forex, futures, commodities. Common aliases "
+            "('stock'/'equity'/'equities', 'fx', 'commodity'/'metal'/'energy', "
+            "'cryptocurrency') are accepted and normalized. When omitted or null, every "
+            "category is allowed. When provided it must resolve to at least one valid "
+            "category; 'options' and unrecognized values are dropped."
+        ),
+    )
+
+    @field_validator("allowed_asset_classes")
+    @classmethod
+    def _normalize_allowed_asset_classes(cls, value: Optional[List[str]]) -> Optional[List[str]]:
+        """Normalize the category selection to canonical, ideation-valid labels.
+
+        Preconditions: ``value`` is ``None`` or a list of category strings.
+        Postconditions: returns ``None`` (no constraint) when ``value`` is
+        ``None``; otherwise a canonical-ordered, deduplicated, non-empty subset
+        of the ideation-valid classes. Raises ``ValueError`` (surfaced by
+        FastAPI as HTTP 422) when a non-null selection contains no valid
+        category, so the lab never starts a run constrained to zero categories.
+        """
+        from investment_team.strategy_lab_context import normalize_allowed_asset_classes
+
+        normalized = normalize_allowed_asset_classes(value)
+        if normalized is None:
+            return None
+        if not normalized:
+            raise ValueError(
+                "allowed_asset_classes must contain at least one of: "
+                "stocks, crypto, forex, futures, commodities"
+            )
+        return normalized
 
 
 class StrategyLabRunResponse(BaseModel):
@@ -1521,6 +1556,16 @@ def _strategy_lab_worker(
         total_cycles = batch_size * batch_count
         max_parallel = request.max_parallel
 
+        # Translate the user's positive category selection into the exclusion
+        # list the design pipeline consumes. ``allowed_asset_classes`` is already
+        # normalized to canonical labels by the request validator; ``None`` (and
+        # a selection covering every class) means "no constraint".
+        exclude_asset_classes: Optional[List[str]] = None
+        if request.allowed_asset_classes:
+            from investment_team.strategy_lab_context import excluded_for_allowed
+
+            exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
+
         def _compute_signal_brief() -> tuple[
             Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
         ]:
@@ -1717,6 +1762,7 @@ def _strategy_lab_worker(
                             precomputed_signal_brief=precomputed_brief,
                             signal_brief_storage=signal_brief_storage,
                             on_phase=_make_on_phase(cn),
+                            exclude_asset_classes=exclude_asset_classes,
                             paper_trading_enabled=request.paper_trading_enabled,
                             paper_trading_lookback_days=request.paper_trading_lookback_days,
                         )

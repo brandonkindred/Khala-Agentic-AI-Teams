@@ -29,7 +29,11 @@ from strands import Agent
 from ...models import StrategyLabRecord
 from ...signal_intelligence_agent import brief_to_prompt_block
 from ...signal_intelligence_models import SignalIntelligenceBriefV1
-from ...strategy_lab_context import asset_class_mix_hint, format_prior_results
+from ...strategy_lab_context import (
+    PROMPT_ASSET_CLASSES,
+    asset_class_mix_hint,
+    format_prior_results,
+)
 from ._llm_budget import DesignBudgetExhausted, charge_active_budget
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import (
@@ -165,13 +169,22 @@ class DesignAgent:
             else "No prior strategies tested yet."
         )
         mix_hint = (
-            asset_class_mix_hint(prior_records) if prior_records else "No history — choose freely."
+            asset_class_mix_hint(prior_records, exclude=exclude_asset_classes)
+            if prior_records
+            else "No history — choose freely."
         )
         if exclude_asset_classes:
+            # State the constraint both ways: the exclusion is the historical
+            # framing the model is trained on, and the positive allow-list is
+            # the clearer instruction when only one or two categories remain.
+            excluded = set(exclude_asset_classes)
+            allowed = [c for c in PROMPT_ASSET_CLASSES if c not in excluded]
             mix_hint += (
                 f"\nMANDATORY EXCLUSION: Do NOT use these asset classes: "
                 f"{', '.join(exclude_asset_classes)}."
             )
+            if allowed:
+                mix_hint += f" Choose **asset_class** ONLY from: {', '.join(allowed)}."
 
         signal_section = ""
         if signal_brief:
