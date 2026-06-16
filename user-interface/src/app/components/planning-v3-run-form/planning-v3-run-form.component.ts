@@ -33,13 +33,13 @@ export class PlanningV3RunFormComponent {
   useMarketResearch = false;
 
   get canSubmit(): boolean {
-    return !!this.repoPath.trim();
+    return !!this.initialBrief.trim();
   }
 
   onSubmit(): void {
     if (!this.canSubmit) return;
     const request: PlanningV3RunRequest = {
-      repo_path: this.repoPath.trim(),
+      repo_path: this.repoPath.trim() || undefined,
       client_name: this.clientName.trim() || undefined,
       initial_brief: this.initialBrief.trim() || undefined,
       spec_content: this.specContent.trim() || undefined,

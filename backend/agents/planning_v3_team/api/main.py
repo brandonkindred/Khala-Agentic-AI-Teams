@@ -39,6 +39,7 @@ from planning_v3_team.shared.job_store import (  # noqa: E402
     mark_job_failed,
     update_job,
 )
+from planning_v3_team.shared.workspace import resolve_workspace  # noqa: E402
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
 logger = logging.getLogger(__name__)
@@ -136,13 +137,11 @@ def _run_workflow_background(
     description="Start client-facing discovery and requirements workflow. Returns job_id; poll GET /status/{job_id}.",
 )
 def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
-    repo = Path(request.repo_path)
-    if not repo.is_dir():
-        raise HTTPException(
-            status_code=400, detail=f"repo_path is not a directory: {request.repo_path}"
-        )
     job_id = str(uuid.uuid4())
-    create_job(job_id, request.repo_path)
+    # repo_path is an output folder, not a source to read: resolve any input
+    # (empty, git URL, or client-side path) to a writable server-side directory.
+    resolved_path = resolve_workspace(request.repo_path, request.client_name, job_id)
+    create_job(job_id, resolved_path)
     try:
         from planning_v3_team.temporal.client import is_temporal_enabled
         from planning_v3_team.temporal.start_workflow import start_planning_v3_workflow
@@ -150,7 +149,7 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
         if is_temporal_enabled():
             start_planning_v3_workflow(
                 job_id,
-                request.repo_path,
+                resolved_path,
                 request.client_name,
                 request.initial_brief,
                 request.spec_content,
@@ -169,7 +168,7 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
         target=_run_workflow_background,
         args=(
             job_id,
-            request.repo_path,
+            resolved_path,
             request.client_name,
             request.initial_brief,
             request.spec_content,

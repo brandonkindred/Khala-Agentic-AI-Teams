@@ -45,7 +45,7 @@ Planning V3 calls other teams via HTTP:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/run` | Start Planning V3; body: `PlanningV3RunRequest`; returns `job_id`. |
+| POST | `/run` | Start Planning V3; body: `PlanningV3RunRequest`; returns `job_id`. `repo_path` is an **optional** server-side output folder for the generated plan (never read as source); when omitted or given as a git URL, a workspace is created under `AGENT_CACHE/planning_v3/`. |
 | GET | `/status/{job_id}` | Job status, phase, progress, pending questions. |
 | GET | `/result/{job_id}` | Handoff package and artifact paths when completed. |
 | GET | `/jobs` | List running/pending jobs. |

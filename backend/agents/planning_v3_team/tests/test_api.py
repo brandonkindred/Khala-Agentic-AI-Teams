@@ -21,7 +21,9 @@ from planning_v3_team.api.main import app  # noqa: E402
 
 
 @pytest.fixture
-def client():
+def client(tmp_path, monkeypatch):
+    # Keep auto-created workspaces inside the test temp dir, never the repo or /.
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "cache"))
     return TestClient(app)
 
 
@@ -54,8 +56,32 @@ def test_run_returns_job_id(client, temp_repo):
     assert data.get("status") == "running"
 
 
-def test_run_400_if_repo_not_dir(client):
-    r = client.post("/run", json={"repo_path": "/nonexistent/path/12345"})
+def test_run_without_repo_path_creates_workspace(client):
+    r = client.post(
+        "/run",
+        json={"initial_brief": "Greenfield app", "use_product_analysis": False},
+    )
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+
+
+def test_run_with_git_url_repo_path(client):
+    r = client.post(
+        "/run",
+        json={
+            "repo_path": "git@github.com:owner/repo.git",
+            "initial_brief": "Home maintenance tracker",
+            "use_product_analysis": False,
+        },
+    )
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+
+
+def test_run_400_if_repo_path_is_file(client, tmp_path):
+    f = tmp_path / "a_file.txt"
+    f.write_text("not a dir", encoding="utf-8")
+    r = client.post("/run", json={"repo_path": str(f), "use_product_analysis": False})
     assert r.status_code == 400
 
 

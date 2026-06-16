@@ -37,6 +37,12 @@ def test_planning_v3_run_request():
     assert r2.spec_content is None
 
 
+def test_planning_v3_run_request_optional_repo_path():
+    r = PlanningV3RunRequest(initial_brief="Build a tracker")
+    assert r.repo_path is None
+    assert r.initial_brief == "Build a tracker"
+
+
 def test_planning_v3_run_response():
     r = PlanningV3RunResponse(job_id="j1", status="running")
     assert r.job_id == "j1"

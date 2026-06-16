@@ -31,10 +31,14 @@ class Phase(str, Enum):
 class PlanningV3RunRequest(BaseModel):
     """Request body for POST /planning-v3/run."""
 
-    repo_path: str = Field(
-        ...,
+    repo_path: Optional[str] = Field(
+        None,
         max_length=4096,
-        description="Local path where artifacts (context doc, PRD, handoff) will be written.",
+        description=(
+            "Optional server-side output folder for artifacts (context doc, PRD, handoff). "
+            "If omitted or given as a git URL, a workspace is created under AGENT_CACHE. "
+            "Planning V3 never reads source code from this path."
+        ),
     )
     client_name: Optional[str] = Field(
         None,
