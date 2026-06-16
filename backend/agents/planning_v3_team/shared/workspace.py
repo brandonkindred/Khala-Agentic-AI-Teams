@@ -3,27 +3,26 @@
 In Planning V3, ``repo_path`` is an OUTPUT directory — the workflow writes the
 generated plan (context doc, PRD, handoff) into it and never reads source code
 from it. Users may supply nothing, a git URL, or a client-side path that does
-not exist on the backend; all of these must resolve to a writable server-side
+not exist on the backend; all of these resolve to a writable server-side
 directory rather than being rejected.
 
 Invariants:
     - Every value returned by ``resolve_workspace`` is an existing, writable
-      directory (created on demand) under either the caller-supplied path or
-      ``AGENT_CACHE/planning_v3/``.
-    - Directory names derived from user text (client name, git repo name) are
-      single, sanitized path segments — they can never contain a path separator
-      or ``..`` and therefore cannot escape the base root.
+      directory created under ``AGENT_CACHE/planning_v3`` — never anywhere else.
+    - Each path segment derived from user text (client name, git repo name, or
+      the final component of a supplied filesystem path) is reduced to a single
+      sanitized token (see ``_slug``) that contains no path separator and is
+      never ``.`` or ``..``. Combined with the server-generated ``job_id`` leaf,
+      the resolved workspace is always exactly two levels under the base root.
 
-Trust boundary:
-    When the caller supplies an explicit filesystem path it is used verbatim
-    (``expanduser`` only), so the workspace can land anywhere the backend
-    process can write. This is intentional — ``repo_path`` is a caller-chosen
-    output folder, the same trust level as a plain ``mkdir`` on a supplied
-    path, and the endpoint sits behind the authenticated security gateway.
-    Empty and git-URL inputs are always confined under ``AGENT_CACHE`` via the
-    sanitized segments above. Deployments that want to forbid arbitrary
-    absolute paths should constrain the resolved path to an allowed root at
-    the call site rather than weakening the sanitization here.
+Confinement:
+    Because every branch builds ``<root>/<safe-segment>/<job_id>``, a supplied
+    path — absolute, relative, containing ``..``, or carrying non-encodable
+    bytes — can never create or write outside the base root: only its final
+    component survives, sanitized. The base root itself derives from
+    ``AGENT_CACHE`` (default the relative ``.agent_cache``, resolved against the
+    process's working directory; deployments set it to an absolute path such as
+    ``/data/agents``), matching every other team's cache convention.
 """
 
 from __future__ import annotations
@@ -86,12 +85,28 @@ def _repo_name_from_git_url(url: str) -> str:
     return _slug(tail, fallback="repo")
 
 
+def _safe_segment_from_path(path: str) -> str:
+    """Return a single confined segment from a supplied filesystem path.
+
+    Preconditions:
+        - ``path`` is a non-empty string that is not a git URL.
+    Postconditions:
+        - Returns ``_slug`` of the path's final ``/``- or ``\\``-delimited
+          component (fallback ``workspace``). Only the basename survives, so an
+          absolute path, a relative path, or one containing ``..`` collapses to
+          a single safe segment and cannot escape the base root.
+    """
+    tail = re.split(r"[\\/]+", path.strip().rstrip("/\\"))[-1]
+    return _slug(tail, fallback="workspace")
+
+
 def _base_root() -> Path:
     """Return the server-side workspace root.
 
     Postconditions:
         - Returns ``<AGENT_CACHE or '.agent_cache'>/planning_v3`` as a ``Path``,
-          read from the environment on every call (no caching).
+          read from the environment on every call (no caching). A relative
+          ``AGENT_CACHE`` is resolved against the process working directory.
     """
     return Path(os.environ.get("AGENT_CACHE", ".agent_cache")) / "planning_v3"
 
@@ -111,14 +126,16 @@ def resolve_workspace(
 
     Postconditions:
         - Returns an absolute ``str`` path to a directory that exists and is
-          writable (created here if absent) and is not a regular file.
+          writable, always located under ``AGENT_CACHE/planning_v3`` (created
+          here if absent).
         - Empty/None ``repo_path`` -> ``<root>/<slug(client_name)>/<job_id>``.
-        - git-URL ``repo_path`` -> ``<root>/<repo_name>/<job_id>`` (a server
-          workspace named after the repo; no clone is attempted).
-        - Filesystem ``repo_path`` -> ``Path(repo_path).expanduser()`` used as
-          given.
-        - Raises ``HTTPException(400)`` only when the resolved path exists and is
-          a regular file, or when the directory cannot be created.
+        - git-URL ``repo_path`` -> ``<root>/<repo_name>/<job_id>`` (named after
+          the repo; no clone is attempted).
+        - Filesystem ``repo_path`` -> ``<root>/<safe basename>/<job_id>``; the
+          supplied path is confined to its sanitized final component and can
+          never write outside the root.
+        - Raises ``HTTPException(400)`` only when the directory cannot be
+          created (e.g. ``AGENT_CACHE`` points at a non-directory).
     """
     base = _base_root()
 
@@ -127,21 +144,13 @@ def resolve_workspace(
     elif _GIT_URL_RE.match(repo_path.strip()):
         candidate = base / _repo_name_from_git_url(repo_path) / job_id
     else:
-        candidate = Path(repo_path).expanduser()
+        candidate = base / _safe_segment_from_path(repo_path) / job_id
 
-    # Keep every filesystem probe inside one guard. ``mkdir`` raises ValueError
-    # (not OSError) on non-encodable inputs such as an embedded NUL byte; some
-    # Python builds can raise it from ``exists``/``is_dir`` too. Mapping both
-    # OSError and ValueError here guarantees a clean 400 regardless of which
-    # call rejects the path, instead of a 500 escaping.
     try:
-        if candidate.exists() and not candidate.is_dir():
-            raise HTTPException(
-                status_code=400,
-                detail=f"Workspace path {candidate} exists but is not a directory (input: {repo_path!r})",
-            )
         candidate.mkdir(parents=True, exist_ok=True)
     except (OSError, ValueError) as exc:
+        # OSError covers an unwritable root / a non-directory in the path;
+        # ValueError covers non-encodable inputs. Map both to a clean 400.
         raise HTTPException(
             status_code=400,
             detail=f"Could not create workspace for repo_path={repo_path!r}: {exc}",

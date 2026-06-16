@@ -18,6 +18,7 @@ from fastapi import HTTPException  # noqa: E402
 
 from planning_v3_team.shared.workspace import (  # noqa: E402
     _repo_name_from_git_url,
+    _safe_segment_from_path,
     _slug,
     resolve_workspace,
 )
@@ -57,27 +58,36 @@ def test_git_https_url_without_suffix(cache):
     assert Path(out) == (cache / "planning_v3" / "repo" / "j2").resolve()
 
 
-def test_client_local_path_used_as_is(cache, tmp_path):
-    target = tmp_path / "sub" / "out"
-    out = resolve_workspace(str(target), "ignored", "jx")
-    assert Path(out) == target.resolve()
-    assert Path(out).is_dir()
+def test_explicit_path_confined_to_basename(cache):
+    # An explicit filesystem path is reduced to its sanitized basename under
+    # the root — it is never used verbatim.
+    out = Path(resolve_workspace("/Users/brandon/Home-maintenance-tracker", "ignored", "jx"))
+    assert out == (cache / "planning_v3" / "Home-maintenance-tracker" / "jx").resolve()
+    assert out.is_dir()
 
 
-def test_existing_file_collision_raises_400(cache, tmp_path):
-    f = tmp_path / "afile"
-    f.write_text("x", encoding="utf-8")
+def test_traversal_path_confined_under_root(cache):
+    # '..' segments cannot escape: only the final component survives.
+    root = (cache / "planning_v3").resolve()
+    out = Path(resolve_workspace("../../outside", None, "jt"))
+    assert out.is_relative_to(root)
+    assert out == (root / "outside" / "jt").resolve()
+
+
+def test_bare_dotdot_path_falls_back(cache):
+    root = (cache / "planning_v3").resolve()
+    out = Path(resolve_workspace("..", None, "jd"))
+    assert out == (root / "workspace" / "jd").resolve()
+    assert out.is_relative_to(root)
+
+
+def test_unwritable_root_raises_400(tmp_path, monkeypatch):
+    # AGENT_CACHE pointing at a regular file makes the root uncreatable.
+    blocker = tmp_path / "cachefile"
+    blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("AGENT_CACHE", str(blocker))
     with pytest.raises(HTTPException) as exc:
-        resolve_workspace(str(f), None, "jf")
-    assert exc.value.status_code == 400
-
-
-def test_mkdir_failure_raises_400(cache, tmp_path):
-    # A path whose parent is a file cannot be created as a directory.
-    f = tmp_path / "blocker"
-    f.write_text("x", encoding="utf-8")
-    with pytest.raises(HTTPException) as exc:
-        resolve_workspace(str(f / "child"), None, "jm")
+        resolve_workspace("", None, "jm")
     assert exc.value.status_code == 400
 
 
@@ -94,6 +104,15 @@ def test_repo_name_strips_git_suffix():
     assert _repo_name_from_git_url("https://host/org/plain/") == "plain"
 
 
+def test_safe_segment_from_path():
+    assert _safe_segment_from_path("/a/b/c") == "c"
+    assert _safe_segment_from_path("relrepo") == "relrepo"
+    assert _safe_segment_from_path("/a/b/c/") == "c"
+    assert _safe_segment_from_path("C:\\Users\\proj") == "proj"
+    assert _safe_segment_from_path("..") == "workspace"
+    assert _safe_segment_from_path("/") == "workspace"
+
+
 def test_repo_name_strips_query_and_fragment():
     assert _repo_name_from_git_url("https://host/org/repo.git?ref=main") == "repo"
     assert _repo_name_from_git_url("https://host/org/repo#readme") == "repo"
@@ -104,7 +123,10 @@ def test_git_url_with_query_maps_to_clean_repo_name(cache):
     assert Path(out) == (cache / "planning_v3" / "repo" / "jq").resolve()
 
 
-def test_nul_byte_repo_path_raises_400(cache):
-    with pytest.raises(HTTPException) as exc:
-        resolve_workspace("/tmp/a\x00b", None, "jn")
-    assert exc.value.status_code == 400
+def test_nul_byte_repo_path_sanitized_and_confined(cache):
+    # The NUL byte is stripped by the slug, so the path is confined (not a 500).
+    root = (cache / "planning_v3").resolve()
+    out = Path(resolve_workspace("/tmp/a\x00b", None, "jn"))
+    assert "\x00" not in str(out)
+    assert out.is_relative_to(root)
+    assert out.is_dir()

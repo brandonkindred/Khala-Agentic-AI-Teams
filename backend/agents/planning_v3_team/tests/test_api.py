@@ -56,13 +56,19 @@ def test_run_returns_job_id(client, temp_repo):
     assert data.get("status") == "running"
 
 
-def test_run_without_repo_path_creates_workspace(client):
+def test_run_without_repo_path_creates_workspace(client, tmp_path):
     r = client.post(
         "/run",
         json={"initial_brief": "Greenfield app", "use_product_analysis": False},
     )
     assert r.status_code == 200
-    assert "job_id" in r.json()
+    job_id = r.json()["job_id"]
+    # The workspace is created synchronously before the response, under AGENT_CACHE.
+    status = client.get(f"/status/{job_id}").json()
+    workspace = Path(status["repo_path"]).resolve()
+    root = (tmp_path / "cache" / "planning_v3").resolve()
+    assert workspace.is_dir()
+    assert workspace.is_relative_to(root)
 
 
 def test_run_with_git_url_repo_path(client):
@@ -78,14 +84,17 @@ def test_run_with_git_url_repo_path(client):
     assert "job_id" in r.json()
 
 
-def test_run_400_if_repo_path_is_file(client, tmp_path):
-    f = tmp_path / "a_file.txt"
-    f.write_text("not a dir", encoding="utf-8")
+def test_run_confines_traversal_path(client, tmp_path):
+    # An explicit traversal path is confined under AGENT_CACHE, not used verbatim.
     r = client.post(
         "/run",
-        json={"repo_path": str(f), "initial_brief": "x", "use_product_analysis": False},
+        json={"repo_path": "../../outside", "initial_brief": "x", "use_product_analysis": False},
     )
-    assert r.status_code == 400
+    assert r.status_code == 200
+    job_id = r.json()["job_id"]
+    workspace = Path(client.get(f"/status/{job_id}").json()["repo_path"]).resolve()
+    root = (tmp_path / "cache" / "planning_v3").resolve()
+    assert workspace.is_relative_to(root)
 
 
 def test_run_with_spec_only_no_brief(client):
