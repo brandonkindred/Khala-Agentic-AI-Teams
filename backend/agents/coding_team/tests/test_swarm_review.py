@@ -680,6 +680,48 @@ def test_quality_gate_tool_exception_proceeds_to_review(tmp_path, monkeypatch):
     assert graph.get_task("t1").status == TaskStatus.IN_REVIEW  # proceeded despite the tool error
 
 
+def test_quality_gate_tool_exception_logs_full_traceback(tmp_path, monkeypatch, caplog):
+    """An unexpected quality-gate tool error must be logged WITH a full traceback
+    (logger.exception → ERROR + exc_info), not a one-line WARNING — a silent
+    summary is exactly what made the review-phase crash undebuggable."""
+    import logging as _logging
+
+    _patch_gates(monkeypatch, build_raises=True)  # build() raises RuntimeError("tool crashed")
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    with caplog.at_level(_logging.ERROR, logger="coding_team.orchestrator"):
+        swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    gate_errors = [r for r in caplog.records if "Quality gate tools error" in r.getMessage()]
+    assert gate_errors, "the quality-gate tool error must be logged"
+    record = gate_errors[0]
+    assert record.levelno == _logging.ERROR  # logger.exception logs at ERROR
+    # Inspect the attached exception directly rather than rely on log formatting:
+    # the full traceback must be carried so the cause is debuggable.
+    assert record.exc_info is not None
+    exc = record.exc_info[1]
+    assert isinstance(exc, RuntimeError) and exc.args[0] == "tool crashed"
+
+
+def test_code_review_runs_even_if_progress_bridge_fails(tmp_path, monkeypatch):
+    """A failure constructing the ActivityBridge (observability only) must NOT skip
+    the code review and silently pass the gate. The review still runs: a rejecting
+    review returns the task for revision (TO_DO), not IN_REVIEW."""
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("bridge down")
+
+    _patch_gates(monkeypatch, build_ok=True, review_ok=False)  # review rejects
+    monkeypatch.setattr(orch_mod, "ActivityBridge", _boom)
+    swarm, graph = _make_real_swarm(tmp_path)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    # Review ran (and rejected) despite the bridge failure → returned for revision.
+    # Before the fix the bridge error was swallowed and the gate passed (IN_REVIEW).
+    assert graph.get_task("t1").status == TaskStatus.TO_DO
+
+
 # ----------------------------------------------------- un-assignment / double-assignment guard
 
 
