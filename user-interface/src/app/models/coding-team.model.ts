@@ -39,6 +39,40 @@ export interface CodingTeamJobStatus {
   pending_questions?: PendingQuestion[];
   /** True when the job is paused waiting for the user to answer pending questions. */
   waiting_for_answers?: boolean;
+  /**
+   * Per-agent status roster (Tech Lead + one Senior SWE per stack), derived server-side: who
+   * is working now, each agent's status, and the task each is on. Absent on older records.
+   */
+  agents?: CodingTeamAgentStatus[];
+}
+
+/**
+ * Live status of one coding-team agent, for the per-agent monitor cards. Mirrors the backend
+ * `AgentStatusEntry`. The roster is the Tech Lead (coordinator) plus one Senior SWE per stack.
+ */
+export interface CodingTeamAgentStatus {
+  /** Stable agent id (engineer stack name, or 'tech_lead'). */
+  agent_id: string;
+  /** 'tech_lead' or 'senior_engineer'. */
+  role: string;
+  /** Human-readable label for the agent card, e.g. "Tech Lead" or "Senior Engineer — frontend". */
+  display_name: string;
+  /** Stack name for engineers; null/undefined for the Tech Lead. */
+  stack?: string | null;
+  /** Tools/services the engineer specializes in (empty for the Tech Lead). */
+  tools_services?: string[];
+  /** working/in_review/idle (engineer) or planning/reviewing/idle (Tech Lead). */
+  status: string;
+  /** Id of the task the agent is currently working, when any. */
+  current_task_id?: string | null;
+  /** Title of the task the agent is currently working, when any. */
+  current_task_title?: string | null;
+  /** Live sub-step from current_activity, when this agent owns it. */
+  current_step?: string | null;
+  /** Human detail from current_activity, when this agent owns it. */
+  activity_detail?: string | null;
+  /** 0.0-1.0 progress of the live sub-step, when this agent owns it. */
+  activity_fraction?: number | null;
 }
 
 /** One row of GET /jobs — enough to spot active GitHub-issue runs without per-job status calls. */

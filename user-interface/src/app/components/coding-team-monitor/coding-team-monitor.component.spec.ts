@@ -1,0 +1,240 @@
+import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { CodingTeamMonitorComponent } from './coding-team-monitor.component';
+import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
+
+describe('CodingTeamMonitorComponent', () => {
+  let component: CodingTeamMonitorComponent;
+  let fixture: ComponentFixture<CodingTeamMonitorComponent>;
+
+  async function render(status: Partial<CodingTeamJobStatus> | null): Promise<HTMLElement> {
+    // Reset first so a test may render more than once (e.g. to compare two statuses).
+    TestBed.resetTestingModule();
+    await TestBed.configureTestingModule({
+      imports: [CodingTeamMonitorComponent, NoopAnimationsModule],
+    }).compileComponents();
+    fixture = TestBed.createComponent(CodingTeamMonitorComponent);
+    component = fixture.componentInstance;
+    component.status = status as CodingTeamJobStatus | null;
+    fixture.detectChanges();
+    return fixture.nativeElement as HTMLElement;
+  }
+
+  function agent(over: Partial<CodingTeamAgentStatus>): CodingTeamAgentStatus {
+    return { agent_id: 'a', role: 'senior_engineer', display_name: 'A', status: 'idle', ...over };
+  }
+
+  it('renders nothing when status is null', async () => {
+    const el = await render(null);
+    expect(el.querySelector('.ct-monitor')).toBeNull();
+  });
+
+  it('renders the monitor container once a status is present', async () => {
+    const el = await render({ job_id: 'j1', status: 'running' });
+    expect(el.querySelector('.ct-monitor')).not.toBeNull();
+  });
+
+  // --- Objective ---------------------------------------------------------------
+
+  it('shows status_text as the objective when present', async () => {
+    const el = await render({ job_id: 'j1', status: 'running', status_text: 'Implementing: Build UI' });
+    expect(el.querySelector('.ct-monitor__objective-detail')?.textContent).toContain(
+      'Implementing: Build UI',
+    );
+  });
+
+  it('falls back to a phase-derived objective when status_text is absent', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'running', phase: 'task_graph' } as CodingTeamJobStatus;
+    expect(c.objectiveText()).toBe('Building the task graph');
+    c.status = { ...c.status, phase: 'coding' };
+    expect(c.objectiveText()).toBe('Implementing the task graph');
+    c.status = { ...c.status, phase: 'completed' };
+    expect(c.objectiveText()).toBe('Run complete');
+    c.status = { ...c.status, phase: 'mystery' };
+    expect(c.objectiveText()).toBe('Coding team run');
+    c.status = null;
+    expect(c.objectiveText()).toBe('Coding team run');
+  });
+
+  it('lists the titles of in-progress and in-review tasks as the current focus', async () => {
+    const el = await render({
+      job_id: 'j1',
+      status: 'running',
+      task_graph_snapshot: [
+        { id: 't1', title: 'Build UI', status: 'in_progress' },
+        { id: 't2', title: 'API', status: 'in_review' },
+        { id: 't3', title: 'Done thing', status: 'merged' },
+        { id: 't4', title: '', status: 'in_progress' },
+      ],
+    });
+    const tasks = el.querySelector('.ct-monitor__objective-tasks')?.textContent ?? '';
+    expect(tasks).toContain('Build UI');
+    expect(tasks).toContain('API');
+    expect(tasks).not.toContain('Done thing');
+  });
+
+  // --- Overall progress + stepper ----------------------------------------------
+
+  it('renders a determinate progress bar with the percent when progress is known', async () => {
+    const el = await render({ job_id: 'j1', status: 'running', progress: 47 });
+    expect(component.overallProgress()).toBe(47);
+    expect(component.progressMode()).toBe('determinate');
+    expect(el.querySelector('.ct-monitor__progress-pct')?.textContent).toContain('47%');
+    expect(el.querySelector('mat-progress-bar')).not.toBeNull();
+  });
+
+  it('clamps out-of-range progress and hides the percent when absent', async () => {
+    await render({ job_id: 'j1', status: 'running', progress: 250 });
+    expect(component.overallProgress()).toBe(100);
+    const el = await render({ job_id: 'j1', status: 'running' });
+    expect(component.overallProgress()).toBeNull();
+    expect(el.querySelector('.ct-monitor__progress-pct')).toBeNull();
+  });
+
+  it('is indeterminate while running before any progress lands, determinate otherwise', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'running' } as CodingTeamJobStatus;
+    expect(c.progressMode()).toBe('indeterminate');
+    c.status = { job_id: 'j', status: 'waiting_for_user' } as CodingTeamJobStatus;
+    expect(c.progressMode()).toBe('determinate');
+  });
+
+  it('uses the warn color only when the job has failed', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'failed' } as CodingTeamJobStatus;
+    expect(c.progressColor()).toBe('warn');
+    c.status = { job_id: 'j', status: 'running' } as CodingTeamJobStatus;
+    expect(c.progressColor()).toBe('primary');
+  });
+
+  it('marks stepper phases completed/current/pending from the phase', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'running', phase: 'coding' } as CodingTeamJobStatus;
+    expect(c.isPhaseCompleted('task_graph')).toBe(true);
+    expect(c.isCurrentPhase('coding')).toBe(true);
+    expect(c.isPhasePending('completed')).toBe(true);
+  });
+
+  it('treats a terminal job as fully completed in the stepper', () => {
+    const c = new CodingTeamMonitorComponent();
+    for (const status of ['completed', 'completed_with_failures']) {
+      c.status = { job_id: 'j', status } as CodingTeamJobStatus;
+      expect(c.isPhaseCompleted('task_graph')).toBe(true);
+      expect(c.isPhaseCompleted('coding')).toBe(true);
+      expect(c.isPhaseCompleted('completed')).toBe(true);
+    }
+  });
+
+  it('infers the paused step from whether a task graph exists yet', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'waiting_for_user', phase: 'paused' } as CodingTeamJobStatus;
+    expect(c.isCurrentPhase('task_graph')).toBe(true);
+    c.status = {
+      job_id: 'j',
+      status: 'waiting_for_user',
+      phase: 'paused',
+      task_graph_snapshot: [{ id: 't1', title: 'x', status: 'to_do' }],
+    } as CodingTeamJobStatus;
+    expect(c.isCurrentPhase('coding')).toBe(true);
+  });
+
+  it('leaves all stepper steps pending for an unknown phase and a null status', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { job_id: 'j', status: 'running', phase: 'mystery' } as CodingTeamJobStatus;
+    expect(c.isPhasePending('task_graph')).toBe(true);
+    expect(c.isPhasePending('coding')).toBe(true);
+    c.status = null;
+    expect(c.isCurrentPhase('task_graph')).toBe(false);
+  });
+
+  // --- Live sub-agent activity -------------------------------------------------
+
+  it('renders the current-activity sub-bar with label, detail, and a clamped fraction', async () => {
+    const el = await render({
+      job_id: 'j1',
+      status: 'running',
+      current_activity: { agent: 'code_review', detail: 'src/app.py', fraction: 1.5 },
+    });
+    expect(el.querySelector('.ct-monitor__activity-label')?.textContent).toContain('Code review');
+    expect(el.querySelector('.ct-monitor__activity-detail')?.textContent).toContain('src/app.py');
+    expect(component.activityFraction()).toBe(1);
+    expect(el.querySelector('.ct-monitor__activity-bar')).not.toBeNull();
+  });
+
+  it('labels the activity agent and falls back gracefully', () => {
+    const c = new CodingTeamMonitorComponent();
+    c.status = { current_activity: { agent: 'tech_lead_review' } } as CodingTeamJobStatus;
+    expect(c.activityAgentLabel()).toBe('Tech Lead review');
+    c.status = { current_activity: { agent: 'something_else' } } as CodingTeamJobStatus;
+    expect(c.activityAgentLabel()).toBe('something_else');
+    c.status = { current_activity: {} } as CodingTeamJobStatus;
+    expect(c.activityAgentLabel()).toBe('Agent activity');
+  });
+
+  it('hides the activity fraction bar when no fraction is reported', async () => {
+    const el = await render({
+      job_id: 'j1',
+      status: 'running',
+      current_activity: { agent: 'code_review', detail: 'parsing' },
+    });
+    expect(component.activityFraction()).toBeNull();
+    expect(el.querySelector('.ct-monitor__activity-bar')).toBeNull();
+  });
+
+  // --- Agent roster ------------------------------------------------------------
+
+  it('renders an agent card per roster entry with status badge and active emphasis', async () => {
+    const el = await render({
+      job_id: 'j1',
+      status: 'running',
+      agents: [
+        agent({ agent_id: 'tech_lead', role: 'tech_lead', display_name: 'Tech Lead', status: 'reviewing' }),
+        agent({
+          agent_id: 'frontend',
+          display_name: 'Senior Engineer — frontend',
+          status: 'working',
+          stack: 'frontend',
+          tools_services: ['Angular'],
+          current_task_title: 'Build UI',
+          current_step: 'reviewing',
+          activity_detail: 'chunk 1/2',
+          activity_fraction: 0.5,
+        }),
+        agent({ agent_id: 'backend', display_name: 'Senior Engineer — backend', status: 'idle' }),
+      ],
+    });
+    const cards = el.querySelectorAll('.ct-agent');
+    expect(cards.length).toBe(3);
+    expect(el.querySelector('.ct-agent__status--reviewing')?.textContent).toContain('Reviewing');
+    expect(el.querySelector('.ct-agent--working')).not.toBeNull();
+    // active emphasis on non-idle agents only
+    expect(el.querySelectorAll('.ct-agent--active').length).toBe(2);
+    // the working engineer surfaces its task, tools, and a per-agent activity bar
+    expect(el.textContent).toContain('Build UI');
+    expect(el.querySelector('.ct-agent__tool')?.textContent).toContain('Angular');
+    expect(el.querySelector('.ct-agent__activity mat-progress-bar')).not.toBeNull();
+  });
+
+  it('exposes role icons, status labels, active flag, and clamped per-agent fraction', () => {
+    const c = new CodingTeamMonitorComponent();
+    expect(c.agentRoleIcon(agent({ role: 'tech_lead' }))).toBe('supervisor_account');
+    expect(c.agentRoleIcon(agent({ role: 'senior_engineer' }))).toBe('code');
+    expect(c.agentStatusLabel(agent({ status: 'working' }))).toBe('Working');
+    expect(c.agentStatusLabel(agent({ status: 'in_review' }))).toBe('In review');
+    expect(c.agentStatusLabel(agent({ status: 'reviewing' }))).toBe('Reviewing');
+    expect(c.agentStatusLabel(agent({ status: 'planning' }))).toBe('Planning');
+    expect(c.agentStatusLabel(agent({ status: 'idle' }))).toBe('Idle');
+    expect(c.agentStatusLabel(agent({ status: 'weird' }))).toBe('weird');
+    expect(c.isAgentActive(agent({ status: 'idle' }))).toBe(false);
+    expect(c.isAgentActive(agent({ status: 'working' }))).toBe(true);
+    expect(c.agentFraction(agent({ activity_fraction: 2 }))).toBe(1);
+    expect(c.agentFraction(agent({ activity_fraction: -1 }))).toBe(0);
+    expect(c.agentFraction(agent({}))).toBeNull();
+  });
+
+  it('omits the roster section entirely when there are no agents', async () => {
+    const el = await render({ job_id: 'j1', status: 'running', agents: [] });
+    expect(el.querySelector('.ct-monitor__agents')).toBeNull();
+  });
+});

@@ -1,0 +1,171 @@
+"""Derive a per-agent status roster for a coding-team job from its persisted state.
+
+The coding-team status endpoint surfaces *which* agents exist and what each is doing, so the
+UI can render per-agent cards (which agent is working now, a status per agent, what the team
+is working on). The roster is derived — not stored — from four pieces of already-persisted
+job state: the stack specs (the engineer roster), the agent->task map (who holds which
+non-merged task), the task-graph snapshot (task titles + statuses), and the current_activity
+(the single live review sub-step). Keeping the derivation here, as a pure function, keeps the
+status endpoint thin and makes the logic unit-testable without a job store.
+
+The Tech Lead is the coordinator: it is never present in ``agent_task_map`` (only Senior SWEs
+are assigned tasks via ``TaskGraphService.assign_task_to_agent``), so its card is always
+synthesized here regardless of the persisted state.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+from coding_team.models import AgentStatusEntry
+
+# The synthetic, stable id for the Tech Lead coordinator card (never a key in agent_task_map).
+TECH_LEAD_AGENT_ID = "tech_lead"
+
+# The ``current_activity.agent`` literal the Tech Lead's merge review reports under. The other
+# literal in the system is ``"code_review"`` (a quality gate that runs on an engineer's task).
+_TECH_LEAD_ACTIVITY_AGENT = "tech_lead_review"
+
+
+def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[Tuple[str, str, List[str]]]:
+    """Map raw stack specs to ``(agent_id, display_name, tools_services)``, one per stack.
+
+    This MUST stay faithful to how the orchestrator names Senior SWE agents (the
+    ``run_coding_team_orchestrator`` worker-build loop), because the returned ``agent_id`` is
+    the exact key the orchestrator writes into ``agent_task_map``. A stack with no name falls
+    back to ``f"stack_{i}"``, and that same value is the agent id — so the two sides cannot
+    drift, the orchestrator and this module call this single helper.
+
+    Preconditions:
+        - ``stacks_raw`` is a list (possibly empty). Each entry is normally a dict that may
+          carry ``name`` (str) and ``tools_services`` (list[str]); malformed/non-dict entries
+          are tolerated and treated as empty.
+    Postconditions:
+        - Returns one tuple per input entry, in order. ``agent_id == display_name``, equal to
+          the entry's ``name`` when truthy else ``f"stack_{i}"``. ``tools_services`` is always
+          a list (a copy; empty when absent or malformed). Never raises.
+    """
+    roster: List[Tuple[str, str, List[str]]] = []
+    for i, entry in enumerate(stacks_raw):
+        spec = entry if isinstance(entry, dict) else {}
+        name = spec.get("name") or f"stack_{i}"
+        tools = spec.get("tools_services")
+        tools = list(tools) if isinstance(tools, list) else []
+        roster.append((name, name, tools))
+    return roster
+
+
+def _coerce_fraction(value: Any) -> Optional[float]:
+    """Return a float in the closed unit interval, or None for anything non-numeric.
+
+    Postconditions: bools are rejected (``True`` is not a fraction); numeric values are
+    clamped to [0.0, 1.0] so a corrupt record can never drive an out-of-range sub-bar.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return min(max(float(value), 0.0), 1.0)
+
+
+def build_agent_statuses(
+    stack_specs: List[Dict[str, Any]],
+    agent_task_map: Dict[str, str],
+    task_graph_snapshot: List[Dict[str, Any]],
+    current_activity: Optional[Dict[str, Any]],
+    phase: Optional[str],
+) -> List[AgentStatusEntry]:
+    """Derive the per-agent status roster for a coding-team job.
+
+    Pure: reads only its arguments, performs no I/O, and never raises on malformed input — a
+    corrupt job record must degrade the cards, not break the status endpoint. The roster is
+    the Tech Lead (always, first) followed by one Senior SWE per entry in ``stack_specs``.
+
+    Preconditions:
+        - ``stack_specs`` is a list of stack dicts (may be empty — old or SE-pipeline records
+          carry none, which yields a Tech-Lead-only roster). Engineer ids are derived from it
+          via :func:`derive_stack_roster`, matching the orchestrator's assignment keys.
+        - ``agent_task_map`` maps an engineer ``agent_id`` to the id of its current non-merged
+          task (the only entries the orchestrator ever writes).
+        - ``task_graph_snapshot`` is the list of task dicts (each with ``id``/``title``/``status``).
+        - ``current_activity`` is the single live review sub-step dict, or None; only a dict is
+          honoured.
+        - ``phase`` is the job phase string, or None.
+    Postconditions:
+        - Returns ``[tech_lead, *engineers]`` in stack order. Each engineer's ``status`` is
+          ``working`` (its task is in_progress), ``in_review`` (its task is in_review), or
+          ``idle`` (no live task). The Tech Lead is ``planning`` during ``task_graph``,
+          ``reviewing`` while a merge review runs or any task is in_review, else ``idle``.
+        - The single ``current_activity`` is overlaid onto exactly one agent: the Tech Lead
+          when it is a ``tech_lead_review`` (checked first — that activity also carries the
+          engineer's task_id, which is still mapped while the task is in_review), otherwise the
+          engineer that owns the activity's task.
+    """
+    activity = current_activity if isinstance(current_activity, dict) else None
+    tasks_by_id: Dict[Any, Dict[str, Any]] = {
+        t.get("id"): t for t in task_graph_snapshot if isinstance(t, dict) and t.get("id")
+    }
+
+    # --- Engineer cards (one per stack) ------------------------------------------------
+    engineers: List[AgentStatusEntry] = []
+    for agent_id, display_name, tools in derive_stack_roster(stack_specs):
+        task_id = agent_task_map.get(agent_id)
+        task = tasks_by_id.get(task_id) if task_id else None
+        status = "idle"
+        current_task_id: Optional[str] = None
+        current_task_title: Optional[str] = None
+        if task is not None:
+            current_task_id = task.get("id")
+            current_task_title = task.get("title")
+            # The map only ever holds in_progress/in_review tasks (merge/fail frees the agent),
+            # so anything that is not in_review is active implementation work.
+            status = "in_review" if task.get("status") == "in_review" else "working"
+        engineers.append(
+            AgentStatusEntry(
+                agent_id=agent_id,
+                role="senior_engineer",
+                display_name=f"Senior Engineer — {display_name}",
+                stack=display_name,
+                tools_services=tools,
+                status=status,
+                current_task_id=current_task_id,
+                current_task_title=current_task_title,
+            )
+        )
+
+    # --- Tech Lead card (coordinator) --------------------------------------------------
+    activity_agent = activity.get("agent") if activity else None
+    any_in_review = any(
+        isinstance(t, dict) and t.get("status") == "in_review" for t in task_graph_snapshot
+    )
+    if phase == "task_graph":
+        tl_status = "planning"
+    elif activity_agent == _TECH_LEAD_ACTIVITY_AGENT or any_in_review:
+        tl_status = "reviewing"
+    else:
+        tl_status = "idle"
+    tech_lead = AgentStatusEntry(
+        agent_id=TECH_LEAD_AGENT_ID,
+        role="tech_lead",
+        display_name="Tech Lead",
+        stack=None,
+        tools_services=[],
+        status=tl_status,
+    )
+
+    # --- current_activity overlay (branch on agent FIRST) ------------------------------
+    if activity is not None:
+        target: Optional[AgentStatusEntry] = None
+        if activity_agent == _TECH_LEAD_ACTIVITY_AGENT:
+            # tech_lead_review carries the engineer's task_id and that task is still mapped to
+            # the engineer (in_review); branching on agent first keeps the review progress on
+            # the Tech Lead's card rather than the engineer's.
+            target = tech_lead
+        else:
+            activity_task_id = activity.get("task_id")
+            if activity_task_id:
+                target = next((e for e in engineers if e.current_task_id == activity_task_id), None)
+        if target is not None:
+            target.current_step = activity.get("step")
+            target.activity_detail = activity.get("detail")
+            target.activity_fraction = _coerce_fraction(activity.get("fraction"))
+
+    return [tech_lead, *engineers]

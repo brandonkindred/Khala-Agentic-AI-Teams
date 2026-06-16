@@ -1,0 +1,113 @@
+@if (status) {
+  <div class="ct-monitor">
+    <!-- Current objective -->
+    <div class="ct-monitor__objective">
+      <mat-icon>flag</mat-icon>
+      <div class="ct-monitor__objective-text">
+        <span class="ct-monitor__section-label">Current objective</span>
+        <span class="ct-monitor__objective-detail">{{ objectiveText() }}</span>
+        @if (workingTaskTitles().length > 0) {
+          <span class="ct-monitor__objective-tasks">
+            Working on: {{ workingTaskTitles().join(', ') }}
+          </span>
+        }
+      </div>
+    </div>
+
+    <!-- Overall progress + phase stepper -->
+    <div class="ct-monitor__progress">
+      <div class="ct-monitor__progress-head">
+        <span class="ct-monitor__section-label">Progress</span>
+        @if (overallProgress() !== null) {
+          <span class="ct-monitor__progress-pct">{{ overallProgress() }}%</span>
+        }
+      </div>
+      <mat-progress-bar
+        class="ct-monitor__progress-bar"
+        [mode]="progressMode()"
+        [value]="overallProgress() ?? 0"
+        [color]="progressColor()"
+      ></mat-progress-bar>
+
+      <div class="ct-monitor__stepper">
+        @for (phase of ALL_PHASES; track phase.id; let last = $last) {
+          <div
+            class="ct-step"
+            [class.completed]="isPhaseCompleted(phase.id)"
+            [class.current]="isCurrentPhase(phase.id)"
+            [class.pending]="isPhasePending(phase.id)"
+            [class.has-connector]="!last"
+          >
+            <div class="ct-step__node"><mat-icon>{{ phase.icon }}</mat-icon></div>
+            <span class="ct-step__label">{{ phase.label }}</span>
+          </div>
+        }
+      </div>
+    </div>
+
+    <!-- Live sub-agent activity -->
+    @if (status.current_activity) {
+      <div class="ct-monitor__activity">
+        <div class="ct-monitor__activity-head">
+          <mat-icon>rate_review</mat-icon>
+          <span class="ct-monitor__activity-label">{{ activityAgentLabel() }}</span>
+          @if (status.current_activity.detail) {
+            <span class="ct-monitor__activity-detail">: {{ status.current_activity.detail }}</span>
+          }
+        </div>
+        @if (activityFraction() !== null) {
+          <div class="ct-monitor__activity-bar">
+            <mat-progress-bar mode="determinate" [value]="activityFraction()! * 100"></mat-progress-bar>
+            <span class="ct-monitor__activity-pct">{{ (activityFraction()! * 100).toFixed(0) }}%</span>
+          </div>
+        }
+      </div>
+    }
+
+    <!-- Per-agent roster -->
+    @if (status.agents && status.agents.length > 0) {
+      <div class="ct-monitor__agents">
+        <span class="ct-monitor__section-label">Team</span>
+        <div class="ct-monitor__agent-grid">
+          @for (agent of status.agents; track agent.agent_id) {
+            <div
+              class="ct-agent ct-agent--{{ agent.status }}"
+              [class.ct-agent--active]="isAgentActive(agent)"
+            >
+              <div class="ct-agent__head">
+                <mat-icon class="ct-agent__role-icon">{{ agentRoleIcon(agent) }}</mat-icon>
+                <span class="ct-agent__name">{{ agent.display_name }}</span>
+                <span class="ct-agent__status ct-agent__status--{{ agent.status }}">
+                  {{ agentStatusLabel(agent) }}
+                </span>
+              </div>
+              @if (agent.tools_services && agent.tools_services.length > 0) {
+                <div class="ct-agent__tools">
+                  @for (tool of agent.tools_services; track tool) {
+                    <span class="ct-agent__tool">{{ tool }}</span>
+                  }
+                </div>
+              }
+              @if (agent.current_task_title) {
+                <div class="ct-agent__task">
+                  <mat-icon>assignment</mat-icon>
+                  <span>{{ agent.current_task_title }}</span>
+                </div>
+              }
+              @if (agent.current_step || agent.activity_detail) {
+                <div class="ct-agent__activity">
+                  <span class="ct-agent__activity-step">
+                    {{ agent.activity_detail || agent.current_step }}
+                  </span>
+                  @if (agentFraction(agent) !== null) {
+                    <mat-progress-bar mode="determinate" [value]="agentFraction(agent)! * 100"></mat-progress-bar>
+                  }
+                </div>
+              }
+            </div>
+          }
+        </div>
+      </div>
+    }
+  </div>
+}
