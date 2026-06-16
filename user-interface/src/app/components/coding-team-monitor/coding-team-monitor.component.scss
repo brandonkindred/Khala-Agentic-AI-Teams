@@ -24,7 +24,7 @@
     gap: 10px;
 
     mat-icon {
-      color: #1565c0;
+      color: var(--mat-sys-primary, #1565c0);
     }
   }
 
@@ -89,7 +89,7 @@
   }
 
   &.completed.has-connector::after {
-    background: #2e7d32;
+    background: var(--mat-sys-tertiary, #2e7d32);
   }
 
   &__node {
@@ -118,30 +118,30 @@
   }
 
   &.current &__node {
-    background: #1565c0;
+    background: var(--mat-sys-primary, #1565c0);
     color: #fff;
-    border-color: #1565c0;
+    border-color: var(--mat-sys-primary, #1565c0);
   }
 
   &.current &__label {
-    color: #1565c0;
+    color: var(--mat-sys-primary, #1565c0);
     font-weight: 600;
   }
 
   &.completed &__node {
-    background: #2e7d32;
+    background: var(--mat-sys-tertiary, #2e7d32);
     color: #fff;
-    border-color: #2e7d32;
+    border-color: var(--mat-sys-tertiary, #2e7d32);
   }
 
   &.failed &__node {
-    background: #c62828;
+    background: var(--mat-sys-error, #c62828);
     color: #fff;
-    border-color: #c62828;
+    border-color: var(--mat-sys-error, #c62828);
   }
 
   &.failed &__label {
-    color: #c62828;
+    color: var(--mat-sys-error, #c62828);
     font-weight: 600;
   }
 }
@@ -166,7 +166,7 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #1565c0;
+    color: var(--mat-sys-primary, #1565c0);
   }
 }
 
@@ -216,7 +216,7 @@
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 
   &--active {
-    border-color: #1565c0;
+    border-color: var(--mat-sys-primary, #1565c0);
     box-shadow: 0 1px 4px rgba(21, 101, 192, 0.18);
     background: #fff;
   }
@@ -259,7 +259,7 @@
     }
     &--working {
       background: #e3f2fd;
-      color: #1565c0;
+      color: var(--mat-sys-primary, #1565c0);
     }
     &--in_review,
     &--reviewing {
@@ -269,6 +269,11 @@
     &--planning {
       background: #ede7f6;
       color: #5e35b1;
+    }
+    // Fallback for any unrecognized status (agentStatusClass folds unknowns here).
+    &--unknown {
+      background: #eceff1;
+      color: rgba(0, 0, 0, 0.5);
     }
   }
 

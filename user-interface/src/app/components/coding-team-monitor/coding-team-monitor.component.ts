@@ -2,8 +2,14 @@ import { Component, Input } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
-import type { PhaseDefinition } from '../../models/software-engineering.model';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
+
+/** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
+interface PhaseDefinition {
+  id: string;
+  label: string;
+  icon: string;
+}
 
 /** Phase-stepper steps for a coding-team job: build the task graph, code it, done. */
 const CODING_TEAM_PHASES: PhaseDefinition[] = [
@@ -93,7 +99,7 @@ export class CodingTeamMonitorComponent {
   }
 
   /** True once the run has ended unsuccessfully (hard failure or cancellation). */
-  isFailed(): boolean {
+  private isFailed(): boolean {
     const s = this.status?.status;
     return s === 'failed' || s === 'cancelled';
   }
@@ -109,7 +115,6 @@ export class CodingTeamMonitorComponent {
   private currentStepId(): string {
     const s = this.status;
     if (!s) return '';
-    if (this.isDone()) return 'completed';
     const hasGraph = (s.task_graph_snapshot?.length ?? 0) > 0;
     if (this.isFailed()) return hasGraph ? 'coding' : 'task_graph';
     switch (s.phase) {
@@ -145,8 +150,9 @@ export class CodingTeamMonitorComponent {
   }
 
   isCurrentPhase(phaseId: string): boolean {
-    // A failed run's reached step renders as failed, not as an in-progress "current" step.
-    if (this.isFailed()) return false;
+    // A finished run marks every step completed (green), and a failed run's reached step renders
+    // failed — neither should also be "current", or a step would carry two conflicting classes.
+    if (this.isDone() || this.isFailed()) return false;
     return this.currentStepId() === phaseId;
   }
 
@@ -185,6 +191,24 @@ export class CodingTeamMonitorComponent {
   /** Material icon for the agent's role. */
   agentRoleIcon(agent: CodingTeamAgentStatus): string {
     return agent.role === 'tech_lead' ? 'supervisor_account' : 'code';
+  }
+
+  /**
+   * Safe, known CSS-class suffix for the agent's status. Maps only the recognized statuses to a
+   * styled class and folds anything else to 'unknown', so an unexpected backend value can never
+   * inject an invalid CSS class name (e.g. one with spaces) into the template.
+   */
+  agentStatusClass(agent: CodingTeamAgentStatus): string {
+    switch (agent.status) {
+      case 'working':
+      case 'in_review':
+      case 'reviewing':
+      case 'planning':
+      case 'idle':
+        return agent.status;
+      default:
+        return 'unknown';
+    }
   }
 
   /** Human-readable status label for the agent badge. */

@@ -47,6 +47,12 @@ def test_derive_roster_empty():
     assert derive_stack_roster([]) == []
 
 
+def test_derive_roster_non_list_returns_empty():
+    # Defensive: a precondition violation (None / non-list) degrades to an empty roster, never raises.
+    assert derive_stack_roster(None) == []  # type: ignore[arg-type]
+    assert derive_stack_roster("garbage") == []  # type: ignore[arg-type]
+
+
 def test_derive_roster_copies_tools_list():
     src = ["Angular"]
     ((_aid, _name, tools),) = derive_stack_roster([{"name": "f", "tools_services": src}])

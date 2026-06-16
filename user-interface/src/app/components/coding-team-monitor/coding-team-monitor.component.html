@@ -72,13 +72,13 @@
         <div class="ct-monitor__agent-grid">
           @for (agent of status.agents; track $index) {
             <div
-              class="ct-agent ct-agent--{{ agent.status }}"
+              class="ct-agent ct-agent--{{ agentStatusClass(agent) }}"
               [class.ct-agent--active]="isAgentActive(agent)"
             >
               <div class="ct-agent__head">
                 <mat-icon class="ct-agent__role-icon">{{ agentRoleIcon(agent) }}</mat-icon>
                 <span class="ct-agent__name">{{ agent.display_name }}</span>
-                <span class="ct-agent__status ct-agent__status--{{ agent.status }}">
+                <span class="ct-agent__status ct-agent__status--{{ agentStatusClass(agent) }}">
                   {{ agentStatusLabel(agent) }}
                 </span>
               </div>

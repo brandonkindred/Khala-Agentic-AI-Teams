@@ -37,14 +37,17 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[Tuple[str, str
     drift, the orchestrator and this module call this single helper.
 
     Preconditions:
-        - ``stacks_raw`` is a list (possibly empty). Each entry is normally a dict that may
-          carry ``name`` (str) and ``tools_services`` (list[str]); malformed/non-dict entries
-          are tolerated and treated as empty.
+        - ``stacks_raw`` is normally a list (possibly empty). Each entry is normally a dict that
+          may carry ``name`` (str) and ``tools_services`` (list[str]); malformed/non-dict
+          entries are tolerated and treated as empty.
     Postconditions:
         - Returns one tuple per input entry, in order. ``agent_id == display_name``, equal to
           the entry's ``name`` when truthy else ``f"stack_{i}"``. ``tools_services`` is always
-          a list (a copy; empty when absent or malformed). Never raises.
+          a list (a copy; empty when absent or malformed). A non-list ``stacks_raw`` yields an
+          empty roster. Never raises.
     """
+    if not isinstance(stacks_raw, list):
+        return []
     roster: List[Tuple[str, str, List[str]]] = []
     for i, entry in enumerate(stacks_raw):
         spec = entry if isinstance(entry, dict) else {}
@@ -103,9 +106,28 @@ def build_agent_statuses(
     tasks_by_id: Dict[Any, Dict[str, Any]] = {
         t.get("id"): t for t in task_graph_snapshot if isinstance(t, dict) and t.get("id")
     }
+    activity_agent = activity.get("agent") if activity else None
+    activity_task_id = activity.get("task_id") if activity else None
+
+    # The single live activity is overlaid onto exactly one agent, and is passed into that agent's
+    # constructor rather than mutated in afterwards. A tech_lead_review goes to the Tech Lead; any
+    # other activity goes to the first engineer whose current task matches its task_id. Branching
+    # on the agent first matters because an in_review task is still mapped to its engineer, so a
+    # tech_lead_review carries that engineer's task_id too.
+    overlay: Dict[str, Any] = (
+        {
+            "current_step": activity.get("step"),
+            "activity_detail": activity.get("detail"),
+            "activity_fraction": _coerce_fraction(activity.get("fraction")),
+        }
+        if activity is not None
+        else {}
+    )
+    overlay_for_engineers = overlay if activity_agent != _TECH_LEAD_ACTIVITY_AGENT else {}
 
     # --- Engineer cards (one per stack) ------------------------------------------------
     engineers: List[AgentStatusEntry] = []
+    overlay_used = False
     for agent_id, display_name, tools in derive_stack_roster(stack_specs):
         task_id = agent_task_map.get(agent_id)
         task = tasks_by_id.get(task_id) if task_id else None
@@ -118,6 +140,18 @@ def build_agent_statuses(
             # The map only ever holds in_progress/in_review tasks (merge/fail frees the agent),
             # so anything that is not in_review is active implementation work.
             status = "in_review" if task.get("status") == "in_review" else "working"
+        # Apply the overlay to the first engineer that owns the activity's task, once. The
+        # ``activity_task_id`` truthy check keeps a task-less activity from matching an idle
+        # engineer (whose current_task_id is None) via ``None == None``.
+        fields: Dict[str, Any] = {}
+        if (
+            overlay_for_engineers
+            and not overlay_used
+            and activity_task_id
+            and activity_task_id == current_task_id
+        ):
+            fields = overlay_for_engineers
+            overlay_used = True
         engineers.append(
             AgentStatusEntry(
                 agent_id=agent_id,
@@ -128,11 +162,11 @@ def build_agent_statuses(
                 status=status,
                 current_task_id=current_task_id,
                 current_task_title=current_task_title,
+                **fields,
             )
         )
 
     # --- Tech Lead card (coordinator) --------------------------------------------------
-    activity_agent = activity.get("agent") if activity else None
     any_in_review = any(
         isinstance(t, dict) and t.get("status") == "in_review" for t in task_graph_snapshot
     )
@@ -142,6 +176,7 @@ def build_agent_statuses(
         tl_status = "reviewing"
     else:
         tl_status = "idle"
+    tl_fields = overlay if activity_agent == _TECH_LEAD_ACTIVITY_AGENT else {}
     tech_lead = AgentStatusEntry(
         agent_id=TECH_LEAD_AGENT_ID,
         role="tech_lead",
@@ -149,23 +184,7 @@ def build_agent_statuses(
         stack=None,
         tools_services=[],
         status=tl_status,
+        **tl_fields,
     )
-
-    # --- current_activity overlay (branch on agent FIRST) ------------------------------
-    if activity is not None:
-        target: Optional[AgentStatusEntry] = None
-        if activity_agent == _TECH_LEAD_ACTIVITY_AGENT:
-            # tech_lead_review carries the engineer's task_id and that task is still mapped to
-            # the engineer (in_review); branching on agent first keeps the review progress on
-            # the Tech Lead's card rather than the engineer's.
-            target = tech_lead
-        else:
-            activity_task_id = activity.get("task_id")
-            if activity_task_id:
-                target = next((e for e in engineers if e.current_task_id == activity_task_id), None)
-        if target is not None:
-            target.current_step = activity.get("step")
-            target.activity_detail = activity.get("detail")
-            target.activity_fraction = _coerce_fraction(activity.get("fraction"))
 
     return [tech_lead, *engineers]
