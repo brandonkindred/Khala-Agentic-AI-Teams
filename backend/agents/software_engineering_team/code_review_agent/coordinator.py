@@ -38,6 +38,7 @@ from software_engineering_team.shared.context_sizing import (
 )
 
 from .chunk_reviewer import ChunkReviewAgent
+from .code_boundaries import preferred_break_lines
 from .models import (
     ChunkReviewInput,
     CodeReviewInput,
@@ -179,6 +180,12 @@ def split_block_into_segments(
           except when a single line alone exceeds it (line boundaries are
           never broken).
         - A within-budget block yields exactly one whole-file segment.
+        - Cuts prefer function/method/class boundaries: when an over-budget
+          buffer contains the start of a top-level construct, the split lands
+          before that construct so it is not severed mid-body. When no such
+          boundary exists in the buffer (minified code, one giant function,
+          unparseable or pre-numbered content), the split falls back to the
+          line boundary, keeping the other postconditions intact.
     """
     assert max_chars > 0, "max_chars must be positive"
     total_lines = len(content.splitlines()) or 1
@@ -192,6 +199,11 @@ def split_block_into_segments(
                 pre_numbered=pre_numbered,
             )
         ]
+    # Lines (1-based) that start a top-level construct; cutting before one keeps
+    # the preceding construct whole. Pre-numbered hunks carry "N: " prefixes that
+    # defeat boundary detection and are rarely whole functions, so they keep the
+    # plain line-boundary behavior (empty break set).
+    breaks = frozenset() if pre_numbered else preferred_break_lines(path, content)
     # Split pieces become partial segments, which render with "N: " prefixes
     # (unless already pre-numbered); budget each line's rendered size so the
     # prompt stays within max_chars after prefixing.
@@ -205,10 +217,22 @@ def split_block_into_segments(
     for ln in lines:
         rendered_len = len(ln) + prefix_width
         if buf and buf_len + rendered_len > max_chars:
-            pieces.append((buf_start, "".join(buf)))
-            buf = []
-            buf_len = 0
-            buf_start = line_no
+            # Prefer the latest construct boundary inside the buffer so the
+            # flushed head ends right before a function/method/class. Candidates
+            # are strictly after buf_start (a non-empty head) and at most the
+            # current line; with none, fall back to the line boundary.
+            cut = max((b for b in breaks if buf_start < b <= line_no), default=None)
+            if cut is not None:
+                head = buf[: cut - buf_start]
+                pieces.append((buf_start, "".join(head)))
+                buf = buf[cut - buf_start :]
+                buf_start = cut
+                buf_len = sum(len(x) + prefix_width for x in buf)
+            else:
+                pieces.append((buf_start, "".join(buf)))
+                buf = []
+                buf_len = 0
+                buf_start = line_no
         buf.append(ln)
         buf_len += rendered_len
         line_no += 1

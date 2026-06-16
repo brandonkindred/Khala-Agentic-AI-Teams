@@ -11,6 +11,8 @@ from coding_team.github_source.pr_review_mapping import (
     build_review_body,
     choose_event,
     format_comment_body,
+    format_issue_comment,
+    inline_comment_to_timeline_body,
     map_issues_to_comments,
     parse_valid_lines,
     render_annotated_hunks,
@@ -165,7 +167,7 @@ def test_map_unknown_file_goes_to_body() -> None:
 
 
 # ---------------------------------------------------------------------------
-# format_comment_body / build_review_body
+# format_comment_body / format_issue_comment / inline_comment_to_timeline_body
 # ---------------------------------------------------------------------------
 
 
@@ -182,18 +184,70 @@ def test_format_comment_body_no_suggestion() -> None:
     assert "Suggested fix" not in body
 
 
-def test_build_review_body_renders_leftovers() -> None:
-    leftovers = [_Issue(file_path="a.py", description="D1"), _Issue(file_path="", description="D2")]
-    body = build_review_body("Summary text", "Spec notes", leftovers)
+def test_format_issue_comment_prefixes_file_location() -> None:
+    body = format_issue_comment(_Issue(file_path="a.py", description="D1"))
+    assert body.startswith("`a.py` — ")
+    assert "D1" in body
+
+
+def test_format_issue_comment_without_file_has_no_prefix() -> None:
+    body = format_issue_comment(_Issue(file_path="", description="D2"))
+    assert not body.startswith("`")
+    assert "D2" in body
+
+
+def test_format_issue_comment_with_none_file_has_no_prefix() -> None:
+    # A finding can carry file_path=None; the `... or ""` guard must treat it like
+    # an empty path (no location prefix) rather than rendering `None`.
+    body = format_issue_comment(_Issue(file_path=None, description="D3"))  # type: ignore[arg-type]
+    assert not body.startswith("`")
+    assert "None" not in body
+    assert "D3" in body
+
+
+def test_inline_comment_to_timeline_body_prefixes_path_and_line() -> None:
+    comment = {"path": "a.py", "line": 12, "side": "RIGHT", "body": "**[HIGH] logic** — boom"}
+    body = inline_comment_to_timeline_body(comment)
+    assert body == "`a.py:12` — **[HIGH] logic** — boom"
+
+
+def test_inline_comment_to_timeline_body_drops_nonpositive_line() -> None:
+    # A non-positive line (invalid in GitHub's 1-based diff) must not render as
+    # `path:0`; it falls back to just the path.
+    comment = {"path": "a.py", "line": 0, "body": "**[HIGH] logic** — boom"}
+    assert inline_comment_to_timeline_body(comment) == "`a.py` — **[HIGH] logic** — boom"
+
+
+# ---------------------------------------------------------------------------
+# build_review_body — summary-only; never lists findings
+# ---------------------------------------------------------------------------
+
+
+def test_build_review_body_is_summary_only() -> None:
+    body = build_review_body("Summary text", "Spec notes")
     assert "Summary text" in body
     assert "**Spec compliance:** Spec notes" in body
-    assert "General findings (not tied to a diff line)" in body
-    assert "`a.py`" in body
-    assert "D1" in body and "D2" in body
+    # Findings are never folded into the body — each gets its own comment.
+    assert "General findings" not in body
 
 
 def test_build_review_body_fallback_when_empty() -> None:
-    assert "No blocking issues" in build_review_body("", "", [])
+    assert "No blocking issues" in build_review_body("", "")
+
+
+def test_build_review_body_fallback_reflects_findings_when_summary_empty() -> None:
+    # An empty summary must not claim "no blocking issues" when findings were
+    # posted as comments — the fallback reports the count instead.
+    body = build_review_body("", "", issue_count=2)
+    assert "No blocking issues" not in body
+    assert "2 findings reported" in body
+
+
+def test_build_review_body_fallback_singular_finding() -> None:
+    # Proper singular/plural: one finding uses "finding", not "finding(s)".
+    body = build_review_body("", "", issue_count=1)
+    assert "1 finding reported" in body
+    assert "findings" not in body
 
 
 # ---------------------------------------------------------------------------

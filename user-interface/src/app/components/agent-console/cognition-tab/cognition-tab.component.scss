@@ -1,0 +1,298 @@
+:host {
+  display: block;
+  padding: 16px 24px;
+}
+
+.cognition-tab {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+
+  &__header {
+    h2 {
+      margin: 0 0 4px;
+      font-size: 1.5rem;
+      color: var(--kh-text-primary, #fff);
+    }
+
+    p {
+      margin: 0;
+      color: var(--kh-text-secondary, #d4d4d8);
+      max-width: 720px;
+    }
+  }
+
+  &__picker {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+}
+
+// `.visually-hidden` (screen-reader-only) lives in the global stylesheet
+// (`src/styles.scss`); the spans below reuse it rather than redefining it here.
+
+.cognition-section {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 18px 16px;
+  background: var(--kh-surface-2, #1f1f1f);
+  border-radius: 10px;
+
+  &__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+
+    h3 {
+      margin: 0;
+      font-size: 1.05rem;
+      color: var(--kh-text-primary, #fff);
+    }
+  }
+
+  &__controls {
+    display: flex;
+    gap: 12px;
+  }
+
+  // The filter form fields use `subscriptSizing="dynamic"` in the template so
+  // the (empty) hint/error subscript row collapses without piercing Material's
+  // view encapsulation.
+  &__filter {
+    min-width: 140px;
+  }
+}
+
+.cognition-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+
+  &__more {
+    align-self: center;
+    margin-top: 10px;
+  }
+}
+
+// Shared card chrome -----------------------------------------------------------
+.proposal-card,
+.memory-event,
+.rule-row {
+  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: var(--kh-surface-1, #1a1a1a);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+// Lowercase chips, colour-coded. mat-chip default casing is left as authored.
+mat-chip {
+  &.is-action,
+  &.is-mode {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
+  }
+
+  &.is-status {
+    --mdc-chip-label-text-color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &.is-warn {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
+  }
+
+  // Event-kind colours, one per EventKind (DESIGN.md §5/§9).
+  &.is-kind-observation {
+    --mdc-chip-label-text-color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &.is-kind-action {
+    --mdc-chip-label-text-color: var(--kh-info, #93c5fd);
+  }
+
+  &.is-kind-tool_call {
+    --mdc-chip-label-text-color: var(--kh-accent, #fbbf24);
+  }
+
+  &.is-kind-outcome {
+    --mdc-chip-label-text-color: var(--kh-success, #4ade80);
+  }
+
+  &.is-kind-error {
+    --mdc-chip-label-text-color: var(--kh-error, #f87171);
+  }
+
+  &.is-kind-feedback {
+    --mdc-chip-label-text-color: var(--kh-accent-subtle, #fcd34d);
+  }
+
+  // Decorative status dot — presentational only (not announced by SRs).
+  &.is-dot::before {
+    content: '●';
+    margin-right: 4px;
+  }
+}
+
+// Proposal card ----------------------------------------------------------------
+.proposal-card {
+  &.is-stale {
+    border-color: color-mix(in srgb, var(--kh-accent, #fbbf24) 55%, transparent);
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  &__time {
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__lead {
+    color: var(--kh-text-primary, #fff);
+    font-weight: 500;
+  }
+
+  &__text {
+    color: var(--kh-text-secondary, #d4d4d8);
+  }
+
+  &__evidence {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+
+    &.is-stale {
+      color: var(--kh-accent, #fbbf24);
+    }
+  }
+
+  &__decision {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  // A native <button> styled as an inline link.
+  &__link {
+    padding: 0;
+    border: 0;
+    background: none;
+    font: inherit;
+    text-align: left;
+    color: var(--kh-info, #93c5fd);
+    cursor: pointer;
+    text-decoration: underline;
+  }
+
+  // Focusable wrapper carrying the disabled-Approve tooltip.
+  &__approve-wrap {
+    display: inline-flex;
+  }
+
+  &__actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 4px;
+  }
+}
+
+// Memory event -----------------------------------------------------------------
+.memory-event {
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  &__relevance {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__time {
+    margin-left: auto;
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__content {
+    color: var(--kh-text-secondary, #d4d4d8);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  &__data {
+    margin: 0;
+    padding: 8px 10px;
+    background: var(--kh-surface-2, #1f1f1f);
+    border-radius: 6px;
+    font-family: var(--kh-mono-font, ui-monospace, monospace);
+    font-size: 12px;
+    color: var(--kh-text-secondary, #d4d4d8);
+    white-space: pre-wrap;
+    overflow-x: auto;
+  }
+}
+
+// Rule row ---------------------------------------------------------------------
+.rule-row {
+  transition: background-color 0.4s ease;
+
+  &.is-highlighted {
+    background: color-mix(in srgb, var(--kh-accent, #fbbf24) 12%, transparent);
+  }
+
+  &.is-retired {
+    opacity: 0.65;
+
+    .rule-row__text {
+      text-decoration: line-through;
+    }
+
+    // Retired status reads as outlined rather than filled.
+    .is-status {
+      --mdc-chip-flat-container-color: transparent;
+
+      border: 1px solid currentColor;
+    }
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  &__meta {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+
+  &__spacer {
+    flex: 1 1 auto;
+  }
+
+  &__text {
+    color: var(--kh-text-primary, #fff);
+    font-weight: 500;
+  }
+
+  &__why {
+    font-size: 12px;
+    color: var(--kh-text-muted, #71717a);
+  }
+}
