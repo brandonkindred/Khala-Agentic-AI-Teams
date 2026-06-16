@@ -343,17 +343,23 @@ describe('CodingTeamMonitorComponent', () => {
     expect(el.querySelector('.ct-monitor__agents')).toBeNull();
   });
 
-  it('renders every roster entry even when two agents share an agent_id (no duplicate-key crash)', async () => {
-    // Two stacks with the same name yield duplicate agent_ids; tracking by index keeps @for from
-    // throwing NG0955 on duplicate keys.
+  it('renders distinct cards for two same-stack engineers (backend disambiguates the ids)', async () => {
+    // Same-named stacks get unique agent_ids from the backend (backend / backend_2), so tracking
+    // by agent.agent_id renders both without an NG0955 duplicate-key error.
     const el = await render({
       job_id: 'j1',
       status: 'running',
       agents: [
         agent({ agent_id: 'backend', display_name: 'Senior Engineer — backend', status: 'working' }),
-        agent({ agent_id: 'backend', display_name: 'Senior Engineer — backend', status: 'idle' }),
+        agent({ agent_id: 'backend_2', display_name: 'Senior Engineer — backend', status: 'idle' }),
       ],
     });
     expect(el.querySelectorAll('.ct-agent').length).toBe(2);
+  });
+
+  it('exposes the monitor as a polite live region for assistive technology', async () => {
+    const monitor = (await render({ job_id: 'j1', status: 'running' })).querySelector('.ct-monitor');
+    expect(monitor?.getAttribute('role')).toBe('status');
+    expect(monitor?.getAttribute('aria-live')).toBe('polite');
   });
 });

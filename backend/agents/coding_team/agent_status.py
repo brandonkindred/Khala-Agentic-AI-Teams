@@ -50,20 +50,29 @@ def derive_stack_roster(stacks_raw: List[Dict[str, Any]]) -> List[StackRosterEnt
           may carry ``name`` (str) and ``tools_services`` (list[str]); malformed/non-dict
           entries are tolerated and treated as empty.
     Postconditions:
-        - Returns one tuple per input entry, in order. ``agent_id == display_name``, equal to
-          the entry's ``name`` when truthy else ``f"stack_{i}"``. ``tools_services`` is always
-          a list (a copy; empty when absent or malformed). A non-list ``stacks_raw`` yields an
-          empty roster. Never raises.
+        - Returns one entry per input, in order. ``display_name`` is the entry's ``name`` when
+          truthy else ``f"stack_{i}"``. ``agent_id`` equals ``display_name`` unless that name was
+          already used, in which case a ``_N`` suffix makes it unique (e.g. two ``"backend"``
+          stacks yield ids ``"backend"`` and ``"backend_2"``), so distinct stacks never collide on
+          one ``agent_task_map`` key. ``tools_services`` is always a list (a copy; empty when
+          absent or malformed). A non-list ``stacks_raw`` yields an empty roster. Never raises.
     """
     if not isinstance(stacks_raw, list):
         return []
     roster: List[StackRosterEntry] = []
+    seen_ids: Dict[str, int] = {}
     for i, entry in enumerate(stacks_raw):
         spec = entry if isinstance(entry, dict) else {}
         name = spec.get("name") or f"stack_{i}"
         tools = spec.get("tools_services")
         tools = list(tools) if isinstance(tools, list) else []
-        roster.append(StackRosterEntry(agent_id=name, display_name=name, tools_services=tools))
+        # Make the agent_id unique even when two stacks share a name, so the orchestrator assigns
+        # them distinct agent_task_map entries (and the UI shows distinct cards) instead of one
+        # overwriting the other. The display name keeps the original, possibly-shared, stack name.
+        count = seen_ids.get(name, 0) + 1
+        seen_ids[name] = count
+        agent_id = name if count == 1 else f"{name}_{count}"
+        roster.append(StackRosterEntry(agent_id=agent_id, display_name=name, tools_services=tools))
     return roster
 
 

@@ -77,6 +77,10 @@
   position: relative;
   text-align: center;
 
+  // Steps are equal-width (flex: 1 1 0), so the connector runs node-centre to node-centre:
+  // it starts at this step's centre (left: 50%) and spans one full step width (width: 100%),
+  // landing on the next node's centre regardless of label length or screen size. Vertically it
+  // sits at the node's centre (node is 34px tall; top: 16px centres the 2px line on 17px).
   &.has-connector::after {
     content: '';
     position: absolute;

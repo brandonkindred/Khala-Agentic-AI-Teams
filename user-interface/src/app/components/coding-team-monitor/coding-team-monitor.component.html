@@ -1,5 +1,5 @@
 @if (status) {
-  <div class="ct-monitor">
+  <div class="ct-monitor" role="status" aria-live="polite">
     <!-- Current objective -->
     <div class="ct-monitor__objective">
       <mat-icon>flag</mat-icon>
@@ -70,7 +70,7 @@
       <div class="ct-monitor__agents">
         <span class="ct-monitor__section-label">Team</span>
         <div class="ct-monitor__agent-grid">
-          @for (agent of status.agents; track $index) {
+          @for (agent of status.agents; track agent.agent_id) {
             <div
               class="ct-agent ct-agent--{{ agentStatusClass(agent) }}"
               [class.ct-agent--active]="isAgentActive(agent)"

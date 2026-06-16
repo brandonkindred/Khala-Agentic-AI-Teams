@@ -53,6 +53,27 @@ def test_derive_roster_non_list_returns_empty():
     assert derive_stack_roster("garbage") == []  # type: ignore[arg-type]
 
 
+def test_derive_roster_disambiguates_duplicate_names():
+    # Two stacks sharing a name get unique agent_ids (so they never collide on one agent_task_map
+    # key) while keeping the original display name.
+    roster = derive_stack_roster([{"name": "backend"}, {"name": "backend"}, {"name": "backend"}])
+    assert [e.agent_id for e in roster] == ["backend", "backend_2", "backend_3"]
+    assert [e.display_name for e in roster] == ["backend", "backend", "backend"]
+
+
+def test_duplicate_stack_names_yield_distinct_engineer_cards():
+    # End-to-end: two same-named stacks each mapped to their own task render as two distinct cards.
+    stacks = [{"name": "backend"}, {"name": "backend"}]
+    amap = {"backend": "t1", "backend_2": "t2"}
+    snap = [
+        {"id": "t1", "title": "API", "status": "in_progress"},
+        {"id": "t2", "title": "Worker", "status": "in_progress"},
+    ]
+    entries = _by_id(build_agent_statuses(stacks, amap, snap, None, "coding"))
+    assert entries["backend"].current_task_title == "API"
+    assert entries["backend_2"].current_task_title == "Worker"
+
+
 def test_derive_roster_copies_tools_list():
     src = ["Angular"]
     ((_aid, _name, tools),) = derive_stack_roster([{"name": "f", "tools_services": src}])
