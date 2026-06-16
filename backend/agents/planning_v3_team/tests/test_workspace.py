@@ -92,3 +92,19 @@ def test_slug_rejects_traversal_and_separators():
 def test_repo_name_strips_git_suffix():
     assert _repo_name_from_git_url("git@host:org/My.Repo.git") == "My.Repo"
     assert _repo_name_from_git_url("https://host/org/plain/") == "plain"
+
+
+def test_repo_name_strips_query_and_fragment():
+    assert _repo_name_from_git_url("https://host/org/repo.git?ref=main") == "repo"
+    assert _repo_name_from_git_url("https://host/org/repo#readme") == "repo"
+
+
+def test_git_url_with_query_maps_to_clean_repo_name(cache):
+    out = resolve_workspace("https://github.com/owner/repo.git?ref=main", None, "jq")
+    assert Path(out) == (cache / "planning_v3" / "repo" / "jq").resolve()
+
+
+def test_nul_byte_repo_path_raises_400(cache):
+    with pytest.raises(HTTPException) as exc:
+        resolve_workspace("/tmp/a\x00b", None, "jn")
+    assert exc.value.status_code == 400

@@ -81,8 +81,25 @@ def test_run_with_git_url_repo_path(client):
 def test_run_400_if_repo_path_is_file(client, tmp_path):
     f = tmp_path / "a_file.txt"
     f.write_text("not a dir", encoding="utf-8")
-    r = client.post("/run", json={"repo_path": str(f), "use_product_analysis": False})
+    r = client.post(
+        "/run",
+        json={"repo_path": str(f), "initial_brief": "x", "use_product_analysis": False},
+    )
     assert r.status_code == 400
+
+
+def test_run_with_spec_only_no_brief(client):
+    r = client.post(
+        "/run",
+        json={"spec_content": "# Full spec", "use_product_analysis": False},
+    )
+    assert r.status_code == 200
+    assert "job_id" in r.json()
+
+
+def test_run_422_without_brief_or_spec(client):
+    r = client.post("/run", json={"use_product_analysis": False})
+    assert r.status_code == 422
 
 
 def test_status_404(client):
@@ -93,7 +110,12 @@ def test_status_404(client):
 def test_status_after_run(client, temp_repo):
     run_r = client.post(
         "/run",
-        json={"repo_path": temp_repo, "use_product_analysis": False, "use_planning_v2": False},
+        json={
+            "repo_path": temp_repo,
+            "initial_brief": "x",
+            "use_product_analysis": False,
+            "use_planning_v2": False,
+        },
     )
     job_id = run_r.json()["job_id"]
     r = client.get(f"/status/{job_id}")

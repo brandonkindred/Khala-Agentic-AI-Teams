@@ -33,7 +33,7 @@ def test_planning_v3_run_request():
     assert r.repo_path == "/tmp/repo"
     assert r.client_name == "Acme"
     assert r.use_product_analysis is True
-    r2 = PlanningV3RunRequest(repo_path="/x")
+    r2 = PlanningV3RunRequest(repo_path="/x", initial_brief="b")
     assert r2.spec_content is None
 
 
@@ -41,6 +41,22 @@ def test_planning_v3_run_request_optional_repo_path():
     r = PlanningV3RunRequest(initial_brief="Build a tracker")
     assert r.repo_path is None
     assert r.initial_brief == "Build a tracker"
+
+
+def test_planning_v3_run_request_spec_only_is_valid():
+    r = PlanningV3RunRequest(spec_content="# Full spec")
+    assert r.initial_brief is None
+    assert r.spec_content == "# Full spec"
+
+
+def test_planning_v3_run_request_requires_brief_or_spec():
+    import pytest
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        PlanningV3RunRequest(repo_path="/x")
+    with pytest.raises(ValidationError):
+        PlanningV3RunRequest(initial_brief="   ", spec_content="")
 
 
 def test_planning_v3_run_response():

@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Phase(str, Enum):
@@ -66,6 +66,26 @@ class PlanningV3RunRequest(BaseModel):
         default=False,
         description="Whether to call Market Research for user/customer discovery when needed.",
     )
+
+    @model_validator(mode="after")
+    def _require_brief_or_spec(self) -> "PlanningV3RunRequest":
+        """Require meaningful input to start the workflow.
+
+        Preconditions:
+            - Field-level validation has already run.
+        Postconditions:
+            - Returns ``self`` unchanged when at least one of ``initial_brief``
+              or ``spec_content`` is a non-blank string.
+            - Raises ``ValueError`` (surfaced by FastAPI as HTTP 422) when both
+              are missing/blank, since the workflow would otherwise run on an
+              empty placeholder spec. ``repo_path`` is intentionally not part of
+              this requirement — it is only an output folder.
+        """
+        if not (self.initial_brief and self.initial_brief.strip()) and not (
+            self.spec_content and self.spec_content.strip()
+        ):
+            raise ValueError("Provide at least one of initial_brief or spec_content.")
+        return self
 
 
 class PlanningV3RunResponse(BaseModel):

@@ -13,6 +13,17 @@ Invariants:
     - Directory names derived from user text (client name, git repo name) are
       single, sanitized path segments — they can never contain a path separator
       or ``..`` and therefore cannot escape the base root.
+
+Trust boundary:
+    When the caller supplies an explicit filesystem path it is used verbatim
+    (``expanduser`` only), so the workspace can land anywhere the backend
+    process can write. This is intentional — ``repo_path`` is a caller-chosen
+    output folder, the same trust level as a plain ``mkdir`` on a supplied
+    path, and the endpoint sits behind the authenticated security gateway.
+    Empty and git-URL inputs are always confined under ``AGENT_CACHE`` via the
+    sanitized segments above. Deployments that want to forbid arbitrary
+    absolute paths should constrain the resolved path to an allowed root at
+    the call site rather than weakening the sanitization here.
 """
 
 from __future__ import annotations
@@ -62,17 +73,26 @@ def _repo_name_from_git_url(url: str) -> str:
     Preconditions:
         - ``url`` matches ``_GIT_URL_RE``.
     Postconditions:
-        - Returns the final ``/``- or ``:``-delimited segment with a trailing
-          ``.git`` removed, sanitized via ``_slug`` (fallback ``repo``).
+        - Returns the final ``/``- or ``:``-delimited segment with any query
+          string/fragment and a trailing ``.git`` removed, sanitized via
+          ``_slug`` (fallback ``repo``).
     """
-    tail = re.split(r"[/:]", url.strip().rstrip("/"))[-1]
+    # Drop any ``?query`` / ``#fragment`` before isolating the repo name so a
+    # URL like ``https://host/org/repo.git?ref=main`` yields ``repo``.
+    cleaned = url.strip().split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    tail = re.split(r"[/:]", cleaned)[-1]
     if tail.endswith(".git"):
         tail = tail[:-4]
     return _slug(tail, fallback="repo")
 
 
 def _base_root() -> Path:
-    """Return ``AGENT_CACHE/planning_v3`` (the server-side workspace root)."""
+    """Return the server-side workspace root.
+
+    Postconditions:
+        - Returns ``<AGENT_CACHE or '.agent_cache'>/planning_v3`` as a ``Path``,
+          read from the environment on every call (no caching).
+    """
     return Path(os.environ.get("AGENT_CACHE", ".agent_cache")) / "planning_v3"
 
 
@@ -112,11 +132,13 @@ def resolve_workspace(
     if candidate.exists() and not candidate.is_dir():
         raise HTTPException(
             status_code=400,
-            detail=f"repo_path exists but is not a directory: {repo_path}",
+            detail=f"Workspace path {candidate} exists but is not a directory (input: {repo_path!r})",
         )
     try:
         candidate.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        # ValueError covers non-encodable inputs (e.g. an embedded NUL byte),
+        # which os.mkdir raises rather than OSError; map both to a clean 400.
         raise HTTPException(
             status_code=400,
             detail=f"Could not create workspace for repo_path={repo_path!r}: {exc}",
