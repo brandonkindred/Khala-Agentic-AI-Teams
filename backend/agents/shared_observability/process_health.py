@@ -415,15 +415,20 @@ def install_fault_diagnostics(logger: Optional[logging.Logger] = None) -> None:
         return
     _diagnostics_installed = True
 
+    # Export PYTHONFAULTHANDLER first and independently of enable(): a spawned /
+    # forkserver worker reads it at interpreter startup (with a fresh stderr), so
+    # it must be set even if enable() can't attach to *this* process's stderr
+    # (e.g. stderr was replaced and has no real fileno, as under some test
+    # runners). Don't override an operator who set it to "0".
+    if "PYTHONFAULTHANDLER" not in os.environ:
+        os.environ["PYTHONFAULTHANDLER"] = "1"
     try:
         import faulthandler
 
         if not faulthandler.is_enabled():
             faulthandler.enable()
-        # Inherited by forked workers; read at interpreter start by spawned ones.
-        os.environ.setdefault("PYTHONFAULTHANDLER", "1")
     except Exception:  # noqa: BLE001 — diagnostics must never block startup
-        _get_logger().debug("faulthandler unavailable", exc_info=True)
+        _get_logger().debug("faulthandler.enable() failed for this process", exc_info=True)
 
     # Capture the hooks already in place (e.g. Sentry) so ours chain to them.
     if sys.excepthook is not _sys_excepthook:

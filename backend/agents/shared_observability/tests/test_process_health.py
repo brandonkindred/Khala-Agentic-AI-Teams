@@ -9,6 +9,7 @@ evaluation and watchdog tick/loop, the watchdog lifecycle, and the faulthandler
 from __future__ import annotations
 
 import logging
+import os
 import sys
 import threading
 import types
@@ -314,6 +315,49 @@ def test_install_fault_diagnostics_sets_hooks_and_is_idempotent(restore_diag_sta
     # A second call is a no-op (does not raise; hooks remain installed).
     ph.install_fault_diagnostics()
     assert sys.excepthook is ph._sys_excepthook
+
+
+def test_install_fault_diagnostics_exports_pythonfaulthandler(
+    restore_diag_state, monkeypatch
+) -> None:
+    """The env var is exported so spawned/forkserver workers arm faulthandler at
+    interpreter startup."""
+    monkeypatch.delenv("PYTHONFAULTHANDLER", raising=False)
+    ph._diagnostics_installed = False
+    ph.install_fault_diagnostics(logging.getLogger("test.ph.env"))
+    assert os.environ.get("PYTHONFAULTHANDLER") == "1"
+
+
+def test_install_fault_diagnostics_preserves_operator_pythonfaulthandler(
+    restore_diag_state, monkeypatch
+) -> None:
+    """An operator who set PYTHONFAULTHANDLER=0 (disabled) is not overridden."""
+    monkeypatch.setenv("PYTHONFAULTHANDLER", "0")
+    ph._diagnostics_installed = False
+    ph.install_fault_diagnostics(logging.getLogger("test.ph.env2"))
+    assert os.environ.get("PYTHONFAULTHANDLER") == "0"
+
+
+def test_install_fault_diagnostics_exports_env_even_if_enable_fails(
+    restore_diag_state, monkeypatch
+) -> None:
+    """If faulthandler.enable() raises (e.g. a replaced stderr with no fileno),
+    the env var is still exported and the excepthooks are still installed — the
+    failure is isolated to this process's faulthandler, not the whole arming."""
+    import faulthandler
+
+    monkeypatch.delenv("PYTHONFAULTHANDLER", raising=False)
+    monkeypatch.setattr(faulthandler, "is_enabled", lambda: False)
+
+    def _boom() -> None:
+        raise RuntimeError("stderr has no fileno")
+
+    monkeypatch.setattr(faulthandler, "enable", _boom)
+    ph._diagnostics_installed = False
+    ph.install_fault_diagnostics(logging.getLogger("test.ph.env3"))
+
+    assert os.environ.get("PYTHONFAULTHANDLER") == "1"  # set despite enable() failing
+    assert sys.excepthook is ph._sys_excepthook  # hooks still installed
 
 
 def test_sys_excepthook_logs_uncaught_with_traceback(restore_diag_state, caplog) -> None:
