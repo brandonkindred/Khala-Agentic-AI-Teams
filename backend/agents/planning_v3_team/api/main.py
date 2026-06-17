@@ -7,6 +7,7 @@ Mount at /api/planning-v3: routes are /run, /status/{job_id}, /result/{job_id}, 
 from __future__ import annotations
 
 import logging
+import shutil
 import sys
 import threading
 import uuid
@@ -38,6 +39,10 @@ from planning_v3_team.shared.job_store import (  # noqa: E402
     mark_job_completed,
     mark_job_failed,
     update_job,
+)
+from planning_v3_team.shared.workspace import (  # noqa: E402
+    WorkspaceResolutionError,
+    resolve_workspace,
 )
 from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 
@@ -136,21 +141,53 @@ def _run_workflow_background(
     description="Start client-facing discovery and requirements workflow. Returns job_id; poll GET /status/{job_id}.",
 )
 def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
-    repo = Path(request.repo_path)
-    if not repo.is_dir():
-        raise HTTPException(
-            status_code=400, detail=f"repo_path is not a directory: {request.repo_path}"
-        )
+    """Start a Planning V3 run: resolve the output workspace and dispatch the workflow.
+
+    Preconditions:
+        - ``request`` has passed Pydantic validation, so at least one of
+          ``initial_brief`` / ``spec_content`` is non-blank.
+    Postconditions:
+        - A job is recorded and its workspace exists under
+          ``AGENT_CACHE/planning_v3``; returns the new ``job_id`` with status
+          ``running``. Dispatch is via Temporal when enabled, else a background
+          thread.
+    Raises:
+        - ``HTTPException(400)`` when the workspace cannot be resolved
+          (``WorkspaceResolutionError``).
+        - ``HTTPException(500)`` when job creation or Temporal dispatch fails (the
+          job is marked failed and the workspace cleaned up first, respectively).
+    """
     job_id = str(uuid.uuid4())
-    create_job(job_id, request.repo_path)
+    # repo_path is an output folder, not a source to read: resolve any input
+    # (empty, git URL, or client-side path) to a writable server-side directory.
+    try:
+        resolved_path = resolve_workspace(request.repo_path, request.client_name, job_id)
+    except WorkspaceResolutionError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        create_job(job_id, resolved_path)
+    except Exception as exc:
+        # Job-store failures (DB connectivity, duplicate id) should surface as a
+        # logged 500 with context rather than an opaque unhandled error. Remove
+        # the just-created workspace so a failed insert leaves no orphan dir.
+        shutil.rmtree(resolved_path, ignore_errors=True)
+        logger.exception("Failed to create Planning V3 job %s", job_id)
+        raise HTTPException(status_code=500, detail=f"Failed to create job: {exc}") from exc
+
     try:
         from planning_v3_team.temporal.client import is_temporal_enabled
         from planning_v3_team.temporal.start_workflow import start_planning_v3_workflow
 
-        if is_temporal_enabled():
+        temporal_enabled = is_temporal_enabled()
+    except ImportError:
+        # Temporal extras not installed: fall through to thread mode.
+        temporal_enabled = False
+
+    if temporal_enabled:
+        try:
             start_planning_v3_workflow(
                 job_id,
-                request.repo_path,
+                resolved_path,
                 request.client_name,
                 request.initial_brief,
                 request.spec_content,
@@ -158,18 +195,27 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
                 request.use_planning_v2,
                 request.use_market_research,
             )
-            return PlanningV3RunResponse(
-                job_id=job_id,
-                status="running",
-                message="Planning V3 started (Temporal). Poll GET /status/{job_id} for progress.",
-            )
-    except ImportError:
-        pass
+        except Exception as exc:
+            # A dispatch failure (e.g. Temporal unreachable) must not leave the
+            # job stuck "running": mark it failed and surface a logged 500.
+            logger.exception("Failed to start Planning V3 Temporal workflow %s", job_id)
+            mark_job_failed(job_id, error=str(exc))
+            raise HTTPException(
+                status_code=500, detail=f"Failed to start workflow: {exc}"
+            ) from exc
+        return PlanningV3RunResponse(
+            job_id=job_id,
+            status="running",
+            message="Planning V3 started (Temporal). Poll GET /status/{job_id} for progress.",
+        )
+
+    # Thread mode (no Temporal): the background worker marks the job failed on
+    # its own errors, so thread.start() is the only step left to run.
     thread = threading.Thread(
         target=_run_workflow_background,
         args=(
             job_id,
-            request.repo_path,
+            resolved_path,
             request.client_name,
             request.initial_brief,
             request.spec_content,

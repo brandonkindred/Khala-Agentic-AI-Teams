@@ -576,10 +576,10 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         system_prompt_context=(
             "A planning team that runs client-facing discovery and requirements gathering, "
             "producing a PRD and handoff for development. The user needs to describe their "
-            "project and provide a repository path."
+            "project; an output folder is optional (a server-side workspace is created "
+            "automatically when none is given)."
         ),
         required_fields=[
-            {"key": "repo_path", "description": "Path to the project repository"},
             {
                 "key": "initial_brief",
                 "description": "Initial project brief or description of what needs to be built",
@@ -587,10 +587,14 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         ],
         optional_fields=[
             {"key": "client_name", "description": "Name of the client or project"},
+            {
+                "key": "repo_path",
+                "description": "Optional server-side output folder for the generated plan",
+            },
         ],
         welcome_message=(
             "Welcome! I'm the Planning assistant. I'll help you scope and plan your project.\n\n"
-            "Tell me about your project — what are you building and where is the repository?"
+            "Tell me about your project — what are you building?"
         ),
         default_suggested_questions=[
             "I need to plan a new feature for an existing project.",
@@ -600,8 +604,8 @@ TEAM_ASSISTANT_CONFIGS: dict[str, TeamAssistantConfig] = {
         launch_spec=LaunchSpec(
             path="/api/planning-v3/run",
             body_builder=declarative_builder(
-                required=["repo_path", "initial_brief"],
-                optional=["client_name"],
+                required=["initial_brief"],
+                optional=["client_name", "repo_path"],
             ),
         ),
     ),

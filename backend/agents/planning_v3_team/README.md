@@ -45,12 +45,18 @@ Planning V3 calls other teams via HTTP:
 
 | Method | Path | Description |
 |--------|------|-------------|
-| POST | `/run` | Start Planning V3; body: `PlanningV3RunRequest`; returns `job_id`. |
+| POST | `/run` | Start Planning V3; body `PlanningV3RunRequest`, returns `job_id`. See the note below. |
 | GET | `/status/{job_id}` | Job status, phase, progress, pending questions. |
 | GET | `/result/{job_id}` | Handoff package and artifact paths when completed. |
 | GET | `/jobs` | List running/pending jobs. |
 | POST | `/{job_id}/answers` | Submit answers to open questions (when waiting_for_answers). |
 | GET | `/health` | Health check. |
+
+**`/run` body notes:** `repo_path` is an **optional** label for the plan's output
+folder (never read as source). Every run is confined to a fresh directory under
+`AGENT_CACHE/planning_v3/` — an empty value, a git URL, or a filesystem path is
+reduced to a single sanitized segment, so a supplied path can never write outside
+the cache root. At least one of `initial_brief`/`spec_content` is required.
 
 ## How downstream teams use the handoff
 

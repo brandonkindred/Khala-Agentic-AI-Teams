@@ -4,7 +4,7 @@ import type { PendingQuestion } from './software-engineering.model';
 
 /** Request for POST /run */
 export interface PlanningV3RunRequest {
-  repo_path: string;
+  repo_path?: string;
   client_name?: string;
   initial_brief?: string;
   spec_content?: string;
