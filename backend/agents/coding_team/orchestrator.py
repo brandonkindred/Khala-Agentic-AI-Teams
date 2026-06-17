@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from coding_team import hitl
 from coding_team.activity import ActivityBridge
+from coding_team.agent_status import derive_stack_roster
 from coding_team.job_store import (
     DEFAULT_CACHE_DIR,
     get_job,
@@ -732,16 +733,16 @@ def run_coding_team_orchestrator(
         _update(stack_specs=stacks_raw)
     _persist_graph()
 
-    # Build Senior SWE agents (one per stack)
-    stack_specs: List[StackSpec] = []
-    for i, s in enumerate(stacks_raw):
-        name = s.get("name") or f"stack_{i}"
-        tools = s.get("tools_services") or []
-        stack_specs.append(StackSpec(name=name, tools_services=tools))
-    agent_ids = [s.name or f"agent_{i}" for i, s in enumerate(stack_specs)]
+    # Build Senior SWE agents (one per stack). derive_stack_roster is the single source of
+    # truth for agent-id naming, shared with the status endpoint's roster builder so the two
+    # cannot drift — a mismatch would make per-agent status lookups silently miss.
+    roster = derive_stack_roster(stacks_raw)
+    stack_specs: List[StackSpec] = [
+        StackSpec(name=name, tools_services=tools) for (_aid, name, tools) in roster
+    ]
+    agent_ids = [aid for (aid, _name, _tools) in roster]
     senior_swes: List[SeniorSWEAgent] = []
-    for i, spec in enumerate(stack_specs):
-        aid = agent_ids[i]
+    for aid, spec in zip(agent_ids, stack_specs):
         llm_swe = llm_getter("coding_team")
         senior_swes.append(SeniorSWEAgent(agent_id=aid, stack_spec=spec, llm=llm_swe))
 

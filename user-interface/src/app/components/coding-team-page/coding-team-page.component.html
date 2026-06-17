@@ -111,6 +111,11 @@
                 <span>{{ jobStatus.status_text }}</span>
               </div>
             }
+
+            <!-- Live monitor: objective, overall progress + phase stepper, sub-agent activity,
+                 and the per-agent roster (who is working and each agent's status). -->
+            <app-coding-team-monitor [status]="jobStatus" />
+
             @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
               <div class="github-job-tasks">
                 <span class="github-job-panel__label">Tasks</span>

@@ -1207,6 +1207,60 @@ def test_status_progress_coercion_clamps_garbage(monkeypatch):
     assert client.get("/status/j1").json()["progress"] == 100
 
 
+# --------------------------------------------------------------------------- /status agents roster
+
+
+def test_status_surfaces_agent_roster(monkeypatch):
+    """/status derives the per-agent roster (Tech Lead + one Senior SWE per stack) from the
+    persisted stack_specs / agent_task_map / task graph / current_activity so the UI can show
+    which agent is working and each agent's status."""
+    monkeypatch.setattr(
+        api,
+        "get_job",
+        lambda jid: _job(
+            status="running",
+            phase="coding",
+            waiting_for_answers=False,
+            pending_questions=[],
+            stack_specs=[
+                {"name": "frontend", "tools_services": ["Angular"]},
+                {"name": "backend", "tools_services": ["Java"]},
+            ],
+            agent_task_map={"frontend": "t1", "backend": "t2"},
+            task_graph_snapshot=[
+                {"id": "t1", "title": "Build UI", "status": "in_progress"},
+                {"id": "t2", "title": "API", "status": "in_review"},
+            ],
+            current_activity={
+                "agent": "tech_lead_review",
+                "step": "parsing",
+                "fraction": 0.5,
+                "task_id": "t2",
+            },
+        ),
+    )
+    body = client.get("/status/j1").json()
+    agents = {a["agent_id"]: a for a in body["agents"]}
+    assert body["agents"][0]["role"] == "tech_lead"  # Tech Lead is always first
+    assert agents["tech_lead"]["status"] == "reviewing"
+    # The tech_lead_review overlay lands on the Tech Lead, not the engineer whose task it is.
+    assert agents["tech_lead"]["current_step"] == "parsing"
+    assert agents["tech_lead"]["activity_fraction"] == 0.5
+    assert agents["frontend"]["status"] == "working"
+    assert agents["frontend"]["current_task_title"] == "Build UI"
+    assert agents["backend"]["status"] == "in_review"
+    assert agents["backend"]["current_step"] is None
+
+
+def test_status_agents_defaults_to_tech_lead_only_without_stacks(monkeypatch):
+    """A record with no stack_specs (old/SE-pipeline) still yields a one-entry roster — the
+    Tech Lead — rather than an empty list, so the panel always has something to show."""
+    monkeypatch.setattr(api, "get_job", lambda jid: _job(status="running", phase="task_graph"))
+    agents = client.get("/status/j1").json()["agents"]
+    assert [a["agent_id"] for a in agents] == ["tech_lead"]
+    assert agents[0]["status"] == "planning"
+
+
 def test_resume_releases_claim_when_activity_clear_fails(monkeypatch):
     """A job-service outage during resume's current_activity wipe must not leak the
     run-thread claim: the failed /resume surfaces the error, and a later /resume
