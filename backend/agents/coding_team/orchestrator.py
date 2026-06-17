@@ -334,15 +334,19 @@ def _read_repo_context(repo_path: Path) -> str:
 
 
 def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
-    """Render resolved decisions as a 'question → answer' block for an engineer's revision feedback."""
+    """Render resolved decisions as a 'question → answer' block for an engineer's revision feedback.
+
+    Postconditions:
+        - Returns "" when ``resolved`` carries no renderable decision (so the function is safe for
+          any caller and never emits a preamble with no decisions under it); otherwise returns the
+          preamble followed by one ``- question → answer`` bullet per decision.
+    """
     body = "\n".join(f"- {ln}" for ln in hitl.resolved_decision_lines(resolved))
+    if not body:
+        return ""
     return (
-        (
-            "The user answered the open question(s) you raised. Implement these decisions exactly; "
-            "do not ask again:\n" + body
-        )
-        if body
-        else "The user answered the open question(s) you raised."
+        "The user answered the open question(s) you raised. Implement these decisions exactly; "
+        "do not ask again:\n" + body
     )
 
 
@@ -1161,49 +1165,69 @@ class CodingTeamSwarm:
         (the structured ``decisions`` recorded on each ``user_decision`` revision-feedback entry).
         Both review gates pass the result to their reviewer so a settled question is never re-raised.
 
+        De-duplication is by normalized question text, last-answer-wins: a later answer to the same
+        question (a task-level escalation) supersedes an earlier one (a plan-level answer), so the
+        reviewer is never shown two conflicting answers to the same question. Records with no question
+        text (answer-only) are keyed by their full rendered line instead, so they de-duplicate against
+        identical lines but are never dropped.
+
         Preconditions:
             - Entries in ``self.resolved_questions`` and ``task.revision_feedback`` are dicts;
-              non-dict entries and decision records without renderable content are skipped.
+              non-dict entries and records with no renderable content are skipped.
         Postconditions:
-            - Returns human-readable lines (``"{question} → {answer}"`` or just the answer when no
-              question text), de-duplicated by ``hitl.normalize_key``. Empty when no decision exists.
+            - Returns human-readable lines (``"{question} → {answer}"``, or the bare answer for an
+              answer-only record) deduplicated as described, in first-seen order (a superseding
+              answer updates the existing line in place). Empty when no decision exists.
             - A ``user_decision`` entry predating the structured ``decisions`` field (one resumed
-              across an upgrade) falls back to its rendered ``reason`` text, so its decision is still
-              surfaced to the reviewer rather than silently dropped.
+              across an upgrade) contributes its rendered ``reason`` bullets, so its decisions are
+              still surfaced to the reviewer rather than dropped.
         """
-        lines: List[str] = []
-        seen: set = set()
+        order: List[str] = []
+        line_by_key: Dict[str, str] = {}
 
-        def _add_line(text: str) -> None:
-            text = (text or "").strip()
-            if not text:
+        def _put(key: str, line: str) -> None:
+            # Last-wins: a later answer to the same key replaces the earlier line but keeps its
+            # first-seen position, so a task-level escalation overrides the plan-level answer.
+            if key not in line_by_key:
+                order.append(key)
+            line_by_key[key] = line
+
+        def _add_record(rec: Any) -> None:
+            if not isinstance(rec, dict):
                 return
-            key = hitl.normalize_key(text)
-            if key in seen:
+            line = hitl.render_decision_line(rec)
+            if not line:
                 return
-            seen.add(key)
-            lines.append(text)
+            question, _answer = hitl.decision_qa(rec)
+            _put(hitl.normalize_key(question) if question else hitl.normalize_key(line), line)
 
-        def _add(records: Any) -> None:
-            for line in hitl.resolved_decision_lines(records):
-                _add_line(line)
+        def _add_legacy_reason(reason: str) -> None:
+            # Pre-"decisions" entry: ``reason`` is a multi-line block (preamble + "- q → a" bullets).
+            # Extract just the bullets so legacy decisions render as clean individual lines and
+            # de-duplicate like structured ones; a bullet-less reason is surfaced whole.
+            bullets = [
+                ln.strip()[2:].strip()
+                for ln in str(reason).splitlines()
+                if ln.strip().startswith("- ")
+            ]
+            for line in bullets or [str(reason).strip()]:
+                if line:
+                    _put(hitl.normalize_key(line), line)
 
-        _add(self.resolved_questions)
+        for rec in self.resolved_questions or []:
+            _add_record(rec)
         for entry in task.revision_feedback or []:
             if not (isinstance(entry, dict) and entry.get("source") == "user_decision"):
                 continue
-            # Gate on field presence, not truthiness: a new entry always carries "decisions"
-            # (an empty list contributes nothing), and only a legacy entry that predates the field
-            # falls back to its rendered reason. Using truthiness would let a new entry with an
-            # empty "decisions" list spill the generic reason sentence into the decisions list.
+            # Gate on field presence, not truthiness: a new entry always carries "decisions" (an
+            # empty list contributes nothing); only a legacy entry that predates the field falls
+            # back to its rendered reason.
             if "decisions" in entry:
-                _add(entry.get("decisions"))
+                for rec in entry.get("decisions") or []:
+                    _add_record(rec)
             elif entry.get("reason"):
-                # Legacy entry (created before the structured ``decisions`` field) resumed across an
-                # upgrade: surface its rendered reason so the reviewer still learns the question was
-                # settled instead of re-raising it.
-                _add_line(str(entry["reason"]))
-        return lines
+                _add_legacy_reason(str(entry["reason"]))
+        return [line_by_key[key] for key in order]
 
     def _review_and_merge(self, update_fn: Callable) -> None:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""

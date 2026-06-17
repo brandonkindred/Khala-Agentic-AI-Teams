@@ -1525,7 +1525,7 @@ def test_review_prompt_omits_decisions_block_when_none(monkeypatch):
 
 def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
     """_user_decisions_for merges plan-level resolved questions with task-level escalations
-    and de-duplicates by normalized question text."""
+    and de-duplicates by normalized question text (case-insensitively)."""
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -1545,7 +1545,8 @@ def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
                 "reason": "ignored-by-render",
                 "decisions": [{"question_text": "Use TLS?", "answer": "Yes, TLS 1.3"}],
             },
-            # A second escalation repeating the plan-level question must not double-render.
+            # A second escalation repeating the plan-level question (different case, same answer)
+            # must collapse onto one line rather than double-render.
             {
                 "source": "user_decision",
                 "decisions": [{"question_text": "which db?", "answer": "Postgres"}],
@@ -1556,14 +1557,15 @@ def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
 
     lines = swarm._user_decisions_for(task)
 
-    assert "Which DB? → Postgres" in lines
     assert "Use TLS? → Yes, TLS 1.3" in lines
-    assert len(lines) == 2, f"duplicate question must collapse, got {lines}"
+    db_lines = [ln for ln in lines if ln.lower() == "which db? → postgres"]
+    assert len(db_lines) == 1, f"repeated DB question must collapse, got {lines}"
+    assert len(lines) == 2, f"got {lines}"
 
 
-def test_user_decisions_for_keeps_distinct_answers_to_same_question(tmp_path):
-    """Dedup is by the full 'question → answer' line, not by question alone: two DIFFERENT answers
-    to the same question are both surfaced (only exact, case/whitespace-equal repeats collapse)."""
+def test_user_decisions_for_latest_answer_wins_for_same_question(tmp_path):
+    """Dedup is by question text with last-answer-wins: a task-level escalation overrides the
+    plan-level answer for the same question, so the reviewer is never shown two conflicting answers."""
     graph = TaskGraphService(job_id="j1")
     swarm = CodingTeamSwarm(
         tech_lead=StubTechLead(approved=True),
@@ -1587,9 +1589,8 @@ def test_user_decisions_for_keeps_distinct_answers_to_same_question(tmp_path):
 
     lines = swarm._user_decisions_for(task)
 
-    assert "Which DB? → Postgres" in lines
-    assert "Which DB? → MySQL" in lines
-    assert len(lines) == 2, f"distinct answers must both render, got {lines}"
+    # The later (task-level) answer supersedes the earlier (plan-level) one; only one line survives.
+    assert lines == ["Which DB? → MySQL"], f"latest answer must win, got {lines}"
 
 
 def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
@@ -1663,7 +1664,7 @@ def test_user_decisions_for_handles_answer_only_lines(tmp_path):
             {
                 "source": "user_decision",
                 "decisions": [
-                    {"answer": "use tls"},  # same answer (case variation) → deduped
+                    {"answer": "Use TLS"},  # identical answer → deduped against the plan-level one
                     {"answer": "Use SSL"},  # distinct answer → kept
                 ],
             }
@@ -1672,9 +1673,36 @@ def test_user_decisions_for_handles_answer_only_lines(tmp_path):
 
     lines = swarm._user_decisions_for(task)
 
-    assert "Use TLS" in lines
+    assert "Use TLS" in lines  # rendered as the bare answer (no "→")
     assert "Use SSL" in lines
     assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
+
+
+def test_user_decisions_for_legacy_multiline_reason_extracts_bullets(tmp_path):
+    """A legacy entry whose 'reason' is the full multi-line block contributes clean per-decision
+    lines (the preamble is dropped, the '- q → a' bullets are extracted), not one messy line."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    reason = (
+        "The user answered the open question(s) you raised. Implement these decisions exactly; "
+        "do not ask again:\n- Which DB? → Postgres\n- Use TLS? → Yes"
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[{"source": "user_decision", "reason": reason}],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert lines == ["Which DB? → Postgres", "Use TLS? → Yes"]
 
 
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):

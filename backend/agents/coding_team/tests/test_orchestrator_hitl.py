@@ -70,10 +70,17 @@ def _answer_all(job: Dict[str, Any], option: str = "yes"):
 
 
 def test_format_decisions():
-    out = _format_decisions([{"question_text": "Strictness?", "answer": "strict"}])
-    assert "Strictness? → strict" in out
-    # empty still returns a non-empty fallback line
-    assert _format_decisions([])
+    out = _format_decisions(
+        [
+            {"question_text": "Strictness?", "answer": "strict"},
+            {"question_text": "Which DB?", "answer": "Postgres"},
+        ]
+    )
+    assert out.startswith("The user answered")  # preamble present for non-empty input
+    assert "- Strictness? → strict" in out  # one bullet per decision
+    assert "- Which DB? → Postgres" in out
+    # empty input → empty string (safe for any caller; no preamble with nothing under it)
+    assert _format_decisions([]) == ""
 
 
 def test_render_decision_line_branches():
