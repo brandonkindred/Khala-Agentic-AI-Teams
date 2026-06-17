@@ -3,7 +3,7 @@
 | Field | Value |
 |---|---|
 | **Feature** | Agent Cognition Core |
-| **Status** | Draft — design only (no code in this effort) |
+| **Status** | Implemented — shipped as `backend/agents/agent_cognition/` |
 | **Affected area** | `backend/agents/` (new shared package), Unified API, Agentic-team-generated agents |
 
 ---
