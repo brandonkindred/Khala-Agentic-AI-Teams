@@ -117,7 +117,8 @@ def start_planning_v3_workflow(
           Temporal worker is running (or starting) in this process.
     Postconditions:
         - A ``PlanningV3Workflow`` is started on ``TASK_QUEUE`` with id
-          ``WORKFLOW_ID_PREFIX + job_id``; returns once Temporal accepts it.
+          ``WORKFLOW_ID_PREFIX + job_id``; returns ``None`` once Temporal
+          accepts the workflow.
     Raises:
         - ``ValueError`` if ``job_id`` or ``repo_path`` is blank (precondition
           violated by the caller).

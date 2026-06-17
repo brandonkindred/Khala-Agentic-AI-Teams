@@ -261,11 +261,10 @@ def test_start_worker_thread_delegates_to_start_team_worker() -> None:
         patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_temporal_worker_thread() is True
-
-    mock_start.assert_called_once()
-    args, kwargs = mock_start.call_args
-    assert args[0] == "agent_provisioning"
-    assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
+        mock_start.assert_called_once()
+        args, kwargs = mock_start.call_args
+        assert args[0] == "agent_provisioning"
+        assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
 
 
 # ---------------------------------------------------------------------------
