@@ -3,24 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import types
 
 import pytest
 
 from agent_cognition.graph import retrieval
-
-
-class _FakeGraphiti:
-    def __init__(self, facts=None, error: Exception | None = None):
-        self._facts = facts or []
-        self._error = error
-        self.calls: list[dict] = []
-
-    async def search(self, *, query, group_ids, num_results):
-        self.calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
-        if self._error is not None:
-            raise self._error
-        return [types.SimpleNamespace(fact=f) for f in self._facts]
+from agent_cognition.testing import FakeGraphiti as _FakeGraphiti
 
 
 def _enable(monkeypatch, graphiti):

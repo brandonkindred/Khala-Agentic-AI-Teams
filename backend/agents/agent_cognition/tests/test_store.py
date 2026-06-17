@@ -14,8 +14,21 @@ from uuid import uuid4
 import pytest
 
 from agent_cognition.memory import store
-from agent_cognition.models import EventKind, MemoryEvent, PeriodSummary, Scale
+from agent_cognition.models import (
+    EventKind,
+    MemoryEvent,
+    PeriodSummary,
+    ProposalAction,
+    ProposalStatus,
+    Rule,
+    RuleMode,
+    RuleProposal,
+    RuleSource,
+    RuleStatus,
+    Scale,
+)
 from agent_cognition.postgres import SCHEMA
+from agent_cognition.rules import store as rules_store
 from shared_postgres import is_postgres_enabled, register_team_schemas
 from shared_postgres.testing import truncate_team_tables
 
@@ -809,3 +822,51 @@ def test_conn_propagates_body_errors_unwrapped() -> None:
         with store._conn() as conn:
             assert conn is not None
             raise ValueError("boom")
+
+
+# ---------------------------------------------------------------------------
+# Version-staleness tolerates the non-load-bearing graph-provenance evidence
+# entry that graph-grounded reflection appends (no summary_id/version keys).
+# ---------------------------------------------------------------------------
+_GRAPH_EVIDENCE = {"source": "graph", "kind": "grounding", "facts": 3}
+
+
+def test_flag_stale_proposals_ignores_graph_provenance_entry() -> None:
+    proposal = RuleProposal(
+        id=str(uuid4()),
+        agent_id="a",
+        action=ProposalAction.ADD,
+        proposed_rule={"text": "derived", "mode": "advisory", "source": "derived", "priority": 0},
+        evidence=[{"summary_id": "s1", "version": 1}, _GRAPH_EVIDENCE],
+        status=ProposalStatus.PENDING,
+        created_at=_CREATED,
+    )
+    rules_store.create_proposal("a", proposal)
+
+    # Flags on the summary ref; the graph entry (no summary_id/version) is skipped,
+    # not cast-errored.
+    assert store.flag_stale_proposals("a", "s1", 2) == 1
+    got = rules_store.get_proposal("a", proposal.id)
+    assert got is not None and got.stale_evidence is True
+
+
+def test_flag_rules_needing_review_ignores_graph_provenance_entry() -> None:
+    # An approved graph-grounded proposal yields an active rule that inherited the
+    # graph-provenance entry; flag_rules_needing_review must still surface it on a
+    # version bump and ignore the extra shape.
+    rule = Rule(
+        id=str(uuid4()),
+        agent_id="a",
+        text="derived",
+        mode=RuleMode.ADVISORY,
+        status=RuleStatus.ACTIVE,
+        source=RuleSource.DERIVED,
+        evidence=[{"summary_id": "s1", "version": 1}, _GRAPH_EVIDENCE],
+        created_at=_CREATED,
+        updated_at=_CREATED,
+    )
+    rules_store.create_rule("a", rule)
+
+    assert store.flag_rules_needing_review("a", "s1", 2) == 1
+    got = rules_store.get_rule("a", rule.id)
+    assert got is not None and got.needs_review is True
