@@ -197,7 +197,9 @@ def test_learning_loop_active_rule_reaches_next_invoke(canned: CannedLLM) -> Non
         seen["ctx"] = ctx
         return {"ok": True}, CognitionWriteback(events=[])
 
-    outcome = asyncio.run(invoke_in_process_call(agent_id, runner))
+    outcome = asyncio.run(
+        invoke_gate.invoke_in_process(agent_id, {"q": "what is the capital of France?"}, runner)
+    )
     assert outcome.status_code == 200
 
     ctx = seen["ctx"]
@@ -206,9 +208,5 @@ def test_learning_loop_active_rule_reaches_next_invoke(canned: CannedLLM) -> Non
     assert rule.id in active_ids, "the approved rule must surface in the next invoke's context"
     assert any(r.text == _DERIVED_RULE_TEXT for r in ctx.rules)
 
-
-async def invoke_in_process_call(agent_id: str, runner: Any) -> Any:
-    """Thin async wrapper so the test body stays synchronous."""
-    return await invoke_gate.invoke_in_process(
-        agent_id, {"q": "what is the capital of France?"}, runner
-    )
+    # The loop ran entirely against the stub — no stage reached a live model.
+    assert canned.json_calls, "rollup + reflection must have driven the canned LLM"
