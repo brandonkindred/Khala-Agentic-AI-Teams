@@ -26,8 +26,12 @@ def clone_lock_path(repo_path: str | Path) -> Path:
     survives the post-success ``rmtree`` of the checkout directory.
 
     Preconditions:
-        - ``repo_path`` is the per-issue checkout path (its ``name`` is the
-          directory that gets cloned, e.g. ``issue-7``).
+        - ``repo_path`` is the per-issue checkout path with a non-empty final
+          component (its ``name`` is the directory that gets cloned, e.g.
+          ``issue-7``) — not a filesystem root. Callers only ever pass the
+          per-issue paths ``_resolve_repo_path`` produces; a root path would
+          yield a degenerate ``/.clone.lock`` (such paths are rejected upstream
+          by the deletion safety guard before this is reached).
     Postconditions:
         - Returns ``<parent>/.<name>.clone.lock``. Pure: no filesystem access.
     """

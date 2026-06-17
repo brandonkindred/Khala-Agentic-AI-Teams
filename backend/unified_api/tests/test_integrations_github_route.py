@@ -439,6 +439,14 @@ def test_resolve_repo_path_uses_se_workspace_dir_with_issue(monkeypatch):
     assert path == "/work/acme_widget/issue-9"
 
 
+def test_resolve_repo_path_uses_workspace_root_with_issue(monkeypatch):
+    # SE_WORKSPACE_DIR unset → falls back to the WORKSPACE_ROOT branch.
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("WORKSPACE_ROOT", "/ws")
+    path = _resolve_repo_path(dict(_GH_CFG), issue_number=5)
+    assert path == "/ws/acme_widget/issue-5"
+
+
 def test_resolve_repo_path_without_issue_is_repo_level(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
@@ -575,6 +583,24 @@ def test_resolve_repo_path_rejects_repo_separator(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     cfg = {"enabled": True, "owner": "acme", "repo": "a/b", "repo_path": ""}
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(cfg, issue_number=1)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_rejects_backslash_in_repo(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "a\\b", "repo_path": ""}
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(cfg, issue_number=1)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_rejects_null_byte_in_repo(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "a\x00b", "repo_path": ""}
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
     assert exc.value.status_code == 400

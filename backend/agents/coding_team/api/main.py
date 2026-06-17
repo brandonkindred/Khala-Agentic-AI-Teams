@@ -1953,6 +1953,15 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
           failure (permissions, race with a concurrent reader) must not turn a
           successful job into a failure; it is caught and logged. The success
           line is logged only after ``rmtree`` returns.
+
+    Note:
+        ``rmtree`` is not atomic. A failure partway through can leave a
+        partially-deleted directory at ``repo_path`` (possibly missing
+        ``.git``); the kept lock file prevents a concurrent clone, but a later
+        retry whose ``_ensure_repo_clone`` finds a non-empty, non-git directory
+        will fail its ``git clone`` and the leftover must be cleared manually.
+        This is rare (``rmtree`` usually fails atomically on a permission error)
+        and the published work is already safe on the remote PR.
     """
     if not _is_ephemeral_checkout_path(repo_path):
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
@@ -2643,7 +2652,11 @@ def _run_with_github_hooks(
         # Cleanup runs BEFORE the terminal status update so the job stays in
         # list_jobs(active_only=True) while the checkout is being removed: a
         # quick same-issue retry is then rejected by the duplicate guard in
-        # /run-from-github instead of cloning into a directory mid-rmtree.
+        # /run-from-github instead of cloning into a directory mid-rmtree. That
+        # guard (_running_job_for_issue) scans the active-jobs list by
+        # github_context, NOT the active-issue git-config marker cleared just
+        # above — the marker only attributes leftover work to an issue after a
+        # job dies — so clearing the marker early does not open the race.
         if not failed and request.cleanup_checkout_on_success:
             _cleanup_issue_checkout(request.repo_path)
 
