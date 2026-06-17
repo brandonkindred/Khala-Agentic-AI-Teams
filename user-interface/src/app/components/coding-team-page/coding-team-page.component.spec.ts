@@ -282,13 +282,14 @@ describe('CodingTeamPageComponent', () => {
       expect(component.jobIdCopied).toBe(true);
     });
 
-    it('splits runs into running and recent', async () => {
+    it('splits runs into running and recent (derived in applyRuns)', async () => {
       await setup();
-      component.runs = [
+      component['initialRunsLoad'] = false;
+      component['applyRuns']([
         ghRun({ job_id: 'a', status: 'running' }),
-        ghRun({ job_id: 'b', status: 'completed' }),
-        ghRun({ job_id: 'c', status: 'waiting_for_user' }),
-      ];
+        ghRun({ job_id: 'b', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
+        ghRun({ job_id: 'c', status: 'waiting_for_user', github_context: { owner: 'acme', repo: 'widgets', issue_number: 4 } }),
+      ]);
       expect(component.runningRuns.map((r) => r.job_id)).toEqual(['a', 'c']);
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['b']);
     });
@@ -722,6 +723,21 @@ describe('CodingTeamPageComponent', () => {
       expect(component.activeIssueNumbers.has(9)).toBe(false);
     });
 
+    it('drops the chip once the snapshot reports the selected run terminal, even if the polled status is stale', async () => {
+      await setup();
+      component['initialRunsLoad'] = false;
+      component.selectedRunId = 'r1';
+      component.selectedRunNumber = 5;
+      // Polled status lags behind the server: still "running" though the run has finished.
+      component.jobStatus = { job_id: 'r1', status: 'running' };
+      component['applyRuns']([
+        ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
+      ]);
+      // The fresh snapshot is trusted: #5 is no longer in progress and the run sits under Recent.
+      expect(component.activeIssueNumbers.has(5)).toBe(false);
+      expect(component.recentRuns.map((r) => r.job_id)).toEqual(['r1']);
+    });
+
     it('drops the chip and refreshes the list when the poller observes a terminal status', async () => {
       await setup();
       component.selectedRunId = 'j1';
@@ -779,6 +795,54 @@ describe('CodingTeamPageComponent', () => {
       expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: 6 });
       expect(component.issueError).toBe('nope');
       expect(component.runningIssue).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Polling lifecycle
+  // -------------------------------------------------------------------------
+
+  describe('polling lifecycle', () => {
+    it('re-polls the runs list on the recurring interval, not just once', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        // The initial timer(0) emission fires the first fetch.
+        await vi.advanceTimersByTimeAsync(0);
+        const afterFirst = apiSpy.listJobs.mock.calls.length;
+        expect(afterFirst).toBeGreaterThanOrEqual(1);
+        // Advancing one poll interval (RUNS_POLL_MS = 15000ms) triggers a second fetch.
+        await vi.advanceTimersByTimeAsync(15000);
+        expect(apiSpy.listJobs.mock.calls.length).toBeGreaterThan(afterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('completes the runs refresh trigger and stops status polling on destroy', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component['startPolling']('j1');
+      expect(component['pollSub']).not.toBeNull();
+
+      fixture.destroy();
+
+      // Subscribing to a completed Subject invokes complete() synchronously.
+      let completed = false;
+      component['refreshTrigger$'].subscribe({ complete: () => { completed = true; } });
+      expect(completed).toBe(true);
+      expect(component['pollSub']).toBeNull();
+    });
+
+    it('cancels the copy-confirmation timer on destroy', async () => {
+      await setup();
+      component.selectedRunId = 'abcdef123456';
+      component.copyJobId();
+      expect(component.jobIdCopied).toBe(true);
+      // The reset timer is tracked so it can be torn down with the component.
+      expect(component['copyResetTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['copyResetTimer']).toBeNull();
     });
   });
 });

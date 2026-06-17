@@ -82,6 +82,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   // Runs panel — the persistent, non-dismissable status panel.
   /** Every coding-team run for this repo (running + recent terminal), newest snapshot from /jobs. */
   runs: CodingTeamJobListItem[] = [];
+  /** Non-terminal runs, for the "Running" section. Derived from `runs` in `applyRuns`. */
+  runningRuns: CodingTeamJobListItem[] = [];
+  /** Terminal runs, for the "Recent" section. Derived from `runs` in `applyRuns`. */
+  recentRuns: CodingTeamJobListItem[] = [];
   runsError: string | null = null;
   /** The run whose live detail is shown; null when nothing is selected. */
   selectedRunId: string | null = null;
@@ -103,6 +107,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly refreshTrigger$ = new Subject<void>();
   /** Auto-select a run only on the first list load, so later polls never steal the user's selection. */
   private initialRunsLoad = true;
+  /** Handle for the copy-confirmation reset, cleared on destroy so it never fires on a dead view. */
+  private copyResetTimer: ReturnType<typeof setTimeout> | null = null;
 
   ngOnInit(): void {
     this.checkGitHubConfig();
@@ -112,6 +118,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.stopPolling();
     this.runsSub?.unsubscribe();
     this.runsSub = null;
+    if (this.copyResetTimer) {
+      clearTimeout(this.copyResetTimer);
+      this.copyResetTimer = null;
+    }
     this.refreshTrigger$.complete();
   }
 
@@ -216,10 +226,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Start a coding-team run for the selected issue. No-op when nothing is selected. On success,
-   * marks its issue in progress, selects the new run (so its live detail shows immediately),
-   * refreshes the Runs list, and clears the selection; on error, surfaces `issueError`. Toggles
-   * `runningIssue`.
+   * Start a coding-team run for the selected issue.
+   *
+   * Preconditions: none enforced — a no-op when `selectedIssue` is null.
+   * Postconditions: on success the issue is marked in progress (`activeIssueNumbers`), the returned
+   * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
+   * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
   confirmAndRun(): void {
     if (!this.selectedIssue) return;
@@ -244,8 +256,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Re-run a terminal selected run's issue (e.g. after a failure). No-op when the selected run has
-   * no issue number. Starts a fresh run for the same issue and selects it.
+   * Re-run the selected (typically terminal) run's issue, e.g. after a failure.
+   *
+   * Preconditions: none enforced — a no-op when the selected run has no resolvable issue number or a
+   * run is already starting (`runningIssue`).
+   * Postconditions: on success a fresh run for the same issue is started and selected, and the issue
+   * is marked in progress; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
   retrySelectedRun(): void {
     const issueNumber = this.selectedRunNumber ?? this.jobStatus?.github_context?.issue_number;
@@ -268,9 +284,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
-   * Subscribe to the Runs list poll. Each tick (and every manual refresh via `refreshTrigger$`)
-   * re-fetches `/jobs` — including terminal jobs, so "Recent" runs are shown — and applies them.
-   * Idempotent: a second call is a no-op while a subscription is live.
+   * Subscribe to the Runs list poll.
+   *
+   * Preconditions: the GitHub integration is configured (`githubOwner`/`githubRepo` set) — the caller
+   * only invokes this once configured, so jobs from other repositories are never matched here.
+   * Postconditions: each `refreshTrigger$` emission re-fetches `/jobs` (terminal jobs included, so
+   * "Recent" runs show) on a `timer(0, RUNS_POLL_MS)` cadence and applies them via `applyRuns`; a
+   * failed fetch sets `runsError` and leaves the page usable. Idempotent — a second call while a
+   * subscription is live is a no-op.
    */
   private startRunsPolling(): void {
     if (this.runsSub) return;
@@ -299,10 +320,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Fold a fresh `/jobs` snapshot into the Runs panel.
    *
    * Preconditions: `githubOwner`/`githubRepo` are set (the poll only starts once configured).
-   * Postconditions: `runs` holds this repo's runs (running + terminal); `activeIssueNumbers` holds
-   * the non-terminal subset's issue numbers, plus the selected run's issue while it is still
-   * non-terminal (so a snapshot that lags a just-started run can't wipe its chip). On the first
-   * load only, a run is auto-selected when none is selected.
+   * Postconditions: `runs` holds this repo's runs (running + terminal) and `runningRuns`/`recentRuns`
+   * hold its non-terminal/terminal partitions; `activeIssueNumbers` holds the non-terminal subset's
+   * issue numbers, plus the selected run's issue only while that run is absent from this snapshot and
+   * not yet observed terminal (so a snapshot that lags a just-started run can't wipe its chip, while
+   * a run the snapshot already reports terminal is trusted and dropped). On the first load only, a
+   * run is auto-selected when none is selected.
    */
   private applyRuns(jobs: CodingTeamJobListItem[]): void {
     const owner = this.githubOwner.toLowerCase();
@@ -314,15 +337,22 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         j.github_context.repo.toLowerCase() === repo,
     );
     this.runs = mine;
+    this.runningRuns = mine.filter((j) => !isCodingTeamTerminalStatus(j.status));
+    this.recentRuns = mine.filter((j) => isCodingTeamTerminalStatus(j.status));
 
-    const active = new Set(
-      mine
-        .filter((j) => !isCodingTeamTerminalStatus(j.status))
-        .map((j) => j.github_context!.issue_number!),
-    );
-    // Keep the chip for the selected run while it is still running, even if this snapshot predates
-    // it — but never once it has finished (the poller has already observed terminal by then).
-    if (this.selectedRunNumber != null && !isCodingTeamTerminalStatus(this.jobStatus?.status)) {
+    const active = new Set(this.runningRuns.map((j) => j.github_context!.issue_number!));
+    // Preserve the chip for a just-started run the snapshot does not list yet, but only while the run
+    // is genuinely absent from the snapshot and not yet observed terminal. Once the snapshot lists the
+    // run we trust the snapshot's own status — so a finished run is dropped and selecting a terminal
+    // (Recent) run never re-adds an "In progress" chip. Keying off the snapshot, not the possibly
+    // stale polled `jobStatus`, avoids a chip lingering for seconds after a run completes.
+    const selectedInSnapshot =
+      this.selectedRunId != null && mine.some((j) => j.job_id === this.selectedRunId);
+    if (
+      this.selectedRunNumber != null &&
+      !selectedInSnapshot &&
+      !isCodingTeamTerminalStatus(this.jobStatus?.status)
+    ) {
       active.add(this.selectedRunNumber);
     }
     this.activeIssueNumbers = active;
@@ -335,9 +365,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   /**
    * On the first list load, surface an in-flight run so a page reload restores the live panel.
-   * Prefers a run paused on questions (so human-in-the-loop runs are reachable immediately), else
-   * the most recently updated non-terminal run. No-op when a run is already selected or none is
-   * active.
+   *
+   * Preconditions: called once, from the first `applyRuns`; `runs` is this repo's filtered snapshot.
+   * Postconditions: a no-op when a run is already selected or none is non-terminal; otherwise selects
+   * a run paused on questions (so human-in-the-loop runs are reachable immediately) when present,
+   * else the most recently updated non-terminal run.
    */
   private autoSelectRun(runs: CodingTeamJobListItem[]): void {
     if (this.selectedRunId) return;
@@ -352,7 +384,16 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.selectRun(pick.job_id);
   }
 
-  /** Show a run's live detail and start polling its status. No-op if it is already selected. */
+  /**
+   * Show a run's live detail and start polling its status.
+   *
+   * Preconditions: `jobId` is a coding-team job id; when it is a row in `runs` it carries a
+   * `github_context.issue_number` (the list is pre-filtered to issue-bearing runs).
+   * Postconditions: a no-op when `jobId` is already selected; otherwise `selectedRunId` is `jobId`,
+   * `selectedRunNumber` is updated from the matching run when present (left untouched when the run is
+   * not yet in `runs`, e.g. just started), `jobStatus`/`issueError` are cleared, and status polling
+   * for `jobId` is (re)started.
+   */
   selectRun(jobId: string): void {
     if (this.selectedRunId === jobId) return;
     this.selectedRunId = jobId;
@@ -379,17 +420,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     );
   }
 
-  /** Non-terminal runs, for the "Running" section. */
-  get runningRuns(): CodingTeamJobListItem[] {
-    return this.runs.filter((r) => !isCodingTeamTerminalStatus(r.status));
-  }
-
-  /** Terminal runs, for the "Recent" section. */
-  get recentRuns(): CodingTeamJobListItem[] {
-    return this.runs.filter((r) => isCodingTeamTerminalStatus(r.status));
-  }
-
-  /** Map a job status to a shared `.kh-badge--*` modifier. */
+  /**
+   * Map a job status to a shared `.kh-badge--*` modifier.
+   *
+   * Preconditions: none (any string or undefined is accepted).
+   * Postconditions: returns one of `running`/`completed`/`failed`/`cancelled`/`warning`/`neutral`;
+   * unrecognized or missing statuses map to `neutral`.
+   */
   badgeClass(status: string | undefined): string {
     switch (status) {
       case 'running':
@@ -409,7 +446,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     }
   }
 
-  /** Relative "x ago" label for a run's last update; empty for a missing timestamp. */
+  /**
+   * Relative "x ago" label for a run's last update.
+   *
+   * Preconditions: `isoString`, when present, is a parseable ISO timestamp.
+   * Postconditions: returns `''` for a missing timestamp, else `just now` / `Nm ago` / `Nh ago` /
+   * `Nd ago` for the elapsed time since `isoString`.
+   */
   timeAgo(isoString?: string): string {
     if (!isoString) return '';
     const diff = Date.now() - new Date(isoString).getTime();
@@ -421,13 +464,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return `${Math.floor(hrs / 24)}d ago`;
   }
 
-  /** Copy the selected run's full job id to the clipboard, flashing a confirmation icon. */
+  /**
+   * Copy the selected run's full job id to the clipboard, flashing a confirmation icon.
+   *
+   * Preconditions: none (a no-op when no run is selected, or when the Clipboard API is unavailable).
+   * Postconditions: when a run is selected, its id is written to the clipboard and `jobIdCopied` is
+   * true for ~1.5s; the reset timer is tracked so it is cancelled on destroy and never fires twice.
+   */
   copyJobId(): void {
     if (!this.selectedRunId) return;
     void navigator.clipboard?.writeText(this.selectedRunId);
     this.jobIdCopied = true;
-    setTimeout(() => {
+    if (this.copyResetTimer) clearTimeout(this.copyResetTimer);
+    this.copyResetTimer = setTimeout(() => {
       this.jobIdCopied = false;
+      this.copyResetTimer = null;
     }, 1500);
   }
 

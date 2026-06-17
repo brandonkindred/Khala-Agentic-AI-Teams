@@ -54,19 +54,25 @@
 // GitHub Issues section
 // ---------------------------------------------------------------------------
 
+// The issues panel and Runs panel reuse the shared `.kh-card` base (surface, border, radius,
+// padding) from styles.scss; only the structure-specific rules live here. They are layout
+// containers rather than interactive cards, so suppress `.kh-card`'s hover border highlight.
+.coding-team-layout__issues.kh-card:hover,
+.runs-panel.kh-card:hover {
+  border-color: var(--kh-border);
+}
+
 .github-section {
   margin: 1.5rem 0;
-  padding: var(--kh-space-5);
-  border: 1px solid var(--kh-border);
-  border-radius: var(--kh-radius-lg);
-  background: var(--kh-surface-2);
 
+  // Inline status banners shown before the two-column layout renders — not cards.
   &--loading,
   &--unconfigured {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     padding: 1rem 1.25rem;
+    border: 1px solid var(--kh-border);
     border-radius: var(--kh-radius-md);
     background: var(--kh-surface-2);
     color: var(--kh-text-secondary);
@@ -326,11 +332,7 @@
 // ---------------------------------------------------------------------------
 
 .runs-panel {
-  padding: var(--kh-space-5);
-  border: 1px solid var(--kh-border);
-  border-radius: var(--kh-radius-lg);
-  background: var(--kh-surface-2);
-
+  // Card base (surface, border, radius, padding) comes from the shared `.kh-card` class.
   &__header {
     display: flex;
     align-items: center;

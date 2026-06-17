@@ -37,7 +37,7 @@
     <!-- ──────────────────────────────────────────────────────────── -->
     <!-- LEFT: GitHub Issues — always visible and selectable           -->
     <!-- ──────────────────────────────────────────────────────────── -->
-    <section class="coding-team-layout__issues github-section">
+    <section class="coding-team-layout__issues github-section kh-card">
       <div class="github-section__header">
         <h2>
           <mat-icon>bug_report</mat-icon>
@@ -181,7 +181,7 @@
     <!-- RIGHT: Runs — persistent status panel (cannot be dismissed)   -->
     <!-- ──────────────────────────────────────────────────────────── -->
     <aside class="coding-team-layout__runs">
-      <div class="runs-panel">
+      <div class="runs-panel kh-card">
         <div class="runs-panel__header">
           <h2>
             <mat-icon>engineering</mat-icon>
@@ -213,27 +213,7 @@
               <p class="runs-section__title">Running</p>
               <div class="runs-list">
                 @for (run of runningRuns; track run.job_id) {
-                  <button
-                    class="coding-run-item"
-                    type="button"
-                    [class.selected]="selectedRunId === run.job_id"
-                    (click)="selectRun(run.job_id)"
-                  >
-                    <div class="coding-run-item__top">
-                      <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
-                      @if (run.waiting_for_answers) {
-                        <span class="kh-badge kh-badge--warning">needs answers</span>
-                      } @else {
-                        <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
-                      }
-                    </div>
-                    @if (run.status_text || run.phase) {
-                      <span class="coding-run-item__detail" [matTooltip]="run.status_text || run.phase || ''">
-                        {{ run.status_text || run.phase }}
-                      </span>
-                    }
-                    <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
-                  </button>
+                  <ng-container *ngTemplateOutlet="runRow; context: { $implicit: run }"></ng-container>
                 }
               </div>
             </div>
@@ -247,22 +227,36 @@
               <p class="runs-section__title">Recent</p>
               <div class="runs-list">
                 @for (run of recentRuns; track run.job_id) {
-                  <button
-                    class="coding-run-item"
-                    type="button"
-                    [class.selected]="selectedRunId === run.job_id"
-                    (click)="selectRun(run.job_id)"
-                  >
-                    <div class="coding-run-item__top">
-                      <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
-                      <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
-                    </div>
-                    <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
-                  </button>
+                  <ng-container *ngTemplateOutlet="runRow; context: { $implicit: run }"></ng-container>
                 }
               </div>
             </div>
           }
+
+          <!-- Shared run row used by both the Running and Recent lists. -->
+          <ng-template #runRow let-run>
+            <button
+              class="coding-run-item"
+              type="button"
+              [class.selected]="selectedRunId === run.job_id"
+              (click)="selectRun(run.job_id)"
+            >
+              <div class="coding-run-item__top">
+                <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
+                @if (run.waiting_for_answers) {
+                  <span class="kh-badge kh-badge--warning">needs answers</span>
+                } @else {
+                  <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
+                }
+              </div>
+              @if (run.status_text || run.phase) {
+                <span class="coding-run-item__detail" [matTooltip]="run.status_text || run.phase || ''">
+                  {{ run.status_text || run.phase }}
+                </span>
+              }
+              <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
+            </button>
+          </ng-template>
         }
 
         <!-- Selected-run live detail -->
