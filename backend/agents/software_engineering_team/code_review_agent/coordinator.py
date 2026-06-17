@@ -903,6 +903,7 @@ def run_coordinator(
         "spec_excerpt": spec_content,
         "architecture_overview": arch_overview,
         "existing_codebase_excerpt": existing_codebase or None,
+        "user_decisions": input_data.user_decisions or None,
     }
 
     chunk_reviewer = ChunkReviewAgent(llm)
