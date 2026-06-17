@@ -15,9 +15,7 @@ def test_default_llm_getter_returns_strands_model(monkeypatch) -> None:
     from software_engineering_team import quality_gate_tools
 
     sentinel = object()
-    monkeypatch.setattr(
-        "llm_service.get_strands_model", lambda agent_key: sentinel
-    )
+    monkeypatch.setattr("llm_service.get_strands_model", lambda agent_key: sentinel)
     assert quality_gate_tools._default_llm_getter("some_key") is sentinel
 
 
@@ -67,6 +65,30 @@ def test_run_code_review_happy_path(monkeypatch) -> None:
     assert result.approved is True
     assert result.issues
     assert result.summary == "ok"
+
+
+def test_run_code_review_forwards_user_decisions(monkeypatch) -> None:
+    """User-settled decisions are forwarded onto the review input so the reviewer treats them
+    as settled rather than re-raising them."""
+    from software_engineering_team import quality_gate_tools as q
+
+    captured = {}
+
+    def _run(inp, progress_callback=None):
+        captured["input"] = inp
+        return _ReviewResult()
+
+    monkeypatch.setattr("code_review_agent.CodeReviewAgent", lambda llm: SimpleNamespace(run=_run))
+    q.run_code_review(
+        code="x" * 50,
+        spec_content="spec",
+        task_description="task",
+        language="python",
+        task_requirements="reqs",
+        user_decisions=["Which DB? → Postgres"],
+        llm_getter=lambda k: MagicMock(),
+    )
+    assert captured["input"].user_decisions == ["Which DB? → Postgres"]
 
 
 def test_run_code_review_default_task_requirements_list(monkeypatch) -> None:
@@ -189,7 +211,9 @@ def test_run_linting_exception_non_blocking(monkeypatch, tmp_path) -> None:
     def boom(*a, **kw):
         raise RuntimeError("lint exploded")
 
-    monkeypatch.setattr("linting_tool_agent.LintingToolAgent", lambda llm: SimpleNamespace(run=boom))
+    monkeypatch.setattr(
+        "linting_tool_agent.LintingToolAgent", lambda llm: SimpleNamespace(run=boom)
+    )
     result = q.run_linting(tmp_path, "t1", llm_getter=lambda k: MagicMock())
     assert result.passed is True
 
@@ -203,9 +227,7 @@ def test_run_dbc_comments_no_code_returns_compliant(monkeypatch, tmp_path) -> No
     from software_engineering_team import quality_gate_tools as q
 
     # Empty repo (no .py/.ts files) → code stays empty → returns compliant
-    result = q.run_dbc_comments(
-        tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock()
-    )
+    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
     assert result.compliant is True
 
 
@@ -225,9 +247,7 @@ def test_run_dbc_comments_already_compliant(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: fake_agent
     )
-    result = q.run_dbc_comments(
-        tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock()
-    )
+    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
     assert result.compliant is True
 
 
@@ -258,9 +278,7 @@ def test_run_dbc_comments_writes_files(monkeypatch, tmp_path) -> None:
     monkeypatch.setattr(
         "software_engineering_team.shared.git_utils.write_files_and_commit", fake_write
     )
-    result = q.run_dbc_comments(
-        tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock()
-    )
+    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
     assert result.compliant is False
     assert result.comments_added == 2
     assert captured["files"] == {"a.py": "# new\ndef x(): pass"}
@@ -275,11 +293,10 @@ def test_run_dbc_comments_exception_non_blocking(monkeypatch, tmp_path) -> None:
         raise RuntimeError("agent err")
 
     monkeypatch.setattr(
-        "technical_writers.dbc_comments_agent.DbcCommentsAgent", lambda llm: SimpleNamespace(run=boom)
+        "technical_writers.dbc_comments_agent.DbcCommentsAgent",
+        lambda llm: SimpleNamespace(run=boom),
     )
-    result = q.run_dbc_comments(
-        tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock()
-    )
+    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
     assert result.compliant is True  # non-blocking
 
 
@@ -290,9 +307,7 @@ def test_run_dbc_comments_skips_excluded_paths(monkeypatch, tmp_path) -> None:
     (tmp_path / "node_modules").mkdir()
     (tmp_path / "node_modules" / "x.py").write_text("ignore me")
     (tmp_path / "binary.txt").write_text("ignore")
-    result = q.run_dbc_comments(
-        tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock()
-    )
+    result = q.run_dbc_comments(tmp_path, "t1", "python", "task", llm_getter=lambda k: MagicMock())
     assert result.compliant is True
 
 
@@ -311,8 +326,12 @@ def test_run_qa_check_passed(monkeypatch) -> None:
     class _Result:
         bugs = []
 
-    monkeypatch.setattr("qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result()))
-    result = q.run_qa_check(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    monkeypatch.setattr(
+        "qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result())
+    )
+    result = q.run_qa_check(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is True
 
 
@@ -326,8 +345,12 @@ def test_run_qa_check_with_bugs(monkeypatch) -> None:
     class _Result:
         bugs = [_Bug()]
 
-    monkeypatch.setattr("qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result()))
-    result = q.run_qa_check(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    monkeypatch.setattr(
+        "qa_agent.QAExpertAgent", lambda llm: SimpleNamespace(run=lambda **kw: _Result())
+    )
+    result = q.run_qa_check(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is False
     assert result.bugs
 
@@ -337,11 +360,11 @@ def test_run_qa_check_exception_non_blocking(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "qa_agent.QAExpertAgent",
-        lambda llm: SimpleNamespace(
-            run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))
-        ),
+        lambda llm: SimpleNamespace(run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))),
     )
-    result = q.run_qa_check(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    result = q.run_qa_check(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is True
 
 
@@ -360,7 +383,9 @@ def test_run_security_scan_clean(monkeypatch) -> None:
         "security_agent.CybersecurityExpertAgent",
         lambda llm: SimpleNamespace(run=lambda **kw: _Result()),
     )
-    result = q.run_security_scan(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    result = q.run_security_scan(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is True
 
 
@@ -378,7 +403,9 @@ def test_run_security_scan_with_vulns(monkeypatch) -> None:
         "security_agent.CybersecurityExpertAgent",
         lambda llm: SimpleNamespace(run=lambda **kw: _Result()),
     )
-    result = q.run_security_scan(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    result = q.run_security_scan(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is False
 
 
@@ -387,11 +414,11 @@ def test_run_security_scan_exception_non_blocking(monkeypatch) -> None:
 
     monkeypatch.setattr(
         "security_agent.CybersecurityExpertAgent",
-        lambda llm: SimpleNamespace(
-            run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))
-        ),
+        lambda llm: SimpleNamespace(run=lambda **kw: (_ for _ in ()).throw(RuntimeError("boom"))),
     )
-    result = q.run_security_scan(code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock())
+    result = q.run_security_scan(
+        code="x", task_description="t", language="py", llm_getter=lambda k: MagicMock()
+    )
     assert result.passed is True
 
 
