@@ -375,8 +375,9 @@ def render_decision_line(entry: Dict[str, Any]) -> str:
     Preconditions:
         - ``entry`` is a decision-record dict (resolved or raw submitted; see ``decision_qa``).
     Postconditions:
-        - Returns ``"{question} → {answer}"`` when a question is present, the bare answer when only
-          an answer is present, and ``""`` when the record carries neither.
+        - Returns ``"{question} → {answer}"`` when a question is present (the answer may be empty —
+          a question without an answer yields ``"question → "``), the bare answer when only an
+          answer is present, and ``""`` when the record carries neither.
     """
     question, answer = decision_qa(entry)
     return f"{question} → {answer}" if question else answer
