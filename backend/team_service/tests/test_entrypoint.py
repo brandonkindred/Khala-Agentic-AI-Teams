@@ -79,3 +79,41 @@ def test_team_name_with_quote_is_embedded_safely() -> None:
 def test_unsafe_module_or_attr_rejected(team_module: str, app_attr: str) -> None:
     with pytest.raises(ValueError):
         entrypoint.build_wrapper_body("t", team_module, app_attr)
+
+
+def test_wrapper_starts_temporal_worker_when_configured() -> None:
+    """With a worker module/func, the wrapper starts the worker in-process,
+    gated on TEMPORAL_ADDRESS and resolved via importlib at runtime."""
+    body = entrypoint.build_wrapper_body(
+        "planning_v3_team",
+        "planning_v3_team.api.main",
+        "app",
+        "planning_v3_team.temporal.worker",
+        "start_planning_v3_temporal_worker_thread",
+    )
+    _compile(body)
+    assert "_os.environ.get('TEMPORAL_ADDRESS', '').strip()" in body
+    assert "_il.import_module('planning_v3_team.temporal.worker')" in body
+    assert "'start_planning_v3_temporal_worker_thread'" in body
+
+
+def test_wrapper_omits_temporal_worker_when_not_configured() -> None:
+    """No worker env vars (the default) → no Temporal block in the wrapper."""
+    body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
+    _compile(body)
+    assert "TEMPORAL_ADDRESS" not in body
+    # Partial config (only one of the two) must also emit nothing.
+    body_partial = entrypoint.build_wrapper_body(
+        "coding_team", "coding_team.api.main", "app", "coding_team.temporal.worker", ""
+    )
+    assert "TEMPORAL_ADDRESS" not in body_partial
+
+
+def test_temporal_names_embedded_safely() -> None:
+    """Worker module/func names are embedded via repr(), so a hostile value
+    cannot inject code — the wrapper still compiles and the payload survives
+    only as an inert string literal."""
+    payload = "evil'); import os; os.system('x"  # injection attempt
+    body = entrypoint.build_wrapper_body("t", "pkg.mod", "app", "pkg.tw", payload)
+    _compile(body)  # would SyntaxError if the payload escaped the string literal
+    assert repr(payload) in body  # embedded verbatim via repr(), not executable
