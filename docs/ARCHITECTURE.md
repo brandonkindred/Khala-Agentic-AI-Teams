@@ -18,7 +18,8 @@ This document describes the architecture of the Software Engineering Team — a 
 - [9. Planning Loop](#9-planning-loop)
 - [10. Plan Folder and Artifacts](#10-plan-folder-and-artifacts)
 - [11. Product Delivery Loop](#11-product-delivery-loop)
-- [12. Repo Layout](#12-repo-layout)
+- [12. Agent Cognition Core](#12-agent-cognition-core)
+- [13. Repo Layout](#13-repo-layout)
 
 ---
 
@@ -618,7 +619,46 @@ Two contracts keep the loop self-healing on the path where the hook actually fir
 
 ---
 
-## 12. Repo Layout
+## 12. Agent Cognition Core
+
+The **Agent Cognition Core** (`backend/agents/agent_cognition/`) is a reusable substrate that gives every Agentic-team-generated agent the faculties of "a reasonable thinking person" rather than a bare LLM wrapper: a durable, time-structured **memory** layer (day → week → month → year rollups), a hybrid **rules engine** (advisory rules injected into prompts + enforced rules gated deterministically) that *learns* behavioral rules from those memories, and a per-agent **tools** layer whose calls feed memory. Because per-agent sandboxes are torn down (`docker compose down -v`) after idle and are network-isolated, all cognitive state lives in the long-lived platform Postgres, namespaced by `agent_id` (via `shared_postgres`), and the agent reaches it only across the invoke boundary — never directly. Design rationale and data model: `backend/agents/agent_cognition/DESIGN.md`.
+
+The closed learning loop — and the invariant proven by the end-to-end test (`tests/test_e2e_pipeline.py`) — runs as follows:
+
+```mermaid
+flowchart TB
+    Invoke["Agent invoke\n(unified_api/routes/agents.py +\nshared_agent_invoke shim)"]
+    Events["Episodic events\nagent_cognition_events"]
+    Rollup["Rollup engine\nmemory/rollup.py\nensure_rollups_current"]
+    Summaries["Period summaries\nday/week/month/year"]
+    Reflect["Reflection\nrules/reflection.py\n(LLM proposes add/retire/amend)"]
+    Proposal["Pending proposal\nagent_cognition_rule_proposals"]
+    HITL["Operator review (HITL)\n/api/cognition approve/reject"]
+    Active["Active rule\nagent_cognition_rules"]
+    Context["Next invoke's CognitionContext\n(advisory rules + memory digest;\nenforced rules gate pre/postcondition)"]
+
+    Invoke -->|writeback| Events
+    Events --> Rollup --> Summaries
+    Summaries --> Reflect --> Proposal
+    Proposal --> HITL -->|approve| Active
+    Active --> Context --> Invoke
+    Scheduler["Central scheduler\nscheduler.py\n(hourly: rollup + reflect +\nprune + ledger GC)"] -.-> Rollup
+    Scheduler -.-> Reflect
+```
+
+The layers, each documented in depth in `backend/agents/agent_cognition/README.md`:
+
+- **Memory** (`memory/`): `store.py` (idempotent episodic DAL, keyed `(agent_id, source_run_id, source_seq)`), `rollup.py` (calendar-correct day→week→month→year summarization with stale-recompute and pruned-period amend regimes), `retrieval.py` (the compact `memory_digest` injected on invoke).
+- **Rules** (`rules/`): `store.py` (rules + proposals CRUD; `approve` applies add/retire/amend deterministically), `enforcement.py` + `predicate.py` (fixed-allowlist DSL for precondition / postcondition / `forbid_tool` gates), `reflection.py` (LLM-derived proposals carrying versioned `(summary_id, version)` evidence — **never activates without approval**), `seed_packs.py` (day-one guardrails installed lazily on first invoke).
+- **Tools** (`tools/`): `binding.py` resolves manifest `cognition.tools` ids to handlers tagged by execution site; `runner.py` brokers the tool loop, gating each call against enforced rules pre-dispatch and emitting a trusted out-of-band audit.
+- **Invoke gate & facade** (`invoke_gate.py`, `context.py`, `invoke_context.py`): the run-once idempotency ledger (`claim_run`/`complete_run`/replay), lazy rollup catch-up, context load, and the marker-wrapped `{input, cognition}` ↔ `{output, cognition_writeback}` envelope consumed by the shim and the invoke proxy.
+- **Operator HITL surface**: `/api/cognition/...` routes (`unified_api/routes/cognition.py`) and the Angular **Cognition** panel in the Agent Console back the approve/reject review flow.
+
+Per-agent config travels in the manifest `CognitionSpec` block (`agent_registry/models.py`); the Agentic team stamps it onto generated agents and their runtime renders the advisory rules + digest into each LLM call. Operability and tuning env vars (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`, retention, digest budget, `LLM_MODEL_cognition`, writeback cap, ledger TTL) are documented under "Configuration & operability" in `backend/agents/agent_cognition/README.md` and in `docs/ENV_VARS.md`.
+
+---
+
+## 13. Repo Layout
 
 The repository contains two independent agent systems. The software engineering team is the primary system documented above; a separate blogging agent system exists under `agents/blogging/`.
 
