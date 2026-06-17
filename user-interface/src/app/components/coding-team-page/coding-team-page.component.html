@@ -358,8 +358,10 @@
                       <mat-spinner diameter="18"></mat-spinner>
                       Resuming…
                     } @else {
-                      <mat-icon>play_arrow</mat-icon>
-                      Resume Run
+                      <ng-container>
+                        <mat-icon>play_arrow</mat-icon>
+                        Resume Run
+                      </ng-container>
                     }
                   </button>
                 </div>
@@ -390,8 +392,10 @@
                       <mat-spinner diameter="18"></mat-spinner>
                       Starting…
                     } @else {
-                      <mat-icon>replay</mat-icon>
-                      Run again
+                      <ng-container>
+                        <mat-icon>replay</mat-icon>
+                        Run again
+                      </ng-container>
                     }
                   </button>
                 </div>
