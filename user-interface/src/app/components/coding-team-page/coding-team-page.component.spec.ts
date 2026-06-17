@@ -282,6 +282,21 @@ describe('CodingTeamPageComponent', () => {
       expect(component.jobIdCopied).toBe(true);
     });
 
+    it('treats a run as waiting only while it is non-terminal', async () => {
+      await setup();
+      expect(component.isRunActive(ghRun({ status: 'running' }))).toBe(true);
+      expect(component.isRunActive(ghRun({ status: 'completed' }))).toBe(false);
+      // A run actively paused on questions is "needs answers"…
+      expect(
+        component.isRunWaiting(ghRun({ status: 'waiting_for_user', waiting_for_answers: true })),
+      ).toBe(true);
+      // …but a terminal run carrying a stale waiting flag is not.
+      expect(
+        component.isRunWaiting(ghRun({ status: 'completed', waiting_for_answers: true })),
+      ).toBe(false);
+      expect(component.isRunWaiting(ghRun({ status: 'running', waiting_for_answers: false }))).toBe(false);
+    });
+
     it('splits runs into running and recent (derived in applyRuns)', async () => {
       await setup();
       component['initialRunsLoad'] = false;
@@ -571,6 +586,46 @@ describe('CodingTeamPageComponent', () => {
       expect(el.querySelector('.delete-btn')).toBeNull();
       expect(el.textContent).toContain('Running');
       expect(el.textContent).toContain('Recent');
+    });
+
+    it('shows a needs-answers badge on a running run paused on questions', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'paused',
+            status: 'waiting_for_user',
+            waiting_for_answers: true,
+            github_context: { owner: 'acme', repo: 'widgets', issue_number: 9 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      fixture.detectChanges();
+      expect(fixture.nativeElement.textContent).toContain('needs answers');
+    });
+
+    it('never shows a needs-answers badge or a live detail line on a terminal Recent run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'done',
+            status: 'completed',
+            // Stale flag from a run that was paused before it finished.
+            waiting_for_answers: true,
+            status_text: 'wrote files',
+            github_context: { owner: 'acme', repo: 'widgets', issue_number: 8 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      fixture.detectChanges();
+      const el: HTMLElement = fixture.nativeElement;
+      // Terminal runs are never auto-selected, so only the Recent row is in the DOM.
+      expect(el.textContent).not.toContain('needs answers');
+      expect(el.querySelector('.coding-run-item__detail')).toBeNull();
+      expect(el.querySelector('.kh-badge--completed')?.textContent).toContain('completed');
     });
 
     it('keeps the issue list visible while a run is selected and its detail is shown', async () => {

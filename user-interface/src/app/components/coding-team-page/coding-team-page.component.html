@@ -243,13 +243,13 @@
             >
               <div class="coding-run-item__top">
                 <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
-                @if (run.waiting_for_answers) {
+                @if (isRunWaiting(run)) {
                   <span class="kh-badge kh-badge--warning">needs answers</span>
                 } @else {
                   <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
                 }
               </div>
-              @if (run.status_text || run.phase) {
+              @if (isRunActive(run) && (run.status_text || run.phase)) {
                 <span class="coding-run-item__detail" [matTooltip]="run.status_text || run.phase || ''">
                   {{ run.status_text || run.phase }}
                 </span>

@@ -447,6 +447,29 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   }
 
   /**
+   * True when a run is still in flight (non-terminal). Scopes run-row affordances that only make
+   * sense for active runs (the "needs answers" badge and the live status/phase detail line).
+   *
+   * Preconditions: none.
+   * Postconditions: returns `false` for any terminal status, `true` otherwise.
+   */
+  isRunActive(run: CodingTeamJobListItem): boolean {
+    return !isCodingTeamTerminalStatus(run.status);
+  }
+
+  /**
+   * True when a run is actively paused on questions the user must answer.
+   *
+   * Preconditions: none.
+   * Postconditions: returns `true` only when the run is non-terminal and flagged
+   * `waiting_for_answers` — so a terminal run that still carries a stale flag is never shown as
+   * needing answers.
+   */
+  isRunWaiting(run: CodingTeamJobListItem): boolean {
+    return !!run.waiting_for_answers && this.isRunActive(run);
+  }
+
+  /**
    * Relative "x ago" label for a run's last update.
    *
    * Preconditions: `isoString`, when present, is a parseable ISO timestamp.
