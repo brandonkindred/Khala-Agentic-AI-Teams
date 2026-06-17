@@ -12,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import httpx
+import pytest
 
 _backend = Path(__file__).resolve().parent.parent.parent
 if str(_backend) not in sys.path:
@@ -20,12 +21,14 @@ _agents = _backend / "agents"
 if str(_agents) not in sys.path:
     sys.path.insert(0, str(_agents))
 
+from fastapi import HTTPException  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from unified_api.main import app  # noqa: E402
 from unified_api.routes.integrations import (  # noqa: E402
     _ensure_repo_clone,
     _git_auth_env,
+    _remote_matches,
     _resolve_repo_path,
 )
 
@@ -489,3 +492,82 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     payload = fake.calls[0][1]
     assert payload["repo_path"] == "/srv/checkout"
     assert payload["cleanup_checkout_on_success"] is False
+
+
+# ---------------------------------------------------------------------------
+# _remote_matches: exact owner/repo comparison (no substring false positives)
+# ---------------------------------------------------------------------------
+
+
+def test_remote_matches_exact_https():
+    assert _remote_matches("https://github.com/acme/widget.git", "acme", "widget") is True
+    assert _remote_matches("https://github.com/acme/widget", "acme", "widget") is True
+
+
+def test_remote_matches_is_case_insensitive():
+    assert _remote_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
+
+
+def test_remote_matches_accepts_scp_form():
+    assert _remote_matches("git@github.com:acme/widget.git", "acme", "widget") is True
+
+
+def test_remote_matches_rejects_repo_prefix_substring():
+    # 'acme/widget' is a substring of 'acme/widget-extra' but must NOT match.
+    assert _remote_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
+
+
+def test_remote_matches_rejects_owner_suffix_substring():
+    # 'acme/widget' is a suffix of 'notacme/widget' but must NOT match.
+    assert _remote_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
+
+
+def test_remote_matches_rejects_short_url():
+    assert _remote_matches("widget", "acme", "widget") is False
+
+
+def test_ensure_repo_clone_rejects_substring_remote(tmp_path):
+    repo = tmp_path / "checkout"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget-extra.git\n", stderr=""
+    )
+    with patch(f"{_M}.subprocess.run", return_value=url_check):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is not None
+    assert "does not match" in err
+
+
+def test_ensure_repo_clone_accepts_scp_form_remote(tmp_path):
+    repo = tmp_path / "checkout"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="git@github.com:acme/widget.git\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is None
+
+
+# ---------------------------------------------------------------------------
+# _resolve_repo_path: owner/repo path-traversal sanitization
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_path_rejects_owner_traversal(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "../../etc", "repo": "widget", "repo_path": ""}
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(cfg, issue_number=1)
+    assert exc.value.status_code == 400
+
+
+def test_resolve_repo_path_rejects_repo_separator(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "a/b", "repo_path": ""}
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(cfg, issue_number=1)
+    assert exc.value.status_code == 400

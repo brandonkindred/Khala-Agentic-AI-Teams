@@ -1398,10 +1398,28 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
         - Otherwise returns a derived path; with ``issue_number`` set the path
           ends in ``issue-{issue_number}`` and two distinct issue numbers map to
           two distinct paths.
+        - Raises ``HTTPException(400)`` when ``owner``/``repo`` carry a path
+          separator, ``..`` segment, or null byte — defense-in-depth so this
+          path builder can't be coerced into escaping the workspace root even if
+          a caller skipped validation.
     """
     override = cfg.get("repo_path", "").strip()
     if override:
         return override
+
+    # Defense-in-depth: owner/repo become path components below, so reject any
+    # value that could traverse out of the workspace (a real GitHub owner/repo
+    # never contains these).
+    for label, value in (("owner", cfg["owner"]), ("repo", cfg["repo"])):
+        if (
+            "/" in value
+            or "\\" in value
+            or "\x00" in value
+            or value in ("..", ".")
+            or ".." in value.split("/")
+            or value.strip() != value
+        ):
+            raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
 
     issue_segment = f"issue-{issue_number}" if issue_number is not None else None
 
@@ -1451,6 +1469,30 @@ def _scrub_git_secret(text: str, token: str) -> str:
     return text.replace(token, "***").replace(encoded, "***")
 
 
+def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
+    """True iff ``remote_url``'s final ``owner/repo`` segments match exactly.
+
+    A substring check (``f"{owner}/{repo}" in url``) gives false positives — e.g.
+    ``acme/widget`` matches ``acme/widget-extra``, and ``acme/widget`` is also a
+    suffix of ``notacme/widget``. This compares the last two path segments
+    exactly (case-insensitively, since GitHub treats owner/repo that way) after
+    stripping a trailing ``.git``/slash, and normalizes the ``git@host:owner/repo``
+    scp form to ``/``-separated so both URL styles work.
+
+    Postconditions:
+        - Returns True iff the remote's last two segments equal ``owner``/``repo``
+          case-insensitively; False otherwise (including malformed/short URLs).
+    """
+    cleaned = remote_url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = [seg for seg in cleaned.replace(":", "/").split("/") if seg]
+    if len(parts) < 2:
+        return False
+    got_owner, got_repo = parts[-2], parts[-1]
+    return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
+
+
 def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
     """Clone or fetch the repository.
 
@@ -1473,7 +1515,6 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
           cannot interleave a ``git clone`` into a half-populated directory.
     """
     env = _git_auth_env(token)
-    expected_suffix = f"{owner}/{repo}"
     path = Path(repo_path)
 
     # The lock lives beside the checkout (not inside it) so it survives the
@@ -1507,7 +1548,7 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
                     timeout=10,
                 )
                 url_out = url_check.stdout.strip()
-                if url_check.returncode != 0 or expected_suffix not in url_out:
+                if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
                     return (
                         f"existing checkout at {repo_path} does not match {owner}/{repo} "
                         f"(remote origin: {url_out[:120]})"

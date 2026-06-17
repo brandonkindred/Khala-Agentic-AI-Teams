@@ -28,7 +28,10 @@ from pydantic import BaseModel, Field  # noqa: E402
 from coding_team import hitl  # noqa: E402
 from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.agent_status import build_agent_statuses  # noqa: E402
-from coding_team.clone_workspace import clone_lock_path  # noqa: E402
+from coding_team.clone_workspace import (  # noqa: E402
+    clone_lock_path,
+    is_within_ephemeral_workspace,
+)
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -1902,33 +1905,35 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
-def _is_safe_to_remove_checkout(repo_path: str) -> bool:
-    """True only for a real per-issue git checkout that is safe to delete.
+def _is_ephemeral_checkout_path(repo_path: str) -> bool:
+    """True only for a platform-owned per-issue git checkout that is safe to delete.
 
     Guards the destructive ``rmtree`` against a caller-supplied ``repo_path``
     (``/run-from-github`` is a public endpoint whose ``repo_path`` is only
-    validated as an existing directory): never a filesystem root or a shallow
-    system directory, and only something that is actually a git checkout we
-    cloned (carries a ``.git`` entry).
+    validated as an existing directory, and ``cleanup_checkout_on_success`` is a
+    request field). Two conditions must both hold:
+
+    1. the path lives strictly under one of this deployment's ephemeral
+       workspace roots (``is_within_ephemeral_workspace``) — so an
+       operator-pinned or arbitrary path is never eligible (and a filesystem
+       root or shallow system dir like ``/`` or ``/data`` is excluded because it
+       is not under a workspace root), even if a caller sets the cleanup flag and
+       points ``repo_path`` at someone else's repo;
+    2. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
-        - ``repo_path`` is the path the hook is about to remove.
+        - None on caller state; ``repo_path`` may be any string (it is validated
+          here precisely because it originates from an untrusted request).
     Postconditions:
-        - Returns True iff the resolved path has at least three components
-          (so not ``/`` or ``/data``) and contains a ``.git`` entry; False on
-          any resolution error or when either check fails.
+        - Returns True iff both conditions hold; False on any resolution error
+          (handled inside ``is_within_ephemeral_workspace``) or when either
+          condition fails. Pure apart from filesystem reads.
     """
-    try:
-        p = Path(repo_path).resolve()
-    except (OSError, ValueError):
+    if not is_within_ephemeral_workspace(repo_path):
         return False
-    # An auto-derived checkout is always <root>/<cache-or-workspace>/.../issue-N,
-    # so a real one has >= 3 resolved components (e.g. ('/', 'data', 'agents',
-    # ...)). The floor rejects a filesystem root ('/',) or a shallow top-level
-    # dir like /data ('/', 'data') so a misconfigured repo_path can't wipe them.
-    if len(p.parts) < 3:
-        return False
-    return (p / ".git").exists()
+    # is_within_ephemeral_workspace already resolved repo_path successfully, so
+    # this resolve cannot raise (a null byte / unresolvable path returns False above).
+    return (Path(repo_path).resolve() / ".git").exists()
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
@@ -1940,13 +1945,16 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
 
     Postconditions:
         - Best-effort: the checkout at ``repo_path`` is removed only when
-          ``_is_safe_to_remove_checkout`` confirms it is a real, non-shallow git
-          checkout; an unsafe path is refused (logged, left in place). Never
-          raises — a cleanup failure (permissions, race with a concurrent
-          reader) must not turn a successful job into a failure; it is caught and
-          logged. The success line is logged only after ``rmtree`` returns.
+          ``_is_ephemeral_checkout_path`` confirms it is a platform-owned,
+          non-shallow git checkout under an ephemeral root; an unsafe path is
+          refused (logged, left in place). The sibling clone lock is unlinked
+          only after the checkout is actually gone, so a failed ``rmtree`` keeps
+          the lock and the duplicate guard in place. Never raises — a cleanup
+          failure (permissions, race with a concurrent reader) must not turn a
+          successful job into a failure; it is caught and logged. The success
+          line is logged only after ``rmtree`` returns.
     """
-    if not _is_safe_to_remove_checkout(repo_path):
+    if not _is_ephemeral_checkout_path(repo_path):
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
     try:
@@ -1954,12 +1962,13 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         logger.info("Removed ephemeral per-issue checkout at %s", repo_path)
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
         logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
+        # Keep the lock file: the checkout still exists, so the lock must keep
+        # guarding it against a concurrent clone into a half-removed directory.
+        return
 
-    # Also drop the sibling clone lock created by unified_api's _ensure_repo_clone
-    # (name resolved via the shared clone_workspace helper, the single source of
-    # truth). Safe here: the job is terminal and the per-issue duplicate guard
-    # means no other process is cloning this issue. Best-effort — never fail a
-    # successful job.
+    # The checkout is gone — drop the sibling clone lock created by unified_api's
+    # _ensure_repo_clone (name resolved via the shared clone_workspace helper,
+    # the single source of truth). Best-effort — never fail a successful job.
     lock_file = clone_lock_path(repo_path)
     try:
         lock_file.unlink(missing_ok=True)
@@ -2621,21 +2630,28 @@ def _run_with_github_hooks(
         # to this job's issue: a sibling job for another issue may have
         # re-marked the checkout since this job prepped.
         _clear_active_issue_if_matches(request.repo_path, num)
-        # Terminal status comes last: the busy-checkout guard treats a
-        # terminal job as done with the checkout, so this must be the hook's
-        # final action after every checkout-touching step above. A job that
-        # merged some work but also has failed tasks is reported as a partial
-        # success so it is not presented as a clean completion.
-        update_job(
-            job_id,
-            status="completed_with_failures" if failed else "completed",
-            phase="completed",
-        )
 
         # Drop the per-issue clone only on a clean completion: every task merged
         # and the work published to the PR, so nothing local is unrecoverable. A
         # partial result (some tasks FAILED) keeps the checkout so a retry can
         # seed from its local progress, as does every earlier failure return.
         # Operator-managed checkouts never set the flag, so they are never removed.
+        #
+        # Cleanup runs BEFORE the terminal status update so the job stays in
+        # list_jobs(active_only=True) while the checkout is being removed: a
+        # quick same-issue retry is then rejected by the duplicate guard in
+        # /run-from-github instead of cloning into a directory mid-rmtree.
         if not failed and request.cleanup_checkout_on_success:
             _cleanup_issue_checkout(request.repo_path)
+
+        # Terminal status comes last: the busy-checkout guard treats a
+        # terminal job as done with the checkout, so this must be the hook's
+        # final action after every checkout-touching step above (including the
+        # cleanup rmtree). A job that merged some work but also has failed tasks
+        # is reported as a partial success so it is not presented as a clean
+        # completion.
+        update_job(
+            job_id,
+            status="completed_with_failures" if failed else "completed",
+            phase="completed",
+        )

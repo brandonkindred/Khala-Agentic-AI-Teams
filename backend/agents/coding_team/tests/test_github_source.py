@@ -1615,8 +1615,11 @@ class TestEphemeralCheckoutCleanup:
         req = RunFromGitHubRequest(owner="o", repo="r", repo_path="/tmp/x")
         assert req.cleanup_checkout_on_success is False
 
-    def test_cleanup_helper_removes_directory(self, patched_app, tmp_path) -> None:
+    def test_cleanup_helper_removes_directory(self, patched_app, tmp_path, monkeypatch) -> None:
         api = patched_app["api"]
+        # tmp_path is an ephemeral workspace root for this test, so checkouts
+        # under it are eligible for removal.
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "ephemeral"
         target.mkdir()
         (target / ".git").mkdir()  # only real checkouts are removed
@@ -1629,43 +1632,68 @@ class TestEphemeralCheckoutCleanup:
         # A missing dir is refused by the safety guard (no .git); must not raise.
         api._cleanup_issue_checkout(str(tmp_path / "does-not-exist"))
 
-    def test_cleanup_helper_refuses_non_checkout_path(self, patched_app, tmp_path) -> None:
+    def test_cleanup_helper_refuses_non_checkout_path(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
         api = patched_app["api"]
-        # A directory that is not a git checkout (no .git) must be left untouched.
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        # A directory under the root but without .git is not a checkout → untouched.
         target = tmp_path / "not-a-checkout"
         target.mkdir()
         (target / "file.txt").write_text("x", encoding="utf-8")
         api._cleanup_issue_checkout(str(target))
         assert target.exists()
 
-    def test_cleanup_helper_refuses_shallow_path(self, patched_app) -> None:
-        api = patched_app["api"]
-        # A filesystem root / shallow system path must never be removed even if it exists.
-        assert api._is_safe_to_remove_checkout("/") is False
-        api._cleanup_issue_checkout("/")  # must not raise and must not attempt removal
-
-    def test_is_safe_to_remove_checkout_handles_resolve_error(self, patched_app) -> None:
-        api = patched_app["api"]
-        # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
-        assert api._is_safe_to_remove_checkout("bad\x00path") is False
-
-    def test_cleanup_helper_swallows_rmtree_failure(
+    def test_cleanup_helper_refuses_path_outside_ephemeral_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
         api = patched_app["api"]
+        # Configure an ephemeral root that does NOT contain the target: even a
+        # real git checkout with the cleanup flag must not be removed.
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path / "ephemeral_root"))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "cache"))
+        outside = tmp_path / "someones" / "real-repo"
+        outside.mkdir(parents=True)
+        (outside / ".git").mkdir()
+        assert api._is_ephemeral_checkout_path(str(outside)) is False
+        api._cleanup_issue_checkout(str(outside))
+        assert outside.exists()
+
+    def test_is_ephemeral_checkout_path_refuses_shallow_path(self, patched_app) -> None:
+        api = patched_app["api"]
+        # A filesystem root / shallow system path must never be removed even if it exists.
+        assert api._is_ephemeral_checkout_path("/") is False
+        api._cleanup_issue_checkout("/")  # must not raise and must not attempt removal
+
+    def test_is_ephemeral_checkout_path_handles_resolve_error(self, patched_app) -> None:
+        api = patched_app["api"]
+        # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
+        assert api._is_ephemeral_checkout_path("bad\x00path") is False
+
+    def test_cleanup_helper_swallows_rmtree_failure_and_keeps_lock(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "checkout"
         target.mkdir()
         (target / ".git").mkdir()
+        lock = tmp_path / ".checkout.clone.lock"
+        lock.write_text("", encoding="utf-8")
 
         def _boom(*_a, **_kw):
             raise OSError("permission denied")
 
         monkeypatch.setattr(api.shutil, "rmtree", _boom)
-        # Must not raise even when rmtree fails.
+        # Must not raise; and because rmtree failed, the lock file is retained so
+        # it keeps guarding the still-present (half-removed) checkout.
         api._cleanup_issue_checkout(str(target))
+        assert lock.exists()
 
-    def test_cleanup_removes_sibling_lock_file(self, patched_app, tmp_path) -> None:
+    def test_cleanup_removes_sibling_lock_file(self, patched_app, tmp_path, monkeypatch) -> None:
         api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
@@ -1679,6 +1707,7 @@ class TestEphemeralCheckoutCleanup:
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
         api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
@@ -1692,9 +1721,11 @@ class TestEphemeralCheckoutCleanup:
         api._cleanup_issue_checkout(str(target))  # must not raise
         assert not target.exists()
 
-    def test_clean_success_with_flag_deletes_checkout(self, patched_app) -> None:
+    def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
         repo_path = patched_app["repo_path"]
         os.makedirs(os.path.join(repo_path, ".git"), exist_ok=True)  # a real checkout
+        # Make the checkout's parent an ephemeral workspace root so cleanup is eligible.
+        monkeypatch.setenv("WORKSPACE_ROOT", os.path.dirname(repo_path))
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(

@@ -15,6 +15,7 @@ so unified_api can depend on it without pulling in the coding-team app.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -32,3 +33,54 @@ def clone_lock_path(repo_path: str | Path) -> Path:
     """
     p = Path(repo_path)
     return p.parent / f".{p.name}.clone.lock"
+
+
+def ephemeral_workspace_roots() -> list[Path]:
+    """Roots under which unified_api auto-derives platform-owned per-issue checkouts.
+
+    Mirrors the auto-derived branches of unified_api's ``_resolve_repo_path`` so
+    the coding team can confirm a checkout is platform-owned (and therefore safe
+    to delete) rather than an operator-pinned or attacker-supplied path. Read
+    from the same env vars both services share:
+
+    - ``SE_WORKSPACE_DIR`` / ``WORKSPACE_ROOT`` → ``<root>/<owner>_<repo>/issue-N``
+    - ``AGENT_CACHE`` (default ``.agent_cache``) → ``<cache>/github_workspaces/...``
+
+    Postconditions:
+        - Returns the resolved candidate roots (de-duplicated, order preserved).
+    """
+    roots: list[Path] = []
+    for var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
+        val = os.environ.get(var, "").strip()
+        if val:
+            roots.append(Path(val).resolve())
+    cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache").strip() or ".agent_cache"
+    roots.append((Path(cache_dir) / "github_workspaces").resolve())
+    # De-duplicate while preserving order.
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for r in roots:
+        if r not in seen:
+            seen.add(r)
+            unique.append(r)
+    return unique
+
+
+def is_within_ephemeral_workspace(repo_path: str | Path) -> bool:
+    """True iff ``repo_path`` resolves to a path strictly under an ephemeral root.
+
+    Defense-in-depth for the destructive cleanup: even if a caller sets the
+    cleanup flag, a checkout is only removable when it lives under a root this
+    deployment auto-derives into (see ``ephemeral_workspace_roots``). An
+    operator-pinned or arbitrary path is therefore never eligible for deletion.
+
+    Postconditions:
+        - Returns True iff the resolved path is a strict descendant of one of
+          ``ephemeral_workspace_roots`` (the root itself is excluded); False on
+          any resolution error or when no root contains it.
+    """
+    try:
+        p = Path(repo_path).resolve()
+    except (OSError, ValueError):
+        return False
+    return any(root in p.parents for root in ephemeral_workspace_roots())
