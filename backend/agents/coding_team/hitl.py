@@ -250,8 +250,14 @@ def normalize_open_questions(raw: Any) -> List[Dict[str, Any]]:
     return out
 
 
-def question_key(text: str) -> str:
-    """Whitespace/case-normalized key used to match an open question against a resolved answer."""
+def normalize_key(text: str) -> str:
+    """Whitespace/case-normalized comparison key for arbitrary text.
+
+    Used both to match an open question against a resolved answer (by question text) and to
+    de-duplicate fully rendered decision lines (``"question → answer"``, including the answer). It
+    normalizes the whole string it is given — it makes no assumption about a ``→`` separator or
+    about which part of the text it is keying.
+    """
     return " ".join((text or "").lower().split())
 
 
@@ -278,11 +284,11 @@ def unanswered_questions(
         return []
     resolved = resolved_questions or []
     answered_keys = {
-        question_key(r.get("question_text", ""))
+        normalize_key(r.get("question_text", ""))
         for r in resolved
         if isinstance(r, dict) and r.get("question_text")
     }
-    return [q for q in open_questions if question_key(_question_text(q)) not in answered_keys]
+    return [q for q in open_questions if normalize_key(_question_text(q)) not in answered_keys]
 
 
 def answers_to_resolved(
@@ -374,6 +380,29 @@ def render_decision_line(entry: Dict[str, Any]) -> str:
     """
     question, answer = decision_qa(entry)
     return f"{question} → {answer}" if question else answer
+
+
+def resolved_decision_lines(records: Any) -> List[str]:
+    """Render a list of decision records into non-empty 'question → answer' lines, in order.
+
+    Single source of truth for the iterate-and-render loop shared by the orchestrator's
+    ``_format_decisions`` / ``_user_decisions_for`` and the Tech Lead's ``_render_resolved_questions``.
+
+    Preconditions:
+        - ``records`` is an iterable of decision-record dicts (or None); non-dict members and
+          records with no renderable content are skipped.
+    Postconditions:
+        - Returns one non-empty ``render_decision_line`` string per renderable record, preserving
+          input order. De-duplication, bulleting, and joining are left to the caller.
+    """
+    lines: List[str] = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        line = render_decision_line(r)
+        if line:
+            lines.append(line)
+    return lines
 
 
 def is_terminal(job_data: Dict[str, Any]) -> bool:

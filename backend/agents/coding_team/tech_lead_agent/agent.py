@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional
 from strands import Agent
 
 from coding_team.hitl import normalize_open_questions as _normalize_open_questions
-from coding_team.hitl import render_decision_line
+from coding_team.hitl import resolved_decision_lines
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
@@ -53,14 +53,7 @@ def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
     Postconditions:
         - Returns a non-empty bullet string when any decision has content, else "".
     """
-    lines: List[str] = []
-    for entry in resolved or []:
-        if not isinstance(entry, dict):
-            continue
-        line = render_decision_line(entry)
-        if line:
-            lines.append(f"- {line}")
-    return "\n".join(lines)
+    return "\n".join(f"- {line}" for line in resolved_decision_lines(resolved))
 
 
 def _plan_text(plan: CodingTeamPlanInput) -> str:

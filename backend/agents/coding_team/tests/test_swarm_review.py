@@ -1643,6 +1643,40 @@ def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_pat
     assert swarm._user_decisions_for(task) == []
 
 
+def test_user_decisions_for_handles_answer_only_lines(tmp_path):
+    """Answer-only decision records (no question_text) render as the bare answer and dedupe against
+    identical answer-only lines (case-insensitively), without assuming a '→' separator."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+        resolved_questions=[{"answer": "Use TLS"}],  # plan-level, answer-only
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [
+                    {"answer": "use tls"},  # same answer (case variation) → deduped
+                    {"answer": "Use SSL"},  # distinct answer → kept
+                ],
+            }
+        ],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert "Use TLS" in lines
+    assert "Use SSL" in lines
+    assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
+
+
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
     """_review_and_merge feeds the task's settled decisions to the Tech Lead reviewer."""
     _patch_git(monkeypatch)

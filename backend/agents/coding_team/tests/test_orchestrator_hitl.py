@@ -76,6 +76,21 @@ def test_format_decisions():
     assert _format_decisions([])
 
 
+def test_render_decision_line_branches():
+    from coding_team.hitl import render_decision_line
+
+    # question + answer → "q → a"
+    assert render_decision_line({"question_text": "Which DB?", "answer": "Postgres"}) == (
+        "Which DB? → Postgres"
+    )
+    # answer-only (no question text) → the bare answer, no "→" separator
+    assert render_decision_line({"answer": "Use TLS"}) == "Use TLS"
+    # question-only → "q → " (answer empty)
+    assert render_decision_line({"question_text": "Which DB?"}) == "Which DB? → "
+    # neither → ""
+    assert render_decision_line({}) == ""
+
+
 def test_hydrate_resolved_from_record():
     plan = CodingTeamPlanInput(repo_path="/tmp", open_questions=["a"])
     _hydrate_resolved_from_record(
