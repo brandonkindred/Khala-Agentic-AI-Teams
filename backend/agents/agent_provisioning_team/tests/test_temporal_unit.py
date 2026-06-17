@@ -247,7 +247,7 @@ def test_start_worker_thread_no_op_when_disabled() -> None:
         patch.object(shared_temporal, "start_team_worker") as mock_start,
     ):
         assert worker_mod.start_agent_provisioning_temporal_worker_thread() is False
-    mock_start.assert_not_called()
+        mock_start.assert_not_called()
 
 
 def test_start_worker_thread_delegates_to_start_team_worker() -> None:

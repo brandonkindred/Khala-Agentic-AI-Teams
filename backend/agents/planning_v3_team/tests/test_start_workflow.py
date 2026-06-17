@@ -28,7 +28,7 @@ def test_wait_for_client_times_out_and_raises(monkeypatch):
     monkeypatch.setattr(sw, "CLIENT_READY_TIMEOUT_S", 0.05)
     monkeypatch.setattr(sw, "CLIENT_READY_POLL_S", 0.01)
 
-    with pytest.raises(RuntimeError, match="is the Planning V3 worker running"):
+    with pytest.raises(RuntimeError, match="cannot reach Temporal"):
         sw._wait_for_client()
 
 

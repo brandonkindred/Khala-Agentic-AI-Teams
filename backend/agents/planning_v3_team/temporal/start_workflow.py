@@ -77,12 +77,24 @@ def _wait_for_client() -> tuple[Any, Any]:
                 "Temporal client not available; the Planning V3 worker is not running"
             )
         if time.monotonic() >= deadline:
-            raise RuntimeError("Temporal client not available; is the Planning V3 worker running?")
+            raise RuntimeError(
+                f"Temporal client not available after {CLIENT_READY_TIMEOUT_S:.0f}s; "
+                "the Planning V3 worker is running but cannot reach Temporal"
+            )
         time.sleep(CLIENT_READY_POLL_S)
 
 
-def _run_async(coro: Any) -> Any:
-    _, loop = _wait_for_client()
+def _run_async(coro: Any, loop: Any) -> Any:
+    """Submit ``coro`` to the worker's event loop and block for the result.
+
+    Preconditions:
+        - ``loop`` is the running event loop owned by the Temporal worker
+          thread (as returned by ``_wait_for_client``), and ``coro`` is a
+          coroutine created from that worker's connected client.
+    Postconditions:
+        - Returns the coroutine's result, waiting up to
+          ``START_WORKFLOW_TIMEOUT`` seconds for it to complete.
+    """
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
@@ -110,7 +122,7 @@ def start_planning_v3_workflow(
         - ``RuntimeError`` if the Temporal client never becomes available
           within ``CLIENT_READY_TIMEOUT_S`` (worker not running / misconfigured).
     """
-    client, _ = _wait_for_client()
+    client, loop = _wait_for_client()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     _run_async(
         client.start_workflow(
@@ -127,6 +139,7 @@ def start_planning_v3_workflow(
             ],
             id=workflow_id,
             task_queue=TASK_QUEUE,
-        )
+        ),
+        loop,
     )
     logger.info("Started PlanningV3Workflow id=%s", workflow_id)
