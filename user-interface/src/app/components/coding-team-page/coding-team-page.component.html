@@ -33,282 +33,386 @@
     </span>
   </div>
 } @else {
-  <section class="github-section">
-    <div class="github-section__header">
-      <h2>
-        <mat-icon>bug_report</mat-icon>
-        GitHub Issues
-        <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
-      </h2>
-      <button
-        mat-flat-button
-        color="primary"
-        (click)="loadIssues()"
-        [disabled]="loadingIssues"
-      >
-        <mat-icon>refresh</mat-icon>
-        @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
-      </button>
-    </div>
-
-    @if (issueError) {
-      <div class="github-banner github-banner--error">
-        <mat-icon>error_outline</mat-icon>
-        <span>{{ issueError }}</span>
+  <div class="coding-team-layout">
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- LEFT: GitHub Issues — always visible and selectable           -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <section class="coding-team-layout__issues github-section">
+      <div class="github-section__header">
+        <h2>
+          <mat-icon>bug_report</mat-icon>
+          GitHub Issues
+          <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+        </h2>
+        <button
+          mat-flat-button
+          color="primary"
+          (click)="loadIssues()"
+          [disabled]="loadingIssues"
+        >
+          <mat-icon>refresh</mat-icon>
+          @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
+        </button>
       </div>
-    }
 
-    <!-- Active job status -->
-    @if (activeJob) {
-      <div class="github-job-panel">
-        <div class="github-job-panel__header">
-          <mat-icon>engineering</mat-icon>
-          <h3>
-            Working on issue
-            @if (activeJob.issue_url) {
-              <a [href]="activeJob.issue_url" target="_blank" rel="noopener noreferrer">#{{ activeJob.issue_number }}</a>
-            } @else {
-              #{{ activeJob.issue_number }}
-            }
-          </h3>
-          @if (jobStatus?.waiting_for_answers) {
-            <span class="github-job-status github-job-status--waiting_for_user">
-              waiting for your answers
-            </span>
-          }
-          <button
-            mat-button
-            (click)="dismissJob()"
-            [disabled]="hasPendingQuestions()"
-            [matTooltip]="hasPendingQuestions() ? 'Answer the pending questions to continue — this run can\'t be dismissed while waiting' : isJobTerminal() ? 'Dismiss this finished job' : 'Hide this panel — the run keeps going in the background'"
-          >
-            <mat-icon>close</mat-icon>
-            Dismiss
-          </button>
+      @if (issueError) {
+        <div class="github-banner github-banner--error">
+          <mat-icon>error_outline</mat-icon>
+          <span>{{ issueError }}</span>
         </div>
+      }
 
-        <div class="github-job-panel__body">
-          <div class="github-job-panel__field">
-            <span class="github-job-panel__label">Job</span>
-            <code>{{ activeJob.job_id | slice:0:12 }}…</code>
+      <!-- Issue list — never hidden by an active run. -->
+      @if (issuesLoaded) {
+        @if (issues.length === 0) {
+          <div class="github-empty">
+            <mat-icon>check_circle_outline</mat-icon>
+            <span>No open issues found.</span>
           </div>
-          @if (jobStatus) {
-            <div class="github-job-panel__field">
-              <span class="github-job-panel__label">Status</span>
-              <span class="github-job-status github-job-status--{{ jobStatus.status }}">
-                {{ jobStatus.status }}
-              </span>
-            </div>
-            @if (jobStatus.phase) {
-              <div class="github-job-panel__field">
-                <span class="github-job-panel__label">Phase</span>
-                <span>{{ jobStatus.phase }}</span>
-              </div>
-            }
-            @if (jobStatus.status_text) {
-              <div class="github-job-panel__field">
-                <span class="github-job-panel__label">Detail</span>
-                <span>{{ jobStatus.status_text }}</span>
-              </div>
-            }
+        } @else {
+          <div class="github-issues-list">
+            @for (issue of pagedIssues; track issue.number) {
+              <button
+                class="github-issue-row"
+                type="button"
+                [class.github-issue-row--selected]="selectedIssue?.number === issue.number"
+                (click)="selectIssue(issue)"
+              >
+                <span class="github-issue-row__number">#{{ issue.number }}</span>
+                <span class="github-issue-row__title" [matTooltip]="issue.title">{{ issue.title }}</span>
+                @if (isIssueInProgress(issue)) {
+                  <span
+                    class="github-label-chip github-label-chip--active"
+                    matTooltip="The coding team is already working on this issue"
+                  >
+                    <mat-icon>engineering</mat-icon>
+                    In progress
+                  </span>
+                }
+                <span class="github-issue-row__labels">
+                  @for (label of issue.labels; track label) {
+                    <span class="github-label-chip">{{ label }}</span>
+                  }
+                </span>
+                @if (hasDependencies(issue)) {
+                  <span
+                    class="github-issue-row__deps"
+                    role="img"
+                    [class.github-issue-row__deps--blocked]="issue.blocked"
+                    [class.github-issue-row__deps--met]="!issue.blocked"
+                    [matTooltip]="dependencyTooltip(issue)"
+                    [attr.aria-label]="dependencyTooltip(issue)"
+                  >
+                    <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                    @if (issue.blocked) {
+                      <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
+                    }
+                  </span>
+                }
+                <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
+              </button>
 
-            <!-- Live monitor: objective, overall progress + phase stepper, sub-agent activity,
-                 and the per-agent roster (who is working and each agent's status). -->
-            <app-coding-team-monitor [status]="jobStatus" />
-
-            @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
-              <div class="github-job-tasks">
-                <span class="github-job-panel__label">Tasks</span>
-                <div class="github-job-tasks__list">
-                  @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div class="github-task-chip github-task-chip--{{ task.status }}">
-                      {{ task.title | slice:0:40 }}
-                      <span class="github-task-chip__status">{{ task.status }}</span>
+              <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
+              @if (selectedIssue?.number === issue.number) {
+                <div class="github-confirm-panel">
+                  <h3>Start AI coding on this issue?</h3>
+                  <div class="github-confirm-panel__issue">
+                    <span class="issue-number">#{{ selectedIssue!.number }}</span>
+                    <span class="issue-title">{{ selectedIssue!.title }}</span>
+                  </div>
+                  @if (selectedIssue!.body_preview) {
+                    <p class="github-confirm-panel__preview">{{ selectedIssue!.body_preview }}</p>
+                  }
+                  @if (selectedIssue!.blocked) {
+                    <div class="github-confirm-panel__warning" role="alert">
+                      <mat-icon>block</mat-icon>
+                      <div>
+                        <strong>Blocked by open dependencies</strong>
+                        <p>
+                          This issue depends on {{ openDepRefs(selectedIssue!) }}, which are still open.
+                          The coding team will attempt the run, but GitHub may reject it until those
+                          issues are closed.
+                        </p>
+                      </div>
                     </div>
                   }
+                  <p class="github-confirm-panel__hint">
+                    The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
+                  </p>
+                  <div class="github-confirm-panel__actions">
+                    <button
+                      mat-flat-button
+                      color="primary"
+                      (click)="confirmAndRun()"
+                      [disabled]="runningIssue"
+                    >
+                      @if (runningIssue) {
+                        <mat-spinner diameter="18"></mat-spinner>
+                        Starting…
+                      } @else {
+                        <ng-container>
+                          <mat-icon>play_arrow</mat-icon>
+                          Confirm &amp; Start
+                        </ng-container>
+                      }
+                    </button>
+                    <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
+                  </div>
                 </div>
-              </div>
+              }
             }
-            @if (hasPendingQuestions()) {
-              <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>help_outline</mat-icon>
-                <span>The coding team is paused and needs your decisions before it can continue.</span>
-              </div>
-              <app-pending-questions
-                [jobId]="activeJob.job_id"
-                [questions]="jobStatus.pending_questions!"
-                submitEndpoint="coding-team"
-                (answersSubmitted)="onAnswersSubmitted($event)"
-              />
-            }
-            @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
-              <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>play_circle_outline</mat-icon>
-                <span>Answers were received but the run could not restart automatically.</span>
-                <button
-                  mat-flat-button
-                  color="accent"
-                  (click)="resumeJob()"
-                  [disabled]="resumingJob"
-                  aria-label="Resume the coding-team run"
-                >
-                  @if (resumingJob) {
-                    <mat-spinner diameter="18"></mat-spinner>
-                    Resuming…
-                  } @else {
-                    <mat-icon>play_arrow</mat-icon>
-                    Resume Run
-                  }
-                </button>
-              </div>
-            }
-            @if (jobStatus.thinking) {
-              <mat-expansion-panel class="thinking-panel" [expanded]="true">
-                <mat-expansion-panel-header>
-                  <mat-panel-title>
-                    <mat-icon>psychology</mat-icon>
-                    Agent thinking
-                  </mat-panel-title>
-                </mat-expansion-panel-header>
-                <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
-              </mat-expansion-panel>
-            }
-            @if (jobStatus.github_pr_url) {
-              <div class="github-job-panel__field github-job-panel__field--pr">
-                <mat-icon>merge_type</mat-icon>
-                <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
-                  {{ jobStatus.github_pr_url }}
-                </a>
-              </div>
-            }
-            @if (jobStatus.error) {
-              <div class="github-banner github-banner--error">
-                <mat-icon>error_outline</mat-icon>
-                <span>{{ jobStatus.error }}</span>
-              </div>
-            }
-          } @else {
-            <div class="github-job-panel__field">
-              <mat-spinner diameter="18"></mat-spinner>
-              <span>Starting…</span>
-            </div>
-          }
-        </div>
-      </div>
-    }
-
-    <!-- Issue confirmation -->
-    @if (selectedIssue && !activeJob) {
-      <div class="github-confirm-panel">
-        <h3>Start AI coding on this issue?</h3>
-        <div class="github-confirm-panel__issue">
-          <span class="issue-number">#{{ selectedIssue.number }}</span>
-          <span class="issue-title">{{ selectedIssue.title }}</span>
-        </div>
-        @if (selectedIssue.body_preview) {
-          <p class="github-confirm-panel__preview">{{ selectedIssue.body_preview }}</p>
-        }
-        @if (selectedIssue.blocked) {
-          <div class="github-confirm-panel__warning" role="alert">
-            <mat-icon>block</mat-icon>
-            <div>
-              <strong>Blocked by open dependencies</strong>
-              <p>
-                This issue depends on {{ openDepRefs(selectedIssue) }}, which are still open.
-                The coding team will attempt the run, but GitHub may reject it until those
-                issues are closed.
-              </p>
-            </div>
           </div>
-        }
-        <p class="github-confirm-panel__hint">
-          The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
-        </p>
-        <div class="github-confirm-panel__actions">
-          <button
-            mat-flat-button
-            color="primary"
-            (click)="confirmAndRun()"
-            [disabled]="runningIssue"
-          >
-            @if (runningIssue) {
-              <mat-spinner diameter="18"></mat-spinner>
-              Starting…
-            } @else {
-              <ng-container>
-                <mat-icon>play_arrow</mat-icon>
-                Confirm &amp; Start
-              </ng-container>
-            }
-          </button>
-          <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
-        </div>
-      </div>
-    }
-
-    <!-- Issue list -->
-    @if (issuesLoaded && !selectedIssue && !activeJob) {
-      @if (issues.length === 0) {
-        <div class="github-empty">
-          <mat-icon>check_circle_outline</mat-icon>
-          <span>No open issues found.</span>
-        </div>
-      } @else {
-        <div class="github-issues-list">
-          @for (issue of pagedIssues; track issue.number) {
-            <button
-              class="github-issue-row"
-              type="button"
-              (click)="selectIssue(issue)"
-            >
-              <span class="github-issue-row__number">#{{ issue.number }}</span>
-              <span class="github-issue-row__title">{{ issue.title }}</span>
-              @if (isIssueInProgress(issue)) {
-                <span
-                  class="github-label-chip github-label-chip--active"
-                  matTooltip="The coding team is already working on this issue"
-                >
-                  <mat-icon>engineering</mat-icon>
-                  In progress
-                </span>
-              }
-              <span class="github-issue-row__labels">
-                @for (label of issue.labels; track label) {
-                  <span class="github-label-chip">{{ label }}</span>
-                }
-              </span>
-              @if (hasDependencies(issue)) {
-                <span
-                  class="github-issue-row__deps"
-                  role="img"
-                  [class.github-issue-row__deps--blocked]="issue.blocked"
-                  [class.github-issue-row__deps--met]="!issue.blocked"
-                  [matTooltip]="dependencyTooltip(issue)"
-                  [attr.aria-label]="dependencyTooltip(issue)"
-                >
-                  <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
-                  @if (issue.blocked) {
-                    <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
-                  }
-                </span>
-              }
-              <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
-            </button>
+          @if (issues.length > PAGE_SIZE_OPTIONS[0]) {
+            <mat-paginator
+              class="github-issues-paginator"
+              [length]="issues.length"
+              [pageSize]="pageSize"
+              [pageIndex]="pageIndex"
+              [pageSizeOptions]="PAGE_SIZE_OPTIONS"
+              showFirstLastButtons
+              (page)="onPageChange($event)"
+            ></mat-paginator>
           }
-        </div>
-        @if (issues.length > PAGE_SIZE_OPTIONS[0]) {
-          <mat-paginator
-            class="github-issues-paginator"
-            [length]="issues.length"
-            [pageSize]="pageSize"
-            [pageIndex]="pageIndex"
-            [pageSizeOptions]="PAGE_SIZE_OPTIONS"
-            (page)="onPageChange($event)"
-          ></mat-paginator>
         }
       }
-    }
-  </section>
+    </section>
+
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <!-- RIGHT: Runs — persistent status panel (cannot be dismissed)   -->
+    <!-- ──────────────────────────────────────────────────────────── -->
+    <aside class="coding-team-layout__runs">
+      <div class="runs-panel">
+        <div class="runs-panel__header">
+          <h2>
+            <mat-icon>engineering</mat-icon>
+            Runs
+          </h2>
+          <mat-icon
+            class="runs-panel__legend"
+            matTooltip="Runs stay here while they work and after they finish — this panel can't be dismissed. Pick a run to watch its live progress."
+            aria-label="About the Runs panel"
+          >help_outline</mat-icon>
+        </div>
+
+        @if (runsError) {
+          <div class="github-banner github-banner--error">
+            <mat-icon>error_outline</mat-icon>
+            <span>{{ runsError }}</span>
+          </div>
+        }
+
+        @if (runs.length === 0) {
+          <div class="kh-empty-state runs-panel__empty">
+            <mat-icon class="kh-empty-icon">rocket_launch</mat-icon>
+            <span class="kh-empty-title">No runs yet</span>
+            <span class="kh-empty-message">Select a GitHub issue and start a run to watch live progress here.</span>
+          </div>
+        } @else {
+          @if (runningRuns.length > 0) {
+            <div class="runs-section">
+              <p class="runs-section__title">Running</p>
+              <div class="runs-list">
+                @for (run of runningRuns; track run.job_id) {
+                  <button
+                    class="coding-run-item"
+                    type="button"
+                    [class.selected]="selectedRunId === run.job_id"
+                    (click)="selectRun(run.job_id)"
+                  >
+                    <div class="coding-run-item__top">
+                      <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
+                      @if (run.waiting_for_answers) {
+                        <span class="kh-badge kh-badge--warning">needs answers</span>
+                      } @else {
+                        <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
+                      }
+                    </div>
+                    @if (run.status_text || run.phase) {
+                      <span class="coding-run-item__detail" [matTooltip]="run.status_text || run.phase || ''">
+                        {{ run.status_text || run.phase }}
+                      </span>
+                    }
+                    <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+
+          @if (recentRuns.length > 0) {
+            <div class="runs-section">
+              @if (runningRuns.length > 0) {
+                <div class="runs-divider"></div>
+              }
+              <p class="runs-section__title">Recent</p>
+              <div class="runs-list">
+                @for (run of recentRuns; track run.job_id) {
+                  <button
+                    class="coding-run-item"
+                    type="button"
+                    [class.selected]="selectedRunId === run.job_id"
+                    (click)="selectRun(run.job_id)"
+                  >
+                    <div class="coding-run-item__top">
+                      <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
+                      <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
+                    </div>
+                    <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
+                  </button>
+                }
+              </div>
+            </div>
+          }
+        }
+
+        <!-- Selected-run live detail -->
+        @if (selectedRunId && jobStatus) {
+          <div class="run-detail">
+            <div class="run-detail__header">
+              <mat-icon>engineering</mat-icon>
+              <h3>
+                Working on issue
+                @if (selectedIssueUrl) {
+                  <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}</a>
+                } @else {
+                  #{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}
+                }
+              </h3>
+              @if (jobStatus.waiting_for_answers) {
+                <span class="kh-badge kh-badge--warning">waiting for answers</span>
+              }
+            </div>
+
+            <div class="run-detail__body">
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Job</span>
+                <code>{{ jobStatus.job_id | slice:0:12 }}…</code>
+                <button
+                  mat-icon-button
+                  class="run-detail__copy"
+                  (click)="copyJobId()"
+                  [matTooltip]="jobIdCopied ? 'Copied!' : 'Copy full job id'"
+                  aria-label="Copy full job id"
+                >
+                  <mat-icon>{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
+                </button>
+              </div>
+              <div class="github-job-panel__field">
+                <span class="github-job-panel__label">Status</span>
+                <span class="kh-badge kh-badge--{{ badgeClass(jobStatus.status) }}">{{ jobStatus.status }}</span>
+              </div>
+              @if (jobStatus.phase) {
+                <div class="github-job-panel__field">
+                  <span class="github-job-panel__label">Phase</span>
+                  <span>{{ jobStatus.phase }}</span>
+                </div>
+              }
+              @if (jobStatus.status_text) {
+                <div class="github-job-panel__field">
+                  <span class="github-job-panel__label">Detail</span>
+                  <span>{{ jobStatus.status_text }}</span>
+                </div>
+              }
+
+              <!-- Live monitor: objective, overall progress + phase stepper, sub-agent activity,
+                   and the per-agent roster (who is working and each agent's status). -->
+              <app-coding-team-monitor [status]="jobStatus" />
+
+              @if (jobStatus.task_graph_snapshot && jobStatus.task_graph_snapshot.length > 0) {
+                <div class="github-job-tasks">
+                  <span class="github-job-panel__label">Tasks</span>
+                  <div class="github-job-tasks__list">
+                    @for (task of jobStatus.task_graph_snapshot; track task.id) {
+                      <div class="github-task-chip github-task-chip--{{ task.status }}" [matTooltip]="task.title">
+                        {{ task.title | slice:0:40 }}
+                        <span class="github-task-chip__status">{{ task.status }}</span>
+                      </div>
+                    }
+                  </div>
+                </div>
+              }
+              @if (hasPendingQuestions()) {
+                <div class="github-banner github-banner--waiting" role="status">
+                  <mat-icon>help_outline</mat-icon>
+                  <span>The coding team is paused and needs your decisions before it can continue.</span>
+                </div>
+                <app-pending-questions
+                  [jobId]="selectedRunId!"
+                  [questions]="jobStatus.pending_questions!"
+                  submitEndpoint="coding-team"
+                  (answersSubmitted)="onAnswersSubmitted($event)"
+                />
+              }
+              @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
+                <div class="github-banner github-banner--waiting" role="status">
+                  <mat-icon>play_circle_outline</mat-icon>
+                  <span>Answers were received but the run could not restart automatically.</span>
+                  <button
+                    mat-flat-button
+                    color="accent"
+                    (click)="resumeJob()"
+                    [disabled]="resumingJob"
+                    aria-label="Resume the coding-team run"
+                  >
+                    @if (resumingJob) {
+                      <mat-spinner diameter="18"></mat-spinner>
+                      Resuming…
+                    } @else {
+                      <mat-icon>play_arrow</mat-icon>
+                      Resume Run
+                    }
+                  </button>
+                </div>
+              }
+              @if (jobStatus.thinking) {
+                <mat-expansion-panel class="thinking-panel">
+                  <mat-expansion-panel-header>
+                    <mat-panel-title>
+                      <mat-icon>psychology</mat-icon>
+                      Agent thinking
+                    </mat-panel-title>
+                  </mat-expansion-panel-header>
+                  <pre class="thinking-stream">{{ jobStatus.thinking }}</pre>
+                </mat-expansion-panel>
+              }
+              @if (jobStatus.github_pr_url) {
+                <div class="github-job-panel__field github-job-panel__field--pr">
+                  <mat-icon>merge_type</mat-icon>
+                  <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
+                    {{ jobStatus.github_pr_url }}
+                  </a>
+                </div>
+              }
+              @if (isJobTerminal()) {
+                <div class="run-detail__retry">
+                  <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
+                    @if (runningIssue) {
+                      <mat-spinner diameter="18"></mat-spinner>
+                      Starting…
+                    } @else {
+                      <mat-icon>replay</mat-icon>
+                      Run again
+                    }
+                  </button>
+                </div>
+              }
+              @if (jobStatus.error) {
+                <div class="github-banner github-banner--error">
+                  <mat-icon>error_outline</mat-icon>
+                  <span>{{ jobStatus.error }}</span>
+                </div>
+              }
+            </div>
+          </div>
+        } @else if (selectedRunId && !jobStatus) {
+          <div class="run-detail run-detail--pending">
+            <mat-spinner diameter="18"></mat-spinner>
+            <span>Starting…</span>
+          </div>
+        }
+      </div>
+    </aside>
+  </div>
 }
 
 <!-- ────────────────────────────────────────────────────────────────── -->
