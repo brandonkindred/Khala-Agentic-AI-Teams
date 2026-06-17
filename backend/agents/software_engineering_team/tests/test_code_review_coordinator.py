@@ -1290,6 +1290,32 @@ def test_language_is_threaded_into_every_chunk_prompt() -> None:
     assert all("**Language:** python" in p for p in client.prompts)
 
 
+def test_user_decisions_thread_through_coordinator_to_chunk_prompt() -> None:
+    """A CodeReviewInput.user_decisions reaches the per-chunk review prompt as settled context."""
+
+    class _Recorder(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.prompts: List[str] = []
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+            self.prompts.append(prompt)
+            return super().complete_json(prompt, **kwargs)
+
+    client = _Recorder()
+    run_coordinator(
+        client,
+        CodeReviewInput(
+            files={"config.py": "TIMEOUT = 30"},
+            task_description="t",
+            language="python",
+            user_decisions=["Which timeout? → 30s"],
+        ),
+    )
+    assert client.prompts
+    assert all("Which timeout? → 30s" in p for p in client.prompts)
+
+
 # ---------------------------------------------------------------------------
 # End-to-end property: large synthetic input through CodeReviewAgent.run
 # ---------------------------------------------------------------------------

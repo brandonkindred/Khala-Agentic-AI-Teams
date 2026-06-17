@@ -34,6 +34,7 @@ class StubTechLead:
         task_description,
         acceptance_criteria,
         changes_summary,
+        user_decisions=None,
         progress_callback=None,
     ):
         return {"approved": self.approved, "reason": "ok", "requested_changes": []}
@@ -979,6 +980,9 @@ def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeyp
     assert task.revision_count == 4  # escalation did not consume the revision budget
     assert task.revision_feedback[-1]["source"] == "user_decision"
     assert "use TLS" in task.revision_feedback[-1]["reason"]
+    # The structured records are preserved alongside the rendered reason so the review gates
+    # can tell the reviewer the question is already settled (see _user_decisions_for).
+    assert task.revision_feedback[-1]["decisions"] == [{"question_text": "Q?", "answer": "use TLS"}]
 
 
 def test_escalate_decision_bounded_by_escalation_cap(tmp_path, monkeypatch):

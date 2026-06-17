@@ -1178,6 +1178,22 @@ def test_build_code_review_input_code_only() -> None:
     assert inp.code == "### a.py ###\nx"
 
 
+def test_build_code_review_input_forwards_user_decisions() -> None:
+    from code_review_agent.models import build_code_review_input
+
+    inp = build_code_review_input(
+        code="x", task_description="t", user_decisions=["Which DB? → Postgres"]
+    )
+    assert inp.user_decisions == ["Which DB? → Postgres"]
+
+
+def test_build_code_review_input_user_decisions_default_none() -> None:
+    from code_review_agent.models import build_code_review_input
+
+    inp = build_code_review_input(code="x", task_description="t")
+    assert inp.user_decisions is None
+
+
 # ---------------------------------------------------------------------------
 # Never-silently-skip review coverage: deleted content, emptied, unreadable,
 # control-char escaping, synthetic-note routing, venv exclusion

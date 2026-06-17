@@ -761,6 +761,7 @@ def run_coding_team_orchestrator(
         path=path,
         agent_ids=agent_ids,
         llm_getter=llm_getter,
+        resolved_questions=plan_input.resolved_questions,
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -821,6 +822,7 @@ class CodingTeamSwarm:
         path: Path,
         agent_ids: List[str],
         llm_getter: Callable[[str], Any],
+        resolved_questions: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -828,6 +830,10 @@ class CodingTeamSwarm:
         self.path = path
         self.agent_ids = agent_ids
         self.llm_getter = llm_getter
+        # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
+        # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
+        # gates so a reviewer never re-raises a question the user has settled.
+        self.resolved_questions: List[Dict[str, Any]] = list(resolved_questions or [])
         # Bound pause cycle (set in run()) used to escalate a worker-raised decision to the user.
         self.pause_for_questions: Optional[PauseCycle] = None
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
@@ -1008,6 +1014,10 @@ class CodingTeamSwarm:
                 "source": "user_decision",
                 "reason": _format_decisions(resolved),
                 "requested_changes": [],
+                # Keep the structured records alongside the rendered reason so the review gates can
+                # tell the reviewer the question is already settled (see _user_decisions_for). The
+                # engineer-facing render reads "reason" and is unaffected.
+                "decisions": resolved,
             }
         ]
         # Bound the total number of decision escalations per task, counted independently of the
@@ -1097,6 +1107,7 @@ class CodingTeamSwarm:
                         task_description=task.description or task.title,
                         language="python" if agent_type == "backend" else "typescript",
                         acceptance_criteria=task.acceptance_criteria or [],
+                        user_decisions=self._user_decisions_for(task),
                         llm_getter=self.llm_getter,
                         progress_callback=cr_bridge,
                     )
@@ -1149,6 +1160,41 @@ class CodingTeamSwarm:
         self.graph.unassign_task(task.id)
         return False
 
+    def _user_decisions_for(self, task: Task) -> List[str]:
+        """Render the user's already-made decisions for ``task`` as 'question → answer' lines.
+
+        Combines plan-level decisions (``self.resolved_questions`` — answered at the entry gate or
+        during Tech Lead planning) with task-level decisions the engineer escalated mid-implementation
+        (the structured ``decisions`` recorded on each ``user_decision`` revision-feedback entry).
+        Both review gates pass the result to their reviewer so a settled question is never re-raised.
+
+        Postconditions:
+            - Returns human-readable lines (``"{question} → {answer}"`` or just the answer when no
+              question text), de-duplicated by ``hitl.question_key``. Empty when no decision exists.
+        """
+        lines: List[str] = []
+        seen: set = set()
+
+        def _add(records: Any) -> None:
+            for r in records or []:
+                if not isinstance(r, dict):
+                    continue
+                q, a = hitl.decision_qa(r)
+                text = (f"{q} → {a}" if q else a).strip()
+                if not text:
+                    continue
+                key = hitl.question_key(text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(text)
+
+        _add(self.resolved_questions)
+        for entry in task.revision_feedback or []:
+            if isinstance(entry, dict) and entry.get("source") == "user_decision":
+                _add(entry.get("decisions"))
+        return lines
+
     def _review_and_merge(self, update_fn: Callable) -> None:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
         from software_engineering_team.shared.git_utils import (
@@ -1182,6 +1228,7 @@ class CodingTeamSwarm:
                     task_description=task.description,
                     acceptance_criteria=task.acceptance_criteria,
                     changes_summary=evidence,
+                    user_decisions=self._user_decisions_for(task),
                     progress_callback=tl_bridge,
                 )
             finally:
