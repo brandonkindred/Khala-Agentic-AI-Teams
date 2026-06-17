@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
 import { MatButtonModule } from '@angular/material/button';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatTooltipModule } from '@angular/material/tooltip';
@@ -36,6 +37,7 @@ const RUNS_POLL_MS = 15000;
     FormsModule,
     MatIconModule,
     MatButtonModule,
+    MatButtonToggleModule,
     MatProgressSpinnerModule,
     MatChipsModule,
     MatTooltipModule,
@@ -55,6 +57,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly integrationsApi = inject(IntegrationsApiService);
 
   latestJobId: string | null = null;
+
+  /** Which single view is visible. The page opens on the assistant chat. */
+  activeView: 'chat' | 'github' | 'jobs' = 'chat';
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -406,6 +411,25 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.startPolling(jobId);
   }
 
+  /**
+   * Toggle a run row in the Jobs accordion: expand it (select + poll) when collapsed, or collapse it
+   * (deselect + stop polling) when it is the open one.
+   *
+   * Preconditions: `run` is a row in `runs`.
+   * Postconditions: when `run` was the selected row, `selectedRunId`/`jobStatus` are cleared and the
+   * status poll is stopped (the 15s list poll keeps the row's badge fresh); otherwise `run` becomes
+   * the selected, expanded row and its status poll starts.
+   */
+  toggleRun(run: CodingTeamJobListItem): void {
+    if (this.selectedRunId === run.job_id) {
+      this.stopPolling();
+      this.selectedRunId = null;
+      this.jobStatus = null;
+      return;
+    }
+    this.selectRun(run.job_id);
+  }
+
   /** The currently selected run's list row, or null. */
   get selectedRun(): CodingTeamJobListItem | null {
     return this.runs.find((r) => r.job_id === this.selectedRunId) ?? null;
@@ -490,13 +514,18 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Copy the selected run's full job id to the clipboard, flashing a confirmation icon.
    *
-   * Preconditions: none (a no-op when no run is selected, or when the Clipboard API is unavailable).
-   * Postconditions: when a run is selected, its id is written to the clipboard and `jobIdCopied` is
-   * true for ~1.5s; the reset timer is tracked so it is cancelled on destroy and never fires twice.
+   * Preconditions: none (a no-op when no run is selected).
+   * Postconditions: when a run is selected and the Clipboard API is available, its id is written to
+   * the clipboard and `jobIdCopied` is true for ~1.5s (the reset timer is tracked so it is cancelled
+   * on destroy and never fires twice); a rejected clipboard write is swallowed so it cannot surface
+   * as an unhandled rejection. When the Clipboard API is unavailable the confirmation still flashes.
    */
   copyJobId(): void {
     if (!this.selectedRunId) return;
-    void navigator.clipboard?.writeText(this.selectedRunId);
+    navigator.clipboard?.writeText(this.selectedRunId).catch(() => {
+      // Clipboard write can reject (permission denied, insecure context); ignore — the user can
+      // still read the id from the panel, and we must not emit an unhandled rejection.
+    });
     this.jobIdCopied = true;
     if (this.copyResetTimer) clearTimeout(this.copyResetTimer);
     this.copyResetTimer = setTimeout(() => {

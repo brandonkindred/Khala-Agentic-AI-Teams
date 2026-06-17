@@ -119,6 +119,28 @@ describe('CodingTeamPageComponent', () => {
     fixture?.destroy();
   });
 
+  /** Switch the visible view (the page opens on 'chat') and re-render. */
+  function showView(view: 'chat' | 'github' | 'jobs'): void {
+    component.activeView = view;
+    fixture.detectChanges();
+  }
+
+  /**
+   * Put a single run into the Jobs accordion and open it with the given status. The run detail
+   * renders inside the list's @for, so the run must be present in `runningRuns` for the expanded
+   * detail to appear.
+   */
+  function openRun(run: CodingTeamJobListItem, jobStatus: Record<string, unknown>): void {
+    component.runs = [run];
+    component.runningRuns = [run];
+    component.recentRuns = [];
+    component.selectedRunId = run.job_id;
+    component.selectedRunNumber = run.github_context?.issue_number ?? null;
+    component.jobStatus = jobStatus as never;
+    component.activeView = 'jobs';
+    fixture.detectChanges();
+  }
+
   it('should create', async () => {
     await setup();
     expect(component).toBeTruthy();
@@ -246,6 +268,39 @@ describe('CodingTeamPageComponent', () => {
   });
 
   // -------------------------------------------------------------------------
+  // View switcher (Chat / GitHub / Jobs)
+  // -------------------------------------------------------------------------
+
+  describe('view switcher', () => {
+    it('opens on the Chat view showing the assistant, not the GitHub or Jobs panels', async () => {
+      await setup();
+      expect(component.activeView).toBe('chat');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('app-team-assistant-chat')).not.toBeNull();
+      expect(el.querySelector('.github-section')).toBeNull();
+      expect(el.querySelector('.jobs-panel')).toBeNull();
+    });
+
+    it('shows only the GitHub issues panel when the GitHub view is active', async () => {
+      await setup();
+      showView('github');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      expect(el.querySelector('app-team-assistant-chat')).toBeNull();
+      expect(el.querySelector('.jobs-panel')).toBeNull();
+    });
+
+    it('shows only the Jobs panel when the Jobs view is active', async () => {
+      await setup();
+      showView('jobs');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.jobs-panel')).not.toBeNull();
+      expect(el.querySelector('app-team-assistant-chat')).toBeNull();
+      expect(el.querySelector('.github-issue-row')).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
   // Pure helpers
   // -------------------------------------------------------------------------
 
@@ -280,6 +335,23 @@ describe('CodingTeamPageComponent', () => {
       component.selectedRunId = 'abcdef123456';
       component.copyJobId();
       expect(component.jobIdCopied).toBe(true);
+    });
+
+    it('swallows a rejected clipboard write instead of leaking an unhandled rejection', async () => {
+      await setup();
+      const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        component.selectedRunId = 'abcdef123456';
+        expect(() => component.copyJobId()).not.toThrow();
+        expect(writeText).toHaveBeenCalledWith('abcdef123456');
+        expect(component.jobIdCopied).toBe(true);
+        // Let the rejected promise settle; the .catch() must absorb it.
+        await flushAsync();
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
     });
 
     it('treats a run as waiting only while it is non-terminal', async () => {
@@ -359,6 +431,7 @@ describe('CodingTeamPageComponent', () => {
         ]),
       );
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
@@ -382,6 +455,7 @@ describe('CodingTeamPageComponent', () => {
         ]),
       );
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
@@ -393,6 +467,7 @@ describe('CodingTeamPageComponent', () => {
     it('renders no indicator when an issue has no dependencies', async () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(of([issueWith({ number: 9 })]));
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('.github-issue-row__deps')).toBeNull();
     });
@@ -406,6 +481,7 @@ describe('CodingTeamPageComponent', () => {
       });
       integrationsSpy.getGitHubIssues.mockReturnValue(of([blocked]));
       await setup();
+      component.activeView = 'github';
 
       component.selectIssue(blocked);
       fixture.detectChanges();
@@ -421,6 +497,7 @@ describe('CodingTeamPageComponent', () => {
 
     it('keeps the issue list visible and shows the inline confirm under the selected row', async () => {
       await setup();
+      component.activeView = 'github';
       component.selectIssue(component.issues[1]); // issue #2
       fixture.detectChanges();
       const el: HTMLElement = fixture.nativeElement;
@@ -438,10 +515,10 @@ describe('CodingTeamPageComponent', () => {
 
   describe('selected-run detail', () => {
     function showRun(jobStatusOverrides: Record<string, unknown>): void {
-      component.selectedRunId = 'j1';
-      component.selectedRunNumber = 5;
-      component.jobStatus = { job_id: 'j1', status: 'waiting_for_user', ...jobStatusOverrides } as never;
-      fixture.detectChanges();
+      openRun(
+        ghRun({ job_id: 'j1', status: 'waiting_for_user', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
+        { job_id: 'j1', status: 'waiting_for_user', ...jobStatusOverrides },
+      );
     }
 
     const QUESTION = {
@@ -454,9 +531,7 @@ describe('CodingTeamPageComponent', () => {
 
     it('renders the Agent thinking panel when jobStatus.thinking is present', async () => {
       await setup();
-      component.selectedRunId = 'j1';
-      component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'weighing the approach' };
-      fixture.detectChanges();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', thinking: 'weighing the approach' });
       const stream = fixture.nativeElement.querySelector('.thinking-stream');
       expect(stream).not.toBeNull();
       expect(stream?.textContent).toContain('weighing the approach');
@@ -464,9 +539,7 @@ describe('CodingTeamPageComponent', () => {
 
     it('hides the Agent thinking panel when there is no thinking text', async () => {
       await setup();
-      component.selectedRunId = 'j1';
-      component.jobStatus = { job_id: 'j1', status: 'running' };
-      fixture.detectChanges();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
       expect(fixture.nativeElement.querySelector('.thinking-stream')).toBeNull();
     });
 
@@ -501,11 +574,24 @@ describe('CodingTeamPageComponent', () => {
 
     it('offers a "Run again" affordance on a terminal run', async () => {
       await setup();
-      component.selectedRunId = 'j1';
-      component.jobStatus = { job_id: 'j1', status: 'failed' };
-      fixture.detectChanges();
+      openRun(ghRun({ job_id: 'j1', status: 'failed' }), { job_id: 'j1', status: 'failed' });
       const retry = fixture.nativeElement.querySelector('.run-detail__retry button');
       expect(retry?.textContent).toContain('Run again');
+    });
+
+    it('renders a status modifier class for every task chip in the run detail', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        task_graph_snapshot: [
+          { id: 't1', title: 'Build', status: 'completed' },
+          { id: 't2', title: 'Wire API', status: 'failed' },
+        ],
+      });
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-task-chip--completed')).not.toBeNull();
+      expect(el.querySelector('.github-task-chip--failed')).not.toBeNull();
     });
 
     it('onAnswersSubmitted folds the post-submit status in and restarts polling', async () => {
@@ -567,7 +653,7 @@ describe('CodingTeamPageComponent', () => {
     it('renders an empty state when there are no runs', async () => {
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('jobs');
       expect(fixture.nativeElement.querySelector('.runs-panel__empty')).not.toBeNull();
     });
 
@@ -580,7 +666,7 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('jobs');
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelectorAll('.coding-run-item').length).toBe(2);
       expect(el.querySelector('.delete-btn')).toBeNull();
@@ -601,7 +687,7 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('jobs');
       expect(fixture.nativeElement.textContent).toContain('needs answers');
     });
 
@@ -620,7 +706,7 @@ describe('CodingTeamPageComponent', () => {
       );
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('jobs');
       const el: HTMLElement = fixture.nativeElement;
       // Terminal runs are never auto-selected, so only the Recent row is in the DOM.
       expect(el.textContent).not.toContain('needs answers');
@@ -628,16 +714,40 @@ describe('CodingTeamPageComponent', () => {
       expect(el.querySelector('.kh-badge--completed')?.textContent).toContain('completed');
     });
 
-    it('keeps the issue list visible while a run is selected and its detail is shown', async () => {
+    it('expands the auto-selected run inline in the Jobs accordion', async () => {
       apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'r1', github_context: { owner: 'acme', repo: 'widgets', issue_number: 1 } })]));
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('jobs');
       expect(component.selectedRunId).toBe('r1');
       const el: HTMLElement = fixture.nativeElement;
-      // The regression guard: the issues list is still fully rendered alongside the run detail.
-      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      // The auto-selected run's row is marked selected and its detail is expanded beneath it.
+      expect(el.querySelector('.coding-run-item.selected')).not.toBeNull();
       expect(el.querySelector('.run-detail')).not.toBeNull();
+    });
+
+    it('toggles a run row open then collapsed in the accordion', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 1 } })]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      const run = component.recentRuns[0];
+      // Terminal run is not auto-selected, so nothing is expanded yet.
+      expect(component.selectedRunId).toBeNull();
+
+      component.toggleRun(run);
+      await flushAsync();
+      fixture.detectChanges();
+      expect(component.selectedRunId).toBe('r1');
+      expect(fixture.nativeElement.querySelector('.run-detail')).not.toBeNull();
+
+      component.toggleRun(run);
+      fixture.detectChanges();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.jobStatus).toBeNull();
+      expect(fixture.nativeElement.querySelector('.run-detail')).toBeNull();
     });
 
     it('auto-selects a non-terminal run on first load and starts polling it', async () => {
@@ -736,7 +846,7 @@ describe('CodingTeamPageComponent', () => {
       apiSpy.listJobs.mockReturnValue(of([ghRun({ github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } })]));
       await setup();
       await flushAsync();
-      fixture.detectChanges();
+      showView('github');
       const chips = fixture.nativeElement.querySelectorAll('.github-label-chip--active');
       expect(chips.length).toBe(1);
       expect(chips[0].textContent).toContain('In progress');

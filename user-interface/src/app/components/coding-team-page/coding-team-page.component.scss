@@ -18,48 +18,31 @@
 }
 
 // ---------------------------------------------------------------------------
-// Two-column layout: issues (always visible) + persistent Runs panel
+// View switcher — one focused view at a time
 // ---------------------------------------------------------------------------
 
-.coding-team-layout {
-  display: grid;
-  grid-template-columns: 1fr 380px;
-  gap: var(--kh-space-5);
-  align-items: flex-start;
-  margin: var(--kh-space-6) 0;
-}
+.view-toggle {
+  margin-bottom: var(--kh-space-5);
 
-.coding-team-layout__issues {
-  min-width: 0;
-  margin: 0;
-}
-
-.coding-team-layout__runs {
-  min-width: 0;
-  position: sticky;
-  top: 1rem;
-}
-
-@media (max-width: 1024px) {
-  .coding-team-layout {
-    grid-template-columns: 1fr;
+  mat-icon {
+    margin-right: var(--kh-space-2);
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    vertical-align: middle;
   }
 
-  .coding-team-layout__runs {
-    position: static;
+  .toggle-label {
+    font-size: var(--kh-text-sm);
   }
 }
 
-// ---------------------------------------------------------------------------
-// GitHub Issues section
-// ---------------------------------------------------------------------------
-
-// The issues panel and Runs panel reuse the shared `.kh-card` base (surface, border, radius) from
-// styles.scss; only the structure-specific rules live here. They are layout containers rather than
-// interactive cards, so keep the tighter `--kh-space-5` padding and suppress `.kh-card`'s hover
-// border highlight.
-.coding-team-layout__issues.kh-card,
-.runs-panel.kh-card {
+// The GitHub issues panel and the Jobs panel reuse the shared `.kh-card` base (surface, border,
+// radius) from styles.scss; only structure-specific rules live here. They are full-width layout
+// containers rather than interactive cards, so keep the tighter `--kh-space-5` padding and suppress
+// `.kh-card`'s hover border highlight.
+.github-section.kh-card,
+.jobs-panel.kh-card {
   padding: var(--kh-space-5);
 
   &:hover {
@@ -67,10 +50,14 @@
   }
 }
 
-.github-section {
-  margin: 1.5rem 0;
+// ---------------------------------------------------------------------------
+// GitHub Issues section
+// ---------------------------------------------------------------------------
 
-  // Inline status banners shown before the two-column layout renders — not cards.
+.github-section {
+  margin: 0;
+
+  // Inline status banners shown when GitHub is loading/unconfigured — not cards.
   &--loading,
   &--unconfigured {
     display: flex;
@@ -81,7 +68,6 @@
     border-radius: var(--kh-radius-md);
     background: var(--kh-surface-2);
     color: var(--kh-text-secondary);
-    margin: 1.5rem 0;
 
     a {
       color: var(--kh-accent-text);
@@ -444,22 +430,34 @@
     font-size: var(--kh-text-xs);
     color: var(--kh-text-muted);
   }
+
+  &__chevron {
+    color: var(--kh-text-tertiary);
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    flex-shrink: 0;
+  }
 }
 
 // ---------------------------------------------------------------------------
-// Selected-run live detail
+// Selected-run live detail — expanded inline beneath its row (accordion body)
 // ---------------------------------------------------------------------------
 
 .run-detail {
-  margin-top: 1rem;
-  padding-top: 1rem;
-  border-top: 1px solid var(--kh-border-subtle);
+  margin: 0 0 0.375rem;
+  padding: var(--kh-space-4);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-1);
+  box-shadow: inset 3px 0 0 var(--kh-accent);
 
   &--pending {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     color: var(--kh-text-tertiary);
+    box-shadow: none;
   }
 
   &__header {
@@ -560,7 +558,10 @@
     opacity: 0.7;
   }
 
-  &--merged {
+  // Status modifiers — mapped to the same semantic tokens as the run badges so every task status
+  // is visually distinct (not just the default chip). Unknown statuses keep the neutral base above.
+  &--merged,
+  &--completed {
     background: var(--kh-success-subtle);
     color: var(--kh-success);
   }
@@ -568,9 +569,19 @@
     background: var(--kh-accent-subtle);
     color: var(--kh-accent-text);
   }
-  &--in_review {
+  &--in_review,
+  &--blocked {
     background: var(--kh-warning-subtle);
     color: var(--kh-warning);
+  }
+  &--failed {
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
+  }
+  &--pending,
+  &--cancelled {
+    background: var(--kh-surface-4);
+    color: var(--kh-text-tertiary);
   }
 }
 

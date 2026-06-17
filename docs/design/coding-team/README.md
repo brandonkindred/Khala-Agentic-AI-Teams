@@ -1,5 +1,12 @@
 # Coding Team page — status panel redesign
 
+> **Update (later iteration):** the two-column layout shown in these mockups proved too dense in use.
+> The shipped design instead splits the page into **three single-focus views** selected by a toggle —
+> **Chat** (the assistant), **GitHub** (the issues list), and **Jobs** (an accordion list of runs
+> where selecting a run expands its progress inline). The mockups below capture the earlier
+> two-column concept and the run states/components, which still inform the Jobs view; treat the
+> three-view split as the current layout.
+
 Design mockups for separating the Coding Team live status panel from the GitHub Issues list, so the
 issues list is **always visible and selectable**, the status panel becomes its **own persistent
 panel** that handles multiple runs, and **cannot be dismissed**.
