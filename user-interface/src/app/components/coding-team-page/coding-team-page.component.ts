@@ -29,6 +29,39 @@ import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 /** How often the Runs list is re-fetched while the page is open. */
 const RUNS_POLL_MS = 15000;
 
+/**
+ * Precomputed view-model for one run row, so the Jobs accordion template binds plain properties
+ * instead of calling helper methods per change-detection cycle. Rebuilt from `runs` in `applyRuns`
+ * (every poll), so the relative `timeAgo` refreshes on the poll cadence.
+ */
+interface RunRowVm {
+  run: CodingTeamJobListItem;
+  issueNumber?: number;
+  status: string;
+  badgeClass: string;
+  waiting: boolean;
+  /** Live status/phase line for active runs; null when there's nothing to show (no empty tooltip). */
+  detail: string | null;
+  timeAgo: string;
+}
+
+/**
+ * Precomputed view-model for one issue row, so the GitHub list template binds plain properties
+ * instead of calling helper methods per change-detection cycle. Rebuilt whenever the visible page or
+ * the "In progress" chip set changes.
+ */
+interface IssueRowVm {
+  issue: GitHubIssueItem;
+  number: number;
+  title: string;
+  labels: string[];
+  inProgress: boolean;
+  hasDeps: boolean;
+  blocked: boolean;
+  openDepsCount: number;
+  depsTooltip: string;
+}
+
 @Component({
   selector: 'app-coding-team-page',
   standalone: true,
@@ -74,6 +107,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   loadingIssues = false;
   issuesLoaded = false;
   issueError: string | null = null;
+  /** View-models for the visible issue page; rebuilt in `recomputeIssueVms`. */
+  pagedIssueVms: IssueRowVm[] = [];
 
   // Issue list pagination (client-side over the fully-fetched issue array)
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
@@ -91,6 +126,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   runningRuns: CodingTeamJobListItem[] = [];
   /** Terminal runs, for the "Recent" section. Derived from `runs` in `applyRuns`. */
   recentRuns: CodingTeamJobListItem[] = [];
+  /** View-models for the Running / Recent run rows; rebuilt from `runs` in `applyRuns`. */
+  runningRunVms: RunRowVm[] = [];
+  recentRunVms: RunRowVm[] = [];
   runsError: string | null = null;
   /** The run whose live detail is shown; null when nothing is selected. */
   selectedRunId: string | null = null;
@@ -177,6 +215,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.pageIndex = 0;
         this.issuesLoaded = true;
         this.loadingIssues = false;
+        this.recomputeIssueVms();
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.issueError = err?.error?.detail || err?.message || 'Failed to load issues.';
@@ -194,6 +233,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   onPageChange(event: PageEvent): void {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
+    this.recomputeIssueVms();
   }
 
   /** Select an issue, surfacing the run-confirmation affordance inline under its row. */
@@ -230,6 +270,39 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       : `Depends on ${this.allDepRefs(issue)} (all complete)`;
   }
 
+  /** Rebuild the Running/Recent run-row view-models from the current `runningRuns`/`recentRuns`. */
+  private buildRunVms(): void {
+    this.runningRunVms = this.runningRuns.map((r) => this.toRunVm(r));
+    this.recentRunVms = this.recentRuns.map((r) => this.toRunVm(r));
+  }
+
+  private toRunVm(run: CodingTeamJobListItem): RunRowVm {
+    return {
+      run,
+      issueNumber: run.github_context?.issue_number,
+      status: run.status,
+      badgeClass: this.badgeClass(run.status),
+      waiting: this.isRunWaiting(run),
+      detail: this.isRunActive(run) ? run.status_text || run.phase || null : null,
+      timeAgo: this.timeAgo(run.updated_at),
+    };
+  }
+
+  /** Rebuild the visible issue-row view-models (current page × current "In progress" chip set). */
+  private recomputeIssueVms(): void {
+    this.pagedIssueVms = this.pagedIssues.map((issue) => ({
+      issue,
+      number: issue.number,
+      title: issue.title,
+      labels: issue.labels,
+      inProgress: this.isIssueInProgress(issue),
+      hasDeps: this.hasDependencies(issue),
+      blocked: issue.blocked,
+      openDepsCount: issue.open_dependencies.length,
+      depsTooltip: this.dependencyTooltip(issue),
+    }));
+  }
+
   /**
    * Start a coding-team run for the selected issue.
    *
@@ -251,6 +324,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         // until the next list tick) doesn't clear it.
         this.selectedRunNumber = resp.issue_number;
         this.selectRun(resp.job_id);
+        this.recomputeIssueVms();
         this.refreshTrigger$.next();
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -279,6 +353,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.activeIssueNumbers.add(resp.issue_number);
         this.selectedRunNumber = resp.issue_number;
         this.selectRun(resp.job_id);
+        this.recomputeIssueVms();
         this.refreshTrigger$.next();
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
@@ -361,6 +436,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       active.add(this.selectedRunNumber);
     }
     this.activeIssueNumbers = active;
+    this.buildRunVms();
+    this.recomputeIssueVms();
 
     if (this.initialRunsLoad) {
       this.initialRunsLoad = false;

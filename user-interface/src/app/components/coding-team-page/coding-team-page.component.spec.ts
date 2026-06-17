@@ -134,6 +134,9 @@ describe('CodingTeamPageComponent', () => {
     component.runs = [run];
     component.runningRuns = [run];
     component.recentRuns = [];
+    // The template iterates the precomputed view-models, so populate them too.
+    component.runningRunVms = [(component as unknown as { toRunVm: (r: CodingTeamJobListItem) => unknown }).toRunVm(run)] as never;
+    component.recentRunVms = [];
     component.selectedRunId = run.job_id;
     component.selectedRunNumber = run.github_context?.issue_number ?? null;
     component.jobStatus = jobStatus as never;
@@ -380,6 +383,45 @@ describe('CodingTeamPageComponent', () => {
       expect(component.runningRuns.map((r) => r.job_id)).toEqual(['a', 'c']);
       expect(component.recentRuns.map((r) => r.job_id)).toEqual(['b']);
     });
+
+    it('precomputes run-row view-models (badge/detail/timeAgo) in applyRuns', async () => {
+      await setup();
+      component['initialRunsLoad'] = false;
+      component['applyRuns']([
+        ghRun({ job_id: 'a', status: 'running', status_text: 'writing files', updated_at: new Date(Date.now() - 5 * 60000).toISOString() }),
+        ghRun({ job_id: 'b', status: 'completed', status_text: 'done', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
+      ]);
+      expect(component.runningRunVms.map((v) => v.run.job_id)).toEqual(['a']);
+      const running = component.runningRunVms[0];
+      expect(running.badgeClass).toBe('running');
+      expect(running.detail).toBe('writing files');
+      expect(running.timeAgo).toBe('5m ago');
+      // A terminal run's live detail line is suppressed.
+      expect(component.recentRunVms.map((v) => v.run.job_id)).toEqual(['b']);
+      expect(component.recentRunVms[0].detail).toBeNull();
+    });
+
+    it('precomputes issue-row view-models from the visible page and chip set', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(
+        of([
+          issueWith({
+            number: 7,
+            blocked: true,
+            open_dependencies: [3],
+            dependencies: [{ number: 3, title: 'A', state: 'open' }],
+          }),
+        ]),
+      );
+      await setup();
+      expect(component.pagedIssueVms.length).toBe(1);
+      const vm = component.pagedIssueVms[0];
+      expect(vm.number).toBe(7);
+      expect(vm.hasDeps).toBe(true);
+      expect(vm.blocked).toBe(true);
+      expect(vm.openDepsCount).toBe(1);
+      expect(vm.depsTooltip).toContain('#3');
+      expect(vm.inProgress).toBe(false);
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -481,10 +523,9 @@ describe('CodingTeamPageComponent', () => {
       });
       integrationsSpy.getGitHubIssues.mockReturnValue(of([blocked]));
       await setup();
-      component.activeView = 'github';
 
       component.selectIssue(blocked);
-      fixture.detectChanges();
+      showView('github');
 
       const el: HTMLElement = fixture.nativeElement;
       const warning = el.querySelector('.github-confirm-panel__warning');
@@ -497,9 +538,8 @@ describe('CodingTeamPageComponent', () => {
 
     it('keeps the issue list visible and shows the inline confirm under the selected row', async () => {
       await setup();
-      component.activeView = 'github';
       component.selectIssue(component.issues[1]); // issue #2
-      fixture.detectChanges();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       // All three issue rows remain visible — selecting one never hides the list.
       expect(el.querySelectorAll('.github-issue-row').length).toBe(3);

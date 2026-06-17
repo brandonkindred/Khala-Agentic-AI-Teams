@@ -104,16 +104,16 @@
           </div>
         } @else {
           <div class="github-issues-list">
-            @for (issue of pagedIssues; track issue.number) {
+            @for (vm of pagedIssueVms; track vm.number) {
               <button
                 class="github-issue-row"
                 type="button"
-                [class.github-issue-row--selected]="selectedIssue?.number === issue.number"
-                (click)="selectIssue(issue)"
+                [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
+                (click)="selectIssue(vm.issue)"
               >
-                <span class="github-issue-row__number">#{{ issue.number }}</span>
-                <span class="github-issue-row__title" [matTooltip]="issue.title">{{ issue.title }}</span>
-                @if (isIssueInProgress(issue)) {
+                <span class="github-issue-row__number">#{{ vm.number }}</span>
+                <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                @if (vm.inProgress) {
                   <span
                     class="github-label-chip github-label-chip--active"
                     matTooltip="The coding team is already working on this issue"
@@ -123,22 +123,22 @@
                   </span>
                 }
                 <span class="github-issue-row__labels">
-                  @for (label of issue.labels; track label) {
+                  @for (label of vm.labels; track label) {
                     <span class="github-label-chip">{{ label }}</span>
                   }
                 </span>
-                @if (hasDependencies(issue)) {
+                @if (vm.hasDeps) {
                   <span
                     class="github-issue-row__deps"
                     role="img"
-                    [class.github-issue-row__deps--blocked]="issue.blocked"
-                    [class.github-issue-row__deps--met]="!issue.blocked"
-                    [matTooltip]="dependencyTooltip(issue)"
-                    [attr.aria-label]="dependencyTooltip(issue)"
+                    [class.github-issue-row__deps--blocked]="vm.blocked"
+                    [class.github-issue-row__deps--met]="!vm.blocked"
+                    [matTooltip]="vm.depsTooltip"
+                    [attr.aria-label]="vm.depsTooltip"
                   >
-                    <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
-                    @if (issue.blocked) {
-                      <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
+                    <mat-icon aria-hidden="true">{{ vm.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                    @if (vm.blocked) {
+                      <span class="github-issue-row__deps-count">{{ vm.openDepsCount }}</span>
                     }
                   </span>
                 }
@@ -146,7 +146,7 @@
               </button>
 
               <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
-              @if (selectedIssue?.number === issue.number) {
+              @if (selectedIssue?.number === vm.number) {
                 <div class="github-confirm-panel">
                   <h3>Start AI coding on this issue?</h3>
                   <div class="github-confirm-panel__issue">
@@ -243,13 +243,13 @@
         <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
       </div>
     } @else {
-      @if (runningRuns.length > 0) {
+      @if (runningRunVms.length > 0) {
         <div class="runs-section">
           <p class="runs-section__title">Running</p>
           <div class="runs-list">
-            @for (run of runningRuns; track run.job_id) {
-              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: run }"></ng-container>
-              @if (selectedRunId === run.job_id) {
+            @for (vm of runningRunVms; track vm.run.job_id) {
+              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: vm }"></ng-container>
+              @if (selectedRunId === vm.run.job_id) {
                 <ng-container *ngTemplateOutlet="runDetail"></ng-container>
               }
             }
@@ -257,16 +257,16 @@
         </div>
       }
 
-      @if (recentRuns.length > 0) {
+      @if (recentRunVms.length > 0) {
         <div class="runs-section">
-          @if (runningRuns.length > 0) {
+          @if (runningRunVms.length > 0) {
             <div class="runs-divider"></div>
           }
           <p class="runs-section__title">Recent</p>
           <div class="runs-list">
-            @for (run of recentRuns; track run.job_id) {
-              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: run }"></ng-container>
-              @if (selectedRunId === run.job_id) {
+            @for (vm of recentRunVms; track vm.run.job_id) {
+              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: vm }"></ng-container>
+              @if (selectedRunId === vm.run.job_id) {
                 <ng-container *ngTemplateOutlet="runDetail"></ng-container>
               }
             }
@@ -275,30 +275,30 @@
       }
     }
 
-    <!-- Shared run row used by both the Running and Recent lists. Clicking toggles its detail. -->
-    <ng-template #runRow let-run>
+    <!-- Shared run row (bound to a precomputed view-model) used by both lists. Clicking toggles its detail. -->
+    <ng-template #runRow let-vm>
       <button
         class="coding-run-item"
         type="button"
-        [class.selected]="selectedRunId === run.job_id"
-        [attr.aria-expanded]="selectedRunId === run.job_id"
-        (click)="toggleRun(run)"
+        [class.selected]="selectedRunId === vm.run.job_id"
+        [attr.aria-expanded]="selectedRunId === vm.run.job_id"
+        (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
-          <span class="coding-run-item__issue">#{{ run.github_context?.issue_number }}</span>
-          @if (isRunWaiting(run)) {
+          <span class="coding-run-item__issue">#{{ vm.issueNumber }}</span>
+          @if (vm.waiting) {
             <span class="kh-badge kh-badge--warning">needs answers</span>
           } @else {
-            <span class="kh-badge kh-badge--{{ badgeClass(run.status) }}">{{ run.status }}</span>
+            <span class="kh-badge kh-badge--{{ vm.badgeClass }}">{{ vm.status }}</span>
           }
-          <mat-icon class="coding-run-item__chevron">{{ selectedRunId === run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
+          <mat-icon class="coding-run-item__chevron">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
         </div>
-        @if (isRunActive(run) && (run.status_text || run.phase)) {
-          <span class="coding-run-item__detail" [matTooltip]="run.status_text || run.phase">
-            {{ run.status_text || run.phase }}
+        @if (vm.detail) {
+          <span class="coding-run-item__detail" [matTooltip]="vm.detail">
+            {{ vm.detail }}
           </span>
         }
-        <span class="coding-run-item__time">{{ timeAgo(run.updated_at) }}</span>
+        <span class="coding-run-item__time">{{ vm.timeAgo }}</span>
       </button>
     </ng-template>
 
