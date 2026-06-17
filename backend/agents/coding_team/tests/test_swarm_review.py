@@ -1561,6 +1561,61 @@ def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
     assert len(lines) == 2, f"duplicate question must collapse, got {lines}"
 
 
+def test_user_decisions_for_keeps_distinct_answers_to_same_question(tmp_path):
+    """Dedup is by the full 'question → answer' line, not by question alone: two DIFFERENT answers
+    to the same question are both surfaced (only exact, case/whitespace-equal repeats collapse)."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+        resolved_questions=[{"question_text": "Which DB?", "answer": "Postgres"}],
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [{"question_text": "Which DB?", "answer": "MySQL"}],
+            }
+        ],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert "Which DB? → Postgres" in lines
+    assert "Which DB? → MySQL" in lines
+    assert len(lines) == 2, f"distinct answers must both render, got {lines}"
+
+
+def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
+    """A user_decision entry predating the structured 'decisions' field (resumed across an upgrade)
+    still surfaces its decision via the rendered 'reason' text, rather than being dropped."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        # Legacy shape: only 'reason', no structured 'decisions'.
+        revision_feedback=[{"source": "user_decision", "reason": "Use TLS? → Yes"}],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert lines == ["Use TLS? → Yes"]
+
+
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
     """_review_and_merge feeds the task's settled decisions to the Tech Lead reviewer."""
     _patch_git(monkeypatch)

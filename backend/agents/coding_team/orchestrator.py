@@ -339,10 +339,10 @@ def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
     for r in resolved or []:
         if not isinstance(r, dict):
             continue
-        q, a = hitl.decision_qa(r)
-        if q or a:
-            lines.append(f"{q} → {a}" if q else a)
-    body = "\n".join(f"- {ln}" for ln in lines if ln)
+        line = hitl.render_decision_line(r)
+        if line:
+            lines.append(line)
+    body = "\n".join(f"- {ln}" for ln in lines)
     return (
         (
             "The user answered the open question(s) you raised. Implement these decisions exactly; "
@@ -1168,31 +1168,46 @@ class CodingTeamSwarm:
         (the structured ``decisions`` recorded on each ``user_decision`` revision-feedback entry).
         Both review gates pass the result to their reviewer so a settled question is never re-raised.
 
+        Preconditions:
+            - Entries in ``self.resolved_questions`` and ``task.revision_feedback`` are dicts;
+              non-dict entries and decision records without renderable content are skipped.
         Postconditions:
             - Returns human-readable lines (``"{question} → {answer}"`` or just the answer when no
               question text), de-duplicated by ``hitl.question_key``. Empty when no decision exists.
+            - A ``user_decision`` entry predating the structured ``decisions`` field (one resumed
+              across an upgrade) falls back to its rendered ``reason`` text, so its decision is still
+              surfaced to the reviewer rather than silently dropped.
         """
         lines: List[str] = []
         seen: set = set()
 
+        def _add_line(text: str) -> None:
+            text = (text or "").strip()
+            if not text:
+                return
+            key = hitl.question_key(text)
+            if key in seen:
+                return
+            seen.add(key)
+            lines.append(text)
+
         def _add(records: Any) -> None:
             for r in records or []:
-                if not isinstance(r, dict):
-                    continue
-                q, a = hitl.decision_qa(r)
-                text = (f"{q} → {a}" if q else a).strip()
-                if not text:
-                    continue
-                key = hitl.question_key(text)
-                if key in seen:
-                    continue
-                seen.add(key)
-                lines.append(text)
+                if isinstance(r, dict):
+                    _add_line(hitl.render_decision_line(r))
 
         _add(self.resolved_questions)
         for entry in task.revision_feedback or []:
-            if isinstance(entry, dict) and entry.get("source") == "user_decision":
-                _add(entry.get("decisions"))
+            if not (isinstance(entry, dict) and entry.get("source") == "user_decision"):
+                continue
+            records = entry.get("decisions")
+            if records:
+                _add(records)
+            elif entry.get("reason"):
+                # Legacy entry (created before the structured ``decisions`` field) resumed across an
+                # upgrade: surface its rendered reason so the reviewer still learns the question was
+                # settled instead of re-raising it.
+                _add_line(str(entry["reason"]))
         return lines
 
     def _review_and_merge(self, update_fn: Callable) -> None:

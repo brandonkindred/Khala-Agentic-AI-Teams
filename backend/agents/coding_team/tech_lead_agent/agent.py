@@ -13,8 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from strands import Agent
 
-from coding_team.hitl import decision_qa
 from coding_team.hitl import normalize_open_questions as _normalize_open_questions
+from coding_team.hitl import render_decision_line
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
@@ -57,9 +57,9 @@ def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
     for entry in resolved or []:
         if not isinstance(entry, dict):
             continue
-        q, a = decision_qa(entry)
-        if q or a:
-            lines.append(f"- {q} → {a}")
+        line = render_decision_line(entry)
+        if line:
+            lines.append(f"- {line}")
     return "\n".join(lines)
 
 

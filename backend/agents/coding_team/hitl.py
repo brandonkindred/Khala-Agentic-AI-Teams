@@ -359,6 +359,23 @@ def decision_qa(entry: Dict[str, Any]) -> "tuple[str, str]":
     return question, answer
 
 
+def render_decision_line(entry: Dict[str, Any]) -> str:
+    """Render one resolved/submitted decision record as a single 'question → answer' line.
+
+    Single source of truth for the per-decision rendering that the orchestrator's
+    ``_format_decisions`` / ``_user_decisions_for`` and the Tech Lead's ``_render_resolved_questions``
+    each used to spell out independently.
+
+    Preconditions:
+        - ``entry`` is a decision-record dict (resolved or raw submitted; see ``decision_qa``).
+    Postconditions:
+        - Returns ``"{question} → {answer}"`` when a question is present, the bare answer when only
+          an answer is present, and ``""`` when the record carries neither.
+    """
+    question, answer = decision_qa(entry)
+    return f"{question} → {answer}" if question else answer
+
+
 def is_terminal(job_data: Dict[str, Any]) -> bool:
     """True when a job will not resume on its own (terminal status or cancellation requested)."""
     if not job_data:
