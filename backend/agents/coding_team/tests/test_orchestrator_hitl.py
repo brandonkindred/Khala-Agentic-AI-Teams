@@ -34,6 +34,7 @@ class StubTechLead:
         task_description,
         acceptance_criteria,
         changes_summary,
+        user_decisions=None,
         progress_callback=None,
     ):
         return {"approved": self.approved, "reason": "ok", "requested_changes": []}
@@ -69,10 +70,32 @@ def _answer_all(job: Dict[str, Any], option: str = "yes"):
 
 
 def test_format_decisions():
-    out = _format_decisions([{"question_text": "Strictness?", "answer": "strict"}])
-    assert "Strictness? → strict" in out
-    # empty still returns a non-empty fallback line
-    assert _format_decisions([])
+    out = _format_decisions(
+        [
+            {"question_text": "Strictness?", "answer": "strict"},
+            {"question_text": "Which DB?", "answer": "Postgres"},
+        ]
+    )
+    assert out.startswith("The user answered")  # preamble present for non-empty input
+    assert "- Strictness? → strict" in out  # one bullet per decision
+    assert "- Which DB? → Postgres" in out
+    # empty input → empty string (safe for any caller; no preamble with nothing under it)
+    assert _format_decisions([]) == ""
+
+
+def test_render_decision_line_branches():
+    from coding_team.hitl import render_decision_line
+
+    # question + answer → "q → a"
+    assert render_decision_line({"question_text": "Which DB?", "answer": "Postgres"}) == (
+        "Which DB? → Postgres"
+    )
+    # answer-only (no question text) → the bare answer, no "→" separator
+    assert render_decision_line({"answer": "Use TLS"}) == "Use TLS"
+    # question-only → "q → " (answer empty)
+    assert render_decision_line({"question_text": "Which DB?"}) == "Which DB? → "
+    # neither → ""
+    assert render_decision_line({}) == ""
 
 
 def test_hydrate_resolved_from_record():
@@ -979,6 +1002,9 @@ def test_escalate_decision_applies_answer_even_at_revision_cap(tmp_path, monkeyp
     assert task.revision_count == 4  # escalation did not consume the revision budget
     assert task.revision_feedback[-1]["source"] == "user_decision"
     assert "use TLS" in task.revision_feedback[-1]["reason"]
+    # The structured records are preserved alongside the rendered reason so the review gates
+    # can tell the reviewer the question is already settled (see _user_decisions_for).
+    assert task.revision_feedback[-1]["decisions"] == [{"question_text": "Q?", "answer": "use TLS"}]
 
 
 def test_escalate_decision_bounded_by_escalation_cap(tmp_path, monkeypatch):

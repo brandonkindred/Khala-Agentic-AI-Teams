@@ -16,6 +16,8 @@ CODE_REVIEW_PROMPT = (
 **Your role:**
 You review code that has been written by a coding agent (Frontend or Backend) for a specific task. Your job is to catch issues BEFORE the code is merged.
 
+**Settled decisions:** Any items listed under "User decisions already made" were answered by the user and are final. Treat them as the baseline the code was built on: review the code against them, and do NOT flag them as open/unanswered questions, request changes to revisit them, or suggest reconsidering them.
+
 """
     + REVIEW_PRIORITY_FRAMEWORK
     + """

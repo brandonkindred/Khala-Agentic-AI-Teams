@@ -142,6 +142,24 @@ def test_no_segment_note_means_no_segment_section() -> None:
     assert "**Segment notes:**" not in client.prompts[0]
 
 
+def test_user_decisions_rendered_as_settled_in_prompt() -> None:
+    """A resolved user decision is surfaced to the reviewer as settled so it is never flagged
+    as an open/unanswered question."""
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input(user_decisions=["Which auth? → OAuth2 (Google)"]))
+    prompt = client.prompts[0]
+    assert "User decisions already made" in prompt
+    assert "Which auth? → OAuth2 (Google)" in prompt
+
+
+def test_no_user_decisions_means_no_decisions_section() -> None:
+    client = _RecorderClient()
+    agent = ChunkReviewAgent(llm=client)
+    agent.run(_chunk_input())
+    assert "User decisions already made" not in client.prompts[0]
+
+
 def test_code_chunk_is_never_compacted() -> None:
     """The coordinator bounds the chunk; the reviewer must send it verbatim.
     A chunk above the map budget is logged but not truncated, so a sentinel at

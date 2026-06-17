@@ -72,7 +72,9 @@ Agents that are free (no active task): {free_agents}
 Respond with JSON: {{ "assignments": [ {{ "agent_id": str, "task_id": str }}, ... ] }}. Use empty list if no assignments."""
 
 
-CODE_REVIEW_SYSTEM = """You are a Tech Lead performing code review (and UAT/security awareness) on a feature branch. You will receive the task description, acceptance criteria, and a summary of changes (or diff). Output whether the work is approved for merge or changes are requested, with brief reasoning."""
+CODE_REVIEW_SYSTEM = """You are a Tech Lead performing code review (and UAT/security awareness) on a feature branch. You will receive the task description, acceptance criteria, and a summary of changes (or diff). Output whether the work is approved for merge or changes are requested, with brief reasoning.
+
+Any decisions listed under "User decisions already made" were answered by the user and are settled. Treat them as the baseline the work was built on: do NOT request changes to revisit them, do NOT reject the work over them, and never raise them as open or unanswered questions. Review the code against those decisions, not against alternatives to them."""
 
 CODE_REVIEW_USER = """Task: {task_title}
 Description: {task_description}

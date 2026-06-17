@@ -114,6 +114,15 @@ def _run_chunk_review(llm: LLMClient, input_data: ChunkReviewInput) -> dict:
                 *[f"- {c}" for c in input_data.acceptance_criteria],
             ]
         )
+    if input_data.user_decisions:
+        context_parts.extend(
+            [
+                "",
+                "**User decisions already made (settled — do NOT flag these as open/unanswered "
+                "questions or suggest reconsidering them):**",
+                *[f"- {d}" for d in input_data.user_decisions],
+            ]
+        )
     if spec_excerpt:
         context_parts.extend(
             [

@@ -99,6 +99,7 @@ def run_code_review(
     acceptance_criteria: Optional[List[str]] = None,
     architecture: Any = None,
     existing_codebase: Optional[str] = None,
+    user_decisions: Optional[List[str]] = None,
     llm_getter: Callable[[str], Any] = _default_llm_getter,
     progress_callback: Optional[Callable[[str, str, float], None]] = None,
 ) -> CodeReviewResult:
@@ -107,6 +108,9 @@ def run_code_review(
     Preconditions:
         - ``progress_callback`` is None or a non-raising callable accepting
           ``(step, detail, fraction)`` (see code_review_agent.models.ReviewProgressCallback).
+        - ``user_decisions`` is None or a list of human-readable 'question → answer' lines the
+          user has already answered; the reviewer treats them as settled (never flags them as open
+          questions). Empty/None changes nothing about the review.
 
     Postconditions:
         - When ``files`` (a ``{path: content}`` mapping of the task's changed
@@ -134,6 +138,7 @@ def run_code_review(
             language=language,
             architecture=architecture,
             existing_codebase=existing_codebase,
+            user_decisions=user_decisions or None,
         )
         result = agent.run(review_input, progress_callback=progress_callback)
         issues = []
@@ -270,10 +275,17 @@ def run_qa_check(
 
         llm = llm_getter("qa")
         agent = QAExpertAgent(llm)
-        result = agent.run(code=code, task_description=task_description, language=language, architecture=architecture)
+        result = agent.run(
+            code=code,
+            task_description=task_description,
+            language=language,
+            architecture=architecture,
+        )
         bugs = []
         if hasattr(result, "bugs"):
-            bugs = [b.model_dump() if hasattr(b, "model_dump") else vars(b) for b in (result.bugs or [])]
+            bugs = [
+                b.model_dump() if hasattr(b, "model_dump") else vars(b) for b in (result.bugs or [])
+            ]
         passed = not bugs
         return QAResult(passed=passed, bugs=bugs)
     except Exception as e:
@@ -295,7 +307,12 @@ def run_security_scan(
 
         llm = llm_getter("security")
         agent = CybersecurityExpertAgent(llm)
-        result = agent.run(code=code, task_description=task_description, language=language, architecture=architecture)
+        result = agent.run(
+            code=code,
+            task_description=task_description,
+            language=language,
+            architecture=architecture,
+        )
         vulns = []
         if hasattr(result, "vulnerabilities"):
             vulns = [
