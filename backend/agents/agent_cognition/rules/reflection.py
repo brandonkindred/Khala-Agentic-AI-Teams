@@ -210,7 +210,10 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
         * Every proposal written has ``status='pending'`` with
           ``proposed_rule.source='derived'`` and ``(summary_id, version)``
           evidence refs spanning the reflection window; **no rule is created or
-          activated** — reflection calls only ``create_proposal``.
+          activated** — reflection calls only ``create_proposal``. When the run is
+          graph-grounded, each proposal's evidence additionally carries a single
+          non-load-bearing graph-provenance entry (no ``summary_id``/``version``
+          keys) that the version-staleness checks ignore.
         * Pending proposals already flagged ``stale_evidence`` (their evidence
           was superseded by a later summary recompute, so the approve gate
           refuses them) are **superseded** before deduping — otherwise their
@@ -271,6 +274,7 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     report.llm_calls = llm.calls
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
+    evidence.extend(_graph_evidence(graph_block))
     active_by_id = {r.id: r for r in active_rules}
     # Two distinct suppressions, deliberately separated:
     #  * ``seen`` is the full proposed-change identity (incl. priority) — an
@@ -426,6 +430,26 @@ def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str
     except Exception:
         logger.warning("reflection: graph grounding failed; proceeding ungrounded", exc_info=True)
         return ""
+
+
+def _graph_evidence(graph_block: str) -> list[dict[str, Any]]:
+    """Non-load-bearing graph-provenance evidence for a graph-grounded run.
+
+    Postconditions:
+        * Returns ``[]`` for an empty ``graph_block`` so an ungrounded run's
+          proposal evidence is byte-identical to baseline.
+        * Otherwise returns exactly one bounded provenance dict recording that the
+          graph grounded this run and how many facts it carried.
+
+    The entry deliberately omits the ``summary_id`` and ``version`` keys so the
+    version-staleness SQL (``flag_stale_proposals`` / ``flag_rules_needing_review``,
+    which iterate ``jsonb_array_elements(evidence)`` reading only those two keys)
+    skips it — provenance must never make a proposal stale or unapprovable.
+    """
+    if not graph_block:
+        return []
+    facts = sum(1 for line in graph_block.splitlines() if line.startswith("- "))
+    return [{"source": "graph", "kind": "grounding", "facts": facts}]
 
 
 # ---------------------------------------------------------------------------

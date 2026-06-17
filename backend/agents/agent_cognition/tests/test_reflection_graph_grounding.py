@@ -7,9 +7,10 @@ to ungrounded behaviour when the graph is disabled or the agent opted out.
 
 from __future__ import annotations
 
+import types
 from datetime import datetime, timezone
 
-from agent_cognition.models import PeriodSummary, Scale
+from agent_cognition.models import PeriodSummary, ProposalStatus, Scale
 from agent_cognition.rules import reflection
 
 _NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
@@ -29,6 +30,18 @@ def _summary() -> PeriodSummary:
 
 class _DummyLLM:
     pass
+
+
+class _FakeGraphiti:
+    """Minimal async stand-in for the Graphiti client used by ``build_graph_context``."""
+
+    def __init__(self, facts: list[str]) -> None:
+        self._facts = facts
+        self.calls: list[dict] = []
+
+    async def search(self, *, query, group_ids, num_results):
+        self.calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
+        return [types.SimpleNamespace(fact=f) for f in self._facts]
 
 
 # ---------------------------------------------------------------------------
@@ -167,3 +180,112 @@ def test_reflect_with_grounding_only_creates_proposals(monkeypatch):
     assert grounded["called"] is True
     assert report.proposed == 1
     assert len(created) == 1 and created[0].status.value == "pending"
+
+
+# ---------------------------------------------------------------------------
+# _graph_evidence: bounded, non-load-bearing provenance entry
+# ---------------------------------------------------------------------------
+def test_graph_evidence_empty_block_is_empty_list():
+    assert reflection._graph_evidence("") == []
+
+
+def test_graph_evidence_counts_fact_lines_and_omits_stale_keys():
+    block = "## Related knowledge (from graph)\n- Alice knows Bob\n- Bob ships code"
+    ev = reflection._graph_evidence(block)
+    assert ev == [{"source": "graph", "kind": "grounding", "facts": 2}]
+    # Must omit the keys the version-staleness SQL reads, or it would make
+    # graph-grounded proposals spuriously stale / unapprovable.
+    assert "summary_id" not in ev[0] and "version" not in ev[0]
+
+
+# ---------------------------------------------------------------------------
+# Acceptance: a fake Graphiti grounds the prompt AND only create_proposal runs
+# ---------------------------------------------------------------------------
+def test_reflect_end_to_end_grounds_prompt_and_preserves_hitl(monkeypatch):
+    """With a fake Graphiti returning facts: the LLM prompt input carries the graph
+    block, the written proposal's evidence carries the graph-provenance entry, and
+    only ``create_proposal`` is ever called (HITL gate untouched)."""
+    monkeypatch.setenv("NEO4J_BOLT_URL", "bolt://neo4j:7687")
+
+    import agent_cognition.graph.retrieval as retrieval_mod
+    import agent_cognition.manifest_scope as ms
+
+    monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: True)
+    graphiti = _FakeGraphiti(["Alice prefers small PRs"])
+    monkeypatch.setattr(retrieval_mod, "get_graphiti", lambda: graphiti)
+
+    def _fetch(agent_id, scale, *, limit=None, exclude_stale=False):
+        return [_summary()] if scale is Scale.DAY else []
+
+    created = []
+    monkeypatch.setattr(reflection.memory_store, "fetch_summaries", _fetch)
+    monkeypatch.setattr(reflection.rules_store, "list_rules", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "list_proposals", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "create_proposal", lambda aid, p: created.append(p))
+    monkeypatch.setattr(reflection, "get_client", lambda key: _DummyLLM())
+
+    def _boom(*a, **k):
+        raise AssertionError("reflection must not activate a rule")
+
+    monkeypatch.setattr(reflection.rules_store, "approve_proposal", _boom)
+    monkeypatch.setattr(reflection.rules_store, "create_rule", _boom)
+
+    captured = {}
+
+    def _capture_compact(text, budget, llm, content_description=""):
+        captured["text"] = text
+        return text
+
+    monkeypatch.setattr(reflection, "compact_text", _capture_compact)
+    monkeypatch.setattr(
+        reflection,
+        "complete_validated",
+        lambda *a, **k: reflection._ReflectionResult(
+            proposals=[{"action": "add", "text": "derived"}]
+        ),
+    )
+
+    report = reflection.reflect("a", _NOW)
+
+    # Graph was queried at the retrieval boundary and grounded the actual prompt.
+    assert graphiti.calls and graphiti.calls[0]["group_ids"] == ["a"]
+    assert captured["text"].startswith("## Related knowledge (from graph)")
+    assert "Alice prefers small PRs" in captured["text"]
+
+    # Only create_proposal ran, the proposal is pending, and its evidence carries
+    # both the summary ref and the non-load-bearing graph-provenance entry.
+    assert report.proposed == 1
+    assert len(created) == 1
+    proposal = created[0]
+    assert proposal.status == ProposalStatus.PENDING
+    assert {"summary_id": "s1", "version": 1} in proposal.evidence
+    assert {"source": "graph", "kind": "grounding", "facts": 1} in proposal.evidence
+
+
+def test_reflect_baseline_evidence_unchanged_when_graph_disabled(monkeypatch):
+    """Graph disabled ⇒ no graph-provenance entry ⇒ evidence identical to baseline."""
+    monkeypatch.delenv("NEO4J_BOLT_URL", raising=False)
+
+    def _fetch(agent_id, scale, *, limit=None, exclude_stale=False):
+        return [_summary()] if scale is Scale.DAY else []
+
+    created = []
+    monkeypatch.setattr(reflection.memory_store, "fetch_summaries", _fetch)
+    monkeypatch.setattr(reflection.rules_store, "list_rules", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "list_proposals", lambda aid, status=None: [])
+    monkeypatch.setattr(reflection.rules_store, "create_proposal", lambda aid, p: created.append(p))
+    monkeypatch.setattr(reflection, "get_client", lambda key: _DummyLLM())
+    monkeypatch.setattr(reflection, "compact_text", lambda text, *a, **k: text)
+    monkeypatch.setattr(
+        reflection,
+        "complete_validated",
+        lambda *a, **k: reflection._ReflectionResult(
+            proposals=[{"action": "add", "text": "derived"}]
+        ),
+    )
+
+    report = reflection.reflect("a", _NOW)
+
+    assert report.proposed == 1
+    assert created[0].evidence == [{"summary_id": "s1", "version": 1}]
+    assert all(e.get("source") != "graph" for e in created[0].evidence)
