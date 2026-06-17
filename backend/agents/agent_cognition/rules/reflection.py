@@ -435,11 +435,15 @@ def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str
 def _graph_evidence(graph_block: str) -> list[dict[str, Any]]:
     """Non-load-bearing graph-provenance evidence for a graph-grounded run.
 
+    Preconditions:
+        * ``graph_block`` is the grounding block produced by
+          ``_graph_grounding_block`` — empty when the graph layer is disabled, the
+          agent opted out, or the search contributed nothing.
     Postconditions:
         * Returns ``[]`` for an empty ``graph_block`` so an ungrounded run's
           proposal evidence is byte-identical to baseline.
-        * Otherwise returns exactly one bounded provenance dict recording that the
-          graph grounded this run and how many facts it carried.
+        * Otherwise returns exactly one bounded provenance dict marking that the
+          graph grounded this run.
 
     The entry deliberately omits the ``summary_id`` and ``version`` keys so the
     version-staleness SQL (``flag_stale_proposals`` / ``flag_rules_needing_review``,
@@ -448,8 +452,7 @@ def _graph_evidence(graph_block: str) -> list[dict[str, Any]]:
     """
     if not graph_block:
         return []
-    facts = sum(1 for line in graph_block.splitlines() if line.startswith("- "))
-    return [{"source": "graph", "kind": "grounding", "facts": facts}]
+    return [{"source": "graph", "kind": "grounding"}]
 
 
 # ---------------------------------------------------------------------------

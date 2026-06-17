@@ -7,11 +7,11 @@ to ungrounded behaviour when the graph is disabled or the agent opted out.
 
 from __future__ import annotations
 
-import types
 from datetime import datetime, timezone
 
 from agent_cognition.models import PeriodSummary, ProposalStatus, Scale
 from agent_cognition.rules import reflection
+from agent_cognition.testing import FakeGraphiti as _FakeGraphiti
 
 _NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
@@ -30,18 +30,6 @@ def _summary() -> PeriodSummary:
 
 class _DummyLLM:
     pass
-
-
-class _FakeGraphiti:
-    """Minimal async stand-in for the Graphiti client used by ``build_graph_context``."""
-
-    def __init__(self, facts: list[str]) -> None:
-        self._facts = facts
-        self.calls: list[dict] = []
-
-    async def search(self, *, query, group_ids, num_results):
-        self.calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
-        return [types.SimpleNamespace(fact=f) for f in self._facts]
 
 
 # ---------------------------------------------------------------------------
@@ -189,10 +177,10 @@ def test_graph_evidence_empty_block_is_empty_list():
     assert reflection._graph_evidence("") == []
 
 
-def test_graph_evidence_counts_fact_lines_and_omits_stale_keys():
+def test_graph_evidence_marks_grounding_and_omits_stale_keys():
     block = "## Related knowledge (from graph)\n- Alice knows Bob\n- Bob ships code"
     ev = reflection._graph_evidence(block)
-    assert ev == [{"source": "graph", "kind": "grounding", "facts": 2}]
+    assert ev == [{"source": "graph", "kind": "grounding"}]
     # Must omit the keys the version-staleness SQL reads, or it would make
     # graph-grounded proposals spuriously stale / unapprovable.
     assert "summary_id" not in ev[0] and "version" not in ev[0]
@@ -259,7 +247,7 @@ def test_reflect_end_to_end_grounds_prompt_and_preserves_hitl(monkeypatch):
     proposal = created[0]
     assert proposal.status == ProposalStatus.PENDING
     assert {"summary_id": "s1", "version": 1} in proposal.evidence
-    assert {"source": "graph", "kind": "grounding", "facts": 1} in proposal.evidence
+    assert {"source": "graph", "kind": "grounding"} in proposal.evidence
 
 
 def test_reflect_baseline_evidence_unchanged_when_graph_disabled(monkeypatch):
