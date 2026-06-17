@@ -30,6 +30,13 @@ def _worker_starting() -> bool:
     Imported lazily so this module doesn't pull ``temporalio.worker`` (via the
     worker module) at import time, and to keep the dependency direction
     one-way (worker → start_workflow never the reverse).
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns True while a Planning V3 worker thread exists and is alive in
+          this process (connecting or connected); False when no worker is
+          running here, so a bounded wait for the client would be futile.
     """
     from planning_v3_team.temporal.worker import is_worker_thread_alive
 

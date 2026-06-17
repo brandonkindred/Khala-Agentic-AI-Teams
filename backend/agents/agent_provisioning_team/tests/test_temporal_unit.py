@@ -235,10 +235,19 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
 
 
 def test_start_worker_thread_no_op_when_disabled() -> None:
+    import shared_temporal
     from agent_provisioning_team.temporal import worker as worker_mod
 
-    with patch.object(worker_mod, "is_temporal_enabled", return_value=False):
+    # Patch the delegate too: otherwise the assertion passes even if the
+    # function's own is_temporal_enabled() guard is removed, because
+    # start_team_worker has its own gate. Asserting it is NOT called proves the
+    # early return comes from the function's guard.
+    with (
+        patch.object(worker_mod, "is_temporal_enabled", return_value=False),
+        patch.object(shared_temporal, "start_team_worker") as mock_start,
+    ):
         assert worker_mod.start_agent_provisioning_temporal_worker_thread() is False
+    mock_start.assert_not_called()
 
 
 def test_start_worker_thread_delegates_to_start_team_worker() -> None:
