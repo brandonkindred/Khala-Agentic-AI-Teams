@@ -9,7 +9,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class Phase(str, Enum):
@@ -29,12 +29,34 @@ class Phase(str, Enum):
 
 
 class PlanningV3RunRequest(BaseModel):
-    """Request body for POST /planning-v3/run."""
+    """Request body for ``POST /planning-v3/run``.
 
-    repo_path: str = Field(
-        ...,
+    Fields:
+        - ``repo_path``: optional output-folder *label* (see the field
+          description); reduced to a sanitized workspace name, never read as
+          source.
+        - ``client_name``: optional client/organization name.
+        - ``initial_brief`` / ``spec_content``: the work to plan; **at least one**
+          must be non-blank (enforced by ``_require_brief_or_spec``).
+        - ``use_product_analysis`` / ``use_planning_v2`` / ``use_market_research``:
+          optional pipeline toggles.
+
+    Invariant:
+        - A validated instance always has a non-blank ``initial_brief`` or
+          ``spec_content``.
+    """
+
+    repo_path: Optional[str] = Field(
+        None,
         max_length=4096,
-        description="Local path where artifacts (context doc, PRD, handoff) will be written.",
+        description=(
+            "Optional label for the output workspace, not a literal path. Any value "
+            "(filesystem path, git URL, or empty) is reduced to a single sanitized "
+            "directory name; the workspace is always created server-side under "
+            "AGENT_CACHE/planning_v3/<sanitized-label>/<job_id>, never at the supplied "
+            "path. Planning V3 writes artifacts (context doc, PRD, handoff) here and "
+            "never reads source code from it."
+        ),
     )
     client_name: Optional[str] = Field(
         None,
@@ -62,6 +84,26 @@ class PlanningV3RunRequest(BaseModel):
         default=False,
         description="Whether to call Market Research for user/customer discovery when needed.",
     )
+
+    @model_validator(mode="after")
+    def _require_brief_or_spec(self) -> "PlanningV3RunRequest":
+        """Require meaningful input to start the workflow.
+
+        Preconditions:
+            - Field-level validation has already run.
+        Postconditions:
+            - Returns ``self`` unchanged when at least one of ``initial_brief``
+              or ``spec_content`` is a non-blank string.
+            - Raises ``ValueError`` (surfaced by FastAPI as HTTP 422) when both
+              are missing/blank, since the workflow would otherwise run on an
+              empty placeholder spec. ``repo_path`` is intentionally not part of
+              this requirement — it is only an output folder.
+        """
+        if not (self.initial_brief and self.initial_brief.strip()) and not (
+            self.spec_content and self.spec_content.strip()
+        ):
+            raise ValueError("Provide at least one of initial_brief or spec_content.")
+        return self
 
 
 class PlanningV3RunResponse(BaseModel):
