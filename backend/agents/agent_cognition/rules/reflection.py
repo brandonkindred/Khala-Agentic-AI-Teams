@@ -210,7 +210,10 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
         * Every proposal written has ``status='pending'`` with
           ``proposed_rule.source='derived'`` and ``(summary_id, version)``
           evidence refs spanning the reflection window; **no rule is created or
-          activated** — reflection calls only ``create_proposal``.
+          activated** — reflection calls only ``create_proposal``. When the run is
+          graph-grounded, each proposal's evidence additionally carries a single
+          non-load-bearing graph-provenance entry (no ``summary_id``/``version``
+          keys) that the version-staleness checks ignore.
         * Pending proposals already flagged ``stale_evidence`` (their evidence
           was superseded by a later summary recompute, so the approve gate
           refuses them) are **superseded** before deduping — otherwise their
@@ -266,11 +269,12 @@ def reflect(agent_id: str, now: datetime) -> ReflectionReport:
     # call, and structured-output validation can retry) so the report reflects
     # true usage for schedulers/budgets/observability rather than a hard-coded 1.
     llm = _CallCountingClient(get_client("cognition"))
-    graph_block = _graph_grounding_block(agent_id, summaries)
+    graph_block, graph_fact_count = _graph_grounding_block(agent_id, summaries)
     result = _propose(summaries, active_rules, llm, graph_block=graph_block)
     report.llm_calls = llm.calls
 
     evidence = [{"summary_id": s.id, "version": s.version} for s in summaries]
+    evidence.extend(_graph_evidence(graph_block, graph_fact_count))
     active_by_id = {r.id: r for r in active_rules}
     # Two distinct suppressions, deliberately separated:
     #  * ``seen`` is the full proposed-change identity (incl. priority) — an
@@ -392,40 +396,71 @@ def _propose(
     )
 
 
-def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> str:
-    """Best-effort knowledge-graph grounding for reflection, or ``""``.
+def _graph_grounding_block(agent_id: str, summaries: list[PeriodSummary]) -> tuple[str, int]:
+    """Best-effort knowledge-graph grounding for reflection.
 
-    Returns a ``## Related knowledge (from graph)`` block of recency-ranked facts
-    related to the agent's recent memory, or ``""`` when the graph layer is
-    disabled, the agent opted out of grounding, or anything fails. The graph is a
-    read-only input here — it never proposes or activates a rule.
+    Returns ``(block, fact_count)``: a ``## Related knowledge (from graph)`` block
+    of recency-ranked facts related to the agent's recent memory and the number of
+    facts it carries, or ``("", 0)`` when the graph layer is disabled, the agent
+    opted out of grounding, or anything fails. The graph is a read-only input here
+    — it never proposes or activates a rule.
 
     Postconditions:
-        * ``""`` unless ``is_neo4j_enabled()`` **and** the agent's manifest enables
-          ``knowledge_graph.ground_rule_proposals``; never raises.
+        * ``("", 0)`` unless ``is_neo4j_enabled()`` **and** the agent's manifest
+          enables ``knowledge_graph.ground_rule_proposals``; never raises.
+        * When non-empty, ``fact_count`` equals the number of facts rendered into
+          ``block`` (taken from the structured search, not parsed back out of the
+          rendered text), so provenance reports the true count.
     """
     try:
         from shared_neo4j import is_neo4j_enabled  # noqa: PLC0415
 
         if not is_neo4j_enabled():
-            return ""
+            return "", 0
         from agent_cognition.manifest_scope import ground_rule_proposals  # noqa: PLC0415
 
         if not ground_rule_proposals(agent_id):
-            return ""
+            return "", 0
         from agent_cognition.graph.bridge import run_sync  # noqa: PLC0415
-        from agent_cognition.graph.retrieval import build_graph_context  # noqa: PLC0415
+        from agent_cognition.graph.retrieval import (  # noqa: PLC0415
+            render_graph_block,
+            search_graph_facts,
+        )
 
         # Query the graph with the agent's recent memory text so the search
         # surfaces facts related to what reflection is reasoning over.
         query = _render_summaries_text(summaries)
-        block = run_sync(build_graph_context(agent_id, query), default="")
-        if not block:
-            return ""
-        return block.replace("## Knowledge graph", "## Related knowledge (from graph)", 1)
+        facts = run_sync(search_graph_facts(agent_id, query), default=[])
+        if not facts:
+            return "", 0
+        block = render_graph_block(facts, header="## Related knowledge (from graph)")
+        return block, len(facts)
     except Exception:
         logger.warning("reflection: graph grounding failed; proceeding ungrounded", exc_info=True)
-        return ""
+        return "", 0
+
+
+def _graph_evidence(graph_block: str, fact_count: int) -> list[dict[str, Any]]:
+    """Non-load-bearing graph-provenance evidence for a graph-grounded run.
+
+    Preconditions:
+        * ``graph_block`` / ``fact_count`` are the pair returned by
+          ``_graph_grounding_block`` — ``("", 0)`` when the graph layer is disabled,
+          the agent opted out, or the search contributed nothing.
+    Postconditions:
+        * Returns ``[]`` for an empty ``graph_block`` so an ungrounded run's
+          proposal evidence is byte-identical to baseline.
+        * Otherwise returns exactly one bounded provenance dict recording that the
+          graph grounded this run and how many facts it carried (``fact_count``).
+
+    The entry deliberately omits the ``summary_id`` and ``version`` keys so the
+    version-staleness SQL (``flag_stale_proposals`` / ``flag_rules_needing_review``,
+    which iterate ``jsonb_array_elements(evidence)`` reading only those two keys)
+    skips it — provenance must never make a proposal stale or unapprovable.
+    """
+    if not graph_block:
+        return []
+    return [{"source": "graph", "kind": "grounding", "facts": fact_count}]
 
 
 # ---------------------------------------------------------------------------
