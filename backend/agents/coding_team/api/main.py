@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 
 from coding_team import hitl  # noqa: E402
 from coding_team.activity import ActivityBridge  # noqa: E402
+from coding_team.agent_status import build_agent_statuses  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -55,7 +56,7 @@ from coding_team.job_store import (  # noqa: E402
     update_job,
 )
 from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
-from coding_team.models import CodingTeamPlanInput  # noqa: E402
+from coding_team.models import AgentStatusEntry, CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
 from coding_team.review_history_store import (  # noqa: E402
     list_reviews,
@@ -221,6 +222,12 @@ class StatusResponse(BaseModel):
     repo_path: Optional[str] = None
     task_graph_snapshot: List[Dict[str, Any]] = Field(default_factory=list)
     agent_task_map: Dict[str, str] = Field(default_factory=dict)
+    agents: List[AgentStatusEntry] = Field(
+        default_factory=list,
+        description="Per-agent status roster (Tech Lead + one Senior SWE per stack): who is "
+        "working, each agent's status, and the task each is on. Derived from stack_specs, "
+        "agent_task_map, the task graph, and current_activity.",
+    )
     error: Optional[str] = None
     github_context: Optional[Dict[str, Any]] = None
     github_pr_url: Optional[str] = None
@@ -411,6 +418,13 @@ def get_status(job_id: str) -> StatusResponse:
         repo_path=data.get("repo_path"),
         task_graph_snapshot=data.get("task_graph_snapshot", []),
         agent_task_map=data.get("agent_task_map", {}),
+        agents=build_agent_statuses(
+            data.get("stack_specs", []),
+            data.get("agent_task_map", {}),
+            data.get("task_graph_snapshot", []),
+            data.get("current_activity"),
+            data.get("phase"),
+        ),
         error=data.get("error"),
         github_context=data.get("github_context"),
         github_pr_url=data.get("github_pr_url"),

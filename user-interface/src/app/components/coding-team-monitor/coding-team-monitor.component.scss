@@ -1,0 +1,337 @@
+:host {
+  display: block;
+}
+
+.ct-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  margin: 12px 0;
+
+  &__section-label {
+    display: block;
+    font-size: 0.72rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  // --- Objective ---
+  &__objective {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+
+    mat-icon {
+      color: var(--mat-sys-primary, #1565c0);
+    }
+  }
+
+  &__objective-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  &__objective-detail {
+    font-size: 0.95rem;
+    font-weight: 500;
+  }
+
+  &__objective-tasks {
+    font-size: 0.82rem;
+    color: rgba(0, 0, 0, 0.6);
+  }
+
+  // --- Progress + stepper ---
+  &__progress-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 4px;
+  }
+
+  &__progress-pct {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: rgba(0, 0, 0, 0.7);
+  }
+
+  &__progress-bar {
+    border-radius: 4px;
+  }
+
+  &__stepper {
+    display: flex;
+    align-items: flex-start;
+    margin-top: 14px;
+  }
+}
+
+.ct-step {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 1 1 0;
+  position: relative;
+  text-align: center;
+
+  // Steps are equal-width (flex: 1 1 0), so the connector runs node-centre to node-centre:
+  // it starts at this step's centre (left: 50%) and spans one full step width (width: 100%),
+  // landing on the next node's centre regardless of label length or screen size. Vertically it
+  // sits at the node's centre (node is 34px tall; top: 16px centres the 2px line on 17px).
+  &.has-connector::after {
+    content: '';
+    position: absolute;
+    top: 16px;
+    left: 50%;
+    width: 100%;
+    height: 2px;
+    background: rgba(0, 0, 0, 0.15);
+    z-index: 0;
+  }
+
+  &.completed.has-connector::after {
+    background: var(--mat-sys-tertiary, #2e7d32);
+  }
+
+  &__node {
+    width: 34px;
+    height: 34px;
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #eceff1;
+    color: rgba(0, 0, 0, 0.45);
+    border: 2px solid rgba(0, 0, 0, 0.15);
+    z-index: 1;
+
+    mat-icon {
+      font-size: 18px;
+      width: 18px;
+      height: 18px;
+    }
+  }
+
+  &__label {
+    margin-top: 6px;
+    font-size: 0.78rem;
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  &.current &__node {
+    background: var(--mat-sys-primary, #1565c0);
+    color: #fff;
+    border-color: var(--mat-sys-primary, #1565c0);
+  }
+
+  &.current &__label {
+    color: var(--mat-sys-primary, #1565c0);
+    font-weight: 600;
+  }
+
+  &.completed &__node {
+    background: var(--mat-sys-tertiary, #2e7d32);
+    color: #fff;
+    border-color: var(--mat-sys-tertiary, #2e7d32);
+  }
+
+  &.failed &__node {
+    background: var(--mat-sys-error, #c62828);
+    color: #fff;
+    border-color: var(--mat-sys-error, #c62828);
+  }
+
+  &.failed &__label {
+    color: var(--mat-sys-error, #c62828);
+    font-weight: 600;
+  }
+}
+
+// --- Live sub-agent activity ---
+.ct-monitor__activity {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: rgba(21, 101, 192, 0.06);
+  border-radius: 6px;
+}
+
+.ct-monitor__activity-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+
+  mat-icon {
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    color: var(--mat-sys-primary, #1565c0);
+  }
+}
+
+.ct-monitor__activity-label {
+  font-weight: 600;
+}
+
+.ct-monitor__activity-detail {
+  color: rgba(0, 0, 0, 0.7);
+}
+
+.ct-monitor__activity-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+
+  mat-progress-bar {
+    flex: 1 1 auto;
+    border-radius: 4px;
+  }
+}
+
+.ct-monitor__activity-pct {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgba(0, 0, 0, 0.6);
+  min-width: 32px;
+  text-align: right;
+}
+
+// --- Agent roster ---
+.ct-monitor__agent-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 10px;
+  margin-top: 6px;
+}
+
+.ct-agent {
+  border: 1px solid rgba(0, 0, 0, 0.12);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fafafa;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+
+  &--active {
+    border-color: var(--mat-sys-primary, #1565c0);
+    box-shadow: 0 1px 4px rgba(21, 101, 192, 0.18);
+    background: #fff;
+  }
+
+  &__head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  &__role-icon {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+    color: rgba(0, 0, 0, 0.55);
+  }
+
+  &__name {
+    font-weight: 600;
+    font-size: 0.88rem;
+    flex: 1 1 auto;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  &__status {
+    font-size: 0.7rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+
+    // status palette
+    &--idle {
+      background: #eceff1;
+      color: rgba(0, 0, 0, 0.5);
+    }
+    &--working {
+      background: #e3f2fd;
+      color: var(--mat-sys-primary, #1565c0);
+    }
+    &--in_review,
+    &--reviewing {
+      background: #fff3e0;
+      color: #e65100;
+    }
+    &--planning {
+      background: #ede7f6;
+      color: #5e35b1;
+    }
+    // Fallback for any unrecognized status (agentStatusClass folds unknowns here).
+    &--unknown {
+      background: #eceff1;
+      color: rgba(0, 0, 0, 0.5);
+    }
+  }
+
+  &__tools {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+
+  &__tool {
+    font-size: 0.68rem;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(0, 0, 0, 0.06);
+    color: rgba(0, 0, 0, 0.65);
+  }
+
+  &__task {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.8rem;
+    color: rgba(0, 0, 0, 0.75);
+
+    mat-icon {
+      font-size: 16px;
+      width: 16px;
+      height: 16px;
+      color: rgba(0, 0, 0, 0.45);
+      flex: 0 0 auto;
+    }
+
+    span {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+  }
+
+  &__activity {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+
+    mat-progress-bar {
+      border-radius: 3px;
+    }
+  }
+
+  &__activity-step {
+    font-size: 0.74rem;
+    color: rgba(0, 0, 0, 0.6);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

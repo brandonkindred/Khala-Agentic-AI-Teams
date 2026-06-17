@@ -14,6 +14,7 @@ import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
 import { HealthIndicatorComponent } from '../health-indicator/health-indicator.component';
+import { CodingTeamMonitorComponent } from '../coding-team-monitor/coding-team-monitor.component';
 import { TeamAssistantChatComponent } from '../team-assistant-chat/team-assistant-chat.component';
 import {
   PendingQuestionsComponent,
@@ -38,6 +39,7 @@ import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
     MatPaginatorModule,
     RouterLink,
     HealthIndicatorComponent,
+    CodingTeamMonitorComponent,
     TeamAssistantChatComponent,
     PendingQuestionsComponent,
   ],

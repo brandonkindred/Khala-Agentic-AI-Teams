@@ -174,3 +174,53 @@ class CodingTeamJobState(BaseModel):
         description="StackSpec list for this job",
     )
     updated_at: Optional[datetime] = None
+
+
+class AgentStatusEntry(BaseModel):
+    """Live status of one coding-team agent, derived for the status API / UI.
+
+    Derived (never persisted) from the job's stack specs, agent->task map, task-graph
+    snapshot, and current_activity by ``coding_team.agent_status.build_agent_statuses``. One
+    entry per agent: the Tech Lead (coordinator) plus one Senior SWE per stack.
+
+    Invariants:
+        - ``role`` is ``"tech_lead"`` or ``"senior_engineer"``.
+        - For an engineer, ``status`` is ``working``/``in_review``/``idle``; for the Tech
+          Lead, ``planning``/``reviewing``/``idle``.
+        - ``current_task_id``/``current_task_title`` are set only while the agent holds a live
+          (non-terminal) task; the ``current_step``/``activity_detail``/``activity_fraction``
+          fields only when this agent owns the single live ``current_activity``.
+    """
+
+    agent_id: str = Field(..., description="Stable agent id (engineer stack name, or 'tech_lead')")
+    role: str = Field(..., description="'tech_lead' or 'senior_engineer'")
+    display_name: str = Field(..., description="Human-readable label for the agent card")
+    stack: Optional[str] = Field(
+        default=None, description="Stack name for engineers; None for the Tech Lead"
+    )
+    tools_services: List[str] = Field(
+        default_factory=list,
+        description="Tools/services the engineer specializes in (empty for the Tech Lead)",
+    )
+    status: str = Field(
+        default="idle",
+        description="working/in_review/idle (engineer) or planning/reviewing/idle (tech lead)",
+    )
+    current_task_id: Optional[str] = Field(
+        default=None, description="Id of the task the agent is currently working"
+    )
+    current_task_title: Optional[str] = Field(
+        default=None, description="Title of the task the agent is currently working"
+    )
+    current_step: Optional[str] = Field(
+        default=None, description="Live sub-step from current_activity, when this agent owns it"
+    )
+    activity_detail: Optional[str] = Field(
+        default=None, description="Human detail from current_activity, when this agent owns it"
+    )
+    activity_fraction: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description="0.0-1.0 progress of the live sub-step, when this agent owns it",
+    )
