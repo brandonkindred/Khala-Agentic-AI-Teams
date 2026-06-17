@@ -225,6 +225,11 @@ class ChunkReviewInput(BaseModel):
         default=None,
         description="Existing codebase excerpt (capped ~4K)",
     )
+    user_decisions: Optional[List[str]] = Field(
+        default=None,
+        description="Product/design questions the user has already answered ('question → answer' "
+        "lines); the reviewer treats them as settled, not as open issues to flag.",
+    )
 
 
 class ChunkReviewOutput(BaseModel):
@@ -330,6 +335,11 @@ class CodeReviewInput(BaseModel):
     existing_codebase: Optional[str] = Field(
         default=None,
         description="Existing code in the repo before the agent's changes",
+    )
+    user_decisions: Optional[List[str]] = Field(
+        default=None,
+        description="Product/design questions the user has already answered ('question → answer' "
+        "lines); the reviewer treats them as settled facts, not as open issues to flag.",
     )
 
     @model_validator(mode="after")

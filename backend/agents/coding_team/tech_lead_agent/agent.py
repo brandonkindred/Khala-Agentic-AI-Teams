@@ -13,8 +13,8 @@ from typing import Any, Callable, Dict, List, Optional
 
 from strands import Agent
 
-from coding_team.hitl import decision_qa
 from coding_team.hitl import normalize_open_questions as _normalize_open_questions
+from coding_team.hitl import resolved_decision_lines
 from coding_team.models import CodingTeamPlanInput
 from coding_team.tech_lead_agent import prompts
 from llm_service import call_llm_with_retries
@@ -53,14 +53,7 @@ def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
     Postconditions:
         - Returns a non-empty bullet string when any decision has content, else "".
     """
-    lines: List[str] = []
-    for entry in resolved or []:
-        if not isinstance(entry, dict):
-            continue
-        q, a = decision_qa(entry)
-        if q or a:
-            lines.append(f"- {q} → {a}")
-    return "\n".join(lines)
+    return "\n".join(f"- {line}" for line in resolved_decision_lines(resolved))
 
 
 def _plan_text(plan: CodingTeamPlanInput) -> str:
@@ -241,11 +234,16 @@ class TechLeadAgent:
         task_description: str,
         acceptance_criteria: List[str],
         changes_summary: str,
+        user_decisions: Optional[List[str]] = None,
         progress_callback: Optional[Callable[[str, str, float], None]] = None,
     ) -> Dict[str, Any]:
         """Review feature branch: approved (bool), reason (str), requested_changes (list).
 
         Preconditions:
+            - ``user_decisions`` is None or a list of human-readable decision lines
+              (``"question → answer"``) the user has already answered; when non-empty they are
+              surfaced to the reviewer as settled facts so it never re-raises a question the user
+              has decided. Empty/None adds nothing to the prompt (identical to the prior behavior).
             - ``progress_callback`` is None or a callable accepting
               ``(step, detail, fraction)``; steps emitted here are
               ``reviewing | waiting_retry | done``. Exceptions it raises are
@@ -263,6 +261,15 @@ class TechLeadAgent:
             acceptance_criteria=json.dumps(acceptance_criteria),
             changes_summary=changes_summary,
         )
+        decisions = [str(d).strip() for d in (user_decisions or []) if str(d).strip()]
+        if decisions:
+            # Appended (not a CODE_REVIEW_USER placeholder) so the template's .format() keys are
+            # untouched. Mirrors the planning path's "User decisions" block in _plan_text.
+            user += (
+                "\n\nUser decisions already made (answered by the user — these are settled; "
+                "do NOT request changes to revisit them or treat them as open/unanswered "
+                "questions):\n" + "\n".join(f"- {d}" for d in decisions)
+            )
         user += "\n\nRespond with valid JSON only, no markdown fences."
         attempts = _review_retry_attempts()
 

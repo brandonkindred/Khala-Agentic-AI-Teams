@@ -334,22 +334,19 @@ def _read_repo_context(repo_path: Path) -> str:
 
 
 def _format_decisions(resolved: List[Dict[str, Any]]) -> str:
-    """Render resolved decisions as a 'question → answer' block for an engineer's revision feedback."""
-    lines = []
-    for r in resolved or []:
-        if not isinstance(r, dict):
-            continue
-        q, a = hitl.decision_qa(r)
-        if q or a:
-            lines.append(f"{q} → {a}" if q else a)
-    body = "\n".join(f"- {ln}" for ln in lines if ln)
+    """Render resolved decisions as a 'question → answer' block for an engineer's revision feedback.
+
+    Postconditions:
+        - Returns "" when ``resolved`` carries no renderable decision (so the function is safe for
+          any caller and never emits a preamble with no decisions under it); otherwise returns the
+          preamble followed by one ``- question → answer`` bullet per decision.
+    """
+    body = "\n".join(f"- {ln}" for ln in hitl.resolved_decision_lines(resolved))
+    if not body:
+        return ""
     return (
-        (
-            "The user answered the open question(s) you raised. Implement these decisions exactly; "
-            "do not ask again:\n" + body
-        )
-        if body
-        else "The user answered the open question(s) you raised."
+        "The user answered the open question(s) you raised. Implement these decisions exactly; "
+        "do not ask again:\n" + body
     )
 
 
@@ -761,6 +758,7 @@ def run_coding_team_orchestrator(
         path=path,
         agent_ids=agent_ids,
         llm_getter=llm_getter,
+        resolved_questions=plan_input.resolved_questions,
     )
     # Flush captured "thinking" to the job record on an interval for the UI poll.
     # beat_first surfaces any planning-phase reasoning immediately; the final flush
@@ -821,6 +819,7 @@ class CodingTeamSwarm:
         path: Path,
         agent_ids: List[str],
         llm_getter: Callable[[str], Any],
+        resolved_questions: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.tech_lead = tech_lead
         self.workers = workers
@@ -828,6 +827,10 @@ class CodingTeamSwarm:
         self.path = path
         self.agent_ids = agent_ids
         self.llm_getter = llm_getter
+        # Plan-level decisions the user already answered (entry gate + Tech Lead planning), folded
+        # into plan_input.resolved_questions before the swarm is built. Surfaced to both review
+        # gates so a reviewer never re-raises a question the user has settled.
+        self.resolved_questions: List[Dict[str, Any]] = list(resolved_questions or [])
         # Bound pause cycle (set in run()) used to escalate a worker-raised decision to the user.
         self.pause_for_questions: Optional[PauseCycle] = None
         # Set True when a pause ended without answers (terminal/timeout); aborts the loop and tells
@@ -1008,6 +1011,10 @@ class CodingTeamSwarm:
                 "source": "user_decision",
                 "reason": _format_decisions(resolved),
                 "requested_changes": [],
+                # Keep the structured records alongside the rendered reason so the review gates can
+                # tell the reviewer the question is already settled (see _user_decisions_for). The
+                # engineer-facing render reads "reason" and is unaffected.
+                "decisions": resolved,
             }
         ]
         # Bound the total number of decision escalations per task, counted independently of the
@@ -1097,6 +1104,7 @@ class CodingTeamSwarm:
                         task_description=task.description or task.title,
                         language="python" if agent_type == "backend" else "typescript",
                         acceptance_criteria=task.acceptance_criteria or [],
+                        user_decisions=self._user_decisions_for(task),
                         llm_getter=self.llm_getter,
                         progress_callback=cr_bridge,
                     )
@@ -1149,6 +1157,78 @@ class CodingTeamSwarm:
         self.graph.unassign_task(task.id)
         return False
 
+    def _user_decisions_for(self, task: Task) -> List[str]:
+        """Render the user's already-made decisions for ``task`` as 'question → answer' lines.
+
+        Combines plan-level decisions (``self.resolved_questions`` — answered at the entry gate or
+        during Tech Lead planning) with task-level decisions the engineer escalated mid-implementation
+        (the structured ``decisions`` recorded on each ``user_decision`` revision-feedback entry).
+        Both review gates pass the result to their reviewer so a settled question is never re-raised.
+
+        De-duplication is by normalized question text, last-answer-wins: a later answer to the same
+        question (a task-level escalation) supersedes an earlier one (a plan-level answer), so the
+        reviewer is never shown two conflicting answers to the same question. Records with no question
+        text (answer-only) are keyed by their full rendered line instead, so they de-duplicate against
+        identical lines but are never dropped.
+
+        Preconditions:
+            - Entries in ``self.resolved_questions`` and ``task.revision_feedback`` are dicts;
+              non-dict entries and records with no renderable content are skipped.
+        Postconditions:
+            - Returns human-readable lines (``"{question} → {answer}"``, or the bare answer for an
+              answer-only record) deduplicated as described, in first-seen order (a superseding
+              answer updates the existing line in place). Empty when no decision exists.
+            - A ``user_decision`` entry predating the structured ``decisions`` field (one resumed
+              across an upgrade) contributes its rendered ``reason`` bullets, so its decisions are
+              still surfaced to the reviewer rather than dropped.
+        """
+        order: List[str] = []
+        line_by_key: Dict[str, str] = {}
+
+        def _put(key: str, line: str) -> None:
+            # Last-wins: a later answer to the same key replaces the earlier line but keeps its
+            # first-seen position, so a task-level escalation overrides the plan-level answer.
+            if key not in line_by_key:
+                order.append(key)
+            line_by_key[key] = line
+
+        def _add_record(rec: Any) -> None:
+            if not isinstance(rec, dict):
+                return
+            line = hitl.render_decision_line(rec)
+            if not line:
+                return
+            question, _answer = hitl.decision_qa(rec)
+            _put(hitl.normalize_key(question) if question else hitl.normalize_key(line), line)
+
+        def _add_legacy_reason(reason: str) -> None:
+            # Pre-"decisions" entry: ``reason`` is a multi-line block (preamble + "- q → a" bullets).
+            # Extract just the bullets so legacy decisions render as clean individual lines and
+            # de-duplicate like structured ones; a bullet-less reason is surfaced whole.
+            bullets = [
+                ln.strip()[2:].strip()
+                for ln in str(reason).splitlines()
+                if ln.strip().startswith("- ")
+            ]
+            for line in bullets or [str(reason).strip()]:
+                if line:
+                    _put(hitl.normalize_key(line), line)
+
+        for rec in self.resolved_questions or []:
+            _add_record(rec)
+        for entry in task.revision_feedback or []:
+            if not (isinstance(entry, dict) and entry.get("source") == "user_decision"):
+                continue
+            # Gate on field presence, not truthiness: a new entry always carries "decisions" (an
+            # empty list contributes nothing); only a legacy entry that predates the field falls
+            # back to its rendered reason.
+            if "decisions" in entry:
+                for rec in entry.get("decisions") or []:
+                    _add_record(rec)
+            elif entry.get("reason"):
+                _add_legacy_reason(str(entry["reason"]))
+        return [line_by_key[key] for key in order]
+
     def _review_and_merge(self, update_fn: Callable) -> None:
         """Coordinator reviews completed tasks: merge approved ones, send rejected ones back."""
         from software_engineering_team.shared.git_utils import (
@@ -1182,6 +1262,7 @@ class CodingTeamSwarm:
                     task_description=task.description,
                     acceptance_criteria=task.acceptance_criteria,
                     changes_summary=evidence,
+                    user_decisions=self._user_decisions_for(task),
                     progress_callback=tl_bridge,
                 )
             finally:

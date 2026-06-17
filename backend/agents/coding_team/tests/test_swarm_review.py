@@ -37,6 +37,7 @@ class StubTechLead:
         self.reason = reason
         self.requested_changes = requested_changes if requested_changes is not None else ["fix X"]
         self.review_calls: List[str] = []
+        self.decision_calls: List[Any] = []
 
     def run_code_review(
         self,
@@ -44,9 +45,11 @@ class StubTechLead:
         task_description,
         acceptance_criteria,
         changes_summary,
+        user_decisions=None,
         progress_callback=None,
     ):
         self.review_calls.append(changes_summary)
+        self.decision_calls.append(user_decisions)
         return {
             "approved": self.approved,
             "reason": self.reason,
@@ -185,6 +188,7 @@ def test_review_error_fails_task_once_without_revision_loop(tmp_path, monkeypatc
             task_description,
             acceptance_criteria,
             changes_summary,
+            user_decisions=None,
             progress_callback=None,
         ):
             self.review_calls.append(changes_summary)
@@ -1157,13 +1161,18 @@ def test_tech_lead_review_reports_progress_and_clears_activity(tmp_path, monkeyp
             task_description,
             acceptance_criteria,
             changes_summary,
+            user_decisions=None,
             progress_callback=None,
         ):
             if progress_callback is not None:
                 progress_callback("reviewing", "attempt 1/3", 0.1)
                 progress_callback("done", "review complete", 1.0)
             return super().run_code_review(
-                task_title, task_description, acceptance_criteria, changes_summary
+                task_title,
+                task_description,
+                acceptance_criteria,
+                changes_summary,
+                user_decisions=user_decisions,
             )
 
     tech_lead = ReportingTechLead(approved=True)
@@ -1468,3 +1477,287 @@ def test_orchestrator_resume_never_regresses_progress(tmp_path, monkeypatch):
     assert progresses[0] == restored, "restored persist must reflect merged tasks"
     assert progresses == sorted(progresses), "no write may regress the bar on resume"
     assert progresses[-1] == 100
+
+
+# ------------------------------------ user decisions surfaced to the review gates
+
+
+def _capture_review_prompt(monkeypatch):
+    """Patch the Tech Lead's LLM call to record the rendered review prompt and approve."""
+    from coding_team.tech_lead_agent import agent as tl_mod
+
+    captured: Dict[str, str] = {}
+
+    def _record(agent, prompt):
+        captured["prompt"] = prompt
+        return {"approved": True, "reason": "ok", "requested_changes": []}
+
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(tl_mod, "_agent_call_json", _record)
+    return tl_mod.TechLeadAgent(model=object()), captured
+
+
+def test_review_prompt_includes_user_decisions(monkeypatch):
+    """A settled decision is rendered into the review prompt so the reviewer does not re-raise it."""
+    tl, captured = _capture_review_prompt(monkeypatch)
+
+    out = tl.run_code_review(
+        "t", "d", [], "evidence", user_decisions=["Which auth? → OAuth2 (Google)"]
+    )
+
+    assert out["approved"] is True
+    assert "User decisions already made" in captured["prompt"]
+    assert "Which auth? → OAuth2 (Google)" in captured["prompt"]
+
+
+def test_review_prompt_omits_decisions_block_when_none(monkeypatch):
+    """No decisions → prompt is unchanged from the pre-feature behavior (no stray header)."""
+    tl, captured = _capture_review_prompt(monkeypatch)
+
+    tl.run_code_review("t", "d", [], "evidence")
+    assert "User decisions already made" not in captured["prompt"]
+
+    # Empty / whitespace-only entries are dropped, not rendered as an empty block.
+    captured.clear()
+    tl.run_code_review("t", "d", [], "evidence", user_decisions=["", "   "])
+    assert "User decisions already made" not in captured["prompt"]
+
+
+def test_user_decisions_for_combines_plan_and_task_levels(tmp_path):
+    """_user_decisions_for merges plan-level resolved questions with task-level escalations
+    and de-duplicates by normalized question text (case-insensitively)."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+        resolved_questions=[{"question_text": "Which DB?", "answer": "Postgres"}],
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "reason": "ignored-by-render",
+                "decisions": [{"question_text": "Use TLS?", "answer": "Yes, TLS 1.3"}],
+            },
+            # A second escalation repeating the plan-level question (different case, same answer)
+            # must collapse onto one line rather than double-render.
+            {
+                "source": "user_decision",
+                "decisions": [{"question_text": "which db?", "answer": "Postgres"}],
+            },
+            {"source": "tech_lead", "reason": "unrelated", "requested_changes": []},
+        ],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert "Use TLS? → Yes, TLS 1.3" in lines
+    db_lines = [ln for ln in lines if ln.lower() == "which db? → postgres"]
+    assert len(db_lines) == 1, f"repeated DB question must collapse, got {lines}"
+    assert len(lines) == 2, f"got {lines}"
+
+
+def test_user_decisions_for_latest_answer_wins_for_same_question(tmp_path):
+    """Dedup is by question text with last-answer-wins: a task-level escalation overrides the
+    plan-level answer for the same question, so the reviewer is never shown two conflicting answers."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+        resolved_questions=[{"question_text": "Which DB?", "answer": "Postgres"}],
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [{"question_text": "Which DB?", "answer": "MySQL"}],
+            }
+        ],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    # The later (task-level) answer supersedes the earlier (plan-level) one; only one line survives.
+    assert lines == ["Which DB? → MySQL"], f"latest answer must win, got {lines}"
+
+
+def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
+    """A user_decision entry predating the structured 'decisions' field (resumed across an upgrade)
+    still surfaces its decision via the rendered 'reason' text, rather than being dropped."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        # Legacy shape: only 'reason', no structured 'decisions'.
+        revision_feedback=[{"source": "user_decision", "reason": "Use TLS? → Yes"}],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert lines == ["Use TLS? → Yes"]
+
+
+def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_path):
+    """A NEW entry carrying an empty structured 'decisions' list contributes nothing — it must NOT
+    spill its generic 'reason' sentence into the decisions list (presence-gated, not truthiness)."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "reason": "The user answered the open question(s) you raised.",
+                "decisions": [],
+            }
+        ],
+    )
+
+    assert swarm._user_decisions_for(task) == []
+
+
+def test_user_decisions_for_handles_answer_only_lines(tmp_path):
+    """Answer-only decision records (no question_text) render as the bare answer and dedupe against
+    identical answer-only lines (case-insensitively), without assuming a '→' separator."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+        resolved_questions=[{"answer": "Use TLS"}],  # plan-level, answer-only
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [
+                    {"answer": "Use TLS"},  # identical answer → deduped against the plan-level one
+                    {"answer": "Use SSL"},  # distinct answer → kept
+                ],
+            }
+        ],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert "Use TLS" in lines  # rendered as the bare answer (no "→")
+    assert "Use SSL" in lines
+    assert len(lines) == 2, f"identical answer-only lines must collapse, got {lines}"
+
+
+def test_user_decisions_for_legacy_multiline_reason_extracts_bullets(tmp_path):
+    """A legacy entry whose 'reason' is the full multi-line block contributes clean per-decision
+    lines (the preamble is dropped, the '- q → a' bullets are extracted), not one messy line."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    reason = (
+        "The user answered the open question(s) you raised. Implement these decisions exactly; "
+        "do not ask again:\n- Which DB? → Postgres\n- Use TLS? → Yes"
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[{"source": "user_decision", "reason": reason}],
+    )
+
+    lines = swarm._user_decisions_for(task)
+
+    assert lines == ["Which DB? → Postgres", "Use TLS? → Yes"]
+
+
+def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
+    """_review_and_merge feeds the task's settled decisions to the Tech Lead reviewer."""
+    _patch_git(monkeypatch)
+    tech_lead = StubTechLead(approved=True)
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    swarm.resolved_questions = [{"question_text": "Which DB?", "answer": "Postgres"}]
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task(
+        "t1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [{"question_text": "Use TLS?", "answer": "Yes"}],
+            }
+        ],
+    )
+    graph.set_task_in_review("t1")
+
+    swarm._review_and_merge(lambda **kw: None)
+
+    assert tech_lead.decision_calls[-1] == ["Which DB? → Postgres", "Use TLS? → Yes"]
+
+
+def test_quality_gate_review_receives_user_decisions(tmp_path, monkeypatch):
+    """The per-task quality-gate code review is also told the user's settled decisions."""
+    import types
+
+    swarm, graph = _make_real_swarm(tmp_path)
+    swarm.resolved_questions = [{"question_text": "Which DB?", "answer": "Postgres"}]
+    graph.update_task(
+        "t1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "decisions": [{"question_text": "Use TLS?", "answer": "Yes"}],
+            }
+        ],
+    )
+
+    captured: Dict[str, Any] = {}
+
+    def _fake_review(**kw):
+        captured["user_decisions"] = kw.get("user_decisions")
+        return types.SimpleNamespace(approved=True, issues=[])
+
+    monkeypatch.setattr(
+        f"{QG}.run_build_verification",
+        lambda *a, **k: types.SimpleNamespace(success=True, error=""),
+    )
+    monkeypatch.setattr(f"{QG}.run_linting", lambda *a, **k: None)
+    monkeypatch.setattr(f"{QG}.run_code_review", _fake_review)
+
+    swarm._implement_and_verify(swarm.workers[0], lambda **kw: None)
+
+    assert captured["user_decisions"] == ["Which DB? → Postgres", "Use TLS? → Yes"]
