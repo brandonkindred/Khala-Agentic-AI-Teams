@@ -113,15 +113,23 @@ def start_planning_v3_workflow(
 
     Preconditions:
         - ``job_id`` is a non-empty, unique run id and ``repo_path`` is a
-          writable workspace path. The Planning V3 Temporal worker is running
-          (or starting) in this process.
+          non-empty workspace path (both enforced below). The Planning V3
+          Temporal worker is running (or starting) in this process.
     Postconditions:
         - A ``PlanningV3Workflow`` is started on ``TASK_QUEUE`` with id
           ``WORKFLOW_ID_PREFIX + job_id``; returns once Temporal accepts it.
     Raises:
+        - ``AssertionError`` if ``job_id`` or ``repo_path`` is blank
+          (precondition violated by the caller).
         - ``RuntimeError`` if the Temporal client never becomes available
           within ``CLIENT_READY_TIMEOUT_S`` (worker not running / misconfigured).
+        - Temporal client errors (e.g. ``temporalio.exceptions.TemporalError`` /
+          ``WorkflowAlreadyStartedError``) or ``concurrent.futures.TimeoutError``
+          propagated from ``client.start_workflow`` / ``_run_async`` if the
+          worker loop does not accept the workflow within ``START_WORKFLOW_TIMEOUT``.
     """
+    assert job_id, "job_id must be a non-empty run id"
+    assert repo_path, "repo_path must be a non-empty workspace path"
     client, loop = _wait_for_client()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     _run_async(

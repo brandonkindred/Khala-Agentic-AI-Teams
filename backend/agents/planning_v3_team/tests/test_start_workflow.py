@@ -123,3 +123,13 @@ def test_start_planning_v3_workflow_dispatches(monkeypatch):
     assert captured["coro"] is fake_client.start_workflow.return_value
     assert captured["loop"] is fake_loop
     assert captured["timeout"] == sw.START_WORKFLOW_TIMEOUT
+
+
+@pytest.mark.parametrize("job_id,repo_path", [("", "/tmp/ws"), ("job-1", "")])
+def test_start_planning_v3_workflow_rejects_blank_preconditions(job_id, repo_path):
+    """DbC: blank job_id or repo_path is a caller bug and is rejected upfront,
+    before any Temporal interaction."""
+    from planning_v3_team.temporal import start_workflow as sw
+
+    with pytest.raises(AssertionError):
+        sw.start_planning_v3_workflow(job_id, repo_path, None, "brief", None, False, False, False)
