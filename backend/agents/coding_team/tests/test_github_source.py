@@ -1603,3 +1603,76 @@ class TestPublishWindowLiveness:
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
         assert job.get("phase") == "completed"
+
+
+class TestEphemeralCheckoutCleanup:
+    """The per-issue clone is deleted only on a clean completion when the
+    caller flagged the checkout as platform-owned and ephemeral."""
+
+    def test_request_default_cleanup_flag_is_false(self) -> None:
+        from coding_team.api.main import RunFromGitHubRequest
+
+        req = RunFromGitHubRequest(owner="o", repo="r", repo_path="/tmp/x")
+        assert req.cleanup_checkout_on_success is False
+
+    def test_cleanup_helper_removes_directory(self, patched_app, tmp_path) -> None:
+        api = patched_app["api"]
+        target = tmp_path / "ephemeral"
+        target.mkdir()
+        (target / "file.txt").write_text("x", encoding="utf-8")
+        api._cleanup_issue_checkout(str(target))
+        assert not target.exists()
+
+    def test_cleanup_helper_swallows_errors_on_missing_dir(self, patched_app, tmp_path) -> None:
+        api = patched_app["api"]
+        # Must never raise even when the directory is already gone.
+        api._cleanup_issue_checkout(str(tmp_path / "does-not-exist"))
+
+    def test_clean_success_with_flag_deletes_checkout(self, patched_app) -> None:
+        repo_path = patched_app["repo_path"]
+        gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(11, repo_path=repo_path, cleanup_checkout_on_success=True),
+        )
+        assert resp.status_code == 200, resp.text
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed"
+        assert not os.path.isdir(repo_path)
+
+    def test_clean_success_without_flag_keeps_checkout(self, patched_app) -> None:
+        repo_path = patched_app["repo_path"]
+        gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
+        patched_app["set_github"](gh)
+        # No flag → default False → operator-managed checkout is preserved.
+        resp = patched_app["client"].post("/run-from-github", json=_body(11, repo_path=repo_path))
+        assert resp.status_code == 200, resp.text
+        assert os.path.isdir(repo_path)
+
+    def test_partial_failure_keeps_checkout_even_with_flag(self, patched_app, monkeypatch) -> None:
+        api = patched_app["api"]
+        repo_path = patched_app["repo_path"]
+
+        def _partial_orchestrator(job_id, _repo_path, _plan, **kw):
+            kw["update_job_fn"](
+                status="running",
+                phase="coding",
+                task_graph_snapshot=[
+                    {"id": "t1", "status": "merged", "feature_branch": "feature/t1"},
+                    {"id": "t2", "status": "failed", "title": "Broken task"},
+                ],
+            )
+
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", _partial_orchestrator)
+        gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
+        patched_app["set_github"](gh)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(11, repo_path=repo_path, cleanup_checkout_on_success=True),
+        )
+        assert resp.status_code == 200, resp.text
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "completed_with_failures"
+        # A partial result must keep the checkout so a retry can seed from it.
+        assert os.path.isdir(repo_path)

@@ -7,6 +7,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -310,6 +311,14 @@ class RunFromGitHubRequest(BaseModel):
         description="PR base; defaults to the repo's default branch.",
     )
     remote: str = Field(default="origin", description="Git remote name in repo_path")
+    cleanup_checkout_on_success: bool = Field(
+        default=False,
+        description=(
+            "When true, the per-issue checkout at repo_path is platform-owned and ephemeral: "
+            "delete it after the job completes cleanly and the work is published to a PR. "
+            "Defaults to false so an operator-managed checkout is never removed."
+        ),
+    )
 
 
 class RunFromGitHubResponse(BaseModel):
@@ -1892,6 +1901,26 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
+def _cleanup_issue_checkout(repo_path: str) -> None:
+    """Remove a platform-owned, ephemeral per-issue checkout after clean success.
+
+    Only called once the job has completed with every task merged and the work
+    published to a PR, so the local clone holds nothing the remote does not. The
+    folder is recreated by the caller's clone-or-fetch on a later run.
+
+    Postconditions:
+        - Best-effort: the directory tree at ``repo_path`` is removed when
+          present. Never raises — a cleanup failure (permissions, race with a
+          concurrent reader, missing dir) must not turn a successful job into a
+          failure; it is logged and swallowed.
+    """
+    try:
+        shutil.rmtree(repo_path, ignore_errors=True)
+        logger.info("Removed ephemeral per-issue checkout at %s", repo_path)
+    except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+        logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
+
+
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
     rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
@@ -2556,3 +2585,11 @@ def _run_with_github_hooks(
             status="completed_with_failures" if failed else "completed",
             phase="completed",
         )
+
+        # Drop the per-issue clone only on a clean completion: every task merged
+        # and the work published to the PR, so nothing local is unrecoverable. A
+        # partial result (some tasks FAILED) keeps the checkout so a retry can
+        # seed from its local progress, as does every earlier failure return.
+        # Operator-managed checkouts never set the flag, so they are never removed.
+        if not failed and request.cleanup_checkout_on_success:
+            _cleanup_issue_checkout(request.repo_path)

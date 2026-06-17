@@ -1369,22 +1369,44 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
     return items
 
 
-def _resolve_repo_path(cfg: dict[str, Any]) -> str:
+def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> str:
     """Resolve the local checkout path for the coding team.
 
     Priority: config override > SE_WORKSPACE_DIR env > WORKSPACE_ROOT env > AGENT_CACHE fallback.
+
+    When ``issue_number`` is given and the path is auto-derived (no operator
+    override), the checkout is namespaced per-issue with an ``issue-{N}`` segment
+    so multiple coding-team jobs can run on different issues of the same
+    repository in true filesystem isolation, concurrently. An operator override
+    is returned verbatim — the operator manages that checkout themselves, so it
+    is neither per-issue-namespaced nor auto-cleaned.
+
+    Preconditions:
+        - ``cfg`` carries non-empty ``owner`` and ``repo`` (the run routes
+          validate this before calling).
+        - ``issue_number`` is a positive issue number or ``None`` (the PR-review
+          path passes ``None`` and gets the repo-level path; it never clones).
+    Postconditions:
+        - Returns the override verbatim when set.
+        - Otherwise returns a derived path; with ``issue_number`` set the path
+          ends in ``issue-{issue_number}`` and two distinct issue numbers map to
+          two distinct paths.
     """
     override = cfg.get("repo_path", "").strip()
     if override:
         return override
 
+    issue_segment = f"issue-{issue_number}" if issue_number is not None else None
+
     for env_var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
         val = os.environ.get(env_var, "").strip()
         if val:
-            return str(Path(val) / f"{cfg['owner']}_{cfg['repo']}")
+            base = Path(val) / f"{cfg['owner']}_{cfg['repo']}"
+            return str(base / issue_segment if issue_segment else base)
 
     cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache")
-    return str(Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"])
+    base = Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"]
+    return str(base / issue_segment if issue_segment else base)
 
 
 def _git_auth_env(token: str) -> dict[str, str]:
@@ -1522,7 +1544,13 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     if not coding_team_url:
         raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
 
-    repo_path = _resolve_repo_path(cfg)
+    # Namespace the checkout per-issue (unless the operator pins an explicit
+    # repo_path) so two issues of the same repo get isolated clones and can run
+    # concurrently. The per-issue clone is platform-owned and ephemeral, so ask
+    # the coding team to delete it once the work is safely published to a PR; an
+    # operator-managed override is never auto-cleaned.
+    repo_path = _resolve_repo_path(cfg, issue_number=body.issue_number)
+    cleanup_checkout_on_success = not cfg.get("repo_path", "").strip()
 
     loop = asyncio.get_running_loop()
     clone_err = await loop.run_in_executor(None, _ensure_repo_clone, repo_path, owner, repo, token)
@@ -1536,6 +1564,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         "repo_path": repo_path,
         "issue_number": body.issue_number,
         "github_token": token,
+        "cleanup_checkout_on_success": cleanup_checkout_on_success,
     }
     if body.base_branch:
         payload["base_branch"] = body.base_branch

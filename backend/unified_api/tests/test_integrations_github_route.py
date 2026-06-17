@@ -23,7 +23,11 @@ if str(_agents) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from unified_api.main import app  # noqa: E402
-from unified_api.routes.integrations import _ensure_repo_clone, _git_auth_env  # noqa: E402
+from unified_api.routes.integrations import (  # noqa: E402
+    _ensure_repo_clone,
+    _git_auth_env,
+    _resolve_repo_path,
+)
 
 client = TestClient(app, follow_redirects=False)
 
@@ -374,3 +378,85 @@ def test_ensure_repo_clone_fetch_failure_scrubs_token(tmp_path):
     assert err is not None
     assert "git fetch failed" in err
     assert "tok-secret" not in err
+
+
+# ---------------------------------------------------------------------------
+# _resolve_repo_path: per-issue checkout isolation
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
+    assert path == "/cache/github_workspaces/acme/widget/issue-42"
+
+
+def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = dict(_GH_CFG)
+    assert _resolve_repo_path(cfg, issue_number=1) != _resolve_repo_path(cfg, issue_number=2)
+
+
+def test_resolve_repo_path_uses_se_workspace_dir_with_issue(monkeypatch):
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    path = _resolve_repo_path(dict(_GH_CFG), issue_number=9)
+    assert path == "/work/acme_widget/issue-9"
+
+
+def test_resolve_repo_path_without_issue_is_repo_level(monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    # The PR-review path passes no issue number and must keep the repo-level path.
+    assert _resolve_repo_path(dict(_GH_CFG)) == "/cache/github_workspaces/acme/widget"
+
+
+def test_resolve_repo_path_operator_override_returned_verbatim():
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
+    # An operator-pinned checkout is never per-issue-namespaced.
+    assert _resolve_repo_path(cfg, issue_number=42) == "/srv/checkout"
+
+
+# ---------------------------------------------------------------------------
+# run_github_issue: forwards a per-issue checkout + ephemeral cleanup flag
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp())
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 200
+    payload = fake.calls[0][1]
+    assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
+    assert payload["cleanup_checkout_on_success"] is True
+    # The clone target must be the per-issue folder, not the repo-level path.
+    assert mock_clone.call_args[0][0] == "/cache/github_workspaces/acme/widget/issue-7"
+
+
+@patch(f"{_M}._ensure_repo_clone", return_value=None)
+@patch(f"{_M}.get_credential", return_value="ghp_token")
+@patch(
+    f"{_M}.get_github_config",
+    return_value={"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"},
+)
+def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_clone, monkeypatch):
+    monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
+    fake = _FakeAsyncClient(result=_ok_resp())
+    with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
+        resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 200
+    payload = fake.calls[0][1]
+    assert payload["repo_path"] == "/srv/checkout"
+    assert payload["cleanup_checkout_on_success"] is False
