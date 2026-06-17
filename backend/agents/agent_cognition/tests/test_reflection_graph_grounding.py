@@ -37,7 +37,7 @@ class _DummyLLM:
 # ---------------------------------------------------------------------------
 def test_grounding_empty_when_neo4j_disabled(monkeypatch):
     monkeypatch.delenv("NEO4J_BOLT_URL", raising=False)
-    assert reflection._graph_grounding_block("a", [_summary()]) == ""
+    assert reflection._graph_grounding_block("a", [_summary()]) == ("", 0)
 
 
 def test_grounding_empty_when_opted_out(monkeypatch):
@@ -45,23 +45,25 @@ def test_grounding_empty_when_opted_out(monkeypatch):
     import agent_cognition.manifest_scope as ms
 
     monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: False)
-    assert reflection._graph_grounding_block("a", [_summary()]) == ""
+    assert reflection._graph_grounding_block("a", [_summary()]) == ("", 0)
 
 
-def test_grounding_block_relabeled_when_enabled(monkeypatch):
+def test_grounding_block_relabeled_and_counted_when_enabled(monkeypatch):
     monkeypatch.setenv("NEO4J_BOLT_URL", "bolt://neo4j:7687")
     import agent_cognition.graph.retrieval as retrieval_mod
     import agent_cognition.manifest_scope as ms
 
     monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: True)
 
-    async def _fake_graph(agent_id, query):
-        return "## Knowledge graph\n- Alice knows Bob"
+    async def _fake_facts(agent_id, query):
+        return ["Alice knows Bob", "Bob ships code"]
 
-    monkeypatch.setattr(retrieval_mod, "build_graph_context", _fake_graph)
-    block = reflection._graph_grounding_block("a", [_summary()])
+    monkeypatch.setattr(retrieval_mod, "search_graph_facts", _fake_facts)
+    block, count = reflection._graph_grounding_block("a", [_summary()])
     assert block.startswith("## Related knowledge (from graph)")
     assert "Alice knows Bob" in block
+    # Count comes from the structured facts list (len), not parsed from the block.
+    assert count == 2
 
 
 def test_grounding_empty_on_unexpected_error(monkeypatch):
@@ -72,7 +74,7 @@ def test_grounding_empty_on_unexpected_error(monkeypatch):
         raise RuntimeError("registry exploded")
 
     monkeypatch.setattr(ms, "ground_rule_proposals", _boom)
-    assert reflection._graph_grounding_block("a", [_summary()]) == ""
+    assert reflection._graph_grounding_block("a", [_summary()]) == ("", 0)
 
 
 def test_grounding_empty_when_graph_returns_nothing(monkeypatch):
@@ -83,10 +85,10 @@ def test_grounding_empty_when_graph_returns_nothing(monkeypatch):
     monkeypatch.setattr(ms, "ground_rule_proposals", lambda a: True)
 
     async def _empty(agent_id, query):
-        return ""
+        return []
 
-    monkeypatch.setattr(retrieval_mod, "build_graph_context", _empty)
-    assert reflection._graph_grounding_block("a", [_summary()]) == ""
+    monkeypatch.setattr(retrieval_mod, "search_graph_facts", _empty)
+    assert reflection._graph_grounding_block("a", [_summary()]) == ("", 0)
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +155,7 @@ def test_reflect_with_grounding_only_creates_proposals(monkeypatch):
 
     def _ground(agent_id, summaries):
         grounded["called"] = True
-        return "## Related knowledge (from graph)\n- fact"
+        return "## Related knowledge (from graph)\n- fact", 1
 
     monkeypatch.setattr(reflection, "_graph_grounding_block", _ground)
     monkeypatch.setattr(reflection, "get_client", lambda key: _DummyLLM())
@@ -174,12 +176,12 @@ def test_reflect_with_grounding_only_creates_proposals(monkeypatch):
 # _graph_evidence: bounded, non-load-bearing provenance entry
 # ---------------------------------------------------------------------------
 def test_graph_evidence_empty_block_is_empty_list():
-    assert reflection._graph_evidence("") == []
+    assert reflection._graph_evidence("", 0) == []
 
 
-def test_graph_evidence_counts_fact_lines_and_omits_stale_keys():
+def test_graph_evidence_stamps_fact_count_and_omits_stale_keys():
     block = "## Related knowledge (from graph)\n- Alice knows Bob\n- Bob ships code"
-    ev = reflection._graph_evidence(block)
+    ev = reflection._graph_evidence(block, 2)
     assert ev == [{"source": "graph", "kind": "grounding", "facts": 2}]
     # Must omit the keys the version-staleness SQL reads, or it would make
     # graph-grounded proposals spuriously stale / unapprovable.
