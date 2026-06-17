@@ -9,6 +9,7 @@ drifting on claim/complete semantics.
 
 from __future__ import annotations
 
+import types
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -17,6 +18,29 @@ from agent_cognition.context import ClaimResult, ClaimState
 from agent_cognition.models import Rule, RuleMode, RuleSource, RuleStatus
 
 _RULE_TS = datetime(2026, 6, 1, tzinfo=timezone.utc)
+
+
+class FakeGraphiti:
+    """In-memory stand-in for the Graphiti client's ``search`` (no live Neo4j).
+
+    Shared by the graph-retrieval tests and the reflection-grounding tests so the
+    two suites cannot drift on the search contract. Returns one fact-bearing
+    object per configured fact, or raises ``error`` to exercise the failure path.
+
+    Invariants:
+        * ``calls`` records every ``search`` invocation's kwargs in order.
+    """
+
+    def __init__(self, facts: list[str] | None = None, error: Exception | None = None) -> None:
+        self._facts = facts or []
+        self._error = error
+        self.calls: list[dict[str, Any]] = []
+
+    async def search(self, *, query, group_ids, num_results):
+        self.calls.append({"query": query, "group_ids": group_ids, "num_results": num_results})
+        if self._error is not None:
+            raise self._error
+        return [types.SimpleNamespace(fact=f) for f in self._facts]
 
 
 def make_rule(
