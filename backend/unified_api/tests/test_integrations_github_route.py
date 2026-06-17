@@ -380,6 +380,35 @@ def test_ensure_repo_clone_fetch_failure_scrubs_token(tmp_path):
     assert "tok-secret" not in err
 
 
+def test_ensure_repo_clone_mkdir_failure_reports_workspace_error(tmp_path):
+    # repo_path's parent already exists as a *file*, so mkdir raises OSError.
+    blocker = tmp_path / "afile"
+    blocker.write_text("x", encoding="utf-8")
+    repo = blocker / "checkout"
+    err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is not None
+    assert "could not prepare workspace dir" in err
+
+
+def test_ensure_repo_clone_lock_open_failure_reports_lock_error(tmp_path):
+    repo = tmp_path / "checkout"
+    # The only open() in _ensure_repo_clone is the lock file; failing it must
+    # surface as a lock error, NOT the git-missing message.
+    with patch("builtins.open", side_effect=PermissionError("denied")):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is not None
+    assert "could not acquire clone lock" in err
+    assert "git executable not found" not in err
+
+
+def test_ensure_repo_clone_flock_failure_reports_lock_error(tmp_path):
+    repo = tmp_path / "checkout"
+    with patch(f"{_M}.fcntl.flock", side_effect=OSError("locked")):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
+    assert err is not None
+    assert "could not acquire clone lock" in err
+
+
 # ---------------------------------------------------------------------------
 # _resolve_repo_path: per-issue checkout isolation
 # ---------------------------------------------------------------------------

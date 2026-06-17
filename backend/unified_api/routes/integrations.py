@@ -1479,57 +1479,68 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
         return f"could not prepare workspace dir for {owner}/{repo}: {e}"
     lock_path = path.parent / f".{path.name}.clone.lock"
 
+    # Open + lock the sibling lock file. open()/flock() failures are workspace
+    # problems (and a FileNotFoundError from open must not be mistaken for a
+    # missing git binary), so they are handled here rather than by the
+    # git-specific FileNotFoundError handler that wraps the git ops below.
     try:
-        with open(lock_path, "w") as lock_file:
+        lock_file = open(lock_path, "w")  # noqa: SIM115 - closed in the finally below
+    except OSError as e:
+        return f"could not acquire clone lock for {owner}/{repo}: {e}"
+    try:
+        try:
             fcntl.flock(lock_file, fcntl.LOCK_EX)
-            try:
-                if path.is_dir() and (path / ".git").is_dir():
-                    url_check = subprocess.run(
-                        ["git", "-C", repo_path, "remote", "get-url", "origin"],
-                        capture_output=True,
-                        text=True,
-                        timeout=10,
-                    )
-                    url_out = url_check.stdout.strip()
-                    if url_check.returncode != 0 or expected_suffix not in url_out:
-                        return (
-                            f"existing checkout at {repo_path} does not match {owner}/{repo} "
-                            f"(remote origin: {url_out[:120]})"
-                        )
-
-                    result = subprocess.run(
-                        ["git", "-C", repo_path, "fetch", "--all"],
-                        capture_output=True,
-                        text=True,
-                        timeout=120,
-                        env=env,
-                    )
-                    if result.returncode != 0:
-                        return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
-                    return None
-
-                clone_url = f"https://github.com/{owner}/{repo}.git"
-                result = subprocess.run(
-                    ["git", "clone", clone_url, repo_path],
+        except OSError as e:
+            return f"could not acquire clone lock for {owner}/{repo}: {e}"
+        try:
+            if path.is_dir() and (path / ".git").is_dir():
+                url_check = subprocess.run(
+                    ["git", "-C", repo_path, "remote", "get-url", "origin"],
                     capture_output=True,
                     text=True,
-                    timeout=300,
+                    timeout=10,
+                )
+                url_out = url_check.stdout.strip()
+                if url_check.returncode != 0 or expected_suffix not in url_out:
+                    return (
+                        f"existing checkout at {repo_path} does not match {owner}/{repo} "
+                        f"(remote origin: {url_out[:120]})"
+                    )
+
+                result = subprocess.run(
+                    ["git", "-C", repo_path, "fetch", "--all"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
                     env=env,
                 )
                 if result.returncode != 0:
-                    safe_err = _scrub_git_secret(result.stderr, token)[:300]
-                    return f"git clone failed: {safe_err}"
+                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
                 return None
-            finally:
+
+            clone_url = f"https://github.com/{owner}/{repo}.git"
+            result = subprocess.run(
+                ["git", "clone", clone_url, repo_path],
+                capture_output=True,
+                text=True,
+                timeout=300,
+                env=env,
+            )
+            if result.returncode != 0:
+                safe_err = _scrub_git_secret(result.stderr, token)[:300]
+                return f"git clone failed: {safe_err}"
+            return None
+        except FileNotFoundError:
+            # `git` is not on PATH in this image — surfaces as a clear message
+            # instead of a FileNotFoundError bubbling up to an opaque 500.
+            return "git executable not found on the server; install git in the API image."
+        except subprocess.TimeoutExpired as e:
+            return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
+        finally:
+            with contextlib.suppress(OSError):
                 fcntl.flock(lock_file, fcntl.LOCK_UN)
-    except FileNotFoundError:
-        # `git` is not on PATH in this image — surfaces as a clear message
-        # instead of a FileNotFoundError bubbling up to an opaque 500.
-        return "git executable not found on the server; install git in the API image."
-    except subprocess.TimeoutExpired as e:
-        return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
-    except OSError as e:
-        return f"could not acquire clone lock for {owner}/{repo}: {e}"
+    finally:
+        lock_file.close()
 
 
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)

@@ -1644,6 +1644,54 @@ class TestEphemeralCheckoutCleanup:
         assert api._is_safe_to_remove_checkout("/") is False
         api._cleanup_issue_checkout("/")  # must not raise and must not attempt removal
 
+    def test_is_safe_to_remove_checkout_handles_resolve_error(self, patched_app) -> None:
+        api = patched_app["api"]
+        # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
+        assert api._is_safe_to_remove_checkout("bad\x00path") is False
+
+    def test_cleanup_helper_swallows_rmtree_failure(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        api = patched_app["api"]
+        target = tmp_path / "checkout"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _boom(*_a, **_kw):
+            raise OSError("permission denied")
+
+        monkeypatch.setattr(api.shutil, "rmtree", _boom)
+        # Must not raise even when rmtree fails.
+        api._cleanup_issue_checkout(str(target))
+
+    def test_cleanup_removes_sibling_lock_file(self, patched_app, tmp_path) -> None:
+        api = patched_app["api"]
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+        lock = tmp_path / ".issue-7.clone.lock"
+        lock.write_text("", encoding="utf-8")
+        api._cleanup_issue_checkout(str(target))
+        assert not target.exists()
+        assert not lock.exists()
+
+    def test_cleanup_lock_unlink_failure_is_swallowed(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        api = patched_app["api"]
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+        (tmp_path / ".issue-7.clone.lock").write_text("", encoding="utf-8")
+
+        def _boom(self, *a, **k):
+            raise OSError("denied")
+
+        # rmtree (os-level) still removes the checkout; only the lock unlink fails.
+        monkeypatch.setattr(api.Path, "unlink", _boom)
+        api._cleanup_issue_checkout(str(target))  # must not raise
+        assert not target.exists()
+
     def test_clean_success_with_flag_deletes_checkout(self, patched_app) -> None:
         repo_path = patched_app["repo_path"]
         os.makedirs(os.path.join(repo_path, ".git"), exist_ok=True)  # a real checkout

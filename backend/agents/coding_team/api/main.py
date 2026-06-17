@@ -1950,6 +1950,18 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
         logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
 
+    # Also drop the sibling clone lock left beside the checkout by unified_api's
+    # _ensure_repo_clone. Its name MUST match that producer (the two services
+    # can't share a helper without inverting the import direction). Safe here:
+    # the job is terminal and the per-issue duplicate guard means no other
+    # process is cloning this issue. Best-effort — never fail a successful job.
+    p = Path(repo_path)
+    lock_file = p.parent / f".{p.name}.clone.lock"
+    try:
+        lock_file.unlink(missing_ok=True)
+    except OSError as e:
+        logger.warning("Failed to remove clone lock %s: %s", lock_file, e)
+
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
