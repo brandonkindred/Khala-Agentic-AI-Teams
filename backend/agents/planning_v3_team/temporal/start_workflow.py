@@ -24,8 +24,20 @@ CLIENT_READY_TIMEOUT_S = 10.0
 CLIENT_READY_POLL_S = 0.05
 
 
+def _worker_starting() -> bool:
+    """True while a Temporal worker thread is alive in this process.
+
+    Imported lazily so this module doesn't pull ``temporalio.worker`` (via the
+    worker module) at import time, and to keep the dependency direction
+    one-way (worker → start_workflow never the reverse).
+    """
+    from planning_v3_team.temporal.worker import is_worker_thread_alive
+
+    return is_worker_thread_alive()
+
+
 def _wait_for_client() -> tuple[Any, Any]:
-    """Block until the Temporal client and loop are populated, or time out.
+    """Block until the Temporal client and loop are populated, or fail.
 
     Preconditions:
         - The Planning V3 Temporal worker has been (or is being) started in
@@ -38,8 +50,9 @@ def _wait_for_client() -> tuple[Any, Any]:
           required together so callers never observe a half-initialised state
           (the worker sets the client just before the loop).
     Raises:
-        - ``RuntimeError`` if the client/loop are still unset after the timeout
-          (worker not running or Temporal misconfigured).
+        - ``RuntimeError`` immediately if no worker thread is running in this
+          process (nothing to wait for), or after ``CLIENT_READY_TIMEOUT_S`` if
+          a running worker never connects.
     """
     deadline = time.monotonic() + CLIENT_READY_TIMEOUT_S
     while True:
@@ -47,6 +60,15 @@ def _wait_for_client() -> tuple[Any, Any]:
         loop = get_temporal_loop()
         if client is not None and loop is not None:
             return client, loop
+        # Fail fast when no worker thread is running here: the bounded wait only
+        # buys anything while a worker is mid-connect. If it is absent or has
+        # died (e.g. Temporal unreachable, so the connect raised and the thread
+        # exited), blocking the full timeout would tie up the request threadpool
+        # for no benefit — the sync /run endpoint runs in a bounded thread pool.
+        if not _worker_starting():
+            raise RuntimeError(
+                "Temporal client not available; the Planning V3 worker is not running"
+            )
         if time.monotonic() >= deadline:
             raise RuntimeError("Temporal client not available; is the Planning V3 worker running?")
         time.sleep(CLIENT_READY_POLL_S)

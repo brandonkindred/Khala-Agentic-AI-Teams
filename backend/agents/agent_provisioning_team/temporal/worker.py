@@ -1,8 +1,12 @@
-"""Temporal worker creation for the Agent Provisioning team.
+"""Temporal worker for the Agent Provisioning team.
 
-Worker startup is handled by ``shared_temporal.start_team_worker`` via the
-Pattern A auto-boot in ``agent_provisioning_team/temporal/__init__.py``.
-This module retains ``create_agent_provisioning_worker`` for tests and
+Worker startup follows shared_temporal Pattern A: the auto-boot in
+``agent_provisioning_team/temporal/__init__.py`` calls ``start_team_worker``
+on import. ``start_agent_provisioning_temporal_worker_thread`` exposes that
+same boot under the no-arg contract the generic team_service entrypoint
+invokes via ``TEAM_TEMPORAL_WORKER_MODULE`` / ``TEAM_TEMPORAL_WORKER_FUNC``
+(matching ``user_agent_founder`` and ``software_engineering_team``). This
+module also retains ``create_agent_provisioning_worker`` for tests and
 diagnostics that want to build a ``Worker`` instance directly.
 """
 
@@ -38,6 +42,30 @@ from agent_provisioning_team.temporal.workflows import (
 logger = logging.getLogger(__name__)
 
 _activity_executor: Optional[ThreadPoolExecutor] = None
+
+
+def start_agent_provisioning_temporal_worker_thread() -> bool:
+    """Start the Agent Provisioning Temporal worker (no-op when disabled).
+
+    Preconditions:
+        - None. Safe to call multiple times — ``start_team_worker`` is
+          idempotent per team, so this is a no-op if the Pattern A auto-boot
+          (or a prior call) already started the worker.
+    Postconditions:
+        - Returns True if a worker thread is running (or already running) for
+          this team, False when Temporal is disabled.
+    """
+    from agent_provisioning_team.temporal import ACTIVITIES, WORKFLOWS
+    from shared_temporal import start_team_worker
+
+    if not is_temporal_enabled():
+        return False
+    return start_team_worker(
+        "agent_provisioning",
+        WORKFLOWS,
+        ACTIVITIES,
+        task_queue=TASK_QUEUE,
+    )
 
 
 def create_agent_provisioning_worker(client: Optional[object] = None) -> Optional[Worker]:
