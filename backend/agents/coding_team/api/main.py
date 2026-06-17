@@ -1901,6 +1901,31 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
+def _is_safe_to_remove_checkout(repo_path: str) -> bool:
+    """True only for a real per-issue git checkout that is safe to delete.
+
+    Guards the destructive ``rmtree`` against a caller-supplied ``repo_path``
+    (``/run-from-github`` is a public endpoint whose ``repo_path`` is only
+    validated as an existing directory): never a filesystem root or a shallow
+    system directory, and only something that is actually a git checkout we
+    cloned (carries a ``.git`` entry).
+
+    Preconditions:
+        - ``repo_path`` is the path the hook is about to remove.
+    Postconditions:
+        - Returns True iff the resolved path has at least three components
+          (so not ``/`` or ``/data``) and contains a ``.git`` entry; False on
+          any resolution error or when either check fails.
+    """
+    try:
+        p = Path(repo_path).resolve()
+    except (OSError, ValueError):
+        return False
+    if len(p.parts) < 3:
+        return False
+    return (p / ".git").exists()
+
+
 def _cleanup_issue_checkout(repo_path: str) -> None:
     """Remove a platform-owned, ephemeral per-issue checkout after clean success.
 
@@ -1909,13 +1934,18 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     folder is recreated by the caller's clone-or-fetch on a later run.
 
     Postconditions:
-        - Best-effort: the directory tree at ``repo_path`` is removed when
-          present. Never raises — a cleanup failure (permissions, race with a
-          concurrent reader, missing dir) must not turn a successful job into a
-          failure; it is logged and swallowed.
+        - Best-effort: the checkout at ``repo_path`` is removed only when
+          ``_is_safe_to_remove_checkout`` confirms it is a real, non-shallow git
+          checkout; an unsafe path is refused (logged, left in place). Never
+          raises — a cleanup failure (permissions, race with a concurrent
+          reader) must not turn a successful job into a failure; it is caught and
+          logged. The success line is logged only after ``rmtree`` returns.
     """
+    if not _is_safe_to_remove_checkout(repo_path):
+        logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
+        return
     try:
-        shutil.rmtree(repo_path, ignore_errors=True)
+        shutil.rmtree(repo_path)
         logger.info("Removed ephemeral per-issue checkout at %s", repo_path)
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
         logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)

@@ -1619,6 +1619,7 @@ class TestEphemeralCheckoutCleanup:
         api = patched_app["api"]
         target = tmp_path / "ephemeral"
         target.mkdir()
+        (target / ".git").mkdir()  # only real checkouts are removed
         (target / "file.txt").write_text("x", encoding="utf-8")
         api._cleanup_issue_checkout(str(target))
         assert not target.exists()
@@ -1628,8 +1629,24 @@ class TestEphemeralCheckoutCleanup:
         # Must never raise even when the directory is already gone.
         api._cleanup_issue_checkout(str(tmp_path / "does-not-exist"))
 
+    def test_cleanup_helper_refuses_non_checkout_path(self, patched_app, tmp_path) -> None:
+        api = patched_app["api"]
+        # A directory that is not a git checkout (no .git) must be left untouched.
+        target = tmp_path / "not-a-checkout"
+        target.mkdir()
+        (target / "file.txt").write_text("x", encoding="utf-8")
+        api._cleanup_issue_checkout(str(target))
+        assert target.exists()
+
+    def test_cleanup_helper_refuses_shallow_path(self, patched_app) -> None:
+        api = patched_app["api"]
+        # A filesystem root / shallow system path must never be removed even if it exists.
+        assert api._is_safe_to_remove_checkout("/") is False
+        api._cleanup_issue_checkout("/")  # must not raise and must not attempt removal
+
     def test_clean_success_with_flag_deletes_checkout(self, patched_app) -> None:
         repo_path = patched_app["repo_path"]
+        os.makedirs(os.path.join(repo_path, ".git"), exist_ok=True)  # a real checkout
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(
