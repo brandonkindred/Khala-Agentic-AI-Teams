@@ -1968,7 +1968,10 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
 
     # The checkout is gone — drop the sibling clone lock created by unified_api's
     # _ensure_repo_clone (name resolved via the shared clone_workspace helper,
-    # the single source of truth). Best-effort — never fail a successful job.
+    # the single source of truth). The lock name is derived from repo_path's last
+    # component, which for the per-issue paths _resolve_repo_path produces is the
+    # checkout name (e.g. ``issue-7``) — this hook is only ever invoked for such
+    # per-issue checkouts. Best-effort — never fail a successful job.
     lock_file = clone_lock_path(repo_path)
     try:
         lock_file.unlink(missing_ok=True)

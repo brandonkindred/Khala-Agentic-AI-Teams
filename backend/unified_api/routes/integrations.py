@@ -1394,10 +1394,14 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
         - ``issue_number`` is a positive issue number or ``None`` (the PR-review
           path passes ``None`` and gets the repo-level path; it never clones).
     Postconditions:
-        - Returns the override verbatim when set.
-        - Otherwise returns a derived path; with ``issue_number`` set the path
-          ends in ``issue-{issue_number}`` and two distinct issue numbers map to
-          two distinct paths.
+        - Returns the override verbatim when set. The override is trusted
+          operator configuration and is intentionally NOT traversal-sanitized
+          (unlike the auto-derived ``owner``/``repo`` below) and not auto-cleaned;
+          if that config source ever accepts untrusted input it must be
+          sanitized by the caller.
+        - Otherwise returns an absolute derived path; with ``issue_number`` set
+          the path ends in ``issue-{issue_number}`` and two distinct issue
+          numbers map to two distinct paths.
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` carry a path
           separator, ``..`` segment, or null byte — defense-in-depth so this
           path builder can't be coerced into escaping the workspace root even if
@@ -1423,15 +1427,22 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
 
     issue_segment = f"issue-{issue_number}" if issue_number is not None else None
 
+    # Auto-derived paths are resolved to absolute so they are stable regardless
+    # of the process working directory at clone vs. cleanup time, and so the
+    # ephemeral-root safety check (which also resolves) compares like with like.
     for env_var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
         val = os.environ.get(env_var, "").strip()
         if val:
             base = Path(val) / f"{cfg['owner']}_{cfg['repo']}"
-            return str(base / issue_segment if issue_segment else base)
+            target = base / issue_segment if issue_segment else base
+            return str(target.resolve())
 
-    cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache")
+    # Mirror ephemeral_workspace_roots()'s AGENT_CACHE handling exactly (strip +
+    # default) so the derived path and the cleanup safety root never diverge.
+    cache_dir = os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
     base = Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"]
-    return str(base / issue_segment if issue_segment else base)
+    target = base / issue_segment if issue_segment else base
+    return str(target.resolve())
 
 
 def _git_auth_env(token: str) -> dict[str, str]:
