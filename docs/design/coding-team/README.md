@@ -7,33 +7,53 @@
 > two-column concept and the run states/components, which still inform the Jobs view; treat the
 > three-view split as the current layout.
 
-Design mockups for separating the Coding Team live status panel from the GitHub Issues list, so the
-issues list is **always visible and selectable**, the status panel becomes its **own persistent
-panel** that handles multiple runs, and **cannot be dismissed**.
+These notes capture the work of separating the Coding Team live status from the GitHub Issues list,
+so the issues list is **always visible and selectable**, runs live in their **own persistent
+status surface** that handles multiple runs, and a run can **never be dismissed into a dead end**.
+The shipped implementation delivers that intent through a **three-view toggle** (see below); the
+mockups predate the toggle and illustrate the earlier two-column arrangement of the same content.
 
-These mockups use the app's real design tokens (`user-interface/src/theme.scss` — premium dark +
+The mockups use the app's real design tokens (`user-interface/src/theme.scss` — premium dark +
 amber). They render directly in GitHub and any browser.
 
-| # | Mockup | What it shows |
-|---|--------|---------------|
-| 1 | [`redesign-running.svg`](./redesign-running.svg) | The full two-column page in the running state: issues always on the left (with an inline confirm under the selected row), the persistent Runs panel on the right (Running + Recent lists + live detail of the selected run). |
-| 2 | [`runs-panel-states.svg`](./runs-panel-states.svg) | The Runs panel in three states: **empty**, **waiting for answers** (pending-questions reachable), and **completed** (with a *Run again* affordance). |
-| 3 | [`before-after.svg`](./before-after.svg) | The fix at a glance: *before*, a run hid every issue and Dismiss was a dead end; *after*, issues stay visible and runs live in their own non-dismissable panel. |
-| — | [`mockup.html`](./mockup.html) | An interactive HTML version of frame 1 (open in a browser) using the real `--kh-*` CSS variables. |
+| # | Mockup | What it shows | Status |
+|---|--------|---------------|--------|
+| 1 | [`redesign-running.svg`](./redesign-running.svg) | The earlier **two-column** page in the running state: issues on the left (inline confirm under the selected row), the Runs panel on the right (Running + Recent lists + live detail). | **Historical** — superseded by the three-view layout; the content (issue rows, run rows, run detail) still matches, only the arrangement changed. |
+| 2 | [`runs-panel-states.svg`](./runs-panel-states.svg) | The Runs panel in three states: **empty**, **waiting for answers** (pending-questions reachable), and **completed** (with a *Run again* affordance). | **Current** — these are exactly the **Jobs** view's run states. |
+| 3 | [`before-after.svg`](./before-after.svg) | The fix at a glance: *before*, a run hid every issue and Dismiss was a dead end; *after*, issues stay visible and runs live in their own non-dismissable surface. | **Historical** — the *after* frame shows the two-column arrangement; the principle (issues never hidden, no Dismiss dead-end) still holds in the Jobs view. |
+| — | [`mockup.html`](./mockup.html) | An interactive HTML version of frame 1 (open in a browser) using the real `--kh-*` CSS variables. | **Historical** — two-column. |
 
-## What changed vs. the old page
+## Current layout — three single-focus views
 
-- **Two-column layout** (`grid-template-columns: 1fr 380px`, stacks below 1024px). Issues left,
-  Runs right.
-- **Issues list is always rendered** once loaded — it is no longer gated on "no active job".
-  Selecting an issue expands an **inline confirm** beneath the row instead of replacing the list.
-- **Runs panel is persistent** — a *Running* + *Recent* list (selecting a run shows its live
-  detail) with **no Dismiss button**. A run paused on questions is pinned in *Running* with a
-  *needs answers* badge, so it can always be reached and answered.
+The page opens on **Chat** and switches between three views via a `mat-button-toggle-group` (the
+`.view-toggle`); only one view's content renders at a time. The header (back link, title, subtitle,
+health indicator) and the runs/issues polling are shared and view-independent, so chips and progress
+stay live even while a view is hidden.
+
+- **Chat** — the `app-team-assistant-chat` component (assistant chat + the "Coding Team" form) plus
+  the queued-job banner. The default view.
+- **GitHub** — the full-width issues list. Selecting an issue expands an **inline confirm** beneath
+  the row (it never replaces the list); starting a run marks the issue **In progress**.
+- **Jobs** — an **accordion** of runs (*Running* + *Recent*). Clicking a row expands that run's live
+  detail inline beneath it; clicking again collapses it. A run paused on questions shows a *needs
+  answers* badge and is always reachable. There is **no Dismiss button**.
+
+Cross-cutting, vs. the legacy page:
+
 - **Re-themed** from legacy light Material colors to the `--kh-*` dark + amber tokens; reuses the
   shared `.kh-badge` / `.kh-empty-state` system.
+- **Per-row bindings are precomputed** into view-models (`RunRowVm` / `IssueRowVm`) so list rows
+  bind plain properties instead of calling helper methods every change-detection cycle.
 - **Usability extras:** copy-job-id, *Run again* on terminal runs, tooltips on truncated text,
-  a panel legend, collapsed-by-default thinking panel, and a paginator range label.
+  a collapsed-by-default thinking panel, and a paginator range label.
+
+### Earlier two-column concept (historical)
+
+The first iteration placed the same content in a **two-column layout**
+(`grid-template-columns: 1fr 380px`, stacking below 1024px): issues left, a persistent Runs panel
+right. It proved too dense in use, which is why the shipped design splits the content across the
+three views above. The two-column mockups (frames 1 and 3, `mockup.html`) are retained only for that
+historical context.
 
 ## Figma
 

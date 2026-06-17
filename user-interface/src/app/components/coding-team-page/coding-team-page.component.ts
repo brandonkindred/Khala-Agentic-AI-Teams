@@ -94,6 +94,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Which single view is visible. The page opens on the assistant chat. */
   activeView: 'chat' | 'github' | 'jobs' = 'chat';
 
+  /** Assistant workflow endpoint for the embedded chat — a named constant, not a template literal. */
+  readonly teamApiUrl = '/api/coding-team/assistant';
+
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
   // GitHub integration state
@@ -201,8 +204,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Refresh the open-issue list and the Runs snapshot together so they never drift. Resets the
    * selection/pagination, triggers a runs refresh (which re-syncs the "In progress" chips), then
    * fetches issues. Sets `issueError` on failure.
+   *
+   * Preconditions: none.
+   * Postconditions: a no-op while a load is already in flight (`loadingIssues`), so a rapid
+   * re-trigger never issues overlapping requests that could land out of order.
    */
   loadIssues(): void {
+    if (this.loadingIssues) return;
     this.loadingIssues = true;
     this.issueError = null;
     this.selectedIssue = null;
@@ -306,13 +314,14 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Start a coding-team run for the selected issue.
    *
-   * Preconditions: none enforced — a no-op when `selectedIssue` is null.
+   * Preconditions: none enforced — a no-op when `selectedIssue` is null or a run is already starting
+   * (`runningIssue`), so a double-click can't submit the same issue twice.
    * Postconditions: on success the issue is marked in progress (`activeIssueNumbers`), the returned
    * run is selected (so its live detail shows immediately), the Runs list is refreshed, and the
    * selection is cleared; on error `issueError` is surfaced. `runningIssue` is toggled across the call.
    */
   confirmAndRun(): void {
-    if (!this.selectedIssue) return;
+    if (!this.selectedIssue || this.runningIssue) return;
     this.runningIssue = true;
     this.issueError = null;
     this.integrationsApi.runGitHubIssue({ issue_number: this.selectedIssue.number }).subscribe({
@@ -420,7 +429,11 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.runningRuns = mine.filter((j) => !isCodingTeamTerminalStatus(j.status));
     this.recentRuns = mine.filter((j) => isCodingTeamTerminalStatus(j.status));
 
-    const active = new Set(this.runningRuns.map((j) => j.github_context!.issue_number!));
+    const active = new Set(
+      this.runningRuns
+        .map((j) => j.github_context?.issue_number)
+        .filter((n): n is number => n != null),
+    );
     // Preserve the chip for a just-started run the snapshot does not list yet, but only while the run
     // is genuinely absent from the snapshot and not yet observed terminal. Once the snapshot lists the
     // run we trust the snapshot's own status — so a finished run is dropped and selecting a terminal
@@ -573,13 +586,16 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /**
    * Relative "x ago" label for a run's last update.
    *
-   * Preconditions: `isoString`, when present, is a parseable ISO timestamp.
-   * Postconditions: returns `''` for a missing timestamp, else `just now` / `Nm ago` / `Nh ago` /
-   * `Nd ago` for the elapsed time since `isoString`.
+   * Preconditions: none.
+   * Postconditions: returns `''` for a missing or unparseable timestamp (so a malformed value can
+   * never render as "NaNd ago"), else `just now` / `Nm ago` / `Nh ago` / `Nd ago` for the elapsed
+   * time since `isoString`.
    */
   timeAgo(isoString?: string): string {
     if (!isoString) return '';
-    const diff = Date.now() - new Date(isoString).getTime();
+    const date = new Date(isoString);
+    if (isNaN(date.getTime())) return '';
+    const diff = Date.now() - date.getTime();
     const mins = Math.floor(diff / 60000);
     if (mins < 1) return 'just now';
     if (mins < 60) return `${mins}m ago`;
@@ -626,8 +642,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    */
   onAnswersSubmitted(status: AnswersSubmittedStatus): void {
     // This page always configures the panel with submitEndpoint="coding-team", so the emitted union
-    // member is always the coding-team status shape.
-    this.jobStatus = status as CodingTeamJobStatus;
+    // member is always the coding-team status shape — but verify the discriminating fields are
+    // present rather than asserting blindly, so a future change to the child's emission can't
+    // silently fold a foreign shape into `jobStatus`.
+    if ('job_id' in status && 'status' in status) {
+      this.jobStatus = status as CodingTeamJobStatus;
+    }
     this.issueError = null;
     if (this.selectedRunId) {
       this.startPolling(this.selectedRunId);
@@ -641,11 +661,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   /**
    * Restart the selected run's orchestrator after answers were stored but auto-resume failed. No-op
-   * when no run is selected. On success, restarts polling from scratch; on error, surfaces
+   * when no run is selected or a resume is already in flight (`resumingJob`), so a double-click can't
+   * fire overlapping resume requests. On success, restarts polling from scratch; on error, surfaces
    * `issueError`.
    */
   resumeJob(): void {
-    if (!this.selectedRunId) return;
+    if (!this.selectedRunId || this.resumingJob) return;
     const jobId = this.selectedRunId;
     this.resumingJob = true;
     this.issueError = null;

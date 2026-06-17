@@ -134,9 +134,10 @@ describe('CodingTeamPageComponent', () => {
     component.runs = [run];
     component.runningRuns = [run];
     component.recentRuns = [];
-    // The template iterates the precomputed view-models, so populate them too.
-    component.runningRunVms = [(component as unknown as { toRunVm: (r: CodingTeamJobListItem) => unknown }).toRunVm(run)] as never;
-    component.recentRunVms = [];
+    // The template iterates the precomputed view-models; rebuild them from the run list via the
+    // same private builder the component uses (bracket access, the spec's idiom for internals —
+    // no structural cast to a private method's shape).
+    component['buildRunVms']();
     component.selectedRunId = run.job_id;
     component.selectedRunNumber = run.github_context?.issue_number ?? null;
     component.jobStatus = jobStatus as never;
@@ -264,6 +265,22 @@ describe('CodingTeamPageComponent', () => {
     expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
   });
 
+  it('confirmAndRun is a no-op while a run is already starting (guards double-submit)', async () => {
+    await setup();
+    component.selectIssue(component.issues[0]);
+    component.runningIssue = true;
+    component.confirmAndRun();
+    expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
+  });
+
+  it('loadIssues is a no-op while a load is already in flight (guards overlapping fetches)', async () => {
+    await setup();
+    integrationsSpy.getGitHubIssues.mockClear();
+    component.loadingIssues = true;
+    component.loadIssues();
+    expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+  });
+
   it('records the latest job id when a workflow is launched', async () => {
     await setup();
     component.onWorkflowLaunched({ job_id: 'wf-1', conversation_id: 'c1' });
@@ -324,6 +341,8 @@ describe('CodingTeamPageComponent', () => {
     it('formats relative times', async () => {
       await setup();
       expect(component.timeAgo()).toBe('');
+      // A malformed timestamp resolves to '' rather than rendering "NaNd ago".
+      expect(component.timeAgo('not-a-real-date')).toBe('');
       expect(component.timeAgo(new Date().toISOString())).toBe('just now');
       expect(component.timeAgo(new Date(Date.now() - 5 * 60000).toISOString())).toBe('5m ago');
       expect(component.timeAgo(new Date(Date.now() - 2 * 3600000).toISOString())).toBe('2h ago');
@@ -651,6 +670,16 @@ describe('CodingTeamPageComponent', () => {
       expect(component.issueError).toBeNull();
       component['stopPolling']();
     });
+
+    it('onAnswersSubmitted ignores a payload missing the job_id/status discriminators', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.jobStatus = { job_id: 'j1', status: 'running' };
+      component.onAnswersSubmitted({ foo: 'bar' } as never);
+      // A foreign shape is never folded into jobStatus — the prior status is preserved.
+      expect(component.jobStatus).toEqual({ job_id: 'j1', status: 'running' });
+      component['stopPolling']();
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -661,6 +690,14 @@ describe('CodingTeamPageComponent', () => {
     it('is a no-op without a selected run', async () => {
       await setup();
       component.selectedRunId = null;
+      component.resumeJob();
+      expect(apiSpy.resumeJob).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op while a resume is already in flight', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.resumingJob = true;
       component.resumeJob();
       expect(apiSpy.resumeJob).not.toHaveBeenCalled();
     });
@@ -1020,6 +1057,27 @@ describe('CodingTeamPageComponent', () => {
         await vi.advanceTimersByTimeAsync(15000);
         expect(apiSpy.listJobs.mock.calls.length).toBeGreaterThan(afterFirst);
       } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a lost connection after repeated status-poll failures', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.selectedRunId = 'j1';
+        apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('network down')));
+        component['startPolling']('j1');
+        // The status poll fires immediately, then every 5s; it gives up after 3 consecutive
+        // failures and surfaces the lost-connection error.
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(component.issueError).toBe('Lost connection to the coding team — status polling failed.');
+        // The poller tore down its own timer once the error budget was exhausted.
+        expect(component['pollSub']?.closed).toBe(true);
+      } finally {
+        component['stopPolling']();
         vi.useRealTimers();
       }
     });

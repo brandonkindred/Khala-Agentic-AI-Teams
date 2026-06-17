@@ -39,7 +39,7 @@
 <!-- ────────────────────────────────────────────────────────────────── -->
 @if (activeView === 'chat') {
   <app-team-assistant-chat
-    [teamApiUrl]="'/api/coding-team/assistant'"
+    [teamApiUrl]="teamApiUrl"
     [teamName]="'Coding Team'"
     [teamDescription]="'Software Engineering sub-team — task graph and implementation'"
     [fields]="[
