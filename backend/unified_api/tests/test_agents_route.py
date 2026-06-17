@@ -453,6 +453,87 @@ def test_invoke_non_cognition_agent_bypasses_gate(cog_client: TestClient, monkey
     assert captured["json"] == {"q": 1}
 
 
+def test_invoke_second_call_injects_real_graph_memory_and_rules(
+    cog_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end acceptance: a cognition+graph agent invoked twice has its
+    second wrapped request carry the real ``## Knowledge graph`` block (assembled
+    from a live graph search), the memory digest, and the agent's active rules —
+    exercising the real ``build_cognition_context`` composition (``load_context``
+    is left unpatched), not a stubbed context. A non-cognition agent is untouched.
+    """
+    import types
+
+    from agent_cognition import invoke_context as invoke_context_mod
+    from agent_cognition import invoke_gate as gate_mod
+    from agent_cognition.graph import retrieval as graph_retrieval
+    from agent_cognition.memory.rollup import RollupReport
+    from agent_cognition.models import RuleMode
+    from agent_cognition.rules import store as rules_store
+    from agent_cognition.testing import FakeRunLedger, make_rule
+    from agent_cognition.tools.envelope import ENVELOPE_MARKER, try_unwrap_request
+
+    # Real gate, faked durable seams (ledger / rollups / persistence). Crucially
+    # ``gate_mod.load_context`` is NOT patched, so the real composition runs.
+    ledger = FakeRunLedger()
+    monkeypatch.setattr(gate_mod, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(gate_mod, "claim_run", ledger.claim_run)
+    monkeypatch.setattr(gate_mod, "complete_run", ledger.complete_run)
+    monkeypatch.setattr(gate_mod, "abandon_run", ledger.abandon_run)
+    monkeypatch.setattr(gate_mod, "persist_writeback", lambda *a, **k: 0)
+    monkeypatch.setattr(gate_mod, "ensure_rollups_current", lambda a, now, max_periods=None: RollupReport(agent_id=a))
+
+    # Real ``build_graph_context`` against a fake Graphiti scoped to the agent.
+    class _FakeGraphiti:
+        def __init__(self) -> None:
+            self.calls: list[dict] = []
+
+        async def search(self, *, query, group_ids, num_results):
+            self.calls.append({"query": query, "group_ids": group_ids})
+            return [types.SimpleNamespace(fact="users prefer concise intros")]
+
+    graphiti = _FakeGraphiti()
+    monkeypatch.setattr(graph_retrieval, "is_neo4j_enabled", lambda: True)
+    monkeypatch.setattr(graph_retrieval, "get_graphiti", lambda: graphiti)
+
+    # Known memory digest + one active advisory rule that rides in the context.
+    monkeypatch.setattr(
+        invoke_context_mod, "build_memory_digest", lambda agent_id: "## Long-term memory\n- ships weekly"
+    )
+    rule = make_rule(
+        {}, agent_id="blogging.cog", mode=RuleMode.ADVISORY, rule_id="r-advisory", text="prefer short paragraphs"
+    )
+    monkeypatch.setattr(rules_store, "list_rules", lambda agent_id, status=None, **kw: [rule])
+
+    captured: dict = {}
+    _install_upstream(monkeypatch, captured=captured)
+
+    # Invoke twice with distinct bodies (keyless → each is a fresh run, not a
+    # replay) so ``captured`` holds the *second* invoke's wrapped request. The
+    # bodies carry a string value so ``extract_query_text`` yields a non-empty
+    # graph query.
+    first = cog_client.post("/api/agents/blogging.cog/invoke", json={"prompt": "draft an intro"})
+    assert first.status_code == 200
+    second = cog_client.post("/api/agents/blogging.cog/invoke", json={"prompt": "draft a conclusion"})
+    assert second.status_code == 200
+    assert captured["posts"] == 2  # two fresh invokes, no replay
+
+    sent = captured["json"]
+    assert sent[ENVELOPE_MARKER] == 1
+    unwrapped = try_unwrap_request(sent)
+    assert unwrapped.input == {"prompt": "draft a conclusion"}  # caller body verbatim
+
+    digest = unwrapped.cognition["memory_digest"]
+    assert "## Knowledge graph" in digest  # graph block, from the live search
+    assert "users prefer concise intros" in digest  # the fact the search returned
+    assert "## Long-term memory" in digest  # the rollup memory digest
+    assert any(r["text"] == "prefer short paragraphs" for r in unwrapped.cognition["rules"])
+
+    # The graph search was scoped to the agent's group and saw the query text.
+    assert graphiti.calls[-1]["group_ids"] == ["blogging.cog"]
+    assert "conclusion" in graphiti.calls[-1]["query"]
+
+
 def test_invoke_retry_same_key_and_body_replays_without_reinvoking(
     cog_client: TestClient, gate_seams, monkeypatch: pytest.MonkeyPatch
 ) -> None:

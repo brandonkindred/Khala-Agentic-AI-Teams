@@ -38,6 +38,22 @@ all built.
   **knowledge-graph layer** (`graph/`, see below) over `shared_neo4j`; and the **operator
   approval API** (`unified_api/routes/cognition.py`).
 
+- **Verified end-to-end** — a cognition+graph agent's invoke carries the assembled side
+  channel: a cognition-enabled invoke wraps the upstream request with the agent's active
+  rules, the rollup memory digest, and a live `## Knowledge graph` block (composed by
+  `invoke_context.build_cognition_context`); a non-cognition agent invokes byte-for-byte as
+  before; and enforced precondition/postcondition gates fail closed. Covered by
+  `unified_api/tests/test_agents_route.py` (the cognition-gate integration block) and the
+  `agent_cognition/tests/` suites.
+
+- **Context sizing.** The injected context is bounded by *count* — top-N salient in-progress
+  events (`AGENT_COGNITION_DIGEST_EVENT_TOP_N`) and top-K related graph facts
+  (`AGENT_COGNITION_GRAPH_SEARCH_TOP_K`) — and by the downstream envelope byte caps
+  (`max_envelope_bytes` on the invoke gate, `AGENT_COGNITION_WRITEBACK_MAX_BYTES` on
+  writeback), rather than a per-block token budget. `build_memory_digest` and
+  `build_graph_context` are intentionally count-bounded reads and take no `token_budget`
+  argument.
+
 ## Knowledge-graph layer (`graph/`)
 
 A Neo4j + Graphiti layer that extracts *meaning* from the rote rollups: it ingests the
