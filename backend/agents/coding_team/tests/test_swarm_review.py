@@ -1616,6 +1616,33 @@ def test_user_decisions_for_falls_back_to_reason_for_legacy_entry(tmp_path):
     assert lines == ["Use TLS? → Yes"]
 
 
+def test_user_decisions_for_empty_decisions_does_not_fall_back_to_reason(tmp_path):
+    """A NEW entry carrying an empty structured 'decisions' list contributes nothing — it must NOT
+    spill its generic 'reason' sentence into the decisions list (presence-gated, not truthiness)."""
+    graph = TaskGraphService(job_id="j1")
+    swarm = CodingTeamSwarm(
+        tech_lead=StubTechLead(approved=True),
+        workers=[StubWorker("a1")],
+        graph=graph,
+        path=Path(tmp_path),
+        agent_ids=["a1"],
+        llm_getter=lambda k: None,
+    )
+    task = Task(
+        id="t1",
+        title="T1",
+        revision_feedback=[
+            {
+                "source": "user_decision",
+                "reason": "The user answered the open question(s) you raised.",
+                "decisions": [],
+            }
+        ],
+    )
+
+    assert swarm._user_decisions_for(task) == []
+
+
 def test_review_and_merge_passes_user_decisions(tmp_path, monkeypatch):
     """_review_and_merge feeds the task's settled decisions to the Tech Lead reviewer."""
     _patch_git(monkeypatch)

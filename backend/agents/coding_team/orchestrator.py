@@ -1200,9 +1200,12 @@ class CodingTeamSwarm:
         for entry in task.revision_feedback or []:
             if not (isinstance(entry, dict) and entry.get("source") == "user_decision"):
                 continue
-            records = entry.get("decisions")
-            if records:
-                _add(records)
+            # Gate on field presence, not truthiness: a new entry always carries "decisions"
+            # (an empty list contributes nothing), and only a legacy entry that predates the field
+            # falls back to its rendered reason. Using truthiness would let a new entry with an
+            # empty "decisions" list spill the generic reason sentence into the decisions list.
+            if "decisions" in entry:
+                _add(entry.get("decisions"))
             elif entry.get("reason"):
                 # Legacy entry (created before the structured ``decisions`` field) resumed across an
                 # upgrade: surface its rendered reason so the reviewer still learns the question was
