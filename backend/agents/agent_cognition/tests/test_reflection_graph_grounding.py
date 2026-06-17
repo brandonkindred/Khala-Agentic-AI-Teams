@@ -177,10 +177,10 @@ def test_graph_evidence_empty_block_is_empty_list():
     assert reflection._graph_evidence("") == []
 
 
-def test_graph_evidence_marks_grounding_and_omits_stale_keys():
+def test_graph_evidence_counts_fact_lines_and_omits_stale_keys():
     block = "## Related knowledge (from graph)\n- Alice knows Bob\n- Bob ships code"
     ev = reflection._graph_evidence(block)
-    assert ev == [{"source": "graph", "kind": "grounding"}]
+    assert ev == [{"source": "graph", "kind": "grounding", "facts": 2}]
     # Must omit the keys the version-staleness SQL reads, or it would make
     # graph-grounded proposals spuriously stale / unapprovable.
     assert "summary_id" not in ev[0] and "version" not in ev[0]
@@ -247,7 +247,7 @@ def test_reflect_end_to_end_grounds_prompt_and_preserves_hitl(monkeypatch):
     proposal = created[0]
     assert proposal.status == ProposalStatus.PENDING
     assert {"summary_id": "s1", "version": 1} in proposal.evidence
-    assert {"source": "graph", "kind": "grounding"} in proposal.evidence
+    assert {"source": "graph", "kind": "grounding", "facts": 1} in proposal.evidence
 
 
 def test_reflect_baseline_evidence_unchanged_when_graph_disabled(monkeypatch):

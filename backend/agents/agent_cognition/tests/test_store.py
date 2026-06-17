@@ -828,7 +828,7 @@ def test_conn_propagates_body_errors_unwrapped() -> None:
 # Version-staleness tolerates the non-load-bearing graph-provenance evidence
 # entry that graph-grounded reflection appends (no summary_id/version keys).
 # ---------------------------------------------------------------------------
-_GRAPH_EVIDENCE = {"source": "graph", "kind": "grounding"}
+_GRAPH_EVIDENCE = {"source": "graph", "kind": "grounding", "facts": 3}
 
 
 def test_flag_stale_proposals_ignores_graph_provenance_entry() -> None:

@@ -442,8 +442,8 @@ def _graph_evidence(graph_block: str) -> list[dict[str, Any]]:
     Postconditions:
         * Returns ``[]`` for an empty ``graph_block`` so an ungrounded run's
           proposal evidence is byte-identical to baseline.
-        * Otherwise returns exactly one bounded provenance dict marking that the
-          graph grounded this run.
+        * Otherwise returns exactly one bounded provenance dict recording that the
+          graph grounded this run and how many facts it carried.
 
     The entry deliberately omits the ``summary_id`` and ``version`` keys so the
     version-staleness SQL (``flag_stale_proposals`` / ``flag_rules_needing_review``,
@@ -452,7 +452,8 @@ def _graph_evidence(graph_block: str) -> list[dict[str, Any]]:
     """
     if not graph_block:
         return []
-    return [{"source": "graph", "kind": "grounding"}]
+    facts = sum(1 for line in graph_block.splitlines() if line.startswith("- "))
+    return [{"source": "graph", "kind": "grounding", "facts": facts}]
 
 
 # ---------------------------------------------------------------------------
