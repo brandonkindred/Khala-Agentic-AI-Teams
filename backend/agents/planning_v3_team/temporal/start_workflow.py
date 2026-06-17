@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any, Optional
 
 from planning_v3_team.temporal.client import (
@@ -16,13 +17,43 @@ from planning_v3_team.temporal.workflows import PlanningV3Workflow
 logger = logging.getLogger(__name__)
 
 START_WORKFLOW_TIMEOUT = 30
+# Cold-start race: the worker connects its client/loop in a daemon thread, so
+# the first request after startup can arrive before those module globals are
+# set. Poll briefly to turn that race into a short wait instead of a 500.
+CLIENT_READY_TIMEOUT_S = 10.0
+CLIENT_READY_POLL_S = 0.05
+
+
+def _wait_for_client() -> tuple[Any, Any]:
+    """Block until the Temporal client and loop are populated, or time out.
+
+    Preconditions:
+        - The Planning V3 Temporal worker has been (or is being) started in
+          this process — normally by the team_service per-worker bootstrap or
+          the API lifespan. The client/loop are stored in module-level globals
+          that the worker thread fills once it connects.
+    Postconditions:
+        - Returns ``(client, loop)`` with both non-None once the worker thread
+          has connected, within ``CLIENT_READY_TIMEOUT_S`` seconds. Both are
+          required together so callers never observe a half-initialised state
+          (the worker sets the client just before the loop).
+    Raises:
+        - ``RuntimeError`` if the client/loop are still unset after the timeout
+          (worker not running or Temporal misconfigured).
+    """
+    deadline = time.monotonic() + CLIENT_READY_TIMEOUT_S
+    while True:
+        client = get_temporal_client()
+        loop = get_temporal_loop()
+        if client is not None and loop is not None:
+            return client, loop
+        if time.monotonic() >= deadline:
+            raise RuntimeError("Temporal client not available; is the Planning V3 worker running?")
+        time.sleep(CLIENT_READY_POLL_S)
 
 
 def _run_async(coro: Any) -> Any:
-    loop = get_temporal_loop()
-    client = get_temporal_client()
-    if loop is None or client is None:
-        raise RuntimeError("Temporal client not available; is the Planning V3 worker running?")
+    _, loop = _wait_for_client()
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=START_WORKFLOW_TIMEOUT)
 
@@ -37,10 +68,20 @@ def start_planning_v3_workflow(
     use_planning_v2: bool,
     use_market_research: bool,
 ) -> None:
-    """Start PlanningV3Workflow for the given job."""
-    client = get_temporal_client()
-    if client is None:
-        raise RuntimeError("Temporal client not available")
+    """Start PlanningV3Workflow for the given job.
+
+    Preconditions:
+        - ``job_id`` is a non-empty, unique run id and ``repo_path`` is a
+          writable workspace path. The Planning V3 Temporal worker is running
+          (or starting) in this process.
+    Postconditions:
+        - A ``PlanningV3Workflow`` is started on ``TASK_QUEUE`` with id
+          ``WORKFLOW_ID_PREFIX + job_id``; returns once Temporal accepts it.
+    Raises:
+        - ``RuntimeError`` if the Temporal client never becomes available
+          within ``CLIENT_READY_TIMEOUT_S`` (worker not running / misconfigured).
+    """
+    client, _ = _wait_for_client()
     workflow_id = f"{WORKFLOW_ID_PREFIX}{job_id}"
     _run_async(
         client.start_workflow(
