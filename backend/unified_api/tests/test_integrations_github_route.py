@@ -447,6 +447,13 @@ def test_resolve_repo_path_without_issue_is_repo_level(monkeypatch):
     assert _resolve_repo_path(dict(_GH_CFG)) == "/cache/github_workspaces/acme/widget"
 
 
+def test_resolve_repo_path_without_issue_uses_se_workspace_dir(monkeypatch):
+    monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    # No issue number + workspace-root env → repo-level path under that root.
+    assert _resolve_repo_path(dict(_GH_CFG)) == "/work/acme_widget"
+
+
 def test_resolve_repo_path_operator_override_returned_verbatim():
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
     # An operator-pinned checkout is never per-issue-namespaced.

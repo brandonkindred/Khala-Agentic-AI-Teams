@@ -54,7 +54,7 @@ def ephemeral_workspace_roots() -> list[Path]:
         val = os.environ.get(var, "").strip()
         if val:
             roots.append(Path(val).resolve())
-    cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache").strip() or ".agent_cache"
+    cache_dir = os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
     roots.append((Path(cache_dir) / "github_workspaces").resolve())
     # De-duplicate while preserving order.
     seen: set[Path] = set()
