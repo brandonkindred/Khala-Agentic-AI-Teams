@@ -28,6 +28,7 @@ from pydantic import BaseModel, Field  # noqa: E402
 from coding_team import hitl  # noqa: E402
 from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.agent_status import build_agent_statuses  # noqa: E402
+from coding_team.clone_workspace import clone_lock_path  # noqa: E402
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -1921,6 +1922,10 @@ def _is_safe_to_remove_checkout(repo_path: str) -> bool:
         p = Path(repo_path).resolve()
     except (OSError, ValueError):
         return False
+    # An auto-derived checkout is always <root>/<cache-or-workspace>/.../issue-N,
+    # so a real one has >= 3 resolved components (e.g. ('/', 'data', 'agents',
+    # ...)). The floor rejects a filesystem root ('/',) or a shallow top-level
+    # dir like /data ('/', 'data') so a misconfigured repo_path can't wipe them.
     if len(p.parts) < 3:
         return False
     return (p / ".git").exists()
@@ -1950,13 +1955,12 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
         logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
 
-    # Also drop the sibling clone lock left beside the checkout by unified_api's
-    # _ensure_repo_clone. Its name MUST match that producer (the two services
-    # can't share a helper without inverting the import direction). Safe here:
-    # the job is terminal and the per-issue duplicate guard means no other
-    # process is cloning this issue. Best-effort — never fail a successful job.
-    p = Path(repo_path)
-    lock_file = p.parent / f".{p.name}.clone.lock"
+    # Also drop the sibling clone lock created by unified_api's _ensure_repo_clone
+    # (name resolved via the shared clone_workspace helper, the single source of
+    # truth). Safe here: the job is terminal and the per-issue duplicate guard
+    # means no other process is cloning this issue. Best-effort — never fail a
+    # successful job.
+    lock_file = clone_lock_path(repo_path)
     try:
         lock_file.unlink(missing_ok=True)
     except OSError as e:

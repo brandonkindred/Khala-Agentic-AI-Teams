@@ -34,6 +34,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from coding_team.clone_workspace import clone_lock_path
 from coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -1374,6 +1375,11 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     """Resolve the local checkout path for the coding team.
 
     Priority: config override > SE_WORKSPACE_DIR env > WORKSPACE_ROOT env > AGENT_CACHE fallback.
+    The ``AGENT_CACHE`` fallback defaults to the relative ``.agent_cache`` (a
+    repo-wide convention), so when neither ``AGENT_CACHE`` nor a workspace-root
+    env var is set the path is resolved against the process working directory;
+    deployments that need a stable absolute location set ``AGENT_CACHE`` (Docker
+    sets it to ``/data/agents``).
 
     When ``issue_number`` is given and the path is auto-derived (no operator
     override), the checkout is namespaced per-issue with an ``issue-{N}`` segment
@@ -1477,14 +1483,14 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return f"could not prepare workspace dir for {owner}/{repo}: {e}"
-    lock_path = path.parent / f".{path.name}.clone.lock"
+    lock_path = clone_lock_path(path)
 
     # Open + lock the sibling lock file. open()/flock() failures are workspace
     # problems (and a FileNotFoundError from open must not be mistaken for a
     # missing git binary), so they are handled here rather than by the
     # git-specific FileNotFoundError handler that wraps the git ops below.
     try:
-        lock_file = open(lock_path, "w")  # noqa: SIM115 - closed in the finally below
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in the finally below
     except OSError as e:
         return f"could not acquire clone lock for {owner}/{repo}: {e}"
     try:

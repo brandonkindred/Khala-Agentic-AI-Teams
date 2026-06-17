@@ -1624,9 +1624,9 @@ class TestEphemeralCheckoutCleanup:
         api._cleanup_issue_checkout(str(target))
         assert not target.exists()
 
-    def test_cleanup_helper_swallows_errors_on_missing_dir(self, patched_app, tmp_path) -> None:
+    def test_cleanup_helper_does_not_raise_on_missing_dir(self, patched_app, tmp_path) -> None:
         api = patched_app["api"]
-        # Must never raise even when the directory is already gone.
+        # A missing dir is refused by the safety guard (no .git); must not raise.
         api._cleanup_issue_checkout(str(tmp_path / "does-not-exist"))
 
     def test_cleanup_helper_refuses_non_checkout_path(self, patched_app, tmp_path) -> None:
