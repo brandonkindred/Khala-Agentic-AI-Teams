@@ -539,6 +539,43 @@ MIN_DOC_SELF_REVIEW_ITERATIONS = 3
 MAX_DOC_SELF_REVIEW_ITERATIONS = 3
 DOC_QUALITY_THRESHOLD = 0.9
 
+# Per-call code-context budget for the documentation self-review. Smaller than
+# MAX_REVIEW_CODE_CHARS because the doc-review prompt also carries the full
+# documentation being refined plus the template.
+MAX_DOC_REVIEW_CHUNK_CHARS = 40_000
+
+
+def _doc_review_code_chunks(code_files: Dict[str, str]) -> List[str]:
+    """Render the code context as bounded, function-aware chunks.
+
+    Preconditions:
+        - ``code_files`` maps file paths to their full source text.
+
+    Postconditions:
+        - Every non-blank file is covered exactly once across the returned
+          strings, split only on function/method/class boundaries; no file is
+          dropped and no file is clipped mid-content. Each string's length is
+          bounded by ``MAX_DOC_REVIEW_CHUNK_CHARS`` (except a single over-budget
+          segment placed alone, per ``build_review_chunks``' contract).
+        - Returns ``["(No code context)"]`` when there is no non-blank code, so
+          the review still runs one pass.
+    """
+    # Imported lazily, fully-qualified, to match this module's existing
+    # convention for code_review_agent imports (see _run_llm_review).
+    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+
+    blocks = [(p, c) for p, c in code_files.items() if c and c.strip()]
+    if not blocks:
+        return ["(No code context)"]
+    chunks = list(build_review_chunks(blocks, MAX_DOC_REVIEW_CHUNK_CHARS))
+    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
+        logger.warning(
+            "Documentation self-review: %d code chunk(s) for %d file(s) — large input",
+            len(chunks),
+            len(blocks),
+        )
+    return [chunk.content for chunk in chunks]
+
 
 def run_documentation_self_review(
     *,
@@ -579,8 +616,10 @@ def run_documentation_self_review(
     final_score = 0.5
     iterations_performed = 0
 
-    code_text = "\n\n".join(f"--- {p} ---\n{c[:2000]}" for p, c in list(code_files.items())[:10])
-    code_text_truncated = code_text[:8000]
+    # Function-aware, bounded code context: every file is covered, none clipped
+    # mid-function, and no prompt exceeds the per-call budget. Computed once —
+    # the code being documented does not change across iterations.
+    code_chunks = _doc_review_code_chunks(code_files)
 
     for iteration in range(1, max_iterations + 1):
         iterations_performed = iteration
@@ -595,60 +634,88 @@ def run_documentation_self_review(
             quality_threshold,
         )
 
+        # One LLM call per code chunk, threading the evolving docs through so
+        # every chunk of code informs the refinement. The iteration's score is
+        # the minimum across chunks (conservative: a later code slice exposing a
+        # documentation gap must not let us stop early). If any chunk fails this
+        # iteration, the early-stop gate is suppressed so the next iteration
+        # re-reviews every chunk — a transient failure on one chunk must not let
+        # high scores on the others end the review with that chunk's code unseen.
+        iteration_score: Optional[float] = None
+        iteration_improvements = 0
+        iteration_updates = 0
+        chunk_failures = 0
+        # Render the evolving documentation once per iteration, then re-render
+        # only when a chunk actually updates a file (below) so later chunks still
+        # see earlier refinements. Documentation is passed in full (no clip) so
+        # the model can rewrite any file's tail; callers are expected to keep
+        # per-microtask documentation within the model's context budget. Rebuilding
+        # this for every chunk when nothing changed was an O(chunks x docs) waste
+        # for large doc sets.
         doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
-        doc_text_truncated = doc_text[:12000]
+        for chunk_idx, code_chunk in enumerate(code_chunks, start=1):
+            prompt = DOCUMENTATION_SELF_REVIEW_PROMPT.format(
+                iteration=iteration,
+                max_iterations=max_iterations,
+                task_description=task_description or "No specific task description",
+                documentation=doc_text if doc_text else "(No documentation files yet)",
+                code=code_chunk,
+            )
 
-        prompt = DOCUMENTATION_SELF_REVIEW_PROMPT.format(
-            iteration=iteration,
-            max_iterations=max_iterations,
-            task_description=task_description or "No specific task description",
-            documentation=doc_text_truncated
-            if doc_text_truncated
-            else "(No documentation files yet)",
-            code=code_text_truncated if code_text_truncated else "(No code context)",
-        )
+            try:
+                raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+                parsed = parse_documentation_self_review_template(raw)
+            except Exception as exc:
+                # Covers both the LLM call and parsing: a malformed response must
+                # not abort the review — log and move to the next chunk.
+                logger.warning(
+                    "Documentation self-review chunk failed (iteration %d, chunk %d/%d): %s",
+                    iteration,
+                    chunk_idx,
+                    len(code_chunks),
+                    exc,
+                )
+                chunk_failures += 1
+                continue
 
-        try:
-            raw = (lambda _r: str(_r))(
-                Agent(model=resolve_text_mode_strands_model(llm))(prompt)
-            ).strip()
-        except Exception as exc:
-            logger.warning(
-                "Documentation self-review LLM call failed (iteration %d): %s",
+            quality_score = parsed.get("quality_score", 0.5)
+            improvements = parsed.get("improvements", [])
+            updated_files = parsed.get("files", {})
+
+            iteration_score = (
+                quality_score if iteration_score is None else min(iteration_score, quality_score)
+            )
+            all_improvements.extend(improvements)
+            iteration_improvements += len(improvements)
+
+            if updated_files:
+                current_docs.update(updated_files)
+                iteration_updates += len(updated_files)
+                # Docs changed; re-render so subsequent chunks see the refinement.
+                doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
+
+        if iteration_score is None:
+            # Every chunk's LLM call failed this iteration; keep prior score.
+            logger.info(
+                "Documentation self-review iteration %d: all %d chunk(s) failed, score unchanged",
                 iteration,
-                exc,
+                len(code_chunks),
             )
             continue
 
-        parsed = parse_documentation_self_review_template(raw)
-        quality_score = parsed.get("quality_score", 0.5)
-        improvements = parsed.get("improvements", [])
-        updated_files = parsed.get("files", {})
+        final_score = iteration_score
+        logger.info(
+            "Documentation self-review iteration %d: score=%.2f, updated %d file(s), %d improvements",
+            iteration,
+            final_score,
+            iteration_updates,
+            iteration_improvements,
+        )
 
-        final_score = quality_score
-        all_improvements.extend(improvements)
-
-        if updated_files:
-            current_docs.update(updated_files)
-            logger.info(
-                "Documentation self-review iteration %d: score=%.2f, updated %d file(s), %d improvements",
-                iteration,
-                quality_score,
-                len(updated_files),
-                len(improvements),
-            )
-        else:
-            logger.info(
-                "Documentation self-review iteration %d: score=%.2f, no file changes, %d improvements noted",
-                iteration,
-                quality_score,
-                len(improvements),
-            )
-
-        if iteration >= min_iterations and quality_score >= quality_threshold:
+        if iteration >= min_iterations and final_score >= quality_threshold and chunk_failures == 0:
             logger.info(
                 "Documentation self-review complete: reached quality threshold %.2f >= %.2f after %d iterations",
-                quality_score,
+                final_score,
                 quality_threshold,
                 iteration,
             )

@@ -54,7 +54,12 @@ from ..strategy_lab.spec_dsl import (
 from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
-from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
+from .engine.fill_simulator import (
+    ENGINE_EXIT_REASON_PREFIX,
+    FillOutcome,
+    FillSimulator,
+    FillSimulatorConfig,
+)
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
@@ -71,11 +76,154 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
 
-# Issue #527 — reserved order ``reason`` prefix the engine stamps on every
-# rule-triggered close order it emits on the strategy's behalf. The conformance
-# quality gate reads this prefix off ``OrderLifecycleEvent`` records to count
-# wrapper-emitted exits and verify each trade obeyed the structured rules.
-ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+# ``ENGINE_EXIT_REASON_PREFIX`` is the reserved order ``reason`` prefix the
+# engine stamps on every close it owns (rule-triggered emissions and reconciled
+# strategy closes). The conformance quality gate reads it off
+# ``OrderLifecycleEvent`` records to verify each trade obeyed the structured
+# rules. Canonical definition lives in the engine layer (``fill_simulator``) and
+# is re-exported here for the many call sites and external importers that read it
+# off this module.
+
+
+def _build_exit_reconciler(
+    exit_rules: Optional[Sequence[ExitRule]],
+    views: Mapping[str, StreamingHistoryView],
+    position_tracker: Optional[Mapping[str, "_TrackedPosition"]] = None,
+) -> Optional[Callable[..., Optional[str]]]:
+    """Build the engine-side exit-attribution reconciler for a run.
+
+    A strategy-initiated close that complies with a structured exit rule at
+    the close bar must still carry ``engine_exit:<kind>`` attribution so the
+    engine stays the single source of exit truth. This returns the closure
+    :class:`~.engine.fill_simulator.FillSimulator` invokes at its
+    TradeRecord exit-stamping site.
+
+    Preconditions:
+      * ``exit_rules`` is the run's structured ``spec.exit_rules`` (possibly
+        empty).
+      * ``views`` is the live per-symbol streaming-history map the run
+        appends to each bar; signal-exit predicates read its latest bar.
+      * ``position_tracker`` is the run's live per-symbol tracker (or
+        ``None`` in isolation). It is consulted only to mirror the engine
+        exit dispatcher's entry-bar skip (see below).
+
+    Postconditions:
+      * Returns ``None`` iff ``exit_rules`` is empty — the FillSimulator
+        then keeps its no-op default and the existing fill-simulator unit
+        tests are unaffected.
+      * Otherwise returns a callable
+        ``(*, symbol, side, entry_price, qty) -> Optional[str]`` — arguments are
+        keyword-only (the FillSimulator invokes it with keywords) — yielding
+        ``"engine_exit:<kind>"`` when a structured rule *fires* at the
+        **signal bar** (the bar the strategy acted on, one before the fill),
+        else ``None``. It does not mutate ``exit_rules`` or ``views``.
+
+    Firing semantics: stamp on rule-fire, with no realized-return bound. This
+    mirrors the engine exit dispatcher (which stamps ``engine_exit:<kind>``
+    whenever a rule fires on the streaming view) and the post-#915 alignment
+    gate, which treats a stop-loss / take-profit as a TRIGGER, not a hard price
+    cap: a next-bar market fill can legitimately gap past the nominal
+    ceiling/floor and is still an engine-owned exit. Magnitude/firing-rate
+    enforcement is owned by ``ExitRuleConformanceGate``, not this per-trade
+    attribution step.
+      * ``take_profit`` / ``stop_loss`` (entry-price basis) — stamp
+        ``engine_exit:<kind>`` (unbracketed) when the rule fires; the
+        alignment gate matches these by exact string.
+      * ``signal_exit`` — stamp ``engine_exit:signal_exit[<idx>]`` with the
+        spec rule index, matching the engine's emitted form so the
+        rule-firing-rate gate counts the reconciled close.
+      * trailing-basis stops are path-dependent and deferred (never stamped).
+
+    Entry-bar skip: a close whose signal bar is the entry bar of a
+    *non-market* entry is never reconciled (``position_tracker[sym]
+    .just_opened``), mirroring the dispatcher — the entry bar's pre-fill OHLC
+    is ambiguous and the engine deliberately does not own an exit there.
+    """
+    if not exit_rules:
+        return None
+
+    rules = list(exit_rules)
+
+    def _reconcile(
+        *,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        qty: float,
+    ) -> Optional[str]:
+        if qty <= 0:
+            return None
+        # Mirror the engine exit dispatcher's entry-bar skip. ``just_opened``
+        # is True only for a non-market (limit/stop) entry on the bar it first
+        # appears; the dispatcher does not evaluate exit rules there because
+        # the bar's pre-fill OHLC is ambiguous. At this call site (during
+        # process_bar, before this bar's tracker update) the flag still
+        # reflects the signal bar, so reconciling would falsely attribute an
+        # exit the engine deliberately did not own. Market entries leave the
+        # flag False and may fire same-bar, matching the dispatcher.
+        if position_tracker is not None:
+            tracked = position_tracker.get(symbol)
+            if tracked is not None and tracked.just_opened:
+                return None
+        # Evaluate every rule at the *signal bar* — the bar the strategy acted
+        # on, one before the fill. At the fill simulator's exit-stamping site
+        # the run loop has not yet appended the fill bar to ``views``, so the
+        # view's latest bar IS the signal bar. Using it for the price (TP/SL)
+        # snapshot as well as signal-exit predicates matches the engine exit
+        # dispatcher (which fires rules on the streaming view) and the
+        # alignment gate (signal bar = fill bar − 1). Evaluating TP/SL against
+        # the fill bar instead would miss a close queued on the rule's bar when
+        # the fill bar doesn't re-cross, and mislabel a discretionary close
+        # when only the fill bar crosses.
+        view = views.get(symbol)
+        if view is None or view.length() == 0:
+            return None
+        i = view.length() - 1
+        bs = BarSnapshot(
+            high=view.bar_field("high", i),
+            low=view.bar_field("low", i),
+            close=view.bar_field("close", i),
+        )
+        ps = PositionState(
+            symbol=symbol,
+            side=side,  # type: ignore[arg-type]  # "long" | "short" Literal
+            qty=qty,
+            entry_price=entry_price,
+            # Trailing watermarks are not tracked at the close site; collapse
+            # them to ``entry_price``. The collapse is inert for the rule kinds
+            # reconciled here: trailing-basis stops are skipped below, and
+            # signal-exit predicates evaluate over bar history (indicators /
+            # ``bar.*`` fields), never the position's running peak/trough, so
+            # they do not consult these fields. (A signal rule that genuinely
+            # needed running watermarks is unsupported and simply would not be
+            # reconciled — it is not silently mis-stamped.)
+            high_since_entry=entry_price,
+            low_since_entry=entry_price,
+        )
+        # Stamp the first rule that fires at the signal bar (spec order =
+        # priority), with no realized-return bound — a fired rule is an
+        # engine-owned exit even if the next-bar fill gapped past the level.
+        for idx, rule in enumerate(rules):
+            kind = getattr(rule, "kind", None)
+            # Trailing-basis stops are path-dependent (running peak/trough);
+            # deferred to the alignment gate, never reconciled here.
+            if kind == "stop_loss" and getattr(rule, "basis", "entry_price") != "entry_price":
+                continue
+            if not evaluate_exit_rules([rule], {symbol: ps}, {symbol: bs}, views=views):
+                continue
+            if kind == "take_profit":
+                return f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+            if kind == "stop_loss":
+                return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            if kind == "signal_exit":
+                # Match the engine's emitted form ``engine_exit:signal_exit[N]``
+                # (``_build_close_order``) so the rule-firing-rate gate, which
+                # only counts the bracketed form, credits the reconciled close.
+                # ``idx`` is the spec ``exit_rules`` index (== ``rule_index``).
+                return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[{idx}]"
+        return None
+
+    return _reconcile
 
 
 @dataclass
@@ -1304,6 +1452,14 @@ class TradingService:
                 transaction_cost_bps=self.config.transaction_cost_bps,
             ),
             execution_model=execution_model,
+            # Reconcile strategy-initiated closes that comply with a structured
+            # exit rule back to ``engine_exit:<kind>`` attribution. ``None`` when
+            # the run has no ``exit_rules`` (e.g. compiled strategies), leaving
+            # the fill simulator's default behaviour unchanged. ``position_tracker``
+            # is threaded so reconciliation mirrors the dispatcher's entry-bar skip.
+            exit_reconciler=_build_exit_reconciler(
+                self._exit_rules, streaming_views, position_tracker
+            ),
         )
 
         result = TradingServiceResult()
@@ -1521,6 +1677,14 @@ class TradingService:
                                 )
                             pending_for_prev = []
 
+                        # Ordering invariant (relied on by the exit reconciler in
+                        # ``_build_exit_reconciler``): ``process_bar`` runs BEFORE
+                        # ``_update_position_tracker`` and ``_append_streaming_bar``
+                        # below. So when the fill simulator stamps an exit during
+                        # this call, ``streaming_views``' latest bar is still the
+                        # signal bar (cur_bar not yet appended) and
+                        # ``position_tracker[sym].just_opened`` still reflects it.
+                        # Do not move the tracker/view updates above this call.
                         outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
                         _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                         for fill in outcome.entry_fills + outcome.exit_fills:
@@ -1788,6 +1952,11 @@ class TradingService:
                             )
                         pending_for_prev = []
 
+                    # Ordering invariant (see the chunked path above and the exit
+                    # reconciler): ``process_bar`` must run BEFORE
+                    # ``_update_position_tracker`` / ``_append_streaming_bar`` so the
+                    # reconciler sees the signal bar (not the fill bar) and the
+                    # pre-update ``just_opened`` flag. Do not reorder.
                     outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
                     _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                     for fill in outcome.entry_fills + outcome.exit_fills:

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 from ...execution.bar_safety import BarSafetyAssertion, _ts_le
 from ...execution.risk_filter import RiskFilter
@@ -44,6 +44,24 @@ from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
 
 logger = logging.getLogger(__name__)
+
+#: Reserved order ``reason`` prefix the engine stamps on every close it owns
+#: (rule-triggered emissions and reconciled strategy closes). Canonical home is
+#: the engine layer; ``trading_service.service`` re-exports it. Both the exit
+#: dispatcher and this simulator's reconciliation guard key off it, so it lives
+#: here — the lowest layer that needs it — to stay a single source of truth.
+ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+
+#: Callback that reconciles exit attribution for a *strategy-initiated* close.
+#: Given the closing position's facts and the realized return, it returns an
+#: ``engine_exit:<kind>`` label when a structured exit rule fired within bounds
+#: at the close bar, else ``None`` (leave the strategy's own reason intact).
+#:
+#: Kept as a plain ``Callable`` so the engine layer never imports the strategy
+#: spec / rule-evaluation machinery: the orchestration layer
+#: (``trading_service.service``) builds the closure and injects it. ``None``
+#: (the default) restores pre-reconciliation behaviour.
+ExitReconciler = Callable[..., Optional[str]]
 
 
 @dataclass
@@ -97,11 +115,17 @@ class FillSimulator:
         config: FillSimulatorConfig,
         bar_safety: Optional[BarSafetyAssertion] = None,
         execution_model: Optional[ExecutionModel] = None,
+        exit_reconciler: Optional[ExitReconciler] = None,
     ) -> None:
         self.portfolio = portfolio
         self.order_book = order_book
         self.risk = risk_filter
         self.config = config
+        # Engine-side exit-attribution reconciliation. ``None`` (default)
+        # leaves strategy-emitted close reasons untouched, preserving the
+        # fill-simulator unit-test baseline; the service injects a closure
+        # when the run has structured ``spec.exit_rules``.
+        self._exit_reconciler = exit_reconciler
         # Defaults to an enabled assertion so any engine refactor that
         # accidentally fills an order against a not-strictly-future bar
         # fails loudly.  Tests that construct pathological traces can pass
@@ -1096,6 +1120,48 @@ class FillSimulator:
         self.order_book.remove(po.order_id)
 
         hold_days = _date_diff(pos.entry_timestamp, bar.timestamp)
+        return_pct = round((net / entry_notional * 100) if entry_notional > 0 else 0.0, 2)
+
+        # Engine-side exit-attribution reconciliation. A strategy-emitted
+        # close (``reason`` not already an ``engine_exit:*`` label) that fires a
+        # structured exit rule at the signal bar must still carry
+        # ``engine_exit:<kind>`` so the trade-alignment gate sees the engine as
+        # the single source of exit truth. A non-firing close keeps its strategy
+        # reason.
+        exit_reason = po.request.reason or None
+        # ``.strip()`` so an engine-owned reason with incidental surrounding
+        # whitespace still bypasses reconciliation (the stored reason is left
+        # verbatim — we only gate on the trimmed form).
+        if self._exit_reconciler is not None and not (exit_reason or "").strip().startswith(
+            ENGINE_EXIT_REASON_PREFIX
+        ):
+            # The reconciler reads the *signal bar* (one before this fill bar)
+            # from the run's streaming views itself, so the fill bar isn't
+            # passed here. ``original_qty`` is the actually-filled (held) size —
+            # this record is only built on a *full* close, so it equals the
+            # closed quantity; the reconciler uses it only as a ``> 0`` liveness
+            # gate. Reconciliation is best-effort *attribution* layered on top of
+            # the already-finalized trade math, so a reconciler bug must never
+            # crash the fill loop: on any exception, log and keep the strategy
+            # reason.
+            try:
+                reconciled = self._exit_reconciler(
+                    symbol=pos.symbol,
+                    side=pos.side.value,
+                    entry_price=pos.entry_price,
+                    qty=pos.original_qty,
+                )
+            except Exception:
+                logger.warning(
+                    "exit reconciler raised for %s; keeping strategy exit reason %r",
+                    pos.symbol,
+                    exit_reason,
+                    exc_info=True,
+                )
+                reconciled = None
+            if reconciled:
+                exit_reason = reconciled
+
         record = TradeRecord(
             trade_num=self._trade_num,
             entry_date=pos.entry_timestamp[:10],
@@ -1108,7 +1174,7 @@ class FillSimulator:
             position_value=round(entry_notional, 2),
             gross_pnl=round(gross, 2),
             net_pnl=net,
-            return_pct=round((net / entry_notional * 100) if entry_notional > 0 else 0.0, 2),
+            return_pct=return_pct,
             hold_days=hold_days,
             outcome="win" if net > 0 else "loss",
             cumulative_pnl=self.portfolio.cumulative_pnl,
@@ -1125,13 +1191,13 @@ class FillSimulator:
             participation_clipped=pos.participation_clipped,
             partial_fill_count=pos.partial_fill_count,
             total_unfilled_qty=pos.total_unfilled_qty,
-            # Issue #527 — propagate the close ``OrderRequest.reason``
-            # onto the trade record so the conformance gate can tell
-            # engine-fired closes (``engine_exit:<kind>``) from
-            # strategy-emitted closes. ``po.request.reason`` is None /
-            # empty for vanilla strategy market exits.
+            # The close ``OrderRequest.reason`` (or the reconciled
+            # ``engine_exit:<kind>`` label computed above) lets the
+            # conformance / alignment gates tell engine-owned closes from
+            # strategy-emitted ones. ``po.request.reason`` is None / empty
+            # for vanilla strategy market exits.
             entry_reason=pos.entry_reason or None,
-            exit_reason=po.request.reason or None,
+            exit_reason=exit_reason,
         )
         return exit_fill, record
 
