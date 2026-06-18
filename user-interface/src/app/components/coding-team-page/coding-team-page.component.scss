@@ -623,3 +623,35 @@
   margin-top: 1rem;
   color: var(--kh-text-tertiary);
 }
+
+// ---------------------------------------------------------------------------
+// Small viewports — the three views are already single-column and full-width,
+// so this only tightens spacing and collapses the toggle to icons so the
+// switcher and cards stay usable on narrow screens.
+// ---------------------------------------------------------------------------
+@media (max-width: 600px) {
+  .view-toggle {
+    width: 100%;
+
+    // Icon-only toggles fit three-across without overflow on a phone.
+    .toggle-label {
+      display: none;
+    }
+
+    mat-icon {
+      margin-right: 0;
+    }
+  }
+
+  .github-section.kh-card,
+  .jobs-panel.kh-card {
+    padding: var(--kh-space-4);
+  }
+
+  // Keep the inline confirm panel and run detail from crowding the screen edges.
+  .github-confirm-panel,
+  .run-detail {
+    padding-left: var(--kh-space-3);
+    padding-right: var(--kh-space-3);
+  }
+}

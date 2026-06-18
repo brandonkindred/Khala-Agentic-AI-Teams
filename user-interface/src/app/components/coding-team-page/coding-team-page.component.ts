@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, OnDestroy, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatIconModule } from '@angular/material/icon';
@@ -12,6 +12,7 @@ import { MatPaginatorModule, PageEvent } from '@angular/material/paginator';
 import { RouterLink } from '@angular/router';
 import { Subject, Subscription, timer, of } from 'rxjs';
 import { catchError, switchMap, tap } from 'rxjs/operators';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CodingTeamApiService } from '../../services/coding-team-api.service';
 import { IntegrationsApiService } from '../../services/integrations-api.service';
 import { pollJobStatus } from '../../services/job-status-poller';
@@ -24,6 +25,7 @@ import {
 } from '../pending-questions/pending-questions.component';
 import type { GitHubIssueItem, RunGitHubIssueResponse } from '../../models/integrations.model';
 import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
+import type { TeamAssistantFieldSpec } from '../../models/team-assistant.model';
 import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 
 /** How often the Runs list is re-fetched while the page is open. */
@@ -88,14 +90,23 @@ interface IssueRowVm {
 export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private readonly api = inject(CodingTeamApiService);
   private readonly integrationsApi = inject(IntegrationsApiService);
+  private readonly destroyRef = inject(DestroyRef);
 
   latestJobId: string | null = null;
 
   /** Which single view is visible. The page opens on the assistant chat. */
   activeView: 'chat' | 'github' | 'jobs' = 'chat';
 
-  /** Assistant workflow endpoint for the embedded chat — a named constant, not a template literal. */
+  // Embedded assistant chat configuration — named properties rather than template literals, so the
+  // chat panel's wiring lives in one place.
+  /** Assistant workflow endpoint for the embedded chat. */
   readonly teamApiUrl = '/api/coding-team/assistant';
+  readonly chatTeamName = 'Coding Team';
+  readonly chatTeamDescription = 'Software Engineering sub-team — task graph and implementation';
+  readonly chatFields: TeamAssistantFieldSpec[] = [
+    { key: 'repo_path', label: 'Repository path', placeholder: 'Path to project repository', required: true },
+    { key: 'plan_input', label: 'Plan / tasks (optional)', placeholder: 'Feature descriptions or structured plan hints' },
+  ];
 
   healthCheck = (): ReturnType<CodingTeamApiService['health']> => this.api.health();
 
@@ -115,12 +126,27 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
 
   // Issue list pagination (client-side over the fully-fetched issue array)
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
+  /** Smallest configured page size; the paginator is shown only when the list exceeds it. */
+  readonly minPageSize = Math.min(...this.PAGE_SIZE_OPTIONS);
   pageSize = 10;
   pageIndex = 0;
 
   // Issue selection & confirmation
-  selectedIssue: GitHubIssueItem | null = null;
+  private _selectedIssue: GitHubIssueItem | null = null;
+  /** Open-dependency refs ("#3, #5") for the selected issue, precomputed so the confirm panel binds a
+   * plain string instead of calling `openDepRefs` each change-detection cycle. */
+  selectedIssueOpenDeps = '';
   runningIssue = false;
+
+  get selectedIssue(): GitHubIssueItem | null {
+    return this._selectedIssue;
+  }
+
+  /** Setting the selected issue refreshes its precomputed open-dependency refs. */
+  set selectedIssue(issue: GitHubIssueItem | null) {
+    this._selectedIssue = issue;
+    this.selectedIssueOpenDeps = issue ? this.openDepRefs(issue) : '';
+  }
 
   // Runs panel — the persistent, non-dismissable status panel.
   /** Every coding-team run for this repo (running + recent terminal), newest snapshot from /jobs. */
@@ -138,7 +164,24 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Issue number of the selected run — kept so the chip survives a list snapshot that lags a just-started run. */
   selectedRunNumber: number | null = null;
   /** Latest polled status of `selectedRunId`; null until the first poll lands. */
-  jobStatus: CodingTeamJobStatus | null = null;
+  private _jobStatus: CodingTeamJobStatus | null = null;
+  /** Badge modifier for the selected run's status, precomputed from `jobStatus` so the detail panel
+   * binds a plain field instead of calling `badgeClass` each change-detection cycle. */
+  jobStatusBadgeClass = 'neutral';
+  /** Whether the selected run has reached a terminal state, precomputed from `jobStatus` (the detail
+   * panel binds this instead of calling `isJobTerminal()`). */
+  jobStatusTerminal = false;
+
+  get jobStatus(): CodingTeamJobStatus | null {
+    return this._jobStatus;
+  }
+
+  /** Setting the polled status refreshes the precomputed badge class and terminal flag. */
+  set jobStatus(status: CodingTeamJobStatus | null) {
+    this._jobStatus = status;
+    this.jobStatusBadgeClass = this.badgeClass(status?.status);
+    this.jobStatusTerminal = isCodingTeamTerminalStatus(status?.status);
+  }
 
   /** True while a manual resume POST is in flight (drives a spinner on the Resume button). */
   resumingJob = false;
@@ -179,7 +222,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    */
   checkGitHubConfig(): void {
     this.loadingConfig = true;
-    this.integrationsApi.getGitHubConfig().subscribe({
+    this.integrationsApi
+      .getGitHubConfig()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (cfg) => {
         this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
         this.githubOwner = cfg.owner;
@@ -217,7 +263,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     // Refreshing the issue list also refreshes the Runs list and the "In progress" chips, so the
     // two lists never drift.
     this.refreshTrigger$.next();
-    this.integrationsApi.getGitHubIssues().subscribe({
+    this.integrationsApi
+      .getGitHubIssues()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (issues) => {
         this.issues = issues;
         this.pageIndex = 0;
@@ -324,7 +373,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (!this.selectedIssue || this.runningIssue) return;
     this.runningIssue = true;
     this.issueError = null;
-    this.integrationsApi.runGitHubIssue({ issue_number: this.selectedIssue.number }).subscribe({
+    this.integrationsApi
+      .runGitHubIssue({ issue_number: this.selectedIssue.number })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
         this.selectedIssue = null;
@@ -356,7 +408,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     if (issueNumber == null || this.runningIssue) return;
     this.runningIssue = true;
     this.issueError = null;
-    this.integrationsApi.runGitHubIssue({ issue_number: issueNumber }).subscribe({
+    this.integrationsApi
+      .runGitHubIssue({ issue_number: issueNumber })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (resp: RunGitHubIssueResponse) => {
         this.runningIssue = false;
         this.activeIssueNumbers.add(resp.issue_number);
@@ -670,7 +725,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const jobId = this.selectedRunId;
     this.resumingJob = true;
     this.issueError = null;
-    this.api.resumeJob(jobId).subscribe({
+    this.api
+      .resumeJob(jobId)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: () => {
         this.resumingJob = false;
         this.startPolling(jobId);

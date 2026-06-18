@@ -40,12 +40,9 @@
 @if (activeView === 'chat') {
   <app-team-assistant-chat
     [teamApiUrl]="teamApiUrl"
-    [teamName]="'Coding Team'"
-    [teamDescription]="'Software Engineering sub-team — task graph and implementation'"
-    [fields]="[
-      {key: 'repo_path', label: 'Repository path', placeholder: 'Path to project repository', required: true},
-      {key: 'plan_input', label: 'Plan / tasks (optional)', placeholder: 'Feature descriptions or structured plan hints'}
-    ]"
+    [teamName]="chatTeamName"
+    [teamDescription]="chatTeamDescription"
+    [fields]="chatFields"
     (workflowLaunched)="onWorkflowLaunched($event)"
   />
   @if (latestJobId) {
@@ -162,7 +159,7 @@
                       <div>
                         <strong>Blocked by open dependencies</strong>
                         <p>
-                          This issue depends on {{ openDepRefs(selectedIssue!) }}, which are still open.
+                          This issue depends on {{ selectedIssueOpenDeps }}, which are still open.
                           The coding team will attempt the run, but GitHub may reject it until those
                           issues are closed.
                         </p>
@@ -195,7 +192,7 @@
               }
             }
           </div>
-          @if (issues.length > PAGE_SIZE_OPTIONS[0]) {
+          @if (issues.length > minPageSize) {
             <mat-paginator
               class="github-issues-paginator"
               [length]="issues.length"
@@ -248,9 +245,9 @@
           <p class="runs-section__title">Running</p>
           <div class="runs-list">
             @for (vm of runningRunVms; track vm.run.job_id) {
-              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: vm }"></ng-container>
+              <ng-container [ngTemplateOutlet]="runRow" [ngTemplateOutletContext]="{ $implicit: vm }"></ng-container>
               @if (selectedRunId === vm.run.job_id) {
-                <ng-container *ngTemplateOutlet="runDetail"></ng-container>
+                <ng-container [ngTemplateOutlet]="runDetail"></ng-container>
               }
             }
           </div>
@@ -265,9 +262,9 @@
           <p class="runs-section__title">Recent</p>
           <div class="runs-list">
             @for (vm of recentRunVms; track vm.run.job_id) {
-              <ng-container *ngTemplateOutlet="runRow; context: { $implicit: vm }"></ng-container>
+              <ng-container [ngTemplateOutlet]="runRow" [ngTemplateOutletContext]="{ $implicit: vm }"></ng-container>
               @if (selectedRunId === vm.run.job_id) {
-                <ng-container *ngTemplateOutlet="runDetail"></ng-container>
+                <ng-container [ngTemplateOutlet]="runDetail"></ng-container>
               }
             }
           </div>
@@ -337,7 +334,7 @@
             </div>
             <div class="github-job-panel__field">
               <span class="github-job-panel__label">Status</span>
-              <span class="kh-badge kh-badge--{{ badgeClass(jobStatus.status) }}">{{ jobStatus.status }}</span>
+              <span class="kh-badge kh-badge--{{ jobStatusBadgeClass }}">{{ jobStatus.status }}</span>
             </div>
             @if (jobStatus.phase) {
               <div class="github-job-panel__field">
@@ -423,7 +420,7 @@
                 </a>
               </div>
             }
-            @if (isJobTerminal()) {
+            @if (jobStatusTerminal) {
               <div class="run-detail__retry">
                 <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
                   @if (runningIssue) {

@@ -441,6 +441,34 @@ describe('CodingTeamPageComponent', () => {
       expect(vm.depsTooltip).toContain('#3');
       expect(vm.inProgress).toBe(false);
     });
+
+    it('precomputes the selected run\'s badge class and terminal flag when jobStatus is set', async () => {
+      await setup();
+      component.jobStatus = { job_id: 'j1', status: 'failed' };
+      expect(component.jobStatusBadgeClass).toBe('failed');
+      expect(component.jobStatusTerminal).toBe(true);
+      component.jobStatus = { job_id: 'j1', status: 'running' };
+      expect(component.jobStatusBadgeClass).toBe('running');
+      expect(component.jobStatusTerminal).toBe(false);
+      component.jobStatus = null;
+      expect(component.jobStatusBadgeClass).toBe('neutral');
+      expect(component.jobStatusTerminal).toBe(false);
+    });
+
+    it('precomputes the selected issue\'s open-dependency refs when an issue is selected', async () => {
+      await setup();
+      component.selectIssue(
+        issueWith({
+          dependencies: [
+            { number: 3, title: 'A', state: 'open' },
+            { number: 5, title: 'B', state: 'closed' },
+          ],
+        }),
+      );
+      expect(component.selectedIssueOpenDeps).toBe('#3');
+      component.cancelSelection();
+      expect(component.selectedIssueOpenDeps).toBe('');
+    });
   });
 
   // -------------------------------------------------------------------------
