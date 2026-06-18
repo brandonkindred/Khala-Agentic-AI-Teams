@@ -54,7 +54,12 @@ from ..strategy_lab.spec_dsl import (
 from ..strategy_lab_context import is_fractional_asset_class
 from .data_stream.protocol import BarEvent, EndOfStreamEvent, StreamEvent
 from .engine.execution_model import build_execution_model
-from .engine.fill_simulator import FillOutcome, FillSimulator, FillSimulatorConfig
+from .engine.fill_simulator import (
+    ENGINE_EXIT_REASON_PREFIX,
+    FillOutcome,
+    FillSimulator,
+    FillSimulatorConfig,
+)
 from .engine.order_book import OrderBook
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
@@ -71,11 +76,13 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
 
-# Issue #527 — reserved order ``reason`` prefix the engine stamps on every
-# rule-triggered close order it emits on the strategy's behalf. The conformance
-# quality gate reads this prefix off ``OrderLifecycleEvent`` records to count
-# wrapper-emitted exits and verify each trade obeyed the structured rules.
-ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+# ``ENGINE_EXIT_REASON_PREFIX`` is the reserved order ``reason`` prefix the
+# engine stamps on every close it owns (rule-triggered emissions and reconciled
+# strategy closes). The conformance quality gate reads it off
+# ``OrderLifecycleEvent`` records to verify each trade obeyed the structured
+# rules. Canonical definition lives in the engine layer (``fill_simulator``) and
+# is re-exported here for the many call sites and external importers that read it
+# off this module.
 
 # Absolute slack (percentage points) allowed on a structured exit rule's return
 # bound when reconciling exit attribution, mirroring the trade-alignment gate's
@@ -86,7 +93,7 @@ _RECONCILE_RETURN_SLACK_PP = 0.5
 
 
 def _build_exit_reconciler(
-    exit_rules: Sequence[ExitRule],
+    exit_rules: Optional[Sequence[ExitRule]],
     views: Mapping[str, StreamingHistoryView],
 ) -> Optional[Callable[..., Optional[str]]]:
     """Build the engine-side exit-attribution reconciler for a run.
@@ -125,13 +132,20 @@ def _build_exit_reconciler(
     if not exit_rules:
         return None
 
-    tp_pcts = [r.pct for r in exit_rules if getattr(r, "kind", None) == "take_profit"]
+    rules = list(exit_rules)
+    tp_pcts = [r.pct for r in rules if getattr(r, "kind", None) == "take_profit"]
     sl_entry_pcts = [
         r.pct
-        for r in exit_rules
+        for r in rules
         if getattr(r, "kind", None) == "stop_loss"
         and getattr(r, "basis", "entry_price") == "entry_price"
     ]
+    # Tightest ceiling / floor across rules of each kind, mirroring the
+    # alignment gate: a close that drifted past the *tightest* cap/floor must
+    # not be reconciled (it stays flagged) rather than being masked by a looser
+    # sibling rule of the same kind.
+    tp_ceiling = min(tp_pcts) * 100.0 if tp_pcts else None
+    sl_floor = -min(sl_entry_pcts) * 100.0 if sl_entry_pcts else None
 
     def _reconcile(
         *,
@@ -150,33 +164,37 @@ def _build_exit_reconciler(
             qty=qty,
             entry_price=entry_price,
             # Trailing watermarks are not tracked at the close site; collapse
-            # them to ``entry_price`` so trailing-basis stops can't fire here.
-            # They are deferred to the alignment gate and excluded below.
+            # them to ``entry_price``. Trailing-basis stops are path-dependent
+            # and skipped below regardless, so the collapse is inert.
             high_since_entry=entry_price,
             low_since_entry=entry_price,
         )
         bs = BarSnapshot(high=bar.high, low=bar.low, close=bar.close)
-        intents = evaluate_exit_rules(exit_rules, {symbol: ps}, {symbol: bs}, views=views)
-        if not intents:
-            return None
-        kind = intents[0].rule_kind
         slack = _RECONCILE_RETURN_SLACK_PP
-        if kind == "take_profit":
-            if not tp_pcts:
-                return None
-            ceiling = min(tp_pcts) * 100.0
-            return (
-                f"{ENGINE_EXIT_REASON_PREFIX}take_profit" if return_pct <= ceiling + slack else None
-            )
-        if kind == "stop_loss":
-            # Only entry-price stops have a static floor to validate; a
-            # trailing-only stop is deferred to the alignment gate.
-            if not sl_entry_pcts:
-                return None
-            floor = -min(sl_entry_pcts) * 100.0
-            return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss" if return_pct >= floor - slack else None
-        if kind == "signal_exit":
-            return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+        # Consider *every* rule that fires at this bar, not just the first in
+        # spec order. ``evaluate_exit_rules`` returns a single first-wins intent
+        # per position, so a rule firing out of bounds would otherwise shadow a
+        # later, compliant rule and drop attribution. Evaluate each rule on its
+        # own and stamp the first firing rule whose bound holds (spec order =
+        # priority). An out-of-bounds firing rule falls through to the next.
+        for rule in rules:
+            kind = getattr(rule, "kind", None)
+            # Trailing-basis stops are path-dependent (running peak/trough);
+            # deferred to the alignment gate, never reconciled here.
+            if kind == "stop_loss" and getattr(rule, "basis", "entry_price") != "entry_price":
+                continue
+            if not evaluate_exit_rules([rule], {symbol: ps}, {symbol: bs}, views=views):
+                continue
+            if (
+                kind == "take_profit"
+                and tp_ceiling is not None
+                and return_pct <= tp_ceiling + slack
+            ):
+                return f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+            if kind == "stop_loss" and sl_floor is not None and return_pct >= sl_floor - slack:
+                return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+            if kind == "signal_exit":
+                return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
         return None
 
     return _reconcile

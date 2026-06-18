@@ -40,6 +40,13 @@ from .portfolio import Portfolio, Position
 
 logger = logging.getLogger(__name__)
 
+#: Reserved order ``reason`` prefix the engine stamps on every close it owns
+#: (rule-triggered emissions and reconciled strategy closes). Canonical home is
+#: the engine layer; ``trading_service.service`` re-exports it. Both the exit
+#: dispatcher and this simulator's reconciliation guard key off it, so it lives
+#: here — the lowest layer that needs it — to stay a single source of truth.
+ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
+
 #: Callback that reconciles exit attribution for a *strategy-initiated* close.
 #: Given the closing position's facts and the realized return, it returns an
 #: ``engine_exit:<kind>`` label when a structured exit rule fired within bounds
@@ -1095,11 +1102,17 @@ class FillSimulator:
         # as the single source of exit truth. An out-of-bounds / non-firing
         # close keeps its strategy reason and stays flagged by the gate.
         exit_reason = po.request.reason or None
-        if self._exit_reconciler is not None and not (exit_reason or "").startswith("engine_exit:"):
+        if self._exit_reconciler is not None and not (exit_reason or "").startswith(
+            ENGINE_EXIT_REASON_PREFIX
+        ):
             reconciled = self._exit_reconciler(
                 symbol=pos.symbol,
                 side=pos.side.value,
                 entry_price=pos.entry_price,
+                # ``original_qty`` is the actually-filled (held) size — this
+                # record is only built on a *full* close, so it equals the
+                # closed quantity. The reconciler uses it only as a ``> 0``
+                # liveness gate; it never enters the return-bound math.
                 qty=pos.original_qty,
                 bar=bar,
                 return_pct=return_pct,

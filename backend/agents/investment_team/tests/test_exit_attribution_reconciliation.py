@@ -211,6 +211,104 @@ def test_zero_qty_is_not_reconciled() -> None:
     )
 
 
+# --- Multiple rules firing on the same bar ---------------------------------
+
+
+def test_multiple_rules_first_out_of_bounds_falls_through_to_signal() -> None:
+    """A take-profit firing *past* its ceiling must not shadow a compliant
+    signal-exit firing on the same bar — attribution still gets stamped."""
+    view = _signal_view(101.0, 100.0, 98.0)  # latest close 98 < 99 → signal fires
+    rules = [
+        TakeProfitRule(pct=0.05),
+        SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0)),
+    ]
+    reconcile = _build_exit_reconciler(rules, {"AAA": view})
+    assert reconcile is not None
+    # bar.high 112 clears the 105 TP target, but return 7% is past the cap.
+    label = reconcile(
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        qty=10.0,
+        bar=_FakeBar(high=112.0, low=97.0, close=98.0),
+        return_pct=7.0,
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+
+
+def test_multiple_rules_first_within_bounds_wins() -> None:
+    """When the first firing rule complies, it takes priority (spec order)."""
+    view = _signal_view(101.0, 100.0, 98.0)
+    rules = [
+        TakeProfitRule(pct=0.05),
+        SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0)),
+    ]
+    reconcile = _build_exit_reconciler(rules, {"AAA": view})
+    assert reconcile is not None
+    label = reconcile(
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        qty=10.0,
+        bar=_FakeBar(high=106.0, low=97.0, close=98.0),
+        return_pct=4.8,  # within the 5% ceiling
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+
+
+def test_tightest_take_profit_ceiling_blocks_drift() -> None:
+    """With multiple TP rules, the tightest ceiling governs — a close that
+    drifted past it is not reconciled (mirrors the alignment gate)."""
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.03), TakeProfitRule(pct=0.05)], {})
+    assert reconcile is not None
+    # Both targets (103, 105) are cleared, but return 4.8% drifted past the
+    # tightest 3% ceiling, so neither rule may reconcile it.
+    label = reconcile(
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        qty=10.0,
+        bar=_FakeBar(high=106.0, low=99.0, close=105.5),
+        return_pct=4.8,
+    )
+    assert label is None
+
+
+# --- Short positions ------------------------------------------------------
+
+
+def test_short_take_profit_within_ceiling_is_reconciled() -> None:
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    assert reconcile is not None
+    # entry 100, short; bar.low 94 clears the 95 target → rule fires; a short
+    # profits as price falls, so the realized return is positive.
+    label = reconcile(
+        symbol="AAA",
+        side="short",
+        entry_price=100.0,
+        qty=10.0,
+        bar=_FakeBar(high=101.0, low=94.0, close=95.0),
+        return_pct=4.8,  # within the 5% ceiling
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+
+
+def test_short_stop_loss_within_floor_is_reconciled() -> None:
+    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {})
+    assert reconcile is not None
+    # entry 100, short; bar.high 106 crosses the 105 ceiling → rule fires; a
+    # short loses as price rises, so the realized return is negative.
+    label = reconcile(
+        symbol="AAA",
+        side="short",
+        entry_price=100.0,
+        qty=10.0,
+        bar=_FakeBar(high=106.0, low=99.0, close=105.0),
+        return_pct=-4.8,  # within the -5% floor
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+
+
 # ---------------------------------------------------------------------------
 # FillSimulator — invokes the injected reconciler at the stamping site
 # ---------------------------------------------------------------------------
