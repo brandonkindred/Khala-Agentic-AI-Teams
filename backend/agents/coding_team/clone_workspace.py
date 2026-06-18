@@ -74,14 +74,8 @@ def ephemeral_workspace_roots() -> list[Path]:
         if val:
             roots.append(Path(val).resolve())
     roots.append((Path(agent_cache_dir()) / "github_workspaces").resolve())
-    # De-duplicate while preserving order.
-    seen: set[Path] = set()
-    unique: list[Path] = []
-    for r in roots:
-        if r not in seen:
-            seen.add(r)
-            unique.append(r)
-    return unique
+    # dict.fromkeys de-duplicates while preserving first-seen order (Path is hashable).
+    return list(dict.fromkeys(roots))
 
 
 def is_within_ephemeral_workspace(repo_path: str | Path) -> bool:
