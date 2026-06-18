@@ -425,6 +425,7 @@ def _watchdog_loop(
     interval_s: float,
     stop_event: threading.Event,
     logger: logging.Logger,
+    initial_oom_count: Optional[int] = None,
 ) -> None:
     """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
 
@@ -432,6 +433,11 @@ def _watchdog_loop(
     pressure-threshold warning is skipped and the loop runs in OOM-detection-only
     mode (the cgroup ``oom_kill`` counter still fires on a host/VM-wide kill of an
     unbounded container).
+
+    ``initial_oom_count`` seeds the OOM-kill baseline from the value already read
+    at arm time, so a kill occurring between arming and the first tick is still
+    reported (and the counter file isn't read twice). Falls back to reading once
+    when not supplied (e.g. direct unit-test calls).
 
     Preconditions (enforced):
         - ``interval_s > 0`` — a non-positive interval would tight-loop this
@@ -447,9 +453,9 @@ def _watchdog_loop(
     if interval_s <= 0:
         raise ValueError("interval_s must be > 0")
     warned = False
-    # Baseline the OOM-kill counter so only kills *after* the watchdog starts are
-    # reported as new (pre-existing kills are surfaced once at arm time instead).
-    last_oom = read_oom_kill_count()
+    # Seed the OOM-kill baseline from the arm-time read so a kill between arming
+    # and the first tick isn't folded silently into a fresh baseline.
+    last_oom = initial_oom_count if initial_oom_count is not None else read_oom_kill_count()
     while not stop_event.wait(interval_s):
         try:
             if limit_bytes:
@@ -541,6 +547,9 @@ def start_memory_watchdog(
             "interval_s": interval_s,
             "stop_event": stop_event,
             "logger": log,
+            # Seed from the count read above so a kill between here and the first
+            # tick is reported and the counter file isn't read a second time.
+            "initial_oom_count": prior_oom,
         },
         name=f"mem-watchdog-{team}",
         daemon=True,

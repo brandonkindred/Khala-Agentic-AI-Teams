@@ -74,6 +74,9 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
         try:
             value = int(float(raw))
         except (TypeError, ValueError, OverflowError):
+            # Surface the misconfiguration: a set-but-unparseable value silently
+            # running on defaults is exactly the surprise this warning prevents.
+            logger.warning("Invalid value for %s: %r; using default %d", name, raw, default)
             value = default
     if value < minimum:
         value = minimum

@@ -47,6 +47,17 @@ def test_env_int_clamps_out_of_range_default(monkeypatch) -> None:
     assert entrypoint._env_int("X_WORKERS", 99, minimum=1, maximum=16) == 16  # above max
 
 
+def test_env_int_warns_on_invalid_value(monkeypatch, caplog) -> None:
+    """A set-but-unparseable value falls back to the default AND logs a warning so
+    the misconfiguration isn't silent."""
+    import logging
+
+    monkeypatch.setenv("X_WORKERS", "abc")
+    with caplog.at_level(logging.WARNING, logger="team_service"):
+        assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2
+    assert any("Invalid value for X_WORKERS" in r.getMessage() for r in caplog.records)
+
+
 def test_wrapper_body_compiles_and_defines_app() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)

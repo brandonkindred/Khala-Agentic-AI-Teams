@@ -1107,10 +1107,13 @@ services:
     volumes:
       - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
       - tempo_data:/var/tempo
+    # Bind to localhost only: app containers export to `tempo:4318` and Grafana
+    # queries `tempo:3200` over the docker network, so these host mappings are
+    # just operator convenience — no need to expose the trace backend on the LAN.
     ports:
-      - "3200:3200"
-      - "4317:4317"
-      - "4318:4318"
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
     networks:
       stack: { ipv4_address: 172.28.0.22, aliases: [tempo] }
     restart: unless-stopped

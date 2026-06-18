@@ -402,6 +402,31 @@ def test_oom_check_tick_unknown_limit_still_detects(monkeypatch) -> None:
     assert "unset" in msg and "global OOM" in msg
 
 
+def test_watchdog_loop_uses_seeded_oom_baseline(monkeypatch, caplog) -> None:
+    """initial_oom_count seeds the baseline (no second counter read), so a kill
+    between arm time and the first tick is still reported as new."""
+    stop = threading.Event()
+
+    def fake_oom(*_a, **_k):
+        stop.set()
+        return 6  # current count in-loop; baseline comes from initial_oom_count=5
+
+    monkeypatch.setattr(ph, "read_oom_kill_count", fake_oom)
+    monkeypatch.setattr(ph, "read_memory_peak_bytes", lambda *a, **k: 400 * 1024 * 1024)
+    logger = logging.getLogger("test.ph.seed")
+    with caplog.at_level(logging.ERROR, logger="test.ph.seed"):
+        ph._watchdog_loop(
+            team="investment_team",
+            limit_bytes=None,
+            threshold=0.85,
+            interval_s=0.01,
+            stop_event=stop,
+            logger=logger,
+            initial_oom_count=5,  # had a re-read been used, baseline would be 6 → no alert
+        )
+    assert any("OOM kill detected" in r.getMessage() for r in caplog.records)
+
+
 def test_watchdog_loop_oom_only_skips_pressure(monkeypatch, caplog) -> None:
     """limit_bytes=None: the loop must not attempt a pressure evaluation (which
     requires a positive limit) but must still fire OOM detection."""
