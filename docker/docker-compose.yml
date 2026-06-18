@@ -523,6 +523,11 @@ services:
       TEAM_PORT: "8100"
       TEAM_TEMPORAL_WORKER_MODULE: ""
       TEAM_TEMPORAL_WORKER_FUNC: ""
+      # These two are already inherited from *team-env-base; set explicitly here so
+      # the footprint knobs are self-evident on the OOM-prone service this PR
+      # targets (and to make the values greppable in the investment block itself).
+      TEAM_WORKERS: ${TEAM_WORKERS:-1}
+      TEAM_MEMORY_WATCHDOG_INTERVAL_S: ${TEAM_MEMORY_WATCHDOG_INTERVAL_S:-10}
       # Cap concurrent Strategy Lab cycles per wave: each holds its own market
       # data + LLM contexts in the single worker, so this bounds peak memory (the
       # dominant OOM driver). Raise once the host/VM has more memory headroom.

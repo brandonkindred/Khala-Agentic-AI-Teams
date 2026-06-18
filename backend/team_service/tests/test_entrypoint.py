@@ -58,6 +58,23 @@ def test_env_int_warns_on_invalid_value(monkeypatch, caplog) -> None:
     assert any("Invalid value for X_WORKERS" in r.getMessage() for r in caplog.records)
 
 
+def test_env_int_warns_on_fractional_truncation(monkeypatch, caplog) -> None:
+    """A fractional value (e.g. '2.5') is truncated AND warned, so the silent
+    truncation can't mask a misconfiguration; an integer-valued '2.0' is quiet."""
+    import logging
+
+    monkeypatch.setenv("X_WORKERS", "2.5")
+    with caplog.at_level(logging.WARNING, logger="team_service"):
+        assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
+    assert any("Fractional value for X_WORKERS" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setenv("X_WORKERS", "2.0")  # integer-valued float → no warning
+    with caplog.at_level(logging.WARNING, logger="team_service"):
+        assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
+    assert not any("Fractional value" in r.getMessage() for r in caplog.records)
+
+
 def test_wrapper_body_compiles_and_defines_app() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)

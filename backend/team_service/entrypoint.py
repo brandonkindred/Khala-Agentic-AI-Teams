@@ -72,7 +72,12 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
     value = default
     if raw is not None and raw.strip():
         try:
-            value = int(float(raw))
+            parsed = float(raw)
+            value = int(parsed)
+            if parsed != value:
+                # e.g. "2.5" → 2: a fractional worker/count is almost certainly a
+                # mistake, so flag the truncation rather than swallow it silently.
+                logger.warning("Fractional value for %s: %r truncated to %d", name, raw, value)
         except (TypeError, ValueError, OverflowError):
             # Surface the misconfiguration: a set-but-unparseable value silently
             # running on defaults is exactly the surprise this warning prevents.
