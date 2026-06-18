@@ -230,6 +230,60 @@ def test_analysis_prompts_label_entry_intent_and_exit_enforcement(
         pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
     ],
 )
+def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _PromptRenderer) -> None:
+    """Both draft prompts must teach the correct risk model: deployed size is
+    the per-trade capital at risk, post-entry safeguards are a separate
+    dimension, and ``fraction × stop`` is never the per-trade-risk figure.
+
+    Guards against the regression where the analysis LLM read the deployed
+    fraction as a stop-multiplied "effective risk", called it "capital in
+    play", and blamed weak returns on it.
+    """
+    rendered = renderer()
+    assert "How to read the sizing line" in rendered, (
+        f"{label} prompt must carry the sizing-interpretation block."
+    )
+    assert "capital DEPLOYED" in rendered, (
+        f"{label} prompt must frame the sizing line as deployed capital at risk."
+    )
+    assert "deployed-fraction × stop is wrong" in rendered, (
+        f"{label} prompt must forbid multiplying the stop into sizing."
+    )
+    assert "SEPARATE per-trade-outcome dimension" in rendered, (
+        f"{label} prompt must require analyzing post-entry safeguards separately."
+    )
+
+
+def test_lose_prompt_forbids_low_effective_risk_attribution() -> None:
+    """The losing-strategy prompt must explicitly block the reported failure
+    mode: attributing weak/negative returns to "low effective risk" or
+    "too little capital in play" derived from a stop-multiplied figure."""
+    rendered = _render_lose()
+    assert 'Do NOT attribute weak or negative returns to "low effective risk"' in rendered
+    assert "the deployed size IS the capital in play and the per-trade loss cap" in rendered
+
+
+def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
+    """The analysis system prompt deepens the quant + veteran-trader persona
+    and embeds the risk model. It is not snapshot-pinned, so assert its
+    content directly (and that no forbidden enforcement phrasing crept in)."""
+    text = (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
+    lowered = text.lower()
+    assert "veteran" in lowered, "system prompt must deepen the veteran-trader persona."
+    assert "per-trade capital at risk" in text
+    assert "deployed-fraction × stop" in text
+    assert "low effective risk" in text  # the framing must name and forbid the bad reading
+    for phrase in ("mandatory", "hard rule", "hard-enforced"):
+        assert phrase not in lowered, f"system prompt must not use forbidden phrasing {phrase!r}."
+
+
+@pytest.mark.parametrize(
+    "label,renderer",
+    [
+        pytest.param("analysis_win", _render_win, id="analysis_win"),
+        pytest.param("analysis_lose", _render_lose, id="analysis_lose"),
+    ],
+)
 def test_prompts_do_not_use_mandatory_or_hard_rule_phrasing(
     label: str, renderer: _PromptRenderer
 ) -> None:

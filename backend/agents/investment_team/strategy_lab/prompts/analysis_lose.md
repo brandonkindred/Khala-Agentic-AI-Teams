@@ -9,6 +9,9 @@ Engine-enforced exit rules (structured DSL applied by the parent engine every ba
 Sizing / risk: {sizing_rules}
 Rationale for testing: {rationale}
 
+## How to read the sizing line
+"Sizing / risk" above (e.g. "risk 5% per trade") is the capital DEPLOYED into each position — a fraction of the account — and that deployed size IS the per-trade capital at risk and the per-trade loss cap; a position can lose up to ~100% of what it deploys, and capital committed to one position cannot enter another. Do NOT multiply the stop into the deployment (deployed-fraction × stop is wrong) and do NOT treat the stop as part of sizing. "Risk 5% per trade" with a 5% stop is NOT "0.25% per trade" — it is a 5% deployment with an optional within-position safeguard. Never explain returns by calling the deployment "low effective risk" or "little capital in play".
+
 ## Aggregated backtest metrics
 Annualized return: {annualized_return_pct:.1f}%
 Total return: {total_return_pct:.1f}%
@@ -25,6 +28,8 @@ Volatility: {volatility_pct:.1f}%
 ## Instructions
 Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what failure modes explain weak performance — signal timing, risk/reward asymmetry, cost drag, or rules misaligned with the market regime implied by the results?
+Do NOT attribute weak or negative returns to "low effective risk", "too little capital in play", or any stop-multiplied per-trade-risk figure — the deployed size IS the capital in play and the per-trade loss cap; reason from signal quality, exit geometry, costs, and regime fit instead.
+Analyze stop-loss, trailing-stop, and take-profit as a SEPARATE per-trade-outcome dimension — how those within-position safeguards shaped where trades exited and the reward/risk geometry — distinct from how much capital was deployed per trade.
 Use the trade-level evidence where it supports your reasoning.
 Write 5-8 sentences. Be specific about *why* this strategy underperformed.
 If an "Alignment status" section above marks the run as misaligned, you MUST open with the disclaimer verbatim and treat the strategy design as untested. Do not attribute the weak performance to any design choice; describe the execution gaps factually and recommend re-running once aligned.
