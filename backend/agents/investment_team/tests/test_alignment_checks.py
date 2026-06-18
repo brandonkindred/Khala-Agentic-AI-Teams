@@ -607,6 +607,7 @@ def test_take_profit_past_ceiling_without_attribution_is_informational_not_criti
     assert tp.passed is True
     assert tp.severity == "info"
     assert result.aligned is True
+    assert "breach" not in tp.details.lower()
     assert "trigger" in tp.details.lower()
 
 

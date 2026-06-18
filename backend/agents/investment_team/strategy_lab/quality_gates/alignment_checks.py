@@ -910,7 +910,8 @@ class DeterministicAlignmentChecker(GateResultsMixin):
                 f"nominal take-profit ceiling {ceiling_pct:.2f}%; closed via {reason!r} "
                 "(not engine_exit:take_profit). A take-profit is a trigger, not a price "
                 "guarantee — the fill can land past the threshold on a gap-up, or "
-                "another exit closed the position first."
+                "another exit closed the position first. Engine-side take-profit firing "
+                "is verified deterministically by the exit-rule conformance gate."
             )
         else:
             details = (
