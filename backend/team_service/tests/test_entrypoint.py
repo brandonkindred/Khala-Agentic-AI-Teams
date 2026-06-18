@@ -22,6 +22,23 @@ def _compile(src: str) -> None:
     compile(src, "<wrapper>", "exec")
 
 
+def test_env_int_defaults_clamps_and_survives_garbage(monkeypatch) -> None:
+    """_env_int parses defensively and clamps to [minimum, maximum]."""
+    monkeypatch.delenv("X_WORKERS", raising=False)
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2  # unset → default
+    for bad in ("garbage", "", "   ", "inf", "1e999"):
+        monkeypatch.setenv("X_WORKERS", bad)
+        assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2  # → default
+    monkeypatch.setenv("X_WORKERS", "0")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 1  # floored
+    monkeypatch.setenv("X_WORKERS", "1000")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 16  # ceiling
+    monkeypatch.setenv("X_WORKERS", "4")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 4  # in range
+    monkeypatch.setenv("X_WORKERS", "99")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1) == 99  # no maximum → unbounded
+
+
 def test_wrapper_body_compiles_and_defines_app() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)

@@ -22,3 +22,11 @@ storage:
       path: /var/tempo/blocks
     wal:
       path: /var/tempo/wal
+
+# Bound on-disk growth explicitly: the compactor deletes trace blocks older than
+# block_retention so the local /var/tempo volume can't fill unbounded on a
+# long-running stack. (Retention in Tempo lives under compactor.compaction, not
+# storage.trace.) 24h is plenty for local debugging.
+compactor:
+  compaction:
+    block_retention: 24h

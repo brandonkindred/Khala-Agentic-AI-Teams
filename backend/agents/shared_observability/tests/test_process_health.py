@@ -368,10 +368,72 @@ def test_start_memory_watchdog_disabled_via_env(monkeypatch) -> None:
     assert ph.start_memory_watchdog("coding_team") is None
 
 
-def test_start_memory_watchdog_no_limit_returns_none(monkeypatch) -> None:
+def test_start_memory_watchdog_no_limit_and_no_oom_counter_returns_none(monkeypatch) -> None:
+    """Nothing to watch (no cgroup limit AND no readable oom_kill counter) → no thread."""
     monkeypatch.setenv("TEAM_MEMORY_WATCHDOG_ENABLED", "true")
     monkeypatch.setattr(ph, "detect_memory_limit_bytes", lambda: None)
+    monkeypatch.setattr(ph, "read_oom_kill_count", lambda *a, **k: None)
     assert ph.start_memory_watchdog("coding_team") is None
+
+
+def test_start_memory_watchdog_oom_only_mode_without_limit(monkeypatch) -> None:
+    """An unbounded container (no mem_limit) still gets a watchdog for OOM-kill
+    detection when the kernel oom_kill counter is readable — the case that matters
+    for host/VM-wide (global) OOM. Regression guard for the silent-OOM gap."""
+    monkeypatch.setenv("TEAM_MEMORY_WATCHDOG_ENABLED", "true")
+    monkeypatch.setattr(ph, "detect_memory_limit_bytes", lambda: None)
+    monkeypatch.setattr(ph, "read_oom_kill_count", lambda *a, **k: 0)  # counter present
+    # Long interval so the thread parks on wait() immediately — no timing race.
+    wd = ph.start_memory_watchdog("investment_team", interval_s=100.0)
+    assert wd is not None and isinstance(wd, ph.Watchdog)
+    assert wd.thread.is_alive()
+    wd.stop_event.set()
+    wd.thread.join(timeout=2)
+    assert not wd.thread.is_alive()
+
+
+def test_oom_check_tick_unknown_limit_still_detects(monkeypatch) -> None:
+    """With no container limit, an oom_kill increment is still reported, and the
+    message flags the limit as unset (pointing at host/VM-wide OOM)."""
+    count, msg = ph._oom_check_tick(
+        1, limit_bytes=None, events_reader=lambda: 2, peak_reader=lambda: 500 * 1024 * 1024
+    )
+    assert count == 2 and msg is not None
+    assert "unset" in msg and "global OOM" in msg
+
+
+def test_watchdog_loop_oom_only_skips_pressure(monkeypatch, caplog) -> None:
+    """limit_bytes=None: the loop must not attempt a pressure evaluation (which
+    requires a positive limit) but must still fire OOM detection."""
+    stop = threading.Event()
+    counts = iter([0, 1])  # baseline 0 (pre-loop), then 1 (in-loop) => increment
+
+    def fake_oom(*_a, **_k):
+        try:
+            v = next(counts)
+        except StopIteration:
+            v = 1
+        if v == 1:
+            stop.set()  # exit after detecting the increment
+        return v
+
+    def fake_usage(*_a, **_k):  # must NOT be consulted in OOM-only mode
+        raise AssertionError("pressure check ran despite no limit")
+
+    monkeypatch.setattr(ph, "read_oom_kill_count", fake_oom)
+    monkeypatch.setattr(ph, "read_memory_peak_bytes", lambda *a, **k: 400 * 1024 * 1024)
+    monkeypatch.setattr(ph, "read_memory_usage_bytes", fake_usage)
+    logger = logging.getLogger("test.ph.oomonly")
+    with caplog.at_level(logging.ERROR, logger="test.ph.oomonly"):
+        ph._watchdog_loop(
+            team="investment_team",
+            limit_bytes=None,
+            threshold=0.85,
+            interval_s=0.01,
+            stop_event=stop,
+            logger=logger,
+        )
+    assert any("OOM kill detected" in r.getMessage() for r in caplog.records)
 
 
 def test_start_memory_watchdog_returns_watchdog(monkeypatch) -> None:

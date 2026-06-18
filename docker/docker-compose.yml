@@ -128,14 +128,10 @@ services:
       POSTGRES_PASSWORD: khala
       POSTGRES_DB: khala_jobs
       PYTHONUNBUFFERED: "1"
-      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
-      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
-      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
-      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
-      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-5}
-      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
-      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-128}
-      OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-2000}
+      # NOTE: no OTEL_* vars here — the job-service image does not install the
+      # OpenTelemetry SDK and its app never calls init_otel(), so it emits no
+      # spans. Setting the endpoint would be a misleading no-op. Instrumenting
+      # job-service (deps + bootstrap) is a separate follow-up.
     extra_hosts:
       - "postgres:172.28.0.2"
     ports:
@@ -1122,6 +1118,8 @@ services:
     # as a victim of host-wide (global) OOM; a self-cap keeps its contribution
     # predictable (if it exceeds this it is restarted, visibly, rather than
     # silently enlarging VM pressure on every other container).
+    # Both forms are intentional (same pairing as the team services): deploy.*
+    # applies under swarm, top-level mem_limit under plain `docker compose up`.
     deploy:
       resources:
         limits: { memory: 1G }

@@ -59,14 +59,15 @@ TEMPORAL_MODULE = os.environ.get("TEAM_TEMPORAL_WORKER_MODULE", "").strip()
 TEMPORAL_FUNC = os.environ.get("TEAM_TEMPORAL_WORKER_FUNC", "").strip()
 
 
-def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
-    """Parse a positive int from env var *name*, defensively.
+def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
+    """Parse a positive int from env var *name*, defensively, then clamp.
 
     Preconditions:
-        - ``default >= minimum``.
+        - ``minimum <= default`` and (when given) ``default <= maximum``.
     Postconditions:
-        - Returns the parsed int clamped to ``>= minimum``; falls back to
-          *default* when the var is unset/blank/non-numeric. Never raises.
+        - Returns the parsed int clamped to ``[minimum, maximum]`` (``maximum``
+          unbounded when None); falls back to *default* when the var is
+          unset/blank/non-numeric. Never raises.
     """
     raw = os.environ.get(name)
     if raw is None or not raw.strip():
@@ -75,13 +76,19 @@ def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
         value = int(float(raw))
     except (TypeError, ValueError, OverflowError):
         return default
-    return value if value >= minimum else minimum
+    if value < minimum:
+        return minimum
+    if maximum is not None and value > maximum:
+        return maximum
+    return value
 
 
 # Each uvicorn worker is a full Python interpreter loading the whole app, so on a
 # memory-constrained host fewer workers means a materially smaller footprint.
-# Default 2 preserves prior behavior; the docker stack sets TEAM_WORKERS=1.
-TEAM_WORKERS = _env_int("TEAM_WORKERS", 2, minimum=1)
+# Default 2 preserves prior behavior; the docker stack sets TEAM_WORKERS=1. Capped
+# at 16 so a misconfigured value can't fork-bomb the host into resource exhaustion.
+_MAX_TEAM_WORKERS = 16
+TEAM_WORKERS = _env_int("TEAM_WORKERS", 2, minimum=1, maximum=_MAX_TEAM_WORKERS)
 
 
 def _shutdown_hook() -> None:

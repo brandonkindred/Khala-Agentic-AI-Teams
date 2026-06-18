@@ -374,7 +374,7 @@ def _watchdog_tick(
 def _oom_check_tick(
     last_count: Optional[int],
     *,
-    limit_bytes: int,
+    limit_bytes: Optional[int] = None,
     events_reader: Optional[Callable[[], Optional[int]]] = None,
     peak_reader: Optional[Callable[[], Optional[int]]] = None,
 ) -> tuple[Optional[int], Optional[str]]:
@@ -386,8 +386,10 @@ def _oom_check_tick(
     is None) just adopts the baseline silently, so pre-existing kills from before
     the watchdog started are not re-reported as new.
 
-    Preconditions:
-        - ``limit_bytes > 0``.
+    ``limit_bytes`` is optional: a container with no ``mem_limit`` has no cgroup
+    budget yet can still be killed by host/VM-wide (global) OOM, so OOM detection
+    must work without one — the limit only enriches the log line.
+
     Postconditions:
         - ``message`` is non-None iff ``last_count is not None and current > last_count``.
           On an unreadable counter the previous ``last_count`` is preserved and no
@@ -401,14 +403,15 @@ def _oom_check_tick(
         peak_fn = peak_reader if peak_reader is not None else read_memory_peak_bytes
         peak = peak_fn()
         peak_str = f"{_mb(peak)}MB" if peak else "unknown"
+        limit_str = f"{_mb(limit_bytes)}MB" if limit_bytes else "unset (no container limit)"
         message = (
             f"OOM kill detected: cgroup oom_kill counter rose to {current} "
             f"(was {last_count}) — the kernel SIGKILLed a process in this container "
             f"with no traceback (a uvicorn worker simply vanishes and is restarted). "
-            f"container peak={peak_str} / limit={_mb(limit_bytes)}MB. If peak stayed "
-            f"well below the limit, the host/VM ran out of memory (global OOM) — "
-            f"raise Docker/VM memory or reduce the running stack rather than this "
-            f"container's limit."
+            f"container peak={peak_str} / limit={limit_str}. If peak stayed well "
+            f"below the limit (or the limit is unset), the host/VM ran out of memory "
+            f"(global OOM) — raise Docker/VM memory or reduce the running stack "
+            f"rather than this container's limit."
         )
         return current, message
     return current, None
@@ -417,7 +420,7 @@ def _oom_check_tick(
 def _watchdog_loop(
     *,
     team: str,
-    limit_bytes: int,
+    limit_bytes: Optional[int],
     threshold: float,
     interval_s: float,
     stop_event: threading.Event,
@@ -425,16 +428,21 @@ def _watchdog_loop(
 ) -> None:
     """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
 
+    When ``limit_bytes`` is None there is no budget to compare against, so the
+    pressure-threshold warning is skipped and the loop runs in OOM-detection-only
+    mode (the cgroup ``oom_kill`` counter still fires on a host/VM-wide kill of an
+    unbounded container).
+
     Preconditions (enforced):
         - ``interval_s > 0`` — a non-positive interval would tight-loop this
           thread (``start_memory_watchdog`` already floors it at 1.0).
-        - ``limit_bytes > 0`` and ``0 < threshold <= 1``.
+        - ``0 < threshold <= 1``; ``limit_bytes`` is a positive byte count or None.
     Postconditions:
-        - Emits a WARNING via *logger* once per transition into memory pressure,
-          and an ERROR when the cgroup ``oom_kill`` counter rises (a worker was
-          SIGKILLed since the last sample); returns only after *stop_event* is set.
-          A failing sample is swallowed (a diagnostic thread must never crash the
-          worker).
+        - Emits a WARNING via *logger* once per transition into memory pressure
+          (only when ``limit_bytes`` is set), and an ERROR when the cgroup
+          ``oom_kill`` counter rises (a worker was SIGKILLed since the last
+          sample); returns only after *stop_event* is set. A failing sample is
+          swallowed (a diagnostic thread must never crash the worker).
     """
     if interval_s <= 0:
         raise ValueError("interval_s must be > 0")
@@ -444,11 +452,12 @@ def _watchdog_loop(
     last_oom = read_oom_kill_count()
     while not stop_event.wait(interval_s):
         try:
-            warned, message = _watchdog_tick(
-                limit_bytes=limit_bytes, threshold=threshold, warned=warned
-            )
-            if message:
-                logger.warning("[%s] %s", team, message)
+            if limit_bytes:
+                warned, message = _watchdog_tick(
+                    limit_bytes=limit_bytes, threshold=threshold, warned=warned
+                )
+                if message:
+                    logger.warning("[%s] %s", team, message)
             last_oom, oom_message = _oom_check_tick(last_oom, limit_bytes=limit_bytes)
             if oom_message:
                 logger.error("[%s] %s", team, oom_message)
@@ -483,8 +492,11 @@ def start_memory_watchdog(
         - ``team`` is a non-empty identifier used in log lines.
     Postconditions:
         - Returns a :class:`Watchdog` (its daemon thread + stop event), or None
-          when disabled via env or when no memory limit can be detected. Never
-          raises (other than the ``team`` precondition).
+          when disabled via env or when neither a memory limit nor a readable
+          cgroup ``oom_kill`` counter is available (nothing to watch). Never
+          raises (other than the ``team`` precondition). When a limit is present
+          the thread emits pressure warnings + OOM detection; with only the
+          counter it runs in OOM-detection-only mode.
     """
     if not team:
         raise ValueError("team must be a non-empty identifier")
@@ -496,9 +508,19 @@ def start_memory_watchdog(
 
     if limit_bytes is None:
         limit_bytes = detect_memory_limit_bytes()
-    if not limit_bytes or limit_bytes <= 0:
-        log.debug("memory watchdog: no memory limit detected; not starting for %s", team)
+    has_limit = bool(limit_bytes and limit_bytes > 0)
+    # Even with no cgroup memory limit (an unbounded container), keep watching when
+    # the kernel's oom_kill counter is readable: such a container can still be
+    # SIGKILLed by host/VM-wide (global) OOM, and that counter is the only trace.
+    oom_available = read_oom_kill_count() is not None
+    if not has_limit and not oom_available:
+        log.debug(
+            "memory watchdog: no memory limit and no oom_kill counter; not starting for %s",
+            team,
+        )
         return None
+    if not has_limit:
+        limit_bytes = None  # OOM-detection-only mode (no pressure threshold)
 
     if interval_s is None:
         interval_s = _env_float("TEAM_MEMORY_WATCHDOG_INTERVAL_S", _DEFAULT_INTERVAL_S, minimum=1.0)
@@ -522,13 +544,21 @@ def start_memory_watchdog(
         daemon=True,
     )
     thread.start()
-    log.info(
-        "Memory watchdog armed for %s: warn at %.0f%% of %dMB (every %.0fs)",
-        team,
-        threshold * 100,
-        _mb(limit_bytes),
-        interval_s,
-    )
+    if limit_bytes:
+        log.info(
+            "Memory watchdog armed for %s: warn at %.0f%% of %dMB (every %.0fs)",
+            team,
+            threshold * 100,
+            _mb(limit_bytes),
+            interval_s,
+        )
+    else:
+        log.info(
+            "Memory watchdog armed for %s: OOM-kill detection only — no container "
+            "memory limit set, so only host/VM-wide kills are watched (every %.0fs)",
+            team,
+            interval_s,
+        )
     # Surface the kernel's OOM-kill record + usage high-water mark at arm time.
     # A non-zero prior count immediately tells an operator the container has
     # already been OOM-killed (the symptom is otherwise silent), and a peak far
@@ -537,11 +567,11 @@ def start_memory_watchdog(
     peak = read_memory_peak_bytes()
     if prior_oom is not None or peak is not None:
         log.info(
-            "Memory watchdog baseline for %s: prior oom_kills=%s, peak=%s of %dMB",
+            "Memory watchdog baseline for %s: prior oom_kills=%s, peak=%s of %s",
             team,
             prior_oom if prior_oom is not None else "n/a",
             f"{_mb(peak)}MB" if peak is not None else "n/a",
-            _mb(limit_bytes),
+            f"{_mb(limit_bytes)}MB" if limit_bytes else "no limit",
         )
         if prior_oom:
             log.warning(

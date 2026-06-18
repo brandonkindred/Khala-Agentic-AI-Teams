@@ -151,10 +151,11 @@ diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how man
 workers run. See `backend/agents/shared_observability/process_health.py`.
 
 ### TEAM_WORKERS
-uvicorn worker processes per team service (default 2; parsed defensively, floored
-at 1). Each worker is a full Python interpreter loading the whole app, so on a
-memory-constrained host fewer workers means a materially smaller footprint — the
-docker stack sets `1`.
+uvicorn worker processes per team service (default 2; parsed defensively, clamped
+to `[1, 16]`). Each worker is a full Python interpreter loading the whole app, so
+on a memory-constrained host fewer workers means a materially smaller footprint —
+the docker stack sets `1`. The upper bound of 16 prevents a misconfigured value
+from fork-bombing the host into resource exhaustion.
 
 ### TEAM_MEMORY_WATCHDOG_INTERVAL_S
 Watchdog sample interval in seconds (default 30; floor 1). The same loop also
