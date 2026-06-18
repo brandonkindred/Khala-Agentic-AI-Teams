@@ -673,7 +673,10 @@ def _start_github_resume_thread(
         issue_number=int(ctx["issue_number"]),
         base_branch=ctx.get("base_branch"),
         remote=str(ctx.get("remote") or "origin"),
-        cleanup_checkout_on_success=bool(ctx.get("cleanup_checkout_on_success", False)),
+        # `is True` (not bool()) so any non-bool persisted value — e.g. a string
+        # "False" from a future serialization change, which bool() would read as
+        # truthy — fails safe to no-cleanup rather than deleting the checkout.
+        cleanup_checkout_on_success=ctx.get("cleanup_checkout_on_success") is True,
     )
 
     def run() -> None:
@@ -1913,13 +1916,14 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
-def _is_ephemeral_checkout_path(repo_path: str) -> bool:
-    """True only for a platform-owned per-issue git checkout that is safe to delete.
+def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
+    """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
+    git checkout safe to delete; otherwise ``None``.
 
-    Guards the destructive ``rmtree`` against a caller-supplied ``repo_path``
-    (``/run-from-github`` is a public endpoint whose ``repo_path`` is only
-    validated as an existing directory, and ``cleanup_checkout_on_success`` is a
-    request field). Two conditions must both hold:
+    Resolving here (and handing the resolved ``Path`` back) means the path that is
+    *validated* is the exact symlink-collapsed path the caller then deletes,
+    closing the check-resolved / delete-raw-string gap a directory→symlink swap
+    could otherwise exploit. Two conditions must both hold:
 
     1. the path lives strictly under one of this deployment's ephemeral
        workspace roots (``is_within_ephemeral_workspace``) — so an
@@ -1933,21 +1937,39 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
         - None on caller state; ``repo_path`` may be any string (it is validated
           here precisely because it originates from an untrusted request).
     Postconditions:
-        - Returns True iff both conditions hold; False on any resolution error
-          (handled inside ``is_within_ephemeral_workspace``) or when either
-          condition fails. Pure apart from filesystem reads.
+        - Returns the resolved ``Path`` when both conditions hold; ``None`` on any
+          resolution error (null byte / unresolvable) or when either condition
+          fails. Pure apart from filesystem reads.
     """
     try:
         resolved = Path(repo_path).resolve()
     except (OSError, ValueError):
-        return False
-    # Resolve once and reuse for both checks. ``resolve()`` defaults to
-    # ``strict=False`` (Python 3.6+), so a not-yet-created path resolves without
-    # raising; passing the already-resolved path to is_within keeps its internal
-    # resolve idempotent.
+        return None
+    # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
+    # path resolves without raising; passing the already-resolved path to is_within
+    # keeps its internal resolve idempotent.
     if not is_within_ephemeral_workspace(resolved):
-        return False
-    return (resolved / ".git").exists()
+        return None
+    if not (resolved / ".git").exists():
+        return None
+    return resolved
+
+
+def _is_ephemeral_checkout_path(repo_path: str) -> bool:
+    """True only for a platform-owned per-issue git checkout that is safe to delete.
+
+    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the two
+    conditions and the threat model). Kept as a predicate for call sites that only
+    need the yes/no answer.
+
+    Preconditions:
+        - None on caller state; ``repo_path`` may be any string.
+    Postconditions:
+        - Returns True iff ``_ephemeral_checkout_target`` resolves a deletable
+          checkout for ``repo_path``; False otherwise. Pure apart from filesystem
+          reads.
+    """
+    return _ephemeral_checkout_target(repo_path) is not None
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
@@ -1958,10 +1980,11 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     folder is recreated by the caller's clone-or-fetch on a later run.
 
     Postconditions:
-        - Best-effort: the checkout at ``repo_path`` is removed only when
-          ``_is_ephemeral_checkout_path`` confirms it is a platform-owned,
-          non-shallow git checkout under an ephemeral root; an unsafe path is
-          refused (logged, left in place). The sibling clone lock is unlinked
+        - Best-effort: the checkout is removed only when
+          ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
+          platform-owned, non-shallow git checkout under an ephemeral root, and
+          the resolved (symlink-collapsed) path it returns is the one deleted; an
+          unsafe path is refused (logged, left in place). The sibling clone lock is unlinked
           only after the checkout is actually gone, so a failed ``rmtree`` keeps
           the lock and the duplicate guard in place. Never raises — a cleanup
           failure (permissions, race with a concurrent reader) must not turn a
@@ -1977,12 +2000,18 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         This is rare (``rmtree`` usually fails atomically on a permission error)
         and the published work is already safe on the remote PR.
     """
-    if not _is_ephemeral_checkout_path(repo_path):
+    target = _ephemeral_checkout_target(repo_path)
+    if target is None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
+    # Delete the resolved, symlink-collapsed path the safety check just validated,
+    # not the raw request string: this removes the check-resolved / delete-raw gap
+    # and bounds the residual TOCTOU window for a directory→symlink swap to the
+    # interval between resolution and rmtree (rmtree also refuses a top-level
+    # symlink, so a swapped checkout root cannot redirect the delete).
     try:
-        shutil.rmtree(repo_path)
-        logger.info("Removed ephemeral per-issue checkout at %s", repo_path)
+        shutil.rmtree(target)
+        logger.info("Removed ephemeral per-issue checkout at %s", target)
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
         logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
         # Keep the lock file: the checkout still exists, so the lock must keep

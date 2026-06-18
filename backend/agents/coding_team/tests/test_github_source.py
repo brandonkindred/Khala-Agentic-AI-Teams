@@ -1738,6 +1738,34 @@ class TestEphemeralCheckoutCleanup:
         assert not target.exists()
         assert lock.exists()  # unlink failed → lock file remains
 
+    def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        # TOCTOU hardening: the deletion must target the resolved, symlink-collapsed
+        # path the safety check validated, not the raw request string. Here the raw
+        # path reaches the checkout through a symlinked parent; cleanup must delete
+        # the canonical location and pass that resolved path to rmtree.
+        api = patched_app["api"]
+        real = tmp_path / "real"
+        (real / "issue-7" / ".git").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        monkeypatch.setenv("WORKSPACE_ROOT", str(real))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.setenv("AGENT_CACHE", str(tmp_path / "cache"))
+
+        captured: dict = {}
+        real_rmtree = api.shutil.rmtree
+
+        def _capture(path, *a, **k):
+            captured["path"] = path
+            return real_rmtree(path, *a, **k)
+
+        monkeypatch.setattr(api.shutil, "rmtree", _capture)
+        api._cleanup_issue_checkout(str(link / "issue-7"))  # raw path via the symlink
+        assert captured["path"] == (real / "issue-7").resolve()
+        assert not (real / "issue-7").exists()
+
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
         repo_path = patched_app["repo_path"]
         os.makedirs(os.path.join(repo_path, ".git"), exist_ok=True)  # a real checkout

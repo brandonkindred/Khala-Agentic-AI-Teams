@@ -660,6 +660,53 @@ def test_resume_github_job_cleanup_flag_defaults_false_when_absent(monkeypatch):
     assert hook_calls == {"cleanup": False}
 
 
+def test_resume_github_job_cleanup_flag_nonbool_fails_safe(monkeypatch):
+    """A non-bool persisted value (e.g. a string from a future serialization change)
+    must fail safe to no-cleanup — `bool("False")` would be True and wrongly delete."""
+    hook_calls = {}
+
+    class _FakeClient:
+        def __init__(self, token=None):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def get_issue(self, owner, repo, number):
+            return {"number": number}
+
+    ctx = {
+        "owner": "acme",
+        "repo": "widgets",
+        "issue_number": 42,
+        "cleanup_checkout_on_success": "False",  # string, not bool
+    }
+    job = _job(
+        status="waiting_for_user",
+        plan_input={"requirements_title": "T"},
+        github_context=ctx,
+    )
+    monkeypatch.setattr(api, "get_job", lambda jid: job)
+    monkeypatch.setattr(api, "update_job", lambda jid, **kw: None)
+    monkeypatch.setattr(api, "_is_run_thread_alive", lambda jid: False)
+    monkeypatch.setattr(api.threading, "Thread", _SyncThread)
+    monkeypatch.setattr(api, "GitHubClient", _FakeClient)
+    monkeypatch.setattr(
+        api,
+        "_run_with_github_hooks",
+        lambda job_id, request, plan, issue, token: hook_calls.update(
+            {"cleanup": request.cleanup_checkout_on_success}
+        ),
+    )
+    monkeypatch.setenv("GITHUB_TOKEN", "tok-123")
+    r = client.post("/run/j1/resume")
+    assert r.status_code == 200
+    assert hook_calls == {"cleanup": False}
+
+
 def test_resume_github_job_uses_persisted_token_without_env(monkeypatch):
     """The standard deployment has no GITHUB_TOKEN env: resume must use the token persisted on the
     job record at creation, not require the env var."""
