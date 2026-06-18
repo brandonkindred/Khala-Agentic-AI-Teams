@@ -66,7 +66,9 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
         - Returns an int clamped to ``[minimum, maximum]`` (``maximum`` unbounded
           when None) on *every* path — including the *default* fallback used when
           the var is unset/blank/non-numeric — so the result always honors the
-          bounds even if a caller passes an out-of-range default. Never raises.
+          bounds even if a caller passes an out-of-range default. Never raises on
+          any input value (it assumes the module ``logger`` is initialized, which
+          it always is by import time).
     """
     raw = os.environ.get(name)
     value = default

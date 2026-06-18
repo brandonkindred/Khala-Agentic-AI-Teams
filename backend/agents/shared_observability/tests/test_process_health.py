@@ -349,15 +349,18 @@ def test_watchdog_loop_survives_tick_errors(monkeypatch, caplog) -> None:
 
     monkeypatch.setattr(ph, "read_memory_usage_bytes", boom)
     logger = logging.getLogger("test.ph.loop_err")
-    # Should not raise out of the loop.
-    ph._watchdog_loop(
-        team="coding_team",
-        limit_bytes=100,
-        threshold=0.5,
-        interval_s=0.01,
-        stop_event=stop,
-        logger=logger,
-    )
+    # Should not raise out of the loop; the first failure surfaces at WARNING so a
+    # persistent watchdog bug isn't hidden at DEBUG forever.
+    with caplog.at_level(logging.WARNING, logger="test.ph.loop_err"):
+        ph._watchdog_loop(
+            team="coding_team",
+            limit_bytes=100,
+            threshold=0.5,
+            interval_s=0.01,
+            stop_event=stop,
+            logger=logger,
+        )
+    assert any("memory watchdog tick failed" in r.getMessage() for r in caplog.records)
 
 
 # ----------------------------------------------------------------- watchdog lifecycle

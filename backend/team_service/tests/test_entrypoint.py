@@ -53,7 +53,7 @@ def test_env_int_warns_on_invalid_value(monkeypatch, caplog) -> None:
     import logging
 
     monkeypatch.setenv("X_WORKERS", "abc")
-    with caplog.at_level(logging.WARNING, logger="team_service"):
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
         assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2
     assert any("Invalid value for X_WORKERS" in r.getMessage() for r in caplog.records)
 
@@ -64,13 +64,13 @@ def test_env_int_warns_on_fractional_truncation(monkeypatch, caplog) -> None:
     import logging
 
     monkeypatch.setenv("X_WORKERS", "2.5")
-    with caplog.at_level(logging.WARNING, logger="team_service"):
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
         assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
     assert any("Fractional value for X_WORKERS" in r.getMessage() for r in caplog.records)
 
     caplog.clear()
     monkeypatch.setenv("X_WORKERS", "2.0")  # integer-valued float → no warning
-    with caplog.at_level(logging.WARNING, logger="team_service"):
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
         assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
     assert not any("Fractional value" in r.getMessage() for r in caplog.records)
 

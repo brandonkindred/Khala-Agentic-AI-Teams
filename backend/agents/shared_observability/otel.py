@@ -205,7 +205,7 @@ def _otlp_metrics_enabled() -> bool:
     ``none`` we skip OTLP metric export entirely even if an OTLP endpoint is
     configured. This lets a stack ship traces to an OTLP backend (e.g. Tempo,
     which ingests traces only) while keeping metrics on a separate path —
-    Khala scrapes ``/metrics`` with Prometheus, so pushing OTLP metrics at a
+    the stack scrapes ``/metrics`` with Prometheus, so pushing OTLP metrics at a
     traces-only collector would just 404 and spam the logs.
 
     ``OTEL_METRICS_EXPORTER`` is, per the OTel spec, a comma-separated list of

@@ -167,12 +167,18 @@ host/VM-wide (global) OOM rather than this container exceeding its own limit.
 Other watchdog knobs (`TEAM_MEMORY_WATCHDOG_ENABLED`, `_LIMIT_MB`, `_THRESHOLD`)
 are unchanged — see the Shared Infrastructure section.
 
+### STRATEGY_LAB_MAX_PARALLEL
+Investment team only. Upper bound (Pydantic `le=`) on a Strategy Lab request's
+`max_parallel` field, evaluated at import (default 6). Raise it to allow more
+parallelism per request on larger hosts without a code change; it also becomes
+the default ceiling for `STRATEGY_LAB_MAX_CONCURRENT_CYCLES`.
+
 ### STRATEGY_LAB_MAX_CONCURRENT_CYCLES
 Investment team only. Hard ceiling on concurrent Strategy Lab cycles per wave
-(default 6 = the request field max, i.e. no extra constraint; floored at 1). Each
-concurrent cycle holds its own market data + LLM contexts in the single worker
-process, so this caps the worker's peak memory — the dominant OOM driver. The
-docker stack sets `2`.
+(default = `STRATEGY_LAB_MAX_PARALLEL`, i.e. no extra constraint; floored at 1).
+Each concurrent cycle holds its own market data + LLM contexts in the single
+worker process, so this caps the worker's peak memory — the dominant OOM driver.
+The docker stack sets `2`.
 
 ---
 

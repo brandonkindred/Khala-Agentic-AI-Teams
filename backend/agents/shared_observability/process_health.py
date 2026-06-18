@@ -453,6 +453,7 @@ def _watchdog_loop(
     if interval_s <= 0:
         raise ValueError("interval_s must be > 0")
     warned = False
+    tick_error_logged = False
     # Seed the OOM-kill baseline from the arm-time read so a kill between arming
     # and the first tick isn't folded silently into a fresh baseline.
     last_oom = initial_oom_count if initial_oom_count is not None else read_oom_kill_count()
@@ -468,7 +469,14 @@ def _watchdog_loop(
             if oom_message:
                 logger.error("[%s] %s", team, oom_message)
         except Exception:  # noqa: BLE001 — a diagnostic thread must never crash the worker
-            logger.debug("memory watchdog tick failed", exc_info=True)
+            # Surface the *first* failure at WARNING so a persistent bug (e.g. in
+            # the pressure/oom check) isn't hidden at DEBUG forever; subsequent
+            # failures stay at DEBUG to avoid flooding the logs every interval.
+            if not tick_error_logged:
+                logger.warning("[%s] memory watchdog tick failed", team, exc_info=True)
+                tick_error_logged = True
+            else:
+                logger.debug("memory watchdog tick failed", exc_info=True)
 
 
 @dataclass
