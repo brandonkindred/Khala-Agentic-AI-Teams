@@ -20,6 +20,8 @@ const agents: AgentSummary[] = [
     has_output_schema: false,
     has_invoke: false,
     has_sandbox: false,
+    has_cognition: false,
+    has_knowledge_graph: false,
   },
   {
     id: 'a2',
@@ -31,6 +33,8 @@ const agents: AgentSummary[] = [
     has_output_schema: false,
     has_invoke: false,
     has_sandbox: false,
+    has_cognition: false,
+    has_knowledge_graph: false,
   },
 ];
 

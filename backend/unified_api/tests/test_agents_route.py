@@ -103,6 +103,16 @@ def test_list_agents_filters(client: TestClient) -> None:
     assert [item["id"] for item in resp.json()] == ["branding.auditor"]
 
 
+def test_list_agents_serializes_knowledge_graph_flag(client: TestClient) -> None:
+    """The summary projection exposes has_knowledge_graph; a manifest with no
+    cognition block reports it False (and the field is always present)."""
+    resp = client.get("/api/agents")
+    assert resp.status_code == 200
+    by_id = {item["id"]: item for item in resp.json()}
+    assert by_id["blogging.planner"]["has_knowledge_graph"] is False
+    assert by_id["blogging.planner"]["has_cognition"] is False
+
+
 def test_list_teams(client: TestClient) -> None:
     resp = client.get("/api/agents/teams")
     assert resp.status_code == 200
@@ -415,6 +425,17 @@ def _install_warming_sandbox(monkeypatch: pytest.MonkeyPatch) -> None:
         return handle
 
     monkeypatch.setattr(agents_route_mod, "acquire", _acquire)
+
+
+def test_list_agents_cognition_agent_is_graph_enabled_by_default(cog_client: TestClient) -> None:
+    """An agent with a bare `cognition: {}` block gets the default-on graph, so the
+    list endpoint reports has_knowledge_graph True; the plain agent reports False."""
+    resp = cog_client.get("/api/agents")
+    assert resp.status_code == 200
+    by_id = {item["id"]: item for item in resp.json()}
+    assert by_id["blogging.cog"]["has_cognition"] is True
+    assert by_id["blogging.cog"]["has_knowledge_graph"] is True
+    assert by_id["blogging.plain"]["has_knowledge_graph"] is False
 
 
 def test_invoke_wraps_body_with_cognition_envelope(

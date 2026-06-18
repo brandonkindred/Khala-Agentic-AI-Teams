@@ -21,5 +21,11 @@ invoke:
 sandbox:
   manifest_path: default.yaml
   access_tier: standard
+cognition:
+  knowledge_graph:            # Neo4j + Graphiti knowledge base, attached by default
+    enabled: true             # set false to opt this agent out of the graph entirely
+    ingest_events: true       # ingest raw episodic events into the graph
+    ingest_summaries: true    # ingest rollup summaries into the graph
+    ground_rule_proposals: true  # feed graph context into rule reflection (HITL preserved)
 source:
   entrypoint: blogging.blog_planning_agent.agent:make_blog_planning_agent
