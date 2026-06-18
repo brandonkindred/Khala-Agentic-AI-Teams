@@ -180,7 +180,7 @@ describe('CodingTeamPageComponent', () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(throwError(() => new Error('boom')));
     await setup();
     expect(component.githubConfigured).toBe(false);
-    expect(component.loadingConfig).toBe(false);
+    expect(component.isLoadingConfig).toBe(false);
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
   });
 
@@ -465,9 +465,9 @@ describe('CodingTeamPageComponent', () => {
           ],
         }),
       );
-      expect(component.selectedIssueOpenDeps).toBe('#3');
+      expect(component.selectedIssueOpenDepsText).toBe('#3');
       component.cancelSelection();
-      expect(component.selectedIssueOpenDeps).toBe('');
+      expect(component.selectedIssueOpenDepsText).toBe('');
     });
   });
 

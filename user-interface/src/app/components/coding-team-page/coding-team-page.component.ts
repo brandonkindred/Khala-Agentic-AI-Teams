@@ -114,7 +114,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   githubConfigured = false;
   githubOwner = '';
   githubRepo = '';
-  loadingConfig = true;
+  isLoadingConfig = true;
 
   // Issue list
   issues: GitHubIssueItem[] = [];
@@ -127,7 +127,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   // Issue list pagination (client-side over the fully-fetched issue array)
   readonly PAGE_SIZE_OPTIONS = [10, 25, 50];
   /** Smallest configured page size; the paginator is shown only when the list exceeds it. */
-  readonly minPageSize = Math.min(...this.PAGE_SIZE_OPTIONS);
+  readonly paginatorThreshold = Math.min(...this.PAGE_SIZE_OPTIONS);
   pageSize = 10;
   pageIndex = 0;
 
@@ -135,7 +135,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   private _selectedIssue: GitHubIssueItem | null = null;
   /** Open-dependency refs ("#3, #5") for the selected issue, precomputed so the confirm panel binds a
    * plain string instead of calling `openDepRefs` each change-detection cycle. */
-  selectedIssueOpenDeps = '';
+  selectedIssueOpenDepsText = '';
   runningIssue = false;
 
   get selectedIssue(): GitHubIssueItem | null {
@@ -145,7 +145,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Setting the selected issue refreshes its precomputed open-dependency refs. */
   set selectedIssue(issue: GitHubIssueItem | null) {
     this._selectedIssue = issue;
-    this.selectedIssueOpenDeps = issue ? this.openDepRefs(issue) : '';
+    this.selectedIssueOpenDepsText = issue ? this.openDepRefs(issue) : '';
   }
 
   // Runs panel — the persistent, non-dismissable status panel.
@@ -228,10 +228,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Load the configured GitHub integration (enabled flag, token, owner/repo) and gate the page on
    * it. On success, marks the page configured only when all of enabled/token/owner/repo are present
    * and — once the owner/repo is known — starts the Runs poll and kicks off the first issue load;
-   * on error, leaves the page in the unconfigured state. Sets `loadingConfig` for the duration.
+   * on error, leaves the page in the unconfigured state. Sets `isLoadingConfig` for the duration.
    */
   checkGitHubConfig(): void {
-    this.loadingConfig = true;
+    this.isLoadingConfig = true;
     this.integrationsApi
       .getGitHubConfig()
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -240,7 +240,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         this.githubConfigured = cfg.enabled && cfg.token_configured && !!cfg.owner && !!cfg.repo;
         this.githubOwner = cfg.owner;
         this.githubRepo = cfg.repo;
-        this.loadingConfig = false;
+        this.isLoadingConfig = false;
         if (this.githubConfigured) {
           // The Runs poll only starts once the configured owner/repo is known, so runs from other
           // repositories are never matched against this page's issues; loadIssues then triggers the
@@ -251,7 +251,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       },
       error: () => {
         this.githubConfigured = false;
-        this.loadingConfig = false;
+        this.isLoadingConfig = false;
       },
     });
   }

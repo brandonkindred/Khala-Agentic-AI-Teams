@@ -54,7 +54,7 @@
 <!-- GITHUB view — browse issues and start runs (full width)            -->
 <!-- ────────────────────────────────────────────────────────────────── -->
 @if (activeView === 'github') {
-  @if (loadingConfig) {
+  @if (isLoadingConfig) {
     <div class="github-section github-section--loading">
       <mat-spinner diameter="24"></mat-spinner>
       <span>Checking GitHub integration…</span>
@@ -162,7 +162,7 @@
                       <div>
                         <strong>Blocked by open dependencies</strong>
                         <p>
-                          This issue depends on {{ selectedIssueOpenDeps }}, which are still open.
+                          This issue depends on {{ selectedIssueOpenDepsText }}, which are still open.
                           The coding team will attempt the run, but GitHub may reject it until those
                           issues are closed.
                         </p>
@@ -195,7 +195,7 @@
               }
             }
           </div>
-          @if (issues.length > minPageSize) {
+          @if (issues.length > paginatorThreshold) {
             <mat-paginator
               class="github-issues-paginator"
               [length]="issues.length"
