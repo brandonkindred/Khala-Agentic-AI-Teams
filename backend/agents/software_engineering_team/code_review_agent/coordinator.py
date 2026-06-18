@@ -6,9 +6,12 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars``
 of code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
-after recovery fails the whole run loudly with
-``CodeReviewUnavailableError`` — the review never renders a verdict on code
-it did not see.
+after recovery degrades to an info "not reviewed" finding naming its range so
+the run completes over the chunks that succeeded — the degraded chunk casts no
+approve/reject vote, so the verdict reflects only reviewed code. The run still
+fails loudly with ``CodeReviewUnavailableError`` for infrastructure failures
+(rate limit, unreachable endpoint, auth/config) and when *no* chunk could be
+reviewed at all — the review never renders a verdict on code it did not see.
 """
 
 from __future__ import annotations
@@ -440,9 +443,11 @@ class _ChunkOutcome:
     """Accumulated result of reviewing one chunk (possibly via bisection).
 
     Invariants:
-        - ``approved_flags`` holds one entry per successful LLM sub-review;
-          a chunk that cannot be reviewed raises instead of producing an
-          outcome, so every outcome reflects reviewed code only.
+        - ``approved_flags`` holds one entry per successful LLM sub-review, so
+          the merged verdict reflects reviewed code only. A chunk that could
+          not be reviewed (content failure surviving recovery) contributes a
+          degraded outcome — info "not reviewed" findings and no
+          ``approved_flags`` entry — rather than aborting the run.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
@@ -545,6 +550,47 @@ def _chunk_ranges(chunk: ReviewChunk) -> List[str]:
     return [_segment_range_label(seg) for seg in chunk.segments]
 
 
+def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
+    """Build a degraded outcome for a chunk that survived recovery unreviewed.
+
+    A content failure that survives retry and bisection down to an
+    un-splittable chunk does not abort the whole run: the chunk's code is
+    named by ``info`` "not reviewed" findings so a human can review it
+    manually, and the chunk casts no approve/reject vote.
+
+    Preconditions:
+        - The failure was already classified content-related (not infra) and
+          could be neither bisected further nor recovered by retry.
+
+    Postconditions:
+        - Returns one ``info``/``general`` finding per segment, anchored to the
+          segment's ``start_line`` and naming its original-file range, so no
+          covered line is silently dropped.
+        - ``approved_flags`` is empty: a chunk that was never reviewed neither
+          approves nor rejects, so the merged verdict reflects only the
+          successfully reviewed chunks.
+    """
+    reason = f"{type(exc).__name__}: {exc}"
+    issues = [
+        CodeReviewIssue(
+            severity="info",
+            category="general",
+            file_path=seg.path,
+            line=seg.start_line,
+            description=(
+                f"This code could not be reviewed automatically ({reason}); "
+                f"{_segment_range_label(seg)} was not reviewed."
+            ),
+            suggestion="Review this section manually; the automated reviewer could not process it.",
+        )
+        for seg in chunk.segments
+    ]
+    return _ChunkOutcome(
+        issues=issues,
+        summaries=[f"Not reviewed: {', '.join(_chunk_ranges(chunk))} ({reason})."],
+    )
+
+
 def _review_chunk_with_recovery(
     reviewer: ChunkReviewAgent,
     chunk: ReviewChunk,
@@ -559,14 +605,18 @@ def _review_chunk_with_recovery(
           (task/spec/architecture context), not per-chunk fields.
 
     Postconditions:
-        - Returns an outcome covering every line of the chunk, or raises
-          ``CodeReviewUnavailableError`` naming the unreviewed ranges — the
-          chunk is never silently skipped or scored.
+        - Returns an outcome covering every line of the chunk — every line is
+          either reviewed or named by an ``info`` "not reviewed" finding — or
+          raises ``CodeReviewUnavailableError`` for infrastructure failures.
+          The chunk is never silently skipped or scored.
         - Infrastructure failures raise immediately without retry or bisection.
         - Content failures bisect up to the depth cap; any chunk that cannot
           bisect further — the original or a bisected child — gets exactly one
-          same-input retry before the run fails, so a one-off transient error
-          in a terminal child never aborts the review.
+          same-input retry. A terminal content failure that survives the retry
+          degrades to a not-reviewed finding (via ``_degraded_outcome``) that
+          casts no approve/reject vote, rather than aborting the whole run; a
+          one-off transient error in a terminal child therefore never costs
+          even that child's review.
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
           summary: applied here, per sub-review, because at the merged level
@@ -608,10 +658,20 @@ def _review_chunk_with_recovery(
                 chunk.paths_label,
             )
             return _review_chunk_with_recovery(reviewer, chunk, base_input, depth, retried=True)
-        raise CodeReviewUnavailableError(
-            f"Chunk review failed after recovery attempts ({type(exc).__name__}: {exc}).",
-            unreviewed=_chunk_ranges(chunk),
-        ) from exc
+        # Content failure that cannot bisect further and survived its retry:
+        # degrade gracefully instead of aborting the whole run. The chunk's
+        # code is named by info "not reviewed" findings and casts no vote, so
+        # the review still completes over the chunks that did succeed. (A run
+        # in which *no* chunk succeeds is caught by ``run_coordinator``'s
+        # total-failure guard, which still raises.)
+        logger.warning(
+            "CodeReviewCoordinator: chunk unreviewable after recovery (%s: %s) — "
+            "degrading to a not-reviewed finding [%s]",
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        return _degraded_outcome(chunk, exc)
     issues = _issues_from_chunk_output(chunk, output.issues)
     if not output.approved and not issues and output.summary and output.summary.strip():
         issues = [
@@ -757,9 +817,11 @@ def _map_chunks(
           state (clients injected here must support concurrent calls).
 
     Postconditions:
-        - Returns one outcome per chunk in input order, or raises
-          ``CodeReviewUnavailableError``. The first failure is observed as it
-          happens — never delayed behind an earlier, slower chunk — pending
+        - Returns one outcome per chunk in input order. A content failure that
+          survives recovery yields a degraded outcome rather than raising, so
+          it does not abort the fan-out. Only an infrastructure failure raises
+          ``CodeReviewUnavailableError``; the first such failure is observed as
+          it happens — never delayed behind an earlier, slower chunk — pending
           chunks are cancelled, and the exception propagates immediately;
           already-running reviews are left to finish in the background rather
           than blocking the failure behind in-flight model calls.
@@ -831,9 +893,11 @@ def run_coordinator(
 
     Postconditions:
         - Every input file/line range is either reviewed or named: empty files
-          get info findings, and any chunk that cannot be reviewed after
-          recovery raises ``CodeReviewUnavailableError`` (no verdict is ever
-          rendered on partially reviewed code).
+          get info findings, and a chunk that cannot be reviewed after recovery
+          degrades to an ``info`` "not reviewed" finding naming its range while
+          the run completes over the chunks that succeeded (the degraded chunk
+          casts no approve/reject vote). The verdict therefore reflects only
+          successfully reviewed code, and no covered line is silently dropped.
         - ``approved is False`` implies at least one critical/high issue.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
@@ -842,8 +906,10 @@ def run_coordinator(
           successful return, including per-chunk ``reviewing`` reports.
 
     Raises:
-        CodeReviewUnavailableError: when the review model is unavailable or a
-            chunk remains unreviewable after retry and bisection.
+        CodeReviewUnavailableError: when the review model is unavailable
+            (an infrastructure failure: rate limit, unreachable endpoint, or
+            auth/config error), or when *no* chunk could be reviewed at all —
+            the run never renders a verdict on a submission it did not see.
     """
     notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
     blocks, skipped_empty = _blocks_from_input(input_data)
@@ -910,6 +976,17 @@ def run_coordinator(
     outcome = _ChunkOutcome()
     for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, progress_callback):
         outcome.absorb(per_chunk)
+
+    # Total-failure guard: individual chunks degrade gracefully to a
+    # not-reviewed finding, but a run in which *no* chunk produced a verdict
+    # has reviewed nothing — rendering approved/rejected here would be a
+    # verdict on code we never saw. Fail loudly instead, naming what went
+    # unreviewed (the degraded info findings already record the ranges).
+    if not outcome.approved_flags:
+        raise CodeReviewUnavailableError(
+            "No chunk could be reviewed after recovery; no verdict was produced for this submission.",
+            unreviewed=[i.description for i in outcome.issues],
+        )
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95

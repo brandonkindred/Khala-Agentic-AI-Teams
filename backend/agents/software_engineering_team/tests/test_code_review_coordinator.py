@@ -802,9 +802,10 @@ def test_persistent_small_chunk_failure_raises_unavailable() -> None:
     assert any("only.py" in r for r in excinfo.value.unreviewed)
 
 
-def test_partial_terminal_failure_raises_instead_of_failing_open(monkeypatch) -> None:
-    """One chunk keeps failing while another succeeds: the run raises rather
-    than approving partially reviewed code."""
+def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) -> None:
+    """One chunk keeps failing while another succeeds: the run completes,
+    naming the unreviewable chunk with an info "not reviewed" finding, and the
+    verdict reflects only the chunk that was actually reviewed."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
@@ -816,12 +817,18 @@ def test_partial_terminal_failure_raises_instead_of_failing_open(monkeypatch) ->
     assert len(files["bad.py"]) < 2 * MIN_SPLIT_SEGMENT_CHARS
 
     client = _SelectiveRaiser("FAILME")
-    with pytest.raises(CodeReviewUnavailableError) as excinfo:
-        run_coordinator(
-            client,
-            CodeReviewInput(files=files, task_description="t", language="python"),
-        )
-    assert any("bad.py" in r for r in excinfo.value.unreviewed)
+    result = run_coordinator(
+        client,
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    # good.py was reviewed and approved (no critical/high), so the verdict
+    # stands; bad.py is named by exactly one info "not reviewed" finding.
+    assert result.approved is True
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert len(not_reviewed) == 1
+    assert not_reviewed[0].severity == "info"
+    assert not_reviewed[0].file_path == "bad.py"
 
 
 def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:

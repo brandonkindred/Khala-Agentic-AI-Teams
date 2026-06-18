@@ -1,4 +1,30 @@
-"""Chunk Reviewer: reviews one chunk of code (used by CodeReviewCoordinator)."""
+"""Chunk Reviewer: the map step of the map-reduce code review.
+
+``ChunkReviewAgent`` reviews exactly one ``ReviewChunk`` in a single LLM call
+and returns that chunk's findings. The coordinator (``coordinator.py``) owns
+splitting the submission into bounded chunks, recovering failed chunks, and
+reducing the per-chunk findings into one verdict; this module owns only the
+single bounded review pass.
+
+Preconditions:
+    - The caller (the coordinator) has already bounded the chunk: the
+      ``code_chunk`` carries at most ``compute_code_review_map_chunk_chars`` of
+      code, and any spec/architecture/existing-codebase context has been
+      compacted to its absolute cap. This module re-applies those caps to the
+      context excerpts defensively but never to the code, which is reviewed
+      verbatim.
+
+Postconditions:
+    - Returns the LLM's findings for this chunk only (``approved``, ``issues``,
+      ``summary``, and the ``spec_compliance_notes``/``suggested_commit_message``
+      passthroughs); it never re-anchors line numbers, dedupes, or applies the
+      approval gate — those are the reduce phase's job.
+
+Invariants:
+    - Stateless apart from the injected ``llm`` handle: every call builds a
+      fresh strands ``Agent``, so concurrent reviews share no mutable state.
+      The code under review is sent verbatim and is never compacted.
+"""
 
 from __future__ import annotations
 
