@@ -34,7 +34,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from coding_team.clone_workspace import agent_cache_dir, clone_lock_path
+from coding_team.clone_workspace import (
+    PER_ISSUE_DIR_TEMPLATE,
+    agent_cache_dir,
+    clone_lock_path,
+)
 from coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -1439,7 +1443,9 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     if issue_number is not None and issue_number < 1:
         raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
 
-    issue_segment = f"issue-{issue_number}" if issue_number is not None else None
+    issue_segment = (
+        PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
+    )
 
     # Auto-derived paths are resolved to absolute so they are stable regardless
     # of the process working directory at clone vs. cleanup time, and so the

@@ -19,12 +19,16 @@ import os
 import re
 from pathlib import Path
 
-# The per-issue checkout directory name unified_api's ``_resolve_repo_path``
-# builds as ``f"issue-{issue_number}"`` (issue numbers are positive integers).
-# Kept here as the single source of truth so the cleanup guard recognises exactly
-# the shape the path builder produces and nothing broader (e.g. a repo-level
-# checkout). If the segment format changes, change it in both places.
-_PER_ISSUE_DIR_RE = re.compile(r"issue-\d+")
+# Single source of truth for the per-issue checkout directory name. The prefix is
+# shared between the builder and the matcher so the two cannot drift:
+#   - unified_api's ``_resolve_repo_path`` builds the segment with
+#     ``PER_ISSUE_DIR_TEMPLATE.format(issue_number=N)`` (issue numbers are positive
+#     integers);
+#   - the cleanup guard recognises exactly that shape with ``_PER_ISSUE_DIR_RE``
+#     (and nothing broader, e.g. a repo-level checkout).
+_PER_ISSUE_PREFIX = "issue-"
+PER_ISSUE_DIR_TEMPLATE = _PER_ISSUE_PREFIX + "{issue_number}"
+_PER_ISSUE_DIR_RE = re.compile(re.escape(_PER_ISSUE_PREFIX) + r"\d+")
 
 
 def is_per_issue_dir(name: str) -> bool:

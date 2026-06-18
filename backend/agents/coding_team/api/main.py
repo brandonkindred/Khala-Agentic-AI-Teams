@@ -2021,15 +2021,19 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         rare (``rmtree`` usually fails atomically on a permission error) and the
         published work is already safe on the remote PR.
     """
-    if _ephemeral_checkout_target(repo_path) is None:
+    target = _ephemeral_checkout_target(repo_path)
+    if target is None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
 
     # Hold the clone lock around the delete so a concurrent _ensure_repo_clone
-    # can't interleave a clone/fetch into the directory being removed. The lock is
-    # the sibling file in the checkout's parent (the same name _ensure_repo_clone
-    # uses), so it outlives the rmtree.
-    lock_path = clone_lock_path(repo_path)
+    # can't interleave a clone/fetch into the directory being removed. Key the lock
+    # on the RESOLVED checkout path (not the raw request string): _ensure_repo_clone
+    # receives the already-resolved checkout path from _resolve_repo_path, so keying
+    # on the raw string would, for a symlinked path, lock a different name and leave
+    # the real checkout unguarded. The lock lives in the checkout's parent, so it
+    # outlives the rmtree.
+    lock_path = clone_lock_path(target)
     try:
         lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
     except OSError as e:
@@ -2038,7 +2042,16 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
         return
     try:
-        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
+            # never turn a successful job into a failure, so skip rather than let it
+            # propagate — honouring the "never raises" contract.
+            logger.warning(
+                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
+            )
+            return
         # Re-validate under the lock: the first check ran before we held it, so
         # confirm the target is still a deletable per-issue checkout, and delete
         # the resolved (symlink-collapsed) path it returns — not the raw request
@@ -2060,11 +2073,15 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
             )
     finally:
         # Release and close, but do NOT unlink the lock file (see Concurrency).
+        # Both are wrapped so a degenerate flock/close can't break "never raises".
         try:
             fcntl.flock(lock_file, fcntl.LOCK_UN)
         except OSError:
             pass
-        lock_file.close()
+        try:
+            lock_file.close()
+        except OSError:
+            pass
 
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:

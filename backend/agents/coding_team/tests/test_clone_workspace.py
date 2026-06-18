@@ -10,6 +10,7 @@ from coding_team.clone_workspace import (
     agent_cache_dir,
     clone_lock_path,
     ephemeral_workspace_roots,
+    is_per_issue_dir,
     is_within_ephemeral_workspace,
 )
 
@@ -67,8 +68,6 @@ def test_clone_lock_path_distinct_issues_distinct_locks() -> None:
 )
 def test_is_per_issue_dir(name, expected) -> None:
     """is_per_issue_dir matches exactly the auto-derived 'issue-<digits>' shape and nothing broader."""
-    from coding_team.clone_workspace import is_per_issue_dir
-
     assert is_per_issue_dir(name) is expected
 
 

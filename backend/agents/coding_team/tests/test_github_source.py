@@ -1774,6 +1774,21 @@ class TestEphemeralCheckoutCleanup:
         api._cleanup_issue_checkout(str(target))  # must not raise
         assert target.exists()  # not deleted without the lock
 
+    def test_cleanup_skipped_when_flock_fails(self, patched_app, tmp_path, monkeypatch) -> None:
+        """If flock fails (e.g. ENOLCK), cleanup skips deletion and never raises."""
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        target = tmp_path / "issue-7"
+        target.mkdir()
+        (target / ".git").mkdir()
+
+        def _flock_boom(fd, op):
+            raise OSError("ENOLCK")
+
+        monkeypatch.setattr(api.fcntl, "flock", _flock_boom)
+        api._cleanup_issue_checkout(str(target))  # must not raise
+        assert target.exists()  # not deleted because the lock was never held
+
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
