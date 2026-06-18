@@ -521,3 +521,55 @@ class TestDocReviewMinScoreAcrossChunks:
             max_iterations=1,
         )
         assert result.final_quality_score == 0.80
+
+
+class _FlakyDocClient(DummyLLMClient):
+    """Raises on the first ``fail_first`` calls, then returns a canned response."""
+
+    def __init__(self, fail_first: int, text: str) -> None:
+        super().__init__()
+        self._fail_first = fail_first
+        self._text = text
+        self._calls = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        self._calls += 1
+        if self._calls <= self._fail_first:
+            raise RuntimeError("transient")
+        return self._text
+
+
+class TestDocReviewChunkFailureGate:
+    def test_chunk_failure_suppresses_early_stop(self):
+        from frontend_code_v2_team.phases.review import (
+            _doc_review_code_chunks,
+            run_documentation_self_review,
+        )
+
+        code_files = {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(6)}
+        n_chunks = len(_doc_review_code_chunks(code_files))
+        assert n_chunks >= 2
+        # First chunk of iteration 1 fails; every other chunk scores 0.95. Without
+        # the failure gate the high score would stop after iteration 1, leaving the
+        # failed chunk's code unreviewed. With it, iteration 2 re-reviews all chunks.
+        client = _FlakyDocClient(fail_first=1, text=_doc_response(0.95))
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old"},
+            code_files=code_files,
+            task_description="task",
+            min_iterations=1,
+            max_iterations=2,
+            quality_threshold=0.9,
+        )
+        assert result.iterations == 2
+        assert result.final_quality_score == 0.95

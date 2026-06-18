@@ -637,10 +637,14 @@ def run_documentation_self_review(
         # One LLM call per code chunk, threading the evolving docs through so
         # every chunk of code informs the refinement. The iteration's score is
         # the minimum across chunks (conservative: a later code slice exposing a
-        # documentation gap must not let us stop early).
+        # documentation gap must not let us stop early). If any chunk fails this
+        # iteration, the early-stop gate is suppressed so the next iteration
+        # re-reviews every chunk — a transient failure on one chunk must not let
+        # high scores on the others end the review with that chunk's code unseen.
         iteration_score: Optional[float] = None
         iteration_improvements = 0
         iteration_updates = 0
+        chunk_failures = 0
         for chunk_idx, code_chunk in enumerate(code_chunks, start=1):
             # Recompute per chunk so refinements made against earlier chunks are
             # visible to later ones. Documentation is passed in full (no clip) so
@@ -669,6 +673,7 @@ def run_documentation_self_review(
                     len(code_chunks),
                     exc,
                 )
+                chunk_failures += 1
                 continue
 
             quality_score = parsed.get("quality_score", 0.5)
@@ -703,7 +708,7 @@ def run_documentation_self_review(
             iteration_improvements,
         )
 
-        if iteration >= min_iterations and final_score >= quality_threshold:
+        if iteration >= min_iterations and final_score >= quality_threshold and chunk_failures == 0:
             logger.info(
                 "Documentation self-review complete: reached quality threshold %.2f >= %.2f after %d iterations",
                 final_score,
