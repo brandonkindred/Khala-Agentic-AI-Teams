@@ -9,6 +9,7 @@ structured-output flow.
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -32,7 +33,7 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 
-from llm_service import LLMRateLimitError, LLMSemanticExhaustionError
+from llm_service import LLMJsonParseError, LLMRateLimitError, LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
@@ -802,9 +803,11 @@ def test_persistent_small_chunk_failure_raises_unavailable() -> None:
     assert any("only.py" in r for r in excinfo.value.unreviewed)
 
 
-def test_partial_terminal_failure_raises_instead_of_failing_open(monkeypatch) -> None:
-    """One chunk keeps failing while another succeeds: the run raises rather
-    than approving partially reviewed code."""
+def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) -> None:
+    """One chunk keeps failing while another succeeds: the run completes (no
+    exception), but the unreviewable chunk produces a blocking ``high`` "not
+    reviewed" finding so the merged review is rejected — unreviewed code must
+    not pass the gate just because a sibling chunk approved."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
@@ -816,12 +819,153 @@ def test_partial_terminal_failure_raises_instead_of_failing_open(monkeypatch) ->
     assert len(files["bad.py"]) < 2 * MIN_SPLIT_SEGMENT_CHARS
 
     client = _SelectiveRaiser("FAILME")
-    with pytest.raises(CodeReviewUnavailableError) as excinfo:
+    result = run_coordinator(
+        client,
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    # The run completed without raising, but bad.py is named by a blocking
+    # high "not reviewed" finding, so the review is rejected.
+    assert result.approved is False
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert len(not_reviewed) == 1
+    assert not_reviewed[0].severity == "high"
+    assert not_reviewed[0].file_path == "bad.py"
+
+
+def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> None:
+    """For a pre-numbered (PR-diff) chunk, a not-reviewed finding must carry the
+    real embedded line numbers — not the positional segment indices — so the
+    finding anchors to the correct diff lines downstream."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    # Embedded original lines 4000-4004 carry the marker; positional indices
+    # for this segment would be 1-5, which must NOT leak into the finding.
+    bad = "\n".join(f"{4000 + i}: FAILME_{i}()" for i in range(5))
+    files = {"bad.py": bad, "good.py": "100: ok()\n101: also_ok()"}
+
+    client = _SelectiveRaiser("FAILME")
+    result = run_coordinator(
+        client,
+        CodeReviewInput(files=files, pre_numbered=True, task_description="t", language="python"),
+    )
+
+    not_reviewed = [
+        i
+        for i in result.issues
+        if "could not be reviewed" in i.description and i.file_path == "bad.py"
+    ]
+    assert not_reviewed, "the failed pre-numbered chunk must surface a not-reviewed finding"
+    assert not_reviewed[0].start_line == 4000
+    assert not_reviewed[0].line == 4004
+
+
+def test_degraded_finding_does_not_leak_raw_exception_text(monkeypatch) -> None:
+    """A not-reviewed finding names only the failure class — never ``str(exc)``.
+    Parse/schema errors embed raw model output (response previews, failing
+    field values); since findings are published verbatim by /review-pr, the
+    degraded finding must not carry that text."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    secret = "leaked_password = 'hunter2'"
+    leaky = LLMJsonParseError(
+        f"Could not parse structured JSON. Response preview: '{secret}'...",
+        response_preview=secret,
+    )
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1",
+    }
+    assert len(files["bad.py"]) < 2 * MIN_SPLIT_SEGMENT_CHARS
+
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=leaky),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
+    finding = not_reviewed[0]
+    # The failure class is named (useful diagnostic); the raw message is not.
+    assert "LLMJsonParseError" in finding.description
+    assert secret not in finding.description
+    assert "Response preview" not in finding.description
+    # The merged summary is likewise sanitized.
+    assert secret not in result.summary
+
+
+def test_unexpected_chunk_exception_fails_closed() -> None:
+    """A non-LLM exception (a bug in the reviewer code, e.g. KeyError) is NOT a
+    known content failure: it must propagate unchanged — never be retried,
+    bisected, or masked as a not-reviewed finding — so the defect surfaces."""
+    client = _SelectiveRaiser("def only", exc=KeyError("reviewer bug"))
+    with pytest.raises(KeyError):
         run_coordinator(
             client,
-            CodeReviewInput(files=files, task_description="t", language="python"),
+            CodeReviewInput(
+                files={"only.py": "def only(): pass"},
+                task_description="t",
+                language="python",
+            ),
         )
-    assert any("bad.py" in r for r in excinfo.value.unreviewed)
+    # Exactly one call: no retry/bisect for an unexpected error.
+    assert len(client.prompts) == 1
+
+
+def test_is_content_failure_classifies_model_output_errors_only() -> None:
+    """Known model-output failures (including a raw ``json.JSONDecodeError`` from
+    the chunk reviewer's ``json.loads``) are recoverable content failures;
+    reviewer-code bugs are not."""
+    from code_review_agent.coordinator import _is_content_failure
+
+    assert _is_content_failure(LLMJsonParseError("bad")) is True
+    assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
+    assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
+    # A JSONDecodeError wrapped by strands must still be recognised via the chain.
+    wrapped = RuntimeError("agent failed")
+    wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
+    assert _is_content_failure(wrapped) is True
+    # Reviewer-code bugs fail closed.
+    assert _is_content_failure(KeyError("bug")) is False
+    assert _is_content_failure(TypeError("bug")) is False
+
+
+def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
+    """The chunk reviewer parses model output with a bare ``json.loads``; bad
+    JSON surfaces as a raw ``json.JSONDecodeError``. That is recoverable model
+    output, so it must take the degrade path (blocking high finding, run
+    completes) — not fail closed like a reviewer-code bug."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    bad_json = json.JSONDecodeError("Expecting value", "not json", 0)
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=bad_json),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
+    assert result.approved is False
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed and not_reviewed[0].severity == "high"
+    assert not_reviewed[0].file_path == "bad.py"
+
+
+def test_all_empty_files_completes_with_info_findings_not_raise() -> None:
+    """A submission of only empty files creates no chunks, so it must complete
+    via the no-code early return (info findings, approved) — the total-failure
+    guard must not fire when there was simply nothing to review."""
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "", "b.py": "   \n\t"}, task_description="t", language="python"
+        ),
+    )
+    assert result.approved is True
+    assert {i.file_path for i in result.issues} == {"a.py", "b.py"}
+    assert all(i.severity == "info" for i in result.issues)
 
 
 def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:

@@ -171,6 +171,7 @@ class AgentSummary(BaseModel):
     has_invoke: bool = False
     has_sandbox: bool = False
     has_cognition: bool = False
+    has_knowledge_graph: bool = False
 
 
 class AgentDetail(BaseModel):

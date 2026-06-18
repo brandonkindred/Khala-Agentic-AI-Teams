@@ -52,6 +52,8 @@ export interface AgentSummary {
   has_output_schema: boolean;
   has_invoke: boolean;
   has_sandbox: boolean;
+  has_cognition: boolean;
+  has_knowledge_graph: boolean;
 }
 
 export interface AgentDetail {

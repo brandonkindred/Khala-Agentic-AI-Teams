@@ -94,7 +94,8 @@ A fully-annotated standalone example lives at
 | `source.entrypoint` | yes | `module.path:Symbol` pointing to the agent's class/factory. **Not imported** at registry load — it's metadata. |
 | `inputs.schema_ref` / `outputs.schema_ref` | no | `module.path:ClassName`. Resolved **lazily** by the `/schema/input` and `/schema/output` endpoints via `TypeAdapter.json_schema()`. If the import fails (e.g. the unified_api container doesn't have team code), the endpoint returns 404 — the UI handles this gracefully. |
 | `invoke`, `sandbox` | no | Metadata for later phases. UI shows indicators when present. |
-| `cognition` | no | Per-agent cognition config (memory retention, tools, rule packs, idempotency requirement). Consumed by the Agent Cognition Core; UI shows an indicator when present. |
+| `cognition` | no | Per-agent cognition config (memory retention, tools, rule packs, idempotency requirement, `knowledge_graph`). Consumed by the Agent Cognition Core; UI shows an indicator when present. |
+| `cognition.knowledge_graph` | no | Neo4j + Graphiti knowledge base for this agent. **Attached by default** (`enabled: true`) whenever a `cognition` block is present — every sub-field is defaulted, so an omitted `knowledge_graph` still validates default-on. Set `enabled: false` to opt the agent out; the graph sync worker and reflection grounding then skip it. |
 
 ### Path conventions
 
