@@ -3,7 +3,12 @@
 ``CodeReviewAgent.run`` always delegates to the map-reduce coordinator
 (`coordinator.run_coordinator`), which bounds every LLM call independently of
 input size, re-anchors line numbers from split segments, and applies the
-deterministic approval gate with its anti-loop safety nets.
+deterministic approval gate with its anti-loop safety nets. A chunk that
+cannot be reviewed after recovery degrades to a blocking ``high`` "not
+reviewed" finding (rejecting the review so unreviewed code never passes the
+gate) rather than aborting the run; an infrastructure failure or a run in which
+no chunk could be reviewed raises ``CodeReviewUnavailableError``, and an
+unexpected reviewer defect propagates unchanged (fails closed).
 """
 
 from __future__ import annotations
@@ -51,16 +56,19 @@ class CodeReviewAgent:
         Postconditions:
             - Returns the coordinator's merged verdict covering every submitted
               line; ``approved is False`` implies at least one critical/high issue.
+              A chunk unreviewable after recovery is named by a blocking ``high``
+              "not reviewed" finding, so the merged review is rejected and
+              unreviewed code never passes the gate as approved.
             - When ``progress_callback`` is provided, it is invoked with
               non-decreasing fractions ending at 1.0 (step ``done``) on every
               successful return; the review result is identical whether or not
               a callback is provided.
 
         Raises:
-            CodeReviewUnavailableError: when the review could not be completed
-                (model unavailable, or a chunk stayed unreviewable after retry
-                and bisection). Callers must treat this as a failed review run
-                — never as review feedback for the coding agent.
+            CodeReviewUnavailableError: when the review could not be completed —
+                the model was unavailable (an infrastructure failure), or no
+                chunk could be reviewed at all. Callers must treat this as a
+                failed review run — never as review feedback for the coding agent.
         """
         code_size = (
             sum(len(c) for c in input_data.files.values())
