@@ -293,6 +293,162 @@ def test_run_review_with_security_agent(monkeypatch, tmp_path: Path):
     assert any(i.source == "security" for i in result.issues)
 
 
+class _Bug:
+    severity = "low"
+    description = "real bug"
+    location = "big.py"
+    recommendation = ""
+
+
+class _Vuln:
+    severity = "high"
+    description = "real vuln"
+    location = "big.py"
+    recommendation = ""
+
+
+def _big_source() -> str:
+    """A single file larger than one QA/security prompt budget."""
+    from software_engineering_team.backend_code_v2_team.phases.review import MAX_REVIEW_CODE_CHARS
+
+    big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
+    assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
+    return big
+
+
+def test_run_qa_agent_chunks_large_input_without_dropping_tail():
+    """The QA agent is run once per function-aware chunk, so a large file's
+    tail is reviewed instead of being truncated at MAX_REVIEW_CODE_CHARS."""
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_qa_agent
+
+    codes: list[str] = []
+
+    class _QAAgent:
+        def run(self, inp):
+            codes.append(inp.code)
+            return MagicMock(bugs_found=[_Bug()])
+
+    issues = _run_qa_agent(
+        qa_agent=_QAAgent(),
+        files={"big.py": _big_source()},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+
+    assert len(codes) > 1  # one QA call per chunk, not a single truncated call
+    joined = "\n".join(codes)
+    assert "fn_0000" in joined  # head reviewed
+    assert "fn_2499" in joined  # tail reviewed — old 60K cap dropped this
+    assert len(issues) == len(codes)  # a bug aggregated from every chunk
+    assert all(i.source == "qa" for i in issues)
+
+
+def test_run_qa_agent_single_call_for_small_input():
+    """Inputs that already fit are reviewed in one call (no regression)."""
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_qa_agent
+
+    calls = {"n": 0}
+
+    class _QAAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            return MagicMock(bugs_found=[_Bug()])
+
+    issues = _run_qa_agent(
+        qa_agent=_QAAgent(),
+        files={"x.py": "def f():\n    return 1"},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+    assert calls["n"] == 1
+    assert len(issues) == 1
+
+
+def test_run_qa_agent_skips_failing_chunk_keeps_others(monkeypatch):
+    """A chunk whose QA call raises is skipped; issues from the others survive."""
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_qa_agent
+
+    calls = {"n": 0}
+
+    class _QAAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("qa unavailable")
+            return MagicMock(bugs_found=[_Bug()])
+
+    monkeypatch.setattr(review_mod, "MANY_CHUNKS_WARN_THRESHOLD", 0)
+
+    issues = _run_qa_agent(
+        qa_agent=_QAAgent(),
+        files={"big.py": _big_source()},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+    assert calls["n"] > 1  # every chunk attempted
+    assert len(issues) >= 1  # failed first chunk did not abort the review
+    assert all(i.description == "real bug" for i in issues)
+
+
+def test_run_security_agent_chunks_large_input_without_dropping_tail():
+    """The security agent is run once per function-aware chunk, covering the
+    whole file instead of only the first MAX_REVIEW_CODE_CHARS."""
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_security_agent
+
+    codes: list[str] = []
+
+    class _SecAgent:
+        def run(self, inp):
+            codes.append(inp.code)
+            return MagicMock(vulnerabilities=[_Vuln()])
+
+    issues = _run_security_agent(
+        security_agent=_SecAgent(),
+        files={"big.py": _big_source()},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+
+    assert len(codes) > 1
+    joined = "\n".join(codes)
+    assert "fn_0000" in joined  # head reviewed
+    assert "fn_2499" in joined  # tail reviewed
+    assert len(issues) == len(codes)
+    assert all(i.source == "security" for i in issues)
+
+
+def test_run_security_agent_skips_failing_chunk_keeps_others(monkeypatch):
+    from software_engineering_team.backend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_security_agent
+
+    calls = {"n": 0}
+
+    class _SecAgent:
+        def run(self, inp):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("security unavailable")
+            return MagicMock(vulnerabilities=[_Vuln()])
+
+    monkeypatch.setattr(review_mod, "MANY_CHUNKS_WARN_THRESHOLD", 0)
+
+    issues = _run_security_agent(
+        security_agent=_SecAgent(),
+        files={"big.py": _big_source()},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+    assert calls["n"] > 1
+    assert len(issues) >= 1
+    assert all(i.description == "real vuln" for i in issues)
+
+
 def test_run_review_with_code_review_agent(monkeypatch, tmp_path: Path):
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
@@ -328,7 +484,9 @@ def test_run_review_passes_files_dict_unmodified(monkeypatch, tmp_path: Path):
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
     from software_engineering_team.backend_code_v2_team.phases.review import run_review
 
-    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n"))
+    monkeypatch.setattr(
+        review_mod, "Agent", lambda *a, **kw: _StubAgent("## PASSED ##\ntrue\n## END PASSED ##\n")
+    )
     monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
 
     captured: dict = {}

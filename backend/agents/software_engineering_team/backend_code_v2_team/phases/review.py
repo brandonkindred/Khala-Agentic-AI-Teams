@@ -118,6 +118,153 @@ def _run_llm_review(
     return issues
 
 
+def _run_chunked_agent_review(
+    *,
+    run_chunk: Callable[[str], Any],
+    files: Dict[str, str],
+    source: str,
+    default_severity: str,
+    label: str,
+    task_id: str,
+    context: str = "",
+) -> List[ReviewIssue]:
+    """Run a quality agent over function-aware chunks of ``files``.
+
+    QA and security agents take one ``code`` string by contract, so a large
+    review is fed to them one chunk at a time (the same chunking the code-review
+    path uses) instead of being capped to the first ``MAX_REVIEW_CODE_CHARS``.
+
+    Preconditions:
+        - ``run_chunk(code)`` invokes the agent on one chunk of concatenated,
+          file-labeled code and returns its raw issue/vulnerability items.
+        - ``files`` maps file paths to their full source text.
+
+    Postconditions:
+        - Inputs over ``MAX_REVIEW_CODE_CHARS`` are split at function/method
+          boundaries (``build_review_chunks``) and every chunk is reviewed, so a
+          large file's tail is reviewed rather than silently truncated away.
+          Blank files contribute nothing.
+        - Small inputs are reviewed in a single call, as before.
+        - A chunk whose ``run_chunk`` call fails is logged and skipped; issues
+          from the other chunks are still returned (one bad chunk never aborts
+          the whole review).
+    """
+    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+
+    blocks = [(path, content) for path, content in files.items() if content and content.strip()]
+    if not blocks:
+        return []
+    chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
+    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
+        logger.warning(
+            "[%s] %s: %d chunks for %d file(s) — large review, many calls%s",
+            task_id,
+            label,
+            len(chunks),
+            len(blocks),
+            context,
+        )
+    issues: List[ReviewIssue] = []
+    for idx, chunk in enumerate(chunks, start=1):
+        try:
+            items = run_chunk(chunk.content)
+        except Exception as exc:
+            logger.warning(
+                "[%s] %s failed (chunk %d/%d)%s: %s",
+                task_id,
+                label,
+                idx,
+                len(chunks),
+                context,
+                exc,
+            )
+            continue
+        for item in items or []:
+            issues.append(
+                ReviewIssue(
+                    source=source,
+                    severity=getattr(item, "severity", default_severity),
+                    description=getattr(item, "description", str(item)),
+                    file_path=getattr(item, "location", getattr(item, "file_path", "")),
+                    recommendation=getattr(item, "recommendation", ""),
+                )
+            )
+    return issues
+
+
+def _run_qa_agent(
+    *,
+    qa_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    context: str = "",
+) -> List[ReviewIssue]:
+    """Run the external QA agent over function-aware chunks of ``files``.
+
+    Preconditions:
+        - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
+
+    Postconditions: see ``_run_chunked_agent_review``; QA bugs become
+    ``ReviewIssue``s with ``source="qa"``.
+    """
+    from qa_agent.models import QAInput as _QAInput
+
+    def _run_chunk(code: str) -> Any:
+        result = qa_agent.run(
+            _QAInput(code=code, language=language, task_description=task_description)
+        )
+        return getattr(result, "bugs_found", getattr(result, "issues", []))
+
+    return _run_chunked_agent_review(
+        run_chunk=_run_chunk,
+        files=files,
+        source="qa",
+        default_severity="medium",
+        label="QA agent",
+        task_id=task_id,
+        context=context,
+    )
+
+
+def _run_security_agent(
+    *,
+    security_agent: Any,
+    files: Dict[str, str],
+    language: str,
+    task_description: str,
+    task_id: str,
+    context: str = "",
+) -> List[ReviewIssue]:
+    """Run the external security agent over function-aware chunks of ``files``.
+
+    Preconditions:
+        - ``security_agent`` is not None and exposes
+          ``.run(SecurityInput) -> SecurityOutput``.
+
+    Postconditions: see ``_run_chunked_agent_review``; vulnerabilities become
+    ``ReviewIssue``s with ``source="security"``.
+    """
+    from security_agent.models import SecurityInput as _SecInput
+
+    def _run_chunk(code: str) -> Any:
+        result = security_agent.run(
+            _SecInput(code=code, language=language, task_description=task_description)
+        )
+        return getattr(result, "vulnerabilities", getattr(result, "issues", []))
+
+    return _run_chunked_agent_review(
+        run_chunk=_run_chunk,
+        files=files,
+        source="security",
+        default_severity="high",
+        label="Security agent",
+        task_id=task_id,
+        context=context,
+    )
+
+
 def _run_build_verification(
     repo_path: Path,
     build_verifier: Optional[Callable[..., Tuple[bool, str]]],
@@ -236,58 +383,30 @@ def run_review(
     else:
         issues.extend(_run_llm_review(llm=llm, task=task, files=execution_result.files))
 
-    # QA/security agents still take a single capped code string (their own
-    # input contract); only the code review agent receives untruncated files.
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in execution_result.files.items())
-    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
-
-    # 4. QA agent
+    # 4. QA agent — chunked so large reviews are not truncated to the first
+    #    MAX_REVIEW_CODE_CHARS (only the code review agent took untruncated files).
     if qa_agent is not None:
-        try:
-            from qa_agent.models import QAInput as _QAInput
-
-            qa_input = _QAInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_qa_agent(
+                qa_agent=qa_agent,
+                files=execution_result.files,
                 language=language,
                 task_description=task.description or "",
+                task_id=task_id,
             )
-            qa_result = qa_agent.run(qa_input)
-            for item in getattr(qa_result, "bugs_found", getattr(qa_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="qa",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning("[%s] QA agent failed: %s", task_id, exc)
+        )
 
     # 5. Security agent
     if security_agent is not None:
-        try:
-            from security_agent.models import SecurityInput as _SecInput
-
-            sec_input = _SecInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_security_agent(
+                security_agent=security_agent,
+                files=execution_result.files,
                 language=language,
                 task_description=task.description or "",
+                task_id=task_id,
             )
-            sec_result = security_agent.run(sec_input)
-            for item in getattr(sec_result, "vulnerabilities", getattr(sec_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="security",
-                        severity=getattr(item, "severity", "high"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning("[%s] Security agent failed: %s", task_id, exc)
+        )
 
     # 6. Domain-specific review from tool agents
     if tool_agents:
@@ -462,62 +581,36 @@ def run_microtask_review(
             detail_callback("Running code review...")
         issues.extend(_run_llm_review(llm=llm, task=task, files=files))
 
-    # QA agent still takes a single capped code string (its own input
-    # contract); only the code review agent receives untruncated files.
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
+    microtask_desc = f"Microtask: {microtask.description or microtask.title}"
+    microtask_ctx = f" for microtask {microtask_id}"
 
     if qa_agent is not None:
         if detail_callback:
             detail_callback("Running QA check...")
-        try:
-            from qa_agent.models import QAInput as _QAInput
-
-            qa_input = _QAInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_qa_agent(
+                qa_agent=qa_agent,
+                files=files,
                 language=language,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
+                task_description=microtask_desc,
+                task_id=task_id,
+                context=microtask_ctx,
             )
-            qa_result = qa_agent.run(qa_input)
-            for item in getattr(qa_result, "bugs_found", getattr(qa_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="qa",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning("[%s] QA agent failed for microtask %s: %s", task_id, microtask_id, exc)
+        )
 
     if security_agent is not None:
         if detail_callback:
             detail_callback("Running security scan...")
-        try:
-            from security_agent.models import SecurityInput as _SecInput
-
-            sec_input = _SecInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_security_agent(
+                security_agent=security_agent,
+                files=files,
                 language=language,
-                task_description=f"Microtask: {microtask.description or microtask.title}",
+                task_description=microtask_desc,
+                task_id=task_id,
+                context=microtask_ctx,
             )
-            sec_result = security_agent.run(sec_input)
-            for item in getattr(sec_result, "vulnerabilities", getattr(sec_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="security",
-                        severity=getattr(item, "severity", "high"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Security agent failed for microtask %s: %s", task_id, microtask_id, exc
-            )
+        )
 
     if tool_agents:
         phase_inp = ToolAgentPhaseInput(
@@ -741,33 +834,19 @@ def run_qa_testing_phase(
         microtask_id,
     )
 
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
-
     if qa_agent is not None:
         if detail_callback:
             detail_callback("Running QA testing...")
-        try:
-            from qa_agent.models import QAInput as _QAInput
-
-            qa_input = _QAInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_qa_agent(
+                qa_agent=qa_agent,
+                files=files,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
+                task_id=task_id,
+                context=f" for microtask {microtask_id}",
             )
-            qa_result = qa_agent.run(qa_input)
-            for item in getattr(qa_result, "bugs_found", getattr(qa_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="qa",
-                        severity=getattr(item, "severity", "medium"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning("[%s] QA agent failed for microtask %s: %s", task_id, microtask_id, exc)
+        )
 
     if tool_agents and ToolAgentKind.TESTING_QA in tool_agents:
         qa_tool_agent = tool_agents[ToolAgentKind.TESTING_QA]
@@ -853,35 +932,19 @@ def run_security_testing_phase(
         microtask_id,
     )
 
-    code_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in files.items())
-    code_text_capped = code_text[:MAX_REVIEW_CODE_CHARS]
-
     if security_agent is not None:
         if detail_callback:
             detail_callback("Running security scan...")
-        try:
-            from security_agent.models import SecurityInput as _SecInput
-
-            sec_input = _SecInput(
-                code=code_text_capped,
+        issues.extend(
+            _run_security_agent(
+                security_agent=security_agent,
+                files=files,
                 language=language,
                 task_description=f"Microtask: {microtask.description or microtask.title}",
+                task_id=task_id,
+                context=f" for microtask {microtask_id}",
             )
-            sec_result = security_agent.run(sec_input)
-            for item in getattr(sec_result, "vulnerabilities", getattr(sec_result, "issues", [])):
-                issues.append(
-                    ReviewIssue(
-                        source="security",
-                        severity=getattr(item, "severity", "high"),
-                        description=getattr(item, "description", str(item)),
-                        file_path=getattr(item, "location", getattr(item, "file_path", "")),
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
-        except Exception as exc:
-            logger.warning(
-                "[%s] Security agent failed for microtask %s: %s", task_id, microtask_id, exc
-            )
+        )
 
     if tool_agents and ToolAgentKind.SECURITY in tool_agents:
         sec_tool_agent = tool_agents[ToolAgentKind.SECURITY]
