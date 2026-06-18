@@ -359,6 +359,49 @@ def test_long_stop_limit_fills_on_recovery_after_gap_through(model) -> None:
     assert "AAA" not in portfolio.positions
 
 
+@pytest.mark.parametrize("model", _models())
+def test_same_bar_submission_does_not_arm_on_lookahead(model) -> None:
+    """Look-ahead safety: a strategy-side standalone STOP_LIMIT submitted on the
+    SAME bar it is processed must NOT arm off that bar's data via the gap-through
+    path (which never reaches ``bar_safety.check_fill``). Otherwise it would
+    carry same-bar trigger info forward and fill on a later bar. Contrast with
+    ``test_short_stop_limit_fills_on_recovery_after_gap_through`` (submitted on an
+    earlier bar → arms → fills)."""
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_long(sim, order_book, entry_open=100.0)
+    # Submit with ``submitted_at`` equal to the bar we then process (look-ahead).
+    order_book.submit(
+        OrderRequest(
+            client_order_id="sl-1",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=10.0,
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=95.0,
+            limit_price=94.0,
+            tif=TimeInForce.GTC,
+        ),
+        submitted_at="2024-01-03",
+        submitted_equity=10_000_000.0,
+    )
+
+    # Same-bar gap-through: triggers (low 85 <= 95) but high 90 < limit 94. The
+    # order must NOT arm and must NOT emit telemetry — the bar is not strictly
+    # after submission.
+    outcome1 = sim.process_bar(_bar("2024-01-03", open_price=90.0, high=90.0, low=85.0, close=88.0))
+    assert outcome1.exit_fills == []
+    assert _unfilled_events(outcome1) == []
+    po = next(p for p in order_book.all_pending() if p.request.client_order_id == "sl-1")
+    assert po.stop_limit_armed is False
+
+    # Later bar where the stop is NOT re-crossed but the limit would be
+    # marketable if it had armed. Because the look-ahead arming was prevented,
+    # it stays un-triggered and does NOT fill.
+    outcome2 = sim.process_bar(_bar("2024-01-04", open_price=96.0, high=97.0, low=96.0, close=96.5))
+    assert outcome2.exit_fills == []
+    assert "AAA" in portfolio.positions
+
+
 def test_unfilled_trigger_aggregates_into_diagnostics_counter() -> None:
     """End-to-end through the diagnostics aggregation: a gap-through outcome
     fed to ``_apply_fill_outcome_events`` bumps

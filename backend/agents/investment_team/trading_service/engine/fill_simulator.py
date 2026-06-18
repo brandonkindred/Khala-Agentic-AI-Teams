@@ -262,7 +262,17 @@ class FillSimulator:
                     }
                 )
             elif req.order_type == OrderType.STOP_LIMIT:
-                if not po.stop_limit_armed and stop_limit_triggered(req, bar):
+                # Look-ahead safety: only arm on a bar STRICTLY AFTER submission.
+                # The latch is engine state that persists across bars and gates
+                # later fills, but the gap-through path below returns ``terms is
+                # None`` and never reaches ``bar_safety.check_fill`` — so without
+                # this guard a strategy-side standalone STOP_LIMIT tagged to the
+                # current bar could arm on same-bar (look-ahead) data and fill on
+                # a later bar. Bound bracket children are already deferred on
+                # same/earlier bars by the guard above; this mirrors that
+                # ``_ts_le`` convention for the standalone case.
+                look_ahead_safe = not _ts_le(bar.timestamp, po.submitted_at)
+                if look_ahead_safe and not po.stop_limit_armed and stop_limit_triggered(req, bar):
                     po.stop_limit_armed = True
                     stop_limit_just_armed = True
                 if po.stop_limit_armed:
