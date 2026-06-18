@@ -137,13 +137,19 @@ def _env_positive_int(name: str, default: int) -> int:
 # it becomes the Pydantic Field `le=` constraint; operators can override via env.
 _MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
 
+# Upper bound on the request's ``max_parallel`` field (its Pydantic ``le=``). Kept
+# as a single named constant so the concurrency-cap default below cannot silently
+# drift away from the schema's maximum.
+_MAX_PARALLEL = 6
+
 # Hard ceiling on how many Strategy Lab cycles run concurrently per wave,
 # independent of the request's ``max_parallel``. Each concurrent cycle holds its
 # own market data + LLM contexts in the single worker process, so on a
 # memory-constrained host this caps the worker's peak footprint (the dominant
-# driver of OOM kills). Defaults to the request field's max (6) — i.e. no extra
-# constraint — so operators opt into tighter limits via env.
-_MAX_CONCURRENT_CYCLES = _env_positive_int("STRATEGY_LAB_MAX_CONCURRENT_CYCLES", 6)
+# driver of OOM kills). Defaults to ``_MAX_PARALLEL`` (the request field's max) so
+# by default it adds no extra constraint and request validation stays the primary
+# limit; operators opt into tighter caps via env.
+_MAX_CONCURRENT_CYCLES = _env_positive_int("STRATEGY_LAB_MAX_CONCURRENT_CYCLES", _MAX_PARALLEL)
 
 init_otel(service_name="investment-team", team_key="investment")
 
@@ -1256,7 +1262,7 @@ class RunStrategyLabRequest(BaseModel):
     max_parallel: int = Field(
         default=3,
         ge=1,
-        le=6,
+        le=_MAX_PARALLEL,
         description="Max strategies to generate in parallel per wave (within a batch).",
     )
     # Paper-trading step (only runs when a cycle's backtest is flagged as winning)

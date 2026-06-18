@@ -62,24 +62,23 @@ TEMPORAL_FUNC = os.environ.get("TEAM_TEMPORAL_WORKER_FUNC", "").strip()
 def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None = None) -> int:
     """Parse a positive int from env var *name*, defensively, then clamp.
 
-    Preconditions:
-        - ``minimum <= default`` and (when given) ``default <= maximum``.
     Postconditions:
-        - Returns the parsed int clamped to ``[minimum, maximum]`` (``maximum``
-          unbounded when None); falls back to *default* when the var is
-          unset/blank/non-numeric. Never raises.
+        - Returns an int clamped to ``[minimum, maximum]`` (``maximum`` unbounded
+          when None) on *every* path — including the *default* fallback used when
+          the var is unset/blank/non-numeric — so the result always honors the
+          bounds even if a caller passes an out-of-range default. Never raises.
     """
     raw = os.environ.get(name)
-    if raw is None or not raw.strip():
-        return default
-    try:
-        value = int(float(raw))
-    except (TypeError, ValueError, OverflowError):
-        return default
+    value = default
+    if raw is not None and raw.strip():
+        try:
+            value = int(float(raw))
+        except (TypeError, ValueError, OverflowError):
+            value = default
     if value < minimum:
-        return minimum
+        value = minimum
     if maximum is not None and value > maximum:
-        return maximum
+        value = maximum
     return value
 
 

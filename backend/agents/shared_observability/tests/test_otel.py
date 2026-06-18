@@ -92,11 +92,17 @@ def test_metric_exporter_opted_out_via_metrics_exporter_none(monkeypatch) -> Non
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
     monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
 
-    # Opted out: metrics suppressed, traces still export.
-    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "none")
-    assert _otlp_metrics_enabled() is False
-    assert _build_metric_exporter() is None
+    # Opted out: metrics suppressed, traces still export. OTEL_METRICS_EXPORTER is
+    # a comma-separated list per the OTel spec, so "none" anywhere disables it.
+    for val in ("none", " none ", "none,console", "otlp,none", "NONE"):
+        monkeypatch.setenv("OTEL_METRICS_EXPORTER", val)
+        assert _otlp_metrics_enabled() is False, val
+        assert _build_metric_exporter() is None, val
     assert _build_span_exporter() is not None
+
+    # A list without "none" does not disable it.
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp,console")
+    assert _otlp_metrics_enabled() is True
 
     # Default (var unset): endpoint configured → metric exporter is built.
     monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)

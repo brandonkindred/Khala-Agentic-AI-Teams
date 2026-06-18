@@ -39,6 +39,14 @@ def test_env_int_defaults_clamps_and_survives_garbage(monkeypatch) -> None:
     assert entrypoint._env_int("X_WORKERS", 2, minimum=1) == 99  # no maximum → unbounded
 
 
+def test_env_int_clamps_out_of_range_default(monkeypatch) -> None:
+    """The default fallback is clamped too, so the [minimum, maximum] postcondition
+    holds even when a caller passes an out-of-range default (var unset)."""
+    monkeypatch.delenv("X_WORKERS", raising=False)
+    assert entrypoint._env_int("X_WORKERS", 0, minimum=1, maximum=16) == 1  # below min
+    assert entrypoint._env_int("X_WORKERS", 99, minimum=1, maximum=16) == 16  # above max
+
+
 def test_wrapper_body_compiles_and_defines_app() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)

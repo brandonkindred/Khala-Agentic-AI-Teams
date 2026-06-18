@@ -512,7 +512,9 @@ def start_memory_watchdog(
     # Even with no cgroup memory limit (an unbounded container), keep watching when
     # the kernel's oom_kill counter is readable: such a container can still be
     # SIGKILLed by host/VM-wide (global) OOM, and that counter is the only trace.
-    oom_available = read_oom_kill_count() is not None
+    # Read it once here and reuse as the startup baseline below (one file read).
+    prior_oom = read_oom_kill_count()
+    oom_available = prior_oom is not None
     if not has_limit and not oom_available:
         log.debug(
             "memory watchdog: no memory limit and no oom_kill counter; not starting for %s",
@@ -563,7 +565,7 @@ def start_memory_watchdog(
     # A non-zero prior count immediately tells an operator the container has
     # already been OOM-killed (the symptom is otherwise silent), and a peak far
     # below the limit points at host/VM-wide pressure rather than this limit.
-    prior_oom = read_oom_kill_count()
+    # ``prior_oom`` was already read above (reused here to avoid a second read).
     peak = read_memory_peak_bytes()
     if prior_oom is not None or peak is not None:
         log.info(

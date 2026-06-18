@@ -207,8 +207,17 @@ def _otlp_metrics_enabled() -> bool:
     which ingests traces only) while keeping metrics on a separate path —
     Khala scrapes ``/metrics`` with Prometheus, so pushing OTLP metrics at a
     traces-only collector would just 404 and spam the logs.
+
+    ``OTEL_METRICS_EXPORTER`` is, per the OTel spec, a comma-separated list of
+    exporters; ``none`` appearing anywhere in it disables OTLP metric export
+    (so ``none``, ``none,console``, ``otlp,none`` are all honored).
     """
-    if os.environ.get("OTEL_METRICS_EXPORTER", "").strip().lower() == "none":
+    exporters = [
+        e.strip().lower()
+        for e in os.environ.get("OTEL_METRICS_EXPORTER", "").split(",")
+        if e.strip()
+    ]
+    if "none" in exporters:
         return False
     return _otlp_endpoint_configured()
 
