@@ -262,6 +262,15 @@ def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _Prompt
     assert "capped by the position limit" in rendered, (
         f"{label} prompt must frame the fixed-notional sizing as capped, not exact."
     )
+    # The exact per-trade deployed dollars are not in the evidence (dynamic
+    # sizing, position cap, whole-share rounding), and exit reasons are not
+    # labelled, so the prompt must keep both qualitative / evidence-conditional.
+    assert "whole-share rounding" in rendered, (
+        f"{label} prompt must warn that whole-share rounding can change deployed size."
+    )
+    assert "Attribute an exit to a specific rule only where the evidence supports it" in rendered, (
+        f"{label} prompt must make exit attribution evidence-conditional."
+    )
 
 
 def test_lose_prompt_targets_conflation_not_genuine_small_sizing() -> None:
@@ -313,6 +322,9 @@ def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> No
     assert 'do NOT read "vol-target X%" or "$Y per trade" as the exact capital at risk' in (
         _SELF_REVIEW_PROMPT
     )
+    # The review prompt lacks per-trade position_value / risk limits, so the
+    # check must forbid asserting an exact figure rather than verify one.
+    assert "an exact deployed-capital figure is not derivable" in _SELF_REVIEW_PROMPT
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
@@ -334,6 +346,8 @@ def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -
     assert "X% is NOT a deployed fraction" in text
     # Trailing stops ratchet from the running extreme, not a move off entry.
     assert "ratchets from the running high/low" in text
+    # Exact per-trade deployed dollars are not derivable from the rendered line.
+    assert "whole-share rounding" in text
     for phrase in ("mandatory", "hard rule", "hard-enforced"):
         assert phrase not in lowered, f"system prompt must not use forbidden phrasing {phrase!r}."
 
