@@ -112,7 +112,8 @@ def _build_exit_reconciler(
         then keeps its no-op default and the existing fill-simulator unit
         tests are unaffected.
       * Otherwise returns a callable
-        ``(symbol, side, entry_price, qty) -> Optional[str]`` yielding
+        ``(*, symbol, side, entry_price, qty) -> Optional[str]`` — arguments are
+        keyword-only (the FillSimulator invokes it with keywords) — yielding
         ``"engine_exit:<kind>"`` when a structured rule *fires* at the
         **signal bar** (the bar the strategy acted on, one before the fill),
         else ``None``. It does not mutate ``exit_rules`` or ``views``.
