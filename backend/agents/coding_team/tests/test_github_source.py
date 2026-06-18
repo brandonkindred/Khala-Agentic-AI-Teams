@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
 from typing import Any, Callable, Optional
 
 import httpx
@@ -1632,8 +1633,11 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_helper_removes_directory(self, patched_app, tmp_path, monkeypatch) -> None:
         api = patched_app["api"]
         # tmp_path is an ephemeral workspace root for this test, so checkouts
-        # under it are eligible for removal.
+        # under it are eligible for removal. Clear the other root vars so an
+        # ambient env can't add unexpected ephemeral roots.
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
         target = tmp_path / "ephemeral"
         target.mkdir()
         (target / ".git").mkdir()  # only real checkouts are removed
@@ -1768,9 +1772,12 @@ class TestEphemeralCheckoutCleanup:
 
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
         repo_path = patched_app["repo_path"]
-        os.makedirs(os.path.join(repo_path, ".git"), exist_ok=True)  # a real checkout
-        # Make the checkout's parent an ephemeral workspace root so cleanup is eligible.
-        monkeypatch.setenv("WORKSPACE_ROOT", os.path.dirname(repo_path))
+        Path(repo_path, ".git").mkdir(parents=True, exist_ok=True)  # a real checkout
+        # Make the checkout's parent an ephemeral workspace root so cleanup is
+        # eligible; clear the other root vars so an ambient env can't interfere.
+        monkeypatch.setenv("WORKSPACE_ROOT", str(Path(repo_path).parent))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(
@@ -1780,7 +1787,7 @@ class TestEphemeralCheckoutCleanup:
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert not os.path.isdir(repo_path)
+        assert not Path(repo_path).is_dir()
 
     def test_clean_success_without_flag_keeps_checkout(self, patched_app) -> None:
         repo_path = patched_app["repo_path"]
@@ -1794,6 +1801,15 @@ class TestEphemeralCheckoutCleanup:
     def test_partial_failure_keeps_checkout_even_with_flag(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
         repo_path = patched_app["repo_path"]
+        Path(repo_path, ".git").mkdir(parents=True, exist_ok=True)  # a real checkout
+        # Make the checkout ephemeral (as in the clean-success test) so the cleanup
+        # decision turns solely on job status: were partial failure NOT to keep it,
+        # it WOULD be deleted here. Clear the other root vars so the only ephemeral
+        # root is the one set below. Without this the safety guard refuses deletion
+        # regardless of status, and the test would pass for the wrong reason.
+        monkeypatch.setenv("WORKSPACE_ROOT", str(Path(repo_path).parent))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
 
         def _partial_orchestrator(job_id, _repo_path, _plan, **kw):
             kw["update_job_fn"](
@@ -1815,5 +1831,6 @@ class TestEphemeralCheckoutCleanup:
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed_with_failures"
-        # A partial result must keep the checkout so a retry can seed from it.
-        assert os.path.isdir(repo_path)
+        # Ephemeral + cleanup flag set, yet kept → the partial-failure status
+        # overrode cleanup (a retry can seed from the preserved checkout).
+        assert Path(repo_path).is_dir()

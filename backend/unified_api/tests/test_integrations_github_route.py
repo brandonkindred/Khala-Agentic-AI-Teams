@@ -583,6 +583,18 @@ def test_ensure_repo_clone_accepts_scp_form_remote(tmp_path):
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("bad", [0, -1, -42])
+def test_resolve_repo_path_rejects_nonpositive_issue_number(monkeypatch, bad):
+    # The docstring promises a positive issue number; a non-positive value would
+    # build a degenerate ``issue-0`` / ``issue--1`` segment, so it is rejected.
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(dict(_GH_CFG), issue_number=bad)
+    assert exc.value.status_code == 400
+
+
 def test_resolve_repo_path_rejects_owner_traversal(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")

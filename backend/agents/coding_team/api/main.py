@@ -2013,7 +2013,11 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
         shutil.rmtree(target)
         logger.info("Removed ephemeral per-issue checkout at %s", target)
     except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
-        logger.warning("Failed to remove ephemeral checkout at %s: %s", repo_path, e)
+        # exc_info so a partial-rmtree failure (the non-atomic case noted above)
+        # is diagnosable from the traceback, not just the message.
+        logger.warning(
+            "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+        )
         # Keep the lock file: the checkout still exists, so the lock must keep
         # guarding it against a concurrent clone into a half-removed directory.
         return

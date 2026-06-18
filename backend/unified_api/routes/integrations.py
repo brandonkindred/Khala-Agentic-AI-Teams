@@ -1403,9 +1403,18 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
           the path ends in ``issue-{issue_number}`` and two distinct issue
           numbers map to two distinct paths.
         - Raises ``HTTPException(400)`` when ``owner``/``repo`` carry a path
-          separator, ``..`` segment, or null byte — defense-in-depth so this
-          path builder can't be coerced into escaping the workspace root even if
-          a caller skipped validation.
+          separator, ``..`` segment, or null byte, or when ``issue_number`` is
+          non-positive — defense-in-depth so this path builder can't be coerced
+          into escaping the workspace root or building a degenerate ``issue-0``
+          segment even if a caller skipped validation.
+
+    Note:
+        The auto-derived layout differs by source: a workspace-root env var gives
+        ``{root}/{owner}_{repo}[/issue-N]`` while the ``AGENT_CACHE`` fallback
+        gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N]``. This is
+        intentional (``AGENT_CACHE`` is a shared multi-team cache namespaced under
+        ``github_workspaces``; a dedicated workspace root is not), and
+        ``ephemeral_workspace_roots`` mirrors both shapes for the cleanup guard.
     """
     override = cfg.get("repo_path", "").strip()
     if override:
@@ -1424,6 +1433,12 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
             or value.strip() != value
         ):
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
+
+    # Enforce the documented precondition: a non-positive issue_number would yield
+    # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
+    # GitHub issue), so reject it here rather than build a bad path.
+    if issue_number is not None and issue_number < 1:
+        raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
 
     issue_segment = f"issue-{issue_number}" if issue_number is not None else None
 
