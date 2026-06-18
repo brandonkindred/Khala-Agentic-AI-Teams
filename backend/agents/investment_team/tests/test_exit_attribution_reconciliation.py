@@ -42,6 +42,7 @@ from investment_team.trading_service.engine.portfolio import Portfolio
 from investment_team.trading_service.service import (
     ENGINE_EXIT_REASON_PREFIX,
     _build_exit_reconciler,
+    _TrackedPosition,
 )
 from investment_team.trading_service.strategy.contract import (
     Bar,
@@ -176,7 +177,9 @@ def test_signal_exit_is_reconciled() -> None:
         qty=10.0,
         return_pct=-2.0,  # signal exits have no return bound
     )
-    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+    # Bracketed rule index matches the engine's emitted form so the
+    # rule-firing-rate gate counts the reconciled close.
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[0]"
 
 
 def test_non_firing_rule_is_not_reconciled() -> None:
@@ -239,7 +242,8 @@ def test_multiple_rules_first_out_of_bounds_falls_through_to_signal() -> None:
         qty=10.0,
         return_pct=7.0,  # TP fires but return is past the cap → falls through
     )
-    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+    # Signal rule is at spec index 1 → bracketed index in the reason.
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[1]"
 
 
 def test_multiple_rules_first_within_bounds_wins() -> None:
@@ -278,6 +282,54 @@ def test_tightest_take_profit_ceiling_blocks_drift() -> None:
         return_pct=4.8,  # past the tightest 3% ceiling
     )
     assert label is None
+
+
+# --- Entry-bar skip (mirrors the dispatcher's just_opened guard) ----------
+
+
+def _tracked(*, just_opened: bool) -> _TrackedPosition:
+    return _TrackedPosition(
+        side=OrderSide.LONG,
+        entry_price=100.0,
+        entry_order_id="e1",
+        just_opened=just_opened,
+        high_since_entry=100.0,
+        low_since_entry=100.0,
+    )
+
+
+def test_just_opened_entry_bar_is_not_reconciled() -> None:
+    """A close whose signal bar is a non-market entry bar (just_opened) is not
+    reconciled — the engine deliberately skips exit eval there."""
+    view = _view((106.0, 99.0, 105.5))  # TP target cleared on the (entry) bar
+    tracker = {"AAA": _tracked(just_opened=True)}
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view}, tracker)
+    assert reconcile is not None
+    label = reconcile(
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        qty=10.0,
+        return_pct=4.8,
+    )
+    assert label is None
+
+
+def test_non_entry_bar_is_reconciled_with_tracker() -> None:
+    """With the tracker present but the position past its entry bar
+    (just_opened False), reconciliation proceeds normally."""
+    view = _view((106.0, 99.0, 105.5))
+    tracker = {"AAA": _tracked(just_opened=False)}
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view}, tracker)
+    assert reconcile is not None
+    label = reconcile(
+        symbol="AAA",
+        side="long",
+        entry_price=100.0,
+        qty=10.0,
+        return_pct=4.8,
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
 
 
 # --- Short positions ------------------------------------------------------

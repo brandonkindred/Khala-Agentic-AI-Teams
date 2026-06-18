@@ -95,6 +95,7 @@ _RECONCILE_RETURN_SLACK_PP = 0.5
 def _build_exit_reconciler(
     exit_rules: Optional[Sequence[ExitRule]],
     views: Mapping[str, StreamingHistoryView],
+    position_tracker: Optional[Mapping[str, "_TrackedPosition"]] = None,
 ) -> Optional[Callable[..., Optional[str]]]:
     """Build the engine-side exit-attribution reconciler for a run.
 
@@ -109,6 +110,9 @@ def _build_exit_reconciler(
         empty).
       * ``views`` is the live per-symbol streaming-history map the run
         appends to each bar; signal-exit predicates read its latest bar.
+      * ``position_tracker`` is the run's live per-symbol tracker (or
+        ``None`` in isolation). It is consulted only to mirror the engine
+        exit dispatcher's entry-bar skip (see below).
 
     Postconditions:
       * Returns ``None`` iff ``exit_rules`` is empty — the FillSimulator
@@ -129,6 +133,15 @@ def _build_exit_reconciler(
         entry-price stop floor (−slack); trailing-basis stops are
         path-dependent and deferred (never stamped here).
       * ``signal_exit`` — no return bound; stamp when the predicate fired.
+        Stamped as ``engine_exit:signal_exit[<idx>]`` (with the spec rule
+        index) to match the engine's emitted form, so the rule-firing-rate
+        gate counts the reconciled close. TP/SL are stamped unbracketed to
+        match the alignment gate's exact-string check.
+
+    Entry-bar skip: a close whose signal bar is the entry bar of a
+    *non-market* entry is never reconciled (``position_tracker[sym]
+    .just_opened``), mirroring the dispatcher — the entry bar's pre-fill OHLC
+    is ambiguous and the engine deliberately does not own an exit there.
     """
     if not exit_rules:
         return None
@@ -158,6 +171,18 @@ def _build_exit_reconciler(
     ) -> Optional[str]:
         if qty <= 0:
             return None
+        # Mirror the engine exit dispatcher's entry-bar skip. ``just_opened``
+        # is True only for a non-market (limit/stop) entry on the bar it first
+        # appears; the dispatcher does not evaluate exit rules there because
+        # the bar's pre-fill OHLC is ambiguous. At this call site (during
+        # process_bar, before this bar's tracker update) the flag still
+        # reflects the signal bar, so reconciling would falsely attribute an
+        # exit the engine deliberately did not own. Market entries leave the
+        # flag False and may fire same-bar, matching the dispatcher.
+        if position_tracker is not None:
+            tracked = position_tracker.get(symbol)
+            if tracked is not None and tracked.just_opened:
+                return None
         # Evaluate every rule at the *signal bar* — the bar the strategy acted
         # on, one before the fill. At the fill simulator's exit-stamping site
         # the run loop has not yet appended the fill bar to ``views``, so the
@@ -195,7 +220,7 @@ def _build_exit_reconciler(
         # later, compliant rule and drop attribution. Evaluate each rule on its
         # own and stamp the first firing rule whose bound holds (spec order =
         # priority). An out-of-bounds firing rule falls through to the next.
-        for rule in rules:
+        for idx, rule in enumerate(rules):
             kind = getattr(rule, "kind", None)
             # Trailing-basis stops are path-dependent (running peak/trough);
             # deferred to the alignment gate, never reconciled here.
@@ -212,7 +237,11 @@ def _build_exit_reconciler(
             if kind == "stop_loss" and sl_floor is not None and return_pct >= sl_floor - slack:
                 return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
             if kind == "signal_exit":
-                return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+                # Match the engine's emitted form ``engine_exit:signal_exit[N]``
+                # (``_build_close_order``) so the rule-firing-rate gate, which
+                # only counts the bracketed form, credits the reconciled close.
+                # ``idx`` is the spec ``exit_rules`` index (== ``rule_index``).
+                return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[{idx}]"
         return None
 
     return _reconcile
@@ -1424,8 +1453,11 @@ class TradingService:
             # Reconcile strategy-initiated closes that comply with a structured
             # exit rule back to ``engine_exit:<kind>`` attribution. ``None`` when
             # the run has no ``exit_rules`` (e.g. compiled strategies), leaving
-            # the fill simulator's default behaviour unchanged.
-            exit_reconciler=_build_exit_reconciler(self._exit_rules, streaming_views),
+            # the fill simulator's default behaviour unchanged. ``position_tracker``
+            # is threaded so reconciliation mirrors the dispatcher's entry-bar skip.
+            exit_reconciler=_build_exit_reconciler(
+                self._exit_rules, streaming_views, position_tracker
+            ),
         )
 
         result = TradingServiceResult()
