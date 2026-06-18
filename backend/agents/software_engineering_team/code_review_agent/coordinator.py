@@ -6,13 +6,20 @@ Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars``
 of code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
-after recovery fails the whole run loudly with
-``CodeReviewUnavailableError`` — the review never renders a verdict on code
-it did not see.
+after recovery degrades to a blocking ``high`` "not reviewed" finding naming
+its range so the run completes over the chunks that succeeded while the merged
+review is rejected — unreviewed code never passes the gate as approved. The run
+still fails loudly with ``CodeReviewUnavailableError`` for infrastructure
+failures (rate limit, unreachable endpoint, auth/config) and when *no* chunk
+could be reviewed at all; an unexpected error (a defect in the reviewer code,
+not a known LLM content failure) propagates unchanged so it fails closed rather
+than being masked — the review never renders an approving verdict on code it
+did not see.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -26,6 +33,7 @@ from llm_service import (
     LLMPermanentError,
     LLMRateLimitError,
     LLMSchemaValidationError,
+    LLMSemanticExhaustionError,
     LLMUnreachableAfterRetriesError,
     compact_text,
 )
@@ -303,6 +311,39 @@ def build_review_chunks(
     return chunks
 
 
+def _prenumbered_line_numbers(seg: FileSegment) -> List[int]:
+    """Parse the embedded ``N: `` line-number prefixes of a pre-numbered segment.
+
+    Postconditions:
+        - Returns the parsed prefixes in content order; empty when the segment
+          is not pre-numbered or carries no parseable prefix.
+    """
+    if not seg.pre_numbered:
+        return []
+    return [
+        int(m.group(1))
+        for line in seg.content.splitlines()
+        if (m := _PRENUMBERED_LINE_RE.match(line)) is not None
+    ]
+
+
+def _segment_line_range(seg: FileSegment) -> Tuple[int, int]:
+    """Return the ``(start, end)`` original line numbers a segment covers.
+
+    Postconditions:
+        - Pre-numbered segments derive the range from their first/last embedded
+          ``N:`` prefixes — the positional ``start_line``/``end_line`` are
+          meaningless for PR-diff hunks, so a cited range stays aligned with the
+          real diff lines ``map_issues_to_comments`` anchors against.
+        - Plain segments (and pre-numbered segments with no parseable prefix)
+          fall back to the positional ``start_line``/``end_line``.
+    """
+    numbers = _prenumbered_line_numbers(seg)
+    if numbers:
+        return numbers[0], numbers[-1]
+    return seg.start_line, seg.end_line
+
+
 def _segment_range_label(seg: FileSegment) -> str:
     """Describe the original-file line range a segment covers.
 
@@ -312,14 +353,9 @@ def _segment_range_label(seg: FileSegment) -> str:
           ``start_line``–``end_line`` of ``total_lines``.
     """
     name = seg.path or "(headerless code)"
-    if seg.pre_numbered:
-        numbers = [
-            int(m.group(1))
-            for line in seg.content.splitlines()
-            if (m := _PRENUMBERED_LINE_RE.match(line)) is not None
-        ]
-        if numbers:
-            return f"{name} (original lines {numbers[0]}-{numbers[-1]})"
+    numbers = _prenumbered_line_numbers(seg)
+    if numbers:
+        return f"{name} (original lines {numbers[0]}-{numbers[-1]})"
     return f"{name} (lines {seg.start_line}-{seg.end_line} of {seg.total_lines})"
 
 
@@ -440,9 +476,11 @@ class _ChunkOutcome:
     """Accumulated result of reviewing one chunk (possibly via bisection).
 
     Invariants:
-        - ``approved_flags`` holds one entry per successful LLM sub-review;
-          a chunk that cannot be reviewed raises instead of producing an
-          outcome, so every outcome reflects reviewed code only.
+        - ``approved_flags`` holds one entry per successful LLM sub-review. A
+          chunk that could not be reviewed (a known content failure surviving
+          recovery) contributes a degraded outcome — a blocking ``high`` "not
+          reviewed" finding and no ``approved_flags`` entry — rather than
+          aborting the run, so unreviewed code is rejected, not silently scored.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
@@ -540,9 +578,115 @@ def _is_infra_failure(exc: BaseException) -> bool:
     return False
 
 
+# Failures that represent the *model* (not our code) returning unusable output
+# for a chunk. Only these may be retried/bisected and, if still unreviewable,
+# degraded to a not-reviewed finding. Any other exception is treated as an
+# unexpected defect and fails closed. ``json.JSONDecodeError`` is included
+# because the chunk reviewer parses the model's reply with a bare
+# ``json.loads`` — malformed model JSON surfaces as that raw error, not an
+# ``LLMJsonParseError``, and is just as recoverable.
+_CONTENT_FAILURE_TYPES = (
+    LLMJsonParseError,
+    LLMSchemaValidationError,
+    LLMSemanticExhaustionError,
+    json.JSONDecodeError,
+)
+
+
+def _is_content_failure(exc: BaseException) -> bool:
+    """Classify a chunk-review failure as a known, recoverable LLM content error.
+
+    Postconditions:
+        - Returns True only when the chain contains a known model-content
+          failure (``LLMJsonParseError``, ``LLMSchemaValidationError``,
+          ``LLMSemanticExhaustionError``, or a raw ``json.JSONDecodeError`` from
+          parsing the model's reply) — the failures a smaller or repeated input
+          might fix, or that a human can be asked to review manually.
+        - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
+          a bug in the reviewer code), so unexpected defects fail closed instead
+          of being masked as a not-reviewed finding.
+        - Walks the ``__cause__``/``__context__`` chain (strands may wrap the
+          client error) up to a bounded depth; never raises.
+    """
+    seen: set[int] = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen and len(seen) < 10:
+        seen.add(id(current))
+        if isinstance(current, _CONTENT_FAILURE_TYPES):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def _chunk_ranges(chunk: ReviewChunk) -> List[str]:
-    """Name every original-file line range the chunk covers."""
+    """Name every original-file line range the chunk covers.
+
+    Postconditions:
+        - Returns one human-readable label per segment, in segment order, via
+          ``_segment_range_label`` — used to name the ranges left unreviewed
+          when a chunk fails.
+    """
     return [_segment_range_label(seg) for seg in chunk.segments]
+
+
+def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
+    """Build a degraded outcome for a chunk that survived recovery unreviewed.
+
+    A known LLM content failure that survives retry and bisection down to an
+    un-splittable chunk does not abort the whole run: the chunk's code is named
+    by a blocking "not reviewed" finding so the gate rejects the review and a
+    human is alerted, while sibling chunks that succeeded still contribute their
+    own verdicts.
+
+    Preconditions:
+        - The failure was already classified a known content failure
+          (``_is_content_failure``) — not infra, not an unexpected defect — and
+          could be neither bisected further nor recovered by retry.
+
+    Postconditions:
+        - Returns one ``high``/``general`` finding per segment, spanning the
+          segment's original-file range via the model's multi-line convention
+          (``start_line`` = first line, ``line`` = last line — there is no
+          ``end_line`` field) and naming the range in its description, so no
+          covered line is silently dropped and downstream tools can highlight
+          the full extent.
+        - The findings are ``high`` severity, so ``_reconcile_approval`` rejects
+          the merged review: unreviewed code can never pass the code-review gate
+          as approved (the backend only feeds issues back on rejection). The
+          chunk casts no LLM approve/reject vote (``approved_flags`` is empty);
+          the block comes from the finding's severity.
+        - The finding text names only the failure *class*, never ``str(exc)``,
+          so raw model output carried by parse/schema errors is never published
+          downstream (e.g. by the ``/review-pr`` flow).
+    """
+    # Name only the failure *class*, never ``str(exc)``: parse/schema errors
+    # embed raw model output (e.g. ``LLMJsonParseError`` carries a 500-char
+    # response preview), and this finding is published verbatim by the
+    # ``/review-pr`` flow — interpolating the message would leak arbitrary
+    # model output / code excerpts into PR comments.
+    reason = type(exc).__name__
+    issues = []
+    for seg in chunk.segments:
+        start, end = _segment_line_range(seg)
+        issues.append(
+            CodeReviewIssue(
+                severity="high",
+                category="general",
+                file_path=seg.path,
+                start_line=start,
+                line=end,
+                description=(
+                    f"This code could not be reviewed automatically ({reason}); "
+                    f"{_segment_range_label(seg)} was not reviewed. Blocking review "
+                    "so unreviewed code is not approved."
+                ),
+                suggestion="Review this section manually; the automated reviewer could not process it.",
+            )
+        )
+    return _ChunkOutcome(
+        issues=issues,
+        summaries=[f"Not reviewed: {', '.join(_chunk_ranges(chunk))} ({reason})."],
+    )
 
 
 def _review_chunk_with_recovery(
@@ -559,14 +703,22 @@ def _review_chunk_with_recovery(
           (task/spec/architecture context), not per-chunk fields.
 
     Postconditions:
-        - Returns an outcome covering every line of the chunk, or raises
-          ``CodeReviewUnavailableError`` naming the unreviewed ranges — the
-          chunk is never silently skipped or scored.
-        - Infrastructure failures raise immediately without retry or bisection.
-        - Content failures bisect up to the depth cap; any chunk that cannot
-          bisect further — the original or a bisected child — gets exactly one
-          same-input retry before the run fails, so a one-off transient error
-          in a terminal child never aborts the review.
+        - Returns an outcome covering every line of the chunk — every line is
+          either reviewed or named by a blocking ``high`` "not reviewed"
+          finding — or raises. The chunk is never silently skipped or scored.
+        - Infrastructure failures raise ``CodeReviewUnavailableError``
+          immediately, without retry or bisection.
+        - Unexpected failures (anything not classified by ``_is_content_failure``
+          — e.g. a ``KeyError``/``TypeError`` from a reviewer bug) propagate
+          unchanged: they fail closed so the defect surfaces, rather than being
+          masked as a not-reviewed finding.
+        - Known content failures bisect up to the depth cap; any chunk that
+          cannot bisect further — the original or a bisected child — gets
+          exactly one same-input retry. A terminal content failure that survives
+          the retry degrades to a blocking ``high`` not-reviewed finding (via
+          ``_degraded_outcome``) rather than aborting the whole run; a one-off
+          transient error in a terminal child therefore never costs even that
+          child's review.
         - A sub-review that rejects with no extractable issues but a non-empty
           summary contributes one synthesized high issue built from that
           summary: applied here, per sub-review, because at the merged level
@@ -588,6 +740,13 @@ def _review_chunk_with_recovery(
                 "no verdict was produced for this submission.",
                 unreviewed=_chunk_ranges(chunk),
             ) from exc
+        if not _is_content_failure(exc):
+            # Not a known LLM content error — likely a defect in the reviewer
+            # code (KeyError/TypeError, a malformed return shape, etc.). Fail
+            # closed so the bug surfaces, rather than masking it as a
+            # not-reviewed finding that another approving chunk could carry
+            # past the gate.
+            raise
         halves = _bisect_chunk(chunk) if depth < _max_bisect_depth() else None
         if halves is not None:
             logger.warning(
@@ -608,10 +767,21 @@ def _review_chunk_with_recovery(
                 chunk.paths_label,
             )
             return _review_chunk_with_recovery(reviewer, chunk, base_input, depth, retried=True)
-        raise CodeReviewUnavailableError(
-            f"Chunk review failed after recovery attempts ({type(exc).__name__}: {exc}).",
-            unreviewed=_chunk_ranges(chunk),
-        ) from exc
+        # Known content failure that cannot bisect further and survived its
+        # retry: degrade instead of aborting the whole run. The chunk's code is
+        # named by a blocking ``high`` "not reviewed" finding (which rejects the
+        # merged review, so unreviewed code is never approved), while the chunks
+        # that did succeed still contribute their verdicts. (A run in which *no*
+        # chunk succeeds is caught by ``run_coordinator``'s total-failure guard,
+        # which still raises.)
+        logger.warning(
+            "CodeReviewCoordinator: chunk unreviewable after recovery (%s: %s) — "
+            "degrading to a not-reviewed finding [%s]",
+            type(exc).__name__,
+            exc,
+            chunk.paths_label,
+        )
+        return _degraded_outcome(chunk, exc)
     issues = _issues_from_chunk_output(chunk, output.issues)
     if not output.approved and not issues and output.summary and output.summary.strip():
         issues = [
@@ -757,9 +927,11 @@ def _map_chunks(
           state (clients injected here must support concurrent calls).
 
     Postconditions:
-        - Returns one outcome per chunk in input order, or raises
-          ``CodeReviewUnavailableError``. The first failure is observed as it
-          happens — never delayed behind an earlier, slower chunk — pending
+        - Returns one outcome per chunk in input order. A content failure that
+          survives recovery yields a degraded outcome rather than raising, so
+          it does not abort the fan-out. Only an infrastructure failure raises
+          ``CodeReviewUnavailableError``; the first such failure is observed as
+          it happens — never delayed behind an earlier, slower chunk — pending
           chunks are cancelled, and the exception propagates immediately;
           already-running reviews are left to finish in the background rather
           than blocking the failure behind in-flight model calls.
@@ -831,9 +1003,11 @@ def run_coordinator(
 
     Postconditions:
         - Every input file/line range is either reviewed or named: empty files
-          get info findings, and any chunk that cannot be reviewed after
-          recovery raises ``CodeReviewUnavailableError`` (no verdict is ever
-          rendered on partially reviewed code).
+          get info findings, and a chunk that cannot be reviewed after recovery
+          degrades to a blocking ``high`` "not reviewed" finding naming its
+          range while the run completes over the chunks that succeeded. The
+          degraded finding rejects the merged review, so unreviewed code never
+          passes the gate as approved; no covered line is silently dropped.
         - ``approved is False`` implies at least one critical/high issue.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
@@ -842,8 +1016,13 @@ def run_coordinator(
           successful return, including per-chunk ``reviewing`` reports.
 
     Raises:
-        CodeReviewUnavailableError: when the review model is unavailable or a
-            chunk remains unreviewable after retry and bisection.
+        CodeReviewUnavailableError: when the review model is unavailable
+            (an infrastructure failure: rate limit, unreachable endpoint, or
+            auth/config error), or when *no* chunk could be reviewed at all —
+            the run never renders a verdict on a submission it did not see.
+        Exception: an unexpected reviewer defect (not a known LLM content
+            failure) propagates unchanged, failing closed so the bug surfaces
+            instead of being masked as a not-reviewed finding.
     """
     notify_review_progress(progress_callback, "preparing", "preparing review input", 0.05)
     blocks, skipped_empty = _blocks_from_input(input_data)
@@ -910,6 +1089,17 @@ def run_coordinator(
     outcome = _ChunkOutcome()
     for per_chunk in _map_chunks(chunk_reviewer, chunks, base_input, progress_callback):
         outcome.absorb(per_chunk)
+
+    # Total-failure guard: individual chunks degrade gracefully to a
+    # not-reviewed finding, but a run in which *no* chunk produced a verdict
+    # has reviewed nothing — rendering approved/rejected here would be a
+    # verdict on code we never saw. Fail loudly instead, naming what went
+    # unreviewed (the degraded info findings already record the ranges).
+    if not outcome.approved_flags:
+        raise CodeReviewUnavailableError(
+            "No chunk could be reviewed after recovery; no verdict was produced for this submission.",
+            unreviewed=[i.description for i in outcome.issues],
+        )
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
