@@ -5,8 +5,10 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 from __future__ import annotations
 
 import base64
+import fcntl
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -27,6 +29,11 @@ from pydantic import BaseModel, Field  # noqa: E402
 from coding_team import hitl  # noqa: E402
 from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.agent_status import build_agent_statuses  # noqa: E402
+from coding_team.clone_workspace import (  # noqa: E402
+    clone_lock_path,
+    is_per_issue_dir,
+    is_within_ephemeral_workspace,
+)
 from coding_team.github_source import (  # noqa: E402
     GitHubAPIError,
     GitHubClient,
@@ -310,6 +317,14 @@ class RunFromGitHubRequest(BaseModel):
         description="PR base; defaults to the repo's default branch.",
     )
     remote: str = Field(default="origin", description="Git remote name in repo_path")
+    cleanup_checkout_on_success: bool = Field(
+        default=False,
+        description=(
+            "When true, the per-issue checkout at repo_path is platform-owned and ephemeral: "
+            "delete it after the job completes cleanly and the work is published to a PR. "
+            "Defaults to false so an operator-managed checkout is never removed."
+        ),
+    )
 
 
 class RunFromGitHubResponse(BaseModel):
@@ -649,6 +664,9 @@ def _start_github_resume_thread(
         - A daemon thread is running the hook-path resume; on thread-start failure the claim is
           released and the exception propagates. A failed issue re-fetch inside the thread marks
           the job failed rather than silently degrading to the hook-less path.
+        - The resumed run reproduces the fresh run's checkout-cleanup decision, read from
+          ``ctx['cleanup_checkout_on_success']`` (absent for jobs persisted before this field
+          existed → ``False``, the safe no-cleanup default).
     """
     request = RunFromGitHubRequest(
         owner=str(ctx["owner"]),
@@ -657,6 +675,10 @@ def _start_github_resume_thread(
         issue_number=int(ctx["issue_number"]),
         base_branch=ctx.get("base_branch"),
         remote=str(ctx.get("remote") or "origin"),
+        # `is True` (not bool()) so any non-bool persisted value — e.g. a string
+        # "False" from a future serialization change, which bool() would read as
+        # truthy — fails safe to no-cleanup rather than deleting the checkout.
+        cleanup_checkout_on_success=ctx.get("cleanup_checkout_on_success") is True,
     )
 
     def run() -> None:
@@ -1206,6 +1228,10 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             "issue_url": issue.html_url,
             "base_branch": request.base_branch,
             "remote": request.remote,
+            # Persisted so a resume reconstructs the SAME cleanup decision the
+            # fresh run made; without it a resumed job would default to False and
+            # leak its ephemeral per-issue checkout on clean completion.
+            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
         },
     }
     # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,
@@ -1892,6 +1918,196 @@ def _clear_active_issue_if_matches(repo_path: str, issue_number: int) -> None:
         _clear_active_issue(repo_path)
 
 
+def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
+    """Resolve ``repo_path`` and return it iff it is a platform-owned per-issue
+    git checkout safe to delete; otherwise ``None``.
+
+    Resolving here (and handing the resolved ``Path`` back) means the path that is
+    *validated* is the exact symlink-collapsed path the caller then deletes,
+    closing the check-resolved / delete-raw-string gap a directory→symlink swap
+    could otherwise exploit. Four conditions must all hold:
+
+    1. the checkout root itself is NOT a symlink — a legitimate platform-owned
+       per-issue checkout is a real directory created by ``git clone``. Resolving
+       a symlinked root would follow it to its target, so a job that replaced its
+       own ``issue-7`` directory with a symlink to a concurrently-running
+       ``issue-8`` checkout would otherwise make cleanup delete the *sibling*;
+    2. the path lives strictly under one of this deployment's ephemeral
+       workspace roots (``is_within_ephemeral_workspace``) — so an
+       operator-pinned or arbitrary path is never eligible (and a filesystem
+       root or shallow system dir like ``/`` or ``/data`` is excluded because it
+       is not under a workspace root), even if a caller sets the cleanup flag and
+       points ``repo_path`` at someone else's repo;
+    3. its final component is the auto-derived ``issue-{N}`` per-issue shape
+       (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
+       ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
+       is never deleted, matching the contract that only per-issue clones are
+       reclaimed;
+    4. it is actually a git checkout (carries a ``.git`` entry).
+
+    Preconditions:
+        - None on caller state; ``repo_path`` may be any string (it is validated
+          here precisely because it originates from an untrusted request).
+    Postconditions:
+        - Returns the resolved ``Path`` when all four conditions hold; ``None`` on
+          any resolution error (null byte / unresolvable) or when any condition
+          fails. Pure apart from filesystem reads.
+    """
+    try:
+        raw = Path(repo_path)
+        resolved = raw.resolve()
+        root_is_symlink = raw.is_symlink()
+    except (OSError, ValueError):
+        return None
+    # Refuse a symlinked checkout root: resolving it would follow the link to its
+    # target and delete *that* (e.g. a sibling issue-N checkout), not the job's own
+    # directory. A real per-issue checkout is never a symlink.
+    if root_is_symlink:
+        return None
+    # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
+    # path resolves without raising; passing the already-resolved path to is_within
+    # keeps its internal resolve idempotent.
+    if not is_within_ephemeral_workspace(resolved):
+        return None
+    if not is_per_issue_dir(resolved.name):
+        return None
+    if not (resolved / ".git").exists():
+        return None
+    return resolved
+
+
+def _is_ephemeral_checkout_path(repo_path: str) -> bool:
+    """True only for a platform-owned per-issue git checkout that is safe to delete.
+
+    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the four
+    conditions and the threat model). Kept as a predicate for call sites that only
+    need the yes/no answer.
+
+    Preconditions:
+        - None on caller state; ``repo_path`` may be any string.
+    Postconditions:
+        - Returns True iff ``_ephemeral_checkout_target`` resolves a deletable
+          checkout for ``repo_path``; False otherwise. Pure apart from filesystem
+          reads.
+    """
+    return _ephemeral_checkout_target(repo_path) is not None
+
+
+def _cleanup_issue_checkout(repo_path: str) -> None:
+    """Remove a platform-owned, ephemeral per-issue checkout after clean success.
+
+    Only called once the job has completed with every task merged and the work
+    published to a PR, so the local clone holds nothing the remote does not. The
+    folder is recreated by the caller's clone-or-fetch on a later run.
+
+    Concurrency:
+        The ``rmtree`` runs while holding the SAME sibling ``flock`` that
+        unified_api's ``_ensure_repo_clone`` takes around clone/fetch. Without it,
+        a quick ``/api/integrations/github/run-issue`` retry — whose clone happens
+        in unified_api *before* the coding-team active-job guard runs — could
+        clone/fetch into the directory mid-rmtree. The lock lives in the
+        checkout's parent, so it survives the rmtree. The lock file is
+        deliberately NOT unlinked: unlinking a flock'd file lets a waiter keep the
+        old (now-orphaned) inode while a later run creates a fresh lock file and
+        locks the new inode, so two runs would each think they hold "the" lock.
+        Leaving it makes a stable per-issue lock both clone and cleanup share; the
+        files are tiny and bounded by the number of distinct issues per repo.
+
+    Postconditions:
+        - Best-effort: the checkout is removed only when
+          ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
+          platform-owned, non-shallow per-issue git checkout under an ephemeral
+          root, and the resolved (symlink-collapsed) path it returns is the one
+          deleted; an unsafe path is refused (logged, left in place). Never
+          raises — a cleanup failure (permissions, lock unavailable, race with a
+          concurrent reader) must not turn a successful job into a failure; it is
+          caught and logged. The success line is logged only after ``rmtree``
+          returns.
+
+    Note:
+        ``rmtree`` is not atomic. A failure partway through can leave a
+        partially-deleted directory at ``repo_path`` (possibly missing
+        ``.git``); the retained lock keeps serialising access, but a later retry
+        whose ``_ensure_repo_clone`` finds a non-empty, non-git directory will
+        fail its ``git clone`` and the leftover must be cleared manually. This is
+        rare (``rmtree`` usually fails atomically on a permission error) and the
+        published work is already safe on the remote PR.
+    """
+    target = _ephemeral_checkout_target(repo_path)
+    if target is None:
+        logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
+        return
+
+    # Hold the clone lock around the delete so a concurrent _ensure_repo_clone
+    # can't interleave a clone/fetch into the directory being removed. Key the lock
+    # on the RESOLVED checkout path (not the raw request string): _ensure_repo_clone
+    # receives the already-resolved checkout path from _resolve_repo_path, so keying
+    # on the raw string would, for a symlinked path, lock a different name and leave
+    # the real checkout unguarded. The lock lives in the checkout's parent, so it
+    # outlives the rmtree. clone_lock_path would only raise ValueError on an
+    # empty-name path, which a validated per-issue target never is — but guard it
+    # anyway so a future change can't break the "never raises" contract.
+    try:
+        lock_path = clone_lock_path(target)
+    except ValueError as e:
+        logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
+        return
+    try:
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
+    except OSError as e:
+        # Can't take the lock (e.g. parent vanished) — skip rather than delete
+        # unsynchronised and risk racing a concurrent clone. Best-effort.
+        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
+        return
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            # flock can fail (e.g. ENOLCK on some network filesystems). Cleanup must
+            # never turn a successful job into a failure, so skip rather than let it
+            # propagate — honouring the "never raises" contract.
+            logger.warning(
+                "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
+            )
+            return
+        # Re-validate under the lock, but on the SAME resolved ``target`` captured
+        # before locking — NOT by re-resolving the raw ``repo_path``. Re-resolving
+        # would let a symlink swapped between the first resolve and lock
+        # acquisition redirect the delete to a different checkout than the one this
+        # lock protects (the lock is keyed on the original ``target``). Operating
+        # on the fixed resolved path closes that window: it is the real directory
+        # (never a symlink), so rmtree hits the intended checkout, and rmtree does
+        # not follow symlinks *inside* the tree (it unlinks the link, never its
+        # target), so a symlink planted in the checkout can't redirect the delete.
+        if not (
+            is_within_ephemeral_workspace(target)
+            and is_per_issue_dir(target.name)
+            and (target / ".git").exists()
+        ):
+            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
+            return
+        try:
+            shutil.rmtree(target)
+            logger.info("Removed ephemeral per-issue checkout at %s", target)
+        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+            # exc_info so a partial-rmtree failure (the non-atomic case noted
+            # above) is diagnosable from the traceback, not just the message.
+            logger.warning(
+                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+            )
+    finally:
+        # Release and close, but do NOT unlink the lock file (see Concurrency).
+        # Both are wrapped so a degenerate flock/close can't break "never raises".
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            lock_file.close()
+        except OSError:
+            pass
+
+
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:
     """True if ref resolves to a commit and has commits not reachable from base_ref."""
     rc, _ = _git(repo_path, "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}")
@@ -2546,11 +2762,30 @@ def _run_with_github_hooks(
         # to this job's issue: a sibling job for another issue may have
         # re-marked the checkout since this job prepped.
         _clear_active_issue_if_matches(request.repo_path, num)
+
+        # Drop the per-issue clone only on a clean completion: every task merged
+        # and the work published to the PR, so nothing local is unrecoverable. A
+        # partial result (some tasks FAILED) keeps the checkout so a retry can
+        # seed from its local progress, as does every earlier failure return.
+        # Operator-managed checkouts never set the flag, so they are never removed.
+        #
+        # Cleanup runs BEFORE the terminal status update so the job stays in
+        # list_jobs(active_only=True) while the checkout is being removed: a
+        # quick same-issue retry is then rejected by the duplicate guard in
+        # /run-from-github instead of cloning into a directory mid-rmtree. That
+        # guard (_running_job_for_issue) scans the active-jobs list by
+        # github_context, NOT the active-issue git-config marker cleared just
+        # above — the marker only attributes leftover work to an issue after a
+        # job dies — so clearing the marker early does not open the race.
+        if not failed and request.cleanup_checkout_on_success:
+            _cleanup_issue_checkout(request.repo_path)
+
         # Terminal status comes last: the busy-checkout guard treats a
         # terminal job as done with the checkout, so this must be the hook's
-        # final action after every checkout-touching step above. A job that
-        # merged some work but also has failed tasks is reported as a partial
-        # success so it is not presented as a clean completion.
+        # final action after every checkout-touching step above (including the
+        # cleanup rmtree). A job that merged some work but also has failed tasks
+        # is reported as a partial success so it is not presented as a clean
+        # completion.
         update_job(
             job_id,
             status="completed_with_failures" if failed else "completed",
