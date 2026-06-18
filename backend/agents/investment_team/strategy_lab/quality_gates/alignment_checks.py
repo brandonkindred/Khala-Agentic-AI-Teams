@@ -8,8 +8,13 @@ structured :class:`StrategySpec`:
   1. Universe — ``trade.symbol in spec.target_symbols``
   2. Side — ``trade.side`` matches an entry rule's declared side
   3. Sizing — ``trade.position_value`` within ±1% of the sizing formula
-  4. Stop-loss compliance — return floor respected (or engine-closed)
-  5. Take-profit compliance — return ceiling respected (or engine-closed)
+  4. Stop-loss attribution — engine-attributed stop closes pass; a
+     realized loss past the nominal floor on a non-attributed close is
+     INFORMATIONAL only (a stop is a trigger, not a price cap — fills
+     gap past the threshold and other rules may close first).
+  5. Take-profit attribution — symmetric to #4: engine-attributed
+     take-profit closes pass; a realized gain past the nominal ceiling
+     on a non-attributed close is INFORMATIONAL only.
   6. Entry-signal correlation — predicate(s) evaluate ``True`` on the
      entry bar; near-misses (within
      ``STRATEGY_LAB_ALIGNMENT_NEAR_MISS_PCT``) optionally route to a
@@ -804,33 +809,50 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             gate_results.append(self._emit_for_finding(finding))
             return
 
-        # Account for transaction costs + slippage when validating the
-        # observed return against the spec's stop-loss floor. A 5% stop
-        # on a strategy with 5 bps cost + 2 bps slippage realistically
-        # bottoms at -5.07%, not -5.00%.
+        # No engine stop-loss attribution. A stop-loss is a TRIGGER that
+        # submits a sell order — it is NOT a hard cap on realized loss.
+        # Prices move tick-to-tick, gap between bars, and carry a bid/ask
+        # spread, so the fill price (and therefore ``return_pct``)
+        # routinely lands past the nominal floor. A non-attributed close
+        # below the floor means one of:
+        #   - the strategy (or another exit rule) closed the position; a
+        #     market exit can fill on a next-bar gap-down open beneath the
+        #     floor before the engine evaluates that bar; or
+        #   - another rule (e.g. a signal exit) fired first on the same bar.
+        # Either way the position WAS exited to limit further loss, which
+        # is the stop's entire purpose. Treating ``return_pct < floor`` as
+        # a hard-limit breach is a category error — a stop cannot bound
+        # realized loss tick-for-tick. The genuine "stop never fired"
+        # enforcement leak is owned by ``ExitRuleConformanceGate``, which
+        # has the per-symbol firing telemetry this per-trade view lacks.
+        # Emit an INFORMATIONAL (passing) row so the audit ledger is
+        # self-describing without a false-positive critical.
         return_pct = float(trade.return_pct)
         floor_pct = -tightest * 100.0
-        # Allow a small absolute slack (0.5 percentage point) on top of
-        # the strict floor to absorb cost/slippage drift without forcing
-        # the gate to know the exact fee model.
-        slack = 0.5
-        passed = return_pct >= floor_pct - slack
+        reason = trade.exit_reason or "strategy/other exit"
+        if return_pct < floor_pct:
+            details = (
+                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% is past the "
+                f"nominal stop-loss floor {floor_pct:.2f}%; closed via {reason!r} "
+                "(not engine_exit:stop_loss). A stop-loss is a trigger, not a price "
+                "guarantee — the fill can land past the threshold on a gap/spread, or "
+                "another exit closed the position first. The position was still "
+                "exited to limit further loss; this is expected market behaviour, not "
+                "a spec misalignment. Engine-side stop firing is verified "
+                "deterministically by the exit-rule conformance gate."
+            )
+        else:
+            details = (
+                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% is within the "
+                f"nominal stop-loss floor {floor_pct:.2f}%; closed via {reason!r}."
+            )
         finding = AlignmentFinding(
             trade_num=trade.trade_num,
             rule_id="exit:stop_loss",
             check_name="stop_loss",
-            passed=passed,
-            severity="info" if passed else "critical",
-            details=(
-                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% within "
-                f"stop-loss floor {floor_pct:.2f}% (±{slack:.2f}pp slack)."
-                if passed
-                else (
-                    f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% breaches "
-                    f"stop-loss floor {floor_pct:.2f}% (±{slack:.2f}pp slack) and "
-                    "exit_reason is not engine_exit:stop_loss."
-                )
-            ),
+            passed=True,
+            severity="info",
+            details=details,
             computed_value=return_pct,
             expected_value=floor_pct,
         )
@@ -871,31 +893,38 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             gate_results.append(self._emit_for_finding(finding))
             return
 
+        # No engine take-profit attribution. Symmetric to the stop-loss
+        # check: a take-profit is a TRIGGER, not a price cap. A position
+        # can fill past the nominal ceiling on a gap-up (the engine
+        # detects the trigger on bar N and fills bar N+1's open), or
+        # another exit rule may have closed the position first. A
+        # non-attributed close above the ceiling is therefore expected
+        # market behaviour, not a misalignment — emit an INFORMATIONAL
+        # (passing) row rather than a false-positive critical.
         return_pct = float(trade.return_pct)
         ceiling_pct = tightest * 100.0
-        # Symmetry with stop-loss: trades may close slightly past the
-        # spec ceiling via gap-up. The check is "did the engine ever
-        # let a position carry materially past the take-profit ceiling
-        # without engine attribution?". 0.5pp absolute slack is the
-        # same forgiveness we extend to the stop-loss floor.
-        slack = 0.5
-        passed = return_pct <= ceiling_pct + slack
+        reason = trade.exit_reason or "strategy/other exit"
+        if return_pct > ceiling_pct:
+            details = (
+                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% is past the "
+                f"nominal take-profit ceiling {ceiling_pct:.2f}%; closed via {reason!r} "
+                "(not engine_exit:take_profit). A take-profit is a trigger, not a price "
+                "guarantee — the fill can land past the threshold on a gap-up, or "
+                "another exit closed the position first. Engine-side take-profit firing "
+                "is verified deterministically by the exit-rule conformance gate."
+            )
+        else:
+            details = (
+                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% is within the "
+                f"nominal take-profit ceiling {ceiling_pct:.2f}%; closed via {reason!r}."
+            )
         finding = AlignmentFinding(
             trade_num=trade.trade_num,
             rule_id="exit:take_profit",
             check_name="take_profit",
-            passed=passed,
-            severity="info" if passed else "critical",
-            details=(
-                f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% within "
-                f"take-profit ceiling {ceiling_pct:.2f}% (±{slack:.2f}pp slack)."
-                if passed
-                else (
-                    f"Trade #{trade.trade_num} return_pct={return_pct:.2f}% exceeds "
-                    f"take-profit ceiling {ceiling_pct:.2f}% (±{slack:.2f}pp slack) "
-                    "and exit_reason is not engine_exit:take_profit."
-                )
-            ),
+            passed=True,
+            severity="info",
+            details=details,
             computed_value=return_pct,
             expected_value=ceiling_pct,
         )
