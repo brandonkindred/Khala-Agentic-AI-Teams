@@ -34,6 +34,10 @@ def _write(dir_: Path, team: str, filename: str, body: str) -> None:
 
 @pytest.fixture()
 def client(tmp_path: Path) -> TestClient:
+    # Isolated registry: these synthetic manifests are loaded from tmp_path, NOT the
+    # real on-disk catalog. This blogging.planner deliberately omits a cognition
+    # block (unlike the shipped Blog Planner manifest), so it is the no-cognition
+    # case for the summary-flag assertions below.
     _write(
         tmp_path,
         "blogging",
