@@ -7,6 +7,8 @@ Reads configuration from environment variables:
   TEAM_NAME                      — job-service team name for shutdown hooks
   TEAM_TEMPORAL_WORKER_MODULE    — optional Temporal worker module path
   TEAM_TEMPORAL_WORKER_FUNC      — optional Temporal worker start function name
+  TEAM_WORKERS                   — uvicorn worker processes (default 2; set 1 to
+                                   shrink the per-team memory footprint)
 """
 
 import atexit
@@ -55,6 +57,31 @@ TEAM_PORT = int(os.environ.get("TEAM_PORT", "8090"))
 TEAM_NAME = os.environ.get("TEAM_NAME", "team")
 TEMPORAL_MODULE = os.environ.get("TEAM_TEMPORAL_WORKER_MODULE", "").strip()
 TEMPORAL_FUNC = os.environ.get("TEAM_TEMPORAL_WORKER_FUNC", "").strip()
+
+
+def _env_int(name: str, default: int, *, minimum: int = 1) -> int:
+    """Parse a positive int from env var *name*, defensively.
+
+    Preconditions:
+        - ``default >= minimum``.
+    Postconditions:
+        - Returns the parsed int clamped to ``>= minimum``; falls back to
+          *default* when the var is unset/blank/non-numeric. Never raises.
+    """
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return default
+    return value if value >= minimum else minimum
+
+
+# Each uvicorn worker is a full Python interpreter loading the whole app, so on a
+# memory-constrained host fewer workers means a materially smaller footprint.
+# Default 2 preserves prior behavior; the docker stack sets TEAM_WORKERS=1.
+TEAM_WORKERS = _env_int("TEAM_WORKERS", 2, minimum=1)
 
 
 def _start_temporal_worker() -> None:
@@ -275,7 +302,13 @@ def _startup_recovery() -> None:
 
 
 if __name__ == "__main__":
-    logger.info("Starting %s on port %d (module=%s)", TEAM_NAME, TEAM_PORT, TEAM_MODULE)
+    logger.info(
+        "Starting %s on port %d (module=%s, workers=%d)",
+        TEAM_NAME,
+        TEAM_PORT,
+        TEAM_MODULE,
+        TEAM_WORKERS,
+    )
     # Arm fault diagnostics in the supervisor process first; forked workers
     # inherit faulthandler, and the generated wrapper re-arms it per worker.
     try:
@@ -292,6 +325,6 @@ if __name__ == "__main__":
         app_import,
         host="0.0.0.0",
         port=TEAM_PORT,
-        workers=2,
+        workers=TEAM_WORKERS,
         log_level="info",
     )

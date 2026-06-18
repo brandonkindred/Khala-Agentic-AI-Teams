@@ -168,6 +168,95 @@ def test_detect_memory_limit_ignores_unlimited_sentinels(monkeypatch, tmp_path) 
     assert ph.detect_memory_limit_bytes() is None
 
 
+# ------------------------------------------------------------------ OOM-kill detection
+
+
+def test_read_oom_kill_count_parses_memory_events(tmp_path) -> None:
+    """memory.events is multi-line key/value; extract the oom_kill counter."""
+    events = tmp_path / "memory.events"
+    events.write_text("low 0\nhigh 0\nmax 0\noom 0\noom_kill 2\noom_group_kill 0\n")
+    assert ph.read_oom_kill_count(str(events)) == 2
+
+
+def test_read_oom_kill_count_missing_key_or_file(tmp_path) -> None:
+    no_key = tmp_path / "memory.events"
+    no_key.write_text("low 0\nhigh 0\nmax 0\noom 0\n")  # no oom_kill line
+    assert ph.read_oom_kill_count(str(no_key)) is None
+    assert ph.read_oom_kill_count(str(tmp_path / "absent")) is None
+    garbage = tmp_path / "g"
+    garbage.write_text("oom_kill not-a-number\n")
+    assert ph.read_oom_kill_count(str(garbage)) is None
+
+
+def test_read_memory_peak_bytes(tmp_path) -> None:
+    peak = tmp_path / "memory.peak"
+    peak.write_text(str(730669056))
+    assert ph.read_memory_peak_bytes(str(peak)) == 730669056
+    assert ph.read_memory_peak_bytes(str(tmp_path / "absent")) is None
+
+
+def test_oom_check_tick_detects_increment() -> None:
+    limit = 4 * 1024 * 1024 * 1024
+    # First sample with no prior baseline: adopt the count, no message.
+    count, msg = ph._oom_check_tick(
+        None, limit_bytes=limit, events_reader=lambda: 2, peak_reader=lambda: 1
+    )
+    assert count == 2 and msg is None
+    # No change: no message.
+    count, msg = ph._oom_check_tick(
+        2, limit_bytes=limit, events_reader=lambda: 2, peak_reader=lambda: 1
+    )
+    assert count == 2 and msg is None
+    # Increment: a new OOM kill — loud message naming SIGKILL + global-OOM hint.
+    count, msg = ph._oom_check_tick(
+        2,
+        limit_bytes=limit,
+        events_reader=lambda: 3,
+        peak_reader=lambda: 700 * 1024 * 1024,
+    )
+    assert count == 3 and msg is not None
+    assert "OOM kill" in msg and "SIGKILL" in msg and "global OOM" in msg
+
+
+def test_oom_check_tick_unreadable_is_noop() -> None:
+    count, msg = ph._oom_check_tick(
+        5, limit_bytes=100, events_reader=lambda: None, peak_reader=lambda: None
+    )
+    assert count == 5 and msg is None
+
+
+def test_watchdog_loop_logs_oom_kill(monkeypatch, caplog) -> None:
+    """An oom_kill counter increment between samples logs an ERROR even though the
+    worker that died left no traceback — the core visibility fix."""
+    stop = threading.Event()
+    counts = iter([0, 1])  # baseline 0 (pre-loop), then 1 (in-loop) => increment
+
+    def fake_oom(*_a, **_k):
+        try:
+            return next(counts)
+        except StopIteration:
+            return 1
+
+    def fake_usage(*_a, **_k):
+        stop.set()  # exit after one iteration
+        return 0  # no memory-pressure warning, isolate the OOM-kill path
+
+    monkeypatch.setattr(ph, "read_oom_kill_count", fake_oom)
+    monkeypatch.setattr(ph, "read_memory_peak_bytes", lambda *a, **k: 700 * 1024 * 1024)
+    monkeypatch.setattr(ph, "read_memory_usage_bytes", fake_usage)
+    logger = logging.getLogger("test.ph.oomloop")
+    with caplog.at_level(logging.ERROR, logger="test.ph.oomloop"):
+        ph._watchdog_loop(
+            team="investment_team",
+            limit_bytes=4 * 1024 * 1024 * 1024,
+            threshold=0.85,
+            interval_s=0.01,
+            stop_event=stop,
+            logger=logger,
+        )
+    assert any("OOM kill detected" in r.getMessage() for r in caplog.records)
+
+
 # --------------------------------------------------------------- pressure / tick / loop
 
 

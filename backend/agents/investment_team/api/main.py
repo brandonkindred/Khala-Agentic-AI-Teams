@@ -137,6 +137,14 @@ def _env_positive_int(name: str, default: int) -> int:
 # it becomes the Pydantic Field `le=` constraint; operators can override via env.
 _MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
 
+# Hard ceiling on how many Strategy Lab cycles run concurrently per wave,
+# independent of the request's ``max_parallel``. Each concurrent cycle holds its
+# own market data + LLM contexts in the single worker process, so on a
+# memory-constrained host this caps the worker's peak footprint (the dominant
+# driver of OOM kills). Defaults to the request field's max (6) — i.e. no extra
+# constraint — so operators opt into tighter limits via env.
+_MAX_CONCURRENT_CYCLES = _env_positive_int("STRATEGY_LAB_MAX_CONCURRENT_CYCLES", 6)
+
 init_otel(service_name="investment-team", team_key="investment")
 
 
@@ -1561,7 +1569,17 @@ def _strategy_lab_worker(
         batch_size = request.batch_size
         batch_count = request.batch_count
         total_cycles = batch_size * batch_count
-        max_parallel = request.max_parallel
+        # Clamp the request's concurrency to the env-configured ceiling so a
+        # memory-constrained host can bound the worker's peak footprint (each
+        # concurrent cycle holds its own market data + LLM contexts in-process).
+        max_parallel = min(request.max_parallel, _MAX_CONCURRENT_CYCLES)
+        if max_parallel < request.max_parallel:
+            logger.info(
+                "Strategy Lab concurrency capped to %d (requested %d) via "
+                "STRATEGY_LAB_MAX_CONCURRENT_CYCLES",
+                max_parallel,
+                request.max_parallel,
+            )
 
         # Translate the user's positive category selection into the exclusion
         # list the design pipeline consumes. ``allowed_asset_classes`` is already
