@@ -207,6 +207,9 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.stopPolling();
     this.runsSub?.unsubscribe();
     this.runsSub = null;
+    // Drop the selected-run bookkeeping so nothing pairs with a dead view.
+    this.selectedRunId = null;
+    this.selectedRunNumber = null;
     if (this.copyResetTimer) {
       clearTimeout(this.copyResetTimer);
       this.copyResetTimer = null;
@@ -287,6 +290,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return this.issues.slice(start, start + this.pageSize);
   }
 
+  /**
+   * Handle a paginator event: adopt the new page index/size and rebuild the visible issue view-models.
+   *
+   * Preconditions: `event` carries the paginator's new `pageIndex`/`pageSize`.
+   * Postconditions: `pageIndex`/`pageSize` reflect `event` and `pagedIssueVms` matches the new slice.
+   */
   onPageChange(event: PageEvent): void {
     this.pageIndex = event.pageIndex;
     this.pageSize = event.pageSize;
@@ -298,6 +307,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.selectedIssue = issue;
   }
 
+  /** Clear the issue selection, collapsing the inline confirmation panel. */
   cancelSelection(): void {
     this.selectedIssue = null;
   }
@@ -333,6 +343,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.recentRunVms = this.recentRuns.map((r) => this.toRunVm(r));
   }
 
+  /**
+   * Build one run row's view-model so the template binds plain fields instead of calling helpers.
+   *
+   * Preconditions: none.
+   * Postconditions: returns a `RunRowVm`; `detail` is null for a terminal run (no live status line).
+   */
   private toRunVm(run: CodingTeamJobListItem): RunRowVm {
     return {
       run,
@@ -497,6 +513,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const selectedInSnapshot =
       this.selectedRunId != null && mine.some((j) => j.job_id === this.selectedRunId);
     if (
+      this.selectedRunId != null &&
       this.selectedRunNumber != null &&
       !selectedInSnapshot &&
       !isCodingTeamTerminalStatus(this.jobStatus?.status)
@@ -561,14 +578,18 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * (deselect + stop polling) when it is the open one.
    *
    * Preconditions: `run` is a row in `runs`.
-   * Postconditions: when `run` was the selected row, `selectedRunId`/`jobStatus` are cleared and the
-   * status poll is stopped (the 15s list poll keeps the row's badge fresh); otherwise `run` becomes
-   * the selected, expanded row and its status poll starts.
+   * Postconditions: when `run` was the selected row, `selectedRunId`/`selectedRunNumber`/`jobStatus`
+   * are cleared and the status poll is stopped (the 15s list poll keeps the row's badge fresh) — so a
+   * later snapshot can't re-add a stale "In progress" chip for the deselected run; otherwise `run`
+   * becomes the selected, expanded row and its status poll starts.
    */
   toggleRun(run: CodingTeamJobListItem): void {
     if (this.selectedRunId === run.job_id) {
       this.stopPolling();
       this.selectedRunId = null;
+      // Clear the issue number too: applyRuns keeps a chip alive for the selected run's issue, so a
+      // lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue.
+      this.selectedRunNumber = null;
       this.jobStatus = null;
       return;
     }
@@ -776,6 +797,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     return isCodingTeamTerminalStatus(this.jobStatus?.status);
   }
 
+  /** Record the job id emitted when the assistant launches a coding workflow (drives the banner). */
   onWorkflowLaunched(event: { job_id: string | null; conversation_id: string }): void {
     this.latestJobId = event.job_id;
   }

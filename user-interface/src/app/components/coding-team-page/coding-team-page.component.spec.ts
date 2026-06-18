@@ -855,6 +855,28 @@ describe('CodingTeamPageComponent', () => {
       expect(fixture.nativeElement.querySelector('.run-detail')).toBeNull();
     });
 
+    it('drops the "In progress" chip when a run is collapsed, even after it finishes', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([ghRun({ job_id: 'r1', status: 'running', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } })]),
+      );
+      await setup();
+      await flushAsync();
+      // The running run is auto-selected and its issue shows "In progress".
+      expect(component.selectedRunId).toBe('r1');
+      expect(component.activeIssueNumbers.has(2)).toBe(true);
+
+      // Collapsing the run drops the selection *and* its issue number.
+      component.toggleRun(component.runs[0]);
+      expect(component.selectedRunId).toBeNull();
+      expect(component.selectedRunNumber).toBeNull();
+
+      // A later poll that reports the run finished must not re-add a stale chip for the deselected run.
+      component['applyRuns']([
+        ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
+      ]);
+      expect(component.activeIssueNumbers.has(2)).toBe(false);
+    });
+
     it('auto-selects a non-terminal run on first load and starts polling it', async () => {
       apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'j-restore' })]));
       await setup();

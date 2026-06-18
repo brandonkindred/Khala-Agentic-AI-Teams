@@ -106,6 +106,8 @@
                 class="github-issue-row"
                 type="button"
                 [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
+                [attr.aria-expanded]="selectedIssue?.number === vm.number"
+                [attr.aria-controls]="'confirm-panel-' + vm.number"
                 (click)="selectIssue(vm.issue)"
               >
                 <span class="github-issue-row__number">#{{ vm.number }}</span>
@@ -144,7 +146,7 @@
 
               <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
               @if (selectedIssue?.number === vm.number) {
-                <div class="github-confirm-panel">
+                <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
                   <h3>Start AI coding on this issue?</h3>
                   <div class="github-confirm-panel__issue">
                     <span class="issue-number">#{{ selectedIssue!.number }}</span>
@@ -279,6 +281,7 @@
         type="button"
         [class.selected]="selectedRunId === vm.run.job_id"
         [attr.aria-expanded]="selectedRunId === vm.run.job_id"
+        [attr.aria-controls]="'run-detail-' + vm.run.job_id"
         (click)="toggleRun(vm.run)"
       >
         <div class="coding-run-item__top">
@@ -302,7 +305,7 @@
     <!-- The selected run's live progress, expanded inline beneath its row. -->
     <ng-template #runDetail>
       @if (jobStatus) {
-        <div class="run-detail">
+        <div class="run-detail" [id]="'run-detail-' + selectedRunId">
           <div class="run-detail__header">
             <mat-icon>engineering</mat-icon>
             <h3>
