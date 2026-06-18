@@ -171,16 +171,21 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
   /** Whether the selected run has reached a terminal state, precomputed from `jobStatus` (the detail
    * panel binds this instead of calling `isJobTerminal()`). */
   jobStatusTerminal = false;
+  /** Whether the selected run is paused on questions, precomputed from `jobStatus` (the detail panel
+   * binds this instead of calling `hasPendingQuestions()` each change-detection cycle). */
+  jobStatusHasPendingQuestions = false;
 
   get jobStatus(): CodingTeamJobStatus | null {
     return this._jobStatus;
   }
 
-  /** Setting the polled status refreshes the precomputed badge class and terminal flag. */
+  /** Setting the polled status refreshes the precomputed badge class, terminal flag, and pending-questions flag. */
   set jobStatus(status: CodingTeamJobStatus | null) {
     this._jobStatus = status;
     this.jobStatusBadgeClass = this.badgeClass(status?.status);
     this.jobStatusTerminal = isCodingTeamTerminalStatus(status?.status);
+    this.jobStatusHasPendingQuestions =
+      !!status?.waiting_for_answers && (status?.pending_questions?.length ?? 0) > 0;
   }
 
   /**
@@ -479,6 +484,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
             }),
           ),
         ),
+        takeUntilDestroyed(this.destroyRef),
       )
       .subscribe((jobs) => this.applyRuns(jobs));
   }
@@ -512,11 +518,12 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         .map((j) => j.github_context?.issue_number)
         .filter((n): n is number => n != null),
     );
-    // Preserve the chip for a just-started run the snapshot does not list yet, but only while the run
-    // is genuinely absent from the snapshot and not yet observed terminal. Once the snapshot lists the
-    // run we trust the snapshot's own status — so a finished run is dropped and selecting a terminal
-    // (Recent) run never re-adds an "In progress" chip. Keying off the snapshot, not the possibly
-    // stale polled `jobStatus`, avoids a chip lingering for seconds after a run completes.
+    // Preserve the chip for a just-started run the snapshot does not list yet — but only while the
+    // run is genuinely absent from the snapshot (`selectedInSnapshot`) AND the polled status has not
+    // gone terminal. Once the snapshot lists the run, OR the polled status reports it finished, the
+    // chip is dropped — so a finished run, or selecting a terminal (Recent) run, never re-adds an
+    // "In progress" chip. Consulting the polled status here (not just the list snapshot) drops the
+    // chip promptly, without waiting a full list-poll cycle for the run to move to Recent.
     const selectedInSnapshot =
       this.selectedRunId != null && mine.some((j) => j.job_id === this.selectedRunId);
     if (
@@ -728,20 +735,25 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * already in flight before the answers were stored — a stale response would otherwise re-render
    * the just-answered questions — and also revives polling after a connection loss (answering proves
    * the connection is back), so the stale "lost connection" error is cleared too.
+   *
+   * Preconditions: none.
+   * Postconditions: a no-op unless the emitted status carries `job_id`/`status` AND its `job_id`
+   * matches the currently selected run — so a slow submit that resolves after the user switched runs
+   * can't fold the wrong run's status in or restart polling for it.
    */
   onAnswersSubmitted(status: AnswersSubmittedStatus): void {
     // This page always configures the panel with submitEndpoint="coding-team", so the emitted union
-    // member is always the coding-team status shape — but verify the discriminating fields are
-    // present rather than asserting blindly, so a future change to the child's emission can't
-    // silently fold a foreign shape into `jobStatus`.
-    if ('job_id' in status && 'status' in status) {
-      this.jobStatus = status as CodingTeamJobStatus;
-    }
+    // member is the coding-team status shape — but verify the discriminating fields are present
+    // rather than asserting blindly, so a future change to the child's emission can't fold a foreign
+    // shape into `jobStatus`.
+    if (!('job_id' in status) || !('status' in status)) return;
+    // Ignore a status for a run the user has since switched away from (a slow submit could resolve
+    // after the selection changed).
+    if (this.selectedRunId == null || status.job_id !== this.selectedRunId) return;
+    this.jobStatus = status as CodingTeamJobStatus;
     this.issueError = null;
     this.jobStatusError = null;
-    if (this.selectedRunId) {
-      this.startPolling(this.selectedRunId);
-    }
+    this.startPolling(this.selectedRunId);
   }
 
   /** True when a non-terminal coding-team run is already working this issue. */

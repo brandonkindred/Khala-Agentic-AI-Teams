@@ -150,13 +150,13 @@
                 <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
                   <h3>Start AI coding on this issue?</h3>
                   <div class="github-confirm-panel__issue">
-                    <span class="issue-number">#{{ selectedIssue!.number }}</span>
-                    <span class="issue-title">{{ selectedIssue!.title }}</span>
+                    <span class="issue-number">#{{ vm.number }}</span>
+                    <span class="issue-title">{{ vm.title }}</span>
                   </div>
-                  @if (selectedIssue!.body_preview) {
-                    <p class="github-confirm-panel__preview">{{ selectedIssue!.body_preview }}</p>
+                  @if (vm.issue.body_preview) {
+                    <p class="github-confirm-panel__preview">{{ vm.issue.body_preview }}</p>
                   }
-                  @if (selectedIssue!.blocked) {
+                  @if (vm.blocked) {
                     <div class="github-confirm-panel__warning" role="alert">
                       <mat-icon aria-hidden="true">block</mat-icon>
                       <div>
@@ -217,13 +217,13 @@
 <!-- ────────────────────────────────────────────────────────────────── -->
 @if (activeView === 'jobs') {
   <section class="jobs-panel kh-card">
-    <div class="runs-panel__header">
+    <div class="jobs-panel__header">
       <h2>
         <mat-icon aria-hidden="true">engineering</mat-icon>
         Runs
       </h2>
       <mat-icon
-        class="runs-panel__legend"
+        class="jobs-panel__legend"
         matTooltip="Runs stay here while they work and after they finish. Pick a run to expand its live progress."
         aria-label="About the Runs list"
       >help_outline</mat-icon>
@@ -237,7 +237,7 @@
     }
 
     @if (runs.length === 0) {
-      <div class="kh-empty-state runs-panel__empty">
+      <div class="kh-empty-state jobs-panel__empty">
         <mat-icon class="kh-empty-icon" aria-hidden="true">rocket_launch</mat-icon>
         <span class="kh-empty-title">No runs yet</span>
         <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
@@ -370,7 +370,7 @@
                 </div>
               </div>
             }
-            @if (hasPendingQuestions()) {
+            @if (jobStatusHasPendingQuestions) {
               <div class="github-banner github-banner--waiting" role="status">
                 <mat-icon aria-hidden="true">help_outline</mat-icon>
                 <span>The coding team is paused and needs your decisions before it can continue.</span>

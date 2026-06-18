@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
 import { of, throwError } from 'rxjs';
-import type { CodingTeamJobListItem } from '../../models/coding-team.model';
+import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -689,7 +689,7 @@ describe('CodingTeamPageComponent', () => {
       component.issueError = 'Lost connection to the coding team — status polling failed.';
 
       const resumed = { job_id: 'j1', status: 'running', waiting_for_answers: false };
-      component.onAnswersSubmitted(resumed as never);
+      component.onAnswersSubmitted(resumed as CodingTeamJobStatus);
 
       expect(component.jobStatus).toEqual(resumed);
       expect(staleSub?.closed).toBe(true);
@@ -703,10 +703,20 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       component.selectedRunId = 'j1';
       component.jobStatus = { job_id: 'j1', status: 'running' };
-      component.onAnswersSubmitted({ foo: 'bar' } as never);
+      component.onAnswersSubmitted({ foo: 'bar' } as unknown as CodingTeamJobStatus);
       // A foreign shape is never folded into jobStatus — the prior status is preserved.
       expect(component.jobStatus).toEqual({ job_id: 'j1', status: 'running' });
       component['stopPolling']();
+    });
+
+    it('onAnswersSubmitted ignores a status whose job_id is not the selected run', async () => {
+      await setup();
+      component.selectedRunId = 'current';
+      component.jobStatus = { job_id: 'current', status: 'running' };
+      // A slow submit resolving after the user switched runs must not overwrite the current run.
+      component.onAnswersSubmitted({ job_id: 'other', status: 'completed' } as CodingTeamJobStatus);
+      expect(component.jobStatus).toEqual({ job_id: 'current', status: 'running' });
+      expect(component['pollSub']).toBeNull();
     });
   });
 
@@ -759,7 +769,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
       await flushAsync();
       showView('jobs');
-      expect(fixture.nativeElement.querySelector('.runs-panel__empty')).not.toBeNull();
+      expect(fixture.nativeElement.querySelector('.jobs-panel__empty')).not.toBeNull();
     });
 
     it('renders Running and Recent sections without a delete button', async () => {
