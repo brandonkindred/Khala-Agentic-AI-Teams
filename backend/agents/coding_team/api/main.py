@@ -2052,15 +2052,21 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
                 "Skipping checkout cleanup; could not acquire clone lock %s: %s", lock_path, e
             )
             return
-        # Re-validate under the lock: the first check ran before we held it, so
-        # confirm the target is still a deletable per-issue checkout, and delete
-        # the resolved (symlink-collapsed) path it returns — not the raw request
-        # string. The resolved path is the real directory (never a symlink), so
-        # rmtree operates on the intended checkout; and rmtree does not follow
-        # symlinks *inside* the tree (it unlinks the link, never its target), so a
-        # symlink planted in the checkout cannot redirect the delete outside it.
-        target = _ephemeral_checkout_target(repo_path)
-        if target is None:
+        # Re-validate under the lock, but on the SAME resolved ``target`` captured
+        # before locking — NOT by re-resolving the raw ``repo_path``. Re-resolving
+        # would let a symlink swapped between the first resolve and lock
+        # acquisition redirect the delete to a different checkout than the one this
+        # lock protects (the lock is keyed on the original ``target``). Operating
+        # on the fixed resolved path closes that window: it is the real directory
+        # (never a symlink), so rmtree hits the intended checkout, and rmtree does
+        # not follow symlinks *inside* the tree (it unlinks the link, never its
+        # target), so a symlink planted in the checkout can't redirect the delete.
+        if not (
+            is_within_ephemeral_workspace(target)
+            and is_per_issue_dir(target.name)
+            and (target / ".git").exists()
+        ):
+            logger.warning("Checkout no longer a deletable per-issue path under lock: %s", target)
             return
         try:
             shutil.rmtree(target)

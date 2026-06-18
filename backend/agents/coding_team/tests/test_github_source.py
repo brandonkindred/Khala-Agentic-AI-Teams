@@ -1818,6 +1818,40 @@ class TestEphemeralCheckoutCleanup:
         assert captured["path"] == (real / "issue-7").resolve()
         assert not (real / "issue-7").exists()
 
+    def test_cleanup_symlink_swap_during_lock_spares_other_checkout(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        """A symlink swapped between the initial resolve and lock acquisition can't
+        redirect the delete: cleanup removes the originally-resolved checkout and
+        leaves the swapped-in checkout untouched."""
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        a = tmp_path / "real_a" / "issue-7"
+        (a / ".git").mkdir(parents=True)
+        b = tmp_path / "real_b" / "issue-7"
+        (b / ".git").mkdir(parents=True)
+        link = tmp_path / "link"
+        link.symlink_to(tmp_path / "real_a", target_is_directory=True)  # initially → A
+
+        state = {"swapped": False}
+        orig_flock = api.fcntl.flock
+
+        def _swap_then_lock(fd, op):
+            # Swap the symlink to B's parent exactly once, at lock acquisition,
+            # i.e. between the initial resolve (which captured A) and the delete.
+            if not state["swapped"]:
+                link.unlink()
+                link.symlink_to(tmp_path / "real_b", target_is_directory=True)
+                state["swapped"] = True
+            return orig_flock(fd, op)
+
+        monkeypatch.setattr(api.fcntl, "flock", _swap_then_lock)
+        api._cleanup_issue_checkout(str(link / "issue-7"))  # resolves to A first
+        assert not a.exists()  # the originally-resolved checkout is removed
+        assert b.exists()  # the swapped-in checkout is spared
+
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
         """On clean completion with the flag set, the per-issue checkout is deleted."""
         # Per-issue checkout (``issue-N``) directly under an ephemeral root, so it
