@@ -1925,32 +1925,44 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     Resolving here (and handing the resolved ``Path`` back) means the path that is
     *validated* is the exact symlink-collapsed path the caller then deletes,
     closing the check-resolved / delete-raw-string gap a directory→symlink swap
-    could otherwise exploit. Three conditions must all hold:
+    could otherwise exploit. Four conditions must all hold:
 
-    1. the path lives strictly under one of this deployment's ephemeral
+    1. the checkout root itself is NOT a symlink — a legitimate platform-owned
+       per-issue checkout is a real directory created by ``git clone``. Resolving
+       a symlinked root would follow it to its target, so a job that replaced its
+       own ``issue-7`` directory with a symlink to a concurrently-running
+       ``issue-8`` checkout would otherwise make cleanup delete the *sibling*;
+    2. the path lives strictly under one of this deployment's ephemeral
        workspace roots (``is_within_ephemeral_workspace``) — so an
        operator-pinned or arbitrary path is never eligible (and a filesystem
        root or shallow system dir like ``/`` or ``/data`` is excluded because it
        is not under a workspace root), even if a caller sets the cleanup flag and
        points ``repo_path`` at someone else's repo;
-    2. its final component is the auto-derived ``issue-{N}`` per-issue shape
+    3. its final component is the auto-derived ``issue-{N}`` per-issue shape
        (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
        ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
        is never deleted, matching the contract that only per-issue clones are
        reclaimed;
-    3. it is actually a git checkout (carries a ``.git`` entry).
+    4. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
         - None on caller state; ``repo_path`` may be any string (it is validated
           here precisely because it originates from an untrusted request).
     Postconditions:
-        - Returns the resolved ``Path`` when all three conditions hold; ``None`` on
+        - Returns the resolved ``Path`` when all four conditions hold; ``None`` on
           any resolution error (null byte / unresolvable) or when any condition
           fails. Pure apart from filesystem reads.
     """
     try:
-        resolved = Path(repo_path).resolve()
+        raw = Path(repo_path)
+        resolved = raw.resolve()
+        root_is_symlink = raw.is_symlink()
     except (OSError, ValueError):
+        return None
+    # Refuse a symlinked checkout root: resolving it would follow the link to its
+    # target and delete *that* (e.g. a sibling issue-N checkout), not the job's own
+    # directory. A real per-issue checkout is never a symlink.
+    if root_is_symlink:
         return None
     # ``resolve()`` defaults to ``strict=False`` (Python 3.6+), so a not-yet-created
     # path resolves without raising; passing the already-resolved path to is_within
@@ -1967,7 +1979,7 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
 def _is_ephemeral_checkout_path(repo_path: str) -> bool:
     """True only for a platform-owned per-issue git checkout that is safe to delete.
 
-    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the three
+    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the four
     conditions and the threat model). Kept as a predicate for call sites that only
     need the yes/no answer.
 

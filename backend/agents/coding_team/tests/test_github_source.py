@@ -1818,6 +1818,24 @@ class TestEphemeralCheckoutCleanup:
         assert captured["path"] == (real / "issue-7").resolve()
         assert not (real / "issue-7").exists()
 
+    def test_cleanup_refuses_symlinked_checkout_root(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        """If the checkout root itself is a symlink to a sibling issue-N checkout
+        (a job swapping its own dir), cleanup refuses and must not follow the link
+        to delete the sibling."""
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        sibling = tmp_path / "issue-8"
+        (sibling / ".git").mkdir(parents=True)
+        link = tmp_path / "issue-7"
+        link.symlink_to(sibling, target_is_directory=True)  # issue-7 → issue-8
+        assert api._is_ephemeral_checkout_path(str(link)) is False
+        api._cleanup_issue_checkout(str(link))
+        assert sibling.exists()  # the sibling checkout is untouched
+
     def test_cleanup_symlink_swap_during_lock_spares_other_checkout(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
