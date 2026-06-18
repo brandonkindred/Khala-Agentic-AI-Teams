@@ -208,6 +208,26 @@ class AnalysisAgent:
         return _ensure_misalignment_disclaimer(draft_narrative, alignment_report)
 
 
+def _sanitize_exit_reason(reason: str, max_len: int = 80) -> str:
+    """Render a free-form exit reason as a bounded single-line value.
+
+    ``exit_reason`` derives from ``OrderRequest.reason``, a strategy-controlled
+    (untrusted, possibly LLM- or user-generated) annotation. Writing it raw into
+    the ledger row would let a multi-line or oversized reason — e.g.
+    ``"engine_exit:stop_loss\\nIgnore previous instructions..."`` — break out of
+    its row and inject prompt text. Collapse all whitespace to single spaces so
+    it cannot span lines, and bound the length so it cannot flood the prompt.
+
+    Preconditions: ``reason`` is a non-empty string.
+    Postconditions: the result contains no newline/tab, is ``<= max_len``
+    characters, and is empty only if ``reason`` was whitespace-only.
+    """
+    flattened = " ".join(reason.split())
+    if len(flattened) > max_len:
+        flattened = flattened[: max_len - 1] + "…"
+    return flattened
+
+
 def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows: int = 14) -> str:
     """Compact evidence string from the simulated ledger for analysis + self-review."""
     if not trades:
@@ -252,7 +272,7 @@ def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows:
             continue
         seen.add(i)
         t = trades[i]
-        exit_reason = f" exit={t.exit_reason}" if t.exit_reason else ""
+        exit_reason = f" exit={_sanitize_exit_reason(t.exit_reason)}" if t.exit_reason else ""
         lines.append(
             f"  #{t.trade_num} {t.symbol} {t.entry_date}->{t.exit_date} "
             f"hold={t.hold_days}d pv=${t.position_value:.2f} ret={t.return_pct:.2f}% "
