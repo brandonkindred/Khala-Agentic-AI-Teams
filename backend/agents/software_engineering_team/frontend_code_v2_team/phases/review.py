@@ -61,6 +61,10 @@ def _run_llm_review(
           and every chunk is reviewed; issues from all chunks are returned.
           No file content is silently truncated away, so a large file's tail is
           reviewed rather than dropped. Blank files contribute nothing.
+        - A chunk that is itself over budget (a single line longer than the cap,
+          e.g. a minified bundle) is hard-split at character boundaries before
+          the LLM call, so it is never sent in one prompt that may overflow the
+          context and be skipped, leaving the file unreviewed.
         - A chunk whose LLM call or parse fails is logged and skipped; issues
           from the other chunks are still returned (one bad chunk never aborts
           the whole review).
@@ -69,7 +73,10 @@ def _run_llm_review(
     # Imported lazily, fully-qualified, to match this module's existing
     # convention for code_review_agent imports and to avoid assuming the
     # software_engineering_team package dir is itself on sys.path.
-    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+    from software_engineering_team.code_review_agent.coordinator import (
+        build_review_chunks,
+        cap_chunk_content,
+    )
 
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
     if not blocks:
@@ -89,30 +96,34 @@ def _run_llm_review(
     issues: List[ReviewIssue] = []
     for idx, chunk in enumerate(chunks, start=1):
         logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
-        prompt = REVIEW_PROMPT.format(
-            requirements=task.requirements or task.description,
-            acceptance_criteria=", ".join(task.acceptance_criteria)
-            if task.acceptance_criteria
-            else "N/A",
-            code=chunk.content,
-        )
-        try:
-            raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-            data = parse_review_template(raw)
-        except Exception as exc:
-            logger.warning("LLM code review: chunk %d/%d failed: %s", idx, len(chunks), exc)
-            continue
-        for item in data.get("issues") or []:
-            if isinstance(item, dict):
-                issues.append(
-                    ReviewIssue(
-                        source=item.get("source", "code_review"),
-                        severity=item.get("severity", "medium"),
-                        description=item.get("description", ""),
-                        file_path=item.get("file_path", ""),
-                        recommendation=item.get("recommendation", ""),
+        # A chunk holding a single line longer than the cap is over budget by
+        # contract; hard-split it at character boundaries so the whole file is
+        # reviewed rather than sent in one prompt that may overflow and be skipped.
+        for piece in cap_chunk_content(chunk.content, MAX_REVIEW_CODE_CHARS):
+            prompt = REVIEW_PROMPT.format(
+                requirements=task.requirements or task.description,
+                acceptance_criteria=", ".join(task.acceptance_criteria)
+                if task.acceptance_criteria
+                else "N/A",
+                code=piece,
+            )
+            try:
+                raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+                data = parse_review_template(raw)
+            except Exception as exc:
+                logger.warning("LLM code review: chunk %d/%d failed: %s", idx, len(chunks), exc)
+                continue
+            for item in data.get("issues") or []:
+                if isinstance(item, dict):
+                    issues.append(
+                        ReviewIssue(
+                            source=item.get("source", "code_review"),
+                            severity=item.get("severity", "medium"),
+                            description=item.get("description", ""),
+                            file_path=item.get("file_path", ""),
+                            recommendation=item.get("recommendation", ""),
+                        )
                     )
-                )
     return issues
 
 
@@ -142,12 +153,19 @@ def _run_chunked_agent_review(
           boundaries (``build_review_chunks``) and every chunk is reviewed, so a
           large file's tail is reviewed rather than silently truncated away.
           Blank files contribute nothing.
+        - A chunk that is itself over budget (a single line longer than the cap,
+          e.g. a minified bundle) is hard-split at character boundaries before
+          ``run_chunk``, so it is never sent in one call that may overflow the
+          agent's context and be skipped, leaving the file unreviewed.
         - Small inputs are reviewed in a single call, as before.
         - A chunk whose ``run_chunk`` call fails is logged and skipped; issues
           from the other chunks are still returned (one bad chunk never aborts
           the whole review).
     """
-    from software_engineering_team.code_review_agent.coordinator import build_review_chunks
+    from software_engineering_team.code_review_agent.coordinator import (
+        build_review_chunks,
+        cap_chunk_content,
+    )
 
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
     if not blocks:
@@ -164,33 +182,34 @@ def _run_chunked_agent_review(
         )
     issues: List[ReviewIssue] = []
     for idx, chunk in enumerate(chunks, start=1):
-        try:
-            items = run_chunk(chunk.content)
-        except Exception as exc:
-            logger.warning(
-                "[%s] %s failed (chunk %d/%d)%s: %s",
-                task_id,
-                label,
-                idx,
-                len(chunks),
-                context,
-                exc,
-            )
-            continue
-        for item in items or []:
-            issues.append(
-                ReviewIssue(
-                    source=source,
-                    severity=getattr(item, "severity", default_severity),
-                    description=getattr(item, "description", str(item)),
-                    # `location` may be present but None; fall back to file_path
-                    # (and "") so file_path is always a string, never None.
-                    file_path=getattr(item, "location", None)
-                    or getattr(item, "file_path", None)
-                    or "",
-                    recommendation=getattr(item, "recommendation", ""),
+        for piece in cap_chunk_content(chunk.content, MAX_REVIEW_CODE_CHARS):
+            try:
+                items = run_chunk(piece)
+            except Exception as exc:
+                logger.warning(
+                    "[%s] %s failed (chunk %d/%d)%s: %s",
+                    task_id,
+                    label,
+                    idx,
+                    len(chunks),
+                    context,
+                    exc,
                 )
-            )
+                continue
+            for item in items or []:
+                issues.append(
+                    ReviewIssue(
+                        source=source,
+                        severity=getattr(item, "severity", default_severity),
+                        description=getattr(item, "description", str(item)),
+                        # `location` may be present but None; fall back to file_path
+                        # (and "") so file_path is always a string, never None.
+                        file_path=getattr(item, "location", None)
+                        or getattr(item, "file_path", None)
+                        or "",
+                        recommendation=getattr(item, "recommendation", ""),
+                    )
+                )
     return issues
 
 

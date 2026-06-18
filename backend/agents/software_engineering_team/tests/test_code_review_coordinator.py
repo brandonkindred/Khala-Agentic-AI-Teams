@@ -20,6 +20,7 @@ from code_review_agent.coordinator import (
     _segment_range_label,
     _validate_line,
     build_review_chunks,
+    cap_chunk_content,
     parse_code_into_file_blocks,
     run_coordinator,
     split_block_into_segments,
@@ -559,6 +560,24 @@ def test_build_review_chunks_oversized_single_line_sits_alone() -> None:
     oversized = [c for c in chunks if any(s.path == "a.py" for s in c.segments)]
     assert len(oversized) == 1
     assert [s.path for s in oversized[0].segments] == ["a.py"]
+
+
+def test_cap_chunk_content_passes_through_within_budget() -> None:
+    content = "x" * 9_999
+    assert cap_chunk_content(content, 10_000) == [content]
+
+
+def test_cap_chunk_content_splits_oversized_into_bounded_pieces() -> None:
+    content = "y" * 25_001  # an unsplittable single line over the cap
+    pieces = cap_chunk_content(content, 10_000)
+    assert len(pieces) == 3
+    assert "".join(pieces) == content  # nothing dropped or duplicated
+    assert all(len(p) <= 10_000 for p in pieces)
+
+
+def test_cap_chunk_content_rejects_nonpositive_cap() -> None:
+    with pytest.raises(AssertionError):
+        cap_chunk_content("abc", 0)
 
 
 def test_review_chunk_paths_label_marks_partial_segments() -> None:

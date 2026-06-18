@@ -409,6 +409,119 @@ def test_fe_run_security_agent_chunks_large_input_without_dropping_tail():
     assert all(i.source == "security" for i in issues)
 
 
+def _oversized_single_line() -> str:
+    """A single source line longer than the per-call budget.
+
+    A minified bundle / long one-line data literal that ``build_review_chunks``
+    cannot split at a line boundary, so it returns one over-budget chunk. The
+    review paths must hard-split it at character boundaries before any agent call.
+    """
+    from software_engineering_team.frontend_code_v2_team.phases.review import MAX_REVIEW_CODE_CHARS
+
+    line = "const DATA='" + ("a" * (MAX_REVIEW_CODE_CHARS + 5_000)) + "';"
+    assert "\n" not in line  # unsplittable at a line boundary
+    assert len(line) > MAX_REVIEW_CODE_CHARS
+    return line
+
+
+def test_fe_run_qa_agent_hard_splits_oversized_single_line():
+    """A single line over the cap is hard-split so every QA call stays within
+    budget and the file is reviewed instead of sent in one oversized, skippable call."""
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        MAX_REVIEW_CODE_CHARS,
+        _run_qa_agent,
+    )
+
+    codes: list[str] = []
+
+    class _QAAgent:
+        def run(self, inp):
+            codes.append(inp.code)
+            return MagicMock(bugs_found=[_Bug()])
+
+    issues = _run_qa_agent(
+        qa_agent=_QAAgent(),
+        files={"bundle.js": _oversized_single_line()},
+        language="typescript",
+        task_description="t",
+        task_id="t1",
+    )
+
+    assert len(codes) > 1  # hard-split, not one oversized call
+    assert all(len(c) <= MAX_REVIEW_CODE_CHARS for c in codes)  # every piece bounded
+    # The header-labeled chunk content is split into pieces; the whole original
+    # line survives intact across them (nothing dropped).
+    assert _oversized_single_line() in "".join(codes)
+    assert len(issues) == len(codes)
+    assert all(i.source == "qa" for i in issues)
+
+
+def test_fe_run_security_agent_hard_splits_oversized_single_line():
+    """Same hard-split guarantee for the security agent path."""
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        MAX_REVIEW_CODE_CHARS,
+        _run_security_agent,
+    )
+
+    codes: list[str] = []
+
+    class _SecAgent:
+        def run(self, inp):
+            codes.append(inp.code)
+            return MagicMock(vulnerabilities=[_Vuln()])
+
+    issues = _run_security_agent(
+        security_agent=_SecAgent(),
+        files={"bundle.js": _oversized_single_line()},
+        language="typescript",
+        task_description="t",
+        task_id="t1",
+    )
+
+    assert len(codes) > 1
+    assert all(len(c) <= MAX_REVIEW_CODE_CHARS for c in codes)
+    assert _oversized_single_line() in "".join(codes)
+    assert all(i.source == "security" for i in issues)
+
+
+def test_fe_run_llm_review_hard_splits_oversized_single_line(monkeypatch):
+    """The LLM fallback also hard-splits an oversized single line so the file is
+    not sent in one prompt that may overflow the context and be skipped."""
+    from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
+    from software_engineering_team.frontend_code_v2_team.phases.review import (
+        MAX_REVIEW_CODE_CHARS,
+        _run_llm_review,
+    )
+
+    codes: list[str] = []
+    clean = (
+        "## PASSED ##\ntrue\n## END PASSED ##\n"
+        "## ISSUES ##\n## END ISSUES ##\n"
+        "## SUMMARY ##\nok\n## END SUMMARY ##\n"
+    )
+
+    class _RecordingAgent:
+        def __init__(self, *a, **kw):
+            pass
+
+        def __call__(self, prompt):
+            codes.append(prompt)
+            return clean
+
+    monkeypatch.setattr(review_mod, "Agent", lambda *a, **kw: _RecordingAgent())
+    monkeypatch.setattr(review_mod, "resolve_text_mode_strands_model", lambda llm: object())
+
+    from software_engineering_team.code_review_agent.coordinator import cap_chunk_content
+
+    full = _oversized_single_line()
+    _run_llm_review(llm=MagicMock(), task=_task(), files={"bundle.js": full})
+
+    # One oversized chunk → one prompt per character-bounded piece.
+    assert len(codes) == len(cap_chunk_content(full, MAX_REVIEW_CODE_CHARS)) > 1
+    # The whole oversized line never fits in any single prompt — it was split.
+    assert not any(full in prompt for prompt in codes)
+
+
 def test_fe_run_security_agent_single_call_for_small_input():
     """Inputs that already fit are reviewed in one call (no regression)."""
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_security_agent
