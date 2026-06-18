@@ -644,7 +644,8 @@ def run_documentation_self_review(
         for chunk_idx, code_chunk in enumerate(code_chunks, start=1):
             # Recompute per chunk so refinements made against earlier chunks are
             # visible to later ones. Documentation is passed in full (no clip) so
-            # the model can rewrite any file's tail.
+            # the model can rewrite any file's tail; callers are expected to keep
+            # per-microtask documentation within the model's context budget.
             doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
 
             prompt = DOCUMENTATION_SELF_REVIEW_PROMPT.format(
@@ -656,12 +657,13 @@ def run_documentation_self_review(
             )
 
             try:
-                raw = (lambda _r: str(_r))(
-                    Agent(model=resolve_text_mode_strands_model(llm))(prompt)
-                ).strip()
+                raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+                parsed = parse_documentation_self_review_template(raw)
             except Exception as exc:
+                # Covers both the LLM call and parsing: a malformed response must
+                # not abort the review — log and move to the next chunk.
                 logger.warning(
-                    "Documentation self-review LLM call failed (iteration %d, chunk %d/%d): %s",
+                    "Documentation self-review chunk failed (iteration %d, chunk %d/%d): %s",
                     iteration,
                     chunk_idx,
                     len(code_chunks),
@@ -669,7 +671,6 @@ def run_documentation_self_review(
                 )
                 continue
 
-            parsed = parse_documentation_self_review_template(raw)
             quality_score = parsed.get("quality_score", 0.5)
             improvements = parsed.get("improvements", [])
             updated_files = parsed.get("files", {})

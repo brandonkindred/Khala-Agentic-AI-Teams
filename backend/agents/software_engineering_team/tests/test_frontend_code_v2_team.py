@@ -463,3 +463,61 @@ class TestDocReviewManyChunksWarning:
             chunks = review_mod._doc_review_code_chunks(code_files)
         assert len(chunks) > 0
         assert any("code chunk(s)" in r.message for r in caplog.records)
+
+
+def _doc_response(score: float) -> str:
+    return (
+        f"## QUALITY_SCORE ##\n{score}\n## END QUALITY_SCORE ##\n"
+        "## IMPROVEMENTS ##\n- tweak\n## END IMPROVEMENTS ##\n"
+        "## FILE docs/readme.md ##\nRefined\n"
+        "## SUMMARY ##\ndone\n## END SUMMARY ##"
+    )
+
+
+class _ScriptedDocClient(DummyLLMClient):
+    """Returns a different canned response on each ``complete_json`` call."""
+
+    def __init__(self, responses: list) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        resp = (
+            self._responses[self._idx] if self._idx < len(self._responses) else self._responses[-1]
+        )
+        self._idx += 1
+        return resp
+
+
+class TestDocReviewMinScoreAcrossChunks:
+    def test_iteration_score_is_min_across_chunks(self):
+        from frontend_code_v2_team.phases.review import (
+            _doc_review_code_chunks,
+            run_documentation_self_review,
+        )
+
+        code_files = {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(6)}
+        n_chunks = len(_doc_review_code_chunks(code_files))
+        assert n_chunks >= 2
+        # First chunk scores high, the rest low → iteration score is the minimum.
+        responses = [_doc_response(0.95)] + [_doc_response(0.80)] * (n_chunks - 1)
+        client = _ScriptedDocClient(responses)
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old"},
+            code_files=code_files,
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+        )
+        assert result.final_quality_score == 0.80
