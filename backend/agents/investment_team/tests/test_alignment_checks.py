@@ -458,10 +458,13 @@ def test_stop_loss_passes_when_engine_attribution_present() -> None:
     assert sl.severity == "info"
 
 
-def test_stop_loss_passes_when_return_within_floor_with_slack() -> None:
+def test_stop_loss_past_floor_is_informational_pass() -> None:
+    """A non-attributed close past the nominal floor is informational and
+    passing — a stop is a trigger, so realized loss beyond the threshold is
+    expected, not a breach."""
     gate = DeterministicAlignmentChecker()
     spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
-    trade = _trade(return_pct=-5.30)  # 0.30pp past the 5% floor, within 0.5pp slack
+    trade = _trade(return_pct=-5.30)  # 0.30pp past the 5% floor
     result = gate.check(
         spec=spec,
         trades=[trade],
@@ -470,6 +473,7 @@ def test_stop_loss_passes_when_return_within_floor_with_slack() -> None:
     )
     sl = next(f for f in result.findings if f.check_name == "stop_loss")
     assert sl.passed is True
+    assert sl.severity == "info"
 
 
 def test_stop_loss_trailing_basis_emits_info_skip_only() -> None:
@@ -502,9 +506,11 @@ def test_stop_loss_trailing_basis_emits_info_skip_only() -> None:
 
 
 def test_stop_loss_mixed_basis_runs_only_entry_basis_floor_check() -> None:
-    """When the spec mixes entry-price and trailing stops, only the
-    entry-price rules drive the critical floor check; the trailing
-    rule(s) emit info skips alongside."""
+    """When the spec mixes entry-price and trailing stops, the trailing
+    rule(s) emit info skips and the entry-price rule drives the
+    attribution check. With no engine stop attribution and a return past
+    the floor, both rows are informational (a stop is a trigger, not a
+    price cap), so the run stays aligned."""
     gate = DeterministicAlignmentChecker()
     spec = _spec(
         exit_rules=[
@@ -512,8 +518,8 @@ def test_stop_loss_mixed_basis_runs_only_entry_basis_floor_check() -> None:
             StopLossRule(pct=0.10, basis="trailing_high"),
         ]
     )
-    # Return well past the -5% entry floor; the entry-basis arm of
-    # the check must still flag critical.
+    # Return well past the -5% entry floor on a non-attributed close —
+    # informational, not a misalignment.
     trade = _trade(return_pct=-12.0, exit_reason=None)
     result = gate.check(
         spec=spec,
@@ -525,16 +531,25 @@ def test_stop_loss_mixed_basis_runs_only_entry_basis_floor_check() -> None:
         (f for f in result.findings if f.check_name == "stop_loss"),
         key=lambda f: f.rule_id or "",
     )
-    # One trailing-info skip + one entry-price critical.
+    # One trailing-info skip + one entry-price info row; neither gates.
     assert len(sl_findings) == 2
     severities = {f.severity for f in sl_findings}
     rule_ids = {f.rule_id for f in sl_findings}
-    assert severities == {"info", "critical"}
+    assert severities == {"info"}
+    assert all(f.passed for f in sl_findings)
+    assert result.aligned is True
     assert "exit:stop_loss" in rule_ids
     assert "exit:stop_loss:trailing_high" in rule_ids
 
 
-def test_stop_loss_critical_when_return_breaches_floor_without_attribution() -> None:
+def test_stop_loss_past_floor_without_attribution_is_informational_not_critical() -> None:
+    """A realized loss past the nominal stop floor on a non-engine-attributed
+    close is NOT a misalignment. A stop-loss is a trigger, not a price cap:
+    the fill can gap past the threshold, or another exit closed the position
+    first. The position was still exited, so the gate emits a passing info row
+    (no "breach" / risk-limit language) and the run stays aligned. Genuine
+    "stop never fired" enforcement leaks are owned by ExitRuleConformanceGate.
+    """
     gate = DeterministicAlignmentChecker()
     spec = _spec(exit_rules=[StopLossRule(pct=0.05)])
     trade = _trade(return_pct=-12.0, exit_reason=None)
@@ -545,8 +560,13 @@ def test_stop_loss_critical_when_return_breaches_floor_without_attribution() -> 
         initial_capital=100_000.0,
     )
     sl = next(f for f in result.findings if f.check_name == "stop_loss")
-    assert sl.passed is False
-    assert sl.severity == "critical"
+    assert sl.passed is True
+    assert sl.severity == "info"
+    assert result.aligned is True
+    # The narrative-driving details must not call this a breach / risk-limit
+    # violation; it must frame the stop as a trigger.
+    assert "breach" not in sl.details.lower()
+    assert "trigger" in sl.details.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -568,7 +588,12 @@ def test_take_profit_passes_when_engine_attribution_present() -> None:
     assert tp.passed is True
 
 
-def test_take_profit_critical_when_return_exceeds_ceiling_without_attribution() -> None:
+def test_take_profit_past_ceiling_without_attribution_is_informational_not_critical() -> None:
+    """Symmetric to the stop-loss case: a realized gain past the nominal
+    take-profit ceiling on a non-engine-attributed close is expected market
+    behaviour (gap-up fills past the trigger, or another exit fired first),
+    not a misalignment. The gate emits a passing info row and the run stays
+    aligned."""
     gate = DeterministicAlignmentChecker()
     spec = _spec(exit_rules=[TakeProfitRule(pct=0.05)])
     trade = _trade(return_pct=12.0, exit_reason=None)
@@ -579,8 +604,11 @@ def test_take_profit_critical_when_return_exceeds_ceiling_without_attribution() 
         initial_capital=100_000.0,
     )
     tp = next(f for f in result.findings if f.check_name == "take_profit")
-    assert tp.passed is False
-    assert tp.severity == "critical"
+    assert tp.passed is True
+    assert tp.severity == "info"
+    assert result.aligned is True
+    assert "breach" not in tp.details.lower()
+    assert "trigger" in tp.details.lower()
 
 
 # ---------------------------------------------------------------------------
