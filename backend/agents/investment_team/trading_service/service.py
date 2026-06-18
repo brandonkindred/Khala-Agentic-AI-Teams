@@ -77,6 +77,110 @@ _MAX_ORDER_EVENTS = 20
 # wrapper-emitted exits and verify each trade obeyed the structured rules.
 ENGINE_EXIT_REASON_PREFIX = "engine_exit:"
 
+# Absolute slack (percentage points) allowed on a structured exit rule's return
+# bound when reconciling exit attribution, mirroring the trade-alignment gate's
+# 0.5pp allowance for transaction-cost / slippage drift. Keeping the two in
+# lockstep means reconciliation stamps exactly the closes the gate would
+# otherwise pass on bounds — and never the out-of-bounds ones it flags.
+_RECONCILE_RETURN_SLACK_PP = 0.5
+
+
+def _build_exit_reconciler(
+    exit_rules: Sequence[ExitRule],
+    views: Mapping[str, StreamingHistoryView],
+) -> Optional[Callable[..., Optional[str]]]:
+    """Build the engine-side exit-attribution reconciler for a run.
+
+    A strategy-initiated close that complies with a structured exit rule at
+    the close bar must still carry ``engine_exit:<kind>`` attribution so the
+    engine stays the single source of exit truth. This returns the closure
+    :class:`~.engine.fill_simulator.FillSimulator` invokes at its
+    TradeRecord exit-stamping site.
+
+    Preconditions:
+      * ``exit_rules`` is the run's structured ``spec.exit_rules`` (possibly
+        empty).
+      * ``views`` is the live per-symbol streaming-history map the run
+        appends to each bar; signal-exit predicates read its latest bar.
+
+    Postconditions:
+      * Returns ``None`` iff ``exit_rules`` is empty — the FillSimulator
+        then keeps its no-op default and the existing fill-simulator unit
+        tests are unaffected.
+      * Otherwise returns a callable
+        ``(symbol, side, entry_price, qty, bar, return_pct) -> Optional[str]``
+        yielding ``"engine_exit:<kind>"`` when a structured rule fires within
+        bounds at the close bar, else ``None``. It does not mutate
+        ``exit_rules`` or ``views``.
+
+    Bound semantics (must match the alignment gate so a close that filled
+    *past* the cap is never masked):
+      * ``take_profit`` — stamp only if ``return_pct`` is within the tightest
+        take-profit ceiling (+slack).
+      * ``stop_loss`` — stamp only if ``return_pct`` is within the tightest
+        entry-price stop floor (−slack); trailing-basis stops are
+        path-dependent and deferred (never stamped here).
+      * ``signal_exit`` — no return bound; stamp when the predicate fired.
+    """
+    if not exit_rules:
+        return None
+
+    tp_pcts = [r.pct for r in exit_rules if getattr(r, "kind", None) == "take_profit"]
+    sl_entry_pcts = [
+        r.pct
+        for r in exit_rules
+        if getattr(r, "kind", None) == "stop_loss"
+        and getattr(r, "basis", "entry_price") == "entry_price"
+    ]
+
+    def _reconcile(
+        *,
+        symbol: str,
+        side: str,
+        entry_price: float,
+        qty: float,
+        bar: Any,
+        return_pct: float,
+    ) -> Optional[str]:
+        if qty <= 0:
+            return None
+        ps = PositionState(
+            symbol=symbol,
+            side=side,  # type: ignore[arg-type]  # "long" | "short" Literal
+            qty=qty,
+            entry_price=entry_price,
+            # Trailing watermarks are not tracked at the close site; collapse
+            # them to ``entry_price`` so trailing-basis stops can't fire here.
+            # They are deferred to the alignment gate and excluded below.
+            high_since_entry=entry_price,
+            low_since_entry=entry_price,
+        )
+        bs = BarSnapshot(high=bar.high, low=bar.low, close=bar.close)
+        intents = evaluate_exit_rules(exit_rules, {symbol: ps}, {symbol: bs}, views=views)
+        if not intents:
+            return None
+        kind = intents[0].rule_kind
+        slack = _RECONCILE_RETURN_SLACK_PP
+        if kind == "take_profit":
+            if not tp_pcts:
+                return None
+            ceiling = min(tp_pcts) * 100.0
+            return (
+                f"{ENGINE_EXIT_REASON_PREFIX}take_profit" if return_pct <= ceiling + slack else None
+            )
+        if kind == "stop_loss":
+            # Only entry-price stops have a static floor to validate; a
+            # trailing-only stop is deferred to the alignment gate.
+            if not sl_entry_pcts:
+                return None
+            floor = -min(sl_entry_pcts) * 100.0
+            return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss" if return_pct >= floor - slack else None
+        if kind == "signal_exit":
+            return f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
+        return None
+
+    return _reconcile
+
 
 @dataclass
 class _TrackedPosition:
@@ -1281,6 +1385,11 @@ class TradingService:
                 transaction_cost_bps=self.config.transaction_cost_bps,
             ),
             execution_model=execution_model,
+            # Reconcile strategy-initiated closes that comply with a structured
+            # exit rule back to ``engine_exit:<kind>`` attribution. ``None`` when
+            # the run has no ``exit_rules`` (e.g. compiled strategies), leaving
+            # the fill simulator's default behaviour unchanged.
+            exit_reconciler=_build_exit_reconciler(self._exit_rules, streaming_views),
         )
 
         result = TradingServiceResult()
