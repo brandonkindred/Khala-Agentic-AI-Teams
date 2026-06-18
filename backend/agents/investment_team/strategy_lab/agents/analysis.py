@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Shared stop-order semantics reference (stop-market / stop-limit / trailing
+# stop). Concatenated onto the analysis system prompts so the LLM does not
+# mislabel correct behavior — chiefly a trailing stop's trigger ratcheting
+# above entry as a long appreciates, which is the intended gain-locking
+# behavior, not a defect. Read once at import (matches the other prompt loads).
+_STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+
 _SELF_REVIEW_PROMPT = """\
 Perform a self-review of the draft analysis below.
 
@@ -100,7 +107,11 @@ class AnalysisAgent:
         # Phase 1: Draft
         template_file = "analysis_win.md" if is_winning else "analysis_lose.md"
         draft_template = (_PROMPT_DIR / template_file).read_text(encoding="utf-8")
-        system_prompt = (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
+        system_prompt = (
+            (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
+            + "\n\n"
+            + _STOP_ORDER_SEMANTICS
+        )
 
         draft_prompt = draft_template.format(
             asset_class=spec.asset_class,
@@ -172,6 +183,7 @@ class AnalysisAgent:
             "Reject any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the 'capital at risk' / 'capital in play', or blames low/negative returns on 'low effective risk'. "
             "Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is accurate and must be preserved. "
             "You correct any contradiction or overclaim before signing off."
+            "\n\n" + _STOP_ORDER_SEMANTICS
         )
 
         review_agent = Agent(

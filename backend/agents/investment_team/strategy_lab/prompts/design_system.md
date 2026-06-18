@@ -56,6 +56,7 @@ Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`
   - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction.
   - `{"kind": "signal_exit", "when": Predicate, "note": str}`.
   Bar-counting "time stops" are deliberately NOT a supported kind — real traders close on price, P&L, or signal reversal, not on an arbitrary "exit after N bars" trigger.
+  A `trailing_high` / `trailing_low` stop ratchets its trigger in the favorable direction as price moves your way and, by design, lifts the protective level **above entry** once a long is in profit (below entry for a short) — that is correct gain-locking behavior, not a defect. See the stop-order semantics reference in the system prompt.
 - **`sizing`** (single object, not a list):
   - `{"kind": "fixed_fraction", "fraction": 0<float<=1.0, "note": str}` — fraction is `0.02` for 2% per trade.
   - `{"kind": "volatility_target", "target_annual_vol": float>0, "note": str}`.

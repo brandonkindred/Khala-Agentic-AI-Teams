@@ -757,9 +757,14 @@ def _build_contract_stub():
         SHORT = "short"
 
     class _OrderType(str, enum.Enum):
+        # Must mirror ``trading_service.strategy.contract.OrderType`` — a custom
+        # strategy that references an order type missing here raises
+        # ``AttributeError`` under the shadow run and is mis-reported as not
+        # submitting on predicate-true bars (the gate swallows the exception).
         MARKET = "market"
         LIMIT = "limit"
         STOP = "stop"
+        STOP_LIMIT = "stop_limit"
         TRAILING_STOP = "trailing_stop"
 
     class _TimeInForce(str, enum.Enum):

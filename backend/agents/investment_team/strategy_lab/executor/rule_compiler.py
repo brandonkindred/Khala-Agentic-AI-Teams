@@ -74,6 +74,14 @@ class ExitIntent:
     rule_kind: ExitRuleKind
     rule_index: int  # index into the spec's ``exit_rules`` list, for traceability
     note: str = ""
+    # ``StopLossRule.basis`` (``entry_price`` / ``trailing_high`` /
+    # ``trailing_low``) for stop-loss intents, else ``None``. Carried as
+    # additive metadata so downstream telemetry can distinguish a trailing
+    # stop fire from a fixed stop fire WITHOUT changing ``rule_kind`` (and
+    # therefore without changing the ``engine_exit:<rule_kind>`` close
+    # ``reason`` that the conformance + alignment gates match by exact
+    # equality).
+    basis: Optional[str] = None
 
 
 def evaluate_exit_rules(
@@ -111,6 +119,7 @@ def evaluate_exit_rules(
                         rule_kind=_kind_of(rule),
                         rule_index=idx,
                         note=getattr(rule, "note", "") or "",
+                        basis=getattr(rule, "basis", None),
                     )
                 )
                 break
