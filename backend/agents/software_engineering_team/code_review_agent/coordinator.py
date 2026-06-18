@@ -19,6 +19,7 @@ did not see.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -577,14 +578,18 @@ def _is_infra_failure(exc: BaseException) -> bool:
     return False
 
 
-# Known LLM failures that represent the *model* (not our code) failing to
-# produce a usable review for a chunk. Only these may be retried/bisected and,
-# if still unreviewable, degraded to a not-reviewed finding. Any other
-# exception is treated as an unexpected defect and fails closed.
+# Failures that represent the *model* (not our code) returning unusable output
+# for a chunk. Only these may be retried/bisected and, if still unreviewable,
+# degraded to a not-reviewed finding. Any other exception is treated as an
+# unexpected defect and fails closed. ``json.JSONDecodeError`` is included
+# because the chunk reviewer parses the model's reply with a bare
+# ``json.loads`` — malformed model JSON surfaces as that raw error, not an
+# ``LLMJsonParseError``, and is just as recoverable.
 _CONTENT_FAILURE_TYPES = (
     LLMJsonParseError,
     LLMSchemaValidationError,
     LLMSemanticExhaustionError,
+    json.JSONDecodeError,
 )
 
 
@@ -594,8 +599,9 @@ def _is_content_failure(exc: BaseException) -> bool:
     Postconditions:
         - Returns True only when the chain contains a known model-content
           failure (``LLMJsonParseError``, ``LLMSchemaValidationError``,
-          ``LLMSemanticExhaustionError``) — the failures a smaller or repeated
-          input might fix, or that a human can be asked to review manually.
+          ``LLMSemanticExhaustionError``, or a raw ``json.JSONDecodeError`` from
+          parsing the model's reply) — the failures a smaller or repeated input
+          might fix, or that a human can be asked to review manually.
         - Returns False for everything else (e.g. ``KeyError``/``TypeError`` from
           a bug in the reviewer code), so unexpected defects fail closed instead
           of being masked as a not-reviewed finding.
@@ -613,7 +619,13 @@ def _is_content_failure(exc: BaseException) -> bool:
 
 
 def _chunk_ranges(chunk: ReviewChunk) -> List[str]:
-    """Name every original-file line range the chunk covers."""
+    """Name every original-file line range the chunk covers.
+
+    Postconditions:
+        - Returns one human-readable label per segment, in segment order, via
+          ``_segment_range_label`` — used to name the ranges left unreviewed
+          when a chunk fails.
+    """
     return [_segment_range_label(seg) for seg in chunk.segments]
 
 

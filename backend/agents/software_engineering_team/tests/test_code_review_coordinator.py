@@ -9,6 +9,7 @@ structured-output flow.
 
 from __future__ import annotations
 
+import json
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -907,6 +908,49 @@ def test_unexpected_chunk_exception_fails_closed() -> None:
         )
     # Exactly one call: no retry/bisect for an unexpected error.
     assert len(client.prompts) == 1
+
+
+def test_is_content_failure_classifies_model_output_errors_only() -> None:
+    """Known model-output failures (including a raw ``json.JSONDecodeError`` from
+    the chunk reviewer's ``json.loads``) are recoverable content failures;
+    reviewer-code bugs are not."""
+    from code_review_agent.coordinator import _is_content_failure
+
+    assert _is_content_failure(LLMJsonParseError("bad")) is True
+    assert _is_content_failure(LLMSemanticExhaustionError("empty")) is True
+    assert _is_content_failure(json.JSONDecodeError("Expecting value", "not json", 0)) is True
+    # A JSONDecodeError wrapped by strands must still be recognised via the chain.
+    wrapped = RuntimeError("agent failed")
+    wrapped.__cause__ = json.JSONDecodeError("Expecting value", "x", 0)
+    assert _is_content_failure(wrapped) is True
+    # Reviewer-code bugs fail closed.
+    assert _is_content_failure(KeyError("bug")) is False
+    assert _is_content_failure(TypeError("bug")) is False
+
+
+def test_raw_json_decode_failure_degrades_not_fails_closed(monkeypatch) -> None:
+    """The chunk reviewer parses model output with a bare ``json.loads``; bad
+    JSON surfaces as a raw ``json.JSONDecodeError``. That is recoverable model
+    output, so it must take the degrade path (blocking high finding, run
+    completes) — not fail closed like a reviewer-code bug."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    llm_probe = DummyLLMClient()
+    cap = compute_code_review_map_chunk_chars(llm_probe)
+    filler_size = cap - 2_000
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1\n".ljust(filler_size, "#"),
+    }
+    bad_json = json.JSONDecodeError("Expecting value", "not json", 0)
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=bad_json),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+    # Completed (no exception), but bad.py is blocked by a high not-reviewed finding.
+    assert result.approved is False
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed and not_reviewed[0].severity == "high"
+    assert not_reviewed[0].file_path == "bad.py"
 
 
 def test_all_empty_files_completes_with_info_findings_not_raise() -> None:
