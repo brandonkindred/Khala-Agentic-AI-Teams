@@ -21,6 +21,7 @@ from code_review_agent.coordinator import (
     _validate_line,
     build_review_chunks,
     cap_chunk_content,
+    cap_review_chunk,
     parse_code_into_file_blocks,
     run_coordinator,
     split_block_into_segments,
@@ -578,6 +579,43 @@ def test_cap_chunk_content_splits_oversized_into_bounded_pieces() -> None:
 def test_cap_chunk_content_rejects_nonpositive_cap() -> None:
     with pytest.raises(AssertionError):
         cap_chunk_content("abc", 0)
+
+
+def test_cap_review_chunk_passes_through_within_budget() -> None:
+    chunk = ReviewChunk(segments=[FileSegment(path="a.py", content="x = 1", total_lines=1)])
+    assert cap_review_chunk(chunk, 10_000) == [chunk.content]
+
+
+def test_cap_review_chunk_preserves_header_on_every_piece() -> None:
+    """An over-budget single-segment chunk (a line longer than the cap) is split
+    into bounded pieces that each carry the ### path ### header so a finding in
+    any tail piece stays attributable."""
+    line = "y" * 25_000  # one unsplittable line over the cap
+    chunk = ReviewChunk(segments=[FileSegment(path="bundle.js", content=line, total_lines=1)])
+    pieces = cap_review_chunk(chunk, 10_000)
+    assert len(pieces) > 1
+    assert all(len(p) <= 10_000 for p in pieces)
+    assert all(p.startswith("### bundle.js ###\n") for p in pieces)
+    # Stripping the header from each piece reproduces the original line.
+    header = "### bundle.js ###\n"
+    assert "".join(p[len(header) :] for p in pieces) == line
+
+
+def test_cap_review_chunk_headerless_segment_falls_back_to_raw_split() -> None:
+    """A headerless (path == '') over-budget chunk has no header to preserve, so
+    it splits like cap_chunk_content."""
+    line = "z" * 25_000
+    chunk = ReviewChunk(segments=[FileSegment(path="", content=line, total_lines=1)])
+    pieces = cap_review_chunk(chunk, 10_000)
+    assert len(pieces) > 1
+    assert all(len(p) <= 10_000 for p in pieces)
+    assert "".join(pieces) == line  # raw split, no header injected
+
+
+def test_cap_review_chunk_rejects_nonpositive_cap() -> None:
+    chunk = ReviewChunk(segments=[FileSegment(path="a.py", content="x = 1", total_lines=1)])
+    with pytest.raises(AssertionError):
+        cap_review_chunk(chunk, 0)
 
 
 def test_review_chunk_paths_label_marks_partial_segments() -> None:

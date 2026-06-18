@@ -62,9 +62,10 @@ def _run_llm_review(
           No file content is silently truncated away, so a large file's tail is
           reviewed rather than dropped. Blank files contribute nothing.
         - A chunk that is itself over budget (a single line longer than the cap,
-          e.g. a minified bundle) is hard-split at character boundaries before
-          the LLM call, so it is never sent in one prompt that may overflow the
-          context and be skipped, leaving the file unreviewed.
+          e.g. a minified bundle) is hard-split before the LLM call, with the
+          ``### path ###`` header re-attached to every piece (``cap_review_chunk``)
+          so it is never sent in one prompt that may overflow the context and be
+          skipped, and a finding in any tail piece stays attributable to its file.
         - A chunk whose LLM call or parse fails is logged and skipped; issues
           from the other chunks are still returned (one bad chunk never aborts
           the whole review).
@@ -75,7 +76,7 @@ def _run_llm_review(
     # software_engineering_team package dir is itself on sys.path.
     from software_engineering_team.code_review_agent.coordinator import (
         build_review_chunks,
-        cap_chunk_content,
+        cap_review_chunk,
     )
 
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
@@ -97,9 +98,10 @@ def _run_llm_review(
     for idx, chunk in enumerate(chunks, start=1):
         logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
         # A chunk holding a single line longer than the cap is over budget by
-        # contract; hard-split it at character boundaries so the whole file is
-        # reviewed rather than sent in one prompt that may overflow and be skipped.
-        for piece in cap_chunk_content(chunk.content, MAX_REVIEW_CODE_CHARS):
+        # contract; hard-split it so the whole file is reviewed rather than sent
+        # in one prompt that may overflow and be skipped — keeping the file
+        # header on every piece so tail findings stay attributable.
+        for piece in cap_review_chunk(chunk, MAX_REVIEW_CODE_CHARS):
             prompt = REVIEW_PROMPT.format(
                 requirements=task.requirements or task.description,
                 acceptance_criteria=", ".join(task.acceptance_criteria)
@@ -137,79 +139,80 @@ def _run_chunked_agent_review(
     task_id: str,
     context: str = "",
 ) -> List[ReviewIssue]:
-    """Run a quality agent over function-aware chunks of ``files``.
+    """Run a quality agent over each file's raw source, one file at a time.
 
-    QA and security agents take one ``code`` string by contract, so a large
-    review is fed to them one chunk at a time (the same chunking the code-review
-    path uses) instead of being capped to the first ``MAX_REVIEW_CODE_CHARS``.
+    QA and security agents analyze *source*, so they are fed each file's raw
+    content — not the code-review renderer's ``### path ###`` headers or ``N:``
+    line-number prefixes, which would make the code syntactically invalid and
+    provoke bogus findings. A file larger than ``MAX_REVIEW_CODE_CHARS`` is
+    hard-split at character boundaries so no over-budget string is ever sent.
 
     Preconditions:
-        - ``run_chunk(code)`` invokes the agent on one chunk of concatenated,
-          file-labeled code and returns its raw issue/vulnerability items.
+        - ``run_chunk(code)`` invokes the agent on one piece of raw source and
+          returns its raw issue/vulnerability items.
         - ``files`` maps file paths to their full source text.
 
     Postconditions:
-        - Inputs over ``MAX_REVIEW_CODE_CHARS`` are split at function/method
-          boundaries (``build_review_chunks``) and every chunk is reviewed, so a
-          large file's tail is reviewed rather than silently truncated away.
+        - Each non-blank file's raw content is reviewed in full; a file over
+          ``MAX_REVIEW_CODE_CHARS`` is split into ≤-cap character pieces and every
+          piece is reviewed, so its tail is reviewed rather than truncated away.
           Blank files contribute nothing.
-        - A chunk that is itself over budget (a single line longer than the cap,
-          e.g. a minified bundle) is hard-split at character boundaries before
-          ``run_chunk``, so it is never sent in one call that may overflow the
-          agent's context and be skipped, leaving the file unreviewed.
-        - Small inputs are reviewed in a single call, as before.
-        - A chunk whose ``run_chunk`` call fails is logged and skipped; issues
-          from the other chunks are still returned (one bad chunk never aborts
+        - A finding's ``file_path`` defaults to the file actually sent when the
+          agent does not report a location, so every piece stays attributable.
+        - A piece whose ``run_chunk`` call fails is logged and skipped; issues
+          from the other pieces are still returned (one bad piece never aborts
           the whole review).
     """
-    from software_engineering_team.code_review_agent.coordinator import (
-        build_review_chunks,
-        cap_chunk_content,
-    )
+    from software_engineering_team.code_review_agent.coordinator import cap_chunk_content
 
     blocks = [(path, content) for path, content in files.items() if content and content.strip()]
     if not blocks:
         return []
-    chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
-    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
+    # One raw piece per file (split only when a file exceeds the per-call cap).
+    pieces = [
+        (path, piece)
+        for path, content in blocks
+        for piece in cap_chunk_content(content, MAX_REVIEW_CODE_CHARS)
+    ]
+    if len(pieces) > MANY_CHUNKS_WARN_THRESHOLD:
         logger.warning(
-            "[%s] %s: %d chunks for %d file(s) — large review, many calls%s",
+            "[%s] %s: %d pieces for %d file(s) — large review, many calls%s",
             task_id,
             label,
-            len(chunks),
+            len(pieces),
             len(blocks),
             context,
         )
     issues: List[ReviewIssue] = []
-    for idx, chunk in enumerate(chunks, start=1):
-        for piece in cap_chunk_content(chunk.content, MAX_REVIEW_CODE_CHARS):
-            try:
-                items = run_chunk(piece)
-            except Exception as exc:
-                logger.warning(
-                    "[%s] %s failed (chunk %d/%d)%s: %s",
-                    task_id,
-                    label,
-                    idx,
-                    len(chunks),
-                    context,
-                    exc,
+    for idx, (path, piece) in enumerate(pieces, start=1):
+        try:
+            items = run_chunk(piece)
+        except Exception as exc:
+            logger.warning(
+                "[%s] %s failed (piece %d/%d)%s: %s",
+                task_id,
+                label,
+                idx,
+                len(pieces),
+                context,
+                exc,
+            )
+            continue
+        for item in items or []:
+            issues.append(
+                ReviewIssue(
+                    source=source,
+                    severity=getattr(item, "severity", default_severity),
+                    description=getattr(item, "description", str(item)),
+                    # `location` may be present but None; fall back to file_path
+                    # then to the file we sent, so file_path is always a useful
+                    # string and tail pieces stay attributable.
+                    file_path=getattr(item, "location", None)
+                    or getattr(item, "file_path", None)
+                    or path,
+                    recommendation=getattr(item, "recommendation", ""),
                 )
-                continue
-            for item in items or []:
-                issues.append(
-                    ReviewIssue(
-                        source=source,
-                        severity=getattr(item, "severity", default_severity),
-                        description=getattr(item, "description", str(item)),
-                        # `location` may be present but None; fall back to file_path
-                        # (and "") so file_path is always a string, never None.
-                        file_path=getattr(item, "location", None)
-                        or getattr(item, "file_path", None)
-                        or "",
-                        recommendation=getattr(item, "recommendation", ""),
-                    )
-                )
+            )
     return issues
 
 

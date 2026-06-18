@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from unittest.mock import MagicMock
+
+# A reviewer-rendered original-line-number prefix ("123: code"); raw source has none.
+_LINE_NUM_PREFIX = re.compile(r"^\d+: ", re.MULTILINE)
+
+
+def _assert_raw_source(codes: list[str]) -> None:
+    """Every piece fed to QA/security is raw source — no ``### path ###`` header
+    and no ``N:`` line-number prefixes (those are code-review-prompt artifacts
+    that would make the source syntactically invalid)."""
+    assert all("### " not in c for c in codes)
+    assert not any(_LINE_NUM_PREFIX.search(c) for c in codes)
 
 
 def _task(**overrides):
@@ -375,9 +387,9 @@ def test_run_qa_agent_hard_splits_oversized_single_line():
 
     assert len(codes) > 1  # hard-split, not one oversized call
     assert all(len(c) <= MAX_REVIEW_CODE_CHARS for c in codes)  # every piece bounded
-    # The header-labeled chunk content is split into pieces; the whole original
-    # line survives intact across them (nothing dropped).
-    assert _oversized_single_line() in "".join(codes)
+    # Raw source: the pieces concatenate back to exactly the original line.
+    assert "".join(codes) == _oversized_single_line()
+    _assert_raw_source(codes)
     assert len(issues) == len(codes)
     assert all(i.source == "qa" for i in issues)
 
@@ -406,19 +418,41 @@ def test_run_security_agent_hard_splits_oversized_single_line():
 
     assert len(codes) > 1
     assert all(len(c) <= MAX_REVIEW_CODE_CHARS for c in codes)
-    assert _oversized_single_line() in "".join(codes)
+    assert "".join(codes) == _oversized_single_line()  # raw, reconstructs exactly
+    _assert_raw_source(codes)
     assert all(i.source == "security" for i in issues)
+
+
+def test_run_qa_agent_defaults_file_path_to_sent_file():
+    """When the QA item reports no location, the finding is attributed to the
+    file actually sent — so even tail pieces stay attributable."""
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_qa_agent
+
+    class _NoLocBug:
+        severity = "low"
+        description = "bug"
+        location = None  # agent did not localize the finding
+
+    class _QAAgent:
+        def run(self, inp):
+            return MagicMock(bugs_found=[_NoLocBug()])
+
+    issues = _run_qa_agent(
+        qa_agent=_QAAgent(),
+        files={"app/svc.py": "def f():\n    return 1"},
+        language="python",
+        task_description="t",
+        task_id="t1",
+    )
+    assert issues and all(i.file_path == "app/svc.py" for i in issues)
 
 
 def test_run_llm_review_hard_splits_oversized_single_line(monkeypatch):
     """The LLM fallback also hard-splits an oversized single line so the file is
-    not sent in one prompt that may overflow the context and be skipped."""
+    not sent in one prompt that may overflow the context and be skipped — and
+    every piece keeps the ### path ### header so tail findings stay attributable."""
     from software_engineering_team.backend_code_v2_team.phases import review as review_mod
-    from software_engineering_team.backend_code_v2_team.phases.review import (
-        MAX_REVIEW_CODE_CHARS,
-        _run_llm_review,
-    )
-    from software_engineering_team.code_review_agent.coordinator import cap_chunk_content
+    from software_engineering_team.backend_code_v2_team.phases.review import _run_llm_review
 
     codes: list[str] = []
     clean = (
@@ -441,15 +475,18 @@ def test_run_llm_review_hard_splits_oversized_single_line(monkeypatch):
     full = _oversized_single_line()
     _run_llm_review(llm=MagicMock(), task=_task(), files={"bundle.py": full})
 
-    # One oversized chunk → one prompt per character-bounded piece.
-    assert len(codes) == len(cap_chunk_content(full, MAX_REVIEW_CODE_CHARS)) > 1
+    assert len(codes) > 1  # the oversized line was hard-split across prompts
     # The whole oversized line never fits in any single prompt — it was split.
     assert not any(full in prompt for prompt in codes)
+    # Every piece keeps the file header, so a finding in any tail piece is
+    # still attributable to the file (the gap Codex flagged).
+    assert all("### bundle.py ###" in prompt for prompt in codes)
 
 
 def test_run_qa_agent_chunks_large_input_without_dropping_tail():
-    """The QA agent is run once per function-aware chunk, so a large file's
-    tail is reviewed instead of being truncated at MAX_REVIEW_CODE_CHARS."""
+    """The QA agent is run once per raw piece of a large file, so its tail is
+    reviewed instead of being truncated at MAX_REVIEW_CODE_CHARS — and the code
+    sent is raw source, not the code-review renderer's headers/line prefixes."""
     from software_engineering_team.backend_code_v2_team.phases.review import _run_qa_agent
 
     codes: list[str] = []
@@ -467,11 +504,13 @@ def test_run_qa_agent_chunks_large_input_without_dropping_tail():
         task_id="t1",
     )
 
-    assert len(codes) > 1  # one QA call per chunk, not a single truncated call
+    assert len(codes) > 1  # one QA call per piece, not a single truncated call
     joined = "\n".join(codes)
     assert "fn_0000" in joined  # head reviewed
     assert "fn_tail" in joined  # tail reviewed — old 60K cap dropped this
-    assert len(issues) == len(codes)  # a bug aggregated from every chunk
+    assert codes[0].startswith("def fn_0000")  # raw source, no ### header / prefix
+    _assert_raw_source(codes)
+    assert len(issues) == len(codes)  # a bug aggregated from every piece
     assert all(i.source == "qa" for i in issues)
 
 
@@ -526,8 +565,8 @@ def test_run_qa_agent_skips_failing_chunk_keeps_others(monkeypatch):
 
 
 def test_run_security_agent_chunks_large_input_without_dropping_tail():
-    """The security agent is run once per function-aware chunk, covering the
-    whole file instead of only the first MAX_REVIEW_CODE_CHARS."""
+    """The security agent is run once per raw piece, covering the whole file
+    instead of only the first MAX_REVIEW_CODE_CHARS, on raw source."""
     from software_engineering_team.backend_code_v2_team.phases.review import _run_security_agent
 
     codes: list[str] = []
@@ -549,6 +588,8 @@ def test_run_security_agent_chunks_large_input_without_dropping_tail():
     joined = "\n".join(codes)
     assert "fn_0000" in joined  # head reviewed
     assert "fn_tail" in joined  # tail reviewed
+    assert codes[0].startswith("def fn_0000")  # raw source, no ### header / prefix
+    _assert_raw_source(codes)
     assert len(issues) == len(codes)
     assert all(i.source == "security" for i in issues)
 
