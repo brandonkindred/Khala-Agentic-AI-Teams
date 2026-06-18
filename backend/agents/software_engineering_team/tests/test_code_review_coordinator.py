@@ -831,6 +831,32 @@ def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) 
     assert not_reviewed[0].file_path == "bad.py"
 
 
+def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> None:
+    """For a pre-numbered (PR-diff) chunk, a not-reviewed finding must carry the
+    real embedded line numbers — not the positional segment indices — so the
+    finding anchors to the correct diff lines downstream."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    # Embedded original lines 4000-4004 carry the marker; positional indices
+    # for this segment would be 1-5, which must NOT leak into the finding.
+    bad = "\n".join(f"{4000 + i}: FAILME_{i}()" for i in range(5))
+    files = {"bad.py": bad, "good.py": "100: ok()\n101: also_ok()"}
+
+    client = _SelectiveRaiser("FAILME")
+    result = run_coordinator(
+        client,
+        CodeReviewInput(files=files, pre_numbered=True, task_description="t", language="python"),
+    )
+
+    not_reviewed = [
+        i
+        for i in result.issues
+        if "could not be reviewed" in i.description and i.file_path == "bad.py"
+    ]
+    assert not_reviewed, "the failed pre-numbered chunk must surface a not-reviewed finding"
+    assert not_reviewed[0].start_line == 4000
+    assert not_reviewed[0].line == 4004
+
+
 def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:
     """Rate-limit/unreachable/auth failures can't be fixed by smaller chunks:
     exactly one map call, then CodeReviewUnavailableError."""

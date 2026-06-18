@@ -306,6 +306,39 @@ def build_review_chunks(
     return chunks
 
 
+def _prenumbered_line_numbers(seg: FileSegment) -> List[int]:
+    """Parse the embedded ``N: `` line-number prefixes of a pre-numbered segment.
+
+    Postconditions:
+        - Returns the parsed prefixes in content order; empty when the segment
+          is not pre-numbered or carries no parseable prefix.
+    """
+    if not seg.pre_numbered:
+        return []
+    return [
+        int(m.group(1))
+        for line in seg.content.splitlines()
+        if (m := _PRENUMBERED_LINE_RE.match(line)) is not None
+    ]
+
+
+def _segment_line_range(seg: FileSegment) -> Tuple[int, int]:
+    """Return the ``(start, end)`` original line numbers a segment covers.
+
+    Postconditions:
+        - Pre-numbered segments derive the range from their first/last embedded
+          ``N:`` prefixes — the positional ``start_line``/``end_line`` are
+          meaningless for PR-diff hunks, so a cited range stays aligned with the
+          real diff lines ``map_issues_to_comments`` anchors against.
+        - Plain segments (and pre-numbered segments with no parseable prefix)
+          fall back to the positional ``start_line``/``end_line``.
+    """
+    numbers = _prenumbered_line_numbers(seg)
+    if numbers:
+        return numbers[0], numbers[-1]
+    return seg.start_line, seg.end_line
+
+
 def _segment_range_label(seg: FileSegment) -> str:
     """Describe the original-file line range a segment covers.
 
@@ -315,14 +348,9 @@ def _segment_range_label(seg: FileSegment) -> str:
           ``start_line``–``end_line`` of ``total_lines``.
     """
     name = seg.path or "(headerless code)"
-    if seg.pre_numbered:
-        numbers = [
-            int(m.group(1))
-            for line in seg.content.splitlines()
-            if (m := _PRENUMBERED_LINE_RE.match(line)) is not None
-        ]
-        if numbers:
-            return f"{name} (original lines {numbers[0]}-{numbers[-1]})"
+    numbers = _prenumbered_line_numbers(seg)
+    if numbers:
+        return f"{name} (original lines {numbers[0]}-{numbers[-1]})"
     return f"{name} (lines {seg.start_line}-{seg.end_line} of {seg.total_lines})"
 
 
@@ -574,21 +602,23 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
           successfully reviewed chunks.
     """
     reason = f"{type(exc).__name__}: {exc}"
-    issues = [
-        CodeReviewIssue(
-            severity="info",
-            category="general",
-            file_path=seg.path,
-            start_line=seg.start_line,
-            line=seg.end_line,
-            description=(
-                f"This code could not be reviewed automatically ({reason}); "
-                f"{_segment_range_label(seg)} was not reviewed."
-            ),
-            suggestion="Review this section manually; the automated reviewer could not process it.",
+    issues = []
+    for seg in chunk.segments:
+        start, end = _segment_line_range(seg)
+        issues.append(
+            CodeReviewIssue(
+                severity="info",
+                category="general",
+                file_path=seg.path,
+                start_line=start,
+                line=end,
+                description=(
+                    f"This code could not be reviewed automatically ({reason}); "
+                    f"{_segment_range_label(seg)} was not reviewed."
+                ),
+                suggestion="Review this section manually; the automated reviewer could not process it.",
+            )
         )
-        for seg in chunk.segments
-    ]
     return _ChunkOutcome(
         issues=issues,
         summaries=[f"Not reviewed: {', '.join(_chunk_ranges(chunk))} ({reason})."],
