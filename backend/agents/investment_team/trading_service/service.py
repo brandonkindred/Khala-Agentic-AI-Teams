@@ -652,7 +652,9 @@ class _EngineExitDispatcher:
         # Finer-grained, additive: distinguish trailing vs fixed stop fires
         # without perturbing ``rule_kind`` / the close ``reason`` that the
         # conformance + alignment gates match exactly.
-        basis_label = f"{intent.rule_kind}:{intent.basis}" if intent.basis else intent.rule_kind
+        basis_label = (
+            f"{intent.rule_kind}:{intent.basis}" if intent.basis is not None else intent.rule_kind
+        )
         diag.exit_rule_firings_by_basis[basis_label] = (
             diag.exit_rule_firings_by_basis.get(basis_label, 0) + 1
         )

@@ -69,13 +69,14 @@ def stop_limit_triggered(req: OrderRequest, bar: Bar) -> bool:
     ``bar.low <= stop_price``. This is the same crossing test a plain STOP uses;
     it is exposed separately so the simulator can distinguish a triggered-but-
     unfilled stop-limit (limit gapped through) from one that never triggered.
+    The crossing test itself only needs a ``stop_price``; the STOP_LIMIT path is
+    its sole caller, but the function is not restricted to that order type.
 
-    Preconditions: ``req.order_type == OrderType.STOP_LIMIT`` and ``req.stop_price``
-    is not None.
+    Preconditions: ``req.stop_price`` is not None.
     Postconditions: returns ``True`` iff the bar's range crossed the stop level on
     the order's trigger side.
     """
-    assert req.stop_price is not None, "stop_limit trigger check requires stop_price"
+    assert req.stop_price is not None, "stop trigger check requires stop_price"
     if req.side == OrderSide.LONG:
         return bar.high >= req.stop_price
     return bar.low <= req.stop_price
@@ -95,8 +96,8 @@ def stop_limit_reference_price(req: OrderRequest, bar: Bar) -> Optional[float]:
     limit model): a buy-limit fills at its limit when ``bar.low <= limit``, a
     sell-limit fills at its limit when ``bar.high >= limit``.
 
-    Preconditions: ``req.order_type == OrderType.STOP_LIMIT`` with both
-    ``stop_price`` and ``limit_price`` set.
+    Preconditions: ``req.stop_price`` and ``req.limit_price`` are both set (the
+    STOP_LIMIT path is the sole caller).
     Postconditions: returns ``limit_price`` when triggered AND fillable this bar,
     else ``None``.
     """

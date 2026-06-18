@@ -21,7 +21,10 @@ and the execution diagnostics and reports:
   (long) / high (short) and fills on bar N+1's open, so realised
   return can land below the rule's raw threshold via gap fills —
   those are absorbed when matched 1:1 with firings. Trailing variants
-  need bar-by-bar replay and are flagged as informational.
+  need bar-by-bar replay this post-hoc gate cannot reconstruct, so the
+  ledger-leak check is not run for them; their execution correctness is
+  instead guaranteed deterministically by ``tests/test_trailing_stop.py``,
+  and their firing counts surface via ``exit_rule_firings_by_basis``.
 * **TakeProfitRule(pct=P)** — sanity-only: when ``exit_rules`` contains
   exactly one rule and that rule is the take-profit, we expect at least
   one engine firing. When other rules are present, the take-profit may
@@ -178,8 +181,11 @@ class ExitRuleConformanceGate(GateResultsMixin):
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
             return self._info(
-                f"StopLossRule(basis={rule.basis!r}) conformance check skipped "
-                "(trailing variants require bar-by-bar replay)."
+                f"StopLossRule(basis={rule.basis!r}) ledger-leak check not run "
+                "(trailing variants require bar-by-bar replay the post-hoc gate "
+                "cannot reconstruct). Trailing-stop execution correctness is "
+                "covered deterministically by tests/test_trailing_stop.py; the "
+                "per-basis firing counts above show how often it fired."
             )
         # The engine detects the trigger on bar N's low (long) / high
         # (short), but the synthetic market close fills on bar N+1's

@@ -306,6 +306,28 @@ def test_long_stop_limit_gap_through_does_not_fill(model) -> None:
 # ---------------------------------------------------------------------------
 
 
+def test_unfilled_trigger_aggregates_into_diagnostics_counter() -> None:
+    """End-to-end through the diagnostics aggregation: a gap-through outcome
+    fed to ``_apply_fill_outcome_events`` bumps
+    ``BacktestExecutionDiagnostics.stop_limit_unfilled_triggers`` and records a
+    ``stop_limit_unfilled`` lifecycle event. Covers the events→counter path in
+    ``service.py`` that the per-bar simulator test does not exercise."""
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import _apply_fill_outcome_events
+
+    sim, order_book, portfolio = _make_simulator(RealisticExecutionModel(participation_cap=0.10))
+    _open_long(sim, order_book, entry_open=100.0)
+    _submit_stop_limit(order_book, side=OrderSide.SHORT, stop_price=95.0, limit_price=94.0)
+
+    outcome = sim.process_bar(_bar("2024-01-03", open_price=90.0, high=90.0, low=85.0, close=88.0))
+    assert _unfilled_events(outcome)  # simulator emitted the event
+
+    diagnostics = BacktestExecutionDiagnostics()
+    _apply_fill_outcome_events(diagnostics, outcome)
+    assert diagnostics.stop_limit_unfilled_triggers == 1
+    assert any(e.event_type == "stop_limit_unfilled" for e in diagnostics.last_order_events)
+
+
 @pytest.mark.parametrize("model", _models())
 def test_stop_limit_no_trigger_rests_quietly(model) -> None:
     """Bar never crosses the stop → no fill and NO unfilled-trigger telemetry
