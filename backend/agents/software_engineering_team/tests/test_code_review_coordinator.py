@@ -32,7 +32,7 @@ from code_review_agent.models import (
 )
 from pydantic import ValidationError
 
-from llm_service import LLMRateLimitError, LLMSemanticExhaustionError
+from llm_service import LLMJsonParseError, LLMRateLimitError, LLMSemanticExhaustionError
 from llm_service.clients.dummy import DummyLLMClient
 from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
 
@@ -855,6 +855,39 @@ def test_degraded_pre_numbered_chunk_uses_embedded_line_numbers(monkeypatch) -> 
     assert not_reviewed, "the failed pre-numbered chunk must surface a not-reviewed finding"
     assert not_reviewed[0].start_line == 4000
     assert not_reviewed[0].line == 4004
+
+
+def test_degraded_finding_does_not_leak_raw_exception_text(monkeypatch) -> None:
+    """A not-reviewed finding names only the failure class — never ``str(exc)``.
+    Parse/schema errors embed raw model output (response previews, failing
+    field values); since findings are published verbatim by /review-pr, the
+    degraded finding must not carry that text."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
+    secret = "leaked_password = 'hunter2'"
+    leaky = LLMJsonParseError(
+        f"Could not parse structured JSON. Response preview: '{secret}'...",
+        response_preview=secret,
+    )
+    files = {
+        "bad.py": "FAILME = True\n" + ("x = 1\n" * 50),
+        "good.py": "ok = 1",
+    }
+    assert len(files["bad.py"]) < 2 * MIN_SPLIT_SEGMENT_CHARS
+
+    result = run_coordinator(
+        _SelectiveRaiser("FAILME", exc=leaky),
+        CodeReviewInput(files=files, task_description="t", language="python"),
+    )
+
+    not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
+    assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
+    finding = not_reviewed[0]
+    # The failure class is named (useful diagnostic); the raw message is not.
+    assert "LLMJsonParseError" in finding.description
+    assert secret not in finding.description
+    assert "Response preview" not in finding.description
+    # The merged summary is likewise sanitized.
+    assert secret not in result.summary
 
 
 def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:

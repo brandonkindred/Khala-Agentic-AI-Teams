@@ -600,8 +600,16 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
         - ``approved_flags`` is empty: a chunk that was never reviewed neither
           approves nor rejects, so the merged verdict reflects only the
           successfully reviewed chunks.
+        - The finding text names only the failure *class*, never ``str(exc)``,
+          so raw model output carried by parse/schema errors is never published
+          downstream (e.g. by the ``/review-pr`` flow).
     """
-    reason = f"{type(exc).__name__}: {exc}"
+    # Name only the failure *class*, never ``str(exc)``: parse/schema errors
+    # embed raw model output (e.g. ``LLMJsonParseError`` carries a 500-char
+    # response preview), and this finding is published verbatim by the
+    # ``/review-pr`` flow — interpolating the message would leak arbitrary
+    # model output / code excerpts into PR comments.
+    reason = type(exc).__name__
     issues = []
     for seg in chunk.segments:
         start, end = _segment_line_range(seg)
