@@ -16,7 +16,6 @@ on. These tests cover the two halves of the fix:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -57,26 +56,24 @@ from investment_team.trading_service.strategy.contract import (
 # ---------------------------------------------------------------------------
 
 
-@dataclass(frozen=True)
-class _FakeBar:
-    """Minimal bar payload — the reconciler only reads ``high/low/close``."""
+def _view(*bars: tuple[float, float, float]) -> StreamingHistoryView:
+    """Build a streaming view whose latest bar is the *signal bar*.
 
-    high: float
-    low: float
-    close: float
-
-
-def _signal_view(*closes: float) -> StreamingHistoryView:
-    """A streaming view whose latest bar drives signal-exit evaluation."""
+    Each ``bar`` is ``(high, low, close)``. The reconciler reads the latest
+    bar's OHLC for price (TP/SL) rules and runs signal-exit predicates against
+    it — mirroring the run loop, where the fill bar has not yet been appended
+    when the reconciler runs, so the view's tail is the bar the strategy acted
+    on.
+    """
     view = StreamingHistoryView()
-    for i, c in enumerate(closes):
+    for i, (high, low, close) in enumerate(bars):
         view.append(
             BarRecord(
                 timestamp=f"2024-01-{i + 1:02d}",
-                open=c,
-                high=c + 1,
-                low=c - 1,
-                close=c,
+                open=close,
+                high=high,
+                low=low,
+                close=close,
                 volume=1_000_000.0,
             )
         )
@@ -89,15 +86,15 @@ def test_build_returns_none_when_no_exit_rules() -> None:
 
 
 def test_take_profit_within_ceiling_is_reconciled() -> None:
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    # entry 100, long; signal bar high 106 clears the 105 target → rule fires.
+    view = _view((106.0, 99.0, 105.5))
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
-    # entry 100, long; bar.high 106 clears the 105 target → rule fires.
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=106.0, low=99.0, close=105.5),
         return_pct=4.8,  # within the 5% ceiling (+0.5pp slack)
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
@@ -106,43 +103,43 @@ def test_take_profit_within_ceiling_is_reconciled() -> None:
 def test_take_profit_past_cap_is_not_reconciled() -> None:
     """A close that filled *past* the cap keeps its strategy reason — the bound
     check is what prevents masking the original #867 cap-breach bug."""
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    view = _view((112.0, 99.0, 111.0))
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=112.0, low=99.0, close=111.0),
         return_pct=7.0,  # exceeds the 5% ceiling + slack
     )
     assert label is None
 
 
 def test_stop_loss_entry_basis_within_floor_is_reconciled() -> None:
-    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {})
+    # entry 100, long; signal bar low 94 crosses the 95 floor → rule fires.
+    view = _view((101.0, 94.0, 95.0))
+    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
-    # entry 100, long; bar.low 94 crosses the 95 floor → rule fires.
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=101.0, low=94.0, close=95.0),
         return_pct=-4.8,  # within the -5% floor (-0.5pp slack)
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
 
 
 def test_stop_loss_breaching_floor_is_not_reconciled() -> None:
-    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {})
+    view = _view((101.0, 80.0, 85.0))
+    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=101.0, low=80.0, close=85.0),
         return_pct=-9.0,  # breaches the -5% floor
     )
     assert label is None
@@ -151,21 +148,24 @@ def test_stop_loss_breaching_floor_is_not_reconciled() -> None:
 def test_trailing_stop_is_deferred_not_reconciled() -> None:
     """Trailing-basis stops are path-dependent; the reconciler never stamps them
     (they stay deferred to the alignment gate), even if a touch is detected."""
-    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="trailing_high")], {})
+    view = _view((101.0, 94.0, 95.0))
+    reconcile = _build_exit_reconciler(
+        [StopLossRule(pct=0.05, basis="trailing_high")], {"AAA": view}
+    )
     assert reconcile is not None
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=101.0, low=94.0, close=95.0),
         return_pct=-4.8,
     )
     assert label is None
 
 
 def test_signal_exit_is_reconciled() -> None:
-    view = _signal_view(101.0, 100.0, 98.0)  # latest close 98 < 99 → predicate fires
+    # latest (signal) bar close 98 < 99 → predicate fires.
+    view = _view((102.0, 100.0, 101.0), (100.0, 98.0, 99.0), (99.0, 97.0, 98.0))
     rule = SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0))
     reconcile = _build_exit_reconciler([rule], {"AAA": view})
     assert reconcile is not None
@@ -174,29 +174,29 @@ def test_signal_exit_is_reconciled() -> None:
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=99.0, low=97.0, close=98.0),
         return_pct=-2.0,  # signal exits have no return bound
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
 
 
 def test_non_firing_rule_is_not_reconciled() -> None:
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    # signal bar high 101 never reaches the 105 target → no rule fires.
+    view = _view((101.0, 99.0, 100.5))
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
-    # bar.high 101 never reaches the 105 target → no rule fires.
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=101.0, low=99.0, close=100.5),
         return_pct=0.5,
     )
     assert label is None
 
 
 def test_zero_qty_is_not_reconciled() -> None:
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    view = _view((106.0, 99.0, 105.0))
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
     assert (
         reconcile(
@@ -204,11 +204,17 @@ def test_zero_qty_is_not_reconciled() -> None:
             side="long",
             entry_price=100.0,
             qty=0.0,
-            bar=_FakeBar(high=106.0, low=99.0, close=105.0),
             return_pct=4.8,
         )
         is None
     )
+
+
+def test_missing_view_is_not_reconciled() -> None:
+    """Without a signal bar in ``views`` the reconciler defers (never guesses)."""
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    assert reconcile is not None
+    assert reconcile(symbol="AAA", side="long", entry_price=100.0, qty=10.0, return_pct=4.8) is None
 
 
 # --- Multiple rules firing on the same bar ---------------------------------
@@ -217,28 +223,28 @@ def test_zero_qty_is_not_reconciled() -> None:
 def test_multiple_rules_first_out_of_bounds_falls_through_to_signal() -> None:
     """A take-profit firing *past* its ceiling must not shadow a compliant
     signal-exit firing on the same bar — attribution still gets stamped."""
-    view = _signal_view(101.0, 100.0, 98.0)  # latest close 98 < 99 → signal fires
+    # Signal bar clears the 105 TP target (high 112) AND fires the signal
+    # predicate (close 98 < 99).
+    view = _view((112.0, 97.0, 98.0))
     rules = [
         TakeProfitRule(pct=0.05),
         SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0)),
     ]
     reconcile = _build_exit_reconciler(rules, {"AAA": view})
     assert reconcile is not None
-    # bar.high 112 clears the 105 TP target, but return 7% is past the cap.
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=112.0, low=97.0, close=98.0),
-        return_pct=7.0,
+        return_pct=7.0,  # TP fires but return is past the cap → falls through
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit"
 
 
 def test_multiple_rules_first_within_bounds_wins() -> None:
     """When the first firing rule complies, it takes priority (spec order)."""
-    view = _signal_view(101.0, 100.0, 98.0)
+    view = _view((106.0, 97.0, 98.0))  # TP target and signal predicate both fire
     rules = [
         TakeProfitRule(pct=0.05),
         SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0)),
@@ -250,7 +256,6 @@ def test_multiple_rules_first_within_bounds_wins() -> None:
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=106.0, low=97.0, close=98.0),
         return_pct=4.8,  # within the 5% ceiling
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
@@ -259,17 +264,18 @@ def test_multiple_rules_first_within_bounds_wins() -> None:
 def test_tightest_take_profit_ceiling_blocks_drift() -> None:
     """With multiple TP rules, the tightest ceiling governs — a close that
     drifted past it is not reconciled (mirrors the alignment gate)."""
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.03), TakeProfitRule(pct=0.05)], {})
+    # Both targets (103, 105) are cleared on the signal bar (high 106).
+    view = _view((106.0, 99.0, 105.5))
+    reconcile = _build_exit_reconciler(
+        [TakeProfitRule(pct=0.03), TakeProfitRule(pct=0.05)], {"AAA": view}
+    )
     assert reconcile is not None
-    # Both targets (103, 105) are cleared, but return 4.8% drifted past the
-    # tightest 3% ceiling, so neither rule may reconcile it.
     label = reconcile(
         symbol="AAA",
         side="long",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=106.0, low=99.0, close=105.5),
-        return_pct=4.8,
+        return_pct=4.8,  # past the tightest 3% ceiling
     )
     assert label is None
 
@@ -278,32 +284,32 @@ def test_tightest_take_profit_ceiling_blocks_drift() -> None:
 
 
 def test_short_take_profit_within_ceiling_is_reconciled() -> None:
-    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {})
+    # entry 100, short; signal bar low 94 clears the 95 target → rule fires; a
+    # short profits as price falls, so the realized return is positive.
+    view = _view((101.0, 94.0, 95.0))
+    reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
-    # entry 100, short; bar.low 94 clears the 95 target → rule fires; a short
-    # profits as price falls, so the realized return is positive.
     label = reconcile(
         symbol="AAA",
         side="short",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=101.0, low=94.0, close=95.0),
         return_pct=4.8,  # within the 5% ceiling
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
 
 
 def test_short_stop_loss_within_floor_is_reconciled() -> None:
-    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {})
+    # entry 100, short; signal bar high 106 crosses the 105 ceiling → rule
+    # fires; a short loses as price rises, so the realized return is negative.
+    view = _view((106.0, 99.0, 105.0))
+    reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
-    # entry 100, short; bar.high 106 crosses the 105 ceiling → rule fires; a
-    # short loses as price rises, so the realized return is negative.
     label = reconcile(
         symbol="AAA",
         side="short",
         entry_price=100.0,
         qty=10.0,
-        bar=_FakeBar(high=106.0, low=99.0, close=105.0),
         return_pct=-4.8,  # within the -5% floor
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
@@ -405,7 +411,7 @@ def test_reconciler_stamps_strategy_close() -> None:
     assert call["qty"] == 10
     assert call["entry_price"] == pytest.approx(100.0)
     assert call["return_pct"] == pytest.approx(5.0)
-    assert call["bar"].close == 105.0
+    assert "bar" not in call  # the reconciler reads the signal bar from views
 
 
 def test_reconciler_skipped_for_engine_owned_reason() -> None:

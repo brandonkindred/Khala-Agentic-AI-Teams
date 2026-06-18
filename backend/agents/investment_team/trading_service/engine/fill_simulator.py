@@ -1105,16 +1105,17 @@ class FillSimulator:
         if self._exit_reconciler is not None and not (exit_reason or "").startswith(
             ENGINE_EXIT_REASON_PREFIX
         ):
+            # The reconciler reads the *signal bar* (one before this fill bar)
+            # from the run's streaming views itself, so the fill bar isn't
+            # passed here. ``original_qty`` is the actually-filled (held) size —
+            # this record is only built on a *full* close, so it equals the
+            # closed quantity; the reconciler uses it only as a ``> 0`` liveness
+            # gate, never in the return-bound math.
             reconciled = self._exit_reconciler(
                 symbol=pos.symbol,
                 side=pos.side.value,
                 entry_price=pos.entry_price,
-                # ``original_qty`` is the actually-filled (held) size — this
-                # record is only built on a *full* close, so it equals the
-                # closed quantity. The reconciler uses it only as a ``> 0``
-                # liveness gate; it never enters the return-bound math.
                 qty=pos.original_qty,
-                bar=bar,
                 return_pct=return_pct,
             )
             if reconciled:

@@ -115,10 +115,11 @@ def _build_exit_reconciler(
         then keeps its no-op default and the existing fill-simulator unit
         tests are unaffected.
       * Otherwise returns a callable
-        ``(symbol, side, entry_price, qty, bar, return_pct) -> Optional[str]``
+        ``(symbol, side, entry_price, qty, return_pct) -> Optional[str]``
         yielding ``"engine_exit:<kind>"`` when a structured rule fires within
-        bounds at the close bar, else ``None``. It does not mutate
-        ``exit_rules`` or ``views``.
+        bounds at the **signal bar** (the bar the strategy acted on, one
+        before the fill), else ``None``. It does not mutate ``exit_rules`` or
+        ``views``.
 
     Bound semantics (must match the alignment gate so a close that filled
     *past* the cap is never masked):
@@ -153,11 +154,29 @@ def _build_exit_reconciler(
         side: str,
         entry_price: float,
         qty: float,
-        bar: Any,
         return_pct: float,
     ) -> Optional[str]:
         if qty <= 0:
             return None
+        # Evaluate every rule at the *signal bar* — the bar the strategy acted
+        # on, one before the fill. At the fill simulator's exit-stamping site
+        # the run loop has not yet appended the fill bar to ``views``, so the
+        # view's latest bar IS the signal bar. Using it for the price (TP/SL)
+        # snapshot as well as signal-exit predicates matches the engine exit
+        # dispatcher (which fires rules on the streaming view) and the
+        # alignment gate (signal bar = fill bar − 1). Evaluating TP/SL against
+        # the fill bar instead would miss a close queued on the rule's bar when
+        # the fill bar doesn't re-cross, and mislabel a discretionary close
+        # when only the fill bar crosses.
+        view = views.get(symbol)
+        if view is None or view.length() == 0:
+            return None
+        i = view.length() - 1
+        bs = BarSnapshot(
+            high=view.bar_field("high", i),
+            low=view.bar_field("low", i),
+            close=view.bar_field("close", i),
+        )
         ps = PositionState(
             symbol=symbol,
             side=side,  # type: ignore[arg-type]  # "long" | "short" Literal
@@ -169,7 +188,6 @@ def _build_exit_reconciler(
             high_since_entry=entry_price,
             low_since_entry=entry_price,
         )
-        bs = BarSnapshot(high=bar.high, low=bar.low, close=bar.close)
         slack = _RECONCILE_RETURN_SLACK_PP
         # Consider *every* rule that fires at this bar, not just the first in
         # spec order. ``evaluate_exit_rules`` returns a single first-wins intent
