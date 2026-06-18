@@ -418,6 +418,7 @@ def test_ensure_repo_clone_flock_failure_reports_lock_error(tmp_path):
 
 
 def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
+    """AGENT_CACHE-derived path is namespaced per issue under github_workspaces."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
@@ -425,20 +426,22 @@ def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
     assert path == "/cache/github_workspaces/acme/widget/issue-42"
 
 
-def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch):
-    # No workspace-root env and no AGENT_CACHE → the relative ``.agent_cache``
-    # default, resolved against the cwd, feeds the github_workspaces layout. This
-    # verifies agent_cache_dir()'s default is wired into the path builder, not just
-    # tested in isolation.
+def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch, tmp_path):
+    """Unset AGENT_CACHE + no workspace root → the relative '.agent_cache' default,
+    resolved against the cwd, feeds the github_workspaces layout. The cwd is pinned
+    to tmp_path so the expected path is deterministic regardless of where the suite
+    runs (no dependence on the ambient working directory)."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
+    monkeypatch.chdir(tmp_path)
     path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
     expected = Path(".agent_cache").resolve() / "github_workspaces" / "acme" / "widget" / "issue-42"
     assert path == str(expected)
 
 
 def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
+    """Two distinct issue numbers resolve to two distinct checkout paths."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
@@ -447,37 +450,42 @@ def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
 
 
 def test_resolve_repo_path_uses_se_workspace_dir_with_issue(monkeypatch):
+    """SE_WORKSPACE_DIR (highest priority) yields <root>/<owner>_<repo>/issue-N."""
     monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
     path = _resolve_repo_path(dict(_GH_CFG), issue_number=9)
     assert path == "/work/acme_widget/issue-9"
 
 
 def test_resolve_repo_path_uses_workspace_root_with_issue(monkeypatch):
-    # SE_WORKSPACE_DIR unset → falls back to the WORKSPACE_ROOT branch.
+    """With SE_WORKSPACE_DIR unset, WORKSPACE_ROOT yields <root>/<owner>_<repo>/issue-N."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.setenv("WORKSPACE_ROOT", "/ws")
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
     path = _resolve_repo_path(dict(_GH_CFG), issue_number=5)
     assert path == "/ws/acme_widget/issue-5"
 
 
 def test_resolve_repo_path_without_issue_is_repo_level(monkeypatch):
+    """No issue number (PR-review path) keeps the repo-level path, no issue-N segment."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
-    # The PR-review path passes no issue number and must keep the repo-level path.
     assert _resolve_repo_path(dict(_GH_CFG)) == "/cache/github_workspaces/acme/widget"
 
 
 def test_resolve_repo_path_without_issue_uses_se_workspace_dir(monkeypatch):
+    """No issue number + workspace-root env → repo-level path under that root."""
     monkeypatch.setenv("SE_WORKSPACE_DIR", "/work")
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
-    # No issue number + workspace-root env → repo-level path under that root.
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
     assert _resolve_repo_path(dict(_GH_CFG)) == "/work/acme_widget"
 
 
 def test_resolve_repo_path_operator_override_returned_verbatim():
+    """An operator-pinned repo_path is returned verbatim, never per-issue-namespaced."""
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"}
-    # An operator-pinned checkout is never per-issue-namespaced.
     assert _resolve_repo_path(cfg, issue_number=42) == "/srv/checkout"
 
 
@@ -490,6 +498,8 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 @patch(f"{_M}.get_credential", return_value="ghp_token")
 @patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
+    """An auto-derived run clones the per-issue folder and forwards repo_path +
+    cleanup_checkout_on_success=True to the coding team."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
@@ -502,7 +512,9 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
     assert payload["cleanup_checkout_on_success"] is True
     # The clone target must be the per-issue folder, not the repo-level path.
-    assert mock_clone.call_args[0][0] == "/cache/github_workspaces/acme/widget/issue-7"
+    mock_clone.assert_called_once_with(
+        "/cache/github_workspaces/acme/widget/issue-7", "acme", "widget", "ghp_token"
+    )
 
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
@@ -512,6 +524,9 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     return_value={"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"},
 )
 def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_clone, monkeypatch):
+    """An operator-pinned repo_path is forwarded verbatim with cleanup disabled, and
+    the clone still runs once against the override path (the run-issue route always
+    ensures the checkout; only the auto-cleanup is suppressed for operator paths)."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -520,6 +535,8 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     payload = fake.calls[0][1]
     assert payload["repo_path"] == "/srv/checkout"
     assert payload["cleanup_checkout_on_success"] is False
+    # Cloning is not skipped for an override — it runs once against the pinned path.
+    mock_clone.assert_called_once_with("/srv/checkout", "acme", "widget", "ghp_token")
 
 
 # ---------------------------------------------------------------------------
@@ -585,8 +602,8 @@ def test_ensure_repo_clone_accepts_scp_form_remote(tmp_path):
 
 @pytest.mark.parametrize("bad", [0, -1, -42])
 def test_resolve_repo_path_rejects_nonpositive_issue_number(monkeypatch, bad):
-    # The docstring promises a positive issue number; a non-positive value would
-    # build a degenerate ``issue-0`` / ``issue--1`` segment, so it is rejected.
+    """A non-positive issue number (which would build a degenerate issue-0/issue--1
+    segment) is rejected with HTTP 400."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
@@ -595,37 +612,32 @@ def test_resolve_repo_path_rejects_nonpositive_issue_number(monkeypatch, bad):
     assert exc.value.status_code == 400
 
 
-def test_resolve_repo_path_rejects_owner_traversal(monkeypatch):
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        # owner and repo are BOTH path components, so both must reject traversal /
+        # separator / backslash / null-byte / dot / surrounding-whitespace injection.
+        ("owner", "../../etc"),
+        ("owner", "a/b"),
+        ("owner", "a\\b"),
+        ("owner", "a\x00b"),
+        ("owner", ".."),
+        ("owner", " acme"),
+        ("repo", "../../etc"),
+        ("repo", "a/b"),
+        ("repo", "a\\b"),
+        ("repo", "a\x00b"),
+        ("repo", ".."),
+        ("repo", "widget "),
+    ],
+)
+def test_resolve_repo_path_rejects_unsafe_owner_or_repo(monkeypatch, field, value):
+    """Both owner and repo are validated against path-injection characters; an unsafe
+    value in either yields HTTP 400 before any path is built."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
-    cfg = {"enabled": True, "owner": "../../etc", "repo": "widget", "repo_path": ""}
-    with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(cfg, issue_number=1)
-    assert exc.value.status_code == 400
-
-
-def test_resolve_repo_path_rejects_repo_separator(monkeypatch):
-    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
-    monkeypatch.setenv("AGENT_CACHE", "/cache")
-    cfg = {"enabled": True, "owner": "acme", "repo": "a/b", "repo_path": ""}
-    with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(cfg, issue_number=1)
-    assert exc.value.status_code == 400
-
-
-def test_resolve_repo_path_rejects_backslash_in_repo(monkeypatch):
-    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
-    monkeypatch.setenv("AGENT_CACHE", "/cache")
-    cfg = {"enabled": True, "owner": "acme", "repo": "a\\b", "repo_path": ""}
-    with pytest.raises(HTTPException) as exc:
-        _resolve_repo_path(cfg, issue_number=1)
-    assert exc.value.status_code == 400
-
-
-def test_resolve_repo_path_rejects_null_byte_in_repo(monkeypatch):
-    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
-    monkeypatch.setenv("AGENT_CACHE", "/cache")
-    cfg = {"enabled": True, "owner": "acme", "repo": "a\x00b", "repo_path": ""}
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "", field: value}
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
     assert exc.value.status_code == 400
