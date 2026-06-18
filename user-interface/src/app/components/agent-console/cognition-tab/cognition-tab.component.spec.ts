@@ -745,4 +745,28 @@ describe('CognitionTabComponent', () => {
     expect(host.textContent).toContain('Select an agent');
     expect(host.querySelectorAll('.cognition-section').length).toBe(0);
   });
+
+  it('wraps every decorative chip glyph in an aria-hidden span (label-only for screen readers)', () => {
+    // Cover all three glyph-bearing chips: the proposal "evidence outdated" warn
+    // chip, the rule-mode chip, and the rule "needs review" warn chip.
+    api.listProposals = vi.fn().mockReturnValue(of([staleProposal]));
+    api.listRules = vi
+      .fn()
+      .mockReturnValue(of([{ ...rules[0], mode: 'enforced' as const, needs_review: true }]));
+    const f = build();
+    f.detectChanges();
+    const host = f.nativeElement as HTMLElement;
+
+    const decoratedChips = host.querySelectorAll('.proposal-card .is-warn, .is-mode, .rule-row .is-warn');
+    expect(decoratedChips.length).toBe(3);
+    for (const chip of Array.from(decoratedChips)) {
+      const icon = chip.querySelector('span[aria-hidden="true"]');
+      // The glyph lives in an aria-hidden span...
+      expect(icon).not.toBeNull();
+      expect(icon!.textContent?.trim()).toMatch(/[⚠⚖💬]/u);
+      // ...and is the chip's ONLY emoji: the text exposed to AT is just the label.
+      const labelText = chip.textContent?.replace(icon!.textContent ?? '', '') ?? '';
+      expect(labelText).not.toMatch(/[⚠⚖💬]/u);
+    }
+  });
 });
