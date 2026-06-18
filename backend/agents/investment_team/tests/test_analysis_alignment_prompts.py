@@ -319,8 +319,12 @@ def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> No
     limit, so the reviewer must not read either as the exact capital at risk.
     """
     assert "capped by the position limit" in _SELF_REVIEW_PROMPT
-    assert 'do NOT read "vol-target X%" or "$Y per trade" as the exact capital at risk' in (
-        _SELF_REVIEW_PROMPT
+    # Fixed-fraction is also nominal (lot rounding / cap can move it), so the
+    # check must not read any of the three renderings as the exact capital.
+    assert "(nominal, before whole-share lot rounding and the position cap)" in _SELF_REVIEW_PROMPT
+    assert (
+        'do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" '
+        "as the exact capital at risk" in _SELF_REVIEW_PROMPT
     )
     # The review prompt lacks per-trade position_value / risk limits, so the
     # check must forbid asserting an exact figure rather than verify one.
