@@ -6,7 +6,7 @@
   margin: 0 0 1rem;
   max-width: 52rem;
   line-height: 1.5;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  color: var(--kh-text-tertiary);
 
   code {
     font-size: 0.9em;
@@ -18,29 +18,59 @@
 }
 
 // ---------------------------------------------------------------------------
+// View switcher — one focused view at a time
+// ---------------------------------------------------------------------------
+
+.view-toggle {
+  margin-bottom: var(--kh-space-5);
+
+  mat-icon {
+    margin-right: var(--kh-space-2);
+    font-size: 18px;
+    width: 18px;
+    height: 18px;
+    vertical-align: middle;
+  }
+
+  .toggle-label {
+    font-size: var(--kh-text-sm);
+  }
+}
+
+// The GitHub issues panel and the Jobs panel reuse the shared `.kh-card` base (surface, border,
+// radius) from styles.scss; only structure-specific rules live here. They are full-width layout
+// containers rather than interactive cards, so keep the tighter `--kh-space-5` padding and suppress
+// `.kh-card`'s hover border highlight.
+.github-section.kh-card,
+.jobs-panel.kh-card {
+  padding: var(--kh-space-5);
+
+  &:hover {
+    border-color: var(--kh-border);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // GitHub Issues section
 // ---------------------------------------------------------------------------
 
 .github-section {
-  margin: 1.5rem 0;
-  padding: 1.25rem;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
-  border-radius: 12px;
-  background: var(--mat-sys-surface-container-lowest, #fff);
+  margin: 0;
 
+  // Inline status banners shown when GitHub is loading/unconfigured — not cards.
   &--loading,
   &--unconfigured {
     display: flex;
     align-items: center;
     gap: 0.75rem;
     padding: 1rem 1.25rem;
-    border-radius: 8px;
-    background: var(--mat-sys-surface-container, #f5f5f5);
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
-    margin: 1.5rem 0;
+    border: 1px solid var(--kh-border);
+    border-radius: var(--kh-radius-md);
+    background: var(--kh-surface-2);
+    color: var(--kh-text-secondary);
 
     a {
-      color: var(--mat-sys-primary, #1a73e8);
+      color: var(--kh-accent-text);
       text-decoration: underline;
     }
   }
@@ -49,6 +79,7 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: 0.75rem;
     margin-bottom: 1rem;
 
     h2 {
@@ -56,15 +87,15 @@
       align-items: center;
       gap: 0.5rem;
       margin: 0;
-      font-size: 1.1rem;
-      font-weight: 500;
+      font-size: var(--kh-text-lg);
+      font-weight: 600;
     }
   }
 
   &__repo {
     font-weight: 400;
-    font-size: 0.85rem;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-tertiary);
     margin-left: 0.25rem;
   }
 }
@@ -74,17 +105,17 @@
   align-items: flex-start;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
-  border-radius: 8px;
+  border-radius: var(--kh-radius-md);
   margin-bottom: 1rem;
 
   &--error {
-    background: #fce8e6;
-    color: #c5221f;
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
   }
 
   &--waiting {
-    background: #fef7e0;
-    color: #b06000;
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
   }
 }
 
@@ -105,21 +136,27 @@
   align-items: center;
   gap: 0.75rem;
   padding: 0.75rem 1rem;
-  border: none;
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--kh-radius-md);
   background: transparent;
+  color: var(--kh-text-primary);
   cursor: pointer;
   text-align: left;
   width: 100%;
-  transition: background-color 0.15s;
+  transition: background-color var(--kh-transition), border-color var(--kh-transition);
 
   &:hover {
-    background: var(--mat-sys-surface-container, #f5f5f5);
+    background: var(--kh-surface-3);
+  }
+
+  &--selected {
+    border-color: var(--kh-accent);
+    background: var(--kh-surface-3);
   }
 
   &__number {
     font-weight: 600;
-    color: var(--mat-sys-primary, #1a73e8);
+    color: var(--kh-accent-text);
     min-width: 3.5rem;
   }
 
@@ -149,11 +186,11 @@
     }
 
     &--blocked {
-      color: var(--mat-sys-error, #d93025);
+      color: var(--kh-error);
     }
 
     &--met {
-      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.5));
+      color: var(--kh-text-tertiary);
     }
   }
 
@@ -161,17 +198,17 @@
     display: inline-block;
     min-width: 1.1rem;
     padding: 0 6px;
-    border-radius: 12px;
+    border-radius: var(--kh-radius-full);
     font-size: 0.72rem;
     font-weight: 600;
     line-height: 1.3rem;
     text-align: center;
-    background: var(--mat-sys-error-container, #fce8e6);
-    color: var(--mat-sys-on-error-container, #c5221f);
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
   }
 
   &__arrow {
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.5));
+    color: var(--kh-text-tertiary);
     flex-shrink: 0;
   }
 }
@@ -179,18 +216,18 @@
 .github-label-chip {
   display: inline-block;
   padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 0.75rem;
-  background: var(--mat-sys-secondary-container, #e8f0fe);
-  color: var(--mat-sys-on-secondary-container, #1a73e8);
+  border-radius: var(--kh-radius-full);
+  font-size: var(--kh-text-xs);
+  background: var(--kh-surface-4);
+  color: var(--kh-text-secondary);
 
   &--active {
     display: inline-flex;
     align-items: center;
     gap: 0.25rem;
     flex-shrink: 0;
-    background: #fef7e0;
-    color: #b06000;
+    background: var(--kh-accent-subtle);
+    color: var(--kh-accent-text);
     font-weight: 600;
 
     mat-icon {
@@ -201,17 +238,18 @@
   }
 }
 
-// Confirmation panel
+// Inline confirmation panel (expands under the selected issue row)
 .github-confirm-panel {
   padding: 1.25rem;
-  border-radius: 8px;
-  background: var(--mat-sys-surface-container, #f8f9fa);
-  margin-bottom: 1rem;
+  border-radius: var(--kh-radius-md);
+  border: 1px solid var(--kh-border);
+  background: var(--kh-surface-3);
+  margin: 0.25rem 0 0.5rem;
 
   h3 {
     margin: 0 0 0.75rem;
-    font-size: 1rem;
-    font-weight: 500;
+    font-size: var(--kh-text-md);
+    font-weight: 600;
   }
 
   &__issue {
@@ -222,7 +260,7 @@
 
     .issue-number {
       font-weight: 600;
-      color: var(--mat-sys-primary, #1a73e8);
+      color: var(--kh-accent-text);
     }
 
     .issue-title {
@@ -231,8 +269,8 @@
   }
 
   &__preview {
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
-    font-size: 0.875rem;
+    color: var(--kh-text-tertiary);
+    font-size: var(--kh-text-sm);
     margin: 0.5rem 0;
     white-space: pre-wrap;
     max-height: 4rem;
@@ -240,8 +278,8 @@
   }
 
   &__hint {
-    font-size: 0.8rem;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+    font-size: var(--kh-text-sm);
+    color: var(--kh-text-tertiary);
     margin: 0.75rem 0;
   }
 
@@ -251,12 +289,12 @@
     gap: 0.5rem;
     padding: 0.75rem 1rem;
     margin: 0.75rem 0;
-    border-radius: 8px;
-    background: var(--mat-sys-error-container, #fce8e6);
-    color: var(--mat-sys-on-error-container, #c5221f);
+    border-radius: var(--kh-radius-md);
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
 
     mat-icon {
-      color: var(--mat-sys-error, #c5221f);
+      color: var(--kh-error);
       flex-shrink: 0;
     }
 
@@ -267,8 +305,9 @@
 
     p {
       margin: 0;
-      font-size: 0.85rem;
+      font-size: var(--kh-text-sm);
       line-height: 1.4;
+      color: var(--kh-error);
     }
   }
 
@@ -279,25 +318,177 @@
   }
 }
 
-// Job status panel
-.github-job-panel {
-  padding: 1.25rem;
-  border-radius: 8px;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
-  background: var(--mat-sys-surface-container-lowest, #fff);
-  margin-bottom: 1rem;
+// ---------------------------------------------------------------------------
+// Runs panel — the persistent status panel (no Dismiss)
+// ---------------------------------------------------------------------------
 
+.jobs-panel {
+  // Card base (surface, border, radius, padding) comes from the shared `.kh-card` class.
   &__header {
     display: flex;
     align-items: center;
     gap: 0.5rem;
     margin-bottom: 1rem;
 
+    h2 {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      margin: 0;
+      flex: 1;
+      font-size: var(--kh-text-lg);
+      font-weight: 600;
+    }
+  }
+
+  &__legend {
+    color: var(--kh-text-tertiary);
+    cursor: help;
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+  }
+
+  &__empty {
+    padding: var(--kh-space-8) var(--kh-space-4);
+  }
+}
+
+.runs-section {
+  margin-bottom: 0.5rem;
+}
+
+.runs-section__title {
+  margin: 0 0 0.5rem;
+  font-size: var(--kh-text-xs);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--kh-text-tertiary);
+}
+
+.runs-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+}
+
+.runs-divider {
+  border-top: 1px solid var(--kh-border-subtle);
+  margin: 0.75rem 0;
+}
+
+.coding-run-item {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.3rem;
+  width: 100%;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: transparent;
+  color: var(--kh-text-primary);
+  cursor: pointer;
+  text-align: left;
+  transition: background var(--kh-transition), border-color var(--kh-transition);
+
+  &:hover {
+    background: var(--kh-surface-3);
+  }
+
+  &.selected {
+    border-color: var(--kh-accent);
+    background: var(--kh-surface-3);
+    box-shadow: inset 3px 0 0 var(--kh-accent);
+  }
+
+  &__top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    gap: 0.5rem;
+  }
+
+  &__issue {
+    font-weight: 600;
+    color: var(--kh-accent-text);
+    font-size: var(--kh-text-sm);
+  }
+
+  &__detail {
+    font-size: var(--kh-text-xs);
+    color: var(--kh-text-tertiary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 100%;
+  }
+
+  &__time {
+    font-size: var(--kh-text-xs);
+    color: var(--kh-text-muted);
+  }
+
+  &__chevron {
+    color: var(--kh-text-tertiary);
+    font-size: 1.1rem;
+    width: 1.1rem;
+    height: 1.1rem;
+    flex-shrink: 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Selected-run live detail — expanded inline beneath its row (accordion body)
+// ---------------------------------------------------------------------------
+
+.run-detail {
+  margin: 0 0 0.375rem;
+  padding: var(--kh-space-4);
+  border: 1px solid var(--kh-border);
+  border-radius: var(--kh-radius-md);
+  background: var(--kh-surface-1);
+  box-shadow: inset 3px 0 0 var(--kh-accent);
+
+  &--pending {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: var(--kh-text-tertiary);
+    box-shadow: none;
+  }
+
+  &__header {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-bottom: 1rem;
+    flex-wrap: wrap;
+
     h3 {
       margin: 0;
       flex: 1;
+      font-size: var(--kh-text-md);
+      font-weight: 600;
+    }
+  }
+
+  &__copy {
+    width: 28px;
+    height: 28px;
+    line-height: 28px;
+    color: var(--kh-text-tertiary);
+
+    mat-icon {
       font-size: 1rem;
-      font-weight: 500;
+      width: 1rem;
+      height: 1rem;
+    }
+
+    &:hover {
+      color: var(--kh-accent-text);
     }
   }
 
@@ -307,6 +498,12 @@
     gap: 0.5rem;
   }
 
+  &__retry {
+    margin-top: 0.5rem;
+  }
+}
+
+.github-job-panel {
   &__field {
     display: flex;
     align-items: center;
@@ -315,11 +512,11 @@
     &--pr {
       margin-top: 0.5rem;
       padding: 0.5rem 0.75rem;
-      border-radius: 6px;
-      background: #e6f4ea;
+      border-radius: var(--kh-radius-sm);
+      background: var(--kh-success-subtle);
 
       a {
-        color: #1e8e3e;
+        color: var(--kh-success);
         word-break: break-all;
       }
     }
@@ -327,46 +524,10 @@
 
   &__label {
     font-weight: 500;
-    font-size: 0.8rem;
+    font-size: var(--kh-text-xs);
     text-transform: uppercase;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.5));
-    min-width: 4rem;
-  }
-}
-
-.github-job-status {
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 4px;
-  font-size: 0.85rem;
-
-  &--pending {
-    background: #fef7e0;
-    color: #f9ab00;
-  }
-  &--running {
-    background: #e8f0fe;
-    color: #1a73e8;
-  }
-  &--completed {
-    background: #e6f4ea;
-    color: #1e8e3e;
-  }
-  &--completed_with_failures {
-    background: #fef7e0;
-    color: #e37400;
-  }
-  &--failed {
-    background: #fce8e6;
-    color: #c5221f;
-  }
-  &--cancelled {
-    background: #f5f5f5;
-    color: #80868b;
-  }
-  &--waiting_for_user {
-    background: #fef7e0;
-    color: #b06000;
+    color: var(--kh-text-tertiary);
+    min-width: 3.5rem;
   }
 }
 
@@ -386,9 +547,10 @@
   align-items: center;
   gap: 0.35rem;
   padding: 4px 10px;
-  border-radius: 6px;
-  font-size: 0.8rem;
-  background: var(--mat-sys-surface-container, #f5f5f5);
+  border-radius: var(--kh-radius-sm);
+  font-size: var(--kh-text-xs);
+  background: var(--kh-surface-3);
+  color: var(--kh-text-secondary);
 
   &__status {
     font-size: 0.7rem;
@@ -396,14 +558,30 @@
     opacity: 0.7;
   }
 
-  &--merged {
-    background: #e6f4ea;
+  // Status modifiers — mapped to the same semantic tokens as the run badges so every task status
+  // is visually distinct (not just the default chip). Unknown statuses keep the neutral base above.
+  &--merged,
+  &--completed {
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
   }
   &--in_progress {
-    background: #e8f0fe;
+    background: var(--kh-accent-subtle);
+    color: var(--kh-accent-text);
   }
-  &--in_review {
-    background: #fef7e0;
+  &--in_review,
+  &--blocked {
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
+  }
+  &--failed {
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
+  }
+  &--pending,
+  &--cancelled {
+    background: var(--kh-surface-4);
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -413,7 +591,7 @@
   gap: 0.5rem;
   padding: 1.5rem;
   justify-content: center;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.5));
+  color: var(--kh-text-tertiary);
 }
 
 .thinking-panel {
@@ -431,12 +609,49 @@
   overflow-y: auto;
   margin: 0;
   padding: 0.75rem;
-  background: var(--mat-sys-surface-container-high, rgba(0, 0, 0, 0.04));
-  border-radius: 4px;
-  font-family: 'Roboto Mono', 'Courier New', monospace;
-  font-size: 0.8rem;
+  background: var(--kh-surface-3);
+  border-radius: var(--kh-radius-sm);
+  font-family: var(--kh-font-mono);
+  font-size: var(--kh-text-xs);
   line-height: 1.4;
   white-space: pre-wrap;
   word-break: break-word;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  color: var(--kh-text-secondary);
+}
+
+.launched-banner {
+  margin-top: 1rem;
+  color: var(--kh-text-tertiary);
+}
+
+// ---------------------------------------------------------------------------
+// Small viewports — the three views are already single-column and full-width,
+// so this only tightens spacing and collapses the toggle to icons so the
+// switcher and cards stay usable on narrow screens.
+// ---------------------------------------------------------------------------
+@media (max-width: 600px) {
+  .view-toggle {
+    width: 100%;
+
+    // Icon-only toggles fit three-across without overflow on a phone.
+    .toggle-label {
+      display: none;
+    }
+
+    mat-icon {
+      margin-right: 0;
+    }
+  }
+
+  .github-section.kh-card,
+  .jobs-panel.kh-card {
+    padding: var(--kh-space-4);
+  }
+
+  // Keep the inline confirm panel and run detail from crowding the screen edges.
+  .github-confirm-panel,
+  .run-detail {
+    padding-left: var(--kh-space-3);
+    padding-right: var(--kh-space-3);
+  }
 }

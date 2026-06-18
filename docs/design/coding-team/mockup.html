@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Coding Team — redesign mockup</title>
+<style>
+  :root{
+    --kh-surface-0:#000;--kh-surface-1:#0a0a0a;--kh-surface-2:#171717;--kh-surface-3:#262626;--kh-surface-4:#333;
+    --kh-accent:#fbbf24;--kh-accent-text:#fde68a;--kh-accent-subtle:rgba(251,191,36,.20);
+    --kh-text-primary:#fff;--kh-text-secondary:#d4d4d8;--kh-text-tertiary:#a1a1aa;--kh-text-muted:#909099;
+    --kh-border:rgba(255,255,255,.16);--kh-border-subtle:rgba(255,255,255,.10);
+    --kh-success:#4ade80;--kh-success-subtle:rgba(74,222,128,.18);
+    --kh-warning:#fbbf24;--kh-warning-subtle:rgba(251,191,36,.18);
+    --kh-error:#f87171;--kh-error-subtle:rgba(248,113,113,.18);
+    --kh-radius-md:8px;--kh-radius-lg:12px;--kh-radius-full:9999px;
+    --font:'Inter','Segoe UI',sans-serif;--mono:'JetBrains Mono',monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--kh-surface-0);color:var(--kh-text-primary);font-family:var(--font);font-size:14px;line-height:1.6;padding:32px}
+  h1{font-size:30px;font-weight:700;letter-spacing:-.5px;margin:0 0 6px}
+  h2{font-size:18px;font-weight:600;margin:0;display:flex;align-items:center;gap:8px}
+  .sub{color:var(--kh-text-tertiary);margin:0 0 8px;max-width:52rem}
+  .head{display:flex;justify-content:space-between;align-items:flex-start;gap:16px}
+  .health{display:inline-flex;align-items:center;gap:8px;background:var(--kh-surface-2);border:1px solid var(--kh-border);border-radius:var(--kh-radius-full);padding:6px 14px;color:var(--kh-text-secondary);font-size:12px;white-space:nowrap}
+  .dot{width:8px;height:8px;border-radius:50%;background:var(--kh-success)}
+  .layout{display:grid;grid-template-columns:1fr 380px;gap:20px;align-items:flex-start;margin-top:24px}
+  @media (max-width:1024px){.layout{grid-template-columns:1fr}}
+  .card{background:var(--kh-surface-2);border:1px solid var(--kh-border);border-radius:var(--kh-radius-lg);padding:20px}
+  .card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:14px}
+  .repo{font-weight:400;font-size:13px;color:var(--kh-text-tertiary);margin-left:6px}
+  .btn{border-radius:var(--kh-radius-md);border:none;padding:8px 16px;font-weight:600;font-size:13px;cursor:pointer}
+  .btn-primary{background:var(--kh-accent);color:#09090b}
+  .btn-ghost{background:transparent;border:1px solid var(--kh-border);color:var(--kh-text-secondary)}
+  .row{display:flex;align-items:center;gap:12px;padding:11px 14px;border-radius:var(--kh-radius-md);border:1px solid transparent;cursor:pointer}
+  .row:hover{background:var(--kh-surface-3)}
+  .row.sel{border-color:var(--kh-accent);background:var(--kh-surface-3)}
+  .num{font-weight:600;color:var(--kh-accent-text);min-width:46px}
+  .title{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .chip{display:inline-flex;align-items:center;gap:4px;padding:2px 9px;border-radius:var(--kh-radius-full);font-size:12px;background:var(--kh-surface-4);color:var(--kh-text-secondary)}
+  .badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:var(--kh-radius-full);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.02em}
+  .b-run{background:var(--kh-accent-subtle);color:var(--kh-accent-text)}
+  .b-ok{background:var(--kh-success-subtle);color:var(--kh-success)}
+  .b-err{background:var(--kh-error-subtle);color:var(--kh-error)}
+  .b-warn{background:var(--kh-warning-subtle);color:var(--kh-warning)}
+  .arrow{color:var(--kh-text-tertiary)}
+  .confirm{margin:4px 0 8px;padding:18px;border-radius:var(--kh-radius-md);border:1px solid var(--kh-border);background:var(--kh-surface-3)}
+  .confirm h3{margin:0 0 10px;font-size:15px}
+  .hint{color:var(--kh-text-tertiary);font-size:13px;margin:8px 0 14px}
+  .actions{display:flex;gap:12px}
+  .sectitle{font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.08em;color:var(--kh-text-tertiary);margin:0 0 8px}
+  .runlist{display:flex;flex-direction:column;gap:6px}
+  .run{display:flex;flex-direction:column;gap:5px;padding:10px 12px;border:1px solid var(--kh-border);border-radius:var(--kh-radius-md);background:transparent;cursor:pointer}
+  .run.sel{border-color:var(--kh-accent);background:var(--kh-surface-3);box-shadow:inset 3px 0 0 var(--kh-accent)}
+  .run-top{display:flex;justify-content:space-between;align-items:center;gap:8px}
+  .run .num{min-width:auto;font-size:13px}
+  .run-det{font-size:12px;color:var(--kh-text-tertiary);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .run-time{font-size:11px;color:var(--kh-text-muted)}
+  .divider{border-top:1px solid var(--kh-border-subtle);margin:14px 0}
+  .field{display:flex;align-items:center;gap:8px;margin:4px 0}
+  .flbl{font-size:11px;font-weight:600;text-transform:uppercase;color:var(--kh-text-tertiary);min-width:56px}
+  code{font-family:var(--mono);font-size:12px;color:var(--kh-text-tertiary)}
+  .bar{height:6px;border-radius:3px;background:var(--kh-surface-3);overflow:hidden}
+  .bar > i{display:block;height:100%;background:var(--kh-accent)}
+  .stepper{display:flex;align-items:center;gap:6px;margin:14px 0}
+  .step{display:flex;flex-direction:column;align-items:center;gap:4px;flex:0 0 auto}
+  .node{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;font-size:12px;color:#09090b}
+  .node.done{background:var(--kh-success)}.node.cur{background:var(--kh-accent)}.node.todo{background:transparent;border:2px solid var(--kh-surface-4);color:var(--kh-text-muted)}
+  .conn{flex:1;height:2px;background:var(--kh-surface-4)}.conn.done{background:var(--kh-success)}
+  .steplbl{font-size:10px;color:var(--kh-text-muted)}.steplbl.cur{color:var(--kh-accent-text)}
+  .agents{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:8px}
+  .agent{border:1px solid var(--kh-border);border-radius:var(--kh-radius-md);background:var(--kh-surface-3);padding:9px}
+  .agent.active{border-color:var(--kh-accent)}
+  .agent b{font-size:12px;font-weight:600;color:var(--kh-text-secondary)}
+  .pr{display:flex;align-items:center;gap:8px;background:var(--kh-success-subtle);color:var(--kh-success);border-radius:6px;padding:9px 12px;margin-top:10px;font-size:13px}
+  .note{color:var(--kh-text-muted);font-size:11px;font-style:italic;margin-top:10px}
+</style>
+</head>
+<body>
+  <div class="head">
+    <div>
+      <div style="color:var(--kh-text-tertiary);font-size:12px">&#8249; Software Engineering</div>
+      <h1>Coding Team</h1>
+      <p class="sub">Sub-team of <strong>Software Engineering</strong>: Tech Lead, stack-specialist Senior Engineers, and Task Graph.</p>
+    </div>
+    <div class="health"><span class="dot"></span> Coding Team API &#183; healthy</div>
+  </div>
+
+  <div class="layout">
+    <!-- LEFT: issues (always visible) -->
+    <section class="card">
+      <div class="card-head">
+        <h2>&#128027; GitHub Issues <span class="repo">acme/widgets</span></h2>
+        <button class="btn btn-primary">&#8635; Refresh</button>
+      </div>
+      <div>
+        <div class="row"><span class="num">#41</span><span class="title">Add OAuth login</span><span class="chip">bug</span><span class="arrow">&#8250;</span></div>
+        <div class="row"><span class="num">#42</span><span class="title">Fix pagination</span><span class="badge b-run">&#9881; In progress</span><span class="chip">api</span><span class="arrow">&#8250;</span></div>
+        <div class="row sel"><span class="num">#43</span><span class="title">Refactor task graph</span><span class="chip">tech</span><span class="arrow">&#8250;</span></div>
+        <div class="confirm">
+          <h3>Start AI coding on this issue?</h3>
+          <div><span class="num">#43</span> Refactor task graph</div>
+          <p class="hint">The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.</p>
+          <div class="actions"><button class="btn btn-primary">&#9658; Confirm &amp; Start</button><button class="btn btn-ghost">Cancel</button></div>
+        </div>
+        <div class="row"><span class="num">#44</span><span class="title">Dark mode toggle</span><span class="badge b-run">&#9881; In progress</span><span class="arrow">&#8250;</span></div>
+        <div class="row"><span class="num">#45</span><span class="title">Improve error toasts</span><span style="color:var(--kh-error)">&#9940; 2</span><span class="chip">ui</span><span class="arrow">&#8250;</span></div>
+        <div class="row"><span class="num">#46</span><span class="title">Add metrics dashboard</span><span class="arrow">&#8250;</span></div>
+      </div>
+      <div class="divider"></div>
+      <div style="display:flex;justify-content:flex-end;gap:24px;color:var(--kh-text-tertiary);font-size:12px"><span>Items per page: 10</span><span>1 &#8211; 10 of 27</span></div>
+      <p class="note">Selecting a row expands an inline confirm beneath it — the list never disappears.</p>
+    </section>
+
+    <!-- RIGHT: persistent Runs panel -->
+    <aside class="card">
+      <div class="card-head"><h2>&#128296; Runs</h2><span style="color:var(--kh-text-tertiary)">&#9432;</span></div>
+
+      <p class="sectitle">Running</p>
+      <div class="runlist">
+        <div class="run sel">
+          <div class="run-top"><span class="num">#42</span><span class="badge b-run">running 45%</span></div>
+          <span class="run-det">Coding &#183; writing files</span>
+          <div class="bar"><i style="width:45%"></i></div>
+          <span class="run-time">2m ago</span>
+        </div>
+        <div class="run">
+          <div class="run-top"><span class="num">#44</span><span class="badge b-warn">&#10067; needs answers</span></div>
+          <span class="run-time">Paused &#183; 5m ago</span>
+        </div>
+      </div>
+
+      <p class="sectitle" style="margin-top:14px">Recent</p>
+      <div class="runlist">
+        <div class="run"><div class="run-top"><span class="num">#38</span><span class="badge b-ok">&#10003; completed</span></div><span class="run-time">1h ago</span></div>
+        <div class="run"><div class="run-top"><span class="num">#35</span><span class="badge b-err">&#10007; failed</span></div><span class="run-time">2h ago</span></div>
+      </div>
+
+      <div class="divider"></div>
+
+      <!-- live detail of selected run -->
+      <h2 style="font-size:15px">&#128295; Working on issue <a href="#" style="color:var(--kh-accent-text);text-decoration:none">#42</a></h2>
+      <div class="field"><span class="flbl">Job</span><code>a1b2c3d4e5f6&#8230;</code><span style="color:var(--kh-text-tertiary)">&#128203;</span></div>
+      <div class="field"><span class="flbl">Status</span><span class="badge b-run">running</span></div>
+      <div style="color:var(--kh-text-secondary);margin:10px 0 6px">&#128681; Implementing the task graph</div>
+      <div class="bar"><i style="width:45%"></i></div>
+      <div class="stepper">
+        <div class="step"><div class="node done">&#10003;</div><span class="steplbl">Planning</span></div>
+        <div class="conn done"></div>
+        <div class="step"><div class="node cur">&#9881;</div><span class="steplbl cur">Coding</span></div>
+        <div class="conn"></div>
+        <div class="step"><div class="node todo"></div><span class="steplbl">Completed</span></div>
+      </div>
+      <div class="agents">
+        <div class="agent"><b>&#128104; Tech Lead</b><div><span class="badge b-ok" style="margin-top:6px">working</span></div></div>
+        <div class="agent active"><b>&#128104; Backend Eng</b><div class="run-det">writing files</div><div class="bar" style="margin-top:5px"><i style="width:60%"></i></div></div>
+        <div class="agent"><b>&#128104; QA Agent</b><div><span class="chip" style="margin-top:6px">idle</span></div></div>
+      </div>
+      <div class="pr">&#128279; Draft PR #128 opened</div>
+      <p class="note">Persistent panel — no Dismiss; runs stay here while working and after they finish.</p>
+    </aside>
+  </div>
+</body>
+</html>
