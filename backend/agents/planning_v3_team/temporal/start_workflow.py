@@ -27,9 +27,12 @@ CLIENT_READY_POLL_S = 0.05
 def _worker_starting() -> bool:
     """True while a Temporal worker thread is alive in this process.
 
-    Imported lazily so this module doesn't pull ``temporalio.worker`` (via the
-    worker module) at import time, and to keep the dependency direction
-    one-way (worker → start_workflow never the reverse).
+    The import of ``is_worker_thread_alive`` is deferred to call time so that
+    importing this module doesn't pull in ``temporalio.worker`` (via the worker
+    module) — keeping ``start_workflow`` cheap to import and loading the worker
+    stack only when a client wait actually needs it. The call-time dependency is
+    ``start_workflow`` → ``worker``; ``worker`` does not import this module, so
+    there is no import cycle.
 
     Preconditions:
         - None.
