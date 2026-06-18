@@ -95,7 +95,7 @@
                   <mat-chip class="is-action">{{ actionLabel }}</mat-chip>
                   <mat-chip class="is-status is-dot">{{ p.status }}</mat-chip>
                   @if (p.stale_evidence) {
-                    <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
+                    <mat-chip class="is-warn"><span aria-hidden="true">⚠</span> {{ EVIDENCE_OUTDATED }}</mat-chip>
                   }
                 </mat-chip-set>
                 <time class="proposal-card__time" [attr.datetime]="p.created_at">{{ p.created_at | date: 'medium' }}</time>
@@ -309,7 +309,7 @@
                     [matTooltip]="ruleModeTooltip(r.mode)"
                     [attr.aria-describedby]="'mode-tip-' + r.id"
                   >
-                    {{ r.mode === 'enforced' ? '⚖' : '💬' }} {{ r.mode }}
+                    <span aria-hidden="true">{{ r.mode === 'enforced' ? '⚖' : '💬' }}</span> {{ r.mode }}
                   </mat-chip>
                   <mat-chip class="is-status">{{ r.status }}</mat-chip>
                 </mat-chip-set>
@@ -319,7 +319,7 @@
                 <span class="rule-row__spacer"></span>
                 @if (r.needs_review) {
                   <mat-chip-set>
-                    <mat-chip class="is-warn">⚠ {{ EVIDENCE_OUTDATED }}</mat-chip>
+                    <mat-chip class="is-warn"><span aria-hidden="true">⚠</span> {{ EVIDENCE_OUTDATED }}</mat-chip>
                   </mat-chip-set>
                 }
               </header>
