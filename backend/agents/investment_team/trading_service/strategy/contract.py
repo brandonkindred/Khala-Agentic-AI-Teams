@@ -34,6 +34,7 @@ class OrderType(str, Enum):
     MARKET = "market"
     LIMIT = "limit"
     STOP = "stop"
+    STOP_LIMIT = "stop_limit"
     TRAILING_STOP = "trailing_stop"
 
 
@@ -90,11 +91,21 @@ class InvalidTWAPOrderError(UnsupportedOrderFeatureError, ValueError):
 
 
 class StopAttachment(BaseModel):
-    """Stop-loss leg attached to an entry order; materialized into an OCO child on entry fill."""
+    """Stop-loss leg attached to an entry order; materialized into an OCO child on entry fill.
+
+    When ``limit_offset`` is set the materialized child is a STOP_LIMIT (a stop
+    that, once triggered, rests as a limit order ``limit_offset`` away from the
+    stop level) rather than a plain STOP. An *offset* (not an absolute limit
+    price) is used because the stop level itself may trail/ratchet, so the limit
+    is re-derived from the live stop. ``trail_offset`` and ``limit_offset`` are
+    mutually exclusive — a ratcheting stop-limit child is not supported.
+    """
 
     stop_price: float
     trail_offset: Optional[float] = None
     trail_offset_kind: Literal["abs", "bps"] = "abs"
+    limit_offset: Optional[float] = None
+    limit_offset_kind: Literal["abs", "bps"] = "abs"
     client_order_id: Optional[str] = None
 
 
@@ -182,6 +193,21 @@ class OrderRequest(BaseModel):
                     "attached_stop_loss.trail_offset must be non-negative, "
                     f"got {self.attached_stop_loss.trail_offset!r}"
                 )
+        if self.attached_stop_loss is not None and self.attached_stop_loss.limit_offset is not None:
+            if self.attached_stop_loss.limit_offset < 0:
+                raise ValueError(
+                    "attached_stop_loss.limit_offset must be non-negative, "
+                    f"got {self.attached_stop_loss.limit_offset!r}"
+                )
+            # A ratcheting stop-limit child (trailing stop whose limit re-derives
+            # from the moving stop each bar) is out of scope; reject the combo
+            # loudly so it surfaces at submission rather than materializing a
+            # silently-wrong child.
+            if self.attached_stop_loss.trail_offset is not None:
+                raise ValueError(
+                    "attached_stop_loss cannot set both trail_offset and limit_offset "
+                    "(a trailing stop-limit child is not supported)"
+                )
         # ``parent_order_id`` / ``oco_group_id`` are engine-internal: the
         # bracket materializer in ``FillSimulator`` calls
         # ``OrderBook.submit_attached`` which clones the request with these
@@ -217,6 +243,26 @@ class OrderRequest(BaseModel):
             raise ValueError("limit order requires limit_price")
         if self.order_type == OrderType.STOP and self.stop_price is None:
             raise ValueError("stop order requires stop_price")
+        if self.order_type == OrderType.STOP_LIMIT:
+            if self.stop_price is None or self.limit_price is None:
+                raise ValueError("stop_limit order requires both stop_price and limit_price")
+            # Limit must sit on the protective side of the stop. A SHORT
+            # stop-limit (sell — closes a long, triggers on a fall) submits a
+            # sell-limit that must not be above the trigger: ``limit <= stop``.
+            # A LONG stop-limit (buy — closes a short, triggers on a rise)
+            # submits a buy-limit that must not be below the trigger:
+            # ``limit >= stop``. A limit on the wrong side could never fill at
+            # trigger and is almost certainly a sign error.
+            if self.side == OrderSide.SHORT and self.limit_price > self.stop_price:
+                raise ValueError(
+                    "short stop_limit requires limit_price <= stop_price "
+                    f"(got limit={self.limit_price!r}, stop={self.stop_price!r})"
+                )
+            if self.side == OrderSide.LONG and self.limit_price < self.stop_price:
+                raise ValueError(
+                    "long stop_limit requires limit_price >= stop_price "
+                    f"(got limit={self.limit_price!r}, stop={self.stop_price!r})"
+                )
         if self.order_type == OrderType.TRAILING_STOP:
             if self.stop_price is None:
                 raise ValueError("trailing_stop order requires stop_price")

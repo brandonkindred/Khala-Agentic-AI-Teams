@@ -34,7 +34,12 @@ from ..strategy.contract import (
     TimeInForce,
     UnfilledPolicy,
 )
-from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
+from .execution_model import (
+    ExecutionModel,
+    FillTerms,
+    OptimisticExecutionModel,
+    stop_limit_triggered,
+)
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
 
@@ -242,16 +247,62 @@ class FillSimulator:
             # into the execution model without touching the immutable
             # ``request`` or changing the execution-model protocol.
             self._update_trailing(po, bar)
-            effective_req = (
-                req.model_copy(
+            # Stop-limit trigger latch: once the stop level is crossed on any
+            # bar, the order behaves as a resting LIMIT and must NOT require the
+            # stop to be re-crossed on a later bar — otherwise a gap-through
+            # that left it unfilled would stay stuck open even after the limit
+            # becomes marketable on a recovery bar. On the arming bar it still
+            # evaluates as a limit, preserving same-bar trigger+fill.
+            stop_limit_just_armed = False
+            if req.order_type == OrderType.TRAILING_STOP and po.effective_stop_price is not None:
+                effective_req = req.model_copy(
                     update={
                         "order_type": OrderType.STOP,
                         "stop_price": po.effective_stop_price,
                     }
                 )
-                if req.order_type == OrderType.TRAILING_STOP and po.effective_stop_price is not None
-                else req
-            )
+            elif req.order_type == OrderType.STOP_LIMIT:
+                # Look-ahead safety: only arm on a bar STRICTLY AFTER submission.
+                # The latch is engine state that persists across bars and gates
+                # later fills, but the gap-through path below returns ``terms is
+                # None`` and never reaches ``bar_safety.check_fill`` — so without
+                # this guard a strategy-side standalone STOP_LIMIT tagged to the
+                # current bar could arm on same-bar (look-ahead) data and fill on
+                # a later bar. Bound bracket children are already deferred on
+                # same/earlier bars by the guard above; this mirrors that
+                # ``_ts_le`` convention for the standalone case.
+                look_ahead_safe = not _ts_le(bar.timestamp, po.submitted_at)
+                if look_ahead_safe and not po.stop_limit_armed and stop_limit_triggered(req, bar):
+                    po.stop_limit_armed = True
+                    stop_limit_just_armed = True
+                    # Bind the latched exit to the position it protects so the
+                    # stale-continuation guard above discards it if that position
+                    # is later closed by a different exit. Without this, a
+                    # recovered limit on a bar where ``existing_pos is None``
+                    # would route through ``_fill_entry`` and open an unintended
+                    # reverse position. Only an opposite-side stop-limit against
+                    # an open position is an exit — a stop-limit with no open
+                    # position is a legitimate entry order and must stay unbound.
+                    if (
+                        po.working_against_entry_order_id is None
+                        and existing_pos is not None
+                        and req.side != existing_pos.side
+                    ):
+                        po.working_against_entry_order_id = existing_pos.entry_order_id
+                if po.stop_limit_armed:
+                    # Latched: neutralize the stop-crossing gate so only the
+                    # limit stage decides the fill on this and every later bar,
+                    # while keeping the stop-limit fill geometry (fill at
+                    # ``limit_price``, no free alpha) consistent across both
+                    # execution models. A SHORT triggers on ``low <= stop`` and a
+                    # LONG on ``high >= stop``, so seeding the stop with the
+                    # bar's far extreme makes the crossing test always pass.
+                    guaranteed_stop = bar.high if req.side == OrderSide.SHORT else bar.low
+                    effective_req = req.model_copy(update={"stop_price": guaranteed_stop})
+                else:
+                    effective_req = req
+            else:
+                effective_req = req
 
             # Determine whether this bar triggered the order and at what
             # terms (price, partial-fill fraction, adverse-selection
@@ -260,6 +311,27 @@ class FillSimulator:
             # owned below.
             terms = self.execution_model.compute_fill_terms(effective_req, bar, next_bar)
             if terms is None:
+                # Stop-limit just triggered (stop crossed this bar) but gapped
+                # through its limit, so it cannot fill this bar and latches into
+                # a resting limit — the position stays open until the limit
+                # becomes marketable on a later bar. Emit informational
+                # telemetry once, on the arming bar, so the gap-through is
+                # observable rather than invisible (subsequent resting bars do
+                # not re-count). A STOP_LIMIT is never IOC/FOK (validate_prices
+                # rejects that), so it always falls through to the resting
+                # ``continue`` below.
+                if stop_limit_just_armed:
+                    events.append(
+                        FillDiagnosticEvent(
+                            kind="stop_limit_unfilled",
+                            order_id=po.order_id,
+                            timestamp=bar.timestamp,
+                            symbol=req.symbol,
+                            side=req.side.value,
+                            order_type=req.order_type.value,
+                            reason="stop_limit_gap_through",
+                        )
+                    )
                 # IOC / FOK semantics demand cancel-on-this-bar when the
                 # order doesn't trigger (e.g. a LIMIT IOC whose limit
                 # price didn't cross). Without this branch they would
@@ -1481,13 +1553,39 @@ class FillSimulator:
         if req.attached_stop_loss is not None:
             sl = req.attached_stop_loss
             is_trailing = sl.trail_offset is not None
+            # ``trail_offset`` and ``limit_offset`` are mutually exclusive
+            # (enforced by the parent's ``validate_prices``), so at most one of
+            # ``is_trailing`` / ``is_limit`` is True here.
+            is_limit = sl.limit_offset is not None
+            sl_limit_price = None
+            if is_limit:
+                if sl.limit_offset_kind == "abs":
+                    limit_off = sl.limit_offset
+                else:  # "bps"
+                    limit_off = sl.stop_price * (sl.limit_offset / 10_000.0)
+                # Limit sits on the protective side of the stop: below it for a
+                # SHORT child (sell-stop-limit closing a long), above it for a
+                # LONG child (buy-stop-limit closing a short). Mirrors the
+                # trailing ``effective_stop_price`` sign convention below.
+                sl_limit_price = (
+                    sl.stop_price - limit_off
+                    if req.side == OrderSide.LONG
+                    else sl.stop_price + limit_off
+                )
+            if is_limit:
+                sl_order_type = OrderType.STOP_LIMIT
+            elif is_trailing:
+                sl_order_type = OrderType.TRAILING_STOP
+            else:
+                sl_order_type = OrderType.STOP
             sl_req = OrderRequest(
                 client_order_id=sl.client_order_id or f"{req.client_order_id}_sl",
                 symbol=req.symbol,
                 side=child_side,
                 qty=filled_qty,
-                order_type=OrderType.TRAILING_STOP if is_trailing else OrderType.STOP,
+                order_type=sl_order_type,
                 stop_price=sl.stop_price,
+                limit_price=sl_limit_price,
                 trail_offset=sl.trail_offset,
                 trail_offset_kind=sl.trail_offset_kind,
                 tif=TimeInForce.GTC,

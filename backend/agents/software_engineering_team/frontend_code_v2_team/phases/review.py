@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
+from software_engineering_team.shared.llm_review import run_llm_review
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.review_progress import call_code_review_agent
 from software_engineering_team.shared.strands_model import resolve_text_mode_strands_model
@@ -52,81 +53,36 @@ def _run_llm_review(
 ) -> List[ReviewIssue]:
     """LLM-based code review when no external review agent is available.
 
+    Thin wrapper that delegates the chunking/prompt/parse orchestration to the
+    shared ``run_llm_review`` helper, passing this team's prompt, parser, and
+    ``ReviewIssue`` factory. The Strands ``Agent`` invocation is built here so
+    this module stays the patch surface for ``Agent`` and
+    ``resolve_text_mode_strands_model``.
+
     Preconditions:
         - ``files`` maps file paths to their full source text.
 
     Postconditions:
-        - Inputs that exceed the per-call budget are split into function-aware
-          chunks (cuts land between whole functions/methods, never mid-body)
-          and every chunk is reviewed; issues from all chunks are returned.
-          No file content is silently truncated away, so a large file's tail is
-          reviewed rather than dropped. Blank files contribute nothing.
-        - A chunk that is itself over budget (a single line longer than the cap,
-          e.g. a minified bundle) is hard-split before the LLM call, with the
-          ``### path ###`` header re-attached to every piece (``cap_review_chunk``)
-          so it is never sent in one prompt that may overflow the context and be
-          skipped, and a finding in any tail piece stays attributable to its file.
-        - A chunk whose LLM call or parse fails is logged and skipped; issues
-          from the other chunks are still returned (one bad chunk never aborts
-          the whole review).
-        - Small inputs are reviewed in a single call, as before.
+        - See ``software_engineering_team.shared.llm_review.run_llm_review``:
+          function-aware chunking with no tail truncation, per-chunk
+          skip-on-failure, single call for small inputs, and a header-preserving
+          hard-split for any chunk that is itself over budget (a single line
+          longer than the cap).
     """
-    # Imported lazily, fully-qualified, to match this module's existing
-    # convention for code_review_agent imports and to avoid assuming the
-    # software_engineering_team package dir is itself on sys.path.
-    from software_engineering_team.code_review_agent.coordinator import (
-        build_review_chunks,
-        cap_review_chunk,
-    )
 
-    blocks = [(path, content) for path, content in files.items() if content and content.strip()]
-    if not blocks:
-        return []
-    # Budget each prompt at the same per-call size the old code truncated to,
-    # but split at function/method boundaries so no construct is severed and no
-    # file tail is dropped.
-    chunks = list(build_review_chunks(blocks, MAX_REVIEW_CODE_CHARS))
-    if len(chunks) > MANY_CHUNKS_WARN_THRESHOLD:
-        logger.warning(
-            "LLM code review: %d chunks for %d file(s) — large review, many LLM calls",
-            len(chunks),
-            len(blocks),
-        )
-    else:
-        logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
-    issues: List[ReviewIssue] = []
-    for idx, chunk in enumerate(chunks, start=1):
-        logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
-        # A chunk holding a single line longer than the cap is over budget by
-        # contract; hard-split it so the whole file is reviewed rather than sent
-        # in one prompt that may overflow and be skipped — keeping the file
-        # header on every piece so tail findings stay attributable.
-        for piece in cap_review_chunk(chunk, MAX_REVIEW_CODE_CHARS):
-            prompt = REVIEW_PROMPT.format(
-                requirements=task.requirements or task.description,
-                acceptance_criteria=", ".join(task.acceptance_criteria)
-                if task.acceptance_criteria
-                else "N/A",
-                code=piece,
-            )
-            try:
-                raw = str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
-                data = parse_review_template(raw)
-            except Exception as exc:
-                logger.warning("LLM code review: chunk %d/%d failed: %s", idx, len(chunks), exc)
-                continue
-            for item in data.get("issues") or []:
-                if isinstance(item, dict):
-                    issues.append(
-                        ReviewIssue(
-                            source=item.get("source", "code_review"),
-                            severity=item.get("severity", "medium"),
-                            description=item.get("description", ""),
-                            file_path=item.get("file_path", ""),
-                            recommendation=item.get("recommendation", ""),
-                        )
-                    )
-    return issues
+    def _invoke(prompt: str) -> str:
+        return str(Agent(model=resolve_text_mode_strands_model(llm))(prompt)).strip()
+
+    return run_llm_review(
+        task=task,
+        files=files,
+        prompt_template=REVIEW_PROMPT,
+        parse_template=parse_review_template,
+        issue_factory=ReviewIssue,
+        invoke_model=_invoke,
+        max_chars=MAX_REVIEW_CODE_CHARS,
+        warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
+    )
 
 
 def _run_chunked_agent_review(

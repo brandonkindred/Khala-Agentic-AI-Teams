@@ -74,6 +74,7 @@
       "closed_trades": 9,
       "entries_filled": 10,
       "exit_rule_firings": {},
+      "exit_rule_firings_by_basis": {},
       "exit_rule_firings_by_symbol": {},
       "exits_emitted": 9,
       "last_order_events": [
@@ -265,6 +266,7 @@
       "orders_rejection_reasons": {},
       "orders_unfilled": 120,
       "risk_capped_entries": 0,
+      "stop_limit_unfilled_triggers": 0,
       "summary": "Backtest closed 9 trade(s) across 504 post-warmup bar(s).",
       "warmup_orders_dropped": 0,
       "zero_trade_category": null
