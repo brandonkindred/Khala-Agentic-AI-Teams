@@ -247,16 +247,38 @@ class FillSimulator:
             # into the execution model without touching the immutable
             # ``request`` or changing the execution-model protocol.
             self._update_trailing(po, bar)
-            effective_req = (
-                req.model_copy(
+            # Stop-limit trigger latch: once the stop level is crossed on any
+            # bar, the order behaves as a resting LIMIT and must NOT require the
+            # stop to be re-crossed on a later bar — otherwise a gap-through
+            # that left it unfilled would stay stuck open even after the limit
+            # becomes marketable on a recovery bar. On the arming bar it still
+            # evaluates as a limit, preserving same-bar trigger+fill.
+            stop_limit_just_armed = False
+            if req.order_type == OrderType.TRAILING_STOP and po.effective_stop_price is not None:
+                effective_req = req.model_copy(
                     update={
                         "order_type": OrderType.STOP,
                         "stop_price": po.effective_stop_price,
                     }
                 )
-                if req.order_type == OrderType.TRAILING_STOP and po.effective_stop_price is not None
-                else req
-            )
+            elif req.order_type == OrderType.STOP_LIMIT:
+                if not po.stop_limit_armed and stop_limit_triggered(req, bar):
+                    po.stop_limit_armed = True
+                    stop_limit_just_armed = True
+                if po.stop_limit_armed:
+                    # Latched: neutralize the stop-crossing gate so only the
+                    # limit stage decides the fill on this and every later bar,
+                    # while keeping the stop-limit fill geometry (fill at
+                    # ``limit_price``, no free alpha) consistent across both
+                    # execution models. A SHORT triggers on ``low <= stop`` and a
+                    # LONG on ``high >= stop``, so seeding the stop with the
+                    # bar's far extreme makes the crossing test always pass.
+                    guaranteed_stop = bar.high if req.side == OrderSide.SHORT else bar.low
+                    effective_req = req.model_copy(update={"stop_price": guaranteed_stop})
+                else:
+                    effective_req = req
+            else:
+                effective_req = req
 
             # Determine whether this bar triggered the order and at what
             # terms (price, partial-fill fraction, adverse-selection
@@ -265,17 +287,16 @@ class FillSimulator:
             # owned below.
             terms = self.execution_model.compute_fill_terms(effective_req, bar, next_bar)
             if terms is None:
-                # Stop-limit triggered (stop crossed) but gapped through its
-                # limit, so it cannot fill this bar and stays resting — the
-                # position remains open. Emit informational telemetry so the
-                # gap-through non-fill is observable rather than invisible. A
-                # STOP_LIMIT is never IOC/FOK (validate_prices rejects that), so
-                # it always falls through to the resting ``continue`` below.
-                if (
-                    req.order_type == OrderType.STOP_LIMIT
-                    and req.stop_price is not None
-                    and stop_limit_triggered(req, bar)
-                ):
+                # Stop-limit just triggered (stop crossed this bar) but gapped
+                # through its limit, so it cannot fill this bar and latches into
+                # a resting limit — the position stays open until the limit
+                # becomes marketable on a later bar. Emit informational
+                # telemetry once, on the arming bar, so the gap-through is
+                # observable rather than invisible (subsequent resting bars do
+                # not re-count). A STOP_LIMIT is never IOC/FOK (validate_prices
+                # rejects that), so it always falls through to the resting
+                # ``continue`` below.
+                if stop_limit_just_armed:
                     events.append(
                         FillDiagnosticEvent(
                             kind="stop_limit_unfilled",

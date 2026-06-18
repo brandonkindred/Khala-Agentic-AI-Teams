@@ -67,6 +67,12 @@ class PendingOrder:
     # ``None`` for non-trailing orders.
     effective_stop_price: Optional[float] = None
     trailing_water: Optional[float] = None
+    # Stop-limit latch: set True the first bar a STOP_LIMIT's stop level is
+    # crossed. Once armed, the order behaves as a resting LIMIT and no longer
+    # requires the stop to be re-crossed — so a gap-through that left it
+    # unfilled still fills on a later bar once the limit becomes marketable,
+    # rather than staying stuck open. Stays False for non-stop-limit orders.
+    stop_limit_armed: bool = False
     armed: bool = True
     # Identity of the position this order is committed to act against,
     # bound at one of three points:

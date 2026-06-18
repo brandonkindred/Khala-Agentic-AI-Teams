@@ -306,6 +306,59 @@ def test_long_stop_limit_gap_through_does_not_fill(model) -> None:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("model", _models())
+def test_short_stop_limit_fills_on_recovery_after_gap_through(model) -> None:
+    """Once triggered, a stop-limit latches into a resting limit. A SHORT
+    stop-limit that gaps through its limit (no fill) must still fill on a later
+    recovery bar where the limit is marketable, even though the stop level is
+    NOT re-crossed on that bar — otherwise the protective exit stays stuck open."""
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_long(sim, order_book, entry_open=100.0)
+    _submit_stop_limit(order_book, side=OrderSide.SHORT, stop_price=95.0, limit_price=94.0)
+
+    # Bar 1 — gap through: triggers (low 85 <= stop 95) but high 90 < limit 94.
+    outcome1 = sim.process_bar(_bar("2024-01-03", open_price=90.0, high=90.0, low=85.0, close=88.0))
+    assert outcome1.exit_fills == []
+    assert "AAA" in portfolio.positions
+    assert len(_unfilled_events(outcome1)) == 1
+
+    # Bar 2 — recovery: stop NOT re-crossed (low 96 > 95), but the sell limit at
+    # 94 is marketable (high 97 >= 94). Latched order fills at the limit.
+    outcome2 = sim.process_bar(_bar("2024-01-04", open_price=96.0, high=97.0, low=96.0, close=96.5))
+    assert len(outcome2.exit_fills) == 1
+    assert outcome2.exit_fills[0].price == pytest.approx(94.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions
+    # Recovery fill is not a re-trigger, so no new unfilled telemetry.
+    assert _unfilled_events(outcome2) == []
+
+
+@pytest.mark.parametrize("model", _models())
+def test_long_stop_limit_fills_on_recovery_after_gap_through(model) -> None:
+    """Buy-side symmetry: a LONG stop-limit that gaps up through its limit
+    latches and fills on a later bar where the buy limit is marketable, without
+    the stop being re-crossed."""
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_short(sim, order_book, entry_open=100.0)
+    _submit_stop_limit(order_book, side=OrderSide.LONG, stop_price=105.0, limit_price=106.0)
+
+    # Bar 1 — gap through up: triggers (high 112 >= stop 105) but low 108 > limit 106.
+    outcome1 = sim.process_bar(
+        _bar("2024-01-03", open_price=110.0, high=112.0, low=108.0, close=111.0)
+    )
+    assert outcome1.exit_fills == []
+    assert "AAA" in portfolio.positions
+    assert len(_unfilled_events(outcome1)) == 1
+
+    # Bar 2 — recovery down: stop NOT re-crossed (high 104 < 105), but the buy
+    # limit at 106 is marketable (low 103 <= 106). Latched order fills at 106.
+    outcome2 = sim.process_bar(
+        _bar("2024-01-04", open_price=104.0, high=104.0, low=103.0, close=103.5)
+    )
+    assert len(outcome2.exit_fills) == 1
+    assert outcome2.exit_fills[0].price == pytest.approx(106.0, rel=1e-9)
+    assert "AAA" not in portfolio.positions
+
+
 def test_unfilled_trigger_aggregates_into_diagnostics_counter() -> None:
     """End-to-end through the diagnostics aggregation: a gap-through outcome
     fed to ``_apply_fill_outcome_events`` bumps
