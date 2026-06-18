@@ -255,10 +255,12 @@ def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _Prompt
     )
     # The sizing line is not always a fixed fraction: vol-target and
     # fixed-notional must be described so the agent doesn't read a vol target
-    # or a dollar notional as "a fraction of the account".
+    # or a dollar notional as "a fraction of the account". A fixed notional is
+    # capped by the position limit, so it must be framed as a target, not the
+    # exact deployed amount.
     assert "vol-target" in rendered, f"{label} prompt must explain the vol-target sizing rendering."
-    assert "fixed Y dollars" in rendered, (
-        f"{label} prompt must explain the fixed-notional sizing rendering."
+    assert "capped by the position limit" in rendered, (
+        f"{label} prompt must frame the fixed-notional sizing as capped, not exact."
     )
 
 
@@ -301,13 +303,16 @@ def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
     assert "equates a low deployed size with low capital-at-risk" not in _SELF_REVIEW_PROMPT
 
 
-def test_self_review_check_handles_vol_target_sizing() -> None:
+def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> None:
     """The self-review check must not equate the "Sizing / risk" line with the
     deployed size for every rule: "vol-target X%" is a target annual volatility
-    (the deployed amount is dynamic and not shown), so the reviewer must not
-    read it as X% capital at risk.
+    (deployed amount dynamic) and "$Y per trade" is capped by the position
+    limit, so the reviewer must not read either as the exact capital at risk.
     """
-    assert 'do NOT read "vol-target X%" as X% capital at risk' in _SELF_REVIEW_PROMPT
+    assert "capped by the position limit" in _SELF_REVIEW_PROMPT
+    assert 'do NOT read "vol-target X%" or "$Y per trade" as the exact capital at risk' in (
+        _SELF_REVIEW_PROMPT
+    )
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
@@ -321,9 +326,10 @@ def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -
     assert "deployed-fraction × stop" in text
     assert "low effective risk" in text  # the framing must name and forbid the bad reading
     # The deployed-size = capital-at-risk principle must cover all sizing
-    # variants, not just fixed-fraction "% of the account".
+    # variants, not just fixed-fraction "% of the account"; a fixed notional is
+    # capped by the position limit, so it is framed as a target.
     assert "vol-target X%" in text
-    assert "fixed Y dollars" in text
+    assert "capped by the position limit" in text
     for phrase in ("mandatory", "hard rule", "hard-enforced"):
         assert phrase not in lowered, f"system prompt must not use forbidden phrasing {phrase!r}."
 
