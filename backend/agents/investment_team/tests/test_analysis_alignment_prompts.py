@@ -262,14 +262,18 @@ def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _Prompt
     assert "capped by the position limit" in rendered, (
         f"{label} prompt must frame the fixed-notional sizing as capped, not exact."
     )
-    # The exact per-trade deployed dollars are not in the evidence (dynamic
-    # sizing, position cap, whole-share rounding), and exit reasons are not
-    # labelled, so the prompt must keep both qualitative / evidence-conditional.
+    # The nominal sizing line can differ from realised deployment (dynamic
+    # sizing, position cap, whole-share rounding); the realised figure lives in
+    # the ledger's per-trade position_value, which the prompt must point to.
     assert "whole-share rounding" in rendered, (
         f"{label} prompt must warn that whole-share rounding can change deployed size."
     )
-    assert "Attribute an exit to a specific rule only where the evidence supports it" in rendered, (
-        f"{label} prompt must make exit attribution evidence-conditional."
+    assert "position_value" in rendered, (
+        f"{label} prompt must point at the ledger's per-trade position_value for exact risk."
+    )
+    # Exit attribution uses the per-trade exit reason when recorded.
+    assert "using the per-trade exit reason in the ledger when it is recorded" in rendered, (
+        f"{label} prompt must use the ledger exit reason for attribution."
     )
 
 
@@ -326,9 +330,64 @@ def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> No
         'do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" '
         "as the exact capital at risk" in _SELF_REVIEW_PROMPT
     )
-    # The review prompt lacks per-trade position_value / risk limits, so the
-    # check must forbid asserting an exact figure rather than verify one.
-    assert "an exact deployed-capital figure is not derivable" in _SELF_REVIEW_PROMPT
+    # The ledger now carries per-trade position_value, so the check verifies
+    # deployed-capital claims against it rather than forcing qualitative-only.
+    assert (
+        "the trade ledger reports per-trade position_value, which IS the realised "
+        "deployed capital at risk" in _SELF_REVIEW_PROMPT
+    )
+
+
+def test_simulated_trades_summary_surfaces_position_value_and_exit_reason() -> None:
+    """The ledger summary must surface per-trade position_value (the realised
+    deployed capital at risk) and the recorded exit reason, so the draft and
+    self-review can verify exact deployed capital and attribute exits."""
+    from investment_team.models import TradeRecord
+    from investment_team.strategy_lab.agents.analysis import _format_simulated_trades_summary
+
+    trades = [
+        TradeRecord(
+            trade_num=1,
+            entry_date="2024-01-03",
+            exit_date="2024-01-08",
+            symbol="AAA",
+            side="long",
+            entry_price=100.0,
+            exit_price=105.0,
+            shares=10.0,
+            position_value=1000.0,
+            gross_pnl=50.0,
+            net_pnl=48.0,
+            return_pct=4.8,
+            hold_days=5,
+            outcome="win",
+            cumulative_pnl=48.0,
+            exit_reason="engine_exit:take_profit",
+        ),
+        TradeRecord(
+            trade_num=2,
+            entry_date="2024-02-01",
+            exit_date="2024-02-04",
+            symbol="BBB",
+            side="long",
+            entry_price=50.0,
+            exit_price=48.0,
+            shares=20.0,
+            position_value=1000.0,
+            gross_pnl=-40.0,
+            net_pnl=-42.0,
+            return_pct=-4.2,
+            hold_days=3,
+            outcome="loss",
+            cumulative_pnl=6.0,
+        ),
+    ]
+    summary = _format_simulated_trades_summary(trades)
+    # Aggregate deployed-capital line + per-trade pv so exact risk is verifiable.
+    assert "Per-trade deployed capital (position_value" in summary
+    assert "pv=$1000.00" in summary
+    # Exit reason surfaced when recorded; trade 2 (no reason) gets no suffix.
+    assert "exit=engine_exit:take_profit" in summary
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
