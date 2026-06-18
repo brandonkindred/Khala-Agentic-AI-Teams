@@ -327,9 +327,13 @@ def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -
     assert "low effective risk" in text  # the framing must name and forbid the bad reading
     # The deployed-size = capital-at-risk principle must cover all sizing
     # variants, not just fixed-fraction "% of the account"; a fixed notional is
-    # capped by the position limit, so it is framed as a target.
+    # capped by the position limit, so it is framed as a target, and a
+    # vol-target line is a volatility target, not a deployed fraction.
     assert "vol-target X%" in text
     assert "capped by the position limit" in text
+    assert "X% is NOT a deployed fraction" in text
+    # Trailing stops ratchet from the running extreme, not a move off entry.
+    assert "ratchets from the running high/low" in text
     for phrase in ("mandatory", "hard rule", "hard-enforced"):
         assert phrase not in lowered, f"system prompt must not use forbidden phrasing {phrase!r}."
 
