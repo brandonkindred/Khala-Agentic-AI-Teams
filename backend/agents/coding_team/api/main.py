@@ -1929,11 +1929,17 @@ def _is_ephemeral_checkout_path(repo_path: str) -> bool:
           (handled inside ``is_within_ephemeral_workspace``) or when either
           condition fails. Pure apart from filesystem reads.
     """
-    if not is_within_ephemeral_workspace(repo_path):
+    try:
+        resolved = Path(repo_path).resolve()
+    except (OSError, ValueError):
         return False
-    # is_within_ephemeral_workspace already resolved repo_path successfully, so
-    # this resolve cannot raise (a null byte / unresolvable path returns False above).
-    return (Path(repo_path).resolve() / ".git").exists()
+    # Resolve once and reuse for both checks. ``resolve()`` defaults to
+    # ``strict=False`` (Python 3.6+), so a not-yet-created path resolves without
+    # raising; passing the already-resolved path to is_within keeps its internal
+    # resolve idempotent.
+    if not is_within_ephemeral_workspace(resolved):
+        return False
+    return (resolved / ".git").exists()
 
 
 def _cleanup_issue_checkout(repo_path: str) -> None:
