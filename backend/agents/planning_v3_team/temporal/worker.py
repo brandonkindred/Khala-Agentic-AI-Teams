@@ -93,3 +93,17 @@ def start_planning_v3_temporal_worker_thread() -> bool:
     _worker_thread.start()
     logger.info("Planning V3 Temporal worker thread started")
     return True
+
+
+def is_worker_thread_alive() -> bool:
+    """Return True if the Temporal worker thread exists and is running.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns whether a worker thread is currently alive in this process —
+          it is either connecting or already connected. False means no worker
+          is running here (never started, or died after a failed connect), so
+          waiting for the client to appear would be futile.
+    """
+    return _worker_thread is not None and _worker_thread.is_alive()
