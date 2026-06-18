@@ -28,6 +28,7 @@ Hypothesis: {hypothesis}
 Signal: {signal_definition}
 Entry rules: {entry_rules}
 Exit rules: {exit_rules}
+Sizing / risk: {sizing_rules}
 
 ## Aggregated metrics (source of truth)
 Annualized: {annualized_return_pct:.1f}% | Total: {total_return_pct:.1f}% | Sharpe: {sharpe_ratio:.2f}
@@ -44,7 +45,7 @@ Outcome label: {outcome_label}
 ## Instructions
 0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
 1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
-1a. Risk-model check: confirm the narrative treats the deployed position size as the per-trade capital at risk and loss cap, and treats stop-loss / trailing stop / take-profit as separate within-position safeguards analyzed as a distinct dimension. Strike any claim that multiplies the stop into sizing (deployed-fraction times stop), equates a low deployed size with low capital-at-risk, or blames returns on "low effective risk" / "little capital in play".
+1a. Risk-model check: confirm the narrative treats the deployed position size (the "Sizing / risk" line) as the per-trade capital at risk and loss cap, and treats stop-loss / trailing stop / take-profit as separate within-position safeguards analyzed as a distinct dimension. Strike any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the "capital at risk" / "capital in play", or blames low/negative returns on "low effective risk". Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is correct and must be preserved; only strike the stop-multiplied conflation and the misattribution of returns to it.
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
 4. In verification_notes (2-4 sentences), state what you verified and any material corrections.
@@ -150,6 +151,7 @@ class AnalysisAgent:
             signal_definition=spec.signal_definition,
             entry_rules=format_rules_for_prompt(spec.entry_rules),
             exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
             sharpe_ratio=metrics.sharpe_ratio,
@@ -167,7 +169,8 @@ class AnalysisAgent:
             "You are a critical peer reviewer for quantitative research, with a quant's rigor and a veteran trader's instinct. "
             "You ensure narrative analysis is faithful to strategy specs, backtest aggregates, and simulated trade facts. "
             "You enforce the correct risk model: the deployed position size (e.g. 'risk 5% per trade') IS the per-trade capital at risk and loss cap, while stop-loss, trailing stops, and take-profit are separate within-position safeguards analyzed as a distinct dimension. "
-            "Reject any claim that multiplies the stop into sizing (deployed-fraction times stop), equates a low deployed size with low capital-at-risk, or blames low/negative returns on 'low effective risk' or 'little capital in play'. "
+            "Reject any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the 'capital at risk' / 'capital in play', or blames low/negative returns on 'low effective risk'. "
+            "Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is accurate and must be preserved. "
             "You correct any contradiction or overclaim before signing off."
         )
 

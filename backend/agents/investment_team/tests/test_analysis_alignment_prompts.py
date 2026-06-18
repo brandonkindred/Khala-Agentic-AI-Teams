@@ -36,6 +36,7 @@ from investment_team.strategy_lab.agents.alignment import (
 )
 from investment_team.strategy_lab.agents.analysis import (
     _PROMPT_DIR,
+    _SELF_REVIEW_PROMPT,
     _format_alignment_status_section,
     format_misalignment_prefix,
 )
@@ -261,6 +262,29 @@ def test_lose_prompt_forbids_low_effective_risk_attribution() -> None:
     rendered = _render_lose()
     assert 'Do NOT attribute weak or negative returns to "low effective risk"' in rendered
     assert "the deployed size IS the capital in play and the per-trade loss cap" in rendered
+
+
+def test_self_review_prompt_includes_sizing_as_source_fact() -> None:
+    """The self-review source-of-truth block must carry the sizing line.
+
+    The ``1a`` risk-model check asks the reviewer to confirm the deployed
+    position size, so the reviewer needs the actual sizing as ground truth —
+    otherwise it can only infer it from the (possibly mistaken) draft and
+    cannot catch a hallucinated fraction.
+    """
+    assert "Sizing / risk: {sizing_rules}" in _SELF_REVIEW_PROMPT
+
+
+def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
+    """The risk-model check must strike only the stop-multiplied conflation and
+    the misattribution of returns — NOT the accurate statement that a small
+    deployment is genuinely small capital at risk (deployed size IS capital at
+    risk under this model).
+    """
+    assert "must be preserved" in _SELF_REVIEW_PROMPT
+    assert "genuinely small deployment is small capital at risk" in _SELF_REVIEW_PROMPT
+    # The over-broad clause that rejected the accurate equation must be gone.
+    assert "equates a low deployed size with low capital-at-risk" not in _SELF_REVIEW_PROMPT
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
