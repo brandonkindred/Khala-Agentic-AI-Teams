@@ -275,6 +275,20 @@ class FillSimulator:
                 if look_ahead_safe and not po.stop_limit_armed and stop_limit_triggered(req, bar):
                     po.stop_limit_armed = True
                     stop_limit_just_armed = True
+                    # Bind the latched exit to the position it protects so the
+                    # stale-continuation guard above discards it if that position
+                    # is later closed by a different exit. Without this, a
+                    # recovered limit on a bar where ``existing_pos is None``
+                    # would route through ``_fill_entry`` and open an unintended
+                    # reverse position. Only an opposite-side stop-limit against
+                    # an open position is an exit — a stop-limit with no open
+                    # position is a legitimate entry order and must stay unbound.
+                    if (
+                        po.working_against_entry_order_id is None
+                        and existing_pos is not None
+                        and req.side != existing_pos.side
+                    ):
+                        po.working_against_entry_order_id = existing_pos.entry_order_id
                 if po.stop_limit_armed:
                     # Latched: neutralize the stop-crossing gate so only the
                     # limit stage decides the fill on this and every later bar,

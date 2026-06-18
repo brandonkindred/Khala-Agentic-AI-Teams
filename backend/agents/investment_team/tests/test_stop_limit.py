@@ -402,6 +402,61 @@ def test_same_bar_submission_does_not_arm_on_lookahead(model) -> None:
     assert "AAA" in portfolio.positions
 
 
+@pytest.mark.parametrize("model", _models())
+def test_armed_exit_binds_to_its_position(model) -> None:
+    """When a strategy-side stop-limit exit arms, it is bound to the position it
+    protects (``working_against_entry_order_id``) so the stale-continuation guard
+    can later discard it if that position is closed by another exit."""
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_long(sim, order_book, entry_open=100.0)
+    _submit_stop_limit(order_book, side=OrderSide.SHORT, stop_price=95.0, limit_price=94.0)
+
+    # Gap-through: arms but does not fill; the long is still open.
+    sim.process_bar(_bar("2024-01-03", open_price=90.0, high=90.0, low=85.0, close=88.0))
+    entry_order_id = portfolio.positions["AAA"].entry_order_id
+    po = next(p for p in order_book.all_pending() if p.request.client_order_id == "sl-1")
+    assert po.stop_limit_armed is True
+    assert po.working_against_entry_order_id == entry_order_id
+
+
+@pytest.mark.parametrize("model", _models())
+def test_armed_exit_discarded_when_position_closed_by_another_exit(model) -> None:
+    """An armed stop-limit exit whose position is closed by a separate exit must
+    be discarded on a later recovery bar — NOT routed through ``_fill_entry`` to
+    open a reverse position. Without the position binding it would open a short."""
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_long(sim, order_book, entry_open=100.0)
+    _submit_stop_limit(order_book, side=OrderSide.SHORT, stop_price=95.0, limit_price=94.0)
+
+    # Arm via gap-through (no fill).
+    sim.process_bar(_bar("2024-01-03", open_price=90.0, high=90.0, low=85.0, close=88.0))
+    assert "AAA" in portfolio.positions
+
+    # Close the long with a separate SHORT MARKET exit on a bar where the 94
+    # limit is NOT marketable (high 93 < 94), so the stop-limit cannot fill.
+    order_book.submit(
+        OrderRequest(
+            client_order_id="close-1",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=10.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-03",
+        submitted_equity=10_000_000.0,
+    )
+    sim.process_bar(_bar("2024-01-04", open_price=93.0, high=93.0, low=92.0, close=92.5))
+    assert "AAA" not in portfolio.positions  # long closed by the market exit
+
+    # Recovery bar where the 94 limit IS marketable. The stale armed stop-limit
+    # must be discarded (stale-continuation guard), not opened as a reverse short.
+    outcome = sim.process_bar(_bar("2024-01-05", open_price=96.0, high=97.0, low=96.0, close=96.5))
+    assert "AAA" not in portfolio.positions
+    assert outcome.entry_fills == []
+    assert not any(p.request.client_order_id == "sl-1" for p in order_book.all_pending())
+
+
 def test_unfilled_trigger_aggregates_into_diagnostics_counter() -> None:
     """End-to-end through the diagnostics aggregation: a gap-through outcome
     fed to ``_apply_fill_outcome_events`` bumps
