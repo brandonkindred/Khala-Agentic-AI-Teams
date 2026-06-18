@@ -72,9 +72,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
     ) -> List[QualityGateResult]:
         with self._using_phase(phase):
             if not exit_rules:
-                return [
-                    self._info("spec.exit_rules empty; engine-enforcement check skipped.")
-                ]
+                return [self._info("spec.exit_rules empty; engine-enforcement check skipped.")]
 
             # Engine exit-rule firing telemetry is unavailable for this run
             # (``diagnostics is None`` — e.g. a metrics object built without
@@ -147,9 +145,24 @@ class ExitRuleConformanceGate(GateResultsMixin):
             details = "engine_exits: " + (
                 ", ".join(f"{k}={v}" for k, v in sorted(firings.items())) or "none"
             )
-            results.append(
-                self._info(details + f" (total={total}, trades={len(trades)})")
-            )
+            results.append(self._info(details + f" (total={total}, trades={len(trades)})"))
+
+            # ---- Additive telemetry: per-basis firing breakdown so a trailing
+            # stop fire is distinguishable from a fixed stop fire, plus any
+            # stop-limit triggers that gapped through their limit unfilled. ----
+            by_basis = diagnostics.exit_rule_firings_by_basis or {}
+            if by_basis:
+                basis_details = ", ".join(f"{k}={v}" for k, v in sorted(by_basis.items()))
+                results.append(self._info(f"engine_exits_by_basis: {basis_details}"))
+            unfilled = diagnostics.stop_limit_unfilled_triggers
+            if unfilled:
+                results.append(
+                    self._info(
+                        f"stop_limit_unfilled_triggers={unfilled} (triggered stop-limit "
+                        "orders that gapped through their limit; position stayed open — "
+                        "intended stop-limit behavior, not a leak)."
+                    )
+                )
 
             return results
 
@@ -164,8 +177,10 @@ class ExitRuleConformanceGate(GateResultsMixin):
         firings_by_symbol: Mapping[str, Mapping[str, int]],
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
-            return self._info(f"StopLossRule(basis={rule.basis!r}) conformance check skipped "
-                    "(trailing variants require bar-by-bar replay).")
+            return self._info(
+                f"StopLossRule(basis={rule.basis!r}) conformance check skipped "
+                "(trailing variants require bar-by-bar replay)."
+            )
         # The engine detects the trigger on bar N's low (long) / high
         # (short), but the synthetic market close fills on bar N+1's
         # open. That next-bar fill can land arbitrarily far below the
@@ -230,14 +245,18 @@ class ExitRuleConformanceGate(GateResultsMixin):
         )
         if unaccounted:
             sample = [(t.trade_num, t.symbol, t.return_pct) for t in unaccounted[:5]]
-            return self._critical(f"StopLossRule(pct={rule.pct}) leak: {total_tripped} engine-attributed "
-                    f"trade(s) closed below the {raw_floor_pct:.2f}% floor; "
-                    f"{len(unaccounted)} unaccounted for by per-symbol firings. "
-                    f"Sample (trade_num, symbol, return_pct)={sample}{skipped_suffix}.")
-        return self._info(f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
-                f"{total_tripped} engine-attributed below-floor trade(s) across "
-                f"{len(by_symbol_tripped)} symbol(s); "
-                f"total firings={total_firings}{skipped_suffix}.")
+            return self._critical(
+                f"StopLossRule(pct={rule.pct}) leak: {total_tripped} engine-attributed "
+                f"trade(s) closed below the {raw_floor_pct:.2f}% floor; "
+                f"{len(unaccounted)} unaccounted for by per-symbol firings. "
+                f"Sample (trade_num, symbol, return_pct)={sample}{skipped_suffix}."
+            )
+        return self._info(
+            f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
+            f"{total_tripped} engine-attributed below-floor trade(s) across "
+            f"{len(by_symbol_tripped)} symbol(s); "
+            f"total firings={total_firings}{skipped_suffix}."
+        )
 
     def _check_take_profit(
         self,
@@ -261,15 +280,23 @@ class ExitRuleConformanceGate(GateResultsMixin):
         # threshold is unreachable on the symbols' actual price action.
         only_rule = len(all_rules) == 1
         if not only_rule:
-            return self._info(f"TakeProfitRule(pct={rule.pct}) co-exists with other exit "
-                    "rules; conformance is informational (other rules may close "
-                    "trades before the take-profit threshold is reached).")
+            return self._info(
+                f"TakeProfitRule(pct={rule.pct}) co-exists with other exit "
+                "rules; conformance is informational (other rules may close "
+                "trades before the take-profit threshold is reached)."
+            )
         tp_firings = firings.get("take_profit", 0)
         if tp_firings >= 1:
-            return self._info(f"TakeProfitRule(pct={rule.pct}) — {tp_firings} engine firing(s) "
-                    f"recorded across {len(trades)} trade(s).")
+            return self._info(
+                f"TakeProfitRule(pct={rule.pct}) — {tp_firings} engine firing(s) "
+                f"recorded across {len(trades)} trade(s)."
+            )
         if not trades:
-            return self._info(f"TakeProfitRule(pct={rule.pct}) — zero trades produced; no firings to verify.")
-        return self._warning(f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
-                f"recorded zero take_profit firings across {len(trades)} trade(s) — "
-                "the threshold may be unreachable on the strategy's universe.")
+            return self._info(
+                f"TakeProfitRule(pct={rule.pct}) — zero trades produced; no firings to verify."
+            )
+        return self._warning(
+            f"TakeProfitRule(pct={rule.pct}) is the only exit rule but the engine "
+            f"recorded zero take_profit firings across {len(trades)} trade(s) — "
+            "the threshold may be unreachable on the strategy's universe."
+        )

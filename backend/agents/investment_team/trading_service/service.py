@@ -501,6 +501,13 @@ class _EngineExitDispatcher:
         )
         sym_firings = diag.exit_rule_firings_by_symbol.setdefault(intent.symbol, {})
         sym_firings[intent.rule_kind] = sym_firings.get(intent.rule_kind, 0) + 1
+        # Finer-grained, additive: distinguish trailing vs fixed stop fires
+        # without perturbing ``rule_kind`` / the close ``reason`` that the
+        # conformance + alignment gates match exactly.
+        basis_label = f"{intent.rule_kind}:{intent.basis}" if intent.basis else intent.rule_kind
+        diag.exit_rule_firings_by_basis[basis_label] = (
+            diag.exit_rule_firings_by_basis.get(basis_label, 0) + 1
+        )
         _record_event(
             diag,
             "emitted",
@@ -968,6 +975,22 @@ def _apply_fill_outcome_events(
             _record_event(
                 diagnostics,
                 "rejected",
+                timestamp=ev.timestamp,
+                symbol=ev.symbol,
+                side=ev.side,
+                order_type=ev.order_type,
+                reason=ev.reason,
+                detail=ev.detail,
+            )
+        elif ev.kind == "stop_limit_unfilled":
+            # A stop-limit triggered (stop crossed) but gapped through its
+            # limit, so it could not fill this bar and stays resting — the
+            # position remains open. Informational telemetry only; not a
+            # rejection (the order is still live) and not a leak.
+            diagnostics.stop_limit_unfilled_triggers += 1
+            _record_event(
+                diagnostics,
+                "stop_limit_unfilled",
                 timestamp=ev.timestamp,
                 symbol=ev.symbol,
                 side=ev.side,

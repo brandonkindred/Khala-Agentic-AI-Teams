@@ -34,7 +34,12 @@ from ..strategy.contract import (
     TimeInForce,
     UnfilledPolicy,
 )
-from .execution_model import ExecutionModel, FillTerms, OptimisticExecutionModel
+from .execution_model import (
+    ExecutionModel,
+    FillTerms,
+    OptimisticExecutionModel,
+    stop_limit_triggered,
+)
 from .order_book import OrderBook, PendingOrder
 from .portfolio import Portfolio, Position
 
@@ -236,6 +241,28 @@ class FillSimulator:
             # owned below.
             terms = self.execution_model.compute_fill_terms(effective_req, bar, next_bar)
             if terms is None:
+                # Stop-limit triggered (stop crossed) but gapped through its
+                # limit, so it cannot fill this bar and stays resting — the
+                # position remains open. Emit informational telemetry so the
+                # gap-through non-fill is observable rather than invisible. A
+                # STOP_LIMIT is never IOC/FOK (validate_prices rejects that), so
+                # it always falls through to the resting ``continue`` below.
+                if (
+                    req.order_type == OrderType.STOP_LIMIT
+                    and req.stop_price is not None
+                    and stop_limit_triggered(req, bar)
+                ):
+                    events.append(
+                        FillDiagnosticEvent(
+                            kind="stop_limit_unfilled",
+                            order_id=po.order_id,
+                            timestamp=bar.timestamp,
+                            symbol=req.symbol,
+                            side=req.side.value,
+                            order_type=req.order_type.value,
+                            reason="stop_limit_gap_through",
+                        )
+                    )
                 # IOC / FOK semantics demand cancel-on-this-bar when the
                 # order doesn't trigger (e.g. a LIMIT IOC whose limit
                 # price didn't cross). Without this branch they would
@@ -1415,13 +1442,39 @@ class FillSimulator:
         if req.attached_stop_loss is not None:
             sl = req.attached_stop_loss
             is_trailing = sl.trail_offset is not None
+            # ``trail_offset`` and ``limit_offset`` are mutually exclusive
+            # (enforced by the parent's ``validate_prices``), so at most one of
+            # ``is_trailing`` / ``is_limit`` is True here.
+            is_limit = sl.limit_offset is not None
+            sl_limit_price = None
+            if is_limit:
+                if sl.limit_offset_kind == "abs":
+                    limit_off = sl.limit_offset
+                else:  # "bps"
+                    limit_off = sl.stop_price * (sl.limit_offset / 10_000.0)
+                # Limit sits on the protective side of the stop: below it for a
+                # SHORT child (sell-stop-limit closing a long), above it for a
+                # LONG child (buy-stop-limit closing a short). Mirrors the
+                # trailing ``effective_stop_price`` sign convention below.
+                sl_limit_price = (
+                    sl.stop_price - limit_off
+                    if req.side == OrderSide.LONG
+                    else sl.stop_price + limit_off
+                )
+            if is_limit:
+                sl_order_type = OrderType.STOP_LIMIT
+            elif is_trailing:
+                sl_order_type = OrderType.TRAILING_STOP
+            else:
+                sl_order_type = OrderType.STOP
             sl_req = OrderRequest(
                 client_order_id=sl.client_order_id or f"{req.client_order_id}_sl",
                 symbol=req.symbol,
                 side=child_side,
                 qty=filled_qty,
-                order_type=OrderType.TRAILING_STOP if is_trailing else OrderType.STOP,
+                order_type=sl_order_type,
                 stop_price=sl.stop_price,
+                limit_price=sl_limit_price,
                 trail_offset=sl.trail_offset,
                 trail_offset_kind=sl.trail_offset_kind,
                 tif=TimeInForce.GTC,

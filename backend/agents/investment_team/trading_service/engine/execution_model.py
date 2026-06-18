@@ -61,6 +61,57 @@ class FillTerms:
     extra_slip_bps: float = 0.0
 
 
+def stop_limit_triggered(req: OrderRequest, bar: Bar) -> bool:
+    """Whether a STOP_LIMIT order's stop level was crossed by ``bar`` (trigger stage only).
+
+    A LONG stop-limit (buy — closes a short) triggers on a rise: ``bar.high >=
+    stop_price``. A SHORT stop-limit (sell — closes a long) triggers on a fall:
+    ``bar.low <= stop_price``. This is the same crossing test a plain STOP uses;
+    it is exposed separately so the simulator can distinguish a triggered-but-
+    unfilled stop-limit (limit gapped through) from one that never triggered.
+
+    Preconditions: ``req.order_type == OrderType.STOP_LIMIT`` and ``req.stop_price``
+    is not None.
+    Postconditions: returns ``True`` iff the bar's range crossed the stop level on
+    the order's trigger side.
+    """
+    assert req.stop_price is not None, "stop_limit trigger check requires stop_price"
+    if req.side == OrderSide.LONG:
+        return bar.high >= req.stop_price
+    return bar.low <= req.stop_price
+
+
+def stop_limit_reference_price(req: OrderRequest, bar: Bar) -> Optional[float]:
+    """Two-stage STOP_LIMIT fill geometry: trigger, then limit-satisfiable.
+
+    Once the stop triggers, the order rests as a limit at ``limit_price``. It
+    fills only if the bar's range reaches the limit on the order's side; if the
+    bar gaps entirely through the limit the order does NOT fill (returns
+    ``None``) and stays resting — the position remains open. This non-fill on a
+    gap-through is the defining, intended behavior of a stop-limit, and is the
+    one way STOP_LIMIT diverges from STOP (which always fills once triggered).
+
+    Fill price is the limit price (no "free alpha" — mirrors the realistic
+    limit model): a buy-limit fills at its limit when ``bar.low <= limit``, a
+    sell-limit fills at its limit when ``bar.high >= limit``.
+
+    Preconditions: ``req.order_type == OrderType.STOP_LIMIT`` with both
+    ``stop_price`` and ``limit_price`` set.
+    Postconditions: returns ``limit_price`` when triggered AND fillable this bar,
+    else ``None``.
+    """
+    assert req.stop_price is not None and req.limit_price is not None, (
+        "stop_limit fill requires stop_price and limit_price"
+    )
+    if not stop_limit_triggered(req, bar):
+        return None
+    if req.side == OrderSide.LONG:
+        # Buy-limit: fills at the limit when the bar trades down to it.
+        return req.limit_price if bar.low <= req.limit_price else None
+    # Sell-limit: fills at the limit when the bar trades up to it.
+    return req.limit_price if bar.high >= req.limit_price else None
+
+
 class ExecutionModel(Protocol):
     """Decides whether and how an order fills against a bar.
 
@@ -137,6 +188,9 @@ class OptimisticExecutionModel:
             if req.side == OrderSide.SHORT and bar.low <= req.stop_price:
                 return FillTerms(reference_price=min(bar.open, req.stop_price))
             return None
+        if req.order_type == OrderType.STOP_LIMIT:
+            ref = stop_limit_reference_price(req, bar)
+            return FillTerms(reference_price=ref) if ref is not None else None
         return None
 
 
@@ -189,6 +243,8 @@ class RealisticExecutionModel:
             ref = self._limit_reference_price(req, bar)
         elif req.order_type == OrderType.STOP:
             ref = self._stop_reference_price(req, bar)
+        elif req.order_type == OrderType.STOP_LIMIT:
+            ref = stop_limit_reference_price(req, bar)
         else:
             return None
         if ref is None:
@@ -211,7 +267,7 @@ class RealisticExecutionModel:
 
         extra_slip_bps = 0.0
         if (
-            req.order_type == OrderType.LIMIT
+            req.order_type in (OrderType.LIMIT, OrderType.STOP_LIMIT)
             and next_bar is not None
             and effective_participation > 0
         ):
