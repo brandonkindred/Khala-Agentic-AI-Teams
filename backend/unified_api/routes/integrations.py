@@ -18,6 +18,7 @@ import asyncio
 import base64
 import contextlib
 import fcntl
+import functools
 import json
 import logging
 import os
@@ -1531,7 +1532,9 @@ def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
     return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
 
 
-def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
+def _ensure_repo_clone(
+    repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True
+) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -1539,6 +1542,9 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
 
     Preconditions:
         - ``owner`` and ``repo`` are non-empty; ``token`` authorizes read access.
+        - ``platform_owned`` is True for an auto-derived per-issue checkout this
+          service owns (and may later auto-clean), False for an operator-pinned
+          ``repo_path`` the operator manages.
     Postconditions:
         - On success the repository is present at ``repo_path`` and ``None`` is
           returned.
@@ -1547,36 +1553,27 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
           or an existing checkout that points at a different remote. This function
           never lets a ``subprocess`` exception escape, so the caller can surface
           a clean error rather than an unhandled 500.
-        - Clone-or-fetch is serialized per checkout via an exclusive
-          ``flock`` on a sibling lock file, so two concurrent requests for the
-          same issue (even across worker processes on the shared host volume)
-          cannot interleave a ``git clone`` into a half-populated directory.
+        - For a platform-owned checkout, clone-or-fetch is serialized per checkout
+          via an exclusive ``flock`` on a sibling lock file, so two concurrent
+          requests for the same issue (even across worker processes on the shared
+          host volume) cannot interleave a ``git clone`` into a half-populated
+          directory. An operator-pinned checkout is fetched **without** the sibling
+          lock: it is never auto-cleaned (so the lock's survive-the-rmtree role
+          doesn't apply) and may live under a parent the service cannot write,
+          where creating a sibling lock would wrongly fail an otherwise-valid
+          fetch.
     """
     env = _git_auth_env(token)
     path = Path(repo_path)
 
-    # The lock lives beside the checkout (not inside it) so it survives the
-    # coding team's post-success rmtree of repo_path. The parent must exist
-    # before the lock file is opened, which also covers the clone branch below.
+    # mkdir(exist_ok=True) on an existing parent is a no-op and needs no write
+    # permission, so this stays safe for operator paths under read-only parents.
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
     except OSError as e:
         return f"could not prepare workspace dir for {owner}/{repo}: {e}"
-    lock_path = clone_lock_path(path)
 
-    # Open + lock the sibling lock file. open()/flock() failures are workspace
-    # problems (and a FileNotFoundError from open must not be mistaken for a
-    # missing git binary), so they are handled here rather than by the
-    # git-specific FileNotFoundError handler that wraps the git ops below.
-    try:
-        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in the finally below
-    except OSError as e:
-        return f"could not acquire clone lock for {owner}/{repo}: {e}"
-    try:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX)
-        except OSError as e:
-            return f"could not acquire clone lock for {owner}/{repo}: {e}"
+    def _clone_or_fetch() -> str | None:
         try:
             if path.is_dir() and (path / ".git").is_dir():
                 url_check = subprocess.run(
@@ -1621,10 +1618,31 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
             return "git executable not found on the server; install git in the API image."
         except subprocess.TimeoutExpired as e:
             return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
-        finally:
-            with contextlib.suppress(OSError):
-                fcntl.flock(lock_file, fcntl.LOCK_UN)
+
+    # Operator-pinned checkout: fetch directly, no sibling lock (see Postconditions).
+    if not platform_owned:
+        return _clone_or_fetch()
+
+    # Platform-owned per-issue checkout: serialize via an exclusive flock on a
+    # sibling lock file. open()/flock() failures are workspace problems (and a
+    # FileNotFoundError from open must not be mistaken for a missing git binary),
+    # so they are handled here rather than by the git-specific handler above. The
+    # lock lives beside the checkout so it survives the coding team's post-success
+    # rmtree of repo_path.
+    lock_path = clone_lock_path(path)
+    try:
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in the finally below
+    except OSError as e:
+        return f"could not acquire clone lock for {owner}/{repo}: {e}"
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            return f"could not acquire clone lock for {owner}/{repo}: {e}"
+        return _clone_or_fetch()
     finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
         lock_file.close()
 
 
@@ -1670,7 +1688,12 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     cleanup_checkout_on_success = not cfg.get("repo_path", "").strip()
 
     loop = asyncio.get_running_loop()
-    clone_err = await loop.run_in_executor(None, _ensure_repo_clone, repo_path, owner, repo, token)
+    clone_err = await loop.run_in_executor(
+        None,
+        functools.partial(
+            _ensure_repo_clone, repo_path, owner, repo, token, platform_owned=cleanup_checkout_on_success
+        ),
+    )
     if clone_err:
         logger.warning("github run-issue: repository preparation failed: %s", clone_err)
         raise HTTPException(status_code=502, detail=clone_err)

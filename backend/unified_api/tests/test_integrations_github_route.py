@@ -532,9 +532,14 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     payload = fake.last_payload()
     assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
     assert payload["cleanup_checkout_on_success"] is True
-    # The clone target must be the per-issue folder, not the repo-level path.
+    # The clone target must be the per-issue folder, not the repo-level path, and
+    # an auto-derived checkout is platform-owned (so it takes the sibling lock).
     mock_clone.assert_called_once_with(
-        "/cache/github_workspaces/acme/widget/issue-7", "acme", "widget", "ghp_token"
+        "/cache/github_workspaces/acme/widget/issue-7",
+        "acme",
+        "widget",
+        "ghp_token",
+        platform_owned=True,
     )
 
 
@@ -556,8 +561,12 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     payload = fake.last_payload()
     assert payload["repo_path"] == "/srv/checkout"
     assert payload["cleanup_checkout_on_success"] is False
-    # Cloning is not skipped for an override — it runs once against the pinned path.
-    mock_clone.assert_called_once_with("/srv/checkout", "acme", "widget", "ghp_token")
+    # Cloning is not skipped for an override — it runs once against the pinned
+    # path, and platform_owned=False so it does NOT require a sibling lock (the
+    # operator's parent dir may be read-only).
+    mock_clone.assert_called_once_with(
+        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -622,6 +631,40 @@ def test_ensure_repo_clone_accepts_scp_form_remote(tmp_path):
     with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]):
         err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
     assert err is None
+
+
+def test_ensure_repo_clone_operator_path_skips_sibling_lock(tmp_path):
+    """An operator-pinned checkout (platform_owned=False) fetches without creating a
+    sibling lock in the parent, so it still works when the parent is not writable by
+    the service (only the checkout itself need be)."""
+    repo = tmp_path / "srv" / "repo"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget.git\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    # If a sibling lock were attempted, open() would still succeed here (tmp is
+    # writable); assert instead that no lock file is created, proving the lock path
+    # is skipped entirely for operator-pinned checkouts.
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok", platform_owned=False)
+    assert err is None
+    assert not (tmp_path / "srv" / ".repo.clone.lock").exists()
+
+
+def test_ensure_repo_clone_platform_owned_creates_sibling_lock(tmp_path):
+    """A platform-owned checkout takes the sibling lock (it is created beside the
+    checkout) so concurrent clone/fetch is serialized."""
+    repo = tmp_path / "issue-7"
+    (repo / ".git").mkdir(parents=True)
+    url_check = subprocess.CompletedProcess(
+        args=["git"], returncode=0, stdout="https://github.com/acme/widget.git\n", stderr=""
+    )
+    fetch_ok = subprocess.CompletedProcess(args=["git"], returncode=0, stdout="", stderr="")
+    with patch(f"{_M}.subprocess.run", side_effect=[url_check, fetch_ok]):
+        err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")  # platform_owned=True default
+    assert err is None
+    assert (tmp_path / ".issue-7.clone.lock").exists()
 
 
 # ---------------------------------------------------------------------------
