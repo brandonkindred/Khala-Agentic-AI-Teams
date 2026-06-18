@@ -425,6 +425,19 @@ def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
     assert path == "/cache/github_workspaces/acme/widget/issue-42"
 
 
+def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch):
+    # No workspace-root env and no AGENT_CACHE → the relative ``.agent_cache``
+    # default, resolved against the cwd, feeds the github_workspaces layout. This
+    # verifies agent_cache_dir()'s default is wired into the path builder, not just
+    # tested in isolation.
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
+    expected = Path(".agent_cache").resolve() / "github_workspaces" / "acme" / "widget" / "issue-42"
+    assert path == str(expected)
+
+
 def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
