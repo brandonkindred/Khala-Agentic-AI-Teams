@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from coding_team.clone_workspace import (
     agent_cache_dir,
     clone_lock_path,
@@ -44,6 +46,14 @@ def test_clone_lock_path_distinct_issues_distinct_locks() -> None:
     b = clone_lock_path("/cache/gh/o/r/issue-2")
     assert a != b
     assert a.parent == b.parent
+
+
+@pytest.mark.parametrize("root", ["/", ""])
+def test_clone_lock_path_rejects_empty_final_component(root) -> None:
+    # A filesystem root has no final component; enforce the precondition rather
+    # than emit a degenerate ``/.clone.lock``.
+    with pytest.raises(ValueError):
+        clone_lock_path(root)
 
 
 # ---------------------------------------------------------------------------

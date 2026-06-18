@@ -34,8 +34,14 @@ def clone_lock_path(repo_path: str | Path) -> Path:
           by the deletion safety guard before this is reached).
     Postconditions:
         - Returns ``<parent>/.<name>.clone.lock``. Pure: no filesystem access.
+    Raises:
+        - ``ValueError`` when ``repo_path`` has an empty final component (a
+          filesystem root), enforcing the precondition rather than emitting a
+          degenerate ``/.clone.lock``.
     """
     p = Path(repo_path)
+    if not p.name:
+        raise ValueError(f"repo_path must have a non-empty final component: {repo_path!r}")
     return p.parent / f".{p.name}.clone.lock"
 
 
