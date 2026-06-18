@@ -563,9 +563,12 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
           could be neither bisected further nor recovered by retry.
 
     Postconditions:
-        - Returns one ``info``/``general`` finding per segment, anchored to the
-          segment's ``start_line`` and naming its original-file range, so no
-          covered line is silently dropped.
+        - Returns one ``info``/``general`` finding per segment, spanning the
+          segment's original-file range via the model's multi-line convention
+          (``start_line`` = first line, ``line`` = last line — there is no
+          ``end_line`` field) and naming the range in its description, so no
+          covered line is silently dropped and downstream tools can highlight
+          the full extent.
         - ``approved_flags`` is empty: a chunk that was never reviewed neither
           approves nor rejects, so the merged verdict reflects only the
           successfully reviewed chunks.
@@ -576,7 +579,8 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
             severity="info",
             category="general",
             file_path=seg.path,
-            line=seg.start_line,
+            start_line=seg.start_line,
+            line=seg.end_line,
             description=(
                 f"This code could not be reviewed automatically ({reason}); "
                 f"{_segment_range_label(seg)} was not reviewed."

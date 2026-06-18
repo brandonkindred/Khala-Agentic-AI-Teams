@@ -114,7 +114,11 @@ class _CiteFirstPrefixed(DummyLLMClient):
         return _BIG_CONTEXT_TOKENS
 
     def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:
-        m = re.search(r"^(\d+): line", prompt, re.M)
+        # Match the splitter's generic original-line prefix ("N: <code>"),
+        # not the synthetic content's "line" token, so the test stays robust
+        # to changes in the filler format. The run-level assertion that cited
+        # lines equal the segments' own start_lines confirms each is in range.
+        m = re.search(r"^(\d+): ", prompt, re.M)
         assert m is not None, "split segments must render original-line prefixes"
         cited = int(m.group(1))
         return {
@@ -194,5 +198,15 @@ def test_e2e_one_chunk_failure_degrades_gracefully(monkeypatch) -> None:
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
     assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
     assert all(i.severity == "info" for i in not_reviewed)
-    assert any(i.file_path == bad_path for i in not_reviewed)
     assert result.approved is True
+
+    # Recovery bisects the failed file's segment into sub-ranges, each
+    # degrading separately; together they must name the entire file. Every
+    # finding carries a structured range (start_line .. line, where `line` is
+    # the range end per the CodeReviewIssue multi-line convention).
+    bad_findings = [i for i in not_reviewed if i.file_path == bad_path]
+    assert bad_findings, "the failed file must be named by not-reviewed findings"
+    assert all(i.start_line is not None and i.line is not None for i in bad_findings)
+    assert all(i.start_line <= i.line for i in bad_findings)
+    assert min(i.start_line for i in bad_findings) == 1
+    assert max(i.line for i in bad_findings) == len(files[bad_path].splitlines())
