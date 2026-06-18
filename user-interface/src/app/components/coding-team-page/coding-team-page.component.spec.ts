@@ -1,6 +1,6 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { Subject, of, throwError } from 'rxjs';
-import type { CodingTeamJobListItem } from '../../models/coding-team.model';
+import { of, throwError } from 'rxjs';
+import type { CodingTeamJobListItem, CodingTeamJobStatus } from '../../models/coding-team.model';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { provideHttpClient } from '@angular/common/http';
 import { provideHttpClientTesting } from '@angular/common/http/testing';
@@ -46,6 +46,26 @@ const CONFIGURED: GitHubConfigResponse = {
   default_label: 'ai',
 };
 
+/** A non-terminal GitHub-issue run for this repo. */
+function ghRun(overrides: Partial<CodingTeamJobListItem> = {}): CodingTeamJobListItem {
+  return {
+    job_id: 'j-run',
+    status: 'running',
+    phase: 'coding',
+    status_text: 'writing files',
+    updated_at: '2026-06-09T10:00:00Z',
+    github_context: { owner: 'acme', repo: 'widgets', issue_number: 2, issue_url: 'https://example.com/2' },
+    ...overrides,
+  };
+}
+
+/** Let pending timer(0) emissions (runs poll, then the selected-run status poll) fire. */
+async function flushAsync(): Promise<void> {
+  for (let i = 0; i < 3; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 describe('CodingTeamPageComponent', () => {
   let component: CodingTeamPageComponent;
   let fixture: ComponentFixture<CodingTeamPageComponent>;
@@ -54,6 +74,7 @@ describe('CodingTeamPageComponent', () => {
     getJobStatus: ReturnType<typeof vi.fn>;
     submitAnswers: ReturnType<typeof vi.fn>;
     listJobs: ReturnType<typeof vi.fn>;
+    resumeJob: ReturnType<typeof vi.fn>;
   };
   let integrationsSpy: {
     getGitHubConfig: ReturnType<typeof vi.fn>;
@@ -84,6 +105,7 @@ describe('CodingTeamPageComponent', () => {
       getJobStatus: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'running' })),
       submitAnswers: vi.fn(),
       listJobs: vi.fn().mockReturnValue(of([])),
+      resumeJob: vi.fn().mockReturnValue(of({ job_id: 'j1', status: 'running', message: '' })),
     };
     integrationsSpy = {
       getGitHubConfig: vi.fn().mockReturnValue(of(CONFIGURED)),
@@ -91,6 +113,37 @@ describe('CodingTeamPageComponent', () => {
       runGitHubIssue: vi.fn(),
     };
   });
+
+  afterEach(() => {
+    // Tear down the runs/status poll timers so they never bleed into the next test.
+    fixture?.destroy();
+  });
+
+  /** Switch the visible view (the page opens on 'chat') and re-render. */
+  function showView(view: 'chat' | 'github' | 'jobs'): void {
+    component.activeView = view;
+    fixture.detectChanges();
+  }
+
+  /**
+   * Put a single run into the Jobs accordion and open it with the given status. The run detail
+   * renders inside the list's @for, so the run must be present in `runningRuns` for the expanded
+   * detail to appear.
+   */
+  function openRun(run: CodingTeamJobListItem, jobStatus: Record<string, unknown>): void {
+    component.runs = [run];
+    component.runningRuns = [run];
+    component.recentRuns = [];
+    // The template iterates the precomputed view-models; rebuild them from the run list via the
+    // same private builder the component uses (bracket access, the spec's idiom for internals —
+    // no structural cast to a private method's shape).
+    component['buildRunVms']();
+    component.selectedRunId = run.job_id;
+    component.selectedRunNumber = run.github_context?.issue_number ?? null;
+    component.jobStatus = jobStatus as never;
+    component.activeView = 'jobs';
+    fixture.detectChanges();
+  }
 
   it('should create', async () => {
     await setup();
@@ -106,20 +159,28 @@ describe('CodingTeamPageComponent', () => {
     expect(component.issues.length).toBe(3);
   });
 
-  it('does NOT auto-load issues when GitHub is not configured', async () => {
+  it('polls the Runs list with terminal jobs included (active=false)', async () => {
+    await setup();
+    await flushAsync();
+    expect(apiSpy.listJobs).toHaveBeenCalledWith(false);
+  });
+
+  it('does NOT auto-load issues or poll runs when GitHub is not configured', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(
       of({ ...CONFIGURED, token_configured: false }),
     );
     await setup();
+    await flushAsync();
     expect(component.githubConfigured).toBe(false);
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+    expect(apiSpy.listJobs).not.toHaveBeenCalled();
   });
 
   it('handles a failed config check without loading issues', async () => {
     integrationsSpy.getGitHubConfig.mockReturnValue(throwError(() => new Error('boom')));
     await setup();
     expect(component.githubConfigured).toBe(false);
-    expect(component.loadingConfig).toBe(false);
+    expect(component.isLoadingConfig).toBe(false);
     expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
   });
 
@@ -127,21 +188,17 @@ describe('CodingTeamPageComponent', () => {
     integrationsSpy.getGitHubIssues.mockReturnValue(of(makeIssues(25)));
     await setup();
 
-    // Defaults to first page of PAGE_SIZE_OPTIONS[0] (10) items.
     expect(component.pageIndex).toBe(0);
     expect(component.pageSize).toBe(10);
     expect(component.pagedIssues.map((i) => i.number)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
-    // Move to the second page.
     component.onPageChange({ pageIndex: 1, pageSize: 10, length: 25 });
     expect(component.pagedIssues.map((i) => i.number)).toEqual([11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
 
-    // Changing page size is honoured.
     component.onPageChange({ pageIndex: 0, pageSize: 25, length: 25 });
     expect(component.pageSize).toBe(25);
     expect(component.pagedIssues.length).toBe(25);
 
-    // Reloading resets back to the first page.
     component.loadIssues();
     expect(component.pageIndex).toBe(0);
   });
@@ -155,7 +212,7 @@ describe('CodingTeamPageComponent', () => {
     expect(component.loadingIssues).toBe(false);
   });
 
-  it('selects, cancels, and runs an issue', async () => {
+  it('selects an issue, cancels, then runs it — selecting the new run, no dismiss', async () => {
     await setup();
     const issue = component.issues[0];
 
@@ -171,15 +228,25 @@ describe('CodingTeamPageComponent', () => {
     component.selectIssue(issue);
     component.confirmAndRun();
     expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: issue.number });
-    expect(component.activeJob?.job_id).toBe('j1');
+    expect(component.selectedRunId).toBe('j1');
+    expect(component.selectedRunNumber).toBe(issue.number);
     expect(component.selectedIssue).toBeNull();
-
-    component.dismissJob();
-    expect(component.activeJob).toBeNull();
-    expect(component.jobStatus).toBeNull();
+    expect(component.isIssueInProgress(issue)).toBe(true);
+    // The panel is not dismissable.
+    expect((component as unknown as Record<string, unknown>)['dismissJob']).toBeUndefined();
   });
 
-  it('treats completed_with_failures as terminal (so polling stops and the job is dismissable)', async () => {
+  it('surfaces an error when starting a run fails', async () => {
+    await setup();
+    const issue = component.issues[0];
+    integrationsSpy.runGitHubIssue.mockReturnValue(throwError(() => ({ error: { detail: 'duplicate run' } })));
+    component.selectIssue(issue);
+    component.confirmAndRun();
+    expect(component.issueError).toBe('duplicate run');
+    expect(component.runningIssue).toBe(false);
+  });
+
+  it('treats completed_with_failures as terminal (so polling stops)', async () => {
     await setup();
     component.jobStatus = null;
     expect(component.isJobTerminal()).toBe(false);
@@ -198,10 +265,210 @@ describe('CodingTeamPageComponent', () => {
     expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
   });
 
+  it('confirmAndRun is a no-op while a run is already starting (guards double-submit)', async () => {
+    await setup();
+    component.selectIssue(component.issues[0]);
+    component.runningIssue = true;
+    component.confirmAndRun();
+    expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
+  });
+
+  it('loadIssues is a no-op while a load is already in flight (guards overlapping fetches)', async () => {
+    await setup();
+    integrationsSpy.getGitHubIssues.mockClear();
+    component.loadingIssues = true;
+    component.loadIssues();
+    expect(integrationsSpy.getGitHubIssues).not.toHaveBeenCalled();
+  });
+
   it('records the latest job id when a workflow is launched', async () => {
     await setup();
     component.onWorkflowLaunched({ job_id: 'wf-1', conversation_id: 'c1' });
     expect(component.latestJobId).toBe('wf-1');
+  });
+
+  // -------------------------------------------------------------------------
+  // View switcher (Chat / GitHub / Jobs)
+  // -------------------------------------------------------------------------
+
+  describe('view switcher', () => {
+    it('opens on the Chat view showing the assistant, not the GitHub or Jobs panels', async () => {
+      await setup();
+      expect(component.activeView).toBe('chat');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('app-team-assistant-chat')).not.toBeNull();
+      expect(el.querySelector('.github-section')).toBeNull();
+      expect(el.querySelector('.jobs-panel')).toBeNull();
+    });
+
+    it('shows only the GitHub issues panel when the GitHub view is active', async () => {
+      await setup();
+      showView('github');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      expect(el.querySelector('app-team-assistant-chat')).toBeNull();
+      expect(el.querySelector('.jobs-panel')).toBeNull();
+    });
+
+    it('shows only the Jobs panel when the Jobs view is active', async () => {
+      await setup();
+      showView('jobs');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.jobs-panel')).not.toBeNull();
+      expect(el.querySelector('app-team-assistant-chat')).toBeNull();
+      expect(el.querySelector('.github-issue-row')).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Pure helpers
+  // -------------------------------------------------------------------------
+
+  describe('helpers', () => {
+    it('maps job statuses to shared badge modifiers', async () => {
+      await setup();
+      expect(component.badgeClass('running')).toBe('running');
+      expect(component.badgeClass('pending')).toBe('running');
+      expect(component.badgeClass('completed')).toBe('completed');
+      expect(component.badgeClass('failed')).toBe('failed');
+      expect(component.badgeClass('cancelled')).toBe('cancelled');
+      expect(component.badgeClass('completed_with_failures')).toBe('warning');
+      expect(component.badgeClass('waiting_for_user')).toBe('warning');
+      expect(component.badgeClass('weird')).toBe('neutral');
+      expect(component.badgeClass(undefined)).toBe('neutral');
+    });
+
+    it('formats relative times', async () => {
+      await setup();
+      expect(component.timeAgo()).toBe('');
+      // A malformed timestamp resolves to '' rather than rendering "NaNd ago".
+      expect(component.timeAgo('not-a-real-date')).toBe('');
+      expect(component.timeAgo(new Date().toISOString())).toBe('just now');
+      expect(component.timeAgo(new Date(Date.now() - 5 * 60000).toISOString())).toBe('5m ago');
+      expect(component.timeAgo(new Date(Date.now() - 2 * 3600000).toISOString())).toBe('2h ago');
+      expect(component.timeAgo(new Date(Date.now() - 3 * 86400000).toISOString())).toBe('3d ago');
+    });
+
+    it('copies the selected job id and flashes confirmation', async () => {
+      await setup();
+      // No selection → no-op, no throw.
+      expect(() => component.copyJobId()).not.toThrow();
+      expect(component.jobIdCopied).toBe(false);
+      component.selectedRunId = 'abcdef123456';
+      component.copyJobId();
+      expect(component.jobIdCopied).toBe(true);
+    });
+
+    it('swallows a rejected clipboard write instead of leaking an unhandled rejection', async () => {
+      await setup();
+      const writeText = vi.fn().mockRejectedValue(new Error('permission denied'));
+      const original = (navigator as { clipboard?: unknown }).clipboard;
+      Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+      try {
+        component.selectedRunId = 'abcdef123456';
+        expect(() => component.copyJobId()).not.toThrow();
+        expect(writeText).toHaveBeenCalledWith('abcdef123456');
+        expect(component.jobIdCopied).toBe(true);
+        // Let the rejected promise settle; the .catch() must absorb it.
+        await flushAsync();
+      } finally {
+        Object.defineProperty(navigator, 'clipboard', { value: original, configurable: true });
+      }
+    });
+
+    it('treats a run as waiting only while it is non-terminal', async () => {
+      await setup();
+      expect(component.isRunActive(ghRun({ status: 'running' }))).toBe(true);
+      expect(component.isRunActive(ghRun({ status: 'completed' }))).toBe(false);
+      // A run actively paused on questions is "needs answers"…
+      expect(
+        component.isRunWaiting(ghRun({ status: 'waiting_for_user', waiting_for_answers: true })),
+      ).toBe(true);
+      // …but a terminal run carrying a stale waiting flag is not.
+      expect(
+        component.isRunWaiting(ghRun({ status: 'completed', waiting_for_answers: true })),
+      ).toBe(false);
+      expect(component.isRunWaiting(ghRun({ status: 'running', waiting_for_answers: false }))).toBe(false);
+    });
+
+    it('splits runs into running and recent (derived in applyRuns)', async () => {
+      await setup();
+      component['initialRunsLoad'] = false;
+      component['applyRuns']([
+        ghRun({ job_id: 'a', status: 'running' }),
+        ghRun({ job_id: 'b', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
+        ghRun({ job_id: 'c', status: 'waiting_for_user', github_context: { owner: 'acme', repo: 'widgets', issue_number: 4 } }),
+      ]);
+      expect(component.runningRuns.map((r) => r.job_id)).toEqual(['a', 'c']);
+      expect(component.recentRuns.map((r) => r.job_id)).toEqual(['b']);
+    });
+
+    it('precomputes run-row view-models (badge/detail/timeAgo) in applyRuns', async () => {
+      await setup();
+      component['initialRunsLoad'] = false;
+      component['applyRuns']([
+        ghRun({ job_id: 'a', status: 'running', status_text: 'writing files', updated_at: new Date(Date.now() - 5 * 60000).toISOString() }),
+        ghRun({ job_id: 'b', status: 'completed', status_text: 'done', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
+      ]);
+      expect(component.runningRunVms.map((v) => v.run.job_id)).toEqual(['a']);
+      const running = component.runningRunVms[0];
+      expect(running.badgeClass).toBe('running');
+      expect(running.detail).toBe('writing files');
+      expect(running.timeAgo).toBe('5m ago');
+      // A terminal run's live detail line is suppressed.
+      expect(component.recentRunVms.map((v) => v.run.job_id)).toEqual(['b']);
+      expect(component.recentRunVms[0].detail).toBeNull();
+    });
+
+    it('precomputes issue-row view-models from the visible page and chip set', async () => {
+      integrationsSpy.getGitHubIssues.mockReturnValue(
+        of([
+          issueWith({
+            number: 7,
+            blocked: true,
+            open_dependencies: [3],
+            dependencies: [{ number: 3, title: 'A', state: 'open' }],
+          }),
+        ]),
+      );
+      await setup();
+      expect(component.pagedIssueVms.length).toBe(1);
+      const vm = component.pagedIssueVms[0];
+      expect(vm.number).toBe(7);
+      expect(vm.hasDeps).toBe(true);
+      expect(vm.blocked).toBe(true);
+      expect(vm.openDepsCount).toBe(1);
+      expect(vm.depsTooltip).toContain('#3');
+      expect(vm.inProgress).toBe(false);
+    });
+
+    it('precomputes the selected run\'s badge class and terminal flag when jobStatus is set', async () => {
+      await setup();
+      component.jobStatus = { job_id: 'j1', status: 'failed' };
+      expect(component.jobStatusBadgeClass).toBe('failed');
+      expect(component.jobStatusTerminal).toBe(true);
+      component.jobStatus = { job_id: 'j1', status: 'running' };
+      expect(component.jobStatusBadgeClass).toBe('running');
+      expect(component.jobStatusTerminal).toBe(false);
+      component.jobStatus = null;
+      expect(component.jobStatusBadgeClass).toBe('neutral');
+      expect(component.jobStatusTerminal).toBe(false);
+    });
+
+    it('precomputes the selected issue\'s open-dependency refs when an issue is selected', async () => {
+      await setup();
+      component.selectIssue(
+        issueWith({
+          dependencies: [
+            { number: 3, title: 'A', state: 'open' },
+            { number: 5, title: 'B', state: 'closed' },
+          ],
+        }),
+      );
+      expect(component.selectedIssueOpenDepsText).toBe('#3');
+      component.cancelSelection();
+      expect(component.selectedIssueOpenDepsText).toBe('');
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -233,7 +500,6 @@ describe('CodingTeamPageComponent', () => {
         ],
       });
       expect(component.dependencyTooltip(met)).toBe('Depends on #3, #5 (all complete)');
-      // Only open deps are listed in the ref string.
       expect(component.openDepRefs(met)).toBe('');
     });
   });
@@ -254,14 +520,13 @@ describe('CodingTeamPageComponent', () => {
         ]),
       );
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
       expect(deps?.classList.contains('github-issue-row__deps--blocked')).toBe(true);
       expect(deps?.querySelector('mat-icon')?.textContent?.trim()).toBe('block');
       expect(el.querySelector('.github-issue-row__deps-count')?.textContent?.trim()).toBe('2');
-      // a11y: the indicator is a single labelled graphic; the icon ligature/count are
-      // not announced separately.
       expect(deps?.getAttribute('role')).toBe('img');
       expect(deps?.getAttribute('aria-label')).toBe('Blocked by #3, #5 — must be closed first');
       expect(deps?.querySelector('mat-icon')?.getAttribute('aria-hidden')).toBe('true');
@@ -279,6 +544,7 @@ describe('CodingTeamPageComponent', () => {
         ]),
       );
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       const deps = el.querySelector('.github-issue-row__deps');
       expect(deps).not.toBeNull();
@@ -290,11 +556,12 @@ describe('CodingTeamPageComponent', () => {
     it('renders no indicator when an issue has no dependencies', async () => {
       integrationsSpy.getGitHubIssues.mockReturnValue(of([issueWith({ number: 9 })]));
       await setup();
+      showView('github');
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('.github-issue-row__deps')).toBeNull();
     });
 
-    it('warns on the confirmation panel for a blocked issue but keeps Confirm enabled', async () => {
+    it('warns on the inline confirmation for a blocked issue but keeps Confirm enabled', async () => {
       const blocked = issueWith({
         number: 7,
         blocked: true,
@@ -305,7 +572,7 @@ describe('CodingTeamPageComponent', () => {
       await setup();
 
       component.selectIssue(blocked);
-      fixture.detectChanges();
+      showView('github');
 
       const el: HTMLElement = fixture.nativeElement;
       const warning = el.querySelector('.github-confirm-panel__warning');
@@ -315,45 +582,32 @@ describe('CodingTeamPageComponent', () => {
       const confirmBtn = el.querySelector('.github-confirm-panel__actions button') as HTMLButtonElement;
       expect(confirmBtn.disabled).toBe(false);
     });
-  });
 
-  it('renders the Agent thinking panel when jobStatus.thinking is present', async () => {
-    await setup();
-    component.activeJob = {
-      job_id: 'j1',
-      issue_number: 5,
-      issue_url: 'u',
-      status: 'queued',
-      message: '',
-    };
-    component.jobStatus = { job_id: 'j1', status: 'running', thinking: 'weighing the approach' };
-    fixture.detectChanges();
-    const el: HTMLElement = fixture.nativeElement;
-    const stream = el.querySelector('.thinking-stream');
-    expect(stream).not.toBeNull();
-    expect(stream?.textContent).toContain('weighing the approach');
-  });
-
-  it('hides the Agent thinking panel when there is no thinking text', async () => {
-    await setup();
-    component.activeJob = {
-      job_id: 'j1',
-      issue_number: 5,
-      issue_url: 'u',
-      status: 'queued',
-      message: '',
-    };
-    component.jobStatus = { job_id: 'j1', status: 'running' };
-    fixture.detectChanges();
-    const el: HTMLElement = fixture.nativeElement;
-    expect(el.querySelector('.thinking-stream')).toBeNull();
+    it('keeps the issue list visible and shows the inline confirm under the selected row', async () => {
+      await setup();
+      component.selectIssue(component.issues[1]); // issue #2
+      showView('github');
+      const el: HTMLElement = fixture.nativeElement;
+      // All three issue rows remain visible — selecting one never hides the list.
+      expect(el.querySelectorAll('.github-issue-row').length).toBe(3);
+      const confirm = el.querySelector('.github-confirm-panel');
+      expect(confirm).not.toBeNull();
+      expect(confirm?.textContent).toContain('#2');
+    });
   });
 
   // -------------------------------------------------------------------------
-  // Pending questions (human-in-the-loop)
+  // Selected-run detail rendering
   // -------------------------------------------------------------------------
 
-  describe('pending questions panel', () => {
+  describe('selected-run detail', () => {
+    function showRun(jobStatusOverrides: Record<string, unknown>): void {
+      openRun(
+        ghRun({ job_id: 'j1', status: 'waiting_for_user', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
+        { job_id: 'j1', status: 'waiting_for_user', ...jobStatusOverrides },
+      );
+    }
+
     const QUESTION = {
       id: 'q1',
       question_text: 'Which auth flow?',
@@ -362,293 +616,570 @@ describe('CodingTeamPageComponent', () => {
       source: 'tech_lead',
     };
 
-    function showActiveJob(jobStatusOverrides: Record<string, unknown>): void {
-      component.activeJob = { job_id: 'j1', issue_number: 5, issue_url: 'u', status: 'queued', message: '' };
-      component.jobStatus = { job_id: 'j1', status: 'waiting_for_user', ...jobStatusOverrides } as any;
-      fixture.detectChanges();
-    }
-
-    it('renders the questions panel and waiting banner when the job is paused', async () => {
+    it('renders the Agent thinking panel when jobStatus.thinking is present', async () => {
       await setup();
-      showActiveJob({ waiting_for_answers: true, pending_questions: [QUESTION] });
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running', thinking: 'weighing the approach' });
+      const stream = fixture.nativeElement.querySelector('.thinking-stream');
+      expect(stream).not.toBeNull();
+      expect(stream?.textContent).toContain('weighing the approach');
+    });
+
+    it('hides the Agent thinking panel when there is no thinking text', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), { job_id: 'j1', status: 'running' });
+      expect(fixture.nativeElement.querySelector('.thinking-stream')).toBeNull();
+    });
+
+    it('renders the questions panel and waiting banner when the run is paused', async () => {
+      await setup();
+      showRun({ waiting_for_answers: true, pending_questions: [QUESTION] });
       const el: HTMLElement = fixture.nativeElement;
       expect(el.querySelector('.github-banner--waiting')).not.toBeNull();
       expect(el.querySelector('app-pending-questions')).not.toBeNull();
       expect(el.textContent).toContain('Which auth flow?');
     });
 
-    it('hides the panel when the job is not waiting for answers', async () => {
+    it('hides the panel when the run is not waiting for answers', async () => {
       await setup();
-      showActiveJob({ waiting_for_answers: false, pending_questions: [QUESTION] });
+      showRun({ waiting_for_answers: false, pending_questions: [QUESTION] });
       expect(fixture.nativeElement.querySelector('app-pending-questions')).toBeNull();
     });
 
     it('hides the panel when there are no pending questions', async () => {
       await setup();
-      showActiveJob({ waiting_for_answers: true, pending_questions: [] });
+      showRun({ waiting_for_answers: true, pending_questions: [] });
       expect(fixture.nativeElement.querySelector('app-pending-questions')).toBeNull();
       expect(component.hasPendingQuestions()).toBe(false);
     });
 
-    it('shows the waiting badge in the job panel header while paused', async () => {
+    it('shows the waiting badge in the detail header while paused', async () => {
       await setup();
-      showActiveJob({ waiting_for_answers: true, pending_questions: [QUESTION] });
-      const badge = fixture.nativeElement.querySelector('.github-job-status--waiting_for_user');
-      expect(badge?.textContent).toContain('waiting for your answers');
+      showRun({ waiting_for_answers: true, pending_questions: [QUESTION] });
+      const badge = fixture.nativeElement.querySelector('.run-detail__header .kh-badge--warning');
+      expect(badge?.textContent).toContain('waiting for answers');
+    });
+
+    it('offers a "Run again" affordance on a terminal run', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1', status: 'failed' }), { job_id: 'j1', status: 'failed' });
+      const retry = fixture.nativeElement.querySelector('.run-detail__retry button');
+      expect(retry?.textContent).toContain('Run again');
+    });
+
+    it('renders a status modifier class for every task chip in the run detail', async () => {
+      await setup();
+      openRun(ghRun({ job_id: 'j1' }), {
+        job_id: 'j1',
+        status: 'running',
+        task_graph_snapshot: [
+          { id: 't1', title: 'Build', status: 'completed' },
+          { id: 't2', title: 'Wire API', status: 'failed' },
+        ],
+      });
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelector('.github-task-chip--completed')).not.toBeNull();
+      expect(el.querySelector('.github-task-chip--failed')).not.toBeNull();
     });
 
     it('onAnswersSubmitted folds the post-submit status in and restarts polling', async () => {
       await setup();
-      component.activeJob = { job_id: 'j1', issue_number: 5, issue_url: 'u', status: 'queued', message: '' };
+      component.selectedRunId = 'j1';
       component['startPolling']('j1');
       const staleSub = component['pollSub'];
       component.issueError = 'Lost connection to the coding team — status polling failed.';
 
       const resumed = { job_id: 'j1', status: 'running', waiting_for_answers: false };
-      component.onAnswersSubmitted(resumed as any);
+      component.onAnswersSubmitted(resumed as CodingTeamJobStatus);
 
       expect(component.jobStatus).toEqual(resumed);
-      // Polling restarted from scratch: stale in-flight fetches are discarded.
       expect(staleSub?.closed).toBe(true);
       expect(component['pollSub']).not.toBeNull();
       expect(component['pollSub']).not.toBe(staleSub);
-      // A stale "lost connection" banner is cleared — answering proves the link is back.
       expect(component.issueError).toBeNull();
       component['stopPolling']();
+    });
+
+    it('onAnswersSubmitted ignores a payload missing the job_id/status discriminators', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.jobStatus = { job_id: 'j1', status: 'running' };
+      component.onAnswersSubmitted({ foo: 'bar' } as unknown as CodingTeamJobStatus);
+      // A foreign shape is never folded into jobStatus — the prior status is preserved.
+      expect(component.jobStatus).toEqual({ job_id: 'j1', status: 'running' });
+      component['stopPolling']();
+    });
+
+    it('onAnswersSubmitted ignores a status whose job_id is not the selected run', async () => {
+      await setup();
+      component.selectedRunId = 'current';
+      component.jobStatus = { job_id: 'current', status: 'running' };
+      // A slow submit resolving after the user switched runs must not overwrite the current run.
+      component.onAnswersSubmitted({ job_id: 'other', status: 'completed' } as CodingTeamJobStatus);
+      expect(component.jobStatus).toEqual({ job_id: 'current', status: 'running' });
+      expect(component['pollSub']).toBeNull();
     });
   });
 
   // -------------------------------------------------------------------------
-  // Active-job restore across reloads
+  // Resume
   // -------------------------------------------------------------------------
 
-  describe('active job restore', () => {
-    const GH_JOB = {
-      job_id: 'j-restore',
-      status: 'waiting_for_user',
-      phase: 'paused',
-      updated_at: '2026-06-09T10:00:00Z',
-      waiting_for_answers: true,
-      github_context: { owner: 'acme', repo: 'widgets', issue_number: 2, issue_url: 'https://example.com/2' },
-    };
-
-    it('re-attaches to a non-terminal GitHub-issue job on init', async () => {
-      apiSpy.listJobs.mockReturnValue(of([GH_JOB]));
+  describe('resume', () => {
+    it('is a no-op without a selected run', async () => {
       await setup();
-      // Must request active-only so terminal jobs' full records never cross the wire.
-      expect(apiSpy.listJobs).toHaveBeenCalledWith(true);
-      expect(component.activeJob?.job_id).toBe('j-restore');
-      expect(component.activeJob?.issue_number).toBe(2);
-      expect(component.activeJob?.issue_url).toBe('https://example.com/2');
-      // The poller's first fetch is immediate (timer(0)), so the restored
-      // panel is hydrated without waiting a full poll interval.
-      await new Promise((resolve) => setTimeout(resolve, 0));
+      component.selectedRunId = null;
+      component.resumeJob();
+      expect(apiSpy.resumeJob).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op while a resume is already in flight', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.resumingJob = true;
+      component.resumeJob();
+      expect(apiSpy.resumeJob).not.toHaveBeenCalled();
+    });
+
+    it('restarts polling on success', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.resumeJob();
+      expect(apiSpy.resumeJob).toHaveBeenCalledWith('j1');
+      expect(component.resumingJob).toBe(false);
+      expect(component['pollSub']).not.toBeNull();
+      component['stopPolling']();
+    });
+
+    it('surfaces an error on failure', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      apiSpy.resumeJob.mockReturnValue(throwError(() => ({ error: { detail: 'cannot resume' } })));
+      component.resumeJob();
+      expect(component.issueError).toBe('cannot resume');
+      expect(component.resumingJob).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Runs panel — list, selection, restore, chips
+  // -------------------------------------------------------------------------
+
+  describe('runs panel', () => {
+    it('renders an empty state when there are no runs', async () => {
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      expect(fixture.nativeElement.querySelector('.jobs-panel__empty')).not.toBeNull();
+    });
+
+    it('renders Running and Recent sections without a delete button', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({ job_id: 'r1', status: 'running' }),
+          ghRun({ job_id: 'r2', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      const el: HTMLElement = fixture.nativeElement;
+      expect(el.querySelectorAll('.coding-run-item').length).toBe(2);
+      expect(el.querySelector('.delete-btn')).toBeNull();
+      expect(el.textContent).toContain('Running');
+      expect(el.textContent).toContain('Recent');
+    });
+
+    it('shows a needs-answers badge on a running run paused on questions', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'paused',
+            status: 'waiting_for_user',
+            waiting_for_answers: true,
+            github_context: { owner: 'acme', repo: 'widgets', issue_number: 9 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      expect(fixture.nativeElement.textContent).toContain('needs answers');
+    });
+
+    it('never shows a needs-answers badge or a live detail line on a terminal Recent run', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({
+            job_id: 'done',
+            status: 'completed',
+            // Stale flag from a run that was paused before it finished.
+            waiting_for_answers: true,
+            status_text: 'wrote files',
+            github_context: { owner: 'acme', repo: 'widgets', issue_number: 8 },
+          }),
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      const el: HTMLElement = fixture.nativeElement;
+      // Terminal runs are never auto-selected, so only the Recent row is in the DOM.
+      expect(el.textContent).not.toContain('needs answers');
+      expect(el.querySelector('.coding-run-item__detail')).toBeNull();
+      expect(el.querySelector('.kh-badge--completed')?.textContent).toContain('completed');
+    });
+
+    it('expands the auto-selected run inline in the Jobs accordion', async () => {
+      apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'r1', github_context: { owner: 'acme', repo: 'widgets', issue_number: 1 } })]));
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      expect(component.selectedRunId).toBe('r1');
+      const el: HTMLElement = fixture.nativeElement;
+      // The auto-selected run's row is marked selected and its detail is expanded beneath it.
+      expect(el.querySelector('.coding-run-item.selected')).not.toBeNull();
+      expect(el.querySelector('.run-detail')).not.toBeNull();
+    });
+
+    it('toggles a run row open then collapsed in the accordion', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 1 } })]),
+      );
+      await setup();
+      await flushAsync();
+      showView('jobs');
+      const run = component.recentRuns[0];
+      // Terminal run is not auto-selected, so nothing is expanded yet.
+      expect(component.selectedRunId).toBeNull();
+
+      component.toggleRun(run);
+      await flushAsync();
+      fixture.detectChanges();
+      expect(component.selectedRunId).toBe('r1');
+      expect(fixture.nativeElement.querySelector('.run-detail')).not.toBeNull();
+
+      component.toggleRun(run);
+      fixture.detectChanges();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.jobStatus).toBeNull();
+      expect(fixture.nativeElement.querySelector('.run-detail')).toBeNull();
+    });
+
+    it('drops the "In progress" chip when a run is collapsed, even after it finishes', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([ghRun({ job_id: 'r1', status: 'running', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } })]),
+      );
+      await setup();
+      await flushAsync();
+      // The running run is auto-selected and its issue shows "In progress".
+      expect(component.selectedRunId).toBe('r1');
+      expect(component.activeIssueNumbers.has(2)).toBe(true);
+
+      // Collapsing the run drops the selection *and* its issue number.
+      component.toggleRun(component.runs[0]);
+      expect(component.selectedRunId).toBeNull();
+      expect(component.selectedRunNumber).toBeNull();
+
+      // A later poll that reports the run finished must not re-add a stale chip for the deselected run.
+      component['applyRuns']([
+        ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } }),
+      ]);
+      expect(component.activeIssueNumbers.has(2)).toBe(false);
+    });
+
+    it('auto-selects a non-terminal run on first load and starts polling it', async () => {
+      apiSpy.listJobs.mockReturnValue(of([ghRun({ job_id: 'j-restore' })]));
+      await setup();
+      await flushAsync();
+      expect(apiSpy.listJobs).toHaveBeenCalledWith(false);
+      expect(component.selectedRunId).toBe('j-restore');
+      expect(component.selectedRunNumber).toBe(2);
       expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j-restore');
       expect(component.activeIssueNumbers.has(2)).toBe(true);
-      component['stopPolling']();
     });
 
-    it('ignores jobs belonging to a different repository', async () => {
+    it('prefers a run paused on questions over a more-recent running run', async () => {
       apiSpy.listJobs.mockReturnValue(
         of([
-          { ...GH_JOB, github_context: { ...GH_JOB.github_context, repo: 'other-repo' } },
-          { ...GH_JOB, job_id: 'other-owner', github_context: { ...GH_JOB.github_context, owner: 'someone-else' } },
+          ghRun({ job_id: 'fresh', status: 'running', updated_at: '2026-06-09T12:00:00Z', github_context: { owner: 'acme', repo: 'widgets', issue_number: 4 } }),
+          ghRun({ job_id: 'paused', status: 'waiting_for_user', waiting_for_answers: true, updated_at: '2026-06-09T09:00:00Z', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
         ]),
       );
       await setup();
-      expect(component.activeJob).toBeNull();
-      expect(component.activeIssueNumbers.size).toBe(0);
+      await flushAsync();
+      expect(component.selectedRunId).toBe('paused');
     });
 
-    it('does not restore at all when GitHub is not configured', async () => {
-      integrationsSpy.getGitHubConfig.mockReturnValue(of({ ...CONFIGURED, token_configured: false }));
-      apiSpy.listJobs.mockReturnValue(of([GH_JOB]));
-      await setup();
-      expect(apiSpy.listJobs).not.toHaveBeenCalled();
-      expect(component.activeJob).toBeNull();
-    });
-
-    it('does not adopt a job when the list resolves after destroy', async () => {
-      const jobs$ = new Subject<CodingTeamJobListItem[]>();
-      apiSpy.listJobs.mockReturnValue(jobs$.asObservable());
-      await setup();
-      fixture.destroy();
-      jobs$.next([GH_JOB]);
-      expect(component.activeJob).toBeNull();
-      expect(component['pollSub']).toBeNull();
-    });
-
-    it('ignores terminal jobs and jobs without a GitHub issue', async () => {
+    it('picks the most recently updated run when several are active', async () => {
       apiSpy.listJobs.mockReturnValue(
         of([
-          { ...GH_JOB, job_id: 'done', status: 'completed' },
-          { job_id: 'local-run', status: 'running', repo_path: '/tmp/x' },
+          ghRun({ job_id: 'older', updated_at: '2026-06-08T10:00:00Z' }),
+          ghRun({ job_id: 'newer', updated_at: '2026-06-09T11:00:00Z', github_context: { owner: 'acme', repo: 'widgets', issue_number: 3 } }),
         ]),
       );
       await setup();
-      expect(component.activeJob).toBeNull();
-      expect(component.activeIssueNumbers.size).toBe(0);
-    });
-
-    it('picks the most recently updated job when several are active', async () => {
-      apiSpy.listJobs.mockReturnValue(
-        of([
-          { ...GH_JOB, job_id: 'older', updated_at: '2026-06-08T10:00:00Z' },
-          {
-            ...GH_JOB,
-            job_id: 'newer',
-            updated_at: '2026-06-09T11:00:00Z',
-            github_context: { ...GH_JOB.github_context, issue_number: 3 },
-          },
-        ]),
-      );
-      await setup();
-      expect(component.activeJob?.job_id).toBe('newer');
-      // Both issues are still flagged as in progress.
+      await flushAsync();
+      expect(component.selectedRunId).toBe('newer');
       expect(component.activeIssueNumbers).toEqual(new Set([2, 3]));
-      component['stopPolling']();
     });
 
-    it('does not replace a job the user just started', async () => {
-      await setup();
-      component.activeJob = { job_id: 'mine', issue_number: 9, issue_url: '', status: 'queued', message: '' };
-      apiSpy.listJobs.mockReturnValue(of([GH_JOB]));
-      component['restoreActiveJob']();
-      expect(component.activeJob.job_id).toBe('mine');
-      expect(component.activeIssueNumbers.has(2)).toBe(true);
-    });
-
-    it('stays usable when the job list cannot be fetched', async () => {
-      apiSpy.listJobs.mockReturnValue(throwError(() => new Error('down')));
-      await setup();
-      expect(component.activeJob).toBeNull();
-      expect(component.githubConfigured).toBe(true);
-    });
-
-    it('renders an "In progress" chip on issues with an active job', async () => {
-      apiSpy.listJobs.mockReturnValue(
-        of([{ ...GH_JOB, github_context: { ...GH_JOB.github_context, issue_number: 2 } }]),
-      );
-      await setup();
-      // Dismiss the restored job so the issue list is visible again.
-      component.dismissJob();
-      fixture.detectChanges();
-      const chips = fixture.nativeElement.querySelectorAll('.github-label-chip--active');
-      expect(chips.length).toBe(1);
-      expect(chips[0].textContent).toContain('In progress');
-      component['stopPolling']();
-    });
-
-    it('marks a just-started issue as in progress', async () => {
-      await setup();
-      const issue = component.issues[0];
-      integrationsSpy.runGitHubIssue.mockReturnValue(
-        of({ job_id: 'j1', issue_number: issue.number, issue_url: 'u', status: 'queued', message: '' }),
-      );
-      component.selectIssue(issue);
-      component.confirmAndRun();
-      expect(component.isIssueInProgress(issue)).toBe(true);
-      component['stopPolling']();
-    });
-
-    it('removes the in-progress chip when the poller observes a terminal status', async () => {
-      await setup();
-      component.activeJob = { job_id: 'j1', issue_number: 7, issue_url: 'u', status: 'queued', message: '' };
-      component.activeIssueNumbers.add(7);
-      apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
-      component['startPolling']('j1');
-      await new Promise((resolve) => setTimeout(resolve, 0));
-      expect(component.activeIssueNumbers.has(7)).toBe(false);
-    });
-
-    it('dismissing a finished job removes its chip; dismissing a running one keeps it', async () => {
-      await setup();
-      // Running case: the server still lists the job after dismiss, so the chip survives
-      // — but the dismissed job itself is never re-adopted into the panel.
+    it('ignores runs belonging to a different repository', async () => {
       apiSpy.listJobs.mockReturnValue(
         of([
-          {
-            job_id: 'j1',
-            status: 'running',
-            github_context: { owner: 'acme', repo: 'widgets', issue_number: 7 },
-          },
-        ]),
-      );
-      component.activeJob = { job_id: 'j1', issue_number: 7, issue_url: 'u', status: 'queued', message: '' };
-      component.activeIssueNumbers.add(7);
-      component.jobStatus = { job_id: 'j1', status: 'running' };
-      component.dismissJob();
-      expect(component.activeIssueNumbers.has(7)).toBe(true);
-      expect(component.activeJob).toBeNull();
-
-      // Finished case: the active-jobs list no longer contains it → chip removed.
-      apiSpy.listJobs.mockReturnValue(of([]));
-      component.activeJob = { job_id: 'j2', issue_number: 7, issue_url: 'u', status: 'queued', message: '' };
-      component.jobStatus = { job_id: 'j2', status: 'completed' };
-      component.dismissJob();
-      expect(component.activeIssueNumbers.has(7)).toBe(false);
-      expect(component.activeJob).toBeNull();
-    });
-
-    it('dismissing one job adopts another active, non-dismissed job', async () => {
-      apiSpy.listJobs.mockReturnValue(
-        of([
-          { ...GH_JOB, job_id: 'j-a', updated_at: '2026-06-09T12:00:00Z' },
-          {
-            ...GH_JOB,
-            job_id: 'j-b',
-            updated_at: '2026-06-09T11:00:00Z',
-            github_context: { ...GH_JOB.github_context, issue_number: 3 },
-          },
+          ghRun({ github_context: { owner: 'acme', repo: 'other-repo', issue_number: 2 } }),
+          ghRun({ job_id: 'other-owner', github_context: { owner: 'someone-else', repo: 'widgets', issue_number: 2 } }),
         ]),
       );
       await setup();
-      expect(component.activeJob?.job_id).toBe('j-a');
-
-      component.jobStatus = { job_id: 'j-a', status: 'running' };
-      component.dismissJob();
-      // The dismissed job is excluded; the other in-flight job takes the panel.
-      expect(component.activeJob?.job_id).toBe('j-b');
-      expect(component.activeJob?.issue_number).toBe(3);
-      component['stopPolling']();
+      await flushAsync();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.runs.length).toBe(0);
+      expect(component.activeIssueNumbers.size).toBe(0);
     });
 
     it('matches the configured repository case-insensitively', async () => {
       apiSpy.listJobs.mockReturnValue(
-        of([{ ...GH_JOB, github_context: { ...GH_JOB.github_context, owner: 'Acme', repo: 'Widgets' } }]),
+        of([ghRun({ github_context: { owner: 'Acme', repo: 'Widgets', issue_number: 2 } })]),
       );
       await setup();
-      expect(component.activeJob?.job_id).toBe('j-restore');
+      await flushAsync();
+      expect(component.selectedRunId).toBe('j-run');
       expect(component.activeIssueNumbers.has(2)).toBe(true);
+    });
+
+    it('lists a terminal run under Recent without auto-selecting it', async () => {
+      apiSpy.listJobs.mockReturnValue(
+        of([
+          ghRun({ job_id: 'done', status: 'completed' }),
+          { job_id: 'local-run', status: 'running', repo_path: '/tmp/x' },
+        ]),
+      );
+      await setup();
+      await flushAsync();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.recentRuns.map((r) => r.job_id)).toEqual(['done']);
+      expect(component.activeIssueNumbers.size).toBe(0);
+    });
+
+    it('stays usable when the runs list cannot be fetched', async () => {
+      apiSpy.listJobs.mockReturnValue(throwError(() => ({ error: { detail: 'down' } })));
+      await setup();
+      await flushAsync();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.runsError).toBe('down');
+      expect(component.githubConfigured).toBe(true);
+    });
+
+    it('does not adopt a run when the list resolves after destroy', async () => {
+      apiSpy.listJobs.mockReturnValue(of([ghRun()]));
+      await setup();
+      fixture.destroy();
+      await flushAsync();
+      expect(component.selectedRunId).toBeNull();
+      expect(component.runs.length).toBe(0);
+    });
+
+    it('renders an "In progress" chip on issues with an active run', async () => {
+      apiSpy.listJobs.mockReturnValue(of([ghRun({ github_context: { owner: 'acme', repo: 'widgets', issue_number: 2 } })]));
+      await setup();
+      await flushAsync();
+      showView('github');
+      const chips = fixture.nativeElement.querySelectorAll('.github-label-chip--active');
+      expect(chips.length).toBe(1);
+      expect(chips[0].textContent).toContain('In progress');
+    });
+
+    it('selectRun is a no-op when the run is already selected', async () => {
+      await setup();
+      component.selectedRunId = 'x';
+      const spy = vi.spyOn(component as unknown as { startPolling: (id: string) => void }, 'startPolling');
+      component.selectRun('x');
+      expect(spy).not.toHaveBeenCalled();
+    });
+
+    it('selectRun selects, derives the issue number, and starts status polling', async () => {
+      await setup();
+      component.runs = [ghRun({ job_id: 'r9', github_context: { owner: 'acme', repo: 'widgets', issue_number: 9 } })];
+      component.selectRun('r9');
+      expect(component.selectedRunId).toBe('r9');
+      expect(component.selectedRunNumber).toBe(9);
+      await flushAsync();
+      expect(apiSpy.getJobStatus).toHaveBeenCalledWith('r9');
+    });
+
+    it('selectRun clears selectedRunNumber when the chosen run carries no issue number', async () => {
+      await setup();
+      // A run present in `runs` but missing github_context (defensive: the list is normally
+      // pre-filtered to issue-bearing runs) must not leave a previous run's number stale.
+      component.runs = [{ job_id: 'no-issue', status: 'running' } as CodingTeamJobListItem];
+      component.selectedRunNumber = 5;
+      component.selectRun('no-issue');
+      expect(component.selectedRunId).toBe('no-issue');
+      expect(component.selectedRunNumber).toBeNull();
       component['stopPolling']();
     });
 
-    it('a stale jobs snapshot cannot wipe the chip of a just-started run', async () => {
+    it('a stale snapshot cannot wipe the chip of a just-started, still-running run', async () => {
       await setup();
-      component.activeJob = { job_id: 'mine', issue_number: 9, issue_url: '', status: 'queued', message: '' };
+      component.selectedRunId = 'mine';
+      component.selectedRunNumber = 9;
       component.jobStatus = { job_id: 'mine', status: 'running' };
-      apiSpy.listJobs.mockReturnValue(of([]));
-      component['restoreActiveJob']();
+      component['applyRuns']([]);
       expect(component.activeIssueNumbers.has(9)).toBe(true);
     });
 
-    it('does not re-add the chip for a displayed job that has finished', async () => {
+    it('does not re-add the chip for a selected run that has finished', async () => {
       await setup();
-      // The poller dropped #9 when the job went terminal; a refresh must not resurrect it.
-      component.activeJob = { job_id: 'mine', issue_number: 9, issue_url: '', status: 'queued', message: '' };
+      component.selectedRunId = 'mine';
+      component.selectedRunNumber = 9;
       component.jobStatus = { job_id: 'mine', status: 'completed' };
-      apiSpy.listJobs.mockReturnValue(of([]));
-      component['restoreActiveJob']();
+      component['applyRuns']([]);
       expect(component.activeIssueNumbers.has(9)).toBe(false);
     });
 
-    it('renders the Dismiss button even while the job is non-terminal', async () => {
+    it('drops the chip once the snapshot reports the selected run terminal, even if the polled status is stale', async () => {
       await setup();
-      component.activeJob = { job_id: 'j1', issue_number: 7, issue_url: 'u', status: 'queued', message: '' };
-      component.jobStatus = { job_id: 'j1', status: 'waiting_for_user' };
-      fixture.detectChanges();
-      const header = fixture.nativeElement.querySelector('.github-job-panel__header');
-      expect(header?.textContent).toContain('Dismiss');
+      component['initialRunsLoad'] = false;
+      component.selectedRunId = 'r1';
+      component.selectedRunNumber = 5;
+      // Polled status lags behind the server: still "running" though the run has finished.
+      component.jobStatus = { job_id: 'r1', status: 'running' };
+      component['applyRuns']([
+        ghRun({ job_id: 'r1', status: 'completed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 5 } }),
+      ]);
+      // The fresh snapshot is trusted: #5 is no longer in progress and the run sits under Recent.
+      expect(component.activeIssueNumbers.has(5)).toBe(false);
+      expect(component.recentRuns.map((r) => r.job_id)).toEqual(['r1']);
+    });
+
+    it('drops the chip and refreshes the list when the poller observes a terminal status', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component.selectedRunNumber = 7;
+      component.activeIssueNumbers.add(7);
+      apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'j1', status: 'completed' }));
+      apiSpy.listJobs.mockReturnValue(of([]));
+      component['startPolling']('j1');
+      await flushAsync();
+      expect(component.jobStatus?.status).toBe('completed');
+      expect(component.activeIssueNumbers.has(7)).toBe(false);
+    });
+
+    it('discards a stale poll for a run the user switched away from', async () => {
+      await setup();
+      component.selectedRunId = 'b';
+      component.jobStatus = null;
+      apiSpy.getJobStatus.mockReturnValue(of({ job_id: 'a', status: 'running' }));
+      component['startPolling']('a');
+      await flushAsync();
+      expect(component.jobStatus).toBeNull();
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Retry
+  // -------------------------------------------------------------------------
+
+  describe('retry', () => {
+    it('is a no-op when the selected run has no issue number', async () => {
+      await setup();
+      component.selectedRunNumber = null;
+      component.jobStatus = null;
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).not.toHaveBeenCalled();
+    });
+
+    it('re-runs the selected run\'s issue and selects the new run', async () => {
+      await setup();
+      component.selectedRunNumber = 5;
+      integrationsSpy.runGitHubIssue.mockReturnValue(
+        of({ job_id: 'j-retry', issue_number: 5, issue_url: 'u', status: 'queued', message: '' }),
+      );
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: 5 });
+      expect(component.selectedRunId).toBe('j-retry');
+      expect(component.isIssueInProgress(issueWith({ number: 5 }))).toBe(true);
+    });
+
+    it('surfaces an error when the retry fails', async () => {
+      await setup();
+      component.jobStatus = { job_id: 'j1', status: 'failed', github_context: { owner: 'acme', repo: 'widgets', issue_number: 6 } };
+      integrationsSpy.runGitHubIssue.mockReturnValue(throwError(() => ({ error: { detail: 'nope' } })));
+      component.retrySelectedRun();
+      expect(integrationsSpy.runGitHubIssue).toHaveBeenCalledWith({ issue_number: 6 });
+      expect(component.issueError).toBe('nope');
+      expect(component.runningIssue).toBe(false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Polling lifecycle
+  // -------------------------------------------------------------------------
+
+  describe('polling lifecycle', () => {
+    it('re-polls the runs list on the recurring interval, not just once', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        // The initial timer(0) emission fires the first fetch.
+        await vi.advanceTimersByTimeAsync(0);
+        const afterFirst = apiSpy.listJobs.mock.calls.length;
+        expect(afterFirst).toBeGreaterThanOrEqual(1);
+        // Advancing one poll interval (RUNS_POLL_MS = 15000ms) triggers a second fetch.
+        await vi.advanceTimersByTimeAsync(15000);
+        expect(apiSpy.listJobs.mock.calls.length).toBeGreaterThan(afterFirst);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('reports a lost connection after repeated status-poll failures', async () => {
+      vi.useFakeTimers();
+      try {
+        await setup();
+        component.selectedRunId = 'j1';
+        apiSpy.getJobStatus.mockReturnValue(throwError(() => new Error('network down')));
+        component['startPolling']('j1');
+        // The status poll fires immediately, then every 5s; it gives up after 3 consecutive
+        // failures and surfaces the lost-connection error.
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(5000);
+        await vi.advanceTimersByTimeAsync(5000);
+        expect(component.issueError).toBe('Lost connection to the coding team — status polling failed.');
+        // The run detail surfaces the same error instead of an indefinite "Starting…" spinner.
+        expect(component.jobStatusError).toBe('Lost connection to the coding team — status polling failed.');
+        // The poller tore down its own timer once the error budget was exhausted.
+        expect(component['pollSub']?.closed).toBe(true);
+      } finally {
+        component['stopPolling']();
+        vi.useRealTimers();
+      }
+    });
+
+    it('completes the runs refresh trigger and stops status polling on destroy', async () => {
+      await setup();
+      component.selectedRunId = 'j1';
+      component['startPolling']('j1');
+      expect(component['pollSub']).not.toBeNull();
+
+      fixture.destroy();
+
+      // Subscribing to a completed Subject invokes complete() synchronously.
+      let completed = false;
+      component['refreshTrigger$'].subscribe({ complete: () => { completed = true; } });
+      expect(completed).toBe(true);
+      expect(component['pollSub']).toBeNull();
+    });
+
+    it('cancels the copy-confirmation timer on destroy', async () => {
+      await setup();
+      component.selectedRunId = 'abcdef123456';
+      component.copyJobId();
+      expect(component.jobIdCopied).toBe(true);
+      // The reset timer is tracked so it can be torn down with the component.
+      expect(component['copyResetTimer']).not.toBeNull();
+      fixture.destroy();
+      expect(component['copyResetTimer']).toBeNull();
     });
   });
 });

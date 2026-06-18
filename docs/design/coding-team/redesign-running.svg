@@ -1,0 +1,190 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="920" viewBox="0 0 1400 920" font-family="Inter, 'Segoe UI', sans-serif">
+  <!-- HISTORICAL: this two-column mockup predates the shipped three-view (Chat / GitHub / Jobs)
+       layout. The content (issue rows, run rows, run detail) still matches; only the arrangement
+       changed. See ./README.md ("Current layout — three single-focus views"). -->
+  <defs>
+    <style>
+      .h1{font-size:28px;font-weight:700;fill:#ffffff;letter-spacing:-.5px}
+      .h2{font-size:18px;font-weight:600;fill:#ffffff}
+      .lbl{font-size:11px;font-weight:600;fill:#a1a1aa;letter-spacing:.08em}
+      .body{font-size:14px;fill:#ffffff}
+      .sec{font-size:13px;fill:#d4d4d8}
+      .mut{font-size:12px;fill:#a1a1aa}
+      .muted{font-size:11px;fill:#909099}
+      .amber{fill:#fde68a;font-weight:600}
+      .code{font-family:'JetBrains Mono',monospace;font-size:12px;fill:#a1a1aa}
+    </style>
+  </defs>
+
+  <!-- App background -->
+  <rect width="1400" height="920" fill="#000000"/>
+
+  <!-- Header -->
+  <text x="40" y="42" class="mut" fill="#a1a1aa">&#8249; Software Engineering</text>
+  <text x="40" y="82" class="h1">Coding Team</text>
+  <text x="40" y="108" class="mut">Sub-team of Software Engineering: Tech Lead, stack-specialist Senior Engineers, and Task Graph.</text>
+  <!-- Health pill -->
+  <rect x="1156" y="58" width="204" height="30" rx="15" fill="#171717" stroke="#2e2e2e"/>
+  <circle cx="1176" cy="73" r="4" fill="#4ade80"/>
+  <text x="1188" y="77" class="mut" fill="#d4d4d8">Coding Team API &#183; healthy</text>
+  <!-- Historical banner: superseded by the three-view layout (see README) -->
+  <rect x="1156" y="14" width="204" height="28" rx="14" fill="none" stroke="#fbbf24"/>
+  <text x="1258" y="32" class="amber" font-size="11" text-anchor="middle">HISTORICAL &#183; see README</text>
+
+  <!-- ============ LEFT: GitHub Issues (always visible) ============ -->
+  <rect x="40" y="140" width="810" height="740" rx="12" fill="#171717" stroke="#2e2e2e"/>
+  <text x="64" y="180" class="h2">&#128027;  GitHub Issues</text>
+  <text x="232" y="180" class="mut">acme/widgets</text>
+  <!-- Refresh button -->
+  <rect x="724" y="160" width="102" height="32" rx="8" fill="#fbbf24"/>
+  <text x="744" y="181" font-size="13" font-weight="600" fill="#09090b">&#8635; Refresh</text>
+  <line x1="64" y1="200" x2="826" y2="200" stroke="#262626"/>
+
+  <!-- Issue rows -->
+  <!-- #41 -->
+  <text x="64" y="234" class="amber">#41</text>
+  <text x="116" y="234" class="body">Add OAuth login</text>
+  <rect x="700" y="220" width="44" height="20" rx="10" fill="#333333"/><text x="710" y="234" class="mut" fill="#d4d4d8">bug</text>
+  <text x="812" y="235" class="mut">&#8250;</text>
+
+  <!-- #42 (in progress) -->
+  <text x="64" y="276" class="amber">#42</text>
+  <text x="116" y="276" class="body">Fix pagination</text>
+  <rect x="430" y="262" width="104" height="20" rx="10" fill="rgba(251,191,36,0.20)"/>
+  <text x="442" y="276" font-size="11" font-weight="600" fill="#fde68a">&#9881; In progress</text>
+  <rect x="700" y="262" width="44" height="20" rx="10" fill="#333333"/><text x="710" y="276" class="mut" fill="#d4d4d8">api</text>
+  <text x="812" y="277" class="mut">&#8250;</text>
+
+  <!-- #43 selected (amber border) + inline confirm -->
+  <rect x="56" y="292" width="778" height="40" rx="8" fill="#262626" stroke="#fbbf24"/>
+  <text x="64" y="318" class="amber">#43</text>
+  <text x="116" y="318" class="body">Refactor task graph</text>
+  <rect x="688" y="304" width="56" height="20" rx="10" fill="#333333"/><text x="698" y="318" class="mut" fill="#d4d4d8">tech</text>
+  <text x="812" y="319" class="mut">&#8250;</text>
+
+  <!-- Inline confirm card under #43 -->
+  <rect x="56" y="340" width="778" height="150" rx="8" fill="#262626" stroke="#3a3a3a"/>
+  <text x="76" y="368" class="h2" font-size="15">Start AI coding on this issue?</text>
+  <text x="76" y="394" class="amber" font-size="13">#43</text>
+  <text x="108" y="394" class="sec">Refactor task graph</text>
+  <text x="76" y="418" class="mut">The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.</text>
+  <rect x="76" y="438" width="150" height="34" rx="8" fill="#fbbf24"/>
+  <text x="96" y="459" font-size="13" font-weight="600" fill="#09090b">&#9658; Confirm &amp; Start</text>
+  <rect x="238" y="438" width="86" height="34" rx="8" fill="transparent" stroke="#3f3f3f"/>
+  <text x="262" y="459" class="sec" font-size="13">Cancel</text>
+
+  <!-- #44 (in progress) -->
+  <text x="64" y="524" class="amber">#44</text>
+  <text x="116" y="524" class="body">Dark mode toggle</text>
+  <rect x="430" y="510" width="104" height="20" rx="10" fill="rgba(251,191,36,0.20)"/>
+  <text x="442" y="524" font-size="11" font-weight="600" fill="#fde68a">&#9881; In progress</text>
+  <text x="812" y="525" class="mut">&#8250;</text>
+
+  <!-- #45 (blocked) -->
+  <text x="64" y="566" class="amber">#45</text>
+  <text x="116" y="566" class="body">Improve error toasts</text>
+  <text x="690" y="566" font-size="13" fill="#f87171">&#9940; 2</text>
+  <rect x="724" y="552" width="36" height="20" rx="10" fill="#333333"/><text x="734" y="566" class="mut" fill="#d4d4d8">ui</text>
+  <text x="812" y="567" class="mut">&#8250;</text>
+
+  <!-- #46 -->
+  <text x="64" y="608" class="amber">#46</text>
+  <text x="116" y="608" class="body">Add metrics dashboard</text>
+  <text x="812" y="609" class="mut">&#8250;</text>
+
+  <!-- Paginator -->
+  <line x1="64" y1="824" x2="826" y2="824" stroke="#262626"/>
+  <text x="600" y="852" class="mut">Items per page: 10</text>
+  <text x="744" y="852" class="mut">1 &#8211; 10 of 27</text>
+
+  <!-- Annotation -->
+  <text x="64" y="700" class="muted" font-style="italic">Selecting a row expands an inline confirm beneath it — the list never disappears.</text>
+
+  <!-- ============ RIGHT: Runs panel (persistent, no Dismiss) ============ -->
+  <rect x="880" y="140" width="480" height="740" rx="12" fill="#171717" stroke="#2e2e2e"/>
+  <text x="904" y="180" class="h2">&#128296;  Runs</text>
+  <circle cx="1000" cy="174" r="9" fill="none" stroke="#a1a1aa"/><text x="996" y="178" class="mut">?</text>
+
+  <!-- RUNNING -->
+  <text x="904" y="214" class="lbl">RUNNING</text>
+  <!-- #42 selected run -->
+  <rect x="900" y="224" width="440" height="68" rx="8" fill="#262626" stroke="#fbbf24"/>
+  <rect x="900" y="224" width="3" height="68" fill="#fbbf24"/>
+  <text x="916" y="248" class="amber" font-size="13">#42</text>
+  <rect x="1238" y="234" width="96" height="20" rx="10" fill="rgba(251,191,36,0.20)"/>
+  <text x="1250" y="248" font-size="11" font-weight="600" fill="#fde68a">running 45%</text>
+  <text x="916" y="268" class="mut">Coding &#183; writing files</text>
+  <rect x="916" y="276" width="320" height="4" rx="2" fill="#333333"/>
+  <rect x="916" y="276" width="144" height="4" rx="2" fill="#fbbf24"/>
+  <text x="1290" y="284" class="muted">2m ago</text>
+
+  <!-- #44 needs answers -->
+  <rect x="900" y="300" width="440" height="48" rx="8" fill="transparent" stroke="#2e2e2e"/>
+  <text x="916" y="324" class="amber" font-size="13">#44</text>
+  <rect x="1216" y="312" width="118" height="20" rx="10" fill="rgba(251,191,36,0.18)"/>
+  <text x="1228" y="326" font-size="11" font-weight="600" fill="#fbbf24">&#10067; needs answers</text>
+  <text x="916" y="342" class="muted">Paused &#183; 5m ago</text>
+
+  <!-- RECENT -->
+  <text x="904" y="378" class="lbl">RECENT</text>
+  <rect x="900" y="388" width="440" height="40" rx="8" fill="transparent" stroke="#2e2e2e"/>
+  <text x="916" y="412" class="amber" font-size="13">#38</text>
+  <rect x="1232" y="398" width="102" height="20" rx="10" fill="rgba(74,222,128,0.18)"/>
+  <text x="1244" y="412" font-size="11" font-weight="600" fill="#4ade80">&#10003; completed</text>
+  <text x="1290" y="438" class="muted"></text>
+
+  <rect x="900" y="436" width="440" height="40" rx="8" fill="transparent" stroke="#2e2e2e"/>
+  <text x="916" y="460" class="amber" font-size="13">#35</text>
+  <rect x="1258" y="446" width="76" height="20" rx="10" fill="rgba(248,113,113,0.18)"/>
+  <text x="1270" y="460" font-size="11" font-weight="600" fill="#f87171">&#10007; failed</text>
+
+  <!-- Divider -->
+  <line x1="904" y1="496" x2="1336" y2="496" stroke="#262626"/>
+
+  <!-- LIVE DETAIL -->
+  <text x="904" y="524" class="h2" font-size="15">&#128295; Working on issue <tspan fill="#fde68a">#42</tspan></text>
+  <text x="1300" y="524" class="mut">&#128203;</text>
+  <text x="904" y="552" class="lbl">JOB</text>
+  <text x="944" y="552" class="code">a1b2c3d4e5f6&#8230;</text>
+  <text x="904" y="576" class="lbl">STATUS</text>
+  <rect x="960" y="562" width="70" height="20" rx="10" fill="rgba(251,191,36,0.20)"/>
+  <text x="972" y="576" font-size="11" font-weight="600" fill="#fde68a">running</text>
+
+  <!-- objective + progress -->
+  <text x="904" y="606" class="sec">&#128681; Implementing the task graph</text>
+  <rect x="904" y="616" width="432" height="6" rx="3" fill="#262626"/>
+  <rect x="904" y="616" width="194" height="6" rx="3" fill="#fbbf24"/>
+  <text x="1300" y="610" class="mut">45%</text>
+
+  <!-- phase stepper -->
+  <circle cx="930" cy="648" r="11" fill="#4ade80"/><text x="926" y="652" font-size="11" fill="#09090b">&#10003;</text>
+  <line x1="941" y1="648" x2="1010" y2="648" stroke="#4ade80" stroke-width="2"/>
+  <circle cx="1021" cy="648" r="11" fill="#fbbf24"/><text x="1017" y="652" font-size="11" fill="#09090b">&#9881;</text>
+  <line x1="1032" y1="648" x2="1101" y2="648" stroke="#333333" stroke-width="2"/>
+  <circle cx="1112" cy="648" r="11" fill="none" stroke="#3f3f3f" stroke-width="2"/>
+  <text x="912" y="678" class="muted">Planning</text>
+  <text x="1006" y="678" class="muted" fill="#fde68a">Coding</text>
+  <text x="1090" y="678" class="muted">Completed</text>
+
+  <!-- agent roster -->
+  <text x="904" y="708" class="lbl">TEAM</text>
+  <rect x="904" y="716" width="140" height="60" rx="8" fill="#262626" stroke="#2e2e2e"/>
+  <text x="916" y="738" class="sec" font-size="12">&#128104; Tech Lead</text>
+  <rect x="916" y="748" width="58" height="18" rx="9" fill="rgba(74,222,128,0.18)"/><text x="924" y="761" font-size="10" fill="#4ade80">working</text>
+
+  <rect x="1050" y="716" width="140" height="60" rx="8" fill="#262626" stroke="#fbbf24"/>
+  <text x="1062" y="738" class="sec" font-size="12">&#128104; Backend Eng</text>
+  <text x="1062" y="758" class="muted">writing files</text>
+  <rect x="1062" y="762" width="100" height="4" rx="2" fill="#333333"/><rect x="1062" y="762" width="60" height="4" rx="2" fill="#fbbf24"/>
+
+  <rect x="1196" y="716" width="140" height="60" rx="8" fill="#262626" stroke="#2e2e2e"/>
+  <text x="1208" y="738" class="sec" font-size="12">&#128104; QA Agent</text>
+  <rect x="1208" y="748" width="36" height="18" rx="9" fill="#333333"/><text x="1216" y="761" font-size="10" fill="#a1a1aa">idle</text>
+
+  <!-- PR link -->
+  <rect x="904" y="800" width="432" height="34" rx="6" fill="rgba(74,222,128,0.18)"/>
+  <text x="918" y="822" font-size="13" fill="#4ade80">&#128279; Draft PR #128 opened</text>
+
+  <!-- Annotation: no dismiss -->
+  <text x="904" y="862" class="muted" font-style="italic">Persistent panel — no Dismiss; runs stay here while working and after they finish.</text>
+</svg>
