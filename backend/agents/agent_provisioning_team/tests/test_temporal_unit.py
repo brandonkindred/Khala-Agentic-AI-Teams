@@ -234,6 +234,39 @@ def test_create_worker_constructs_worker_when_enabled() -> None:
     assert len(kwargs["activities"]) == 8
 
 
+def test_start_worker_thread_no_op_when_disabled() -> None:
+    import shared_temporal
+    from agent_provisioning_team.temporal import worker as worker_mod
+
+    # Patch the delegate too: otherwise the assertion passes even if the
+    # function's own is_temporal_enabled() guard is removed, because
+    # start_team_worker has its own gate. Asserting it is NOT called proves the
+    # early return comes from the function's guard.
+    with (
+        patch.object(worker_mod, "is_temporal_enabled", return_value=False),
+        patch.object(shared_temporal, "start_team_worker") as mock_start,
+    ):
+        assert worker_mod.start_agent_provisioning_temporal_worker_thread() is False
+        mock_start.assert_not_called()
+
+
+def test_start_worker_thread_delegates_to_start_team_worker() -> None:
+    """The entrypoint contract (TEAM_TEMPORAL_WORKER_FUNC) resolves to a real,
+    idempotent function that boots the worker via shared_temporal."""
+    import shared_temporal
+    from agent_provisioning_team.temporal import worker as worker_mod
+
+    with (
+        patch.object(worker_mod, "is_temporal_enabled", return_value=True),
+        patch.object(shared_temporal, "start_team_worker", return_value=True) as mock_start,
+    ):
+        assert worker_mod.start_agent_provisioning_temporal_worker_thread() is True
+        mock_start.assert_called_once()
+        args, kwargs = mock_start.call_args
+        assert args[0] == "agent_provisioning"
+        assert kwargs["task_queue"] == worker_mod.TASK_QUEUE
+
+
 # ---------------------------------------------------------------------------
 # activities.py — v1 + v2 surfaces
 # ---------------------------------------------------------------------------

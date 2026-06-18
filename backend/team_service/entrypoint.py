@@ -57,21 +57,6 @@ TEMPORAL_MODULE = os.environ.get("TEAM_TEMPORAL_WORKER_MODULE", "").strip()
 TEMPORAL_FUNC = os.environ.get("TEAM_TEMPORAL_WORKER_FUNC", "").strip()
 
 
-def _start_temporal_worker() -> None:
-    """Start the team's Temporal worker thread when TEMPORAL_ADDRESS is configured."""
-    if not TEMPORAL_MODULE or not TEMPORAL_FUNC:
-        return
-    if not os.environ.get("TEMPORAL_ADDRESS", "").strip():
-        return
-    try:
-        mod = importlib.import_module(TEMPORAL_MODULE)
-        start_fn = getattr(mod, TEMPORAL_FUNC)
-        if start_fn():
-            logger.info("Temporal worker started for %s", TEAM_NAME)
-    except Exception:
-        logger.warning("Could not start Temporal worker for %s", TEAM_NAME, exc_info=True)
-
-
 def _shutdown_hook() -> None:
     """Mark active jobs as interrupted on service shutdown.
 
@@ -106,14 +91,25 @@ def _shutdown_hook() -> None:
             logger.warning("Shutdown hook failed for %s", TEAM_NAME, exc_info=True)
 
 
-def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
+def build_wrapper_body(
+    team_name: str,
+    team_module: str,
+    app_attr: str,
+    temporal_module: str = "",
+    temporal_func: str = "",
+) -> str:
     """Assemble the per-worker ``_team_wrapper.py`` source for a team service.
 
     Pure (no side effects): returns the wrapper source as a string so the
     generated code can be compiled/asserted in tests. When imported by each
     uvicorn worker the module re-initialises OpenTelemetry, arms fault
     diagnostics + the memory watchdog, imports/builds the FastAPI ``app``,
-    instruments it, and exposes ``/metrics``.
+    instruments it, and exposes ``/metrics``. When ``temporal_module`` and
+    ``temporal_func`` are both provided it also starts the team's Temporal
+    worker *in this worker process* (gated on ``TEMPORAL_ADDRESS``), so the
+    module-level Temporal client lives in the same process that serves
+    requests — workers are forked after the supervisor starts, so a worker
+    started in the supervisor would never be visible here.
 
     The OTel *import* and the ``init_otel()`` *call* sit in separate try blocks
     on purpose: a transient init failure must not discard the successfully
@@ -127,6 +123,10 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
           FastAPI ``app``.
         - ``team_module``/``app_attr`` are valid dotted Python identifiers (they
           land in a ``from X import Y`` statement that ``repr()`` can't guard).
+        - ``temporal_module``/``temporal_func`` are optional. They are embedded
+          via ``repr()`` and resolved at runtime with ``importlib``/``getattr``,
+          so (unlike ``team_module``) they need no identifier validation and
+          cannot inject code. When either is empty no Temporal block is emitted.
     Postconditions:
         - Returns valid Python source that defines a module-level ``app`` and
           always ``compile()``s.
@@ -207,6 +207,25 @@ def build_wrapper_body(team_name: str, team_module: str, app_attr: str) -> str:
         "except Exception:\n"
         "    _log.warning('prometheus instrumentator unavailable', exc_info=True)\n"
     )
+
+    # Start the team's Temporal worker in THIS worker process. uvicorn forks
+    # its workers after the supervisor boots, and the connected client is held
+    # in a module-level global, so a worker started in the supervisor is never
+    # visible to request handlers. Gated on TEMPORAL_ADDRESS; the start fn is
+    # idempotent and self-disables when Temporal is off. Names are embedded via
+    # repr() (injection-safe) and resolved with importlib at runtime.
+    if temporal_module and temporal_func:
+        body += (
+            "try:\n"
+            "    import os as _os\n"
+            "    if _os.environ.get('TEMPORAL_ADDRESS', '').strip():\n"
+            "        import importlib as _il\n"
+            f"        _twfn = getattr(_il.import_module({temporal_module!r}), {temporal_func!r})\n"
+            "        if _twfn():\n"
+            f"            _log.info('Temporal worker started (per worker) for %s', {team_name!r})\n"
+            "except Exception:\n"
+            "    _log.warning('Temporal worker startup failed', exc_info=True)\n"
+        )
     return body
 
 
@@ -220,6 +239,9 @@ def _resolve_app() -> str:
         re-exporting the team's own FastAPI app).
       * FastAPI OpenTelemetry instrumentation (trace every request/response).
       * prometheus-fastapi-instrumentator installed and /metrics exposed.
+      * The team's Temporal worker (when TEAM_TEMPORAL_WORKER_MODULE/_FUNC are
+        set), started inside the worker process so its client is visible to
+        request handlers.
 
     The wrapper is re-imported by each uvicorn worker on fork, so per-worker
     instrumentation state is fine with workers>1.
@@ -246,7 +268,7 @@ def _resolve_app() -> str:
     # Guaranteed to exist in the container image, but create it for robustness
     # (e.g. local runs) so the write below can't fail on a missing directory.
     wrapper_path.parent.mkdir(parents=True, exist_ok=True)
-    body = build_wrapper_body(TEAM_NAME, TEAM_MODULE, TEAM_APP_ATTR)
+    body = build_wrapper_body(TEAM_NAME, TEAM_MODULE, TEAM_APP_ATTR, TEMPORAL_MODULE, TEMPORAL_FUNC)
     wrapper_path.write_text(body, encoding="utf-8")
     return "_team_wrapper:app"
 
@@ -285,7 +307,9 @@ if __name__ == "__main__":
     except Exception:
         logger.warning("fault diagnostics unavailable", exc_info=True)
     _startup_recovery()
-    _start_temporal_worker()
+    # The Temporal worker is started per uvicorn worker process from the
+    # generated wrapper (see build_wrapper_body) — not here in the supervisor,
+    # whose forked workers would never see a client connected pre-fork.
     atexit.register(_shutdown_hook)
     app_import = _resolve_app()
     uvicorn.run(
