@@ -74,6 +74,7 @@
       "closed_trades": 0,
       "entries_filled": 0,
       "exit_rule_firings": {},
+      "exit_rule_firings_by_basis": {},
       "exit_rule_firings_by_symbol": {},
       "exits_emitted": 0,
       "last_order_events": [
@@ -265,6 +266,7 @@
       "orders_rejection_reasons": {},
       "orders_unfilled": 84,
       "risk_capped_entries": 0,
+      "stop_limit_unfilled_triggers": 0,
       "summary": "Backtest closed zero trades; 84 order(s) left unfilled with no entry fills recorded.",
       "warmup_orders_dropped": 0,
       "zero_trade_category": "ORDERS_UNFILLED"
