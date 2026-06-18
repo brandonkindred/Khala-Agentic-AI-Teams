@@ -256,9 +256,7 @@ def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _Prompt
     # The sizing line is not always a fixed fraction: vol-target and
     # fixed-notional must be described so the agent doesn't read a vol target
     # or a dollar notional as "a fraction of the account".
-    assert "vol-target" in rendered, (
-        f"{label} prompt must explain the vol-target sizing rendering."
-    )
+    assert "vol-target" in rendered, f"{label} prompt must explain the vol-target sizing rendering."
     assert "fixed Y dollars" in rendered, (
         f"{label} prompt must explain the fixed-notional sizing rendering."
     )
@@ -273,7 +271,9 @@ def test_lose_prompt_targets_conflation_not_genuine_small_sizing() -> None:
     """
     rendered = _render_lose()
     assert 'stop-multiplied "effective risk" figure' in rendered
-    assert "limited deployment constrained returns is a legitimate, accurate explanation" in rendered
+    assert (
+        "limited deployment constrained returns is a legitimate, accurate explanation" in rendered
+    )
     # The over-broad blanket ban on "too little capital in play" must be gone.
     assert '"too little capital in play"' not in rendered
 
@@ -299,6 +299,15 @@ def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
     assert "genuinely small deployment is small capital at risk" in _SELF_REVIEW_PROMPT
     # The over-broad clause that rejected the accurate equation must be gone.
     assert "equates a low deployed size with low capital-at-risk" not in _SELF_REVIEW_PROMPT
+
+
+def test_self_review_check_handles_vol_target_sizing() -> None:
+    """The self-review check must not equate the "Sizing / risk" line with the
+    deployed size for every rule: "vol-target X%" is a target annual volatility
+    (the deployed amount is dynamic and not shown), so the reviewer must not
+    read it as X% capital at risk.
+    """
+    assert 'do NOT read "vol-target X%" as X% capital at risk' in _SELF_REVIEW_PROMPT
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
