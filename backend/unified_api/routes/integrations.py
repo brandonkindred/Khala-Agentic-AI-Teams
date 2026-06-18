@@ -1429,7 +1429,6 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
             or "\\" in value
             or "\x00" in value
             or value in ("..", ".")
-            or ".." in value.split("/")
             or value.strip() != value
         ):
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")

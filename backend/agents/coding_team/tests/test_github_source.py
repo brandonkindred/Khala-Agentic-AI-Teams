@@ -1625,12 +1625,14 @@ class TestEphemeralCheckoutCleanup:
     caller flagged the checkout as platform-owned and ephemeral."""
 
     def test_request_default_cleanup_flag_is_false(self) -> None:
+        """RunFromGitHubRequest defaults cleanup_checkout_on_success to False."""
         from coding_team.api.main import RunFromGitHubRequest
 
         req = RunFromGitHubRequest(owner="o", repo="r", repo_path="/tmp/x")
         assert req.cleanup_checkout_on_success is False
 
     def test_cleanup_helper_removes_directory(self, patched_app, tmp_path, monkeypatch) -> None:
+        """A real per-issue checkout under an ephemeral root is removed."""
         api = patched_app["api"]
         # tmp_path is an ephemeral workspace root for this test, so checkouts
         # under it are eligible for removal. Clear the other root vars so an
@@ -1648,6 +1650,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_refuses_repo_level_path_under_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """A repo-level checkout (no issue-N component) under a root is never removed."""
         # A repo-level checkout (no ``issue-N`` final component) that merely sits
         # under an ephemeral root must NOT be removed even with .git and the flag —
         # only per-issue clones are reclaimable (the PR-review path lives here).
@@ -1663,6 +1666,7 @@ class TestEphemeralCheckoutCleanup:
         assert repo_level.exists()
 
     def test_cleanup_helper_does_not_raise_on_missing_dir(self, patched_app, tmp_path) -> None:
+        """A missing directory is refused by the guard and cleanup does not raise."""
         api = patched_app["api"]
         # A missing dir is refused by the safety guard (no .git); must not raise.
         api._cleanup_issue_checkout(str(tmp_path / "does-not-exist"))
@@ -1670,6 +1674,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_helper_refuses_non_checkout_path(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """A directory without a .git entry is not a checkout and is left untouched."""
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         # A directory under the root but without .git is not a checkout → untouched.
@@ -1682,6 +1687,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_helper_refuses_path_outside_ephemeral_root(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """A real checkout outside every ephemeral root is never removed, even with the flag."""
         api = patched_app["api"]
         # Configure an ephemeral root that does NOT contain the target: even a
         # real git checkout with the cleanup flag must not be removed.
@@ -1696,12 +1702,14 @@ class TestEphemeralCheckoutCleanup:
         assert outside.exists()
 
     def test_is_ephemeral_checkout_path_refuses_shallow_path(self, patched_app) -> None:
+        """A filesystem root / shallow system path is never eligible for removal."""
         api = patched_app["api"]
         # A filesystem root / shallow system path must never be removed even if it exists.
         assert api._is_ephemeral_checkout_path("/") is False
         api._cleanup_issue_checkout("/")  # must not raise and must not attempt removal
 
     def test_is_ephemeral_checkout_path_handles_resolve_error(self, patched_app) -> None:
+        """An unresolvable path (embedded null byte) is treated as unsafe, not removed."""
         api = patched_app["api"]
         # An embedded null byte makes Path.resolve() raise ValueError → treated as unsafe.
         assert api._is_ephemeral_checkout_path("bad\x00path") is False
@@ -1709,6 +1717,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_helper_swallows_rmtree_failure_and_keeps_lock(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """An rmtree failure is swallowed; the checkout and the lock are both retained."""
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "issue-7"
@@ -1728,6 +1737,7 @@ class TestEphemeralCheckoutCleanup:
         assert lock.exists()
 
     def test_cleanup_retains_lock_file_for_reuse(self, patched_app, tmp_path, monkeypatch) -> None:
+        """Cleanup removes the checkout but retains the clone lock for reuse."""
         # The clone lock is held around rmtree and deliberately NOT unlinked: it is
         # the stable per-issue lock both clone and cleanup share, so unlinking a
         # flock'd file can't orphan its inode and let two runs hold "the" lock.
@@ -1744,6 +1754,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_skipped_when_lock_cannot_be_opened(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """If the clone lock cannot be opened, cleanup skips deletion and does not raise."""
         # If the clone lock can't be opened, cleanup must skip (not delete
         # unsynchronised) and never raise.
         api = patched_app["api"]
@@ -1766,6 +1777,7 @@ class TestEphemeralCheckoutCleanup:
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        """Cleanup deletes the resolved canonical path, not the raw symlinked request string."""
         # TOCTOU hardening: the deletion must target the resolved, symlink-collapsed
         # path the safety check validated, not the raw request string. Here the raw
         # path reaches the checkout through a symlinked parent; cleanup must delete
@@ -1792,6 +1804,7 @@ class TestEphemeralCheckoutCleanup:
         assert not (real / "issue-7").exists()
 
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
+        """On clean completion with the flag set, the per-issue checkout is deleted."""
         # Per-issue checkout (``issue-N``) directly under an ephemeral root, so it
         # is eligible for cleanup; clear the other root vars so the env can't add
         # extra roots.
@@ -1813,6 +1826,7 @@ class TestEphemeralCheckoutCleanup:
         assert not checkout.is_dir()
 
     def test_clean_success_without_flag_keeps_checkout(self, patched_app) -> None:
+        """Without the flag, an operator-managed checkout is preserved on clean completion."""
         repo_path = patched_app["repo_path"]
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
@@ -1822,6 +1836,7 @@ class TestEphemeralCheckoutCleanup:
         assert os.path.isdir(repo_path)
 
     def test_partial_failure_keeps_checkout_even_with_flag(self, patched_app, monkeypatch) -> None:
+        """On partial failure the checkout is kept even with the cleanup flag set."""
         api = patched_app["api"]
         # Per-issue checkout under an ephemeral root (same eligible setup as the
         # clean-success test) so the cleanup decision turns solely on job status:
