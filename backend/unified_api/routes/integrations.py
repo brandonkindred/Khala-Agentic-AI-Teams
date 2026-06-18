@@ -34,7 +34,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
-from coding_team.clone_workspace import clone_lock_path
+from coding_team.clone_workspace import agent_cache_dir, clone_lock_path
 from coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -1437,10 +1437,9 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
             target = base / issue_segment if issue_segment else base
             return str(target.resolve())
 
-    # Mirror ephemeral_workspace_roots()'s AGENT_CACHE handling exactly (strip +
-    # default) so the derived path and the cleanup safety root never diverge.
-    cache_dir = os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
-    base = Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"]
+    # Shared AGENT_CACHE resolver (single source of truth) so the derived path
+    # and the cleanup safety root in ephemeral_workspace_roots never diverge.
+    base = Path(agent_cache_dir()) / "github_workspaces" / cfg["owner"] / cfg["repo"]
     target = base / issue_segment if issue_segment else base
     return str(target.resolve())
 

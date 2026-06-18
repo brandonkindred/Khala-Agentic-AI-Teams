@@ -5,10 +5,26 @@ from __future__ import annotations
 from pathlib import Path
 
 from coding_team.clone_workspace import (
+    agent_cache_dir,
     clone_lock_path,
     ephemeral_workspace_roots,
     is_within_ephemeral_workspace,
 )
+
+
+def test_agent_cache_dir_default(monkeypatch) -> None:
+    monkeypatch.delenv("AGENT_CACHE", raising=False)
+    assert agent_cache_dir() == ".agent_cache"
+
+
+def test_agent_cache_dir_blank_falls_back(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_CACHE", "   ")
+    assert agent_cache_dir() == ".agent_cache"
+
+
+def test_agent_cache_dir_value_is_stripped(monkeypatch) -> None:
+    monkeypatch.setenv("AGENT_CACHE", "  /cache  ")
+    assert agent_cache_dir() == "/cache"
 
 
 def test_clone_lock_path_is_sibling_of_checkout() -> None:

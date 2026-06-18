@@ -1686,9 +1686,10 @@ class TestEphemeralCheckoutCleanup:
             raise OSError("permission denied")
 
         monkeypatch.setattr(api.shutil, "rmtree", _boom)
-        # Must not raise; and because rmtree failed, the lock file is retained so
-        # it keeps guarding the still-present (half-removed) checkout.
+        # Must not raise; and because rmtree failed, the checkout is still present
+        # and the lock file is retained so it keeps guarding it.
         api._cleanup_issue_checkout(str(target))
+        assert target.exists()
         assert lock.exists()
 
     def test_cleanup_removes_sibling_lock_file(self, patched_app, tmp_path, monkeypatch) -> None:
@@ -1711,7 +1712,8 @@ class TestEphemeralCheckoutCleanup:
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
-        (tmp_path / ".issue-7.clone.lock").write_text("", encoding="utf-8")
+        lock = tmp_path / ".issue-7.clone.lock"
+        lock.write_text("", encoding="utf-8")
 
         def _boom(self, *a, **k):
             raise OSError("denied")
@@ -1720,6 +1722,7 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.setattr(api.Path, "unlink", _boom)
         api._cleanup_issue_checkout(str(target))  # must not raise
         assert not target.exists()
+        assert lock.exists()  # unlink failed → lock file remains
 
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
         repo_path = patched_app["repo_path"]

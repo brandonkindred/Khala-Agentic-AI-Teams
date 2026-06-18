@@ -39,6 +39,21 @@ def clone_lock_path(repo_path: str | Path) -> Path:
     return p.parent / f".{p.name}.clone.lock"
 
 
+def agent_cache_dir() -> str:
+    """Return the ``AGENT_CACHE`` root, defaulting to the relative ``.agent_cache``.
+
+    Single source of truth for the ``AGENT_CACHE`` default + whitespace handling,
+    shared by unified_api's ``_resolve_repo_path`` and
+    ``ephemeral_workspace_roots`` so the derived checkout path and the cleanup
+    safety root can never diverge.
+
+    Postconditions:
+        - Returns the stripped ``AGENT_CACHE`` value, or ``".agent_cache"`` when
+          it is unset/blank. Pure: no filesystem access.
+    """
+    return os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
+
+
 def ephemeral_workspace_roots() -> list[Path]:
     """Roots under which unified_api auto-derives platform-owned per-issue checkouts.
 
@@ -58,8 +73,7 @@ def ephemeral_workspace_roots() -> list[Path]:
         val = os.environ.get(var, "").strip()
         if val:
             roots.append(Path(val).resolve())
-    cache_dir = os.environ.get("AGENT_CACHE", "").strip() or ".agent_cache"
-    roots.append((Path(cache_dir) / "github_workspaces").resolve())
+    roots.append((Path(agent_cache_dir()) / "github_workspaces").resolve())
     # De-duplicate while preserving order.
     seen: set[Path] = set()
     unique: list[Path] = []
