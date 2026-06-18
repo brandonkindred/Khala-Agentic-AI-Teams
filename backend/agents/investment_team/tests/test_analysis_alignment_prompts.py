@@ -344,6 +344,9 @@ def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -
     assert "vol-target X%" in text
     assert "capped by the position limit" in text
     assert "X% is NOT a deployed fraction" in text
+    # Fixed-fraction is the nominal/target deployment before lot rounding, not
+    # an exact deployed fraction (whole-share rounding can exceed it).
+    assert "nominal deployed fraction before any whole-share lot rounding" in text
     # Trailing stops ratchet from the running extreme, not a move off entry.
     assert "ratchets from the running high/low" in text
     # Exact per-trade deployed dollars are not derivable from the rendered line.
