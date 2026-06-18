@@ -23,8 +23,18 @@ class _TextStubClient(DummyLLMClient):
         super().__init__()
         self._text = text
 
-    def complete_json(self, prompt: str, *, temperature: float = 0.0, system_prompt: Optional[str] = None, tools: Optional[list] = None, think: bool = False, **kwargs: Any) -> Any:
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
         return self._text
+
 
 from frontend_code_v2_team.models import (  # noqa: E402
     FrontendCodeV2WorkflowResult,
@@ -267,3 +277,325 @@ class TestFrontendDevelopmentAgent:
         runners = agent._build_tool_runners(tool_agents)
         assert ToolAgentKind.STATE_MANAGEMENT in runners
         assert ToolAgentKind.GIT_BRANCH_MANAGEMENT in runners
+
+
+# ---------------------------------------------------------------------------
+# Documentation self-review: function-aware code chunking (large-input path)
+# ---------------------------------------------------------------------------
+
+_DOC_REVIEW_RESPONSE = (
+    "## QUALITY_SCORE ##\n0.95\n## END QUALITY_SCORE ##\n"
+    "## IMPROVEMENTS ##\n- Clarified usage\n## END IMPROVEMENTS ##\n"
+    "## FILE docs/readme.md ##\nRefined content\n"
+    "## SUMMARY ##\nRefinements made\n## END SUMMARY ##"
+)
+
+
+class _RecordingDocClient(DummyLLMClient):
+    """Records every user prompt and returns a canned doc-review response.
+
+    ``DummyLLMClient.stream`` forwards the rendered user prompt to
+    ``complete_json`` (one call per Agent invocation, no tools), so the recorded
+    prompts are exactly what each documentation self-review pass showed the LLM.
+    """
+
+    def __init__(self, text: str) -> None:
+        super().__init__()
+        self._text = text
+        self.prompts: list[str] = []
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        self.prompts.append(prompt)
+        return self._text
+
+
+def _make_big_code_file(idx: int, approx_chars: int = 30_000) -> str:
+    """Build a ~approx_chars file of many small functions, with a tail sentinel."""
+    lines: list[str] = []
+    size = 0
+    n = 0
+    while size < approx_chars:
+        line = f"function f{idx}_{n}(a, b) {{ return a + b + {n}; }}"
+        lines.append(line)
+        size += len(line) + 1
+        n += 1
+    lines.append(f"// SENTINEL_END_{idx}")
+    return "\n".join(lines)
+
+
+class TestDocumentationSelfReviewChunking:
+    """Issue: the doc self-review used to triple-truncate its code context."""
+
+    _NUM_FILES = 6
+
+    def _big_code_files(self) -> dict:
+        return {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(self._NUM_FILES)}
+
+    def test_chunks_cover_all_files_without_clipping(self):
+        from frontend_code_v2_team.phases.review import (
+            MAX_DOC_REVIEW_CHUNK_CHARS,
+            _doc_review_code_chunks,
+        )
+
+        code_files = self._big_code_files()
+        chunks = _doc_review_code_chunks(code_files)
+        # Large input is genuinely split into multiple bounded chunks.
+        assert len(chunks) > 1
+        joined = "\n".join(chunks)
+        # No file silently dropped: every path appears across the chunks.
+        for path in code_files:
+            assert path in joined
+        # No file clipped mid-content: every file's tail sentinel survives.
+        for i in range(self._NUM_FILES):
+            assert f"SENTINEL_END_{i}" in joined
+        # Every chunk stays within the per-call budget (short lines never make a
+        # single segment exceed it).
+        for chunk in chunks:
+            assert len(chunk) <= MAX_DOC_REVIEW_CHUNK_CHARS
+
+    def test_empty_code_yields_single_placeholder_pass(self):
+        from frontend_code_v2_team.phases.review import _doc_review_code_chunks
+
+        assert _doc_review_code_chunks({}) == ["(No code context)"]
+        # Blank-only content is treated as no code context.
+        assert _doc_review_code_chunks({"a.ts": "   \n"}) == ["(No code context)"]
+
+    def test_large_input_shows_every_chunk_to_llm(self):
+        from frontend_code_v2_team.phases.review import (
+            _doc_review_code_chunks,
+            run_documentation_self_review,
+        )
+
+        code_files = self._big_code_files()
+        n_chunks = len(_doc_review_code_chunks(code_files))
+        client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old docs"},
+            code_files=code_files,
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+        )
+        # One LLM call per code chunk; all code shown across the single pass.
+        assert len(client.prompts) == n_chunks
+        all_prompts = "\n".join(client.prompts)
+        for i in range(self._NUM_FILES):
+            assert f"SENTINEL_END_{i}" in all_prompts
+        assert "docs/readme.md" in result.documentation
+        assert result.iterations == 1
+
+    def test_small_input_single_call_per_iteration(self):
+        from frontend_code_v2_team.phases.review import run_documentation_self_review
+
+        client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old"},
+            code_files={"src/a.ts": "export const a = 1;"},
+            task_description="task",
+            min_iterations=1,
+            max_iterations=2,
+            quality_threshold=0.9,
+        )
+        # Small code = one chunk = one call; score 0.95 >= 0.9 stops at min_iterations.
+        assert len(client.prompts) == 1
+        assert result.iterations == 1
+        assert result.final_quality_score == 0.95
+
+    def test_large_documentation_passed_in_full(self):
+        """The old ``[:12000]`` clip dropped documentation tails as well as code.
+
+        Removing the clip means a large doc must reach the LLM uncut; this guards
+        against a regression that re-introduces truncation on the doc side.
+        """
+        from frontend_code_v2_team.phases.review import run_documentation_self_review
+
+        # A doc well past the old 12000-char boundary, with a tail sentinel that
+        # only survives if the whole document is sent to the model.
+        big_doc = ("Documentation paragraph. " * 600) + "\nDOC_TAIL_SENTINEL"
+        assert len(big_doc) > 12_000
+        client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
+        run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": big_doc},
+            code_files={"src/a.ts": "export const a = 1;"},
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+        )
+        # One small code chunk = one call, and the doc tail past the old clip
+        # boundary appears in the prompt uncut.
+        assert len(client.prompts) == 1
+        assert "DOC_TAIL_SENTINEL" in client.prompts[0]
+
+
+class _RaisingDocClient(DummyLLMClient):
+    """Raises on every LLM call to exercise the per-chunk failure path."""
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        raise RuntimeError("boom")
+
+
+class TestDocumentationSelfReviewResilience:
+    def test_llm_failure_is_resilient_and_reports_progress(self):
+        from frontend_code_v2_team.phases.review import run_documentation_self_review
+
+        seen: list[str] = []
+        result = run_documentation_self_review(
+            llm=_RaisingDocClient(),
+            documentation={"docs/readme.md": "old"},
+            code_files={"src/a.ts": "export const a = 1;"},
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+            detail_callback=seen.append,
+        )
+        # Every chunk's call fails, but the pass never raises and returns the
+        # docs unchanged with the default score.
+        assert result.documentation == {"docs/readme.md": "old"}
+        assert result.iterations == 1
+        assert result.final_quality_score == 0.5
+        # Per-iteration and final progress callbacks both fired.
+        assert any("iteration 1/1" in m for m in seen)
+        assert any("complete" in m for m in seen)
+
+
+class TestDocReviewManyChunksWarning:
+    def test_warns_when_chunk_count_exceeds_threshold(self, monkeypatch, caplog):
+        import frontend_code_v2_team.phases.review as review_mod
+
+        monkeypatch.setattr(review_mod, "MANY_CHUNKS_WARN_THRESHOLD", 0)
+        code_files = {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(2)}
+        with caplog.at_level("WARNING"):
+            chunks = review_mod._doc_review_code_chunks(code_files)
+        assert len(chunks) > 0
+        assert any("code chunk(s)" in r.message for r in caplog.records)
+
+
+def _doc_response(score: float) -> str:
+    return (
+        f"## QUALITY_SCORE ##\n{score}\n## END QUALITY_SCORE ##\n"
+        "## IMPROVEMENTS ##\n- tweak\n## END IMPROVEMENTS ##\n"
+        "## FILE docs/readme.md ##\nRefined\n"
+        "## SUMMARY ##\ndone\n## END SUMMARY ##"
+    )
+
+
+class _ScriptedDocClient(DummyLLMClient):
+    """Returns a different canned response on each ``complete_json`` call."""
+
+    def __init__(self, responses: list) -> None:
+        super().__init__()
+        self._responses = list(responses)
+        self._idx = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        resp = (
+            self._responses[self._idx] if self._idx < len(self._responses) else self._responses[-1]
+        )
+        self._idx += 1
+        return resp
+
+
+class TestDocReviewMinScoreAcrossChunks:
+    def test_iteration_score_is_min_across_chunks(self):
+        from frontend_code_v2_team.phases.review import (
+            _doc_review_code_chunks,
+            run_documentation_self_review,
+        )
+
+        code_files = {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(6)}
+        n_chunks = len(_doc_review_code_chunks(code_files))
+        assert n_chunks >= 2
+        # First chunk scores high, the rest low → iteration score is the minimum.
+        responses = [_doc_response(0.95)] + [_doc_response(0.80)] * (n_chunks - 1)
+        client = _ScriptedDocClient(responses)
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old"},
+            code_files=code_files,
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+        )
+        assert result.final_quality_score == 0.80
+
+
+class _FlakyDocClient(DummyLLMClient):
+    """Raises on the first ``fail_first`` calls, then returns a canned response."""
+
+    def __init__(self, fail_first: int, text: str) -> None:
+        super().__init__()
+        self._fail_first = fail_first
+        self._text = text
+        self._calls = 0
+
+    def complete_json(
+        self,
+        prompt: str,
+        *,
+        temperature: float = 0.0,
+        system_prompt: Optional[str] = None,
+        tools: Optional[list] = None,
+        think: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        self._calls += 1
+        if self._calls <= self._fail_first:
+            raise RuntimeError("transient")
+        return self._text
+
+
+class TestDocReviewChunkFailureGate:
+    def test_chunk_failure_suppresses_early_stop(self):
+        from frontend_code_v2_team.phases.review import (
+            _doc_review_code_chunks,
+            run_documentation_self_review,
+        )
+
+        code_files = {f"src/mod_{i}.ts": _make_big_code_file(i) for i in range(6)}
+        n_chunks = len(_doc_review_code_chunks(code_files))
+        assert n_chunks >= 2
+        # First chunk of iteration 1 fails; every other chunk scores 0.95. Without
+        # the failure gate the high score would stop after iteration 1, leaving the
+        # failed chunk's code unreviewed. With it, iteration 2 re-reviews all chunks.
+        client = _FlakyDocClient(fail_first=1, text=_doc_response(0.95))
+        result = run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": "old"},
+            code_files=code_files,
+            task_description="task",
+            min_iterations=1,
+            max_iterations=2,
+            quality_threshold=0.9,
+        )
+        assert result.iterations == 2
+        assert result.final_quality_score == 0.95
