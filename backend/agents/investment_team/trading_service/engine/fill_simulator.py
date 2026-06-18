@@ -1096,11 +1096,11 @@ class FillSimulator:
         return_pct = round((net / entry_notional * 100) if entry_notional > 0 else 0.0, 2)
 
         # Engine-side exit-attribution reconciliation. A strategy-emitted
-        # close (``reason`` not already an ``engine_exit:*`` label) that
-        # complies with a structured exit rule at this bar must still carry
-        # ``engine_exit:<kind>`` so the trade-alignment gate sees the engine
-        # as the single source of exit truth. An out-of-bounds / non-firing
-        # close keeps its strategy reason and stays flagged by the gate.
+        # close (``reason`` not already an ``engine_exit:*`` label) that fires a
+        # structured exit rule at the signal bar must still carry
+        # ``engine_exit:<kind>`` so the trade-alignment gate sees the engine as
+        # the single source of exit truth. A non-firing close keeps its strategy
+        # reason.
         exit_reason = po.request.reason or None
         # ``.strip()`` so an engine-owned reason with incidental surrounding
         # whitespace still bypasses reconciliation (the stored reason is left
@@ -1113,14 +1113,25 @@ class FillSimulator:
             # passed here. ``original_qty`` is the actually-filled (held) size —
             # this record is only built on a *full* close, so it equals the
             # closed quantity; the reconciler uses it only as a ``> 0`` liveness
-            # gate, never in the return-bound math.
-            reconciled = self._exit_reconciler(
-                symbol=pos.symbol,
-                side=pos.side.value,
-                entry_price=pos.entry_price,
-                qty=pos.original_qty,
-                return_pct=return_pct,
-            )
+            # gate. Reconciliation is best-effort *attribution* layered on top of
+            # the already-finalized trade math, so a reconciler bug must never
+            # crash the fill loop: on any exception, log and keep the strategy
+            # reason.
+            try:
+                reconciled = self._exit_reconciler(
+                    symbol=pos.symbol,
+                    side=pos.side.value,
+                    entry_price=pos.entry_price,
+                    qty=pos.original_qty,
+                )
+            except Exception:
+                logger.warning(
+                    "exit reconciler raised for %s; keeping strategy exit reason %r",
+                    pos.symbol,
+                    exit_reason,
+                    exc_info=True,
+                )
+                reconciled = None
             if reconciled:
                 exit_reason = reconciled
 

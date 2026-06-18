@@ -84,13 +84,6 @@ _MAX_ORDER_EVENTS = 20
 # is re-exported here for the many call sites and external importers that read it
 # off this module.
 
-# Absolute slack (percentage points) allowed on a structured exit rule's return
-# bound when reconciling exit attribution, mirroring the trade-alignment gate's
-# 0.5pp allowance for transaction-cost / slippage drift. Keeping the two in
-# lockstep means reconciliation stamps exactly the closes the gate would
-# otherwise pass on bounds — and never the out-of-bounds ones it flags.
-_RECONCILE_RETURN_SLACK_PP = 0.5
-
 
 def _build_exit_reconciler(
     exit_rules: Optional[Sequence[ExitRule]],
@@ -119,24 +112,26 @@ def _build_exit_reconciler(
         then keeps its no-op default and the existing fill-simulator unit
         tests are unaffected.
       * Otherwise returns a callable
-        ``(symbol, side, entry_price, qty, return_pct) -> Optional[str]``
-        yielding ``"engine_exit:<kind>"`` when a structured rule fires within
-        bounds at the **signal bar** (the bar the strategy acted on, one
-        before the fill), else ``None``. It does not mutate ``exit_rules`` or
-        ``views``.
+        ``(symbol, side, entry_price, qty) -> Optional[str]`` yielding
+        ``"engine_exit:<kind>"`` when a structured rule *fires* at the
+        **signal bar** (the bar the strategy acted on, one before the fill),
+        else ``None``. It does not mutate ``exit_rules`` or ``views``.
 
-    Bound semantics (must match the alignment gate so a close that filled
-    *past* the cap is never masked):
-      * ``take_profit`` — stamp only if ``return_pct`` is within the tightest
-        take-profit ceiling (+slack).
-      * ``stop_loss`` — stamp only if ``return_pct`` is within the tightest
-        entry-price stop floor (−slack); trailing-basis stops are
-        path-dependent and deferred (never stamped here).
-      * ``signal_exit`` — no return bound; stamp when the predicate fired.
-        Stamped as ``engine_exit:signal_exit[<idx>]`` (with the spec rule
-        index) to match the engine's emitted form, so the rule-firing-rate
-        gate counts the reconciled close. TP/SL are stamped unbracketed to
-        match the alignment gate's exact-string check.
+    Firing semantics: stamp on rule-fire, with no realized-return bound. This
+    mirrors the engine exit dispatcher (which stamps ``engine_exit:<kind>``
+    whenever a rule fires on the streaming view) and the post-#915 alignment
+    gate, which treats a stop-loss / take-profit as a TRIGGER, not a hard price
+    cap: a next-bar market fill can legitimately gap past the nominal
+    ceiling/floor and is still an engine-owned exit. Magnitude/firing-rate
+    enforcement is owned by ``ExitRuleConformanceGate``, not this per-trade
+    attribution step.
+      * ``take_profit`` / ``stop_loss`` (entry-price basis) — stamp
+        ``engine_exit:<kind>`` (unbracketed) when the rule fires; the
+        alignment gate matches these by exact string.
+      * ``signal_exit`` — stamp ``engine_exit:signal_exit[<idx>]`` with the
+        spec rule index, matching the engine's emitted form so the
+        rule-firing-rate gate counts the reconciled close.
+      * trailing-basis stops are path-dependent and deferred (never stamped).
 
     Entry-bar skip: a close whose signal bar is the entry bar of a
     *non-market* entry is never reconciled (``position_tracker[sym]
@@ -147,19 +142,6 @@ def _build_exit_reconciler(
         return None
 
     rules = list(exit_rules)
-    tp_pcts = [r.pct for r in rules if getattr(r, "kind", None) == "take_profit"]
-    sl_entry_pcts = [
-        r.pct
-        for r in rules
-        if getattr(r, "kind", None) == "stop_loss"
-        and getattr(r, "basis", "entry_price") == "entry_price"
-    ]
-    # Tightest ceiling / floor across rules of each kind, mirroring the
-    # alignment gate: a close that drifted past the *tightest* cap/floor must
-    # not be reconciled (it stays flagged) rather than being masked by a looser
-    # sibling rule of the same kind.
-    tp_ceiling = min(tp_pcts) * 100.0 if tp_pcts else None
-    sl_floor = -min(sl_entry_pcts) * 100.0 if sl_entry_pcts else None
 
     def _reconcile(
         *,
@@ -167,7 +149,6 @@ def _build_exit_reconciler(
         side: str,
         entry_price: float,
         qty: float,
-        return_pct: float,
     ) -> Optional[str]:
         if qty <= 0:
             return None
@@ -218,13 +199,9 @@ def _build_exit_reconciler(
             high_since_entry=entry_price,
             low_since_entry=entry_price,
         )
-        slack = _RECONCILE_RETURN_SLACK_PP
-        # Consider *every* rule that fires at this bar, not just the first in
-        # spec order. ``evaluate_exit_rules`` returns a single first-wins intent
-        # per position, so a rule firing out of bounds would otherwise shadow a
-        # later, compliant rule and drop attribution. Evaluate each rule on its
-        # own and stamp the first firing rule whose bound holds (spec order =
-        # priority). An out-of-bounds firing rule falls through to the next.
+        # Stamp the first rule that fires at the signal bar (spec order =
+        # priority), with no realized-return bound — a fired rule is an
+        # engine-owned exit even if the next-bar fill gapped past the level.
         for idx, rule in enumerate(rules):
             kind = getattr(rule, "kind", None)
             # Trailing-basis stops are path-dependent (running peak/trough);
@@ -233,13 +210,9 @@ def _build_exit_reconciler(
                 continue
             if not evaluate_exit_rules([rule], {symbol: ps}, {symbol: bs}, views=views):
                 continue
-            if (
-                kind == "take_profit"
-                and tp_ceiling is not None
-                and return_pct <= tp_ceiling + slack
-            ):
+            if kind == "take_profit":
                 return f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
-            if kind == "stop_loss" and sl_floor is not None and return_pct >= sl_floor - slack:
+            if kind == "stop_loss":
                 return f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
             if kind == "signal_exit":
                 # Match the engine's emitted form ``engine_exit:signal_exit[N]``
@@ -1680,6 +1653,14 @@ class TradingService:
                                 )
                             pending_for_prev = []
 
+                        # Ordering invariant (relied on by the exit reconciler in
+                        # ``_build_exit_reconciler``): ``process_bar`` runs BEFORE
+                        # ``_update_position_tracker`` and ``_append_streaming_bar``
+                        # below. So when the fill simulator stamps an exit during
+                        # this call, ``streaming_views``' latest bar is still the
+                        # signal bar (cur_bar not yet appended) and
+                        # ``position_tracker[sym].just_opened`` still reflects it.
+                        # Do not move the tracker/view updates above this call.
                         outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
                         _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                         for fill in outcome.entry_fills + outcome.exit_fills:
@@ -1947,6 +1928,11 @@ class TradingService:
                             )
                         pending_for_prev = []
 
+                    # Ordering invariant (see the chunked path above and the exit
+                    # reconciler): ``process_bar`` must run BEFORE
+                    # ``_update_position_tracker`` / ``_append_streaming_bar`` so the
+                    # reconciler sees the signal bar (not the fill bar) and the
+                    # pre-update ``just_opened`` flag. Do not reorder.
                     outcome = fill_sim.process_bar(cur_bar, next_bar=next_bar)
                     _apply_fill_outcome_events(result.execution_diagnostics, outcome)
                     for fill in outcome.entry_fills + outcome.exit_fills:
