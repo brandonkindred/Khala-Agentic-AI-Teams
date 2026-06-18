@@ -265,6 +265,7 @@ class AgentRegistry:
             has_invoke=m.invoke is not None,
             has_sandbox=m.sandbox is not None,
             has_cognition=m.cognition is not None,
+            has_knowledge_graph=bool(m.cognition and m.cognition.knowledge_graph.enabled),
         )
 
     @staticmethod

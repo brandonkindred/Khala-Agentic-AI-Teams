@@ -17,6 +17,8 @@ from __future__ import annotations
 import asyncio
 import base64
 import contextlib
+import fcntl
+import functools
 import json
 import logging
 import os
@@ -33,6 +35,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, Field
 
+from coding_team.clone_workspace import (
+    PER_ISSUE_DIR_TEMPLATE,
+    agent_cache_dir,
+    clone_lock_path,
+)
 from coding_team.github_source.client import _pr_detail_from_payload
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
@@ -1369,22 +1376,101 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
     return items
 
 
-def _resolve_repo_path(cfg: dict[str, Any]) -> str:
+def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> str:
     """Resolve the local checkout path for the coding team.
 
     Priority: config override > SE_WORKSPACE_DIR env > WORKSPACE_ROOT env > AGENT_CACHE fallback.
+    The ``AGENT_CACHE`` fallback defaults to the relative ``.agent_cache`` (a
+    repo-wide convention), so when neither ``AGENT_CACHE`` nor a workspace-root
+    env var is set the path is resolved against the process working directory;
+    deployments that need a stable absolute location set ``AGENT_CACHE`` (Docker
+    sets it to ``/data/agents``).
+
+    When ``issue_number`` is given and the path is auto-derived (no operator
+    override), the checkout is namespaced per-issue with an ``issue-{N}`` segment
+    so multiple coding-team jobs can run on different issues of the same
+    repository in true filesystem isolation, concurrently. An operator override
+    is returned verbatim — the operator manages that checkout themselves, so it
+    is neither per-issue-namespaced nor auto-cleaned.
+
+    Preconditions:
+        - ``cfg`` carries non-empty ``owner`` and ``repo`` (the run routes
+          validate this before calling).
+        - ``issue_number`` is a positive issue number or ``None`` (the PR-review
+          path passes ``None`` and gets the repo-level path; it never clones).
+    Postconditions:
+        - Returns the override verbatim when set. The override is trusted
+          operator configuration and is intentionally NOT traversal-sanitized
+          (unlike the auto-derived ``owner``/``repo`` below) and not auto-cleaned;
+          if that config source ever accepts untrusted input it must be
+          sanitized by the caller.
+        - Otherwise returns an absolute derived path; with ``issue_number`` set
+          the path ends in ``issue-{issue_number}`` and two distinct issue
+          numbers map to two distinct paths.
+        - Raises ``HTTPException(400)`` when ``owner``/``repo`` carry a path
+          separator, ``..`` segment, or null byte, or when ``issue_number`` is
+          non-positive — defense-in-depth so this path builder can't be coerced
+          into escaping the workspace root or building a degenerate ``issue-0``
+          segment even if a caller skipped validation.
+
+    Note:
+        The auto-derived layout differs by source: a workspace-root env var gives
+        ``{root}/{owner}_{repo}[/issue-N]`` while the ``AGENT_CACHE`` fallback
+        gives ``{cache}/github_workspaces/{owner}/{repo}[/issue-N]``. This is
+        intentional (``AGENT_CACHE`` is a shared multi-team cache namespaced under
+        ``github_workspaces``; a dedicated workspace root is not), and
+        ``ephemeral_workspace_roots`` mirrors both shapes for the cleanup guard.
     """
     override = cfg.get("repo_path", "").strip()
     if override:
         return override
 
+    # Enforce the documented precondition explicitly: owner/repo must be present
+    # and non-empty before they become path components. A caller that bypassed
+    # upstream validation would otherwise hit a raw KeyError → 500; surface a
+    # clean 400 instead.
+    for label in ("owner", "repo"):
+        if not cfg.get(label):
+            raise HTTPException(status_code=400, detail=f"missing GitHub {label}")
+
+    # Defense-in-depth: owner/repo become path components below, so reject any
+    # value that could traverse out of the workspace (a real GitHub owner/repo
+    # never contains these).
+    for label, value in (("owner", cfg["owner"]), ("repo", cfg["repo"])):
+        if (
+            "/" in value
+            or "\\" in value
+            or "\x00" in value
+            or value in ("..", ".")
+            or value.strip() != value
+        ):
+            raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
+
+    # Enforce the documented precondition: a non-positive issue_number would yield
+    # a degenerate ``issue-0`` / ``issue--1`` segment (and never names a real
+    # GitHub issue), so reject it here rather than build a bad path.
+    if issue_number is not None and issue_number < 1:
+        raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
+
+    issue_segment = (
+        PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
+    )
+
+    # Auto-derived paths are resolved to absolute so they are stable regardless
+    # of the process working directory at clone vs. cleanup time, and so the
+    # ephemeral-root safety check (which also resolves) compares like with like.
     for env_var in ("SE_WORKSPACE_DIR", "WORKSPACE_ROOT"):
         val = os.environ.get(env_var, "").strip()
         if val:
-            return str(Path(val) / f"{cfg['owner']}_{cfg['repo']}")
+            base = Path(val) / f"{cfg['owner']}_{cfg['repo']}"
+            target = base / issue_segment if issue_segment else base
+            return str(target.resolve())
 
-    cache_dir = os.environ.get("AGENT_CACHE", ".agent_cache")
-    return str(Path(cache_dir) / "github_workspaces" / cfg["owner"] / cfg["repo"])
+    # Shared AGENT_CACHE resolver (single source of truth) so the derived path
+    # and the cleanup safety root in ephemeral_workspace_roots never diverge.
+    base = Path(agent_cache_dir()) / "github_workspaces" / cfg["owner"] / cfg["repo"]
+    target = base / issue_segment if issue_segment else base
+    return str(target.resolve())
 
 
 def _git_auth_env(token: str) -> dict[str, str]:
@@ -1422,7 +1508,33 @@ def _scrub_git_secret(text: str, token: str) -> str:
     return text.replace(token, "***").replace(encoded, "***")
 
 
-def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str | None:
+def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
+    """True iff ``remote_url``'s final ``owner/repo`` segments match exactly.
+
+    A substring check (``f"{owner}/{repo}" in url``) gives false positives — e.g.
+    ``acme/widget`` matches ``acme/widget-extra``, and ``acme/widget`` is also a
+    suffix of ``notacme/widget``. This compares the last two path segments
+    exactly (case-insensitively, since GitHub treats owner/repo that way) after
+    stripping a trailing ``.git``/slash, and normalizes the ``git@host:owner/repo``
+    scp form to ``/``-separated so both URL styles work.
+
+    Postconditions:
+        - Returns True iff the remote's last two segments equal ``owner``/``repo``
+          case-insensitively; False otherwise (including malformed/short URLs).
+    """
+    cleaned = remote_url.strip().rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    parts = [seg for seg in cleaned.replace(":", "/").split("/") if seg]
+    if len(parts) < 2:
+        return False
+    got_owner, got_repo = parts[-2], parts[-1]
+    return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
+
+
+def _ensure_repo_clone(
+    repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True
+) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -1430,6 +1542,9 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
 
     Preconditions:
         - ``owner`` and ``repo`` are non-empty; ``token`` authorizes read access.
+        - ``platform_owned`` is True for an auto-derived per-issue checkout this
+          service owns (and may later auto-clean), False for an operator-pinned
+          ``repo_path`` the operator manages.
     Postconditions:
         - On success the repository is present at ``repo_path`` and ``None`` is
           returned.
@@ -1438,55 +1553,97 @@ def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str) -> str
           or an existing checkout that points at a different remote. This function
           never lets a ``subprocess`` exception escape, so the caller can surface
           a clean error rather than an unhandled 500.
+        - For a platform-owned checkout, clone-or-fetch is serialized per checkout
+          via an exclusive ``flock`` on a sibling lock file, so two concurrent
+          requests for the same issue (even across worker processes on the shared
+          host volume) cannot interleave a ``git clone`` into a half-populated
+          directory. An operator-pinned checkout is fetched **without** the sibling
+          lock: it is never auto-cleaned (so the lock's survive-the-rmtree role
+          doesn't apply) and may live under a parent the service cannot write,
+          where creating a sibling lock would wrongly fail an otherwise-valid
+          fetch.
     """
     env = _git_auth_env(token)
-    expected_suffix = f"{owner}/{repo}"
     path = Path(repo_path)
 
+    # mkdir(exist_ok=True) on an existing parent is a no-op and needs no write
+    # permission, so this stays safe for operator paths under read-only parents.
     try:
-        if path.is_dir() and (path / ".git").is_dir():
-            url_check = subprocess.run(
-                ["git", "-C", repo_path, "remote", "get-url", "origin"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            url_out = url_check.stdout.strip()
-            if url_check.returncode != 0 or expected_suffix not in url_out:
-                return (
-                    f"existing checkout at {repo_path} does not match {owner}/{repo} (remote origin: {url_out[:120]})"
-                )
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        return f"could not prepare workspace dir for {owner}/{repo}: {e}"
 
+    def _clone_or_fetch() -> str | None:
+        try:
+            if path.is_dir() and (path / ".git").is_dir():
+                url_check = subprocess.run(
+                    ["git", "-C", repo_path, "remote", "get-url", "origin"],
+                    capture_output=True,
+                    text=True,
+                    timeout=10,
+                )
+                url_out = url_check.stdout.strip()
+                if url_check.returncode != 0 or not _remote_matches(url_out, owner, repo):
+                    return (
+                        f"existing checkout at {repo_path} does not match {owner}/{repo} "
+                        f"(remote origin: {url_out[:120]})"
+                    )
+
+                result = subprocess.run(
+                    ["git", "-C", repo_path, "fetch", "--all"],
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                    env=env,
+                )
+                if result.returncode != 0:
+                    return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
+                return None
+
+            clone_url = f"https://github.com/{owner}/{repo}.git"
             result = subprocess.run(
-                ["git", "-C", repo_path, "fetch", "--all"],
+                ["git", "clone", clone_url, repo_path],
                 capture_output=True,
                 text=True,
-                timeout=120,
+                timeout=300,
                 env=env,
             )
             if result.returncode != 0:
-                return f"git fetch failed: {_scrub_git_secret(result.stderr, token)[:300]}"
+                safe_err = _scrub_git_secret(result.stderr, token)[:300]
+                return f"git clone failed: {safe_err}"
             return None
+        except FileNotFoundError:
+            # `git` is not on PATH in this image — surfaces as a clear message
+            # instead of a FileNotFoundError bubbling up to an opaque 500.
+            return "git executable not found on the server; install git in the API image."
+        except subprocess.TimeoutExpired as e:
+            return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
 
-        path.parent.mkdir(parents=True, exist_ok=True)
-        clone_url = f"https://github.com/{owner}/{repo}.git"
-        result = subprocess.run(
-            ["git", "clone", clone_url, repo_path],
-            capture_output=True,
-            text=True,
-            timeout=300,
-            env=env,
-        )
-        if result.returncode != 0:
-            safe_err = _scrub_git_secret(result.stderr, token)[:300]
-            return f"git clone failed: {safe_err}"
-        return None
-    except FileNotFoundError:
-        # `git` is not on PATH in this image — surfaces as a clear message
-        # instead of a FileNotFoundError bubbling up to an opaque 500.
-        return "git executable not found on the server; install git in the API image."
-    except subprocess.TimeoutExpired as e:
-        return f"git operation timed out after {e.timeout:.0f}s while preparing {owner}/{repo}."
+    # Operator-pinned checkout: fetch directly, no sibling lock (see Postconditions).
+    if not platform_owned:
+        return _clone_or_fetch()
+
+    # Platform-owned per-issue checkout: serialize via an exclusive flock on a
+    # sibling lock file. open()/flock() failures are workspace problems (and a
+    # FileNotFoundError from open must not be mistaken for a missing git binary),
+    # so they are handled here rather than by the git-specific handler above. The
+    # lock lives beside the checkout so it survives the coding team's post-success
+    # rmtree of repo_path.
+    lock_path = clone_lock_path(path)
+    try:
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in the finally below
+    except OSError as e:
+        return f"could not acquire clone lock for {owner}/{repo}: {e}"
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX)
+        except OSError as e:
+            return f"could not acquire clone lock for {owner}/{repo}: {e}"
+        return _clone_or_fetch()
+    finally:
+        with contextlib.suppress(OSError):
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 
 @router.post("/github/run-issue", response_model=RunGitHubIssueResponse)
@@ -1522,10 +1679,21 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     if not coding_team_url:
         raise HTTPException(status_code=503, detail="Coding team service not configured (CODING_TEAM_SERVICE_URL).")
 
-    repo_path = _resolve_repo_path(cfg)
+    # Namespace the checkout per-issue (unless the operator pins an explicit
+    # repo_path) so two issues of the same repo get isolated clones and can run
+    # concurrently. The per-issue clone is platform-owned and ephemeral, so ask
+    # the coding team to delete it once the work is safely published to a PR; an
+    # operator-managed override is never auto-cleaned.
+    repo_path = _resolve_repo_path(cfg, issue_number=body.issue_number)
+    cleanup_checkout_on_success = not cfg.get("repo_path", "").strip()
 
     loop = asyncio.get_running_loop()
-    clone_err = await loop.run_in_executor(None, _ensure_repo_clone, repo_path, owner, repo, token)
+    clone_err = await loop.run_in_executor(
+        None,
+        functools.partial(
+            _ensure_repo_clone, repo_path, owner, repo, token, platform_owned=cleanup_checkout_on_success
+        ),
+    )
     if clone_err:
         logger.warning("github run-issue: repository preparation failed: %s", clone_err)
         raise HTTPException(status_code=502, detail=clone_err)
@@ -1536,6 +1704,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
         "repo_path": repo_path,
         "issue_number": body.issue_number,
         "github_token": token,
+        "cleanup_checkout_on_success": cleanup_checkout_on_success,
     }
     if body.base_branch:
         payload["base_branch"] = body.base_branch

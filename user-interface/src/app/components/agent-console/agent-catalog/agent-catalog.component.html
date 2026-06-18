@@ -140,6 +140,12 @@
                 @if (agent.has_sandbox) {
                   <span matTooltip="Sandbox provisioning configured"><mat-icon>cloud_queue</mat-icon></span>
                 }
+                @if (agent.has_cognition) {
+                  <span matTooltip="Cognition configured"><mat-icon>memory</mat-icon></span>
+                }
+                @if (agent.has_knowledge_graph) {
+                  <span matTooltip="Knowledge graph attached"><mat-icon>hub</mat-icon></span>
+                }
               </div>
             </mat-card-content>
           </mat-card>

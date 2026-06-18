@@ -250,6 +250,8 @@ def test_summary_flags_reflect_manifest_content(tmp_path: Path) -> None:
     assert summary.has_invoke is True
     assert summary.has_sandbox is True
     assert summary.has_cognition is True
+    # A cognition block with no explicit `knowledge_graph` is graph-enabled by default.
+    assert summary.has_knowledge_graph is True
 
 
 def test_detail_returns_manifest_and_anatomy_when_present(tmp_path: Path) -> None:
@@ -430,6 +432,7 @@ def test_cognition_spec_absent_defaults_to_none(tmp_path: Path) -> None:
     assert plain.cognition is None
     [summary] = reg.search()
     assert summary.has_cognition is False
+    assert summary.has_knowledge_graph is False
 
 
 def test_cognition_spec_partial_block_uses_defaults(tmp_path: Path) -> None:
@@ -459,6 +462,42 @@ def test_cognition_spec_partial_block_uses_defaults(tmp_path: Path) -> None:
     assert partial.cognition.memory.retention_days_events == 90
     assert partial.cognition.rule_packs == []
     assert partial.cognition.requires_idempotency_key is False
+    # An omitted `knowledge_graph` block attaches a default-on graph.
+    assert partial.cognition.knowledge_graph.enabled is True
+    assert partial.cognition.knowledge_graph.ingest_events is True
+    assert partial.cognition.knowledge_graph.ingest_summaries is True
+    assert partial.cognition.knowledge_graph.ground_rule_proposals is True
+    [summary] = reg.search()
+    assert summary.has_knowledge_graph is True
+
+
+def test_cognition_knowledge_graph_opt_out(tmp_path: Path) -> None:
+    """`knowledge_graph.enabled: false` opts the agent out; the summary flag is False."""
+    _write_manifest(
+        tmp_path,
+        "blogging",
+        "optout.yaml",
+        """
+        schema_version: 1
+        id: blogging.optout
+        team: blogging
+        name: Opt Out
+        summary: cognition present but graph disabled
+        cognition:
+          knowledge_graph:
+            enabled: false
+        source:
+          entrypoint: x:y
+        """,
+    )
+    reg = AgentRegistry.load(tmp_path)
+    optout = reg.get("blogging.optout")
+    assert optout is not None
+    assert optout.cognition is not None
+    assert optout.cognition.knowledge_graph.enabled is False
+    [summary] = reg.search()
+    assert summary.has_cognition is True
+    assert summary.has_knowledge_graph is False
 
 
 def test_cognition_retention_must_be_positive(tmp_path: Path) -> None:
@@ -495,3 +534,7 @@ def test_cognition_example_manifest_is_valid() -> None:
     assert manifest.cognition.rule_packs == ["default_guardrails"]
     assert manifest.cognition.memory.retention_days_events == 90
     assert manifest.cognition.requires_idempotency_key is False
+    assert manifest.cognition.knowledge_graph.enabled is True
+    assert manifest.cognition.knowledge_graph.ingest_events is True
+    assert manifest.cognition.knowledge_graph.ingest_summaries is True
+    assert manifest.cognition.knowledge_graph.ground_rule_proposals is True
