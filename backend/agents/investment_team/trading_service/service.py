@@ -208,8 +208,13 @@ def _build_exit_reconciler(
             qty=qty,
             entry_price=entry_price,
             # Trailing watermarks are not tracked at the close site; collapse
-            # them to ``entry_price``. Trailing-basis stops are path-dependent
-            # and skipped below regardless, so the collapse is inert.
+            # them to ``entry_price``. The collapse is inert for the rule kinds
+            # reconciled here: trailing-basis stops are skipped below, and
+            # signal-exit predicates evaluate over bar history (indicators /
+            # ``bar.*`` fields), never the position's running peak/trough, so
+            # they do not consult these fields. (A signal rule that genuinely
+            # needed running watermarks is unsupported and simply would not be
+            # reconciled — it is not silently mis-stamped.)
             high_since_entry=entry_price,
             low_since_entry=entry_price,
         )

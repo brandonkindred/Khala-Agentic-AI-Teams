@@ -1102,7 +1102,10 @@ class FillSimulator:
         # as the single source of exit truth. An out-of-bounds / non-firing
         # close keeps its strategy reason and stays flagged by the gate.
         exit_reason = po.request.reason or None
-        if self._exit_reconciler is not None and not (exit_reason or "").startswith(
+        # ``.strip()`` so an engine-owned reason with incidental surrounding
+        # whitespace still bypasses reconciliation (the stored reason is left
+        # verbatim — we only gate on the trimmed form).
+        if self._exit_reconciler is not None and not (exit_reason or "").strip().startswith(
             ENGINE_EXIT_REASON_PREFIX
         ):
             # The reconciler reads the *signal bar* (one before this fill bar)

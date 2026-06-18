@@ -87,7 +87,8 @@ def test_build_returns_none_when_no_exit_rules() -> None:
 
 
 def test_take_profit_within_ceiling_is_reconciled() -> None:
-    # entry 100, long; signal bar high 106 clears the 105 target → rule fires.
+    """A long take-profit close within the ceiling (+0.5pp slack) is reconciled
+    to ``engine_exit:take_profit`` (signal bar high 106 clears the 105 target)."""
     view = _view((106.0, 99.0, 105.5))
     reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
@@ -118,7 +119,8 @@ def test_take_profit_past_cap_is_not_reconciled() -> None:
 
 
 def test_stop_loss_entry_basis_within_floor_is_reconciled() -> None:
-    # entry 100, long; signal bar low 94 crosses the 95 floor → rule fires.
+    """A long entry-basis stop close within the floor (-0.5pp slack) is
+    reconciled to ``engine_exit:stop_loss`` (signal bar low 94 crosses 95)."""
     view = _view((101.0, 94.0, 95.0))
     reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
@@ -133,6 +135,8 @@ def test_stop_loss_entry_basis_within_floor_is_reconciled() -> None:
 
 
 def test_stop_loss_breaching_floor_is_not_reconciled() -> None:
+    """A stop-loss close that breaches the floor keeps its strategy reason (so
+    the alignment gate still flags the drift)."""
     view = _view((101.0, 80.0, 85.0))
     reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
@@ -165,6 +169,8 @@ def test_trailing_stop_is_deferred_not_reconciled() -> None:
 
 
 def test_signal_exit_is_reconciled() -> None:
+    """A long signal-exit close (predicate fires on the signal bar) is reconciled
+    to the engine's bracketed ``engine_exit:signal_exit[idx]`` form."""
     # latest (signal) bar close 98 < 99 → predicate fires.
     view = _view((102.0, 100.0, 101.0), (100.0, 98.0, 99.0), (99.0, 97.0, 98.0))
     rule = SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0))
@@ -183,7 +189,8 @@ def test_signal_exit_is_reconciled() -> None:
 
 
 def test_non_firing_rule_is_not_reconciled() -> None:
-    # signal bar high 101 never reaches the 105 target → no rule fires.
+    """A close on a bar where no exit rule fires keeps its strategy reason
+    (signal bar high 101 never reaches the 105 target)."""
     view = _view((101.0, 99.0, 100.5))
     reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
@@ -198,6 +205,8 @@ def test_non_firing_rule_is_not_reconciled() -> None:
 
 
 def test_zero_qty_is_not_reconciled() -> None:
+    """A zero-quantity close fails the ``qty > 0`` liveness gate and is not
+    reconciled."""
     view = _view((106.0, 99.0, 105.0))
     reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
@@ -288,6 +297,8 @@ def test_tightest_take_profit_ceiling_blocks_drift() -> None:
 
 
 def _tracked(*, just_opened: bool) -> _TrackedPosition:
+    """Build a long ``_TrackedPosition`` with the given ``just_opened`` flag
+    (entry_price 100, watermarks collapsed to entry)."""
     return _TrackedPosition(
         side=OrderSide.LONG,
         entry_price=100.0,
@@ -336,8 +347,12 @@ def test_non_entry_bar_is_reconciled_with_tracker() -> None:
 
 
 def test_short_take_profit_within_ceiling_is_reconciled() -> None:
-    # entry 100, short; signal bar low 94 clears the 95 target → rule fires; a
-    # short profits as price falls, so the realized return is positive.
+    """A short take-profit close within the ceiling is reconciled to
+    ``engine_exit:take_profit``.
+
+    Entry 100, short; signal bar low 94 clears the 95 target → rule fires; a
+    short profits as price falls, so the realized return is positive.
+    """
     view = _view((101.0, 94.0, 95.0))
     reconcile = _build_exit_reconciler([TakeProfitRule(pct=0.05)], {"AAA": view})
     assert reconcile is not None
@@ -352,8 +367,12 @@ def test_short_take_profit_within_ceiling_is_reconciled() -> None:
 
 
 def test_short_stop_loss_within_floor_is_reconciled() -> None:
-    # entry 100, short; signal bar high 106 crosses the 105 ceiling → rule
-    # fires; a short loses as price rises, so the realized return is negative.
+    """A short entry-basis stop close within the floor is reconciled to
+    ``engine_exit:stop_loss``.
+
+    Entry 100, short; signal bar high 106 crosses the 105 ceiling → rule fires;
+    a short loses as price rises, so the realized return is negative.
+    """
     view = _view((106.0, 99.0, 105.0))
     reconcile = _build_exit_reconciler([StopLossRule(pct=0.05, basis="entry_price")], {"AAA": view})
     assert reconcile is not None
@@ -365,6 +384,24 @@ def test_short_stop_loss_within_floor_is_reconciled() -> None:
         return_pct=-4.8,  # within the -5% floor
     )
     assert label == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+
+
+def test_short_signal_exit_is_reconciled() -> None:
+    """Signal-exit reconciliation is side-agnostic: a short close whose
+    predicate fires on the signal bar is stamped ``engine_exit:signal_exit[idx]``
+    regardless of return sign (signal exits carry no return bound)."""
+    view = _view((103.0, 101.0, 102.0), (102.0, 100.0, 101.0), (101.0, 97.0, 98.0))
+    rule = SignalExitRule(when=Predicate(lhs="bar.close", op="<", rhs=99.0))
+    reconcile = _build_exit_reconciler([rule], {"AAA": view})
+    assert reconcile is not None
+    label = reconcile(
+        symbol="AAA",
+        side="short",
+        entry_price=100.0,
+        qty=10.0,
+        return_pct=2.0,  # short profits as price falls; no bound applies
+    )
+    assert label == f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[0]"
 
 
 # ---------------------------------------------------------------------------
@@ -385,6 +422,8 @@ class _RecordingReconciler:
 
 
 def _bar(ts: str, *, price: float) -> Bar:
+    """Build an ``AAA`` daily bar at ``ts`` with the given close price and
+    ``high``/``low`` set to ``price ± 1``."""
     return Bar(
         symbol="AAA",
         timestamp=ts,
@@ -398,6 +437,9 @@ def _bar(ts: str, *, price: float) -> Bar:
 
 
 def _make_sim(reconciler: Any | None) -> tuple[FillSimulator, OrderBook]:
+    """Return a ``(FillSimulator, OrderBook)`` pair with a 10M portfolio, zero
+    slippage/cost, an optimistic execution model, and the given
+    ``exit_reconciler`` injected."""
     portfolio = Portfolio(initial_capital=10_000_000.0)
     order_book = OrderBook()
     sim = FillSimulator(
@@ -413,6 +455,8 @@ def _make_sim(reconciler: Any | None) -> tuple[FillSimulator, OrderBook]:
 
 
 def _open_long(sim: FillSimulator, order_book: OrderBook) -> None:
+    """Submit a market LONG order for 10 AAA and process a bar at price 100 so
+    it fills, leaving an open long position."""
     order_book.submit(
         OrderRequest(
             client_order_id="entry-1",
@@ -429,6 +473,8 @@ def _open_long(sim: FillSimulator, order_book: OrderBook) -> None:
 
 
 def _submit_close(order_book: OrderBook, *, reason: str) -> None:
+    """Submit a market SHORT close order for 10 AAA carrying ``reason`` (used to
+    drive the reconciliation branch on the next processed bar)."""
     order_book.submit(
         OrderRequest(
             client_order_id="exit-1",
@@ -476,6 +522,20 @@ def test_reconciler_skipped_for_engine_owned_reason() -> None:
     outcome = sim.process_bar(_bar("2024-01-03", price=105.0))
 
     assert outcome.closed_trades[0].exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+    assert stub.calls == []
+
+
+def test_reconciler_skipped_for_whitespace_padded_engine_reason() -> None:
+    """The engine-owned guard tolerates incidental surrounding whitespace, so a
+    padded ``engine_exit:*`` reason still bypasses the reconciler."""
+    stub = _RecordingReconciler(f"{ENGINE_EXIT_REASON_PREFIX}take_profit")
+    sim, order_book = _make_sim(stub)
+    _open_long(sim, order_book)
+    _submit_close(order_book, reason=f"  {ENGINE_EXIT_REASON_PREFIX}stop_loss  ")
+
+    outcome = sim.process_bar(_bar("2024-01-03", price=105.0))
+
+    assert outcome.closed_trades[0].exit_reason == f"  {ENGINE_EXIT_REASON_PREFIX}stop_loss  "
     assert stub.calls == []
 
 
