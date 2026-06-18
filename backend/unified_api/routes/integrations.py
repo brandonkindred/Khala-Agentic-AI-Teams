@@ -1424,6 +1424,14 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     if override:
         return override
 
+    # Enforce the documented precondition explicitly: owner/repo must be present
+    # and non-empty before they become path components. A caller that bypassed
+    # upstream validation would otherwise hit a raw KeyError → 500; surface a
+    # clean 400 instead.
+    for label in ("owner", "repo"):
+        if not cfg.get(label):
+            raise HTTPException(status_code=400, detail=f"missing GitHub {label}")
+
     # Defense-in-depth: owner/repo become path components below, so reject any
     # value that could traverse out of the workspace (a real GitHub owner/repo
     # never contains these).

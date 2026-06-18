@@ -2032,8 +2032,14 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     # receives the already-resolved checkout path from _resolve_repo_path, so keying
     # on the raw string would, for a symlinked path, lock a different name and leave
     # the real checkout unguarded. The lock lives in the checkout's parent, so it
-    # outlives the rmtree.
-    lock_path = clone_lock_path(target)
+    # outlives the rmtree. clone_lock_path would only raise ValueError on an
+    # empty-name path, which a validated per-issue target never is — but guard it
+    # anyway so a future change can't break the "never raises" contract.
+    try:
+        lock_path = clone_lock_path(target)
+    except ValueError as e:
+        logger.warning("Skipping checkout cleanup; invalid lock path for %s: %s", target, e)
+        return
     try:
         lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
     except OSError as e:

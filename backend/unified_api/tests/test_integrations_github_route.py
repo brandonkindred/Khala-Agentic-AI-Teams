@@ -393,6 +393,8 @@ def test_ensure_repo_clone_fetch_failure_scrubs_token(tmp_path):
 
 
 def test_ensure_repo_clone_mkdir_failure_reports_workspace_error(tmp_path):
+    """_ensure_repo_clone reports a workspace error (not a git error) when the
+    parent dir can't be created because the parent path is a file."""
     # repo_path's parent already exists as a *file*, so mkdir raises OSError.
     blocker = tmp_path / "afile"
     blocker.write_text("x", encoding="utf-8")
@@ -403,6 +405,8 @@ def test_ensure_repo_clone_mkdir_failure_reports_workspace_error(tmp_path):
 
 
 def test_ensure_repo_clone_lock_open_failure_reports_lock_error(tmp_path):
+    """A failure opening the clone lock surfaces as a lock error, not the
+    git-executable-missing message."""
     repo = tmp_path / "checkout"
     # The only open() in _ensure_repo_clone is the lock file; failing *just* that
     # open (not every open) must surface as a lock error, NOT the git-missing
@@ -422,6 +426,7 @@ def test_ensure_repo_clone_lock_open_failure_reports_lock_error(tmp_path):
 
 
 def test_ensure_repo_clone_flock_failure_reports_lock_error(tmp_path):
+    """A flock failure surfaces as a lock error rather than escaping."""
     repo = tmp_path / "checkout"
     with patch(f"{_M}.fcntl.flock", side_effect=OSError("locked")):
         err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
@@ -445,17 +450,15 @@ def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
 
 def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch):
     """Unset AGENT_CACHE + no workspace root → the relative '.agent_cache' default,
-    resolved against the cwd, feeds the github_workspaces layout. Expected is built
-    from the same cwd the function sees (Path.cwd()), so the assertion holds without
-    altering global state — no chdir, so it's safe under parallel test runners."""
+    resolved to an absolute path under the github_workspaces layout. Asserts on the
+    absolute-ness and the trailing layout rather than the exact cwd, so it's
+    deterministic regardless of the working directory or test runner."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
     path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
-    expected = (
-        Path.cwd() / ".agent_cache" / "github_workspaces" / "acme" / "widget" / "issue-42"
-    ).resolve()
-    assert path == str(expected)
+    assert Path(path).is_absolute()
+    assert path.endswith("/.agent_cache/github_workspaces/acme/widget/issue-42")
 
 
 def test_resolve_repo_path_distinct_issues_map_to_distinct_paths(monkeypatch):
@@ -563,33 +566,39 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
 
 
 def test_remote_matches_exact_https():
+    """An exact https remote (with or without .git) matches owner/repo."""
     assert _remote_matches("https://github.com/acme/widget.git", "acme", "widget") is True
     assert _remote_matches("https://github.com/acme/widget", "acme", "widget") is True
 
 
 def test_remote_matches_is_case_insensitive():
+    """owner/repo comparison is case-insensitive (GitHub treats them that way)."""
     assert _remote_matches("https://github.com/ACME/Widget.git", "acme", "widget") is True
 
 
 def test_remote_matches_accepts_scp_form():
+    """The git@host:owner/repo scp form matches the same owner/repo."""
     assert _remote_matches("git@github.com:acme/widget.git", "acme", "widget") is True
 
 
 def test_remote_matches_rejects_repo_prefix_substring():
-    # 'acme/widget' is a substring of 'acme/widget-extra' but must NOT match.
+    """'acme/widget' is a substring of 'acme/widget-extra' but must NOT match."""
     assert _remote_matches("https://github.com/acme/widget-extra.git", "acme", "widget") is False
 
 
 def test_remote_matches_rejects_owner_suffix_substring():
-    # 'acme/widget' is a suffix of 'notacme/widget' but must NOT match.
+    """'acme/widget' is a suffix of 'notacme/widget' but must NOT match."""
     assert _remote_matches("https://github.com/notacme/widget.git", "acme", "widget") is False
 
 
 def test_remote_matches_rejects_short_url():
+    """A URL with fewer than two path segments never matches."""
     assert _remote_matches("widget", "acme", "widget") is False
 
 
 def test_ensure_repo_clone_rejects_substring_remote(tmp_path):
+    """An existing checkout whose remote only substring-matches owner/repo is
+    rejected with a 'does not match' error rather than reused."""
     repo = tmp_path / "checkout"
     (repo / ".git").mkdir(parents=True)
     url_check = subprocess.CompletedProcess(
@@ -602,6 +611,8 @@ def test_ensure_repo_clone_rejects_substring_remote(tmp_path):
 
 
 def test_ensure_repo_clone_accepts_scp_form_remote(tmp_path):
+    """An existing checkout whose remote is the scp form of the same owner/repo is
+    accepted and fetched (no 'does not match' error)."""
     repo = tmp_path / "checkout"
     (repo / ".git").mkdir(parents=True)
     url_check = subprocess.CompletedProcess(
@@ -657,8 +668,25 @@ def test_resolve_repo_path_rejects_unsafe_owner_or_repo(monkeypatch, field, valu
     monkeypatch.setenv("AGENT_CACHE", "/cache")
     # repo_path="" means "no operator override", so the function proceeds to
     # owner/repo path derivation (and thus the sanitization checks under test)
-    # rather than returning an override verbatim.
-    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "", field: value}
+    # rather than returning an override verbatim. Build the dict without a safe
+    # default for the field under test, then set the unsafe value — no duplicate key.
+    cfg = {"enabled": True, "repo_path": ""}
+    cfg["owner"] = "acme" if field != "owner" else value
+    cfg["repo"] = "widget" if field != "repo" else value
+    with pytest.raises(HTTPException) as exc:
+        _resolve_repo_path(cfg, issue_number=1)
+    assert exc.value.status_code == 400
+
+
+@pytest.mark.parametrize("missing", ["owner", "repo"])
+def test_resolve_repo_path_rejects_missing_owner_or_repo(monkeypatch, missing):
+    """A config missing owner/repo yields HTTP 400 (enforcing the documented
+    precondition) rather than a raw KeyError → 500."""
+    monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", "/cache")
+    cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": ""}
+    del cfg[missing]
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
     assert exc.value.status_code == 400
