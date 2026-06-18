@@ -48,6 +48,25 @@ def test_clone_lock_path_distinct_issues_distinct_locks() -> None:
     assert a.parent == b.parent
 
 
+@pytest.mark.parametrize(
+    "name,expected",
+    [
+        ("issue-7", True),
+        ("issue-12345", True),
+        ("issue-", False),
+        ("issue-7a", False),
+        ("issue-7/extra", False),
+        ("acme_widget", False),
+        ("widget", False),
+        ("", False),
+    ],
+)
+def test_is_per_issue_dir(name, expected) -> None:
+    from coding_team.clone_workspace import is_per_issue_dir
+
+    assert is_per_issue_dir(name) is expected
+
+
 @pytest.mark.parametrize("root", ["/", ""])
 def test_clone_lock_path_rejects_empty_final_component(root) -> None:
     # A filesystem root has no final component; enforce the precondition rather

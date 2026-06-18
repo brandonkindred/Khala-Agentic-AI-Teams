@@ -16,7 +16,26 @@ so unified_api can depend on it without pulling in the coding-team app.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+# The per-issue checkout directory name unified_api's ``_resolve_repo_path``
+# builds as ``f"issue-{issue_number}"`` (issue numbers are positive integers).
+# Kept here as the single source of truth so the cleanup guard recognises exactly
+# the shape the path builder produces and nothing broader (e.g. a repo-level
+# checkout). If the segment format changes, change it in both places.
+_PER_ISSUE_DIR_RE = re.compile(r"issue-\d+")
+
+
+def is_per_issue_dir(name: str) -> bool:
+    """True iff ``name`` is an auto-derived per-issue checkout directory name.
+
+    Preconditions:
+        - ``name`` is a path's final component (``Path.name``), not a full path.
+    Postconditions:
+        - Returns True iff ``name`` exactly matches ``issue-<digits>``. Pure.
+    """
+    return _PER_ISSUE_DIR_RE.fullmatch(name) is not None
 
 
 def clone_lock_path(repo_path: str | Path) -> Path:

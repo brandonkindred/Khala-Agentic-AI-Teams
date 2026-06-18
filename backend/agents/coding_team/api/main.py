@@ -5,6 +5,7 @@ FastAPI app for coding_team: GET /health, POST /run, GET /status/{job_id}, GET /
 from __future__ import annotations
 
 import base64
+import fcntl
 import logging
 import os
 import shutil
@@ -30,6 +31,7 @@ from coding_team.activity import ActivityBridge  # noqa: E402
 from coding_team.agent_status import build_agent_statuses  # noqa: E402
 from coding_team.clone_workspace import (  # noqa: E402
     clone_lock_path,
+    is_per_issue_dir,
     is_within_ephemeral_workspace,
 )
 from coding_team.github_source import (  # noqa: E402
@@ -1923,7 +1925,7 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     Resolving here (and handing the resolved ``Path`` back) means the path that is
     *validated* is the exact symlink-collapsed path the caller then deletes,
     closing the check-resolved / delete-raw-string gap a directory→symlink swap
-    could otherwise exploit. Two conditions must both hold:
+    could otherwise exploit. Three conditions must all hold:
 
     1. the path lives strictly under one of this deployment's ephemeral
        workspace roots (``is_within_ephemeral_workspace``) — so an
@@ -1931,14 +1933,19 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
        root or shallow system dir like ``/`` or ``/data`` is excluded because it
        is not under a workspace root), even if a caller sets the cleanup flag and
        points ``repo_path`` at someone else's repo;
-    2. it is actually a git checkout (carries a ``.git`` entry).
+    2. its final component is the auto-derived ``issue-{N}`` per-issue shape
+       (``is_per_issue_dir``) — so a repo-level checkout that merely sits under an
+       ephemeral root (e.g. the PR-review path ``.../github_workspaces/owner/repo``)
+       is never deleted, matching the contract that only per-issue clones are
+       reclaimed;
+    3. it is actually a git checkout (carries a ``.git`` entry).
 
     Preconditions:
         - None on caller state; ``repo_path`` may be any string (it is validated
           here precisely because it originates from an untrusted request).
     Postconditions:
-        - Returns the resolved ``Path`` when both conditions hold; ``None`` on any
-          resolution error (null byte / unresolvable) or when either condition
+        - Returns the resolved ``Path`` when all three conditions hold; ``None`` on
+          any resolution error (null byte / unresolvable) or when any condition
           fails. Pure apart from filesystem reads.
     """
     try:
@@ -1950,6 +1957,8 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
     # keeps its internal resolve idempotent.
     if not is_within_ephemeral_workspace(resolved):
         return None
+    if not is_per_issue_dir(resolved.name):
+        return None
     if not (resolved / ".git").exists():
         return None
     return resolved
@@ -1958,7 +1967,7 @@ def _ephemeral_checkout_target(repo_path: str) -> Optional[Path]:
 def _is_ephemeral_checkout_path(repo_path: str) -> bool:
     """True only for a platform-owned per-issue git checkout that is safe to delete.
 
-    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the two
+    Thin boolean view over ``_ephemeral_checkout_target`` (see it for the three
     conditions and the threat model). Kept as a predicate for call sites that only
     need the yes/no answer.
 
@@ -1979,60 +1988,81 @@ def _cleanup_issue_checkout(repo_path: str) -> None:
     published to a PR, so the local clone holds nothing the remote does not. The
     folder is recreated by the caller's clone-or-fetch on a later run.
 
+    Concurrency:
+        The ``rmtree`` runs while holding the SAME sibling ``flock`` that
+        unified_api's ``_ensure_repo_clone`` takes around clone/fetch. Without it,
+        a quick ``/api/integrations/github/run-issue`` retry — whose clone happens
+        in unified_api *before* the coding-team active-job guard runs — could
+        clone/fetch into the directory mid-rmtree. The lock lives in the
+        checkout's parent, so it survives the rmtree. The lock file is
+        deliberately NOT unlinked: unlinking a flock'd file lets a waiter keep the
+        old (now-orphaned) inode while a later run creates a fresh lock file and
+        locks the new inode, so two runs would each think they hold "the" lock.
+        Leaving it makes a stable per-issue lock both clone and cleanup share; the
+        files are tiny and bounded by the number of distinct issues per repo.
+
     Postconditions:
         - Best-effort: the checkout is removed only when
           ``_ephemeral_checkout_target`` resolves ``repo_path`` to a
-          platform-owned, non-shallow git checkout under an ephemeral root, and
-          the resolved (symlink-collapsed) path it returns is the one deleted; an
-          unsafe path is refused (logged, left in place). The sibling clone lock is unlinked
-          only after the checkout is actually gone, so a failed ``rmtree`` keeps
-          the lock and the duplicate guard in place. Never raises — a cleanup
-          failure (permissions, race with a concurrent reader) must not turn a
-          successful job into a failure; it is caught and logged. The success
-          line is logged only after ``rmtree`` returns.
+          platform-owned, non-shallow per-issue git checkout under an ephemeral
+          root, and the resolved (symlink-collapsed) path it returns is the one
+          deleted; an unsafe path is refused (logged, left in place). Never
+          raises — a cleanup failure (permissions, lock unavailable, race with a
+          concurrent reader) must not turn a successful job into a failure; it is
+          caught and logged. The success line is logged only after ``rmtree``
+          returns.
 
     Note:
         ``rmtree`` is not atomic. A failure partway through can leave a
         partially-deleted directory at ``repo_path`` (possibly missing
-        ``.git``); the kept lock file prevents a concurrent clone, but a later
-        retry whose ``_ensure_repo_clone`` finds a non-empty, non-git directory
-        will fail its ``git clone`` and the leftover must be cleared manually.
-        This is rare (``rmtree`` usually fails atomically on a permission error)
-        and the published work is already safe on the remote PR.
+        ``.git``); the retained lock keeps serialising access, but a later retry
+        whose ``_ensure_repo_clone`` finds a non-empty, non-git directory will
+        fail its ``git clone`` and the leftover must be cleared manually. This is
+        rare (``rmtree`` usually fails atomically on a permission error) and the
+        published work is already safe on the remote PR.
     """
-    target = _ephemeral_checkout_target(repo_path)
-    if target is None:
+    if _ephemeral_checkout_target(repo_path) is None:
         logger.warning("Refusing to remove unsafe or non-checkout path: %s", repo_path)
         return
-    # Delete the resolved, symlink-collapsed path the safety check just validated,
-    # not the raw request string: this removes the check-resolved / delete-raw gap
-    # and bounds the residual TOCTOU window for a directory→symlink swap to the
-    # interval between resolution and rmtree (rmtree also refuses a top-level
-    # symlink, so a swapped checkout root cannot redirect the delete).
-    try:
-        shutil.rmtree(target)
-        logger.info("Removed ephemeral per-issue checkout at %s", target)
-    except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
-        # exc_info so a partial-rmtree failure (the non-atomic case noted above)
-        # is diagnosable from the traceback, not just the message.
-        logger.warning(
-            "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
-        )
-        # Keep the lock file: the checkout still exists, so the lock must keep
-        # guarding it against a concurrent clone into a half-removed directory.
-        return
 
-    # The checkout is gone — drop the sibling clone lock created by unified_api's
-    # _ensure_repo_clone (name resolved via the shared clone_workspace helper,
-    # the single source of truth). The lock name is derived from repo_path's last
-    # component, which for the per-issue paths _resolve_repo_path produces is the
-    # checkout name (e.g. ``issue-7``) — this hook is only ever invoked for such
-    # per-issue checkouts. Best-effort — never fail a successful job.
-    lock_file = clone_lock_path(repo_path)
+    # Hold the clone lock around the delete so a concurrent _ensure_repo_clone
+    # can't interleave a clone/fetch into the directory being removed. The lock is
+    # the sibling file in the checkout's parent (the same name _ensure_repo_clone
+    # uses), so it outlives the rmtree.
+    lock_path = clone_lock_path(repo_path)
     try:
-        lock_file.unlink(missing_ok=True)
+        lock_file = open(lock_path, "w", encoding="utf-8")  # noqa: SIM115 - closed in finally
     except OSError as e:
-        logger.warning("Failed to remove clone lock %s: %s", lock_file, e)
+        # Can't take the lock (e.g. parent vanished) — skip rather than delete
+        # unsynchronised and risk racing a concurrent clone. Best-effort.
+        logger.warning("Skipping checkout cleanup; could not open clone lock %s: %s", lock_path, e)
+        return
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # Re-validate under the lock: the first check ran before we held it, so
+        # confirm the target is still a deletable per-issue checkout, and delete
+        # the resolved (symlink-collapsed) path it returns — not the raw request
+        # string — so a directory→symlink swap can't redirect the delete (rmtree
+        # also refuses a top-level symlink).
+        target = _ephemeral_checkout_target(repo_path)
+        if target is None:
+            return
+        try:
+            shutil.rmtree(target)
+            logger.info("Removed ephemeral per-issue checkout at %s", target)
+        except Exception as e:  # noqa: BLE001 - cleanup must never fail a successful job
+            # exc_info so a partial-rmtree failure (the non-atomic case noted
+            # above) is diagnosable from the traceback, not just the message.
+            logger.warning(
+                "Failed to remove ephemeral checkout at %s: %s", repo_path, e, exc_info=True
+            )
+    finally:
+        # Release and close, but do NOT unlink the lock file (see Concurrency).
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        lock_file.close()
 
 
 def _is_ahead(repo_path: str, ref: str, base_ref: str) -> bool:

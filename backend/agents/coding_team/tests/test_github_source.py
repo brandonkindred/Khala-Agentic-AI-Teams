@@ -1638,12 +1638,29 @@ class TestEphemeralCheckoutCleanup:
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
         monkeypatch.delenv("AGENT_CACHE", raising=False)
-        target = tmp_path / "ephemeral"
+        target = tmp_path / "issue-7"  # the auto-derived per-issue shape
         target.mkdir()
         (target / ".git").mkdir()  # only real checkouts are removed
         (target / "file.txt").write_text("x", encoding="utf-8")
         api._cleanup_issue_checkout(str(target))
         assert not target.exists()
+
+    def test_cleanup_refuses_repo_level_path_under_root(
+        self, patched_app, tmp_path, monkeypatch
+    ) -> None:
+        # A repo-level checkout (no ``issue-N`` final component) that merely sits
+        # under an ephemeral root must NOT be removed even with .git and the flag —
+        # only per-issue clones are reclaimable (the PR-review path lives here).
+        api = patched_app["api"]
+        monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
+        monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
+        monkeypatch.delenv("AGENT_CACHE", raising=False)
+        repo_level = tmp_path / "acme_widget"  # no issue-N segment
+        repo_level.mkdir()
+        (repo_level / ".git").mkdir()
+        assert api._is_ephemeral_checkout_path(str(repo_level)) is False
+        api._cleanup_issue_checkout(str(repo_level))
+        assert repo_level.exists()
 
     def test_cleanup_helper_does_not_raise_on_missing_dir(self, patched_app, tmp_path) -> None:
         api = patched_app["api"]
@@ -1694,10 +1711,10 @@ class TestEphemeralCheckoutCleanup:
     ) -> None:
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
-        target = tmp_path / "checkout"
+        target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
-        lock = tmp_path / ".checkout.clone.lock"
+        lock = tmp_path / ".issue-7.clone.lock"
         lock.write_text("", encoding="utf-8")
 
         def _boom(*_a, **_kw):
@@ -1710,37 +1727,41 @@ class TestEphemeralCheckoutCleanup:
         assert target.exists()
         assert lock.exists()
 
-    def test_cleanup_removes_sibling_lock_file(self, patched_app, tmp_path, monkeypatch) -> None:
+    def test_cleanup_retains_lock_file_for_reuse(self, patched_app, tmp_path, monkeypatch) -> None:
+        # The clone lock is held around rmtree and deliberately NOT unlinked: it is
+        # the stable per-issue lock both clone and cleanup share, so unlinking a
+        # flock'd file can't orphan its inode and let two runs hold "the" lock.
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
         lock = tmp_path / ".issue-7.clone.lock"
-        lock.write_text("", encoding="utf-8")
         api._cleanup_issue_checkout(str(target))
-        assert not target.exists()
-        assert not lock.exists()
+        assert not target.exists()  # checkout removed
+        assert lock.exists()  # lock retained for reuse
 
-    def test_cleanup_lock_unlink_failure_is_swallowed(
+    def test_cleanup_skipped_when_lock_cannot_be_opened(
         self, patched_app, tmp_path, monkeypatch
     ) -> None:
+        # If the clone lock can't be opened, cleanup must skip (not delete
+        # unsynchronised) and never raise.
         api = patched_app["api"]
         monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
         target = tmp_path / "issue-7"
         target.mkdir()
         (target / ".git").mkdir()
-        lock = tmp_path / ".issue-7.clone.lock"
-        lock.write_text("", encoding="utf-8")
 
-        def _boom(self, *a, **k):
-            raise OSError("denied")
+        real_open = open
 
-        # rmtree (os-level) still removes the checkout; only the lock unlink fails.
-        monkeypatch.setattr(api.Path, "unlink", _boom)
+        def _open_boom(path, *a, **k):
+            if str(path).endswith(".clone.lock"):
+                raise OSError("cannot open lock")
+            return real_open(path, *a, **k)
+
+        monkeypatch.setattr("builtins.open", _open_boom)
         api._cleanup_issue_checkout(str(target))  # must not raise
-        assert not target.exists()
-        assert lock.exists()  # unlink failed → lock file remains
+        assert target.exists()  # not deleted without the lock
 
     def test_cleanup_deletes_resolved_path_not_raw_symlinked_string(
         self, patched_app, tmp_path, monkeypatch
@@ -1771,23 +1792,25 @@ class TestEphemeralCheckoutCleanup:
         assert not (real / "issue-7").exists()
 
     def test_clean_success_with_flag_deletes_checkout(self, patched_app, monkeypatch) -> None:
-        repo_path = patched_app["repo_path"]
-        Path(repo_path, ".git").mkdir(parents=True, exist_ok=True)  # a real checkout
-        # Make the checkout's parent an ephemeral workspace root so cleanup is
-        # eligible; clear the other root vars so an ambient env can't interfere.
-        monkeypatch.setenv("WORKSPACE_ROOT", str(Path(repo_path).parent))
+        # Per-issue checkout (``issue-N``) directly under an ephemeral root, so it
+        # is eligible for cleanup; clear the other root vars so the env can't add
+        # extra roots.
+        root = Path(patched_app["repo_path"])
+        checkout = root / "issue-11"
+        (checkout / ".git").mkdir(parents=True)  # a real checkout
+        monkeypatch.setenv("WORKSPACE_ROOT", str(root))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
         monkeypatch.delenv("AGENT_CACHE", raising=False)
         gh = _FakeClient(issues=[_issue(11)], sub_map={11: []})
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(
             "/run-from-github",
-            json=_body(11, repo_path=repo_path, cleanup_checkout_on_success=True),
+            json=_body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
         )
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed"
-        assert not Path(repo_path).is_dir()
+        assert not checkout.is_dir()
 
     def test_clean_success_without_flag_keeps_checkout(self, patched_app) -> None:
         repo_path = patched_app["repo_path"]
@@ -1800,14 +1823,15 @@ class TestEphemeralCheckoutCleanup:
 
     def test_partial_failure_keeps_checkout_even_with_flag(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
-        repo_path = patched_app["repo_path"]
-        Path(repo_path, ".git").mkdir(parents=True, exist_ok=True)  # a real checkout
-        # Make the checkout ephemeral (as in the clean-success test) so the cleanup
-        # decision turns solely on job status: were partial failure NOT to keep it,
-        # it WOULD be deleted here. Clear the other root vars so the only ephemeral
-        # root is the one set below. Without this the safety guard refuses deletion
-        # regardless of status, and the test would pass for the wrong reason.
-        monkeypatch.setenv("WORKSPACE_ROOT", str(Path(repo_path).parent))
+        # Per-issue checkout under an ephemeral root (same eligible setup as the
+        # clean-success test) so the cleanup decision turns solely on job status:
+        # were partial failure NOT to keep it, it WOULD be deleted here. Without
+        # this the safety guard refuses deletion regardless of status and the test
+        # would pass for the wrong reason.
+        root = Path(patched_app["repo_path"])
+        checkout = root / "issue-11"
+        (checkout / ".git").mkdir(parents=True)  # a real checkout
+        monkeypatch.setenv("WORKSPACE_ROOT", str(root))
         monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
         monkeypatch.delenv("AGENT_CACHE", raising=False)
 
@@ -1826,11 +1850,11 @@ class TestEphemeralCheckoutCleanup:
         patched_app["set_github"](gh)
         resp = patched_app["client"].post(
             "/run-from-github",
-            json=_body(11, repo_path=repo_path, cleanup_checkout_on_success=True),
+            json=_body(11, repo_path=str(checkout), cleanup_checkout_on_success=True),
         )
         assert resp.status_code == 200, resp.text
         job = patched_app["jobs"].get_job(resp.json()["job_id"])
         assert job["status"] == "completed_with_failures"
         # Ephemeral + cleanup flag set, yet kept → the partial-failure status
         # overrode cleanup (a retry can seed from the preserved checkout).
-        assert Path(repo_path).is_dir()
+        assert checkout.is_dir()
