@@ -803,9 +803,10 @@ def test_persistent_small_chunk_failure_raises_unavailable() -> None:
 
 
 def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) -> None:
-    """One chunk keeps failing while another succeeds: the run completes,
-    naming the unreviewable chunk with an info "not reviewed" finding, and the
-    verdict reflects only the chunk that was actually reviewed."""
+    """One chunk keeps failing while another succeeds: the run completes (no
+    exception), but the unreviewable chunk produces a blocking ``high`` "not
+    reviewed" finding so the merged review is rejected — unreviewed code must
+    not pass the gate just because a sibling chunk approved."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     llm_probe = DummyLLMClient()
     cap = compute_code_review_map_chunk_chars(llm_probe)
@@ -822,12 +823,12 @@ def test_partial_terminal_failure_degrades_to_not_reviewed_finding(monkeypatch) 
         CodeReviewInput(files=files, task_description="t", language="python"),
     )
 
-    # good.py was reviewed and approved (no critical/high), so the verdict
-    # stands; bad.py is named by exactly one info "not reviewed" finding.
-    assert result.approved is True
+    # The run completed without raising, but bad.py is named by a blocking
+    # high "not reviewed" finding, so the review is rejected.
+    assert result.approved is False
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
     assert len(not_reviewed) == 1
-    assert not_reviewed[0].severity == "info"
+    assert not_reviewed[0].severity == "high"
     assert not_reviewed[0].file_path == "bad.py"
 
 
@@ -888,6 +889,39 @@ def test_degraded_finding_does_not_leak_raw_exception_text(monkeypatch) -> None:
     assert "Response preview" not in finding.description
     # The merged summary is likewise sanitized.
     assert secret not in result.summary
+
+
+def test_unexpected_chunk_exception_fails_closed() -> None:
+    """A non-LLM exception (a bug in the reviewer code, e.g. KeyError) is NOT a
+    known content failure: it must propagate unchanged — never be retried,
+    bisected, or masked as a not-reviewed finding — so the defect surfaces."""
+    client = _SelectiveRaiser("def only", exc=KeyError("reviewer bug"))
+    with pytest.raises(KeyError):
+        run_coordinator(
+            client,
+            CodeReviewInput(
+                files={"only.py": "def only(): pass"},
+                task_description="t",
+                language="python",
+            ),
+        )
+    # Exactly one call: no retry/bisect for an unexpected error.
+    assert len(client.prompts) == 1
+
+
+def test_all_empty_files_completes_with_info_findings_not_raise() -> None:
+    """A submission of only empty files creates no chunks, so it must complete
+    via the no-code early return (info findings, approved) — the total-failure
+    guard must not fire when there was simply nothing to review."""
+    result = run_coordinator(
+        DummyLLMClient(),
+        CodeReviewInput(
+            files={"a.py": "", "b.py": "   \n\t"}, task_description="t", language="python"
+        ),
+    )
+    assert result.approved is True
+    assert {i.file_path for i in result.issues} == {"a.py", "b.py"}
+    assert all(i.severity == "info" for i in result.issues)
 
 
 def test_infra_failure_fails_fast_without_retry_or_bisect() -> None:

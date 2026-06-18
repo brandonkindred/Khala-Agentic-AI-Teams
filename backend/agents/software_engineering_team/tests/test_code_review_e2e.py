@@ -179,11 +179,12 @@ class _FailOneFile(DummyLLMClient):
             return super().complete_json(prompt, **kwargs)
 
 
-def test_e2e_one_chunk_failure_degrades_gracefully(monkeypatch) -> None:
+def test_e2e_one_chunk_failure_degrades_without_passing_the_gate(monkeypatch) -> None:
     """A scripted client that exhausts one chunk's review (LLMSemanticExhaustionError)
-    while the rest succeed: the run completes, no exception escapes, the failed
-    file is named by an info "not reviewed" finding, and approval gating
-    reflects only the successfully reviewed chunks."""
+    while the rest succeed: the run completes (no exception escapes), but the
+    failed file is named by a blocking ``high`` "not reviewed" finding so the
+    merged review is rejected — unreviewed code must not pass the gate just
+    because the other chunks approved."""
     monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", "1")
     files = _synthetic_files(num_files=6, chars_each=64_000)  # forces separate chunks
     bad_path = "pkg/mod_3.py"
@@ -193,12 +194,12 @@ def test_e2e_one_chunk_failure_degrades_gracefully(monkeypatch) -> None:
         CodeReviewInput(files=files, task_description="review", language="python")
     )
 
-    # The run completed (no exception); the only finding names the failed file
-    # as not reviewed, and the verdict reflects the chunks that did succeed.
+    # The run completed (no exception); the failed file is named by blocking
+    # high findings, so the review is rejected rather than approved.
     not_reviewed = [i for i in result.issues if "could not be reviewed" in i.description]
     assert not_reviewed, "the failed chunk must surface a not-reviewed finding"
-    assert all(i.severity == "info" for i in not_reviewed)
-    assert result.approved is True
+    assert all(i.severity == "high" for i in not_reviewed)
+    assert result.approved is False
 
     # Recovery bisects the failed file's segment into sub-ranges, each
     # degrading separately; together they must name the entire file. Every
