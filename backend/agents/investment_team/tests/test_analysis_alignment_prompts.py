@@ -253,15 +253,29 @@ def test_analysis_prompts_carry_risk_model_framing(label: str, renderer: _Prompt
     assert "SEPARATE per-trade-outcome dimension" in rendered, (
         f"{label} prompt must require analyzing post-entry safeguards separately."
     )
+    # The sizing line is not always a fixed fraction: vol-target and
+    # fixed-notional must be described so the agent doesn't read a vol target
+    # or a dollar notional as "a fraction of the account".
+    assert "vol-target" in rendered, (
+        f"{label} prompt must explain the vol-target sizing rendering."
+    )
+    assert "fixed Y dollars" in rendered, (
+        f"{label} prompt must explain the fixed-notional sizing rendering."
+    )
 
 
-def test_lose_prompt_forbids_low_effective_risk_attribution() -> None:
-    """The losing-strategy prompt must explicitly block the reported failure
-    mode: attributing weak/negative returns to "low effective risk" or
-    "too little capital in play" derived from a stop-multiplied figure."""
+def test_lose_prompt_targets_conflation_not_genuine_small_sizing() -> None:
+    """The losing-strategy prompt must block the reported failure mode — a
+    stop-multiplied "effective risk" figure blamed for returns — WITHOUT
+    suppressing the accurate observation that a genuinely small deployment can
+    itself constrain returns (which would contradict the self-review prompt and
+    omit a valid sizing failure).
+    """
     rendered = _render_lose()
-    assert 'Do NOT attribute weak or negative returns to "low effective risk"' in rendered
-    assert "the deployed size IS the capital in play and the per-trade loss cap" in rendered
+    assert 'stop-multiplied "effective risk" figure' in rendered
+    assert "limited deployment constrained returns is a legitimate, accurate explanation" in rendered
+    # The over-broad blanket ban on "too little capital in play" must be gone.
+    assert '"too little capital in play"' not in rendered
 
 
 def test_self_review_prompt_includes_sizing_as_source_fact() -> None:
@@ -297,6 +311,10 @@ def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -
     assert "per-trade capital at risk" in text
     assert "deployed-fraction × stop" in text
     assert "low effective risk" in text  # the framing must name and forbid the bad reading
+    # The deployed-size = capital-at-risk principle must cover all sizing
+    # variants, not just fixed-fraction "% of the account".
+    assert "vol-target X%" in text
+    assert "fixed Y dollars" in text
     for phrase in ("mandatory", "hard rule", "hard-enforced"):
         assert phrase not in lowered, f"system prompt must not use forbidden phrasing {phrase!r}."
 

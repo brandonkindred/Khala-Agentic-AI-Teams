@@ -10,7 +10,7 @@ Sizing / risk: {sizing_rules}
 Rationale for testing: {rationale}
 
 ## How to read the sizing line
-"Sizing / risk" above (e.g. "risk 5% per trade") is the capital DEPLOYED into each position — a fraction of the account — and that deployed size IS the per-trade capital at risk and the per-trade loss cap; a position can lose up to ~100% of what it deploys, and capital committed to one position cannot enter another. Do NOT multiply the stop into the deployment (deployed-fraction × stop is wrong) and do NOT treat the stop as part of sizing. "Risk 5% per trade" with a 5% stop is NOT "0.25% per trade" — it is a 5% deployment with an optional within-position safeguard. Never explain returns by calling the deployment "low effective risk" or "little capital in play".
+"Sizing / risk" above is the capital DEPLOYED into each position, and that deployed size IS the per-trade capital at risk and the per-trade loss cap; a position can lose up to ~100% of what it deploys, and capital committed to one position cannot enter another. It renders by sizing rule: "risk X% per trade" deploys X% of the account; "vol-target X%" sizes the deployment dynamically to a target volatility (so the deployed fraction varies per trade); "$Y per trade" deploys a fixed Y dollars. Do NOT multiply the stop into the deployment (deployed-fraction × stop is wrong) and do NOT treat the stop as part of sizing — "risk 5% per trade" with a 5% stop is NOT "0.25% per trade", it is a 5% deployment with an optional within-position safeguard. Never derive a stop-multiplied "effective risk" figure or treat one as the capital in play; the deployed amount itself is the capital at risk.
 
 ## Aggregated backtest metrics
 Annualized return: {annualized_return_pct:.1f}%
