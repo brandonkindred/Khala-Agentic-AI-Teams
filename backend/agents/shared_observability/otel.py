@@ -198,14 +198,30 @@ def _build_span_exporter() -> Any:
         return None
 
 
+def _otlp_metrics_enabled() -> bool:
+    """True when OTLP metric export should be wired up.
+
+    Honors the standard ``OTEL_METRICS_EXPORTER`` selector: when set to
+    ``none`` we skip OTLP metric export entirely even if an OTLP endpoint is
+    configured. This lets a stack ship traces to an OTLP backend (e.g. Tempo,
+    which ingests traces only) while keeping metrics on a separate path —
+    Khala scrapes ``/metrics`` with Prometheus, so pushing OTLP metrics at a
+    traces-only collector would just 404 and spam the logs.
+    """
+    if os.environ.get("OTEL_METRICS_EXPORTER", "").strip().lower() == "none":
+        return False
+    return _otlp_endpoint_configured()
+
+
 def _build_metric_exporter() -> Any:
     """Pick an OTLP metric exporter based on OTEL_EXPORTER_OTLP_PROTOCOL.
 
-    Returns ``None`` when no OTLP endpoint is configured. Prometheus-based
+    Returns ``None`` when no OTLP endpoint is configured, or when OTLP metric
+    export is opted out via ``OTEL_METRICS_EXPORTER=none``. Prometheus-based
     stacks scrape ``/metrics`` directly, so OTLP metric export is redundant
-    there; see ``_otlp_endpoint_configured``.
+    there; see ``_otlp_endpoint_configured`` and ``_otlp_metrics_enabled``.
     """
-    if not _otlp_endpoint_configured():
+    if not _otlp_metrics_enabled():
         return None
     protocol = os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf").lower()
     try:

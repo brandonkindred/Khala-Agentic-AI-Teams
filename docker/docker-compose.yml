@@ -128,6 +128,10 @@ services:
       POSTGRES_PASSWORD: khala
       POSTGRES_DB: khala_jobs
       PYTHONUNBUFFERED: "1"
+      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
     extra_hosts:
       - "postgres:172.28.0.2"
     ports:
@@ -170,6 +174,10 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
+      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
       BLOG_PLANNING_MAX_ITERATIONS: ${BLOG_PLANNING_MAX_ITERATIONS:-5}
       BLOG_PLANNING_MAX_PARSE_RETRIES: ${BLOG_PLANNING_MAX_PARSE_RETRIES:-3}
       BLOG_PLANNING_MODEL: ${BLOG_PLANNING_MODEL:-}
@@ -218,6 +226,12 @@ services:
       JOB_SERVICE_URL: http://job-service:8085
       UNIFIED_API_BASE_URL: http://khala:8080
       AGENT_CACHE: /data/agents
+      # OpenTelemetry: export traces to the in-stack Tempo backend. Metrics stay
+      # on Prometheus scraping, so OTLP metric export is disabled. Override any of
+      # these via docker/.env to point at an external collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
       TEAM_MODULE: software_engineering_team.api.main
       TEAM_NAME: software_engineering_team
       TEAM_PORT: "8091"
@@ -498,6 +512,17 @@ services:
     networks:
       stack: { ipv4_address: 172.28.0.18, aliases: [investment-service] }
     restart: unless-stopped
+    # Strategy Lab market-data + backtest paths hold large datasets in memory; cap
+    # it so a runaway worker is OOM-killed predictably (docker records
+    # OOMKilled=true) instead of the host kernel picking a victim. The top-level
+    # mem_limit/mem_reservation mirror the deploy.resources values so the cap is
+    # enforced under plain `docker compose up` (non-swarm) too.
+    deploy:
+      resources:
+        limits: { memory: 8G }
+        reservations: { memory: 4G }
+    mem_limit: 8g
+    mem_reservation: 4g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 15s
@@ -596,10 +621,10 @@ services:
     # same pairing the unified-api service uses.
     deploy:
       resources:
-        limits: { memory: 2G }
-        reservations: { memory: 1G }
-    mem_limit: 2g
-    mem_reservation: 1g
+        limits: { memory: 4G }
+        reservations: { memory: 2G }
+    mem_limit: 4g
+    mem_reservation: 2g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
       interval: 15s
@@ -869,6 +894,10 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
       AGENT_CACHE: /data/agents
+      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
       # Knowledge-graph layer (Graphiti + Neo4j). NEO4J_BOLT_URL is the enablement
       # gate; it is always set in the stack so the graph layer is live.
       NEO4J_BOLT_URL: bolt://neo4j:7687
@@ -1046,6 +1075,33 @@ services:
       timeout: 5s
       retries: 5
 
+  # Tempo is the trace backend: every app container exports OTLP traces here
+  # (OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318). Grafana reads it back via the
+  # pre-provisioned "Tempo" datasource. Metrics are NOT sent here — they remain on
+  # Prometheus scraping (containers run OTEL_METRICS_EXPORTER=none).
+  tempo:
+    image: grafana/tempo:2.7.1
+    container_name: khala-stack-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    # The grafana/tempo image runs as uid 10001; uncomment if Tempo logs a
+    # permission error writing /var/tempo on first boot with a fresh volume.
+    # user: "0"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    networks:
+      stack: { ipv4_address: 172.28.0.22, aliases: [tempo] }
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3200/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   stack:
     name: khala-stack
@@ -1066,4 +1122,5 @@ volumes:
   agents_data:
   prometheus_data:
   grafana_data:
+  tempo_data:
   neo4j_data:

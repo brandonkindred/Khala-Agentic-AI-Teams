@@ -108,6 +108,30 @@ Exposes HTTP log endpoint.
 
 ---
 
+## Observability (OpenTelemetry)
+
+Every team microservice, the unified API, the blogging service, and the job
+service bootstrap OpenTelemetry via `shared_observability.init_otel`. Metrics are
+collected by Prometheus scraping `/metrics`; traces are exported over OTLP. See
+`backend/agents/shared_observability/README.md` for the full SDK-honored list.
+
+### OTEL_EXPORTER_OTLP_ENDPOINT
+OTLP collector endpoint for trace (and, unless disabled, metric) export. When
+unset, no exporter is built and spans are created but not shipped. The docker
+stack defaults this to the in-stack Grafana Tempo backend (`http://tempo:4318`);
+point it at any external collector to override.
+
+### OTEL_EXPORTER_OTLP_PROTOCOL
+`http/protobuf` (default) or `grpc`.
+
+### OTEL_METRICS_EXPORTER
+Standard OTel selector. Set to `none` to skip OTLP metric export while still
+exporting traces — the docker stack uses this so metrics stay on Prometheus
+scraping and aren't pushed at the traces-only Tempo backend. Any other value (or
+unset) leaves OTLP metric export gated on `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+---
+
 ## Blogging and Medium
 
 ### BLOGGING_RUN_ARTIFACTS_ROOT
