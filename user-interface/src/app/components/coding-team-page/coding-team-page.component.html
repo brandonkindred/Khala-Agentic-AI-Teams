@@ -71,7 +71,7 @@
     <section class="github-section kh-card">
       <div class="github-section__header">
         <h2>
-          <mat-icon>bug_report</mat-icon>
+          <mat-icon aria-hidden="true">bug_report</mat-icon>
           GitHub Issues
           <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
         </h2>
@@ -81,14 +81,14 @@
           (click)="loadIssues()"
           [disabled]="loadingIssues"
         >
-          <mat-icon>refresh</mat-icon>
+          <mat-icon aria-hidden="true">refresh</mat-icon>
           @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
         </button>
       </div>
 
       @if (issueError) {
-        <div class="github-banner github-banner--error">
-          <mat-icon>error_outline</mat-icon>
+        <div class="github-banner github-banner--error" role="alert">
+          <mat-icon aria-hidden="true">error_outline</mat-icon>
           <span>{{ issueError }}</span>
         </div>
       }
@@ -107,6 +107,7 @@
                 type="button"
                 [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
                 [attr.aria-expanded]="selectedIssue?.number === vm.number"
+                [attr.aria-selected]="selectedIssue?.number === vm.number"
                 [attr.aria-controls]="'confirm-panel-' + vm.number"
                 (click)="selectIssue(vm.issue)"
               >
@@ -117,7 +118,7 @@
                     class="github-label-chip github-label-chip--active"
                     matTooltip="The coding team is already working on this issue"
                   >
-                    <mat-icon>engineering</mat-icon>
+                    <mat-icon aria-hidden="true">engineering</mat-icon>
                     In progress
                   </span>
                 }
@@ -141,7 +142,7 @@
                     }
                   </span>
                 }
-                <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
+                <mat-icon class="github-issue-row__arrow" aria-hidden="true">chevron_right</mat-icon>
               </button>
 
               <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
@@ -157,7 +158,7 @@
                   }
                   @if (selectedIssue!.blocked) {
                     <div class="github-confirm-panel__warning" role="alert">
-                      <mat-icon>block</mat-icon>
+                      <mat-icon aria-hidden="true">block</mat-icon>
                       <div>
                         <strong>Blocked by open dependencies</strong>
                         <p>
@@ -183,7 +184,7 @@
                         Starting…
                       } @else {
                         <ng-container>
-                          <mat-icon>play_arrow</mat-icon>
+                          <mat-icon aria-hidden="true">play_arrow</mat-icon>
                           Confirm &amp; Start
                         </ng-container>
                       }
@@ -218,7 +219,7 @@
   <section class="jobs-panel kh-card">
     <div class="runs-panel__header">
       <h2>
-        <mat-icon>engineering</mat-icon>
+        <mat-icon aria-hidden="true">engineering</mat-icon>
         Runs
       </h2>
       <mat-icon
@@ -229,15 +230,15 @@
     </div>
 
     @if (runsError) {
-      <div class="github-banner github-banner--error">
-        <mat-icon>error_outline</mat-icon>
+      <div class="github-banner github-banner--error" role="alert">
+        <mat-icon aria-hidden="true">error_outline</mat-icon>
         <span>{{ runsError }}</span>
       </div>
     }
 
     @if (runs.length === 0) {
       <div class="kh-empty-state runs-panel__empty">
-        <mat-icon class="kh-empty-icon">rocket_launch</mat-icon>
+        <mat-icon class="kh-empty-icon" aria-hidden="true">rocket_launch</mat-icon>
         <span class="kh-empty-title">No runs yet</span>
         <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
       </div>
@@ -291,7 +292,7 @@
           } @else {
             <span class="kh-badge kh-badge--{{ vm.badgeClass }}">{{ vm.status }}</span>
           }
-          <mat-icon class="coding-run-item__chevron">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
+          <mat-icon class="coding-run-item__chevron" aria-hidden="true">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
         </div>
         @if (vm.detail) {
           <span class="coding-run-item__detail" [matTooltip]="vm.detail">
@@ -307,7 +308,7 @@
       @if (jobStatus) {
         <div class="run-detail" [id]="'run-detail-' + selectedRunId">
           <div class="run-detail__header">
-            <mat-icon>engineering</mat-icon>
+            <mat-icon aria-hidden="true">engineering</mat-icon>
             <h3>
               Working on issue
               @if (selectedIssueUrl) {
@@ -332,7 +333,7 @@
                 [matTooltip]="jobIdCopied ? 'Copied!' : 'Copy full job id'"
                 aria-label="Copy full job id"
               >
-                <mat-icon>{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
+                <mat-icon aria-hidden="true">{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
               </button>
             </div>
             <div class="github-job-panel__field">
@@ -371,7 +372,7 @@
             }
             @if (hasPendingQuestions()) {
               <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>help_outline</mat-icon>
+                <mat-icon aria-hidden="true">help_outline</mat-icon>
                 <span>The coding team is paused and needs your decisions before it can continue.</span>
               </div>
               <app-pending-questions
@@ -383,7 +384,7 @@
             }
             @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
               <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>play_circle_outline</mat-icon>
+                <mat-icon aria-hidden="true">play_circle_outline</mat-icon>
                 <span>Answers were received but the run could not restart automatically.</span>
                 <button
                   mat-flat-button
@@ -397,7 +398,7 @@
                     Resuming…
                   } @else {
                     <ng-container>
-                      <mat-icon>play_arrow</mat-icon>
+                      <mat-icon aria-hidden="true">play_arrow</mat-icon>
                       Resume Run
                     </ng-container>
                   }
@@ -408,7 +409,7 @@
               <mat-expansion-panel class="thinking-panel">
                 <mat-expansion-panel-header>
                   <mat-panel-title>
-                    <mat-icon>psychology</mat-icon>
+                    <mat-icon aria-hidden="true">psychology</mat-icon>
                     Agent thinking
                   </mat-panel-title>
                 </mat-expansion-panel-header>
@@ -417,7 +418,7 @@
             }
             @if (jobStatus.github_pr_url) {
               <div class="github-job-panel__field github-job-panel__field--pr">
-                <mat-icon>merge_type</mat-icon>
+                <mat-icon aria-hidden="true">merge_type</mat-icon>
                 <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
                   {{ jobStatus.github_pr_url }}
                 </a>
@@ -431,7 +432,7 @@
                     Starting…
                   } @else {
                     <ng-container>
-                      <mat-icon>replay</mat-icon>
+                      <mat-icon aria-hidden="true">replay</mat-icon>
                       Run again
                     </ng-container>
                   }
@@ -439,11 +440,18 @@
               </div>
             }
             @if (jobStatus.error) {
-              <div class="github-banner github-banner--error">
-                <mat-icon>error_outline</mat-icon>
+              <div class="github-banner github-banner--error" role="alert">
+                <mat-icon aria-hidden="true">error_outline</mat-icon>
                 <span>{{ jobStatus.error }}</span>
               </div>
             }
+          </div>
+        </div>
+      } @else if (jobStatusError) {
+        <div class="run-detail run-detail--error">
+          <div class="github-banner github-banner--error" role="alert">
+            <mat-icon aria-hidden="true">error_outline</mat-icon>
+            <span>{{ jobStatusError }}</span>
           </div>
         </div>
       } @else {

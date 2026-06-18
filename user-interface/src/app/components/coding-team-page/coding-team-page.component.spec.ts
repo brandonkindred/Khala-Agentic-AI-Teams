@@ -997,6 +997,18 @@ describe('CodingTeamPageComponent', () => {
       expect(apiSpy.getJobStatus).toHaveBeenCalledWith('r9');
     });
 
+    it('selectRun clears selectedRunNumber when the chosen run carries no issue number', async () => {
+      await setup();
+      // A run present in `runs` but missing github_context (defensive: the list is normally
+      // pre-filtered to issue-bearing runs) must not leave a previous run's number stale.
+      component.runs = [{ job_id: 'no-issue', status: 'running' } as CodingTeamJobListItem];
+      component.selectedRunNumber = 5;
+      component.selectRun('no-issue');
+      expect(component.selectedRunId).toBe('no-issue');
+      expect(component.selectedRunNumber).toBeNull();
+      component['stopPolling']();
+    });
+
     it('a stale snapshot cannot wipe the chip of a just-started, still-running run', async () => {
       await setup();
       component.selectedRunId = 'mine';
@@ -1124,6 +1136,8 @@ describe('CodingTeamPageComponent', () => {
         await vi.advanceTimersByTimeAsync(5000);
         await vi.advanceTimersByTimeAsync(5000);
         expect(component.issueError).toBe('Lost connection to the coding team — status polling failed.');
+        // The run detail surfaces the same error instead of an indefinite "Starting…" spinner.
+        expect(component.jobStatusError).toBe('Lost connection to the coding team — status polling failed.');
         // The poller tore down its own timer once the error budget was exhausted.
         expect(component['pollSub']?.closed).toBe(true);
       } finally {

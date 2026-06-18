@@ -183,6 +183,13 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     this.jobStatusTerminal = isCodingTeamTerminalStatus(status?.status);
   }
 
+  /**
+   * Set when the selected run's status poll gives up, so the detail panel shows an error instead of
+   * an indefinite "Starting…" spinner when the very first status never arrives. Cleared whenever a
+   * fresh poll starts (new selection or resubmitted answers).
+   */
+  jobStatusError: string | null = null;
+
   /** True while a manual resume POST is in flight (drives a spinner on the Resume button). */
   resumingJob = false;
   /** True for a short window after the job id is copied, to flip the copy icon to a check. */
@@ -543,6 +550,8 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
     const active = runs.filter((r) => !isCodingTeamTerminalStatus(r.status));
     if (active.length === 0) return;
     const waiting = active.find((r) => r.waiting_for_answers);
+    // ISO-8601 timestamps sort lexicographically in chronological order, so localeCompare picks the
+    // most recently updated run without parsing dates.
     const pick =
       waiting ??
       active.reduce((best, j) =>
@@ -557,19 +566,22 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
    * Preconditions: `jobId` is a coding-team job id; when it is a row in `runs` it carries a
    * `github_context.issue_number` (the list is pre-filtered to issue-bearing runs).
    * Postconditions: a no-op when `jobId` is already selected; otherwise `selectedRunId` is `jobId`,
-   * `selectedRunNumber` is updated from the matching run when present (left untouched when the run is
-   * not yet in `runs`, e.g. just started), `jobStatus`/`issueError` are cleared, and status polling
-   * for `jobId` is (re)started.
+   * `selectedRunNumber` is taken from the matching run when it is in `runs` (its issue number, or null
+   * if the run somehow lacks one — the list is pre-filtered to issue-bearing runs, so this is a
+   * defensive fallback), and left untouched when the run is not yet in `runs` (e.g. just started, so
+   * the caller's pre-set number survives); `jobStatus`/`issueError`/`jobStatusError` are cleared, and
+   * status polling for `jobId` is (re)started.
    */
   selectRun(jobId: string): void {
     if (this.selectedRunId === jobId) return;
     this.selectedRunId = jobId;
     const run = this.runs.find((r) => r.job_id === jobId);
-    if (run?.github_context?.issue_number != null) {
-      this.selectedRunNumber = run.github_context.issue_number;
+    if (run) {
+      this.selectedRunNumber = run.github_context?.issue_number ?? null;
     }
     this.jobStatus = null;
     this.issueError = null;
+    this.jobStatusError = null;
     this.startPolling(jobId);
   }
 
@@ -591,6 +603,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       // lingering selectedRunNumber would re-flag a deselected (and possibly finished) issue.
       this.selectedRunNumber = null;
       this.jobStatus = null;
+      this.jobStatusError = null;
       return;
     }
     this.selectRun(run.job_id);
@@ -725,6 +738,7 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       this.jobStatus = status as CodingTeamJobStatus;
     }
     this.issueError = null;
+    this.jobStatusError = null;
     if (this.selectedRunId) {
       this.startPolling(this.selectedRunId);
     }
@@ -780,7 +794,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
         }
       },
       () => {
+        // The status poll gave up: surface it on the page banner and in the run detail, so a
+        // never-arriving first status shows an error instead of a perpetual "Starting…" spinner.
         this.issueError = 'Lost connection to the coding team — status polling failed.';
+        this.jobStatusError = this.issueError;
       },
     );
   }
