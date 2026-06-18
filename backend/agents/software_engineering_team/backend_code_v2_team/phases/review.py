@@ -185,7 +185,11 @@ def _run_chunked_agent_review(
                     source=source,
                     severity=getattr(item, "severity", default_severity),
                     description=getattr(item, "description", str(item)),
-                    file_path=getattr(item, "location", getattr(item, "file_path", "")),
+                    # `location` may be present but None; fall back to file_path
+                    # (and "") so file_path is always a string, never None.
+                    file_path=getattr(item, "location", None)
+                    or getattr(item, "file_path", None)
+                    or "",
                     recommendation=getattr(item, "recommendation", ""),
                 )
             )

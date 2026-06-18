@@ -284,6 +284,8 @@ def test_fe_run_review_with_security_agent(monkeypatch, tmp_path: Path):
 
 
 class _Bug:
+    """Mock QA finding (a bug) for the chunked-review tests."""
+
     severity = "low"
     description = "real bug"
     location = "big.py"
@@ -291,6 +293,8 @@ class _Bug:
 
 
 class _Vuln:
+    """Mock security finding (a vulnerability) for the chunked-review tests."""
+
     severity = "high"
     description = "real vuln"
     location = "big.py"
@@ -298,10 +302,25 @@ class _Vuln:
 
 
 def _big_source() -> str:
-    """A single file larger than one QA/security prompt budget."""
+    """A single file larger than one QA/security prompt budget.
+
+    Grows whole functions until the source exceeds MAX_REVIEW_CODE_CHARS, so the
+    test adapts automatically if that constant changes. The source begins with
+    fn_0000 (head) and ends with a fn_tail sentinel (tail); tests assert both
+    survive chunking, proving neither end is dropped.
+    """
     from software_engineering_team.frontend_code_v2_team.phases.review import MAX_REVIEW_CODE_CHARS
 
-    big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
+    lines: list[str] = []
+    total = 0
+    i = 0
+    while total <= MAX_REVIEW_CODE_CHARS:
+        fn = f"def fn_{i:04d}():\n    return {i}"
+        lines.append(fn)
+        total += len(fn) + 1  # +1 for the joining newline
+        i += 1
+    lines.append("def fn_tail():\n    return -1")
+    big = "\n".join(lines)
     assert len(big) > MAX_REVIEW_CODE_CHARS  # forces more than one chunk
     return big
 
@@ -329,12 +348,13 @@ def test_fe_run_qa_agent_chunks_large_input_without_dropping_tail():
     assert len(codes) > 1  # one QA call per chunk, not a single truncated call
     joined = "\n".join(codes)
     assert "fn_0000" in joined  # head reviewed
-    assert "fn_2499" in joined  # tail reviewed — old 60K cap dropped this
+    assert "fn_tail" in joined  # tail reviewed — old 60K cap dropped this
     assert len(issues) == len(codes)
     assert all(i.source == "qa" for i in issues)
 
 
 def test_fe_run_qa_agent_skips_failing_chunk_keeps_others(monkeypatch):
+    """A chunk whose QA call raises is skipped; issues from the others survive."""
     from software_engineering_team.frontend_code_v2_team.phases import review as review_mod
     from software_engineering_team.frontend_code_v2_team.phases.review import _run_qa_agent
 
@@ -384,7 +404,7 @@ def test_fe_run_security_agent_chunks_large_input_without_dropping_tail():
     assert len(codes) > 1
     joined = "\n".join(codes)
     assert "fn_0000" in joined  # head reviewed
-    assert "fn_2499" in joined  # tail reviewed
+    assert "fn_tail" in joined  # tail reviewed
     assert len(issues) == len(codes)
     assert all(i.source == "security" for i in issues)
 
