@@ -12,22 +12,28 @@ orchestration so it lives in one place; each team passes in its own
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, TypeVar
+
+from software_engineering_team.shared.models import Task
 
 logger = logging.getLogger(__name__)
+
+# The two V2 teams each own a distinct ``ReviewIssue`` type, so the helper is
+# generic over whatever the caller's ``issue_factory`` produces.
+IssueT = TypeVar("IssueT")
 
 
 def run_llm_review(
     *,
-    task: Any,
+    task: Task,
     files: Dict[str, str],
     prompt_template: str,
     parse_template: Callable[[str], Dict[str, Any]],
-    issue_factory: Callable[..., Any],
+    issue_factory: Callable[..., IssueT],
     invoke_model: Callable[[str], str],
     max_chars: int,
     warn_threshold: int,
-) -> List[Any]:
+) -> List[IssueT]:
     """LLM-based code review when no external review agent is available.
 
     Preconditions:
@@ -36,6 +42,10 @@ def run_llm_review(
           and ``code`` format fields.
         - ``parse_template`` returns a dict that may contain an ``"issues"`` list
           of dicts.
+        - ``issue_factory`` is a callable accepting keyword arguments ``source``,
+          ``severity``, ``description``, ``file_path``, and ``recommendation``
+          (e.g. each team's ``ReviewIssue``); an incompatible factory raises
+          ``TypeError``.
         - ``invoke_model`` runs one prompt through the team's LLM and returns the
           raw text response.
         - ``max_chars`` > 0 and ``warn_threshold`` >= 0.
@@ -51,8 +61,9 @@ def run_llm_review(
           the whole review).
         - Small inputs are reviewed in a single call, as before.
     """
-    # Imported lazily, fully-qualified, to match the V2 teams' existing
-    # convention for code_review_agent imports and to avoid assuming the
+    # Imported lazily (not at module level) so importing this helper does not
+    # pull in the whole code_review_agent package; this also matches the V2
+    # teams' existing convention and avoids assuming the
     # software_engineering_team package dir is itself on sys.path.
     from software_engineering_team.code_review_agent.coordinator import build_review_chunks
 
@@ -71,7 +82,7 @@ def run_llm_review(
         )
     else:
         logger.debug("LLM code review: %d chunk(s) for %d file(s)", len(chunks), len(blocks))
-    issues: List[Any] = []
+    issues: List[IssueT] = []
     for idx, chunk in enumerate(chunks, start=1):
         logger.debug("LLM code review: reviewing chunk %d/%d", idx, len(chunks))
         prompt = prompt_template.format(

@@ -7,6 +7,7 @@ helper is tested in isolation from any one team's models.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 from software_engineering_team.shared.llm_review import run_llm_review
@@ -93,9 +94,10 @@ def test_run_llm_review_skips_blank_files():
     assert calls["n"] == 0
 
 
-def test_run_llm_review_chunks_large_file_and_skips_failing_chunk():
+def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
     """A too-large file is split into function-aware chunks (tail not dropped);
-    a chunk whose invoke raises is skipped while the others' issues survive."""
+    a chunk whose invoke raises is skipped while the others' issues survive, and
+    crossing warn_threshold emits a WARNING."""
     prompts: list[str] = []
     calls = {"n": 0}
 
@@ -109,16 +111,17 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk():
     big = "\n".join(f"def fn_{i:04d}():\n    return {i}" for i in range(2500))
     assert len(big) > 60_000  # forces more than one chunk
 
-    issues = run_llm_review(
-        task=_task(),
-        files={"big.py": big},
-        prompt_template=_PROMPT,
-        parse_template=_parse_one_issue,
-        issue_factory=_Issue,
-        invoke_model=invoke,
-        max_chars=60_000,
-        warn_threshold=0,  # exercise the many-chunks warning path
-    )
+    with caplog.at_level(logging.WARNING, logger="software_engineering_team.shared.llm_review"):
+        issues = run_llm_review(
+            task=_task(),
+            files={"big.py": big},
+            prompt_template=_PROMPT,
+            parse_template=_parse_one_issue,
+            issue_factory=_Issue,
+            invoke_model=invoke,
+            max_chars=60_000,
+            warn_threshold=0,  # exercise the many-chunks warning path
+        )
 
     assert calls["n"] > 1  # every chunk attempted
     joined = "\n".join(prompts)
@@ -126,3 +129,8 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk():
     assert "fn_2499" in joined  # tail reviewed, not truncated
     # First chunk raised; remaining chunks each yield one parsed issue.
     assert len(issues) == calls["n"] - 1
+    # The many-chunks warning fired because chunk count exceeded warn_threshold=0.
+    assert any(
+        rec.levelno == logging.WARNING and "large review" in rec.getMessage()
+        for rec in caplog.records
+    )
