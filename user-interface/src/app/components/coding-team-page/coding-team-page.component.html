@@ -17,87 +17,328 @@
 </div>
 
 <!-- ────────────────────────────────────────────────────────────────── -->
-<!-- GitHub Issues Workflow                                             -->
+<!-- View switcher — one focused view at a time                         -->
 <!-- ────────────────────────────────────────────────────────────────── -->
-@if (loadingConfig) {
-  <div class="github-section github-section--loading">
-    <mat-spinner diameter="24"></mat-spinner>
-    <span>Checking GitHub integration…</span>
-  </div>
-} @else if (!githubConfigured) {
-  <div class="github-section github-section--unconfigured">
-    <mat-icon>info</mat-icon>
-    <span>
-      GitHub integration is not configured.
-      <a routerLink="/integrations">Set up GitHub</a> to browse issues and start AI-driven coding.
-    </span>
-  </div>
-} @else {
-  <section class="github-section">
-    <div class="github-section__header">
+<mat-button-toggle-group class="view-toggle" [(value)]="activeView" aria-label="Coding Team view">
+  <mat-button-toggle value="chat" matTooltip="Chat with the Coding Team assistant">
+    <mat-icon>smart_toy</mat-icon>
+    <span class="toggle-label">Chat</span>
+  </mat-button-toggle>
+  <mat-button-toggle value="github" matTooltip="Browse GitHub issues and start a run">
+    <mat-icon>bug_report</mat-icon>
+    <span class="toggle-label">GitHub</span>
+  </mat-button-toggle>
+  <mat-button-toggle value="jobs" matTooltip="Track run progress">
+    <mat-icon>engineering</mat-icon>
+    <span class="toggle-label">Jobs</span>
+  </mat-button-toggle>
+</mat-button-toggle-group>
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- CHAT view — Coding Team Assistant + queued-job banner              -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (activeView === 'chat') {
+  <app-team-assistant-chat
+    [teamApiUrl]="teamApiUrl"
+    [teamName]="chatTeamName"
+    [teamDescription]="chatTeamDescription"
+    [fields]="chatFields"
+    (workflowLaunched)="onWorkflowLaunched($event)"
+  />
+  @if (latestJobId) {
+    <p class="launched-banner">Coding job queued — id <code>{{ latestJobId }}</code>.</p>
+  }
+}
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- GITHUB view — browse issues and start runs (full width)            -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (activeView === 'github') {
+  @if (isLoadingConfig) {
+    <div class="github-section github-section--loading">
+      <mat-spinner diameter="24"></mat-spinner>
+      <span>Checking GitHub integration…</span>
+    </div>
+  } @else if (!githubConfigured) {
+    <div class="github-section github-section--unconfigured">
+      <mat-icon>info</mat-icon>
+      <span>
+        GitHub integration is not configured.
+        <a routerLink="/integrations">Set up GitHub</a> to browse issues and start AI-driven coding.
+      </span>
+    </div>
+  } @else {
+    <section class="github-section kh-card">
+      <div class="github-section__header">
+        <h2>
+          <mat-icon aria-hidden="true">bug_report</mat-icon>
+          GitHub Issues
+          <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+        </h2>
+        <button
+          mat-flat-button
+          color="primary"
+          (click)="loadIssues()"
+          [disabled]="loadingIssues"
+        >
+          <mat-icon aria-hidden="true">refresh</mat-icon>
+          @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
+        </button>
+      </div>
+
+      @if (issueError) {
+        <div class="github-banner github-banner--error" role="alert">
+          <mat-icon aria-hidden="true">error_outline</mat-icon>
+          <span>{{ issueError }}</span>
+        </div>
+      }
+
+      @if (issuesLoaded) {
+        @if (issues.length === 0) {
+          <div class="github-empty">
+            <mat-icon>check_circle_outline</mat-icon>
+            <span>No open issues found.</span>
+          </div>
+        } @else {
+          <div class="github-issues-list">
+            @for (vm of pagedIssueVms; track vm.number) {
+              <button
+                class="github-issue-row"
+                type="button"
+                [class.github-issue-row--selected]="selectedIssue?.number === vm.number"
+                [attr.aria-expanded]="selectedIssue?.number === vm.number"
+                [attr.aria-selected]="selectedIssue?.number === vm.number"
+                [attr.aria-controls]="'confirm-panel-' + vm.number"
+                (click)="selectIssue(vm.issue)"
+              >
+                <span class="github-issue-row__number">#{{ vm.number }}</span>
+                <span class="github-issue-row__title" [matTooltip]="vm.title">{{ vm.title }}</span>
+                @if (vm.inProgress) {
+                  <span
+                    class="github-label-chip github-label-chip--active"
+                    matTooltip="The coding team is already working on this issue"
+                  >
+                    <mat-icon aria-hidden="true">engineering</mat-icon>
+                    In progress
+                  </span>
+                }
+                <span class="github-issue-row__labels">
+                  @for (label of vm.labels; track label) {
+                    <span class="github-label-chip">{{ label }}</span>
+                  }
+                </span>
+                @if (vm.hasDeps) {
+                  <span
+                    class="github-issue-row__deps"
+                    role="img"
+                    [class.github-issue-row__deps--blocked]="vm.blocked"
+                    [class.github-issue-row__deps--met]="!vm.blocked"
+                    [matTooltip]="vm.depsTooltip"
+                    [attr.aria-label]="vm.depsTooltip"
+                  >
+                    <mat-icon aria-hidden="true">{{ vm.blocked ? 'block' : 'account_tree' }}</mat-icon>
+                    @if (vm.blocked) {
+                      <span class="github-issue-row__deps-count">{{ vm.openDepsCount }}</span>
+                    }
+                  </span>
+                }
+                <mat-icon class="github-issue-row__arrow" aria-hidden="true">chevron_right</mat-icon>
+              </button>
+
+              <!-- Inline confirmation — expands under the selected row; the list stays visible. -->
+              @if (selectedIssue?.number === vm.number) {
+                <div class="github-confirm-panel" [id]="'confirm-panel-' + vm.number">
+                  <h3>Start AI coding on this issue?</h3>
+                  <div class="github-confirm-panel__issue">
+                    <span class="issue-number">#{{ vm.number }}</span>
+                    <span class="issue-title">{{ vm.title }}</span>
+                  </div>
+                  @if (vm.issue.body_preview) {
+                    <p class="github-confirm-panel__preview">{{ vm.issue.body_preview }}</p>
+                  }
+                  @if (vm.blocked) {
+                    <div class="github-confirm-panel__warning" role="alert">
+                      <mat-icon aria-hidden="true">block</mat-icon>
+                      <div>
+                        <strong>Blocked by open dependencies</strong>
+                        <p>
+                          This issue depends on {{ selectedIssueOpenDepsText }}, which are still open.
+                          The coding team will attempt the run, but GitHub may reject it until those
+                          issues are closed.
+                        </p>
+                      </div>
+                    </div>
+                  }
+                  <p class="github-confirm-panel__hint">
+                    The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
+                  </p>
+                  <div class="github-confirm-panel__actions">
+                    <button
+                      mat-flat-button
+                      color="primary"
+                      (click)="confirmAndRun()"
+                      [disabled]="runningIssue"
+                    >
+                      @if (runningIssue) {
+                        <mat-spinner diameter="18"></mat-spinner>
+                        Starting…
+                      } @else {
+                        <ng-container>
+                          <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                          Confirm &amp; Start
+                        </ng-container>
+                      }
+                    </button>
+                    <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
+                  </div>
+                </div>
+              }
+            }
+          </div>
+          @if (issues.length > paginatorThreshold) {
+            <mat-paginator
+              class="github-issues-paginator"
+              [length]="issues.length"
+              [pageSize]="pageSize"
+              [pageIndex]="pageIndex"
+              [pageSizeOptions]="PAGE_SIZE_OPTIONS"
+              showFirstLastButtons
+              (page)="onPageChange($event)"
+            ></mat-paginator>
+          }
+        }
+      }
+    </section>
+  }
+}
+
+<!-- ────────────────────────────────────────────────────────────────── -->
+<!-- JOBS view — accordion list; selecting a run expands its progress   -->
+<!-- ────────────────────────────────────────────────────────────────── -->
+@if (activeView === 'jobs') {
+  <section class="jobs-panel kh-card">
+    <div class="jobs-panel__header">
       <h2>
-        <mat-icon>bug_report</mat-icon>
-        GitHub Issues
-        <span class="github-section__repo">{{ githubOwner }}/{{ githubRepo }}</span>
+        <mat-icon aria-hidden="true">engineering</mat-icon>
+        Runs
       </h2>
-      <button
-        mat-flat-button
-        color="primary"
-        (click)="loadIssues()"
-        [disabled]="loadingIssues"
-      >
-        <mat-icon>refresh</mat-icon>
-        @if (loadingIssues) { Loading… } @else if (issuesLoaded) { Refresh } @else { Load issues }
-      </button>
+      <mat-icon
+        class="jobs-panel__legend"
+        matTooltip="Runs stay here while they work and after they finish. Pick a run to expand its live progress."
+        aria-label="About the Runs list"
+      >help_outline</mat-icon>
     </div>
 
-    @if (issueError) {
-      <div class="github-banner github-banner--error">
-        <mat-icon>error_outline</mat-icon>
-        <span>{{ issueError }}</span>
+    @if (runsError) {
+      <div class="github-banner github-banner--error" role="alert">
+        <mat-icon aria-hidden="true">error_outline</mat-icon>
+        <span>{{ runsError }}</span>
       </div>
     }
 
-    <!-- Active job status -->
-    @if (activeJob) {
-      <div class="github-job-panel">
-        <div class="github-job-panel__header">
-          <mat-icon>engineering</mat-icon>
-          <h3>
-            Working on issue
-            @if (activeJob.issue_url) {
-              <a [href]="activeJob.issue_url" target="_blank" rel="noopener noreferrer">#{{ activeJob.issue_number }}</a>
-            } @else {
-              #{{ activeJob.issue_number }}
+    @if (runs.length === 0) {
+      <div class="kh-empty-state jobs-panel__empty">
+        <mat-icon class="kh-empty-icon" aria-hidden="true">rocket_launch</mat-icon>
+        <span class="kh-empty-title">No runs yet</span>
+        <span class="kh-empty-message">Open the GitHub view, pick an issue, and start a run to watch live progress here.</span>
+      </div>
+    } @else {
+      @if (runningRunVms.length > 0) {
+        <div class="runs-section">
+          <p class="runs-section__title">Running</p>
+          <div class="runs-list">
+            @for (vm of runningRunVms; track vm.run.job_id) {
+              <ng-container [ngTemplateOutlet]="runRow" [ngTemplateOutletContext]="{ $implicit: vm }"></ng-container>
+              @if (selectedRunId === vm.run.job_id) {
+                <ng-container [ngTemplateOutlet]="runDetail"></ng-container>
+              }
             }
-          </h3>
-          @if (jobStatus?.waiting_for_answers) {
-            <span class="github-job-status github-job-status--waiting_for_user">
-              waiting for your answers
-            </span>
-          }
-          <button
-            mat-button
-            (click)="dismissJob()"
-            [disabled]="hasPendingQuestions()"
-            [matTooltip]="hasPendingQuestions() ? 'Answer the pending questions to continue — this run can\'t be dismissed while waiting' : isJobTerminal() ? 'Dismiss this finished job' : 'Hide this panel — the run keeps going in the background'"
-          >
-            <mat-icon>close</mat-icon>
-            Dismiss
-          </button>
-        </div>
-
-        <div class="github-job-panel__body">
-          <div class="github-job-panel__field">
-            <span class="github-job-panel__label">Job</span>
-            <code>{{ activeJob.job_id | slice:0:12 }}…</code>
           </div>
-          @if (jobStatus) {
+        </div>
+      }
+
+      @if (recentRunVms.length > 0) {
+        <div class="runs-section">
+          @if (runningRunVms.length > 0) {
+            <div class="runs-divider"></div>
+          }
+          <p class="runs-section__title">Recent</p>
+          <div class="runs-list">
+            @for (vm of recentRunVms; track vm.run.job_id) {
+              <ng-container [ngTemplateOutlet]="runRow" [ngTemplateOutletContext]="{ $implicit: vm }"></ng-container>
+              @if (selectedRunId === vm.run.job_id) {
+                <ng-container [ngTemplateOutlet]="runDetail"></ng-container>
+              }
+            }
+          </div>
+        </div>
+      }
+    }
+
+    <!-- Shared run row (bound to a precomputed view-model) used by both lists. Clicking toggles its detail. -->
+    <ng-template #runRow let-vm>
+      <button
+        class="coding-run-item"
+        type="button"
+        [class.selected]="selectedRunId === vm.run.job_id"
+        [attr.aria-expanded]="selectedRunId === vm.run.job_id"
+        [attr.aria-controls]="'run-detail-' + vm.run.job_id"
+        (click)="toggleRun(vm.run)"
+      >
+        <div class="coding-run-item__top">
+          <span class="coding-run-item__issue">#{{ vm.issueNumber }}</span>
+          @if (vm.waiting) {
+            <span class="kh-badge kh-badge--warning">needs answers</span>
+          } @else {
+            <span class="kh-badge kh-badge--{{ vm.badgeClass }}">{{ vm.status }}</span>
+          }
+          <mat-icon class="coding-run-item__chevron" aria-hidden="true">{{ selectedRunId === vm.run.job_id ? 'expand_less' : 'expand_more' }}</mat-icon>
+        </div>
+        @if (vm.detail) {
+          <span class="coding-run-item__detail" [matTooltip]="vm.detail">
+            {{ vm.detail }}
+          </span>
+        }
+        <span class="coding-run-item__time">{{ vm.timeAgo }}</span>
+      </button>
+    </ng-template>
+
+    <!-- The selected run's live progress, expanded inline beneath its row. -->
+    <ng-template #runDetail>
+      @if (jobStatus) {
+        <div class="run-detail" [id]="'run-detail-' + selectedRunId">
+          <div class="run-detail__header">
+            <mat-icon aria-hidden="true">engineering</mat-icon>
+            <h3>
+              Working on issue
+              @if (selectedIssueUrl) {
+                <a [href]="selectedIssueUrl" target="_blank" rel="noopener noreferrer">#{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}</a>
+              } @else {
+                #{{ jobStatus.github_context?.issue_number ?? selectedRunNumber }}
+              }
+            </h3>
+            @if (jobStatus.waiting_for_answers) {
+              <span class="kh-badge kh-badge--warning">waiting for answers</span>
+            }
+          </div>
+
+          <div class="run-detail__body">
+            <div class="github-job-panel__field">
+              <span class="github-job-panel__label">Job</span>
+              <code>{{ jobStatus.job_id | slice:0:12 }}…</code>
+              <button
+                mat-icon-button
+                class="run-detail__copy"
+                (click)="copyJobId()"
+                [matTooltip]="jobIdCopied ? 'Copied!' : 'Copy full job id'"
+                aria-label="Copy full job id"
+              >
+                <mat-icon aria-hidden="true">{{ jobIdCopied ? 'check' : 'content_copy' }}</mat-icon>
+              </button>
+            </div>
             <div class="github-job-panel__field">
               <span class="github-job-panel__label">Status</span>
-              <span class="github-job-status github-job-status--{{ jobStatus.status }}">
-                {{ jobStatus.status }}
-              </span>
+              <span class="kh-badge kh-badge--{{ jobStatusBadgeClass }}">{{ jobStatus.status }}</span>
             </div>
             @if (jobStatus.phase) {
               <div class="github-job-panel__field">
@@ -121,7 +362,7 @@
                 <span class="github-job-panel__label">Tasks</span>
                 <div class="github-job-tasks__list">
                   @for (task of jobStatus.task_graph_snapshot; track task.id) {
-                    <div class="github-task-chip github-task-chip--{{ task.status }}">
+                    <div class="github-task-chip github-task-chip--{{ task.status }}" [matTooltip]="task.title">
                       {{ task.title | slice:0:40 }}
                       <span class="github-task-chip__status">{{ task.status }}</span>
                     </div>
@@ -129,13 +370,13 @@
                 </div>
               </div>
             }
-            @if (hasPendingQuestions()) {
+            @if (jobStatusHasPendingQuestions) {
               <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>help_outline</mat-icon>
+                <mat-icon aria-hidden="true">help_outline</mat-icon>
                 <span>The coding team is paused and needs your decisions before it can continue.</span>
               </div>
               <app-pending-questions
-                [jobId]="activeJob.job_id"
+                [jobId]="selectedRunId!"
                 [questions]="jobStatus.pending_questions!"
                 submitEndpoint="coding-team"
                 (answersSubmitted)="onAnswersSubmitted($event)"
@@ -143,7 +384,7 @@
             }
             @if (jobStatus.status === 'waiting_for_user' && !jobStatus.waiting_for_answers) {
               <div class="github-banner github-banner--waiting" role="status">
-                <mat-icon>play_circle_outline</mat-icon>
+                <mat-icon aria-hidden="true">play_circle_outline</mat-icon>
                 <span>Answers were received but the run could not restart automatically.</span>
                 <button
                   mat-flat-button
@@ -156,17 +397,19 @@
                     <mat-spinner diameter="18"></mat-spinner>
                     Resuming…
                   } @else {
-                    <mat-icon>play_arrow</mat-icon>
-                    Resume Run
+                    <ng-container>
+                      <mat-icon aria-hidden="true">play_arrow</mat-icon>
+                      Resume Run
+                    </ng-container>
                   }
                 </button>
               </div>
             }
             @if (jobStatus.thinking) {
-              <mat-expansion-panel class="thinking-panel" [expanded]="true">
+              <mat-expansion-panel class="thinking-panel">
                 <mat-expansion-panel-header>
                   <mat-panel-title>
-                    <mat-icon>psychology</mat-icon>
+                    <mat-icon aria-hidden="true">psychology</mat-icon>
                     Agent thinking
                   </mat-panel-title>
                 </mat-expansion-panel-header>
@@ -175,155 +418,48 @@
             }
             @if (jobStatus.github_pr_url) {
               <div class="github-job-panel__field github-job-panel__field--pr">
-                <mat-icon>merge_type</mat-icon>
+                <mat-icon aria-hidden="true">merge_type</mat-icon>
                 <a [href]="jobStatus.github_pr_url" target="_blank" rel="noopener">
                   {{ jobStatus.github_pr_url }}
                 </a>
               </div>
             }
+            @if (jobStatusTerminal) {
+              <div class="run-detail__retry">
+                <button mat-stroked-button (click)="retrySelectedRun()" [disabled]="runningIssue">
+                  @if (runningIssue) {
+                    <mat-spinner diameter="18"></mat-spinner>
+                    Starting…
+                  } @else {
+                    <ng-container>
+                      <mat-icon aria-hidden="true">replay</mat-icon>
+                      Run again
+                    </ng-container>
+                  }
+                </button>
+              </div>
+            }
             @if (jobStatus.error) {
-              <div class="github-banner github-banner--error">
-                <mat-icon>error_outline</mat-icon>
+              <div class="github-banner github-banner--error" role="alert">
+                <mat-icon aria-hidden="true">error_outline</mat-icon>
                 <span>{{ jobStatus.error }}</span>
               </div>
             }
-          } @else {
-            <div class="github-job-panel__field">
-              <mat-spinner diameter="18"></mat-spinner>
-              <span>Starting…</span>
-            </div>
-          }
-        </div>
-      </div>
-    }
-
-    <!-- Issue confirmation -->
-    @if (selectedIssue && !activeJob) {
-      <div class="github-confirm-panel">
-        <h3>Start AI coding on this issue?</h3>
-        <div class="github-confirm-panel__issue">
-          <span class="issue-number">#{{ selectedIssue.number }}</span>
-          <span class="issue-title">{{ selectedIssue.title }}</span>
-        </div>
-        @if (selectedIssue.body_preview) {
-          <p class="github-confirm-panel__preview">{{ selectedIssue.body_preview }}</p>
-        }
-        @if (selectedIssue.blocked) {
-          <div class="github-confirm-panel__warning" role="alert">
-            <mat-icon>block</mat-icon>
-            <div>
-              <strong>Blocked by open dependencies</strong>
-              <p>
-                This issue depends on {{ openDepRefs(selectedIssue) }}, which are still open.
-                The coding team will attempt the run, but GitHub may reject it until those
-                issues are closed.
-              </p>
-            </div>
           </div>
-        }
-        <p class="github-confirm-panel__hint">
-          The coding team will analyze the issue, write code, run quality gates, and open a draft PR when satisfied.
-        </p>
-        <div class="github-confirm-panel__actions">
-          <button
-            mat-flat-button
-            color="primary"
-            (click)="confirmAndRun()"
-            [disabled]="runningIssue"
-          >
-            @if (runningIssue) {
-              <mat-spinner diameter="18"></mat-spinner>
-              Starting…
-            } @else {
-              <ng-container>
-                <mat-icon>play_arrow</mat-icon>
-                Confirm &amp; Start
-              </ng-container>
-            }
-          </button>
-          <button mat-stroked-button (click)="cancelSelection()">Cancel</button>
         </div>
-      </div>
-    }
-
-    <!-- Issue list -->
-    @if (issuesLoaded && !selectedIssue && !activeJob) {
-      @if (issues.length === 0) {
-        <div class="github-empty">
-          <mat-icon>check_circle_outline</mat-icon>
-          <span>No open issues found.</span>
+      } @else if (jobStatusError) {
+        <div class="run-detail run-detail--error">
+          <div class="github-banner github-banner--error" role="alert">
+            <mat-icon aria-hidden="true">error_outline</mat-icon>
+            <span>{{ jobStatusError }}</span>
+          </div>
         </div>
       } @else {
-        <div class="github-issues-list">
-          @for (issue of pagedIssues; track issue.number) {
-            <button
-              class="github-issue-row"
-              type="button"
-              (click)="selectIssue(issue)"
-            >
-              <span class="github-issue-row__number">#{{ issue.number }}</span>
-              <span class="github-issue-row__title">{{ issue.title }}</span>
-              @if (isIssueInProgress(issue)) {
-                <span
-                  class="github-label-chip github-label-chip--active"
-                  matTooltip="The coding team is already working on this issue"
-                >
-                  <mat-icon>engineering</mat-icon>
-                  In progress
-                </span>
-              }
-              <span class="github-issue-row__labels">
-                @for (label of issue.labels; track label) {
-                  <span class="github-label-chip">{{ label }}</span>
-                }
-              </span>
-              @if (hasDependencies(issue)) {
-                <span
-                  class="github-issue-row__deps"
-                  role="img"
-                  [class.github-issue-row__deps--blocked]="issue.blocked"
-                  [class.github-issue-row__deps--met]="!issue.blocked"
-                  [matTooltip]="dependencyTooltip(issue)"
-                  [attr.aria-label]="dependencyTooltip(issue)"
-                >
-                  <mat-icon aria-hidden="true">{{ issue.blocked ? 'block' : 'account_tree' }}</mat-icon>
-                  @if (issue.blocked) {
-                    <span class="github-issue-row__deps-count">{{ issue.open_dependencies.length }}</span>
-                  }
-                </span>
-              }
-              <mat-icon class="github-issue-row__arrow">chevron_right</mat-icon>
-            </button>
-          }
+        <div class="run-detail run-detail--pending">
+          <mat-spinner diameter="18"></mat-spinner>
+          <span>Starting…</span>
         </div>
-        @if (issues.length > PAGE_SIZE_OPTIONS[0]) {
-          <mat-paginator
-            class="github-issues-paginator"
-            [length]="issues.length"
-            [pageSize]="pageSize"
-            [pageIndex]="pageIndex"
-            [pageSizeOptions]="PAGE_SIZE_OPTIONS"
-            (page)="onPageChange($event)"
-          ></mat-paginator>
-        }
       }
-    }
+    </ng-template>
   </section>
-}
-
-<!-- ────────────────────────────────────────────────────────────────── -->
-<!-- Team Assistant (existing)                                          -->
-<!-- ────────────────────────────────────────────────────────────────── -->
-<app-team-assistant-chat
-  [teamApiUrl]="'/api/coding-team/assistant'"
-  [teamName]="'Coding Team'"
-  [teamDescription]="'Software Engineering sub-team — task graph and implementation'"
-  [fields]="[
-    {key: 'repo_path', label: 'Repository path', placeholder: 'Path to project repository', required: true},
-    {key: 'plan_input', label: 'Plan / tasks (optional)', placeholder: 'Feature descriptions or structured plan hints'}
-  ]"
-  (workflowLaunched)="onWorkflowLaunched($event)"
-/>
-@if (latestJobId) {
-  <p class="launched-banner">Coding job queued — id <code>{{ latestJobId }}</code>.</p>
 }

@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="540" viewBox="0 0 1400 540" font-family="Inter, 'Segoe UI', sans-serif">
+  <defs>
+    <style>
+      .h2{font-size:16px;font-weight:600;fill:#ffffff}
+      .lbl{font-size:11px;font-weight:600;fill:#a1a1aa;letter-spacing:.08em}
+      .body{font-size:14px;fill:#ffffff}
+      .sec{font-size:13px;fill:#d4d4d8}
+      .mut{font-size:12px;fill:#a1a1aa}
+      .muted{font-size:11px;fill:#909099}
+      .amber{fill:#fde68a;font-weight:600}
+      .cap{font-size:13px;font-weight:600;fill:#fde68a;letter-spacing:.04em}
+    </style>
+  </defs>
+  <rect width="1400" height="540" fill="#000000"/>
+
+  <text x="40" y="44" class="h2" font-size="18">Runs panel — states</text>
+
+  <!-- ===== 1. EMPTY ===== -->
+  <text x="40" y="84" class="cap">1 · Empty</text>
+  <rect x="40" y="96" width="420" height="400" rx="12" fill="#171717" stroke="#2e2e2e"/>
+  <text x="64" y="132" class="h2">&#128296; Runs</text>
+  <!-- empty state centered -->
+  <circle cx="250" cy="270" r="26" fill="none" stroke="#3f3f3f" stroke-width="2"/>
+  <text x="238" y="280" font-size="26" fill="#909099">&#128640;</text>
+  <text x="250" y="328" text-anchor="middle" class="body" font-weight="600" fill="#d4d4d8">No runs yet</text>
+  <text x="250" y="354" text-anchor="middle" class="mut">Select a GitHub issue and start a run</text>
+  <text x="250" y="372" text-anchor="middle" class="mut">to watch live progress here.</text>
+
+  <!-- ===== 2. WAITING FOR ANSWERS ===== -->
+  <text x="490" y="84" class="cap">2 · Waiting for answers</text>
+  <rect x="490" y="96" width="420" height="400" rx="12" fill="#171717" stroke="#2e2e2e"/>
+  <text x="514" y="132" class="h2">&#128296; Runs</text>
+  <text x="514" y="164" class="lbl">RUNNING</text>
+  <!-- selected waiting run -->
+  <rect x="510" y="174" width="380" height="48" rx="8" fill="#262626" stroke="#fbbf24"/>
+  <rect x="510" y="174" width="3" height="48" fill="#fbbf24"/>
+  <text x="526" y="198" class="amber" font-size="13">#44</text>
+  <rect x="752" y="186" width="118" height="20" rx="10" fill="rgba(251,191,36,0.18)"/>
+  <text x="764" y="200" font-size="11" font-weight="600" fill="#fbbf24">&#10067; needs answers</text>
+  <text x="526" y="216" class="muted">Paused &#183; 5m ago</text>
+  <!-- pending questions card -->
+  <line x1="514" y1="240" x2="886" y2="240" stroke="#262626"/>
+  <rect x="514" y="256" width="372" height="36" rx="8" fill="rgba(251,191,36,0.18)"/>
+  <text x="528" y="278" font-size="12" fill="#fbbf24">&#10067; The team is paused and needs your decisions.</text>
+  <rect x="514" y="304" width="372" height="150" rx="8" fill="#262626" stroke="#3a3a3a"/>
+  <text x="530" y="330" class="sec" font-weight="600">Which auth flow should we use?</text>
+  <rect x="530" y="344" width="180" height="26" rx="6" fill="#1d1d1d" stroke="#3f3f3f"/>
+  <circle cx="546" cy="357" r="5" fill="none" stroke="#fbbf24"/><text x="560" y="361" class="mut">OAuth 2.0 (PKCE)</text>
+  <rect x="530" y="376" width="180" height="26" rx="6" fill="#1d1d1d" stroke="#3f3f3f"/>
+  <circle cx="546" cy="389" r="5" fill="none" stroke="#3f3f3f"/><text x="560" y="393" class="mut">Magic link</text>
+  <rect x="530" y="414" width="120" height="30" rx="8" fill="#fbbf24"/>
+  <text x="550" y="434" font-size="13" font-weight="600" fill="#09090b">Submit answers</text>
+
+  <!-- ===== 3. COMPLETED ===== -->
+  <text x="940" y="84" class="cap">3 · Completed (with Run again)</text>
+  <rect x="940" y="96" width="420" height="400" rx="12" fill="#171717" stroke="#2e2e2e"/>
+  <text x="964" y="132" class="h2">&#128296; Runs</text>
+  <text x="964" y="164" class="lbl">RECENT</text>
+  <rect x="960" y="174" width="380" height="40" rx="8" fill="#262626" stroke="#fbbf24"/>
+  <rect x="960" y="174" width="3" height="40" fill="#fbbf24"/>
+  <text x="976" y="198" class="amber" font-size="13">#38</text>
+  <rect x="1232" y="184" width="102" height="20" rx="10" fill="rgba(74,222,128,0.18)"/>
+  <text x="1244" y="198" font-size="11" font-weight="600" fill="#4ade80">&#10003; completed</text>
+  <!-- detail -->
+  <line x1="964" y1="232" x2="1336" y2="232" stroke="#262626"/>
+  <text x="964" y="258" class="h2" font-size="15">&#128295; Working on issue <tspan fill="#fde68a">#38</tspan></text>
+  <text x="964" y="288" class="sec">&#128681; Done — draft PR opened</text>
+  <rect x="964" y="300" width="372" height="6" rx="3" fill="#4ade80"/>
+  <text x="1306" y="294" class="mut">100%</text>
+  <!-- all phases green -->
+  <circle cx="990" cy="332" r="11" fill="#4ade80"/><text x="986" y="336" font-size="11" fill="#09090b">&#10003;</text>
+  <line x1="1001" y1="332" x2="1070" y2="332" stroke="#4ade80" stroke-width="2"/>
+  <circle cx="1081" cy="332" r="11" fill="#4ade80"/><text x="1077" y="336" font-size="11" fill="#09090b">&#10003;</text>
+  <line x1="1092" y1="332" x2="1161" y2="332" stroke="#4ade80" stroke-width="2"/>
+  <circle cx="1172" cy="332" r="11" fill="#4ade80"/><text x="1168" y="336" font-size="11" fill="#09090b">&#10003;</text>
+  <!-- PR + Run again -->
+  <rect x="964" y="356" width="372" height="34" rx="6" fill="rgba(74,222,128,0.18)"/>
+  <text x="978" y="378" font-size="13" fill="#4ade80">&#128279; Draft PR #121 opened</text>
+  <rect x="964" y="404" width="120" height="34" rx="8" fill="transparent" stroke="#3f3f3f"/>
+  <text x="984" y="426" class="sec" font-size="13">&#8635; Run again</text>
+</svg>
