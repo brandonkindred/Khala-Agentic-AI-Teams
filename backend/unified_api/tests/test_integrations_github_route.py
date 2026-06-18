@@ -61,12 +61,21 @@ class _FakeResp:
 
 
 class _FakeAsyncClient:
-    """Async-context-manager stand-in for httpx.AsyncClient."""
+    """Async-context-manager stand-in for httpx.AsyncClient.
+
+    ``calls`` records every ``post`` as a ``(url, json_payload)`` tuple; use
+    ``last_payload()`` to read the JSON body of the most recent request rather
+    than indexing the tuple structure directly.
+    """
 
     def __init__(self, *, result=None, exc=None):
         self._result = result
         self._exc = exc
         self.calls = []
+
+    def last_payload(self):
+        """Return the JSON payload of the most recent post (the tuple's [1])."""
+        return self.calls[-1][1]
 
     async def __aenter__(self):
         return self
@@ -395,9 +404,17 @@ def test_ensure_repo_clone_mkdir_failure_reports_workspace_error(tmp_path):
 
 def test_ensure_repo_clone_lock_open_failure_reports_lock_error(tmp_path):
     repo = tmp_path / "checkout"
-    # The only open() in _ensure_repo_clone is the lock file; failing it must
-    # surface as a lock error, NOT the git-missing message.
-    with patch("builtins.open", side_effect=PermissionError("denied")):
+    # The only open() in _ensure_repo_clone is the lock file; failing *just* that
+    # open (not every open) must surface as a lock error, NOT the git-missing
+    # message. A targeted side effect avoids disturbing any other open().
+    real_open = open
+
+    def _open_boom(path, *a, **k):
+        if str(path).endswith(".clone.lock"):
+            raise PermissionError("denied")
+        return real_open(path, *a, **k)
+
+    with patch("builtins.open", _open_boom):
         err = _ensure_repo_clone(str(repo), "acme", "widget", "tok")
     assert err is not None
     assert "could not acquire clone lock" in err
@@ -426,17 +443,18 @@ def test_resolve_repo_path_namespaces_per_issue_under_agent_cache(monkeypatch):
     assert path == "/cache/github_workspaces/acme/widget/issue-42"
 
 
-def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch, tmp_path):
+def test_resolve_repo_path_default_agent_cache_fallback(monkeypatch):
     """Unset AGENT_CACHE + no workspace root → the relative '.agent_cache' default,
-    resolved against the cwd, feeds the github_workspaces layout. The cwd is pinned
-    to tmp_path so the expected path is deterministic regardless of where the suite
-    runs (no dependence on the ambient working directory)."""
+    resolved against the cwd, feeds the github_workspaces layout. Expected is built
+    from the same cwd the function sees (Path.cwd()), so the assertion holds without
+    altering global state — no chdir, so it's safe under parallel test runners."""
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.delenv("AGENT_CACHE", raising=False)
-    monkeypatch.chdir(tmp_path)
     path = _resolve_repo_path(dict(_GH_CFG), issue_number=42)
-    expected = Path(".agent_cache").resolve() / "github_workspaces" / "acme" / "widget" / "issue-42"
+    expected = (
+        Path.cwd() / ".agent_cache" / "github_workspaces" / "acme" / "widget" / "issue-42"
+    ).resolve()
     assert path == str(expected)
 
 
@@ -508,7 +526,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 200
-    payload = fake.calls[0][1]
+    payload = fake.last_payload()
     assert payload["repo_path"] == "/cache/github_workspaces/acme/widget/issue-7"
     assert payload["cleanup_checkout_on_success"] is True
     # The clone target must be the per-issue folder, not the repo-level path.
@@ -532,7 +550,7 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
         resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 200
-    payload = fake.calls[0][1]
+    payload = fake.last_payload()
     assert payload["repo_path"] == "/srv/checkout"
     assert payload["cleanup_checkout_on_success"] is False
     # Cloning is not skipped for an override — it runs once against the pinned path.
@@ -637,6 +655,9 @@ def test_resolve_repo_path_rejects_unsafe_owner_or_repo(monkeypatch, field, valu
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
     monkeypatch.setenv("AGENT_CACHE", "/cache")
+    # repo_path="" means "no operator override", so the function proceeds to
+    # owner/repo path derivation (and thus the sanitization checks under test)
+    # rather than returning an override verbatim.
     cfg = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "", field: value}
     with pytest.raises(HTTPException) as exc:
         _resolve_repo_path(cfg, issue_number=1)
