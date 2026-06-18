@@ -662,6 +662,9 @@ def _start_github_resume_thread(
         - A daemon thread is running the hook-path resume; on thread-start failure the claim is
           released and the exception propagates. A failed issue re-fetch inside the thread marks
           the job failed rather than silently degrading to the hook-less path.
+        - The resumed run reproduces the fresh run's checkout-cleanup decision, read from
+          ``ctx['cleanup_checkout_on_success']`` (absent for jobs persisted before this field
+          existed → ``False``, the safe no-cleanup default).
     """
     request = RunFromGitHubRequest(
         owner=str(ctx["owner"]),
@@ -670,6 +673,7 @@ def _start_github_resume_thread(
         issue_number=int(ctx["issue_number"]),
         base_branch=ctx.get("base_branch"),
         remote=str(ctx.get("remote") or "origin"),
+        cleanup_checkout_on_success=bool(ctx.get("cleanup_checkout_on_success", False)),
     )
 
     def run() -> None:
@@ -1219,6 +1223,10 @@ def post_run_from_github(request: RunFromGitHubRequest) -> RunFromGitHubResponse
             "issue_url": issue.html_url,
             "base_branch": request.base_branch,
             "remote": request.remote,
+            # Persisted so a resume reconstructs the SAME cleanup decision the
+            # fresh run made; without it a resumed job would default to False and
+            # leak its ephemeral per-issue checkout on clean completion.
+            "cleanup_checkout_on_success": request.cleanup_checkout_on_success,
         },
     }
     # Persist the token (encrypted) so a resume after the orchestrator thread dies (server restart,

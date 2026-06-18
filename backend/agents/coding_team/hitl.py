@@ -257,6 +257,13 @@ def normalize_key(text: str) -> str:
     de-duplicate fully rendered decision lines (``"question → answer"``, including the answer). It
     normalizes the whole string it is given — it makes no assumption about a ``→`` separator or
     about which part of the text it is keying.
+
+    Preconditions:
+        - ``text`` is a string or ``None`` (``None`` is treated as the empty string).
+    Postconditions:
+        - Returns ``text`` lowercased with leading/trailing whitespace stripped and every internal
+          whitespace run collapsed to a single space; ``""`` for ``None``/blank input. Pure: no
+          side effects, and inputs equal modulo case and whitespace map to the same key.
     """
     return " ".join((text or "").lower().split())
 

@@ -1489,6 +1489,20 @@ class TestStatusResponseSurfacing:
         assert body["github_context"]["issue_number"] == 1
         assert body["github_pr_url"] == "https://example/pr/42"
 
+    def test_github_context_persists_cleanup_flag(self, patched_app) -> None:
+        # The cleanup decision is persisted in github_context so a later resume
+        # reproduces it; without this a resumed job would default to no-cleanup
+        # and leak its ephemeral per-issue checkout.
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+        post = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"], cleanup_checkout_on_success=True),
+        )
+        assert post.status_code == 200
+        status = patched_app["client"].get(f"/status/{post.json()['job_id']}")
+        assert status.json()["github_context"]["cleanup_checkout_on_success"] is True
+
 
 class TestBusyCheckoutGuard:
     """Auto-recovery must never mutate a sibling job's live working tree:
