@@ -645,13 +645,15 @@ def run_documentation_self_review(
         iteration_improvements = 0
         iteration_updates = 0
         chunk_failures = 0
+        # Render the evolving documentation once per iteration, then re-render
+        # only when a chunk actually updates a file (below) so later chunks still
+        # see earlier refinements. Documentation is passed in full (no clip) so
+        # the model can rewrite any file's tail; callers are expected to keep
+        # per-microtask documentation within the model's context budget. Rebuilding
+        # this for every chunk when nothing changed was an O(chunks x docs) waste
+        # for large doc sets.
+        doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
         for chunk_idx, code_chunk in enumerate(code_chunks, start=1):
-            # Recompute per chunk so refinements made against earlier chunks are
-            # visible to later ones. Documentation is passed in full (no clip) so
-            # the model can rewrite any file's tail; callers are expected to keep
-            # per-microtask documentation within the model's context budget.
-            doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
-
             prompt = DOCUMENTATION_SELF_REVIEW_PROMPT.format(
                 iteration=iteration,
                 max_iterations=max_iterations,
@@ -689,6 +691,8 @@ def run_documentation_self_review(
             if updated_files:
                 current_docs.update(updated_files)
                 iteration_updates += len(updated_files)
+                # Docs changed; re-render so subsequent chunks see the refinement.
+                doc_text = "\n\n".join(f"--- {p} ---\n{c}" for p, c in current_docs.items())
 
         if iteration_score is None:
             # Every chunk's LLM call failed this iteration; keep prior score.

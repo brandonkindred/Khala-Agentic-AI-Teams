@@ -810,6 +810,32 @@ class TestDocumentationSelfReviewChunking:
         assert result.iterations == 1
         assert result.final_quality_score == 0.95
 
+    def test_large_documentation_passed_in_full(self):
+        """The old ``[:12000]`` clip dropped documentation tails as well as code.
+
+        Removing the clip means a large doc must reach the LLM uncut; this guards
+        against a regression that re-introduces truncation on the doc side.
+        """
+        from backend_code_v2_team.phases.review import run_documentation_self_review
+
+        # A doc well past the old 12000-char boundary, with a tail sentinel that
+        # only survives if the whole document is sent to the model.
+        big_doc = ("Documentation paragraph. " * 600) + "\nDOC_TAIL_SENTINEL"
+        assert len(big_doc) > 12_000
+        client = _RecordingDocClient(_DOC_REVIEW_RESPONSE)
+        run_documentation_self_review(
+            llm=client,
+            documentation={"docs/readme.md": big_doc},
+            code_files={"app/a.py": "A = 1"},
+            task_description="task",
+            min_iterations=1,
+            max_iterations=1,
+        )
+        # One small code chunk = one call, and the doc tail past the old clip
+        # boundary appears in the prompt uncut.
+        assert len(client.prompts) == 1
+        assert "DOC_TAIL_SENTINEL" in client.prompts[0]
+
 
 class _RaisingDocClient(DummyLLMClient):
     """Raises on every LLM call to exercise the per-chunk failure path."""
