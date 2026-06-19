@@ -349,19 +349,17 @@ class _EngineExitDispatcher:
         gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
         if gating is None:
             return
-        tracked, pos, has_resting_stop_limit = gating
+        tracked, pos, exclude_resting_limit_stop = gating
 
-        # Resting structured exit: while a limit-style stop's STOP_LIMIT is
-        # already resting on the book, treat that stop rule as already in-flight
-        # and exclude it from the chosen intent. This both (a) suppresses a
-        # duplicate stop-limit emission and (b) lets a lower-priority rule
-        # (take-profit / signal-exit) still fire and close the position — its fill
-        # retires the resting stop-limit via the binding + stale-continuation
-        # guard. A plain ``return`` here would instead starve any rule listed
-        # after the stop on every bar the stop re-triggers. The book scan was
-        # already done by ``_should_evaluate``; only re-rank intents when the spec
-        # actually has a limit-style stop.
-        exclude_resting_limit_stop = self._has_limit_stop_rule and has_resting_stop_limit
+        # Resting structured exit: when ``exclude_resting_limit_stop`` is set (a
+        # limit-style stop already has its STOP_LIMIT resting on the book), the
+        # chosen intent excludes that stop rule — treating it as already in
+        # flight. This both (a) suppresses a duplicate stop-limit emission and
+        # (b) lets a lower-priority rule (take-profit / signal-exit) still fire
+        # and close the position; its fill retires the resting stop-limit via the
+        # binding + stale-continuation guard. (Standing the whole bar down here
+        # would instead starve any rule listed after the stop on every bar the
+        # stop re-triggers.)
         intent = self._evaluate(
             sym, tracked, pos, cur_bar, exclude_resting_limit_stop=exclude_resting_limit_stop
         )
@@ -435,8 +433,8 @@ class _EngineExitDispatcher:
         portfolio: Portfolio,
         order_book: OrderBook,
     ) -> Optional[tuple[_TrackedPosition, Position, bool]]:
-        """Return ``(tracked, pos, has_resting_stop_limit)`` if rule evaluation
-        should run for this symbol on this bar, else ``None``.
+        """Return ``(tracked, pos, exclude_resting_limit_stop)`` if rule
+        evaluation should run for this symbol on this bar, else ``None``.
 
         Gates:
         * Tracker has the symbol (a position is open).
@@ -450,14 +448,18 @@ class _EngineExitDispatcher:
           higher-priority rule (take-profit / signal-exit) must still be able to
           fire and close the position while the stop-limit rests unfilled.
 
-        The single pending-order pass also reports ``has_resting_stop_limit`` (an
-        opposite-side engine STOP_LIMIT already resting) so ``maybe_emit`` can
-        exclude the in-flight limit stop from the chosen intent without a second
-        scan.
+        The single pending-order pass also derives ``exclude_resting_limit_stop``
+        so ``maybe_emit`` can drop the in-flight limit stop from the chosen intent
+        without a second scan. It is already AND-ed with ``_has_limit_stop_rule``,
+        so it is directly actionable (always ``False`` for a market-only spec) —
+        callers need not re-check.
 
+        Preconditions: ``order_book`` is the live order book for this run, and
+        ``position_tracker``/``portfolio`` reflect state as of the current bar.
         Postconditions: returns ``None`` when evaluation should be skipped;
-        otherwise the open ``(tracked, pos)`` and whether an engine stop-limit
-        is resting for this position.
+        otherwise the open ``(tracked, pos)`` and whether the chosen intent must
+        exclude an already-resting limit-style stop (``True`` only when the spec
+        has a limit stop AND an engine STOP_LIMIT for this position is resting).
         """
         if sym not in position_tracker:
             return None
@@ -467,7 +469,10 @@ class _EngineExitDispatcher:
         tracked = position_tracker[sym]
         if tracked.just_opened:
             return None
-        has_resting_stop_limit = False
+        # The resting-stop-limit fact only matters when the spec can author one;
+        # for market-only specs leave it False (and skip the per-order check).
+        track_resting = self._has_limit_stop_rule
+        exclude_resting_limit_stop = False
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
             if po_req.side == tracked.side:
@@ -477,9 +482,9 @@ class _EngineExitDispatcher:
             if po_req.order_type == OrderType.MARKET:
                 # In-flight guaranteed close — stand the whole bar down.
                 return None
-            if po_req.order_type == OrderType.STOP_LIMIT:
-                has_resting_stop_limit = True
-        return tracked, pos, has_resting_stop_limit
+            if track_resting and po_req.order_type == OrderType.STOP_LIMIT:
+                exclude_resting_limit_stop = True
+        return tracked, pos, exclude_resting_limit_stop
 
     def _evaluate(
         self,
