@@ -61,7 +61,12 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
-_TERMINAL_STATUSES = frozenset({"failed", "cancelled", "completed", "completed_with_failures"})
+# ``already_complete`` is a terminal SUCCESS (work already done, no changes needed) and so belongs
+# here: a finished already-complete job must not look resumable to is_terminal() consumers (the
+# /resume endpoint and the auto-resume guard).
+_TERMINAL_STATUSES = frozenset(
+    {"failed", "cancelled", "completed", "completed_with_failures", "already_complete"}
+)
 
 
 def heartbeat_timestamp() -> str:

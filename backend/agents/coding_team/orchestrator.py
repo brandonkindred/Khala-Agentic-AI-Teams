@@ -54,6 +54,8 @@ def _no_change_revisit_cap() -> int:
     Configurable via CODING_TEAM_NO_CHANGE_REVISIT_CAP (default 3; garbage/empty → default; floored
     at 1 so the guard can never be disabled into an unbounded no-progress loop).
 
+    Preconditions:
+        - None (reads only the optional environment variable).
     Postconditions:
         - Returns an int >= 1.
     """
@@ -991,6 +993,9 @@ class CodingTeamSwarm:
         compares equal. Pass ``diff`` to reuse a diff the caller already computed (the review path
         collects it for the reviewer) instead of paying for a second git invocation.
 
+        Preconditions:
+            - ``task`` is a task tracked by this swarm's graph; ``self.path`` is the repo checkout.
+              ``diff`` is None (compute from the branch) or a diff string to hash directly.
         Postconditions:
             - Returns a hex digest; identical change states across rounds yield identical digests.
         """
@@ -1009,6 +1014,9 @@ class CodingTeamSwarm:
         no-progress re-evaluation) and bumps ``no_change_revisits``; a different digest means real
         progress and resets the counter to 0. The first bounce only records a baseline.
 
+        Preconditions:
+            - ``task`` is a task tracked by this swarm's graph and is being bounced for revision this
+              round; the caller has already appended this round's feedback to ``task``.
         Postconditions:
             - ``task.last_change_digest`` reflects the current change state and ``no_change_revisits``
               is incremented (no change) or reset to 0 (change), persisted via the graph.
@@ -1031,6 +1039,9 @@ class CodingTeamSwarm:
         (the documentation of what has been tried) and act on the verdict — close it out as already
         done, fail it terminally, or grant one more bounded window.
 
+        Preconditions:
+            - ``task`` is a non-terminal task tracked by this swarm's graph that has hit the
+              no-change cap (``_note_revision_progress`` returned True for it).
         Postconditions:
             - "done": task is MERGED with ``resolved_without_changes=True`` (terminal, agent freed,
               dependents unblocked) and the reasoning recorded.

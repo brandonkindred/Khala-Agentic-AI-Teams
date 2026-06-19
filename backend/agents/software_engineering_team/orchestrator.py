@@ -3030,8 +3030,10 @@ def run_orchestrator(
                 progress_span=span,
             )
             # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
-            # completed_with_failures / failed / cancelled), so there is nothing to finalize here —
-            # writing COMPLETED would clobber a failure or a partial-success it already set.
+            # completed_with_failures / already_complete / failed / cancelled), so there is nothing
+            # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an
+            # already-complete result it already set. ``already_complete`` (the work was already
+            # done — no changes needed) is a terminal success and is left intact.
             return
 
         # Legacy path (deprecated for main path): tech_lead_agent, backend_code_v2_team,
