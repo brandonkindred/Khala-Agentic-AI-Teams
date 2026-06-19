@@ -128,4 +128,48 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.error).toBe('save failed');
     expect(component.saving).toBe(false);
   });
+
+  it('onProviderChange resets the model to the new provider default', () => {
+    component.model = 'deepseek-v4-pro:cloud';
+    component.onProviderChange('claude');
+    expect(component.provider).toBe('claude');
+    expect(component.model).toBe('claude-opus-4-8'); // first claude option
+    component.onProviderChange('ollama');
+    expect(component.model).toBe('llama3.1'); // first ollama suggestion
+  });
+
+  it('does not send a stale cross-provider model after a provider switch', () => {
+    apiSpy.updateConfig.mockReturnValue(of({ ...BASE_CONFIG, provider: 'claude' }));
+    // Start on Ollama with an Ollama model, then switch to Claude via the handler.
+    component.model = 'deepseek-v4-pro:cloud';
+    component.onProviderChange('claude');
+    component.save();
+    const body = apiSpy.updateConfig.mock.calls[0][0];
+    expect(body.model).toBe('claude-opus-4-8'); // not the stale Ollama model
+  });
+
+  it('treats a custom host containing ollama.com as Local, not Cloud', () => {
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, ollama_base_url: 'http://ollama.company.com:11434' }),
+    );
+    component.loadConfig();
+    expect(component.ollamaMode).toBe('local');
+  });
+
+  it('defaults a cleared Local base URL to localhost instead of sending empty', () => {
+    apiSpy.updateConfig.mockReturnValue(of({ ...BASE_CONFIG }));
+    component.provider = 'ollama';
+    component.ollamaMode = 'local';
+    component.ollamaBaseUrl = '';
+    component.save();
+    const body = apiSpy.updateConfig.mock.calls[0][0];
+    expect(body.ollama_base_url).toBe('http://localhost:11434');
+  });
+
+  it('clears a stale success banner when reloading', () => {
+    component.success = 'previously saved';
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG }));
+    component.loadConfig();
+    expect(component.success).toBeNull();
+  });
 });

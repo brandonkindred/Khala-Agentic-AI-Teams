@@ -55,6 +55,36 @@ def test_resolve_claude_model_ignores_ollama_agent_defaults():
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
+def test_looks_like_claude_model():
+    for m in (
+        "claude-opus-4-8",
+        "claude-sonnet-4-6",
+        "claude-fable-5",
+        "claude-mythos-5",
+        "anthropic.claude-opus-4-8",
+    ):
+        assert c._looks_like_claude_model(m) is True
+    for m in ("deepseek-v4-pro:cloud", "llama3.1", "qwen3-coder:480b-cloud", "", "gpt-4"):
+        assert c._looks_like_claude_model(m) is False
+
+
+def test_resolve_claude_model_ignores_non_claude_global_env(monkeypatch):
+    # The shipped docker default LLM_MODEL=deepseek-v4-pro:cloud must NOT be sent
+    # to the Anthropic API — a non-Claude model falls back to the default.
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
+    assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+
+
+def test_resolve_claude_model_ignores_non_claude_per_agent_env(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL_backend", "llama3.1")
+    assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
+
+
+def test_resolve_claude_model_accepts_claude_global_env(monkeypatch):
+    monkeypatch.setenv("LLM_MODEL", "claude-haiku-4-5")
+    assert c.resolve_claude_model(None) == "claude-haiku-4-5"
+
+
 def test_resolve_claude_api_key_precedence(monkeypatch):
     assert c.resolve_claude_api_key() == ""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")

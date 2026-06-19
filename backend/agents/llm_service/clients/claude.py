@@ -221,13 +221,18 @@ class ClaudeLLMClient(LLMClient):
     def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
         """Resolve the output token cap. Explicit -> ``LLM_MAX_TOKENS`` -> default.
 
-        Postconditions: returns an int in ``[1, CLAUDE_MAX_OUTPUT_TOKENS]``.
+        Preconditions: ``explicit`` is ``None`` or an int.
+        Postconditions: returns an int in ``[1, CLAUDE_MAX_OUTPUT_TOKENS]``. A
+            non-positive (``0`` / negative) explicit value is treated as "unset"
+            and falls through to the env/default — never coerced to a 1-token cap.
         """
         if explicit is not None:
             try:
-                return max(1, min(int(explicit), CLAUDE_MAX_OUTPUT_TOKENS))
+                explicit_int = int(explicit)
             except (TypeError, ValueError):
-                pass
+                explicit_int = 0
+            if explicit_int > 0:
+                return min(explicit_int, CLAUDE_MAX_OUTPUT_TOKENS)
         env = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
         if env:
             try:
@@ -273,7 +278,8 @@ class ClaudeLLMClient(LLMClient):
 
         Postconditions: returns the assembled final message on success. Raises
             ``LLMRateLimitError`` (429), ``LLMTemporaryError`` (5xx / connection),
-            or ``LLMPermanentError`` (other 4xx / unexpected) otherwise.
+            or ``LLMPermanentError`` (other 4xx / any other Anthropic SDK error)
+            otherwise — no raw ``anthropic`` exception escapes the unified hierarchy.
         """
         anthropic = _import_anthropic()
         client = self._get_client()
@@ -316,6 +322,11 @@ class ClaudeLLMClient(LLMClient):
             ) from e
         except anthropic.APIConnectionError as e:
             raise LLMTemporaryError(f"Claude connection/transport error: {e}", cause=e) from e
+        except anthropic.AnthropicError as e:
+            # Catch-all for any other SDK error (bare APIError, request-construction
+            # / stream-parsing failures) so callers only ever see the unified
+            # hierarchy. Unknown faults are treated as permanent (not blindly retried).
+            raise LLMPermanentError(f"Claude SDK error: {e}", cause=e) from e
 
     def _content_from_message(self, message: Any) -> tuple[str, Any]:
         """Reduce a final message to ``(kind, value)``.
@@ -324,9 +335,12 @@ class ClaudeLLMClient(LLMClient):
         is ``{"__tool_calls__": [...]}``), else ``("text", text)`` with the joined
         text blocks. Maps ``stop_reason`` edge cases onto the unified hierarchy.
 
-        Postconditions: raises ``LLMPermanentError`` on a ``refusal`` stop reason,
-            ``LLMTruncatedError`` on ``max_tokens`` with partial text. A ``"text"``
-            value may be empty (the caller decides whether that is an error).
+        Postconditions: raises ``LLMPermanentError`` on a ``refusal`` stop reason
+            and ``LLMTruncatedError`` on a ``max_tokens`` stop reason — both are
+            checked BEFORE returning a tool envelope, so a tool call truncated at
+            the token cap (possibly incomplete arguments) surfaces as a truncation
+            error rather than a "successful" tool invocation. A ``"text"`` value
+            may be empty (the caller decides whether that is an error).
         """
         blocks = list(getattr(message, "content", None) or [])
         tool_calls = []
@@ -347,21 +361,25 @@ class ClaudeLLMClient(LLMClient):
             elif btype == "text":
                 text_parts.append(getattr(block, "text", "") or "")
 
+        text = "".join(text_parts)
         stop_reason = getattr(message, "stop_reason", None)
-        if tool_calls:
-            logger.info("Claude returned %d tool call(s)", len(tool_calls))
-            return "tools", {"__tool_calls__": tool_calls}
+        # Check terminal stop reasons before the tool branch: a tool_use block
+        # under stop_reason=max_tokens is a truncated (possibly invalid) call, and
+        # must not be reported as a complete invocation (mirrors the Ollama path,
+        # which raises on finish_reason=length regardless of content).
         if stop_reason == "refusal":
             raise LLMPermanentError(
                 "Claude refused the request (stop_reason=refusal). Do not retry the same prompt."
             )
-        text = "".join(text_parts)
-        if stop_reason == "max_tokens" and text.strip():
+        if stop_reason == "max_tokens":
             raise LLMTruncatedError(
                 "Claude response truncated due to token limit (stop_reason=max_tokens)",
                 partial_content=text,
                 finish_reason="max_tokens",
             )
+        if tool_calls:
+            logger.info("Claude returned %d tool call(s)", len(tool_calls))
+            return "tools", {"__tool_calls__": tool_calls}
         return "text", text
 
     def _record(
@@ -433,9 +451,14 @@ class ClaudeLLMClient(LLMClient):
         """Run the model in JSON mode and return a decoded dict.
 
         ``temperature`` is accepted for interface compatibility but never sent to
-        the Anthropic API. Tool invocations return ``{"__tool_calls__": [...]}``.
+        the Anthropic API.
 
         Preconditions: ``objective`` is a non-empty string.
+        Postconditions: returns a parsed ``dict`` — either the JSON object the model
+            produced (via the shared repair-tolerant parser) or, on tool use, the
+            ``{"__tool_calls__": [...]}`` envelope. Raises ``LLMJsonParseError`` when
+            the text is not parseable JSON, or the unified ``LLM*`` errors on
+            transport/refusal/truncation. A telemetry record is emitted for the call.
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
@@ -505,6 +528,10 @@ class ClaudeLLMClient(LLMClient):
         envelope (matching the Ollama client).
 
         Preconditions: ``objective`` is a non-empty string.
+        Postconditions: returns the model's text, or a JSON string of the
+            ``{"__tool_calls__": [...]}`` envelope on tool use. Raises the unified
+            ``LLM*`` errors on transport/refusal/truncation. A telemetry record is
+            emitted for the call.
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
@@ -556,6 +583,12 @@ class ClaudeLLMClient(LLMClient):
 
         Preconditions: ``objective`` is a non-empty string; ``response_format`` is
             ``"json"`` or ``"text"``.
+        Postconditions: returns the ``{"__tool_calls__": [...]}`` envelope on tool
+            use; otherwise a parsed ``dict`` (json mode) or ``str`` (text mode).
+            OpenAI-style ``role:"tool"`` results and assistant ``tool_calls`` in
+            ``messages`` are translated to Anthropic blocks (never dropped). Raises
+            ``LLMJsonParseError`` (json mode, unparseable) or the unified ``LLM*``
+            errors. A telemetry record is emitted for the call.
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
@@ -565,7 +598,7 @@ class ClaudeLLMClient(LLMClient):
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
             self._log_request(caller=caller, think=think, kind=f"chat:{response_format}")
-            system, anthropic_messages = _split_system(messages)
+            system, anthropic_messages = _to_anthropic_messages(messages)
             if response_format == "json" and not tools:
                 system = (
                     f"{system.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
@@ -630,30 +663,91 @@ def _retry_after_seconds(error: Any) -> Optional[float]:
     return value if value > 0 else None
 
 
-def _split_system(messages: list) -> tuple[str, list]:
-    """Split a chat ``messages`` list into ``(system_text, anthropic_messages)``.
+def _to_anthropic_messages(messages: list) -> tuple[str, list]:
+    """Translate an OpenAI-style chat ``messages`` list to Anthropic shape.
 
-    Anthropic carries the system prompt as a top-level parameter, not as a
-    ``role: "system"`` message. Any system entries are concatenated into the
-    returned system text; the remaining user/assistant turns (string content) are
-    passed through.
+    Anthropic carries the system prompt as a top-level parameter (not a
+    ``role:"system"`` message) and represents tool use with content blocks, not
+    OpenAI's ``assistant.tool_calls`` + ``role:"tool"`` messages. This translator
+    is what makes :func:`llm_service.tool_loop.complete_json_with_tool_loop` work
+    under the Claude provider:
 
-    Preconditions: ``messages`` is a list of ``{role, content}`` dicts.
-    Postconditions: returns ``(system_text, [{"role","content"}, ...])`` with only
-        ``user``/``assistant`` roles in the second element. Never raises for a
-        reasonably-shaped list.
+    - ``role:"system"`` entries are concatenated into the returned system text.
+    - ``role:"assistant"`` with ``tool_calls`` becomes an assistant turn whose
+      content is ``tool_use`` blocks (plus any leading text); string ``arguments``
+      are parsed to a dict (Anthropic requires an object ``input``).
+    - ``role:"tool"`` results become ``tool_result`` blocks; consecutive tool
+      results are coalesced into a single user turn (Anthropic groups all results
+      for one assistant turn in one user message).
+    - plain ``user``/``assistant`` string turns pass through.
+
+    Preconditions: ``messages`` is a list of ``{role, content, ...}`` dicts.
+    Postconditions: returns ``(system_text, anthropic_messages)`` where every entry
+        has role ``user``/``assistant`` and Anthropic-valid content; no tool
+        result is ever silently dropped. Never raises for a reasonably-shaped list.
     """
+    import json  # noqa: PLC0415
+
     system_parts: list[str] = []
     out: list[dict] = []
+    pending_tool_results: list[dict] = []
+
+    def _flush_tool_results() -> None:
+        if pending_tool_results:
+            out.append({"role": "user", "content": list(pending_tool_results)})
+            pending_tool_results.clear()
+
     for msg in messages or []:
         if not isinstance(msg, dict):
             continue
         role = msg.get("role")
         content = msg.get("content", "")
+        if role == "tool":
+            # OpenAI tool result -> Anthropic tool_result block (coalesced).
+            pending_tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": str(msg.get("tool_call_id") or ""),
+                    "content": content if isinstance(content, str) else json.dumps(content),
+                }
+            )
+            continue
+        # Any non-tool message ends the current run of tool results.
+        _flush_tool_results()
         if role == "system":
             if isinstance(content, str) and content:
                 system_parts.append(content)
             continue
-        if role in ("user", "assistant"):
-            out.append({"role": role, "content": content})
+        if role == "assistant":
+            tool_calls = msg.get("tool_calls") or []
+            if tool_calls:
+                blocks: list[dict] = []
+                if isinstance(content, str) and content.strip():
+                    blocks.append({"type": "text", "text": content})
+                for tc in tool_calls:
+                    if not isinstance(tc, dict):
+                        continue
+                    fn = tc.get("function") or {}
+                    args = fn.get("arguments")
+                    if isinstance(args, str):
+                        try:
+                            args = json.loads(args)
+                        except (json.JSONDecodeError, ValueError):
+                            args = {}
+                    blocks.append(
+                        {
+                            "type": "tool_use",
+                            "id": str(tc.get("id") or ""),
+                            "name": fn.get("name") or "",
+                            "input": args if isinstance(args, dict) else {},
+                        }
+                    )
+                if blocks:
+                    out.append({"role": "assistant", "content": blocks})
+                continue
+            out.append({"role": "assistant", "content": content})
+            continue
+        if role == "user":
+            out.append({"role": "user", "content": content})
+    _flush_tool_results()
     return "\n\n".join(system_parts), out

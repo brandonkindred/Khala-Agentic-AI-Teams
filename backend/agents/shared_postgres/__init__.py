@@ -25,7 +25,7 @@ from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared_postgres.runner import ensure_team_schema, register_team_schemas
 from shared_postgres.schema import TeamSchema
-from shared_postgres.secrets import delete_secret, get_secret, set_secret
+from shared_postgres.secrets import delete_secret, get_secret, get_secrets, set_secret
 
 
 def _import_json_adapter():
@@ -66,6 +66,7 @@ __all__ = [
     "ensure_team_schema",
     "get_conn",
     "get_secret",
+    "get_secrets",
     "is_postgres_enabled",
     "register_all_team_schemas",
     "register_team_schemas",

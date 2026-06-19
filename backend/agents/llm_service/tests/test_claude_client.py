@@ -211,6 +211,91 @@ def test_chat_rejects_bad_response_format():
 
 
 # ---------------------------------------------------------------------------
+# tool-loop message translation (_to_anthropic_messages)
+# ---------------------------------------------------------------------------
+
+
+def test_to_anthropic_messages_translates_tool_loop_sequence():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    system, msgs = _to_anthropic_messages(
+        [
+            {"role": "system", "content": "be brief"},
+            {"role": "user", "content": "do it"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "toolu_1",
+                        "type": "function",
+                        "function": {"name": "f", "arguments": '{"x": 1}'},
+                    }
+                ],
+            },
+            {"role": "tool", "tool_call_id": "toolu_1", "content": '{"ok": true}'},
+        ]
+    )
+    assert system == "be brief"
+    # assistant turn carries a tool_use block; arguments string parsed to dict
+    assert msgs[0] == {"role": "user", "content": "do it"}
+    assert msgs[1]["role"] == "assistant"
+    assert msgs[1]["content"] == [
+        {"type": "tool_use", "id": "toolu_1", "name": "f", "input": {"x": 1}}
+    ]
+    # tool result becomes a tool_result block in a user turn (never dropped)
+    assert msgs[2] == {
+        "role": "user",
+        "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": '{"ok": true}'}],
+    }
+
+
+def test_to_anthropic_messages_coalesces_multiple_tool_results():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {"id": "a", "function": {"name": "f", "arguments": {}}},
+                    {"id": "b", "function": {"name": "g", "arguments": {}}},
+                ],
+            },
+            {"role": "tool", "tool_call_id": "a", "content": "ra"},
+            {"role": "tool", "tool_call_id": "b", "content": "rb"},
+        ]
+    )
+    # both results coalesced into ONE user turn
+    results = msgs[-1]
+    assert results["role"] == "user"
+    assert [c["tool_use_id"] for c in results["content"]] == ["a", "b"]
+
+
+def test_chat_tool_loop_messages_reach_invoke(monkeypatch):
+    # End-to-end: chat() with tool-loop-style messages produces Anthropic-shaped
+    # messages on the wire (the bug was these being silently dropped).
+    client, capture = _make_client(_text_message('{"done": true}'))
+    client.chat(
+        [
+            {"role": "user", "content": "go"},
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [{"id": "t1", "function": {"name": "f", "arguments": {}}}],
+            },
+            {"role": "tool", "tool_call_id": "t1", "content": "result"},
+        ],
+        objective="t",
+    )
+    roles = [m["role"] for m in capture["messages"]]
+    assert roles == ["user", "assistant", "user"]
+    assert capture["messages"][-1]["content"][0]["type"] == "tool_result"
+
+
+# ---------------------------------------------------------------------------
 # stop reasons
 # ---------------------------------------------------------------------------
 
@@ -225,6 +310,16 @@ def test_max_tokens_with_text_raises_truncated():
     client, _ = _make_client(_text_message("partial...", stop_reason="max_tokens"))
     with pytest.raises(LLMTruncatedError):
         client.complete("hi", objective="t")
+
+
+def test_truncated_tool_call_raises_before_envelope():
+    # A tool_use block under stop_reason=max_tokens (possibly incomplete args)
+    # must surface as truncation, not a "successful" tool invocation.
+    msg = _tool_message("do_it", {"partial": True})
+    msg.stop_reason = "max_tokens"
+    client, _ = _make_client(msg)
+    with pytest.raises(LLMTruncatedError):
+        client.complete_json("q", objective="t", tools=[{"name": "do_it", "input_schema": {}}])
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +384,16 @@ def test_resolve_max_tokens_caps():
     assert client._resolve_max_tokens(999_999) == 128_000
     assert client._resolve_max_tokens(None) == 32_768
     assert client._resolve_max_tokens(100) == 100
+    # A non-positive explicit value is "unset" -> falls through to the default,
+    # not coerced to a 1-token cap.
+    assert client._resolve_max_tokens(0) == 32_768
+    assert client._resolve_max_tokens(-5) == 32_768
+
+
+def test_base_anthropic_error_maps_permanent():
+    client, _ = _make_client(exc=anthropic.AnthropicError("internal sdk failure"))
+    with pytest.raises(LLMPermanentError):
+        client.complete("hi", objective="t")
 
 
 def test_telemetry_recorded_with_tokens():

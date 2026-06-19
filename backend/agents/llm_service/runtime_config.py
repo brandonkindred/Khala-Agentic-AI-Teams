@@ -77,28 +77,25 @@ def _postgres_enabled() -> bool:
 
 
 def _load_all() -> dict[str, str]:
-    """Read every runtime key from the secret store. Returns ``{}`` on failure.
+    """Read every runtime key from the secret store in ONE query. ``{}`` on failure.
 
-    Postconditions: returns a dict mapping each key in ``ALL_KEYS`` to its stored
-        value (absent/empty values omitted). Any read error yields ``{}`` so the
-        resolver falls back to env vars. Never raises.
+    Postconditions: returns a dict mapping each key in ``ALL_KEYS`` present in the
+        store to its value (absent/empty values omitted), fetched with a single
+        batched ``get_secrets`` round-trip. Any error yields ``{}`` so the resolver
+        falls back to env vars. Never raises.
     """
     if not _postgres_enabled():
         return {}
     try:
-        from shared_postgres.secrets import get_secret
+        from shared_postgres.secrets import get_secrets
     except Exception:  # noqa: BLE001 - defensive
         return {}
-    out: dict[str, str] = {}
-    for key in ALL_KEYS:
-        try:
-            val = get_secret(SERVICE, key)
-        except Exception as e:  # noqa: BLE001 - one bad key must not poison the rest
-            logger.debug("runtime_config read failed for %s: %s", key, e)
-            val = ""
-        if val:
-            out[key] = val
-    return out
+    try:
+        values = get_secrets(SERVICE, ALL_KEYS)
+    except Exception as e:  # noqa: BLE001 - read must never crash a caller
+        logger.debug("runtime_config batch read failed: %s", e)
+        return {}
+    return {key: val for key, val in values.items() if val}
 
 
 def _refresh_locked() -> None:
@@ -113,8 +110,8 @@ def get_runtime(key: str) -> str:
 
     Preconditions: ``key`` is one of :data:`ALL_KEYS`.
     Postconditions: returns the stored value, or ``""`` when absent, Postgres is
-        disabled, or the store read failed. The underlying store is read at most
-        once per TTL window across all keys (one batched load). Never raises.
+        disabled, or the store read failed. All keys are loaded together in a
+        single batched query at most once per TTL window. Never raises.
     """
     assert key in ALL_KEYS, f"unknown runtime key: {key!r}"
     ttl = _ttl_seconds()

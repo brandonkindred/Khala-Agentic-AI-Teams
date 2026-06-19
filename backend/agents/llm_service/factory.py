@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 _client_cache: dict[tuple[str, str, float], OllamaLLMClient] = {}
 # Claude clients cache by (model, api-key fingerprint) so a key or model change
 # yields a fresh client (and a stale key never lingers behind a cached client).
-_claude_cache: dict[tuple[str, str], ClaudeLLMClient] = {}
+_claude_cache: dict[tuple[str, str, float], ClaudeLLMClient] = {}
 _cache_lock = threading.Lock()
 
 
@@ -197,18 +197,20 @@ def get_client(
 def _get_claude_client(agent_key: Optional[str]) -> Union[ClaudeLLMClient, "_AttributingClient"]:
     """Build/cache a :class:`ClaudeLLMClient` for ``agent_key``.
 
-    Cached by ``(model, api_key_fingerprint)`` so a key or model change yields a
-    fresh client. Wrapped in :class:`_AttributingClient` when ``agent_key`` is
+    Cached by ``(model, api_key_fingerprint, timeout)`` so a model, key, or timeout
+    change yields a fresh client (the timeout dimension mirrors the Ollama cache
+    key and avoids a stale-timeout client if ``resolve_timeout`` ever becomes
+    per-agent). Wrapped in :class:`_AttributingClient` when ``agent_key`` is
     truthy, mirroring the Ollama path.
 
     Postconditions: returns a ready client; the underlying ``ClaudeLLMClient`` is
-        the cached singleton for its (model, key) pair.
+        the cached singleton for its (model, key, timeout) tuple.
     """
     model = llm_config.resolve_claude_model(agent_key)
     api_key = llm_config.resolve_claude_api_key()
     timeout = llm_config.resolve_timeout(agent_key)
     fingerprint = sha256_fingerprint(api_key) if api_key else "no-key"
-    cache_key = (model, fingerprint)
+    cache_key = (model, fingerprint, timeout)
     with _cache_lock:
         client = _claude_cache.get(cache_key)
         if client is None:

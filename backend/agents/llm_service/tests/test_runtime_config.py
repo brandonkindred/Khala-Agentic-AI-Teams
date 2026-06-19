@@ -17,7 +17,11 @@ def _reset_cache():
 
 def _fake_store(monkeypatch, store: dict, *, enabled=True):
     monkeypatch.setattr(rc, "_postgres_enabled", lambda: enabled)
-    monkeypatch.setattr(secrets_mod, "get_secret", lambda service, key: store.get(key, ""))
+
+    def _get_secrets(service, keys):
+        return {k: store[k] for k in keys if k in store}
+
+    monkeypatch.setattr(secrets_mod, "get_secrets", _get_secrets)
 
 
 def test_returns_empty_when_postgres_disabled(monkeypatch):
@@ -67,17 +71,15 @@ def test_unknown_key_asserts():
         rc.get_runtime("not_a_key")
 
 
-def test_load_skips_key_that_raises(monkeypatch):
-    def _boom(service, key):
-        if key == rc.KEY_MODEL:
-            raise RuntimeError("db hiccup")
-        return "claude" if key == rc.KEY_PROVIDER else ""
+def test_load_returns_empty_when_batch_read_raises(monkeypatch):
+    def _boom(service, keys):
+        raise RuntimeError("db hiccup")
 
     monkeypatch.setattr(rc, "_postgres_enabled", lambda: True)
-    monkeypatch.setattr(secrets_mod, "get_secret", _boom)
-    # The failing key resolves to "" without poisoning the others.
+    monkeypatch.setattr(secrets_mod, "get_secrets", _boom)
+    # A failed batch read resolves every key to "" (env fallback), never raises.
     assert rc.get_runtime(rc.KEY_MODEL) == ""
-    assert rc.get_runtime(rc.KEY_PROVIDER) == "claude"
+    assert rc.get_runtime(rc.KEY_PROVIDER) == ""
 
 
 def test_postgres_enabled_swallows_import_error(monkeypatch):

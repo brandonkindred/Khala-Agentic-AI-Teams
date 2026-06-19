@@ -269,27 +269,60 @@ def resolve_provider() -> str:
     return raw
 
 
+def _looks_like_claude_model(model: str) -> bool:
+    """Return True when ``model`` looks like an Anthropic/Claude model id.
+
+    Heuristic guard so a cross-provider model id (e.g. an Ollama model left in
+    ``LLM_MODEL`` or a stale runtime model from before a provider switch) is never
+    sent to the Anthropic API. Matches the Claude/Fable/Mythos families and the
+    Bedrock/Vertex-style ``anthropic.``/``claude-`` prefixes.
+
+    Postconditions: returns a bool; never raises. ``""`` -> False.
+    """
+    m = (model or "").strip().lower()
+    if not m:
+        return False
+    if m.startswith(("claude", "anthropic.", "anthropic/")):
+        return True
+    return any(token in m for token in ("claude", "fable", "mythos"))
+
+
 def resolve_claude_model(agent_key: Optional[str] = None) -> str:
     """Resolve the Claude model id for ``agent_key``.
 
-    Order: ``LLM_MODEL_<agent_key>`` -> ``LLM_MODEL`` -> runtime model -> default
-    (``claude-opus-4-8``). Deliberately skips the Ollama ``AGENT_DEFAULT_MODELS``
-    table (those are Ollama model names, never valid Claude ids).
+    Ordered, **provider-validated** sources: ``LLM_MODEL_<agent_key>`` (per-agent
+    env) -> runtime model (the LLM Provider UI) -> ``LLM_MODEL`` (global env). Each
+    candidate is accepted only if :func:`_looks_like_claude_model`; a non-Claude
+    id (e.g. an Ollama model still in ``LLM_MODEL``, or a stale runtime model left
+    over from a provider switch) is skipped with a warning so it never reaches the
+    Anthropic API. Falls back to ``DEFAULT_CLAUDE_MODEL``. The Ollama
+    ``AGENT_DEFAULT_MODELS`` table is deliberately never consulted.
 
-    Postconditions: returns a non-empty Claude model id string.
+    Note the runtime (UI) value is ranked above the global ``LLM_MODEL`` env, so
+    a UI-selected Claude model is honored (consistent with ``resolve_provider`` /
+    ``resolve_base_url``); per-agent env pinning still wins when set.
+
+    Postconditions: returns a non-empty Claude-looking model id string.
     """
     from . import runtime_config as _rc
 
+    candidates: list[str] = []
     if agent_key:
-        per_agent = os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}")
-        if per_agent and per_agent.strip():
-            return per_agent.strip()
-    global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
-    if global_model:
-        return global_model
-    runtime_model = _runtime(_rc.KEY_MODEL).strip()
-    if runtime_model:
-        return runtime_model
+        candidates.append((os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip())
+    candidates.append(_runtime(_rc.KEY_MODEL).strip())
+    candidates.append((os.environ.get(ENV_LLM_MODEL) or "").strip())
+
+    for candidate in candidates:
+        if not candidate:
+            continue
+        if _looks_like_claude_model(candidate):
+            return candidate
+        logger.warning(
+            "Ignoring non-Claude model %r for the Claude provider; using default %s. "
+            "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
+            candidate,
+            DEFAULT_CLAUDE_MODEL,
+        )
     return DEFAULT_CLAUDE_MODEL
 
 

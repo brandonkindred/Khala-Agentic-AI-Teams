@@ -92,6 +92,19 @@ def _get_fernet():
     return _fernet
 
 
+def get_fernet():
+    """Public accessor for the process-wide Fernet used by the secret store.
+
+    This is the single Fernet-key derivation for the platform; ``unified_api``'s
+    credential modules delegate here so there is exactly one key implementation
+    (env ``INTEGRATION_ENCRYPTION_KEY`` -> ``$AGENT_CACHE/integration.key``) shared
+    by the unified API and every team container.
+
+    Postconditions: returns a ready ``cryptography.fernet.Fernet``.
+    """
+    return _get_fernet()
+
+
 @timed_query(store=_STORE, op="get_secret")
 def get_secret(service: str, key: str) -> str:
     """Return the decrypted secret for ``(service, key)``, or ``""``.
@@ -123,6 +136,46 @@ def get_secret(service: str, key: str) -> str:
     except Exception as e:  # noqa: BLE001 - corrupt/foreign ciphertext
         logger.error("Failed to decrypt shared secret %s/%s: %s", service, key, e)
         return ""
+
+
+@timed_query(store=_STORE, op="get_secrets")
+def get_secrets(service: str, keys: "list[str] | tuple[str, ...]") -> dict[str, str]:
+    """Return decrypted values for several keys of one ``service`` in ONE query.
+
+    Batched counterpart to :func:`get_secret` — a single
+    ``SELECT … WHERE service = %s`` round-trip instead of one per key.
+
+    Preconditions: ``service`` is non-empty; ``keys`` is a non-empty iterable of
+        non-empty strings.
+    Postconditions: returns a dict mapping each requested key present in the store
+        to its decrypted plaintext; absent keys and keys whose ciphertext fails to
+        decrypt (logged) are omitted. Returns ``{}`` when Postgres is disabled or
+        the read fails. Never raises for absent values.
+    """
+    assert service, "service must be non-empty"
+    wanted = {k for k in keys if k}
+    if not wanted or not is_postgres_enabled():
+        return {}
+    rows: list[tuple] = []
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT credential_key, ciphertext FROM encrypted_integration_credentials "
+                "WHERE service = %s AND credential_key = ANY(%s)",
+                (service, list(wanted)),
+            )
+            rows = cur.fetchall()
+    except Exception as e:  # noqa: BLE001 - read must never crash a caller
+        logger.warning("shared secrets batch read failed (%s): %s", service, e)
+        return {}
+    fernet = _get_fernet()
+    out: dict[str, str] = {}
+    for key, ciphertext in rows:
+        try:
+            out[key] = fernet.decrypt(ciphertext.encode()).decode()
+        except Exception as e:  # noqa: BLE001 - corrupt/foreign ciphertext
+            logger.error("Failed to decrypt shared secret %s/%s: %s", service, key, e)
+    return out
 
 
 @timed_query(store=_STORE, op="set_secret")
@@ -175,6 +228,27 @@ def delete_secret(service: str, key: str) -> None:
             )
     except Exception as e:  # noqa: BLE001 - delete is best-effort
         logger.warning("shared secret delete failed (%s/%s): %s", service, key, e)
+
+
+@timed_query(store=_STORE, op="delete_service_secrets")
+def delete_service_secrets(service: str) -> None:
+    """Remove every secret row for ``service``.
+
+    Preconditions: ``service`` is a non-empty string.
+    Postconditions: all rows for ``service`` are removed; a no-op when Postgres is
+        disabled. Never raises.
+    """
+    assert service, "service must be non-empty"
+    if not is_postgres_enabled():
+        return
+    try:
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM encrypted_integration_credentials WHERE service = %s",
+                (service,),
+            )
+    except Exception as e:  # noqa: BLE001 - delete is best-effort
+        logger.warning("shared service secret delete failed (%s): %s", service, e)
 
 
 def _reset_fernet_for_testing() -> None:

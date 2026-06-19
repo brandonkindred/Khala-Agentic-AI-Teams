@@ -78,6 +78,7 @@ export class LlmConfigDashboardComponent implements OnInit {
   loadConfig(): void {
     this.loading = true;
     this.error = null;
+    this.success = null;
     this.api.getConfig().subscribe({
       next: (cfg) => {
         this.applyConfig(cfg);
@@ -94,7 +95,7 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.provider = cfg.provider === 'claude' ? 'claude' : 'ollama';
     this.model = cfg.model || '';
     this.ollamaBaseUrl = cfg.ollama_base_url || OLLAMA_CLOUD_URL;
-    this.ollamaMode = this.ollamaBaseUrl.includes('ollama.com') ? 'cloud' : 'local';
+    this.ollamaMode = this.isOllamaCloudUrl(this.ollamaBaseUrl) ? 'cloud' : 'local';
     this.claudeApiKeyConfigured = cfg.claude_api_key_configured;
     this.ollamaApiKeyConfigured = cfg.ollama_api_key_configured;
     this.storageAvailable = cfg.storage_available;
@@ -112,9 +113,37 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.ollamaBaseUrl = mode === 'cloud' ? OLLAMA_CLOUD_URL : OLLAMA_LOCAL_DEFAULT;
   }
 
+  /** React to a provider switch by resetting the model to the new provider's default.
+   *
+   * Without this, a model id from the previous provider (e.g. an Ollama model)
+   * would be left in the field and persisted/sent under the new provider, which
+   * the API would reject. Defaults to the first curated option for the provider.
+   */
+  onProviderChange(provider: LlmProvider): void {
+    this.provider = provider;
+    this.model = this.modelOptions.length ? this.modelOptions[0] : '';
+  }
+
   /** The model suggestions for the active provider. */
   get modelOptions(): string[] {
     return this.provider === 'claude' ? this.claudeModelOptions : this.ollamaModelSuggestions;
+  }
+
+  /** True iff the URL's host is exactly ollama.com (the Cloud endpoint).
+   *
+   * Uses the parsed hostname, not a substring, so a custom host that merely
+   * contains 'ollama.com' (e.g. http://ollama.company.com) is treated as Local.
+   */
+  private isOllamaCloudUrl(url: string): boolean {
+    const u = (url || '').trim();
+    if (!u) {
+      return true;
+    }
+    try {
+      return new URL(u).hostname.toLowerCase() === 'ollama.com';
+    } catch {
+      return u.toLowerCase() === OLLAMA_CLOUD_URL;
+    }
   }
 
   /** Persist the configuration. */
@@ -130,8 +159,13 @@ export class LlmConfigDashboardComponent implements OnInit {
 
     const body: LlmConfigUpdate = { provider: this.provider, model: this.model.trim() };
     if (this.provider === 'ollama') {
+      // Local mode with a cleared base URL falls back to the localhost default
+      // rather than sending '' (which the backend skips, silently keeping the
+      // previously stored Cloud URL).
       body.ollama_base_url =
-        this.ollamaMode === 'cloud' ? OLLAMA_CLOUD_URL : this.ollamaBaseUrl.trim();
+        this.ollamaMode === 'cloud'
+          ? OLLAMA_CLOUD_URL
+          : this.ollamaBaseUrl.trim() || OLLAMA_LOCAL_DEFAULT;
       if (this.ollamaApiKey.trim()) {
         body.ollama_api_key = this.ollamaApiKey.trim();
       }

@@ -34,7 +34,8 @@
         <section class="field-group">
           <div class="field-label" id="provider-label">Provider</div>
           <mat-radio-group
-            [(ngModel)]="provider"
+            [ngModel]="provider"
+            (ngModelChange)="onProviderChange($event)"
             class="provider-radio"
             aria-labelledby="provider-label"
           >

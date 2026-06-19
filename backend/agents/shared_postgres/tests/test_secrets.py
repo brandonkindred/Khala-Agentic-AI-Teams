@@ -12,6 +12,7 @@ class _FakeCursor:
     def __init__(self, store):
         self.store = store
         self._row = None
+        self._rows: list = []
 
     def __enter__(self):
         return self
@@ -21,16 +22,27 @@ class _FakeCursor:
 
     def execute(self, sql, params):
         s = sql.strip().upper()
-        if s.startswith("SELECT"):
+        if (
+            "ANY(" in s
+        ):  # batched get_secrets: SELECT key, ciphertext WHERE service AND key = ANY(...)
+            service, keys = params
+            self._rows = [(k, self.store[(service, k)]) for k in keys if (service, k) in self.store]
+        elif s.startswith("SELECT"):
             cipher = self.store.get((params[0], params[1]))
             self._row = (cipher,) if cipher is not None else None
         elif "INSERT" in s:
             self.store[(params[0], params[1])] = params[2]
+        elif s.startswith("DELETE") and len(params) == 1:  # delete_service_secrets
+            for k in [key for key in self.store if key[0] == params[0]]:
+                self.store.pop(k, None)
         elif s.startswith("DELETE"):
             self.store.pop((params[0], params[1]), None)
 
     def fetchone(self):
         return self._row
+
+    def fetchall(self):
+        return self._rows
 
 
 class _FakeConn:
@@ -83,6 +95,37 @@ def test_empty_value_deletes(store):
 
 def test_get_missing_returns_empty(store):
     assert secrets_mod.get_secret("llm_config", "nope") == ""
+
+
+def test_get_secrets_batched_round_trip(store):
+    secrets_mod.set_secret("llm_config", "provider", "claude")
+    secrets_mod.set_secret("llm_config", "model", "claude-opus-4-8")
+    out = secrets_mod.get_secrets("llm_config", ["provider", "model", "absent"])
+    assert out == {"provider": "claude", "model": "claude-opus-4-8"}  # absent omitted
+
+
+def test_get_secrets_empty_when_disabled(monkeypatch):
+    monkeypatch.setattr(secrets_mod, "is_postgres_enabled", lambda: False)
+    assert secrets_mod.get_secrets("llm_config", ["provider"]) == {}
+
+
+def test_get_secrets_no_keys_returns_empty(store):
+    assert secrets_mod.get_secrets("llm_config", []) == {}
+
+
+def test_delete_service_secrets_removes_all(store):
+    secrets_mod.set_secret("llm_config", "a", "1")
+    secrets_mod.set_secret("llm_config", "b", "2")
+    secrets_mod.set_secret("other", "c", "3")
+    secrets_mod.delete_service_secrets("llm_config")
+    assert ("llm_config", "a") not in store
+    assert ("llm_config", "b") not in store
+    assert ("other", "c") in store  # other service untouched
+
+
+def test_get_fernet_is_usable(store):
+    token = secrets_mod.get_fernet().encrypt(b"hi")
+    assert secrets_mod.get_fernet().decrypt(token) == b"hi"
 
 
 def test_delete_removes(store):
