@@ -26,6 +26,31 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # behavior, not a defect. Read once at import (matches the other prompt loads).
 _STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
 
+# The self-review risk-model check (instruction "1a"). Kept as its own
+# implicitly-concatenated constant — rather than one ~1k-char line inside the
+# template — for source readability; interpolated into the template below.
+_RISK_MODEL_CHECK = (
+    "1a. Risk-model check: confirm the narrative treats the deployed position size as the per-trade "
+    "capital at risk and loss cap, and treats stop-loss / trailing stop / take-profit as separate "
+    "within-position safeguards analyzed as a distinct dimension. "
+    'Read the "Sizing / risk" line by rule: "risk X% per trade" targets X% of the account (nominal, '
+    "before whole-share lot rounding and the position cap); "
+    '"$Y per trade" targets a fixed $Y per position capped by the position limit; '
+    '"vol-target X%" is a target annual volatility, so the deployed amount is dynamic and not shown — '
+    'do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" as the exact capital at risk, '
+    "since lot rounding or a position cap may move the realised deployment. "
+    "Strike any claim that derives per-trade risk by multiplying the stop into sizing "
+    '(deployed-fraction times stop), calls such a stop-multiplied figure the "capital at risk" / '
+    '"capital in play", or blames low/negative returns on "low effective risk". '
+    "Stating that the deployed size IS the capital at risk — including that a genuinely small "
+    "deployment is small capital at risk — is correct and must be preserved; only strike the "
+    "stop-multiplied conflation and the misattribution of returns to it. "
+    "The sizing line is only the nominal rule; the trade ledger reports per-trade position_value, "
+    "which IS the realised deployed capital at risk — verify any per-trade deployed-capital or "
+    "capital-at-risk claim against those position_value figures rather than re-deriving it from the "
+    "nominal sizing line."
+)
+
 _SELF_REVIEW_PROMPT = """\
 Perform a self-review of the draft analysis below.
 
@@ -52,7 +77,7 @@ Outcome label: {outcome_label}
 ## Instructions
 0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
 1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
-1a. Risk-model check: confirm the narrative treats the deployed position size as the per-trade capital at risk and loss cap, and treats stop-loss / trailing stop / take-profit as separate within-position safeguards analyzed as a distinct dimension. Read the "Sizing / risk" line by rule: "risk X% per trade" targets X% of the account (nominal, before whole-share lot rounding and the position cap); "$Y per trade" targets a fixed $Y per position capped by the position limit; "vol-target X%" is a target annual volatility, so the deployed amount is dynamic and not shown — do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" as the exact capital at risk, since lot rounding or a position cap may move the realised deployment. Strike any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the "capital at risk" / "capital in play", or blames low/negative returns on "low effective risk". Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is correct and must be preserved; only strike the stop-multiplied conflation and the misattribution of returns to it. The sizing line is only the nominal rule; the trade ledger reports per-trade position_value, which IS the realised deployed capital at risk — verify any per-trade deployed-capital or capital-at-risk claim against those position_value figures rather than re-deriving it from the nominal sizing line.
+{risk_model_check}
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
 4. In verification_notes (2-4 sentences), state what you verified and any material corrections.
@@ -163,6 +188,7 @@ class AnalysisAgent:
             entry_rules=format_rules_for_prompt(spec.entry_rules),
             exit_rules=format_rules_for_prompt(spec.exit_rules),
             sizing_rules=format_sizing_rule(spec.sizing),
+            risk_model_check=_RISK_MODEL_CHECK,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
             sharpe_ratio=metrics.sharpe_ratio,

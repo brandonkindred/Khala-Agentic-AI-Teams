@@ -36,6 +36,7 @@ from investment_team.strategy_lab.agents.alignment import (
 )
 from investment_team.strategy_lab.agents.analysis import (
     _PROMPT_DIR,
+    _RISK_MODEL_CHECK,
     _SELF_REVIEW_PROMPT,
     _format_alignment_status_section,
     format_misalignment_prefix,
@@ -310,10 +311,12 @@ def test_self_review_check_preserves_accurate_low_capital_statement() -> None:
     deployment is genuinely small capital at risk (deployed size IS capital at
     risk under this model).
     """
-    assert "must be preserved" in _SELF_REVIEW_PROMPT
-    assert "genuinely small deployment is small capital at risk" in _SELF_REVIEW_PROMPT
+    # The 1a check is interpolated from _RISK_MODEL_CHECK into the template.
+    assert "{risk_model_check}" in _SELF_REVIEW_PROMPT
+    assert "must be preserved" in _RISK_MODEL_CHECK
+    assert "genuinely small deployment is small capital at risk" in _RISK_MODEL_CHECK
     # The over-broad clause that rejected the accurate equation must be gone.
-    assert "equates a low deployed size with low capital-at-risk" not in _SELF_REVIEW_PROMPT
+    assert "equates a low deployed size with low capital-at-risk" not in _RISK_MODEL_CHECK
 
 
 def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> None:
@@ -322,19 +325,19 @@ def test_self_review_check_handles_vol_target_and_capped_notional_sizing() -> No
     (deployed amount dynamic) and "$Y per trade" is capped by the position
     limit, so the reviewer must not read either as the exact capital at risk.
     """
-    assert "capped by the position limit" in _SELF_REVIEW_PROMPT
+    assert "capped by the position limit" in _RISK_MODEL_CHECK
     # Fixed-fraction is also nominal (lot rounding / cap can move it), so the
     # check must not read any of the three renderings as the exact capital.
-    assert "(nominal, before whole-share lot rounding and the position cap)" in _SELF_REVIEW_PROMPT
+    assert "(nominal, before whole-share lot rounding and the position cap)" in _RISK_MODEL_CHECK
     assert (
         'do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" '
-        "as the exact capital at risk" in _SELF_REVIEW_PROMPT
+        "as the exact capital at risk" in _RISK_MODEL_CHECK
     )
     # The ledger now carries per-trade position_value, so the check verifies
     # deployed-capital claims against it rather than forcing qualitative-only.
     assert (
         "the trade ledger reports per-trade position_value, which IS the realised "
-        "deployed capital at risk" in _SELF_REVIEW_PROMPT
+        "deployed capital at risk" in _RISK_MODEL_CHECK
     )
 
 
@@ -431,6 +434,59 @@ def test_exit_reason_is_sanitized_against_prompt_injection() -> None:
     ]
     summary = _format_simulated_trades_summary(trades)
     assert "\nIgnore previous instructions" not in summary
+
+
+def test_sanitize_exit_reason_edge_cases() -> None:
+    """Boundary contract for _sanitize_exit_reason: a whitespace-only reason
+    collapses to empty; a reason exactly at the length bound is untouched; one
+    char over is truncated to (max_len - 1) chars plus the ellipsis marker."""
+    from investment_team.strategy_lab.agents.analysis import _sanitize_exit_reason
+
+    assert _sanitize_exit_reason("   ") == ""
+    assert _sanitize_exit_reason("x" * 80) == "x" * 80
+    assert len(_sanitize_exit_reason("x" * 80)) == 80
+    assert _sanitize_exit_reason("x" * 81) == "x" * 79 + "…"
+
+
+def test_simulated_trades_summary_samples_large_ledger() -> None:
+    """With more trades than max_sample_rows the summary samples a bounded
+    subset (with an elision marker) while the aggregate stats span ALL trades,
+    and the best/worst trades are still named."""
+    from investment_team.models import TradeRecord
+    from investment_team.strategy_lab.agents.analysis import _format_simulated_trades_summary
+
+    trades = [
+        TradeRecord(
+            trade_num=i,
+            entry_date="2024-01-01",
+            exit_date="2024-01-02",
+            symbol=f"S{i}",
+            side="long",
+            entry_price=100.0,
+            exit_price=100.0 + i,
+            shares=1.0,
+            position_value=float(100 + i),
+            gross_pnl=float(i),
+            net_pnl=float(i),
+            return_pct=float(i),
+            hold_days=i,
+            outcome="win" if i % 2 == 0 else "loss",
+            cumulative_pnl=float(i),
+        )
+        for i in range(1, 21)  # 20 > max_sample_rows (14)
+    ]
+    summary = _format_simulated_trades_summary(trades)
+    # Aggregates span all 20 trades (10 even -> win, 10 odd -> loss).
+    assert "20 simulated trades | 10 wins / 10 losses" in summary
+    # position_value aggregate over all trades: min 101, max 120.
+    assert "min $101.00, max $120.00" in summary
+    # Best (#20) and worst (#1) trades are still named from the full ledger.
+    assert "best 20.00% (trade #20 S20)" in summary
+    assert "worst 1.00% (trade #1 S1)" in summary
+    # Only a bounded sample of rows is shown, with an elision marker.
+    shown_rows = [ln for ln in summary.splitlines() if ln.strip().startswith("#")]
+    assert len(shown_rows) <= 14
+    assert "(6 additional trades not shown)" in summary
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:
