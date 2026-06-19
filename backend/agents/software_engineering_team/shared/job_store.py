@@ -33,6 +33,10 @@ logger = logging.getLogger(__name__)
 # SE-specific statuses (not in shared job_service_client)
 JOB_STATUS_AGENT_CRASH = "agent_crash"
 JOB_STATUS_PAUSED_LLM_CONNECTIVITY = "paused_llm_connectivity"
+# Terminal-success status the coding team can hand back when an SE job delegates to it and the work
+# was already done (no changes needed). It reaches SE run-team jobs unchanged, so SE must treat it
+# as terminal everywhere completed/failed/cancelled are treated as terminal.
+JOB_STATUS_ALREADY_COMPLETE = "already_complete"
 
 # Sentinel failure reason when LLM is unreachable after 3 attempts (frontend team retry + circuit breaker)
 LLM_UNREACHABLE_AFTER_RETRIES = "LLM unreachable after 3 attempts with exponential backoff. Check connectivity and resume when ready."
@@ -319,7 +323,12 @@ def request_cancel(
     Returns True if the job was found and cancellation was requested.
     Returns False if the job was not found or is already in a terminal state.
     """
-    terminal_statuses = (JOB_STATUS_COMPLETED, JOB_STATUS_FAILED, JOB_STATUS_CANCELLED)
+    terminal_statuses = (
+        JOB_STATUS_COMPLETED,
+        JOB_STATUS_FAILED,
+        JOB_STATUS_CANCELLED,
+        JOB_STATUS_ALREADY_COMPLETE,
+    )
     data = _client(cache_dir).get_job(job_id)
     if data is None:
         return False
