@@ -10,12 +10,19 @@
 export const COMPLETED_WITH_FAILURES = 'completed_with_failures';
 
 /**
+ * A run finished because the requested work was already done — no changes were needed (the coding
+ * team recognized the issue as already complete). A terminal SUCCESS, distinct from 'completed'.
+ */
+export const ALREADY_COMPLETE = 'already_complete';
+
+/**
  * Terminal statuses for coding-team-style jobs: once a job reports one of these it will not change
  * again, so polling can stop and the job is dismissable.
  */
 export const CODING_TEAM_TERMINAL_STATUSES: readonly string[] = [
   'completed',
   COMPLETED_WITH_FAILURES,
+  ALREADY_COMPLETE,
   'failed',
   'cancelled',
 ];

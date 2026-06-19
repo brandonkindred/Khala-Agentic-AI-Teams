@@ -1443,6 +1443,50 @@ class TestActiveIssueMarkerLifecycle:
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
         assert cleared == []
 
+    def test_cleared_on_already_complete(self, patched_app, monkeypatch) -> None:
+        # An already-complete run is a clean no-op success: it must clear the marker like the normal
+        # publish-success path, not leave it behind (a later retry would treat stale local state as
+        # interrupted progress).
+        def already_done(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                already_complete=True,
+                completion_evidence="already merged",
+                task_graph_snapshot=[],
+            )
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=already_done)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_already_complete_removes_ephemeral_checkout_when_flagged(
+        self, patched_app, monkeypatch
+    ) -> None:
+        # The per-issue clone must also be removed on an already-complete run when
+        # cleanup_checkout_on_success is set — otherwise the clone leaks just like on the normal
+        # success path.
+        api = patched_app["api"]
+        removed: list[str] = []
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
+        monkeypatch.setattr(api, "_cleanup_issue_checkout", lambda p: removed.append(p))
+
+        def already_done(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                already_complete=True,
+                completion_evidence="already merged",
+                task_graph_snapshot=[],
+            )
+
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", already_done)
+        patched_app["set_github"](_FakeClient(issues=[_issue(3)], sub_map={3: []}))
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(3, repo_path=patched_app["repo_path"], cleanup_checkout_on_success=True),
+        )
+        assert resp.status_code == 200
+        assert removed == [patched_app["repo_path"]]
+
     def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]
         monkeypatch.setattr(api, "_push_branch", lambda *a, **kw: (False, "remote hung up"))

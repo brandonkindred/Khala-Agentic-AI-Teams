@@ -2671,6 +2671,15 @@ def _run_with_github_hooks(
                 body += f" — {evidence}"
             body += f"\n\nNo changes were needed. Recommend closing #{num}."
             _safe_comment(client, owner, repo, num, body)
+            # An already-complete run is a clean no-op success, so it must run the SAME checkout
+            # cleanup as the normal success path below — otherwise it leaves the active-issue marker
+            # set (a later same-issue retry would treat stale local state as interrupted progress)
+            # and leaks the per-issue clone when cleanup_checkout_on_success is set. Cleanup runs
+            # BEFORE the terminal status write so the job stays in list_jobs(active_only=True) while
+            # the checkout is removed (same ordering rationale as the merged-work path).
+            _clear_active_issue_if_matches(request.repo_path, num)
+            if request.cleanup_checkout_on_success:
+                _cleanup_issue_checkout(request.repo_path)
             update_job(
                 job_id,
                 status="already_complete",
