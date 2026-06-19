@@ -101,13 +101,16 @@ class ExitRuleConformanceGate(GateResultsMixin):
             results: List[QualityGateResult] = []
             firings = diagnostics.exit_rule_firings or {}
             firings_by_symbol = diagnostics.exit_rule_firings_by_symbol or {}
+            fills_by_symbol = diagnostics.exit_rule_fills_by_symbol or {}
 
             # ---- StopLossRule (entry_price basis only — trailing variants need
             # bar-by-bar replay which the gate cannot reconstruct from the trade
             # ledger alone) ----
             stop_losses = [r for r in exit_rules if isinstance(r, StopLossRule)]
             for rule in stop_losses:
-                results.append(self._check_stop_loss(rule, trades, firings_by_symbol))
+                results.append(
+                    self._check_stop_loss(rule, trades, firings_by_symbol, fills_by_symbol)
+                )
 
             # ---- TakeProfitRule (sanity only) ----
             take_profits = [r for r in exit_rules if isinstance(r, TakeProfitRule)]
@@ -178,6 +181,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         rule: StopLossRule,
         trades: Sequence[TradeRecord],
         firings_by_symbol: Mapping[str, Mapping[str, int]],
+        fills_by_symbol: Mapping[str, Mapping[str, int]],
     ) -> QualityGateResult:
         if rule.basis != "entry_price":
             return self._info(
@@ -223,6 +227,21 @@ class ExitRuleConformanceGate(GateResultsMixin):
         # match the engine's per-symbol stop_loss firing count. Any
         # excess is a bookkeeping leak between the dispatcher's
         # emission path and the diagnostics counter.
+        # Reconciliation source: a ``style="market"`` stop emits a guaranteed
+        # market close, so emission == fill and the emission-time per-symbol
+        # firing counts are the right denominator (unchanged behaviour). A
+        # ``style="limit"`` stop emits a resting STOP_LIMIT that can fire (emit)
+        # yet gap through its limit unfilled — leaving no closed trade — so its
+        # firing count overcounts actual closes and would MASK a real leak.
+        # Reconcile a limit-style stop against *fills* instead: one engine
+        # below-floor close == one engine fill, and a fired-but-not-filled
+        # stop-limit contributes neither a trade nor a fill, so it is tolerated.
+        if rule.style == "limit":
+            counts_by_symbol = fills_by_symbol
+            count_label = "fills"
+        else:
+            counts_by_symbol = firings_by_symbol
+            count_label = "firings"
         raw_floor_pct = -(rule.pct * 100.0)
         engine_stop_kind = f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
         by_symbol_tripped: dict[str, list[TradeRecord]] = {}
@@ -237,12 +256,12 @@ class ExitRuleConformanceGate(GateResultsMixin):
                 continue
             by_symbol_tripped.setdefault(t.symbol, []).append(t)
         unaccounted: list[TradeRecord] = []
-        total_firings = 0
+        total_counts = 0
         for sym, tripped in by_symbol_tripped.items():
-            sym_firings = firings_by_symbol.get(sym, {}).get("stop_loss", 0)
-            total_firings += sym_firings
-            if len(tripped) > sym_firings:
-                unaccounted.extend(tripped[sym_firings:])
+            sym_counts = counts_by_symbol.get(sym, {}).get("stop_loss", 0)
+            total_counts += sym_counts
+            if len(tripped) > sym_counts:
+                unaccounted.extend(tripped[sym_counts:])
         total_tripped = sum(len(v) for v in by_symbol_tripped.values())
         skipped_suffix = (
             f"; excluded {skipped_strategy_closes} strategy-closed below-floor trade(s)"
@@ -254,14 +273,19 @@ class ExitRuleConformanceGate(GateResultsMixin):
             return self._critical(
                 f"StopLossRule(pct={rule.pct}) leak: {total_tripped} engine-attributed "
                 f"trade(s) closed below the {raw_floor_pct:.2f}% floor; "
-                f"{len(unaccounted)} unaccounted for by per-symbol firings. "
+                f"{len(unaccounted)} unaccounted for by per-symbol {count_label}. "
                 f"Sample (trade_num, symbol, return_pct)={sample}{skipped_suffix}."
             )
+        limit_suffix = (
+            " (limit-style: fired-but-unfilled gap-throughs tolerated)"
+            if rule.style == "limit"
+            else ""
+        )
         return self._info(
-            f"StopLossRule(pct={rule.pct}) — per-symbol firings cover "
+            f"StopLossRule(pct={rule.pct}) — per-symbol {count_label} cover "
             f"{total_tripped} engine-attributed below-floor trade(s) across "
             f"{len(by_symbol_tripped)} symbol(s); "
-            f"total firings={total_firings}{skipped_suffix}."
+            f"total {count_label}={total_counts}{skipped_suffix}{limit_suffix}."
         )
 
     def _check_take_profit(

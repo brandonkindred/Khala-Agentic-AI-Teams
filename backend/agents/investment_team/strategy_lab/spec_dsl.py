@@ -323,7 +323,56 @@ class StopLossRule(_SpecNode):
     kind: Literal["stop_loss"] = "stop_loss"
     pct: float = Field(gt=0, le=1.0)
     basis: Literal["entry_price", "trailing_high", "trailing_low"] = "entry_price"
+    # Execution style for the structured close the engine emits when this rule
+    # fires. ``"market"`` (default) emits a guaranteed next-bar-open market close.
+    # ``"limit"`` emits a *resting* STOP_LIMIT at the rule's price floor/ceiling
+    # with the limit placed ``limit_offset_pct`` away on the protective side; it
+    # may **not** fill on a gap-through (the position stays open), which is the
+    # defining, intended trade-off of a stop-limit. ``"market"`` keeps the
+    # structured-exit "guaranteed close" invariant; ``"limit"`` relaxes it.
+    style: Literal["market", "limit"] = "market"
+    # Limit offset as a fraction of the stop level, consulted only when
+    # ``style == "limit"``. The limit sits below the stop for a long position
+    # (sell-stop-limit) and above it for a short (buy-stop-limit). Required when
+    # ``style == "limit"``; forbidden otherwise.
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, le=1.0)
     note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_limit_style(self):
+        """Tie ``limit_offset_pct`` to ``style`` and restrict limit-style stops to
+        a static (``entry_price``) stop level.
+
+        Preconditions: ``style`` and ``basis`` are valid Literals (Pydantic
+        enforces this before this validator runs).
+        Postconditions: returns ``self`` unchanged when consistent; raises
+        ``ValueError`` when ``style == "limit"`` lacks ``limit_offset_pct`` or
+        uses a trailing basis, or when ``limit_offset_pct`` is set without
+        ``style == "limit"``.
+
+        A trailing basis moves the stop level every bar, so a *resting* limit
+        order against it would need continuous re-pricing — the same reason the
+        bracket path forbids combining ``trail_offset`` with ``limit_offset``. A
+        limit-style structured stop therefore requires the static
+        ``entry_price`` basis.
+        """
+        if self.style == "limit":
+            if self.limit_offset_pct is None:
+                raise ValueError(
+                    "StopLossRule.style='limit' requires limit_offset_pct "
+                    "(the limit's distance from the stop level, as a fraction)"
+                )
+            if self.basis != "entry_price":
+                raise ValueError(
+                    "StopLossRule.style='limit' is only supported with "
+                    "basis='entry_price'; a resting stop-limit needs a static "
+                    "stop level, and a trailing basis re-prices the stop each bar"
+                )
+        elif self.limit_offset_pct is not None:
+            raise ValueError(
+                "StopLossRule.limit_offset_pct is only valid when style='limit'"
+            )
+        return self
 
 
 class TakeProfitRule(_SpecNode):
@@ -372,6 +421,13 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
     for a monotonic move means it is tighter, so the first side-compatible stop
     is the true worst case. ``TradingService`` uses the ``None`` result to detect
     a side with no effective stop (the short-safety auto-stop injection).
+
+    A ``style="limit"`` stop is still counted as an effective stop here: it
+    bounds the *intended* loss at the same ``pct`` and so still suppresses the
+    short-safety auto-stop injection. A gap-through that leaves a limit-style
+    stop unfilled can let *realised* loss exceed ``pct`` — that residual risk is
+    surfaced via ``stop_limit_unfilled_triggers`` telemetry, not by treating the
+    rule as "no stop" (which would inject a redundant second stop).
 
     Preconditions: ``side`` is ``"long"`` or ``"short"``.
     Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
@@ -556,7 +612,10 @@ def _format_rule(
         return f"{rule.side} when {_format_predicate(rule.when)}"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
-        return f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
+        base = f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
+        if rule.style == "limit":
+            return f"{base} (limit, {_format_number(rule.limit_offset_pct * 100)}% offset)"
+        return base
     if isinstance(rule, TakeProfitRule):
         return f"take profit {_format_number(rule.pct * 100)}%"
     if isinstance(rule, SignalExitRule):

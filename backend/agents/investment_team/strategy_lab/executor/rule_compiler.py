@@ -82,6 +82,17 @@ class ExitIntent:
     # ``reason`` that the conformance + alignment gates match by exact
     # equality).
     basis: Optional[str] = None
+    # Execution style for the close the engine builds from this intent.
+    # ``"market"`` (default, and the only value for non-stop-loss intents) emits
+    # a guaranteed market close. ``"limit"`` (only for ``StopLossRule`` with
+    # ``style="limit"``) tells the dispatcher to emit a *resting* STOP_LIMIT.
+    style: str = "market"
+    # Limit offset (fraction of ``stop_price``) and the resolved stop trigger
+    # level, populated only for ``style="limit"`` stop-loss intents so
+    # ``_build_close_order`` can construct the STOP_LIMIT without re-reading the
+    # spec or the position.
+    limit_offset_pct: Optional[float] = None
+    stop_price: Optional[float] = None
 
 
 def evaluate_exit_rules(
@@ -113,6 +124,17 @@ def evaluate_exit_rules(
         sym_view = views.get(symbol) if views is not None else None
         for idx, rule in enumerate(rules):
             if _rule_triggers(rule, position, bar, sym_view):
+                style = getattr(rule, "style", "market") or "market"
+                limit_offset_pct = getattr(rule, "limit_offset_pct", None)
+                # A limit-style stop needs the resolved trigger level so the
+                # dispatcher can rest a STOP_LIMIT there. Limit-style is
+                # restricted to ``entry_price`` basis (see ``StopLossRule``),
+                # so the level is a static offset off the entry price.
+                stop_price = (
+                    _stop_loss_level(rule, position)
+                    if isinstance(rule, StopLossRule) and style == "limit"
+                    else None
+                )
                 intents.append(
                     ExitIntent(
                         symbol=symbol,
@@ -120,10 +142,33 @@ def evaluate_exit_rules(
                         rule_index=idx,
                         note=getattr(rule, "note", "") or "",
                         basis=getattr(rule, "basis", None),
+                        style=style,
+                        limit_offset_pct=limit_offset_pct,
+                        stop_price=stop_price,
                     )
                 )
                 break
     return intents
+
+
+def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
+    """Resolve the price level at which ``rule`` floors (long) / caps (short)
+    the position, matching :func:`_stop_loss_triggers`'s geometry.
+
+    Preconditions: ``rule`` is side-compatible with ``position`` (the caller only
+    resolves a level for a rule that just triggered, so the basis can fire for
+    this side).
+    Postconditions: returns ``entry_price * (1 - pct)`` for a long and
+    ``entry_price * (1 + pct)`` for a short on the ``entry_price`` basis; for a
+    trailing basis it floors off the running high (long) / caps off the running
+    low (short).
+    """
+    pct = rule.pct
+    if position.side == "long":
+        ref = position.high_since_entry if rule.basis == "trailing_high" else position.entry_price
+        return ref * (1.0 - pct)
+    ref = position.low_since_entry if rule.basis == "trailing_low" else position.entry_price
+    return ref * (1.0 + pct)
 
 
 def _kind_of(rule: ExitRule) -> ExitRuleKind:

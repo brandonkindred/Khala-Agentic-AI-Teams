@@ -620,3 +620,94 @@ def test_diagnostic_events_default_to_empty_list(realistic: bool) -> None:
     assert outcome.exit_fills == []
     assert outcome.closed_trades == []
     assert outcome.diagnostic_events == []
+
+
+# ---------------------------------------------------------------------------
+# Fill-based exit counter (engine_exit fills) in _apply_fill_outcome_events
+# ---------------------------------------------------------------------------
+
+
+def _exit_filled_event(*, symbol: str, reason: str, order_type: str = "market"):
+    from investment_team.trading_service.engine.fill_simulator import FillDiagnosticEvent
+
+    return FillDiagnosticEvent(
+        kind="exit_filled",
+        order_id="e1",
+        timestamp="2024-01-02T00:00:00",
+        symbol=symbol,
+        side="short",
+        order_type=order_type,
+        reason=reason,
+    )
+
+
+def test_engine_exit_fill_bumps_fill_based_counter() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.engine.fill_simulator import FillOutcome
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = FillOutcome(
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=[],
+        diagnostic_events=[
+            _exit_filled_event(
+                symbol="AAA",
+                reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+                order_type="stop_limit",
+            )
+        ],
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    assert diag.exit_rule_fills.get("stop_loss") == 1
+    assert diag.exit_rule_fills_by_symbol.get("AAA", {}).get("stop_loss") == 1
+
+
+def test_signal_exit_fill_strips_index_suffix() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.engine.fill_simulator import FillOutcome
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = FillOutcome(
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=[],
+        diagnostic_events=[
+            _exit_filled_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]"
+            )
+        ],
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    # The "[2]" rule-index suffix is stripped so the fill key matches the
+    # firing key (rule kind only).
+    assert diag.exit_rule_fills.get("signal_exit") == 1
+
+
+def test_strategy_close_fill_is_not_counted() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.engine.fill_simulator import FillOutcome
+    from investment_team.trading_service.service import _apply_fill_outcome_events
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = FillOutcome(
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=[],
+        diagnostic_events=[_exit_filled_event(symbol="AAA", reason="strategy_market_exit")],
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    # Only engine-stamped exits feed the fill counter.
+    assert diag.exit_rule_fills == {}
+    assert diag.exit_rule_fills_by_symbol == {}

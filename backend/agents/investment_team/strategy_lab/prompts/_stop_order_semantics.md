@@ -12,7 +12,13 @@ by-design behavior as a defect, bug, or misconfiguration.
   price. It guarantees price-or-better, **not execution**: if the bar gaps through
   the limit, the order goes unfilled and **the position stays open**. A
   triggered-but-unfilled stop-limit is the defining, intended risk of this order
-  type — never describe a gap-through non-fill as a malfunction.
+  type — never describe a gap-through non-fill as a malfunction. A stop-loss exit
+  rule can be authored as a stop-limit with `{"kind": "stop_loss", "style":
+  "limit", "limit_offset_pct": <fraction>}` (only with `basis: "entry_price"`):
+  the engine rests a limit `limit_offset_pct` below the stop floor (long) / above
+  the stop ceiling (short). Choose `style: "limit"` only when avoiding a bad
+  gap-down fill price matters MORE than guaranteeing the exit; otherwise leave
+  `style` at its default `"market"` so the close is guaranteed.
 
 - **Trailing stop.** A stop whose trigger ratchets in the *favorable* direction as
   price moves favorably — it rises as a long appreciates, falls as a short

@@ -378,9 +378,19 @@ class _EngineExitDispatcher:
 
         pending_for_prev.append(req)
         self._register_binding(req, pos)
-        self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
-        self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
-        self._cancel_pending_entry_continuations(sym, pos, order_book)
+        # Retirement/cancellation of competing orders assumes the position is
+        # closed by this emission. That holds for a market close (guaranteed
+        # next-bar fill) but NOT for a ``style="limit"`` stop: it can gap
+        # through its limit and rest unfilled, leaving the position live. Doing
+        # the retirement now would strand competing orders and risk an
+        # unintended reverse position on a later bar, so for a limit-style stop
+        # we defer all of it to the actual fill — the fill simulator binds the
+        # STOP_LIMIT to its position on arm and its stale-continuation guard
+        # retires the rest when (and only when) the close actually fills.
+        if intent.style != "limit":
+            self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
+            self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
+            self._cancel_pending_entry_continuations(sym, pos, order_book)
         self._record_emission(req, intent, cur_bar, result)
 
     # ------------------------------------------------------------------
@@ -403,9 +413,13 @@ class _EngineExitDispatcher:
         * Portfolio agrees and has positive qty.
         * ``tracked.just_opened`` is False — skip the entry bar for
           non-market fills (see ``_update_position_tracker``).
-        * No in-flight engine market exit already pending on the
-          order book (avoid stacking redundant engine markets across
-          bars while the rule keeps re-triggering).
+        * No in-flight engine exit already pending on the order book — a
+          guaranteed market close (avoid stacking redundant engine markets
+          across bars while the rule keeps re-triggering) OR a *resting*
+          STOP_LIMIT from a ``style="limit"`` stop. The latch is what makes a
+          limit-style stop a "resting structured exit": while its STOP_LIMIT
+          rests (possibly armed but gapped through unfilled), the dispatcher
+          stands down instead of emitting a fresh duplicate every bar.
         """
         if sym not in position_tracker:
             return None
@@ -417,7 +431,7 @@ class _EngineExitDispatcher:
             return None
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
-            if po_req.order_type != OrderType.MARKET:
+            if po_req.order_type not in (OrderType.MARKET, OrderType.STOP_LIMIT):
                 continue
             if po_req.side != tracked.side and (po_req.reason or "").startswith(
                 ENGINE_EXIT_REASON_PREFIX
@@ -514,22 +528,33 @@ class _EngineExitDispatcher:
         ``scale_in_qty`` is added to ``pos.qty`` so any same-side
         same-bar strategy order that grows the position next bar is
         also closed by this emission (see ``_sum_same_side_queued``).
+
+        A ``style="limit"`` stop-loss intent builds a *resting* STOP_LIMIT
+        (GTC, ``REQUEUE_NEXT_BAR``) at ``intent.stop_price`` with the limit
+        ``intent.limit_offset_pct`` away on the protective side, rather than the
+        guaranteed market close every other intent uses. The fill simulator
+        owns its arm/latch/gap-through lifecycle from there.
         """
         self._next_seq += 1
         close_side = OrderSide.SHORT if tracked.side == OrderSide.LONG else OrderSide.LONG
-        req = OrderRequest(
-            client_order_id=f"e{self._next_seq}",
-            symbol=intent.symbol,
-            side=close_side,
-            qty=pos.qty + scale_in_qty,
-            order_type=OrderType.MARKET,
-            tif=TimeInForce.DAY,
-            reason=(
-                f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
-                if intent.rule_kind == "signal_exit"
-                else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
-            ),
+        reason = (
+            f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+            if intent.rule_kind == "signal_exit"
+            else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
+        qty = pos.qty + scale_in_qty
+        if intent.style == "limit":
+            req = self._build_stop_limit_close(intent, close_side, qty, reason)
+        else:
+            req = OrderRequest(
+                client_order_id=f"e{self._next_seq}",
+                symbol=intent.symbol,
+                side=close_side,
+                qty=qty,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+                reason=reason,
+            )
         try:
             req.validate_prices()
         except Exception as exc:  # pragma: no cover — engine-built request
@@ -541,6 +566,43 @@ class _EngineExitDispatcher:
             )
             return None
         return req
+
+    def _build_stop_limit_close(
+        self,
+        intent: ExitIntent,
+        close_side: OrderSide,
+        qty: float,
+        reason: str,
+    ) -> OrderRequest:
+        """Build the resting STOP_LIMIT close for a ``style="limit"`` stop.
+
+        Preconditions: ``intent.style == "limit"`` with ``intent.stop_price`` and
+        ``intent.limit_offset_pct`` populated by the evaluator.
+        Postconditions: returns an unvalidated STOP_LIMIT ``OrderRequest`` whose
+        limit sits on the protective side of the stop — below the stop for a
+        SHORT close (selling out of a long) and above it for a LONG close
+        (buying out of a short) — matching ``validate_prices``'s sign rule and
+        the bracket-child geometry in ``fill_simulator``.
+        """
+        assert intent.stop_price is not None, "limit-style exit intent missing stop_price"
+        assert intent.limit_offset_pct is not None, "limit-style exit intent missing limit_offset_pct"
+        stop_price = intent.stop_price
+        limit_off = stop_price * intent.limit_offset_pct
+        limit_price = (
+            stop_price - limit_off if close_side == OrderSide.SHORT else stop_price + limit_off
+        )
+        return OrderRequest(
+            client_order_id=f"e{self._next_seq}",
+            symbol=intent.symbol,
+            side=close_side,
+            qty=qty,
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=stop_price,
+            limit_price=limit_price,
+            tif=TimeInForce.GTC,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            reason=reason,
+        )
 
     def _register_binding(self, req: OrderRequest, pos: Position) -> None:
         """Record the binding so the bar-loop submit step can set
@@ -664,7 +726,7 @@ class _EngineExitDispatcher:
             timestamp=cur_bar.timestamp,
             symbol=intent.symbol,
             side=req.side.value,
-            order_type=OrderType.MARKET.value,
+            order_type=req.order_type.value,
             reason=req.reason,
         )
 
@@ -1120,6 +1182,22 @@ def _apply_fill_outcome_events(
                 reason=ev.reason,
                 detail=ev.detail,
             )
+            # Fill-based exit counter: an engine-emitted exit that actually
+            # filled (reason ``engine_exit:<kind>``). Distinct from emission-time
+            # ``exit_rule_firings`` — a limit-style stop can fire (emit) yet gap
+            # through unfilled, so conformance reconciles against fills. Strategy
+            # closes carry their own reason and are excluded.
+            reason = ev.reason or ""
+            if reason.startswith(ENGINE_EXIT_REASON_PREFIX):
+                kind = reason[len(ENGINE_EXIT_REASON_PREFIX):]
+                # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the
+                # fill key matches the firing key (rule kind only).
+                bracket = kind.find("[")
+                if bracket != -1:
+                    kind = kind[:bracket]
+                diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
+                sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
+                sym_fills[kind] = sym_fills.get(kind, 0) + 1
         elif ev.kind == "rejected":
             _increment_rejection(diagnostics, ev.reason)
             _record_event(

@@ -308,6 +308,57 @@ def test_format_stop_loss_trailing_low():
     assert format_rules_for_prompt([rule]) == "trailing-low stop loss 5%"
 
 
+# ---------------------------------------------------------------------------
+# StopLossRule.style="limit" — DSL surface for stop-limit exits.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_defaults_to_market_style():
+    rule = StopLossRule(pct=0.03)
+    assert rule.style == "market"
+    assert rule.limit_offset_pct is None
+
+
+def test_stop_loss_limit_style_accepts_offset():
+    rule = StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.005)
+    assert rule.style == "limit"
+    assert rule.limit_offset_pct == 0.005
+
+
+def test_stop_loss_limit_style_requires_offset():
+    with pytest.raises(ValidationError, match="requires limit_offset_pct"):
+        StopLossRule(pct=0.03, style="limit")
+
+
+def test_stop_loss_market_style_forbids_offset():
+    with pytest.raises(ValidationError, match="only valid when style='limit'"):
+        StopLossRule(pct=0.03, limit_offset_pct=0.005)
+
+
+def test_stop_loss_limit_style_rejects_trailing_basis():
+    with pytest.raises(ValidationError, match="only supported with basis='entry_price'"):
+        StopLossRule(pct=0.03, basis="trailing_high", style="limit", limit_offset_pct=0.005)
+
+
+def test_stop_loss_limit_offset_pct_bounds():
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.0)
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=1.5)
+
+
+def test_format_stop_loss_limit_style():
+    rule = StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.005)
+    assert format_rules_for_prompt([rule]) == "stop loss 3% (limit, 0.5% offset)"
+
+
+def test_format_stop_loss_market_style_unchanged_with_style_field():
+    # Explicitly setting style="market" must render byte-identically to the
+    # default, so existing rendering callers are unaffected.
+    rule = StopLossRule(pct=0.03, style="market")
+    assert format_rules_for_prompt([rule]) == "stop loss 3%"
+
+
 def test_format_indicator_source_default_omitted():
     rule = EntryRule(
         side="long",

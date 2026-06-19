@@ -562,6 +562,124 @@ def test_stop_loss_passes_when_all_below_floor_are_strategy_closed() -> None:
     assert "2 strategy-closed below-floor trade(s)" in info.details
 
 
+# ---------------------------------------------------------------------------
+# StopLossRule(style="limit") — fill-based reconciliation
+# ---------------------------------------------------------------------------
+
+
+def _limit_rule() -> StopLossRule:
+    return StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01)
+
+
+def test_limit_stop_tolerates_fired_but_not_filled() -> None:
+    """A limit-style stop can fire (emit) on several bars yet gap through its
+    limit unfilled — those firings produce no closed trade. The gate must
+    reconcile against FILLS, so excess firings with no trades are tolerated and
+    do not manufacture a critical.
+    """
+    gate = ExitRuleConformanceGate()
+    # One below-floor engine-stopped trade (it filled); three firings total
+    # (two gapped through unfilled, leaving the position open / no trade).
+    trades = [_trade(return_pct=-6.0)]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"stop_loss": 3},
+        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 3}},
+        exit_rule_fills={"stop_loss": 1},
+        exit_rule_fills_by_symbol={"AAA": {"stop_loss": 1}},
+    )
+    results = gate.check(
+        exit_rules=[_limit_rule()],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    info = next(
+        r for r in results if "StopLossRule" in r.details and "per-symbol fills" in r.details
+    )
+    assert "fired-but-unfilled gap-throughs tolerated" in info.details
+
+
+def test_limit_stop_leak_caught_by_fills_when_firings_would_mask() -> None:
+    """Two engine-attributed below-floor trades but only one recorded fill is a
+    real leak. Firing-based reconciliation (firings=2) would mask it; the
+    fill-based path (fills=1) flags the unaccounted trade.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [
+        _trade(trade_num=1, return_pct=-6.0),
+        _trade(trade_num=2, return_pct=-7.0),
+    ]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"stop_loss": 2},
+        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 2}},
+        exit_rule_fills={"stop_loss": 1},
+        exit_rule_fills_by_symbol={"AAA": {"stop_loss": 1}},
+    )
+    results = gate.check(
+        exit_rules=[_limit_rule()],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "critical"
+    assert "1 unaccounted" in fails[0].details
+    assert "per-symbol fills" in fails[0].details
+
+
+def test_limit_stop_zero_fills_with_engine_trade_is_a_leak() -> None:
+    """An engine-attributed below-floor *trade* means a position closed via the
+    engine stop — so a fill must exist. Zero recorded fills against such a trade
+    is a genuine bookkeeping leak, not a tolerated gap-through.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [_trade(return_pct=-6.0)]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"stop_loss": 1},
+        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 1}},
+        exit_rule_fills={},
+        exit_rule_fills_by_symbol={"AAA": {}},
+    )
+    results = gate.check(
+        exit_rules=[_limit_rule()],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "critical"
+
+
+def test_market_stop_ignores_fill_counter() -> None:
+    """A market-style stop reconciles against firings (emission == guaranteed
+    fill), so an empty fill counter must NOT turn a correctly-fired market stop
+    into a false leak.
+    """
+    gate = ExitRuleConformanceGate()
+    trades = [_trade(return_pct=-6.0)]
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"stop_loss": 1},
+        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 1}},
+        # No fill counter populated — the market path must not consult it.
+    )
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05)],
+        trades=trades,
+        diagnostics=diag,
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert fails == []
+    info = next(
+        r for r in results if "StopLossRule" in r.details and "per-symbol firings" in r.details
+    )
+    assert "fired-but-unfilled" not in info.details
+
+
 def test_stop_loss_excludes_engine_take_profit_below_floor() -> None:
     """An engine take_profit firing can fill below the stop-loss floor
     on a gap (engine fired TP on bar N's high, fills on bar N+1's

@@ -4,49 +4,49 @@ overview: Let the Strategy Lab DSL designer author a stop-limit exit (StopLossRu
 todos:
   - id: dsl-stoplossrule-style
     content: Add style ("market"|"limit", default "market") and limit_offset_pct (Optional[float], gt=0) to StopLossRule in strategy_lab/spec_dsl.py with a model validator requiring limit_offset_pct when style=="limit" and forbidding it when style=="market".
-    status: pending
+    status: completed
   - id: dsl-format-rule
     content: Render style/limit_offset_pct in _format_rule (spec_dsl.py) so a limit-style stop reads e.g. "stop loss 3% (limit, 0.5% offset)"; keep market-style output byte-identical to today.
-    status: pending
+    status: completed
   - id: dsl-first-side-stop-factor
     content: Audit first_side_stop_factor / stop_caps_side and the short-safety auto-stop injection in TradingService so a limit-style stop still counts as an effective stop (or is explicitly excluded) — a non-filling stop must not silently disable the worst-case loss bound used for sizing/short-safety.
-    status: pending
+    status: completed
   - id: exitintent-carries-style
     content: Extend ExitIntent (rule_compiler.py) with style + limit_offset_pct (or a resolved limit basis) so the dispatcher's _build_close_order can branch without re-reading the spec.
-    status: pending
+    status: completed
   - id: build-close-order-stop-limit
     content: Branch _build_close_order in trading_service/service.py to emit OrderType.STOP_LIMIT (with stop_price/limit_price, TIF=GTC, UnfilledPolicy=REQUEUE_NEXT_BAR) when intent.style=="limit", reusing the bracket limit-price geometry (protective side below stop for a long, above for a short). Keep MARKET for style=="market". Fix the hardcoded order_type=OrderType.MARKET in _record_emission's lifecycle event (service.py:667) to reflect the real emitted type.
-    status: pending
+    status: completed
   - id: resting-structured-exit
-    content: Extend the _should_evaluate in-flight guard (service.py:418-425) to also recognize a resting STOP_LIMIT engine exit, not just a pending MARKET, so a limit-style stop is emitted once per position and rests/latches across bars (fill simulator owns arm/latch/gap-through) instead of being re-emitted every bar — this IS the "resting structured exit" concept. Track/clear a resting-exit marker on _TrackedPosition.
-    status: pending
+    content: 'DONE — Extended the _should_evaluate in-flight guard (service.py) to also recognize a resting STOP_LIMIT engine exit, not just a pending MARKET, so a limit-style stop is emitted once per position and rests/latches across bars (fill simulator owns arm/latch/gap-through) instead of being re-emitted every bar — this IS the "resting structured exit" concept. Implemented via the order book (the resting opposite-side engine STOP_LIMIT is the source of truth) rather than a separate _TrackedPosition marker, avoiding state-sync drift.'
+    status: completed
   - id: retirement-bindings-live-position
     content: Make _retire_competing_resting_orders and _cancel_pending_entry_continuations NOT treat the position as closed when the emitted exit is a non-filling stop-limit still resting; defer retirement/cancellation to the actual fill so an unfilled stop-limit cannot leave the position live while bindings think it is gone (which would risk an unintended reverse position on a later bar).
-    status: pending
+    status: completed
   - id: fill-based-firings-counter
     content: Add a fill-based exit counter (e.g. exit_rule_fills / exit_rule_fills_by_symbol) to BacktestExecutionDiagnostics, bumped when an engine exit order actually fills (next to the existing stop_limit_unfilled_triggers handling in _apply_fill_outcome_events), distinct from the emission-time exit_rule_firings bumped in _record_emission.
-    status: pending
+    status: completed
   - id: conformance-fill-based
     content: Update exit_rule_conformance._check_stop_loss to reconcile below-floor trades against the fill-based counter (not emissions), and tolerate "fired but did not fill" for limit-style stop rules so a legitimate gap-through non-fill does not read as a leak (false critical) and a real leak is not masked.
-    status: pending
+    status: completed
   - id: prompts-designer
     content: Update strategy_lab/prompts/design_system.md and _stop_order_semantics.md so the designer LLM can author a well-formed limit-style StopLossRule (style + limit_offset_pct), stating the gap-through "may not fill, position stays open" trade-off and when to prefer market vs limit.
-    status: pending
+    status: completed
   - id: prompts-reviewer
     content: Mirror the stop-limit guidance into the design_review reviewer prompt so the reviewer validates limit-style stops (offset present/sane, gap-through acceptable for the strategy) without false-flagging them.
-    status: pending
+    status: completed
   - id: tests-dsl
     content: Add spec_dsl tests for StopLossRule style/limit_offset_pct validation (limit requires offset, market forbids it, bounds) and _format_rule rendering for both styles.
-    status: pending
+    status: completed
   - id: tests-engine-structured-exit
     content: Add structured-exit engine tests mirroring tests/test_stop_limit.py — a DSL limit-style stop fills at limit on a clean cross, does not fill on gap-through (position stays open, counter bumps), fills on recovery while latched, and is retired/discarded correctly when another exit closes the position first.
-    status: pending
+    status: completed
   - id: tests-conformance
     content: Add exit_rule_conformance gate tests covering a limit-style stop that fired-but-did-not-fill (no critical), reconciliation against the fill-based counter, and that a genuine market-stop leak still criticals.
-    status: pending
+    status: completed
   - id: tests-coverage-90
     content: Ensure backend line coverage stays >=90% for all touched files (spec_dsl, service, exit_rule_conformance, models, rule_compiler) and the new test modules; justify any pragma:no cover inline.
-    status: pending
+    status: completed
 isProject: false
 ---
 
