@@ -68,8 +68,13 @@ def _env_int(name: str, default: int, *, minimum: int = 1, maximum: int | None =
           the var is unset/blank/non-numeric — so the result always honors the
           bounds even if a caller passes an out-of-range default. Never raises on
           any input value (it assumes the module ``logger`` is initialized, which
-          it always is by import time).
+          it always is by import time). Swapped bounds (``minimum > maximum``) are
+          normalized rather than producing an undefined clamp.
     """
+    # Defensive: a caller passing minimum > maximum would otherwise clamp to an
+    # ill-defined value; normalize so the [minimum, maximum] window is coherent.
+    if maximum is not None and minimum > maximum:
+        minimum, maximum = maximum, minimum
     raw = os.environ.get(name)
     value = default
     if raw is not None and raw.strip():

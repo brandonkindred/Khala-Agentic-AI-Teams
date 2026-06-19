@@ -404,14 +404,26 @@ def _oom_check_tick(
         peak = peak_fn()
         peak_str = f"{_mb(peak)}MB" if peak else "unknown"
         limit_str = f"{_mb(limit_bytes)}MB" if limit_bytes else "unset (no container limit)"
+        # Tailor the likely-cause hint to the evidence: a peak well under the limit
+        # (or no limit / unknown peak) points at host/VM-wide pressure, whereas a
+        # peak near the limit points at the container hitting its own budget.
+        looks_global = limit_bytes is None or peak is None or peak < limit_bytes * 0.5
+        if looks_global:
+            cause = (
+                "the peak is well below the limit (or the limit/peak is unknown), so "
+                "the host/VM likely ran out of memory (global OOM) — raise Docker/VM "
+                "memory or reduce the running stack rather than this container's limit."
+            )
+        else:
+            cause = (
+                "the peak is near this container's limit, so the container likely "
+                "exceeded its own memory limit — raise its limit or reduce its usage."
+            )
         message = (
             f"OOM kill detected: cgroup oom_kill counter rose to {current} "
             f"(was {last_count}) — the kernel SIGKILLed a process in this container "
             f"with no traceback (a uvicorn worker simply vanishes and is restarted). "
-            f"container peak={peak_str} / limit={limit_str}. If peak stayed well "
-            f"below the limit (or the limit is unset), the host/VM ran out of memory "
-            f"(global OOM) — raise Docker/VM memory or reduce the running stack "
-            f"rather than this container's limit."
+            f"container peak={peak_str} / limit={limit_str}. Likely cause: {cause}"
         )
         return current, message
     return current, None

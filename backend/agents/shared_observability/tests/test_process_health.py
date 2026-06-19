@@ -395,6 +395,21 @@ def test_start_memory_watchdog_oom_only_mode_without_limit(monkeypatch) -> None:
     assert not wd.thread.is_alive()
 
 
+def test_oom_check_tick_within_container_cause(monkeypatch) -> None:
+    """When the peak is near the container limit, the message attributes the kill
+    to the container's own budget — not host/VM-wide (global) OOM."""
+    limit = 4 * 1024 * 1024 * 1024
+    count, msg = ph._oom_check_tick(
+        1,
+        limit_bytes=limit,
+        events_reader=lambda: 2,
+        peak_reader=lambda: int(limit * 0.95),  # 95% of limit → within-container
+    )
+    assert count == 2 and msg is not None
+    assert "exceeded its own memory limit" in msg
+    assert "global OOM" not in msg
+
+
 def test_oom_check_tick_unknown_limit_still_detects(monkeypatch) -> None:
     """With no container limit, an oom_kill increment is still reported, and the
     message flags the limit as unset (pointing at host/VM-wide OOM)."""

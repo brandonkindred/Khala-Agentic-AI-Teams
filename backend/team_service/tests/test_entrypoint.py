@@ -47,6 +47,13 @@ def test_env_int_clamps_out_of_range_default(monkeypatch) -> None:
     assert entrypoint._env_int("X_WORKERS", 99, minimum=1, maximum=16) == 16  # above max
 
 
+def test_env_int_normalizes_swapped_bounds(monkeypatch) -> None:
+    """minimum > maximum is normalized (swapped) so the clamp window is coherent."""
+    monkeypatch.setenv("X_WORKERS", "10")
+    # Caller mistakenly passes minimum=16 > maximum=1; normalized to [1, 16] → 10.
+    assert entrypoint._env_int("X_WORKERS", 1, minimum=16, maximum=1) == 10
+
+
 def test_env_int_warns_on_invalid_value(monkeypatch, caplog) -> None:
     """A set-but-unparseable value falls back to the default AND logs a warning so
     the misconfiguration isn't silent."""
