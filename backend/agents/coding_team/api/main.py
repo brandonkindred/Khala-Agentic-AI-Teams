@@ -1745,7 +1745,15 @@ def _record_failure(
 
 
 def _has_merged_tasks(job: Dict[str, Any]) -> bool:
-    return any((t or {}).get("status") == "merged" for t in (job.get("task_graph_snapshot") or []))
+    """True iff the job landed at least one REAL merge — a task that is MERGED and actually changed
+    code. Tasks the Tech Lead adjudicated as already-done (``resolved_without_changes``) are MERGED
+    but landed no diff on ``development``, so they do not count: a job whose only merged tasks are
+    such no-op resolutions has nothing to publish, and treating them as publishable would push an
+    empty branch / open a no-op PR instead of reporting that no real work landed."""
+    return any(
+        (t or {}).get("status") == "merged" and not (t or {}).get("resolved_without_changes")
+        for t in (job.get("task_graph_snapshot") or [])
+    )
 
 
 def _failed_tasks(job: Dict[str, Any]) -> List[Dict[str, Any]]:

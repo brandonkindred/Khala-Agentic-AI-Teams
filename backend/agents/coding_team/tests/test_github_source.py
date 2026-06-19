@@ -914,6 +914,37 @@ class TestEndpointFailures:
         assert gh.created_pulls == []
         assert any("produced no merged tasks" in b for _, b in gh.comments)
 
+    def test_only_resolved_without_changes_merge_is_not_publishable(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """A completed_with_failures job whose only MERGED task landed no diff
+        (resolved_without_changes), alongside a failed task, has nothing real to publish: the hook
+        must report 'no merged tasks' and open NO PR, not push an empty branch / no-op PR."""
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+
+        def _no_real_merge(job_id: str, _rp, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed_with_failures",
+                phase="completed",
+                task_graph_snapshot=[
+                    {"id": "t1", "status": "merged", "resolved_without_changes": True},
+                    {"id": "t2", "status": "failed"},
+                ],
+            )
+
+        monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_real_merge)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "no merged tasks" in job["error"]
+        assert gh.created_pulls == []  # no no-op PR for synthetic no-diff merges
+        assert any("produced no merged tasks" in b for _, b in gh.comments)
+
     def test_already_complete_recommends_closure_no_pr(self, patched_app, monkeypatch) -> None:
         """When the orchestrator reports the work already done, the hook comments a closure
         recommendation and opens NO pull request."""

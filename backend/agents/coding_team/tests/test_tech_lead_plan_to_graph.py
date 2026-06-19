@@ -208,6 +208,43 @@ def test_plan_to_task_graph_already_complete_ignored_when_tasks_present(monkeypa
     assert len(out["tasks"]) == 1
 
 
+def test_plan_to_task_graph_already_complete_string_false_is_not_truthy(monkeypatch) -> None:
+    """LLM schema drift: a STRING "false" must NOT short-circuit to already_complete. bool("false")
+    is True, so a naive cast would wrongly close the issue with no PR."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "tasks": [],
+            "stacks": [],
+            "already_complete": "false",  # string, not bool
+            "completion_evidence": "should be ignored",
+        },
+    )
+    out = TechLeadAgent(model=object()).run_plan_to_task_graph(
+        CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
+    )
+    assert out["already_complete"] is False
+    assert out["completion_evidence"] == ""
+
+
+def test_as_bool_strict_coercion() -> None:
+    """Only a real True or an explicit true-like string counts; everything else is False."""
+    assert tl_mod._as_bool(True) is True
+    assert tl_mod._as_bool("true") is True
+    assert tl_mod._as_bool(" TRUE ") is True
+    assert tl_mod._as_bool("yes") is True
+    assert tl_mod._as_bool("1") is True
+    assert tl_mod._as_bool(False) is False
+    assert tl_mod._as_bool("false") is False  # the bug this guards
+    assert tl_mod._as_bool("0") is False
+    assert tl_mod._as_bool("no") is False
+    assert tl_mod._as_bool(None) is False
+    assert tl_mod._as_bool(0) is False
+    assert tl_mod._as_bool("maybe") is False
+
+
 def test_run_revision_adjudication_verdicts(monkeypatch) -> None:
     """Each valid verdict is parsed through; the reason is preserved."""
     monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())

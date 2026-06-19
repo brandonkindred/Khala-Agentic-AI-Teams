@@ -44,6 +44,29 @@ def _review_retry_attempts() -> int:
     return retries + 1
 
 
+def _as_bool(value: Any) -> bool:
+    """Coerce an LLM-provided flag to a strict boolean.
+
+    JSON booleans already parse to ``bool``; this guards the common schema drift where a model emits
+    the STRING "false"/"true". ``bool("false")`` is True, so a naive cast would read "false" as
+    truthy — which for ``already_complete`` would wrongly short-circuit the whole job and recommend
+    closing the issue with no PR. Only a real ``True`` or an explicit true-like string
+    ("true"/"1"/"yes", case-insensitive) counts.
+
+    Preconditions:
+        - ``value`` is arbitrary parsed-JSON content (bool, str, number, None, ...).
+    Postconditions:
+        - Returns a bool; anything not unambiguously true (including "false"/"0"/"no"/None/other
+          strings/numbers) returns False — the safe default that never treats a non-true value as
+          true.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return False
+
+
 def _render_resolved_questions(resolved: List[Dict[str, Any]]) -> str:
     """Render user-supplied decisions as 'question → answer' lines for the planning prompt.
 
@@ -180,7 +203,9 @@ class TechLeadAgent:
             stacks = [{"name": "default", "tools_services": []}]
         # already_complete only counts when the model also returned no tasks: a true flag alongside
         # a non-empty task list is contradictory, so the tasks win (we never silently drop work).
-        already_complete = bool(data.get("already_complete")) and not tasks
+        # Use strict boolean coercion — the STRING "false" must not read as truthy (bool("false") is
+        # True), which would wrongly short-circuit the job to already_complete and close the issue.
+        already_complete = _as_bool(data.get("already_complete")) and not tasks
         return {
             "tasks": tasks,
             "stacks": stacks,
