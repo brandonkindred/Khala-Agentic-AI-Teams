@@ -563,6 +563,10 @@ OrderLifecycleEventType = Literal[
     # max_position_pct). Recorded so a zero-trade run is explainable rather than a
     # silent no-emit; carries no order (it never reached the order book).
     "risk_capped_skip",
+    # A stop-limit order that triggered (stop level crossed) but gapped through
+    # its limit price, so it could not fill this bar and stays resting with the
+    # position open — the intended, defining risk of a stop-limit order.
+    "stop_limit_unfilled",
 ]
 
 ZeroTradeCategory = Literal[
@@ -634,6 +638,21 @@ class BacktestExecutionDiagnostics(BaseModel):
     # view so a stop_loss firing on one symbol can't mask a missed
     # firing on another (cross-symbol leak attribution).
     exit_rule_firings_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
+    # Finer-grained breakdown of ``exit_rule_firings`` that distinguishes a
+    # trailing stop fire from a fixed stop fire, keyed by ``"<rule_kind>:<basis>"``
+    # for stop-loss firings (``stop_loss:entry_price`` / ``stop_loss:trailing_high``
+    # / ``stop_loss:trailing_low``) and by bare ``<rule_kind>`` for rules without a
+    # basis (``take_profit`` / ``signal_exit``). This is additive metadata: the
+    # close ``reason`` and ``exit_rule_firings`` above stay byte-stable so the
+    # exact-match conformance + alignment gates are unaffected, while analysis and
+    # operability surfaces gain per-basis visibility.
+    exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
+    # Count of stop-limit orders that triggered (stop level crossed) but could not
+    # fill on the trigger bar because the bar gapped through the limit price. A
+    # triggered-but-unfilled stop-limit leaves the position open — the defining,
+    # intended risk of the order type — so it is surfaced as informational
+    # telemetry rather than silently dropped.
+    stop_limit_unfilled_triggers: int = Field(default=0, ge=0)
     open_positions_at_end: List[OpenPositionDiagnostic] = Field(default_factory=list)
     last_order_events: List[OrderLifecycleEvent] = Field(default_factory=list)
 

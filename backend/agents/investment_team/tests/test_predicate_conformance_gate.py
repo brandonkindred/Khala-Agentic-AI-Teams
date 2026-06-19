@@ -13,6 +13,7 @@ from investment_team.models import StrategySpec
 from investment_team.strategy_lab.quality_gates.predicate_conformance import (
     PredicateConformanceGate,
     _build_conformance_detail,
+    _build_contract_stub,
     _code_conformance_retries,
     _enriched_trace_lines,
     _exec_strategy,
@@ -28,6 +29,20 @@ from investment_team.strategy_lab.spec_dsl import (
     SignalExitRule,
     StopLossRule,
 )
+
+
+def test_contract_stub_order_type_mirrors_real_enum() -> None:
+    """The shadow ``contract`` stub's ``OrderType`` must mirror the real
+    ``trading_service.strategy.contract.OrderType`` exactly. A missing member
+    (e.g. STOP_LIMIT) makes custom strategy code that references it raise
+    ``AttributeError`` under the shadow run, which the gate swallows and
+    mis-reports as the strategy not submitting on predicate-true bars."""
+    from investment_team.trading_service.strategy.contract import OrderType as RealOrderType
+
+    stub = _build_contract_stub()
+    stub_members = {m.name: m.value for m in stub.OrderType}
+    real_members = {m.name: m.value for m in RealOrderType}
+    assert stub_members == real_members
 
 
 def _spec(

@@ -35,7 +35,16 @@ from .model_factory import get_strands_model
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_SYSTEM_PROMPT = (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
+# Shared stop-order semantics reference (stop-market / stop-limit / trailing
+# stop). Appended so the reviewer's risk-control check does not mislabel a
+# trailing stop's above-entry ratchet — the intended gain-locking behavior —
+# as a defect.
+_STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+_SYSTEM_PROMPT = (
+    (_PROMPT_DIR / "design_review_system.md").read_text(encoding="utf-8")
+    + "\n\n"
+    + _STOP_ORDER_SEMANTICS
+)
 
 
 # ---------------------------------------------------------------------------

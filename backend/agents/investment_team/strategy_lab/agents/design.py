@@ -50,9 +50,18 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
-_SYSTEM_PROMPT = (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8")
-_SELF_REVIEW_SYSTEM_PROMPT = (_PROMPT_DIR / "design_self_review_system.md").read_text(
-    encoding="utf-8"
+# Shared stop-order semantics reference (stop-market / stop-limit / trailing
+# stop). Appended to the designer's system prompts so a trailing stop's
+# above-entry ratchet is understood as intended gain-locking behavior, and so
+# the designer does not author exits that contradict the engine's mechanics.
+_STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
+_SYSTEM_PROMPT = (
+    (_PROMPT_DIR / "design_system.md").read_text(encoding="utf-8") + "\n\n" + _STOP_ORDER_SEMANTICS
+)
+_SELF_REVIEW_SYSTEM_PROMPT = (
+    (_PROMPT_DIR / "design_self_review_system.md").read_text(encoding="utf-8")
+    + "\n\n"
+    + _STOP_ORDER_SEMANTICS
 )
 
 _DESIGN_USER_TEMPLATE = """\
