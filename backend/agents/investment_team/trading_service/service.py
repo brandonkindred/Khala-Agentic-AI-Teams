@@ -16,6 +16,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
+from functools import cached_property
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
 
 import numpy as np
@@ -41,6 +42,7 @@ from ..strategy_lab.executor.rule_compiler import (
     ExitIntent,
     PositionState,
     evaluate_exit_rules,
+    is_limit_stop_rule,
 )
 from ..strategy_lab.spec_dsl import (
     EntryRule,
@@ -60,7 +62,7 @@ from .engine.fill_simulator import (
     FillSimulator,
     FillSimulatorConfig,
 )
-from .engine.order_book import OrderBook
+from .engine.order_book import OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     OrderRequest,
@@ -347,9 +349,23 @@ class _EngineExitDispatcher:
         gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
         if gating is None:
             return
-        tracked, pos = gating
+        tracked, pos, resting_limit_stop_id = gating
+        exclude_resting_limit_stop = resting_limit_stop_id is not None
 
-        intent = self._evaluate(sym, tracked, pos, cur_bar)
+        # Resting structured exit: when a limit-style STOP_LIMIT already rests on
+        # the book (``resting_limit_stop_id`` set), the spec's (single — see
+        # StrategySpec validation) limit-style stop is treated as in flight, so the
+        # chosen intent excludes that stop rule. This both (a) suppresses a
+        # duplicate stop-limit emission and (b) lets a lower-priority rule
+        # (take-profit / signal-exit) still fire and close the position.
+        # (Standing the whole bar down would instead starve any rule listed after
+        # the stop on every bar the stop re-triggers.) When a replacement intent
+        # is emitted we cancel the resting stop-limit below — otherwise it could
+        # fill first at its stale limit price on a recovery bar and pre-empt the
+        # intended close.
+        intent = self._evaluate(
+            sym, tracked, pos, cur_bar, exclude_resting_limit_stop=exclude_resting_limit_stop
+        )
         if intent is None:
             return
 
@@ -371,6 +387,14 @@ class _EngineExitDispatcher:
         scale_in_qty = self._sum_same_side_queued(
             sym, tracked.side, pending_for_prev
         ) + self._sum_same_side_resting(sym, tracked.side, order_book)
+        # For a limit-style stop we do NOT cancel the position's in-flight entry
+        # continuation (see below), so its still-unfilled remainder can grow the
+        # position before this close fills. Oversize the close to cover it; a
+        # market close instead cancels the continuation outright, so it does not
+        # need (and must not double-count) this term. ``_fill_exit`` clips the
+        # close to the live position qty, so oversizing never over-closes.
+        if intent.style == "limit":
+            scale_in_qty += self._sum_entry_continuation_remainder(sym, pos, order_book)
 
         req = self._build_close_order(intent, tracked, pos, scale_in_qty)
         if req is None:
@@ -378,9 +402,38 @@ class _EngineExitDispatcher:
 
         pending_for_prev.append(req)
         self._register_binding(req, pos)
+        # Bind competing opposite-side exits to the position. This is safe for
+        # BOTH styles: binding only *retires* an order via the fill simulator's
+        # stale-continuation guard once the position is actually closed/replaced,
+        # so a ``style="limit"`` stop that gaps through and rests leaves the
+        # bound competing orders working. Binding is what prevents an unbound
+        # competing exit (e.g. a resting take-profit) from surviving the close
+        # and later firing as a fresh reverse entry — so it must run for the
+        # limit-style stop too, not just the guaranteed market close.
         self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
         self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
-        self._cancel_pending_entry_continuations(sym, pos, order_book)
+        # Cancelling the entry continuation, by contrast, *actively* removes a
+        # legitimate scale-in remainder on the assumption the close will fill.
+        # A market close is guaranteed next bar; a limit-style stop may gap
+        # through unfilled, so deferring this avoids stripping a scale-in for a
+        # position that stays open. The continuation's remainder was already
+        # folded into ``scale_in_qty`` above, so if the limit close later fills
+        # after the continuation grew the position, it still covers the grown
+        # size (``_fill_exit`` clips to the live qty) — no residual exposure.
+        if intent.style != "limit":
+            self._cancel_pending_entry_continuations(sym, pos, order_book)
+        # A resting limit-style STOP_LIMIT is excluded from evaluation, so when one
+        # rests the chosen intent is always a *different*, market-style rule
+        # (take-profit / signal-exit) — a guaranteed close next bar. Cancel the now
+        # redundant resting stop-limit: left on the book it sits ahead of this
+        # close in submission order, so on a recovery bar that makes its latched
+        # limit marketable it would fill first at the stale limit price and the
+        # intended close would be dropped by the stale-continuation guard. Binding
+        # alone cannot prevent this — it only retires the stop *after* the position
+        # is gone, which is too late once the stop itself is what closed it.
+        if resting_limit_stop_id is not None:
+            assert intent.style != "limit"  # excluded by _evaluate; never re-emit
+            order_book.cancel(resting_limit_stop_id)
         self._record_emission(req, intent, cur_bar, result)
 
     # ------------------------------------------------------------------
@@ -394,18 +447,39 @@ class _EngineExitDispatcher:
         position_tracker: Mapping[str, _TrackedPosition],
         portfolio: Portfolio,
         order_book: OrderBook,
-    ) -> Optional[tuple[_TrackedPosition, Position]]:
-        """Return ``(tracked, pos)`` if rule evaluation should run for
-        this symbol on this bar, else ``None``.
+    ) -> Optional[tuple[_TrackedPosition, Position, Optional[str]]]:
+        """Return ``(tracked, pos, resting_limit_stop_id)`` if rule
+        evaluation should run for this symbol on this bar, else ``None``.
 
         Gates:
         * Tracker has the symbol (a position is open).
         * Portfolio agrees and has positive qty.
         * ``tracked.just_opened`` is False — skip the entry bar for
           non-market fills (see ``_update_position_tracker``).
-        * No in-flight engine market exit already pending on the
-          order book (avoid stacking redundant engine markets across
-          bars while the rule keeps re-triggering).
+        * No in-flight engine MARKET exit already pending on the order book — a
+          guaranteed market close fills next bar, so re-emitting while it is in
+          flight would stack a redundant market. A *resting* limit-style
+          STOP_LIMIT deliberately does NOT stand evaluation down here: a
+          higher-priority rule (take-profit / signal-exit) must still be able to
+          fire and close the position while the stop-limit rests unfilled.
+
+        The single pending-order pass also derives the resting limit-stop's
+        ``order_id`` so ``maybe_emit`` can both (a) drop the in-flight limit stop
+        from the chosen intent and (b) cancel that resting STOP_LIMIT when a
+        different rule replaces it — without a second scan. A spec has at most one
+        limit-style stop (enforced by ``StrategySpec``), so "an engine STOP_LIMIT
+        rests" unambiguously means "that stop is in flight" — no per-order
+        identity bookkeeping beyond the single id is needed. The id is only
+        captured when ``_has_limit_stop_rule`` holds, so it is directly actionable
+        (always ``None`` for a market-only spec).
+
+        Preconditions: ``order_book`` is the live order book for this run, and
+        ``position_tracker``/``portfolio`` reflect state as of the current bar.
+        Postconditions: returns ``None`` when evaluation should be skipped;
+        otherwise the open ``(tracked, pos)`` and the ``order_id`` of the
+        already-resting limit-style stop (non-``None`` only when the spec has a
+        limit stop AND an engine STOP_LIMIT for this position is resting). A
+        non-``None`` id means the chosen intent must exclude that stop rule.
         """
         if sym not in position_tracker:
             return None
@@ -415,15 +489,22 @@ class _EngineExitDispatcher:
         tracked = position_tracker[sym]
         if tracked.just_opened:
             return None
+        # The resting-stop-limit fact only matters when the spec can author one;
+        # for market-only specs leave it None (and skip the per-order check).
+        track_resting = self._has_limit_stop_rule
+        resting_limit_stop_id: Optional[str] = None
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
-            if po_req.order_type != OrderType.MARKET:
+            if po_req.side == tracked.side:
                 continue
-            if po_req.side != tracked.side and (po_req.reason or "").startswith(
-                ENGINE_EXIT_REASON_PREFIX
-            ):
+            if not (po_req.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX):
+                continue
+            if po_req.order_type == OrderType.MARKET:
+                # In-flight guaranteed close — stand the whole bar down.
                 return None
-        return tracked, pos
+            if track_resting and po_req.order_type == OrderType.STOP_LIMIT:
+                resting_limit_stop_id = po.order_id
+        return tracked, pos, resting_limit_stop_id
 
     def _evaluate(
         self,
@@ -431,10 +512,28 @@ class _EngineExitDispatcher:
         tracked: _TrackedPosition,
         pos: Position,
         cur_bar,
+        *,
+        exclude_resting_limit_stop: bool = False,
     ) -> Optional[ExitIntent]:
-        """Run the pure rule evaluator. Returns at most one intent per
-        symbol — :func:`evaluate_exit_rules` stops at the first
-        triggered rule per position.
+        """Run the pure rule evaluator and pick the intent to act on.
+
+        Default: returns the first triggered rule's intent per spec priority
+        (:func:`evaluate_exit_rules` stops at the first trigger).
+
+        ``exclude_resting_limit_stop`` is set by ``maybe_emit`` when the spec's
+        (single) limit-style stop already has a STOP_LIMIT resting: the evaluator
+        returns all triggered intents in priority order and this method skips the
+        in-flight limit-style intent, returning the first lower-priority rule
+        instead (take-profit / signal-exit), or ``None`` if the limit stop is the
+        only trigger. Because a spec has at most one limit-style stop (enforced by
+        ``StrategySpec``), skipping every limit-style intent skips exactly that
+        one rule. The pure evaluator stays unaware of order-book state; the skip
+        decision lives here in the dispatcher.
+
+        Preconditions: ``tracked``/``pos`` describe the same open position
+        (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
+        Postconditions: returns an ``ExitIntent`` to emit, or ``None`` (no rule
+        triggered, or the only trigger is the excluded resting limit stop).
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
@@ -443,8 +542,63 @@ class _EngineExitDispatcher:
             {sym: snapshot},
             {sym: bar_snap},
             views=self.views,
+            first_only=not exclude_resting_limit_stop,
         )
-        return intents[0] if intents else None
+        if not exclude_resting_limit_stop:
+            return intents[0] if intents else None
+        for intent in intents:
+            if intent.style == "limit":
+                continue
+            return intent
+        return None
+
+    @cached_property
+    def _has_limit_stop_rule(self) -> bool:
+        """Whether the spec contains a ``style="limit"`` stop-loss rule. Lets the
+        per-bar dispatch skip the resting-order re-ranking for the common
+        market-only specs.
+
+        Postconditions: ``True`` iff any exit rule is a limit-style stop-loss.
+        Cached: ``exit_rules`` is immutable across the run.
+        """
+        return any(is_limit_stop_rule(r) for r in self.exit_rules)
+
+    @staticmethod
+    def _entry_continuations(
+        sym: str, pos: Position, order_book: OrderBook
+    ) -> List[PendingOrder]:
+        """The position's own in-flight entry continuations — the partially-filled
+        ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` remainder of its entry order, identified
+        by ``po.order_id == pos.entry_order_id`` and ``cumulative_filled_qty > 0``.
+
+        Single source of the continuation-identity rule shared by the limit-style
+        oversize (:meth:`_sum_entry_continuation_remainder`) and the market-style
+        cancel (:meth:`_cancel_pending_entry_continuations`).
+
+        Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
+        Postconditions: returns the matching pending orders (possibly empty).
+        """
+        return [
+            po
+            for po in order_book.pending_for_symbol(sym)
+            if po.order_id == pos.entry_order_id and po.cumulative_filled_qty > 0
+        ]
+
+    @classmethod
+    def _sum_entry_continuation_remainder(
+        cls, sym: str, pos: Position, order_book: OrderBook
+    ) -> float:
+        """Unfilled remainder of the position's in-flight entry continuation(s).
+
+        Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
+        Postconditions: returns the summed unfilled qty (``>= 0``), so a limit-style
+        close can be oversized to cover growth it does not cancel. ``_fill_exit``
+        clips to the live qty, so the oversize is safe.
+        """
+        return sum(
+            max(po.request.qty - po.cumulative_filled_qty, 0.0)
+            for po in cls._entry_continuations(sym, pos, order_book)
+        )
 
     @staticmethod
     def _sum_same_side_queued(
@@ -514,22 +668,33 @@ class _EngineExitDispatcher:
         ``scale_in_qty`` is added to ``pos.qty`` so any same-side
         same-bar strategy order that grows the position next bar is
         also closed by this emission (see ``_sum_same_side_queued``).
+
+        A ``style="limit"`` stop-loss intent builds a *resting* STOP_LIMIT
+        (GTC, ``REQUEUE_NEXT_BAR``) from the evaluator-resolved ``intent.stop_price``
+        and ``intent.limit_price`` (see ``_build_stop_limit_close``), rather than
+        the guaranteed market close every other intent uses. The fill simulator
+        owns its arm/latch/gap-through lifecycle from there.
         """
         self._next_seq += 1
         close_side = OrderSide.SHORT if tracked.side == OrderSide.LONG else OrderSide.LONG
-        req = OrderRequest(
-            client_order_id=f"e{self._next_seq}",
-            symbol=intent.symbol,
-            side=close_side,
-            qty=pos.qty + scale_in_qty,
-            order_type=OrderType.MARKET,
-            tif=TimeInForce.DAY,
-            reason=(
-                f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
-                if intent.rule_kind == "signal_exit"
-                else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
-            ),
+        reason = (
+            f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
+            if intent.rule_kind == "signal_exit"
+            else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
+        qty = pos.qty + scale_in_qty
+        if intent.style == "limit":
+            req = self._build_stop_limit_close(intent, close_side, qty, reason)
+        else:
+            req = OrderRequest(
+                client_order_id=f"e{self._next_seq}",
+                symbol=intent.symbol,
+                side=close_side,
+                qty=qty,
+                order_type=OrderType.MARKET,
+                tif=TimeInForce.DAY,
+                reason=reason,
+            )
         try:
             req.validate_prices()
         except Exception as exc:  # pragma: no cover — engine-built request
@@ -541,6 +706,40 @@ class _EngineExitDispatcher:
             )
             return None
         return req
+
+    def _build_stop_limit_close(
+        self,
+        intent: ExitIntent,
+        close_side: OrderSide,
+        qty: float,
+        reason: str,
+    ) -> OrderRequest:
+        """Build the resting STOP_LIMIT close for a ``style="limit"`` stop.
+
+        Preconditions: ``intent.style == "limit"`` with ``intent.stop_price`` and
+        ``intent.limit_price`` resolved by the evaluator (the limit already sits
+        on the protective side — below the stop for a SHORT close, above for a
+        LONG close — via ``spec_dsl.protective_limit_price``).
+        Postconditions: returns an unvalidated STOP_LIMIT ``OrderRequest`` with a
+        strictly-positive limit price (guaranteed by the DSL's ``limit_offset_pct
+        < 1.0`` bound) on the protective side, matching ``validate_prices``'s sign
+        rule.
+        """
+        assert intent.stop_price is not None, "limit-style exit intent missing stop_price"
+        assert intent.limit_price is not None, "limit-style exit intent missing limit_price"
+        assert intent.limit_price > 0, "limit-style exit intent has non-positive limit_price"
+        return OrderRequest(
+            client_order_id=f"e{self._next_seq}",
+            symbol=intent.symbol,
+            side=close_side,
+            qty=qty,
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=intent.stop_price,
+            limit_price=intent.limit_price,
+            tif=TimeInForce.GTC,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            reason=reason,
+        )
 
     def _register_binding(self, req: OrderRequest, pos: Position) -> None:
         """Record the binding so the bar-loop submit step can set
@@ -618,16 +817,12 @@ class _EngineExitDispatcher:
         engine sized for and leaving residual exposure after
         ``_fill_exit`` clips at ``min(req.qty, existing_pos.qty)``.
 
-        Continuations are identified by ``po.order_id ==
-        pos.entry_order_id`` (exact — the strategy can't reuse an
-        engine-issued order_id, and same-side new strategy entries
-        have different order_ids).
+        Continuations are identified by :meth:`_entry_continuations`
+        (``po.order_id == pos.entry_order_id`` — the strategy can't reuse an
+        engine-issued order_id, and same-side new strategy entries have different
+        order_ids).
         """
-        for po in order_book.pending_for_symbol(sym):
-            if po.order_id != pos.entry_order_id:
-                continue
-            if po.cumulative_filled_qty <= 0:
-                continue
+        for po in self._entry_continuations(sym, pos, order_book):
             order_book.cancel(po.order_id)
 
     def _record_emission(
@@ -664,7 +859,7 @@ class _EngineExitDispatcher:
             timestamp=cur_bar.timestamp,
             symbol=intent.symbol,
             side=req.side.value,
-            order_type=OrderType.MARKET.value,
+            order_type=req.order_type.value,
             reason=req.reason,
         )
 
@@ -1148,6 +1343,25 @@ def _apply_fill_outcome_events(
                 reason=ev.reason,
                 detail=ev.detail,
             )
+        elif ev.kind == "engine_exit_filled":
+            # An engine-SUBMITTED exit order actually filled and closed a
+            # position (``ev.reason`` is its un-reconciled ``engine_exit:<kind>``
+            # reason). This counts only true engine fills — distinct from the
+            # reconciled ``exit_reason`` on closed trades, which can relabel a
+            # *strategy* close as ``engine_exit:*`` and would otherwise inflate
+            # the fire-vs-fill telemetry (hiding a stop-limit that never
+            # executed). Distinct, too, from emission-time ``exit_rule_firings``:
+            # a limit-style stop can fire (emit) yet gap through unfilled, in
+            # which case no engine fill is recorded here.
+            kind = ev.reason[len(ENGINE_EXIT_REASON_PREFIX):]
+            # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
+            # matches the firing key (rule kind only).
+            bracket = kind.find("[")
+            if bracket != -1:
+                kind = kind[:bracket]
+            diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
+            sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
+            sym_fills[kind] = sym_fills.get(kind, 0) + 1
 
 
 class _StreamingEquityBuffer:

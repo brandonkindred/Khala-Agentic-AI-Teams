@@ -197,6 +197,43 @@ def test_rule_order_swapped_changes_winner() -> None:
     assert intents[0].rule_kind == "take_profit"
 
 
+def test_first_only_false_returns_all_triggered_in_spec_order() -> None:
+    pos = _long()
+    rules = [StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)]
+    # Wide bar triggers both. With first_only=False the evaluator returns both in
+    # spec order (so a caller can choose among them), each with its true index.
+    intents = evaluate_exit_rules(
+        rules, {"AAA": pos}, {"AAA": _bar(high=106, low=94)}, first_only=False
+    )
+    assert [(i.rule_kind, i.rule_index) for i in intents] == [
+        ("stop_loss", 0),
+        ("take_profit", 1),
+    ]
+
+
+def test_limit_stop_prices_resolved_regardless_of_first_only() -> None:
+    pos = _long()
+    rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01)
+    bars = {"AAA": _bar(low=94)}  # crosses the 95 floor (entry 100, -5%)
+    # first_only controls only how many intents are returned, never their
+    # contents — a limit-style intent carries resolved prices in both modes.
+    for first_only in (True, False):
+        intent = evaluate_exit_rules([rule], {"AAA": pos}, bars, first_only=first_only)[0]
+        assert intent.style == "limit"
+        assert intent.stop_price == 95.0
+        assert intent.limit_price == 95.0 - 95.0 * 0.01
+
+
+def test_first_only_false_with_single_trigger_returns_one() -> None:
+    pos = _long()
+    rules = [StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)]
+    # Only the stop fires (no high spike); first_only=False still returns just it.
+    intents = evaluate_exit_rules(
+        rules, {"AAA": pos}, {"AAA": _bar(high=101, low=94)}, first_only=False
+    )
+    assert [i.rule_kind for i in intents] == ["stop_loss"]
+
+
 def test_no_rules_yields_no_intents() -> None:
     intents = evaluate_exit_rules([], {"AAA": _long()}, {"AAA": _bar()})
     assert intents == []

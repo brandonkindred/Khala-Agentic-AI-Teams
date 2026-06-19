@@ -73,6 +73,8 @@
       "bars_processed": 504,
       "closed_trades": 9,
       "entries_filled": 10,
+      "exit_rule_fills": {},
+      "exit_rule_fills_by_symbol": {},
       "exit_rule_firings": {},
       "exit_rule_firings_by_basis": {},
       "exit_rule_firings_by_symbol": {},
