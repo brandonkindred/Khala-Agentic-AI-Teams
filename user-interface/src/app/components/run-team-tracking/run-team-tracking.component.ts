@@ -10,6 +10,7 @@ import { SoftwareEngineeringApiService } from '../../services/software-engineeri
 import type { JobStatusResponse, TaskStateEntry, TeamProgressEntry } from '../../models';
 import { PLANNING_V2_PHASES, CODE_TEAM_PHASES, MICROTASK_PHASES, PRODUCT_ANALYSIS_PHASES, type PhaseDefinition } from '../../models';
 import { markStatusReceived } from '../../shared/staleness.util';
+import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 /** Team display order for swim lanes. */
@@ -150,14 +151,11 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           this.workTreeRows = this.buildWorkTreeRows(res);
           this.statusChange.emit(res);
           this.loading = false;
-          // completed_with_failures is the coding team's partial-success terminal
-          // status — without it here the poll runs forever on such jobs.
-          if (
-            res.status === 'completed' ||
-            res.status === 'completed_with_failures' ||
-            res.status === 'failed' ||
-            res.status === 'cancelled'
-          ) {
+          // Stop polling on any coding-team terminal status. Routed through the shared helper
+          // (rather than a hard-coded list) so terminal successes like completed_with_failures and
+          // already_complete are always recognized here — otherwise the poll runs forever on a job
+          // that delegated to the coding team and finished with one of those statuses.
+          if (isCodingTeamTerminalStatus(res.status)) {
             this.pollSub?.unsubscribe();
             this.pollSub = null;
           } else if (wasWaiting !== isWaiting || newInterval !== oldInterval) {

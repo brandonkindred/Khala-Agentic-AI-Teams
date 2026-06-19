@@ -469,6 +469,19 @@ review is flagged as an infrastructure error (default `2` → 3 attempts; floore
 exhaustion the orchestrator fails the task once with a clear
 diagnostic rather than re-sending the same failing prompt through the revision loop.
 
+### CODING_TEAM_NO_CHANGE_REVISIT_CAP
+Number of consecutive **no-change** revision rounds the coding team tolerates on a single task
+before handing it to the Tech Lead for direction (default `3`; garbage/empty → default; floored at
+`1` so the guard can never be disabled). A no-change round is one where the engineer revisits a task
+it already flagged done but produces no change to the task's branch diff — the "is it done? maybe
+not, let me look again" loop. This is distinct from `MAX_TASK_REVISIONS` (20): a revision that
+actually changes the code resets this counter, so productive work keeps its full revision budget;
+only zero-progress re-evaluation is bounded. On reaching the cap the Tech Lead adjudicates the
+stalled task — `done` (mark it resolved with no diff), `fail` (terminal), or `continue` (a fresh
+window). When the whole issue's work is already complete, the job ends with the terminal status
+`already_complete` and the `run-from-github` flow comments a closure recommendation on the issue
+instead of opening a no-op PR.
+
 ### CODING_TEAM_ANSWER_WAIT_TIMEOUT_S
 Wall-clock cap (seconds, default `3600`) the coding team's human-in-the-loop decision gate blocks
 waiting for the user to answer escalated open

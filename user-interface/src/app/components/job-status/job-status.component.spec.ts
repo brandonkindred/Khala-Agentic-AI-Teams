@@ -1,5 +1,5 @@
 import { ComponentFixture, TestBed } from '@angular/core/testing';
-import { of } from 'rxjs';
+import { of, Subject } from 'rxjs';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { JobStatusComponent } from './job-status.component';
@@ -49,6 +49,30 @@ describe('JobStatusComponent', () => {
     expect(apiSpy.getJobStatus).toHaveBeenCalledWith('j1');
     expect(component.status).toBeTruthy();
     expect(component.status?.job_id).toBe('j1');
+  });
+
+  it('stops polling on already_complete (a coding-team terminal success)', () => {
+    // A Subject (not of()) emits AFTER the subscription is assigned, so the stop path nulls the real
+    // field rather than racing the synchronous subscription assignment.
+    const statusSubject = new Subject<Record<string, unknown>>();
+    apiSpy.getJobStatus.mockReturnValue(statusSubject);
+    component.jobId = 'j1';
+    fixture.detectChanges();
+    statusSubject.next({
+      job_id: 'j1',
+      status: 'already_complete',
+      progress: 100,
+      phase: 'completed',
+      waiting_for_answers: false,
+      task_results: [],
+      task_ids: [],
+      failed_tasks: [],
+      pending_questions: [],
+    });
+    expect(component.status?.status).toBe('already_complete');
+    // Routed through isCodingTeamTerminalStatus, so the poll unsubscribed on this terminal success
+    // (a missing case here would leave the poll running forever).
+    expect((component as unknown as { sub: unknown }).sub).toBeNull();
   });
 
   it('should set loading false when jobId is null on init', () => {

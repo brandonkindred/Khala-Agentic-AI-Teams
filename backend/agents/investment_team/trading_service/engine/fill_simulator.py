@@ -24,6 +24,7 @@ from typing import Callable, List, Optional, Tuple
 from ...execution.bar_safety import BarSafetyAssertion, _ts_le
 from ...execution.risk_filter import RiskFilter
 from ...models import TradeRecord
+from ...strategy_lab.spec_dsl import protective_limit_price
 from ..strategy.contract import (
     Bar,
     Fill,
@@ -81,7 +82,7 @@ class FillDiagnosticEvent:
     what happened on this bar; the consumer picks the diagnostic shape.
     """
 
-    kind: str  # "entry_filled" | "exit_filled" | "rejected"
+    kind: str  # "entry_filled" | "exit_filled" | "rejected" | "stop_limit_unfilled" | "engine_exit_filled"
     order_id: str
     timestamp: str
     symbol: str
@@ -532,6 +533,25 @@ class FillSimulator:
                     self._record_exit_event(events, po, bar, exit_fill)
                 if trade is not None:
                     closed.append(trade)
+                    # Count an actual engine-order exit FILL only when an
+                    # engine-SUBMITTED order closed the position. ``trade.exit_reason``
+                    # can be reconciled to ``engine_exit:*`` for a *strategy* close
+                    # (see ``_fill_exit``); ``po.request.reason`` is the true,
+                    # un-reconciled order reason, so a reconciled strategy close
+                    # does not masquerade as an engine stop-limit fill in the
+                    # fire-vs-fill telemetry.
+                    if (po.request.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX):
+                        events.append(
+                            FillDiagnosticEvent(
+                                kind="engine_exit_filled",
+                                order_id=po.order_id,
+                                timestamp=bar.timestamp,
+                                symbol=po.request.symbol,
+                                side=po.request.side.value,
+                                order_type=po.request.order_type.value,
+                                reason=po.request.reason,
+                            )
+                        )
 
         return FillOutcome(
             entry_fills=entry_fills,
@@ -1564,13 +1584,12 @@ class FillSimulator:
                 else:  # "bps"
                     limit_off = sl.stop_price * (sl.limit_offset / 10_000.0)
                 # Limit sits on the protective side of the stop: below it for a
-                # SHORT child (sell-stop-limit closing a long), above it for a
-                # LONG child (buy-stop-limit closing a short). Mirrors the
-                # trailing ``effective_stop_price`` sign convention below.
-                sl_limit_price = (
-                    sl.stop_price - limit_off
-                    if req.side == OrderSide.LONG
-                    else sl.stop_price + limit_off
+                # SHORT child (sell-stop-limit closing a long parent), above it
+                # for a LONG child (buy-stop-limit closing a short parent).
+                # Shared with the DSL structured-exit path via the single
+                # sign-convention helper.
+                sl_limit_price = protective_limit_price(
+                    sl.stop_price, limit_off, closing_long=(req.side == OrderSide.LONG)
                 )
             if is_limit:
                 sl_order_type = OrderType.STOP_LIMIT

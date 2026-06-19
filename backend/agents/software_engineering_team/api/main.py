@@ -44,6 +44,7 @@ from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
 from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
 from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_AGENT_CRASH,
+    JOB_STATUS_ALREADY_COMPLETE,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
@@ -1101,6 +1102,9 @@ RESTARTABLE_STATUSES = (
     JOB_STATUS_FAILED,
     JOB_STATUS_CANCELLED,
     JOB_STATUS_AGENT_CRASH,
+    # A terminal success like completed: a run-team job that delegated to the coding team can end
+    # here, and the dashboard offers Restart for it, so the endpoint must accept it (not 400).
+    JOB_STATUS_ALREADY_COMPLETE,
 )
 
 

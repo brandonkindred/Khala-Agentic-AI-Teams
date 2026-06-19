@@ -620,3 +620,193 @@ def test_diagnostic_events_default_to_empty_list(realistic: bool) -> None:
     assert outcome.exit_fills == []
     assert outcome.closed_trades == []
     assert outcome.diagnostic_events == []
+
+
+# ---------------------------------------------------------------------------
+# Fill-based exit counter (engine_exit fills) in _apply_fill_outcome_events.
+# Counted off ``engine_exit_filled`` diagnostic events (emitted only when an
+# engine-SUBMITTED order closes a position, keyed by its un-reconciled reason),
+# NOT off closed-trade exit_reason (which can be reconciled for strategy closes).
+# ---------------------------------------------------------------------------
+
+
+def _closed_trade(*, symbol: str, exit_reason: str | None, trade_num: int = 1):
+    from investment_team.models import TradeRecord
+
+    return TradeRecord(
+        trade_num=trade_num,
+        entry_date="2024-01-01",
+        exit_date="2024-01-02",
+        symbol=symbol,
+        side="long",
+        entry_price=100.0,
+        exit_price=95.0,
+        shares=100.0,
+        position_value=10_000.0,
+        gross_pnl=-500.0,
+        net_pnl=-500.0,
+        return_pct=-5.0,
+        hold_days=1,
+        outcome="loss",
+        cumulative_pnl=-500.0,
+        exit_reason=exit_reason,
+    )
+
+
+def _engine_exit_filled_event(*, symbol: str, reason: str):
+    from investment_team.trading_service.engine.fill_simulator import FillDiagnosticEvent
+
+    return FillDiagnosticEvent(
+        kind="engine_exit_filled",
+        order_id="e1",
+        timestamp="2024-01-02T00:00:00",
+        symbol=symbol,
+        side="short",
+        order_type="stop_limit",
+        reason=reason,
+    )
+
+
+def _outcome(*, closed_trades=None, diagnostic_events=None):
+    from investment_team.trading_service.engine.fill_simulator import FillOutcome
+
+    return FillOutcome(
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=closed_trades or [],
+        diagnostic_events=diagnostic_events or [],
+    )
+
+
+def test_engine_exit_fill_bumps_fill_based_counter() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = _outcome(
+        diagnostic_events=[
+            _engine_exit_filled_event(symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
+        ]
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    assert diag.exit_rule_fills.get("stop_loss") == 1
+    assert diag.exit_rule_fills_by_symbol.get("AAA", {}).get("stop_loss") == 1
+
+
+def test_signal_exit_fill_strips_index_suffix() -> None:
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    outcome = _outcome(
+        diagnostic_events=[
+            _engine_exit_filled_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]"
+            )
+        ]
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    # The "[2]" rule-index suffix is stripped so the fill key matches the
+    # firing key (rule kind only).
+    assert diag.exit_rule_fills.get("signal_exit") == 1
+
+
+def test_reconciled_strategy_close_is_not_counted_as_engine_fill() -> None:
+    """A strategy close whose TradeRecord.exit_reason was reconciled to
+    engine_exit:* must NOT count as an engine fill — only an engine-SUBMITTED
+    order emits engine_exit_filled. Otherwise the fire-vs-fill telemetry would
+    hide a stop-limit that never executed.
+    """
+    from investment_team.models import BacktestExecutionDiagnostics
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
+
+    diag = BacktestExecutionDiagnostics()
+    # A closed trade reconciled to engine_exit:stop_loss, but NO engine_exit_filled
+    # event (the close was a strategy order; only its attribution was reconciled).
+    outcome = _outcome(
+        closed_trades=[
+            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
+        ],
+        diagnostic_events=[],
+    )
+    _apply_fill_outcome_events(diag, outcome)
+
+    assert diag.exit_rule_fills == {}
+    assert diag.exit_rule_fills_by_symbol == {}
+
+
+_ENTRY_ONLY_STRATEGY_CODE = textwrap.dedent('''\
+    """Enters one long and holds — the engine stop-loss is the sole closer."""
+    from contract import OrderSide, OrderType, Strategy
+
+
+    class EntryOnly(Strategy):
+        WINDOW = 5
+
+        def on_bar(self, ctx, bar):
+            history = ctx.history(bar.symbol, self.WINDOW)
+            if len(history) < self.WINDOW:
+                return
+            sma = sum(b.close for b in history) / self.WINDOW
+            if ctx.position(bar.symbol) is None and bar.close > sma:
+                ctx.submit_order(
+                    symbol=bar.symbol,
+                    side=OrderSide.LONG,
+                    qty=10,
+                    order_type=OrderType.MARKET,
+                    reason="entry_only",
+                )
+''')
+
+
+def test_engine_stop_fill_populates_fill_counter_end_to_end() -> None:
+    """Regression guard: in a real run the fill counter must be populated off the
+    CLOSED TRADES (whose exit_reason carries ``engine_exit:*``), not the
+    exit_filled diagnostic events (whose reason is the fill kind). An entry-only
+    strategy whose long is closed by an engine stop_loss must bump
+    ``exit_rule_fills``/``exit_rule_fills_by_symbol`` so the limit-style
+    conformance reconciliation has real data to reconcile against.
+    """
+    from investment_team.strategy_lab.spec_dsl import StopLossRule
+
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-923-fill-counter",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="engine stop closes the held long",
+        signal_definition="entry-only + engine stop_loss",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        strategy_code=_ENTRY_ONLY_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+    diagnostics = run.service_result.execution_diagnostics
+
+    assert run.service_result.error is None, run.service_result.error
+    # The engine stop fired and filled, producing a closed trade attributed to
+    # engine_exit:stop_loss — so the fill counter must reflect it.
+    assert diagnostics.exit_rule_fills.get("stop_loss", 0) >= 1
+    assert diagnostics.exit_rule_fills_by_symbol.get("AAA", {}).get("stop_loss", 0) >= 1

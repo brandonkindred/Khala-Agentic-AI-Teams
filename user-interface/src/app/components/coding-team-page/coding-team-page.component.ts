@@ -642,7 +642,10 @@ export class CodingTeamPageComponent implements OnInit, OnDestroy {
       case 'running':
       case 'pending':
         return 'running';
+      // already_complete is a terminal success (the work was already done) — show the success
+      // badge, not the 'neutral' default.
       case 'completed':
+      case 'already_complete':
         return 'completed';
       case 'failed':
         return 'failed';

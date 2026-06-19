@@ -2,6 +2,7 @@ import { ChangeDetectionStrategy, Component, Input } from '@angular/core';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
 import type { CodingTeamAgentStatus, CodingTeamJobStatus } from '../../models/coding-team.model';
+import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
 
 /** One step of the phase stepper. Local, to keep the monitor decoupled from other features. */
 interface PhaseDefinition {
@@ -96,10 +97,14 @@ export class CodingTeamMonitorComponent {
     return this.isFailed() || this.status?.status === 'completed_with_failures' ? 'warn' : 'primary';
   }
 
-  /** True once the run has finished successfully (with or without per-task failures). */
+  /**
+   * True once the run has finished successfully — a clean completion, a partial success (per-task
+   * failures), or an already-complete no-op (the work was already done). All are terminal successes
+   * that must render the stepper as finished rather than leave it spinning forever.
+   */
   private isDone(): boolean {
     const s = this.status?.status;
-    return s === 'completed' || s === 'completed_with_failures';
+    return s === 'completed' || s === COMPLETED_WITH_FAILURES || s === ALREADY_COMPLETE;
   }
 
   /** True once the run has ended unsuccessfully (hard failure or cancellation). */

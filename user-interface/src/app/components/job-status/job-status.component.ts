@@ -7,6 +7,7 @@ import { MatIconModule } from '@angular/material/icon';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import type { JobStatusResponse } from '../../models';
 import { markStatusReceived } from '../../shared/staleness.util';
+import { isCodingTeamTerminalStatus } from '../../models/job-status.model';
 import { StallWarningComponent } from '../../shared/stall-warning/stall-warning.component';
 
 @Component({
@@ -50,14 +51,11 @@ export class JobStatusComponent implements OnInit, OnDestroy {
           this.status = markStatusReceived(res);
           this.statusChange.emit(res);
           this.loading = false;
-          // completed_with_failures is the coding team's partial-success terminal
-          // status — without it here the poll runs forever on such jobs.
-          if (
-            res.status === 'completed' ||
-            res.status === 'completed_with_failures' ||
-            res.status === 'failed' ||
-            res.status === 'cancelled'
-          ) {
+          // Stop polling on any coding-team terminal status. Routed through the shared helper
+          // (rather than a hard-coded list) so terminal successes like completed_with_failures and
+          // already_complete are always recognized here — otherwise the poll runs forever on a job
+          // that delegated to the coding team and finished with one of those statuses.
+          if (isCodingTeamTerminalStatus(res.status)) {
             this.sub?.unsubscribe();
             this.sub = null;
           } else if (wasWaiting !== isWaiting) {

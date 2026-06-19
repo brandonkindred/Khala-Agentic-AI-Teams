@@ -32,12 +32,20 @@ GIT_UTILS = "software_engineering_team.shared.git_utils"
 class StubTechLead:
     """Duck-typed Tech Lead: records the review evidence and returns a fixed verdict."""
 
-    def __init__(self, approved: bool, reason: str = "needs work", requested_changes=None) -> None:
+    def __init__(
+        self,
+        approved: bool,
+        reason: str = "needs work",
+        requested_changes=None,
+        adjudication_verdict: str = "fail",
+    ) -> None:
         self.approved = approved
         self.reason = reason
         self.requested_changes = requested_changes if requested_changes is not None else ["fix X"]
         self.review_calls: List[str] = []
         self.decision_calls: List[Any] = []
+        self.adjudication_verdict = adjudication_verdict
+        self.adjudication_calls: List[Any] = []
 
     def run_code_review(
         self,
@@ -61,6 +69,12 @@ class StubTechLead:
             {"agent_id": a, "task_id": t["id"]} for t, a in zip(ready_tasks, free_agents)
         ]
         return {"assignments": assignments}
+
+    def run_revision_adjudication(
+        self, task_title, task_description, acceptance_criteria, changes_summary, revision_feedback
+    ):
+        self.adjudication_calls.append(revision_feedback)
+        return {"verdict": self.adjudication_verdict, "reason": "stub verdict"}
 
 
 class StubWorker:
@@ -1049,6 +1063,412 @@ def test_in_progress_implementation_is_bounded(tmp_path, monkeypatch):
     assert "ready for review" in task.revision_feedback[-1]["reason"].lower()
     assert len(worker.implement_calls) <= orch_mod.MAX_TASK_REVISIONS + 1  # bounded, not 50
     assert swarm._is_complete()  # loop terminates
+
+
+# ------------------------------------------ no-change revisit cap → Tech Lead adjudication
+
+
+def test_no_change_revisit_cap_env_parsing(monkeypatch):
+    """Cap parses defensively: garbage → default, floored at 1, never disabled."""
+    monkeypatch.delenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", raising=False)
+    assert orch_mod._no_change_revisit_cap() == orch_mod.NO_CHANGE_REVISIT_CAP
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "7")
+    assert orch_mod._no_change_revisit_cap() == 7
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "garbage")
+    assert orch_mod._no_change_revisit_cap() == orch_mod.NO_CHANGE_REVISIT_CAP
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "0")
+    assert orch_mod._no_change_revisit_cap() == 1  # floored, guard can never be disabled
+
+
+def test_note_revision_progress_counts_no_change_then_resets(tmp_path, monkeypatch):
+    """Identical diffs across rounds accrue no_change_revisits; a changed diff resets it."""
+    diffs = iter(["", "", "CHANGED", "CHANGED"])
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: next(diffs))
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "3")
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    task = graph.get_task("t1")
+
+    assert swarm._note_revision_progress(task) is False  # "" baseline → no_change 0
+    assert task.no_change_revisits == 0
+    assert swarm._note_revision_progress(task) is False  # "" again → no_change 1
+    assert task.no_change_revisits == 1
+    assert swarm._note_revision_progress(task) is False  # "CHANGED" → progress, reset
+    assert task.no_change_revisits == 0
+    assert swarm._note_revision_progress(task) is False  # "CHANGED" again → no_change 1
+
+
+def test_escalate_done_marks_resolved_without_changes(tmp_path, monkeypatch):
+    # _patch_git defaults to an EMPTY branch diff → genuinely nothing landed → resolved-without-changes.
+    _patch_git(monkeypatch)
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.MERGED
+    assert task.resolved_without_changes is True
+    assert graph.get_task_for_agent("a1") is None  # agent freed
+    assert tech_lead.adjudication_calls  # the history was handed to the Tech Lead
+
+
+def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monkeypatch):
+    """A 'done' verdict on a stalled but NON-empty branch merges the work (it is not a no-op), so the
+    real changes reach development and the PR — instead of being silently dropped and mis-reported as
+    an already-complete resolution."""
+    merge_calls: List[Any] = []
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+    monkeypatch.setattr(
+        f"{GIT_UTILS}.merge_branch", lambda *a, **k: (merge_calls.append(a) or (True, "ok"))
+    )
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.MERGED
+    assert task.resolved_without_changes is False  # real work landed → not a no-op resolution
+    assert merge_calls  # the branch was actually merged into development
+    assert graph.get_task_for_agent("a1") is None  # agent freed
+
+
+def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatch):
+    """A 'done' verdict whose non-empty branch fails to merge (conflict/checkout failure) must FAIL
+    the task and cascade — not mark it merged, which would drop the work and could leave a conflicted
+    tree. It must also abort the half-applied merge so later tasks/publish run on a clean checkout."""
+    aborted: list[Any] = []
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
+    monkeypatch.setattr(
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: (aborted.append(p) or (True, "aborted"))
+    )
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED  # not merged
+    assert graph.get_task("t1").resolved_without_changes is False
+    assert graph.get_task("t2").status == TaskStatus.FAILED  # dependent cascade-failed
+    assert aborted  # the conflicted merge was aborted before cascading
+
+
+def test_escalate_fail_marks_failed_and_cascades(tmp_path, monkeypatch):
+    _patch_git(monkeypatch)
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="fail"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+    graph.assign_task_to_agent("t1", "a1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED
+    assert graph.get_task("t2").status == TaskStatus.FAILED  # dependent cascade-failed
+
+
+def test_escalate_continue_resets_window(tmp_path, monkeypatch):
+    _patch_git(monkeypatch)
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="continue"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", no_change_revisits=5)
+
+    graph.update_task("t1", last_change_digest="seeded-digest")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.IN_PROGRESS  # back to the engineer
+    assert task.no_change_revisits == 0  # fresh window
+    assert task.last_change_digest == ""  # digest cleared so the next round is a fresh baseline
+
+
+def test_escalate_continue_clears_digest_so_cap_one_grants_a_real_window(tmp_path, monkeypatch):
+    """Regression: with CAP=1 a 'continue' must clear last_change_digest, or the next unchanged round
+    re-trips the cap immediately (the escalation bounce does not bump revision_count, so the churn is
+    not bounded by MAX_TASK_REVISIONS) and the task never gets a real revision window."""
+    import hashlib
+
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "1")
+    _patch_git(monkeypatch)  # constant empty diff → the branch stays unchanged across rounds
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="continue"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    # Seed a digest matching the (empty) branch so the task is mid-no-change-loop.
+    graph.update_task(
+        "t1", last_change_digest=hashlib.sha256(b"").hexdigest(), no_change_revisits=1
+    )
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+    assert graph.get_task("t1").last_change_digest == ""  # cleared for a fresh baseline
+
+    # The very next no-change check is now a fresh baseline (no_change=0), NOT an immediate
+    # re-escalation — the engineer actually gets a round to change the code.
+    escalated = swarm._note_revision_progress(graph.get_task("t1"))
+    assert escalated is False
+    assert graph.get_task("t1").no_change_revisits == 0
+
+
+def test_return_for_revision_escalates_on_no_change(tmp_path, monkeypatch):
+    """A quality-gate rejection with no diff change escalates to the Tech Lead and returns False."""
+    import hashlib
+
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "")
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (True, "ok"))
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "1")
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    # Seed the prior digest so this round registers as a no-change repeat (cap=1 → escalate now).
+    graph.update_task("t1", last_change_digest=hashlib.sha256(b"").hexdigest())
+
+    ready = swarm._return_for_revision(graph.get_task("t1"), [{"type": "build", "error": "boom"}])
+
+    assert ready is False
+    assert graph.get_task("t1").status == TaskStatus.MERGED  # adjudicated done
+    assert tech_lead.adjudication_calls
+
+
+def test_no_change_loop_escalates_to_tech_lead(tmp_path, monkeypatch):
+    """An engineer that keeps re-flagging done with no diff is handed to the Tech Lead, not spun
+    to the 20-revision cap."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 20)
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "2")
+    _patch_git(monkeypatch)  # constant empty diff → every round is a no-change round
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=50)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.MERGED
+    assert task.resolved_without_changes is True
+    assert tech_lead.adjudication_calls  # escalated
+    assert task.revision_count < orch_mod.MAX_TASK_REVISIONS  # did NOT grind to the 20-cap
+
+
+def test_changing_diff_keeps_revising_without_escalation(tmp_path, monkeypatch):
+    """A task that actually changes its code each round keeps its full revision budget and is
+    bounded by MAX_TASK_REVISIONS, never escalated as a no-change loop."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 5)
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "3")
+    counter = {"n": 0}
+
+    def changing_diff(*a, **k):
+        counter["n"] += 1
+        return f"diff revision {counter['n']}"  # different every call → always progress
+
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", changing_diff)
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (True, "ok"))
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="fail")
+    worker = StubWorker("a1")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [worker])
+    graph.add_task("t1", title="T1")
+
+    swarm.run(max_rounds=50)
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.FAILED  # bounded by the 20-style MAX cap (here 5)
+    assert task.revision_count >= 5  # revised well past the no-change cap of 3
+    assert tech_lead.adjudication_calls == []  # never escalated — real progress each round
+
+
+def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, monkeypatch):
+    """A job whose only terminal tasks are already-done resolutions reports already_complete."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+                "already_complete": False,
+                "completion_evidence": "",
+            }
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # Mark t1 terminal as an already-done resolution (no real diff landed).
+            self.graph.update_task("t1", resolved_without_changes=True)
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates[-1]["status"] == "already_complete"
+    assert updates[-1]["already_complete"] is True
+
+
+def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeypatch):
+    """already_complete requires EVERY task terminal: a resolved-without-changes task alongside a
+    still-pending (TO_DO) task is a normal completion, not an 'already complete, recommend closing'
+    no-op — the swarm can exit at max_rounds with unfinished work and must not abandon it."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+                "already_complete": False,
+                "completion_evidence": "",
+            }
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # t1 resolves as already-done; t2 is left TO_DO (the loop ran out of rounds before
+            # finishing it) — a non-terminal task that must block the already_complete verdict.
+            self.graph.update_task("t1", resolved_without_changes=True)
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates[-1]["status"] == "completed"  # not already_complete
+    assert updates[-1].get("already_complete") is not True
+
+
+def test_return_for_revision_persists_revision_count_on_accept_as_is(tmp_path, monkeypatch):
+    """When the gate path accepts a task as-is at the revision cap, the incremented revision_count
+    is persisted to the graph (consistent with the FAILED/IN_PROGRESS paths), not just bumped on a
+    discarded local."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 2)
+    # A changing diff each call → _note_revision_progress never escalates, so we reach the cap check.
+    counter = {"n": 0}
+
+    def changing_diff(*a, **k):
+        counter["n"] += 1
+        return f"diff {counter['n']}"
+
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", changing_diff)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", revision_count=1)  # one below the cap of 2
+
+    ready = swarm._return_for_revision(graph.get_task("t1"), [{"type": "build", "error": "boom"}])
+
+    assert ready is True  # accepted as-is at the cap
+    assert graph.get_task("t1").revision_count == 2  # the bump was persisted, not lost
+
+
+def test_planning_already_complete_short_circuits_swarm(tmp_path, monkeypatch):
+    """When the Tech Lead judges the issue already done at planning time, no swarm runs."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [],
+                "stacks": [{"name": "backend", "tools_services": []}],
+                "already_complete": True,
+                "completion_evidence": "Sub-issues #12 and #13 already merged.",
+            }
+
+    class ExplodingSwarm:
+        def __init__(self, *a, **k):
+            raise AssertionError("swarm must not be built when the work is already complete")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", ExplodingSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates[-1]["status"] == "already_complete"
+    assert "#12" in updates[-1]["completion_evidence"]
+
+
+def test_snapshot_restore_preserves_no_change_fields():
+    tg = TaskGraphService(job_id="j1")
+    tg.add_task("t1", title="T1")
+    tg.update_task(
+        "t1",
+        no_change_revisits=2,
+        last_change_digest="abc123",
+        resolved_without_changes=True,
+    )
+
+    tg2 = TaskGraphService(job_id="j1")
+    tg2.restore(tg.snapshot())
+
+    task = tg2.get_task("t1")
+    assert task.no_change_revisits == 2
+    assert task.last_change_digest == "abc123"
+    assert task.resolved_without_changes is True
 
 
 # ----------------------------------------------------- full review evidence (never truncated)

@@ -96,6 +96,30 @@ class Task(BaseModel):
         default_factory=list,
         description="Feedback from prior revision rounds (quality gate or Tech Lead review)",
     )
+    no_change_revisits: int = Field(
+        default=0,
+        description=(
+            "Consecutive revision rounds that produced NO change to the task's branch diff "
+            "(the engineer revisited work already flagged done without altering the code). "
+            "Reset to 0 the moment a round changes the diff. Distinct from revision_count, which "
+            "counts every revision; this counts only zero-progress re-evaluations and caps them."
+        ),
+    )
+    last_change_digest: str = Field(
+        default="",
+        description=(
+            "Hash of the task's branch diff at the previous bounce, used to detect a round that "
+            "made no change. Empty until the first bounce records a baseline."
+        ),
+    )
+    resolved_without_changes: bool = Field(
+        default=False,
+        description=(
+            "True when the Tech Lead adjudicated a stalled (no-change) task as already complete: "
+            "the task is terminal (MERGED) but landed no diff, so the job-level outcome treats it "
+            "as 'already done' rather than real merged work."
+        ),
+    )
 
 
 class SeniorEngineerSpec(BaseModel):
@@ -139,7 +163,20 @@ class CodingTeamPlanInput(BaseModel):
     )
     existing_code_summary: Optional[str] = Field(
         default=None,
-        description="Optional summary of existing codebase",
+        description=(
+            "Optional summary of EXISTING repository code. It is current code that may still need "
+            "changes — NOT completed work — and is deliberately NOT fed to the planning prompt, "
+            "because feeding repo source to the planner risks a false already_complete. Use "
+            "completed_work_summary for genuinely-finished work that should drive already_complete."
+        ),
+    )
+    completed_work_summary: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional evidence that the plan's work is ALREADY DONE (e.g. closed/merged GitHub "
+            "sub-issues). Unlike existing_code_summary, this is the basis for the Tech Lead's "
+            "already_complete short-circuit: only genuinely-finished work belongs here."
+        ),
     )
     resolved_questions: Optional[List[Dict[str, Any]]] = Field(
         default=None,

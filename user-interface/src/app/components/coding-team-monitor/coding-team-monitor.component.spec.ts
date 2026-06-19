@@ -150,7 +150,7 @@ describe('CodingTeamMonitorComponent', () => {
 
   it('treats a terminal success as fully completed in the stepper', () => {
     const c = component;
-    for (const status of ['completed', 'completed_with_failures']) {
+    for (const status of ['completed', 'completed_with_failures', 'already_complete']) {
       c.status = { job_id: 'j', status } as CodingTeamJobStatus;
       expect(c.isPhaseCompleted('task_graph')).toBe(true);
       expect(c.isPhaseCompleted('coding')).toBe(true);

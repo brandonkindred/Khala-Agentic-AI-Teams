@@ -1745,7 +1745,15 @@ def _record_failure(
 
 
 def _has_merged_tasks(job: Dict[str, Any]) -> bool:
-    return any((t or {}).get("status") == "merged" for t in (job.get("task_graph_snapshot") or []))
+    """True iff the job landed at least one REAL merge — a task that is MERGED and actually changed
+    code. Tasks the Tech Lead adjudicated as already-done (``resolved_without_changes``) are MERGED
+    but landed no diff on ``development``, so they do not count: a job whose only merged tasks are
+    such no-op resolutions has nothing to publish, and treating them as publishable would push an
+    empty branch / open a no-op PR instead of reporting that no real work landed."""
+    return any(
+        (t or {}).get("status") == "merged" and not (t or {}).get("resolved_without_changes")
+        for t in (job.get("task_graph_snapshot") or [])
+    )
 
 
 def _failed_tasks(job: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2567,7 +2575,7 @@ def _defer_terminal_success(job_id: str):
     """
 
     def _update(**kw: Any) -> None:
-        if kw.get("status") in ("completed", "completed_with_failures"):
+        if kw.get("status") in hitl.TERMINAL_SUCCESS_STATUSES:
             kw = {**kw, "status": "running", "phase": "publishing"}
         update_job(job_id, **kw)
 
@@ -2658,6 +2666,33 @@ def _run_with_github_hooks(
             )
             _safe_comment(
                 client, owner, repo, num, f"Coding team job `{job_id}` did not complete: {reason}"
+            )
+            return
+
+        if job_after.get("already_complete"):
+            # The team determined the issue's work was already done (planning recognized it, or every
+            # task resolved as already-satisfied with no real diff). Recommend closing the issue and
+            # do NOT open a no-op PR — there is nothing to merge.
+            evidence = str(job_after.get("completion_evidence") or "").strip()
+            body = f"Coding team job `{job_id}`: this work appears to be already complete"
+            if evidence:
+                body += f" — {evidence}"
+            body += f"\n\nNo changes were needed. Recommend closing #{num}."
+            _safe_comment(client, owner, repo, num, body)
+            # An already-complete run is a clean no-op success, so it must run the SAME checkout
+            # cleanup as the normal success path below — otherwise it leaves the active-issue marker
+            # set (a later same-issue retry would treat stale local state as interrupted progress)
+            # and leaks the per-issue clone when cleanup_checkout_on_success is set. Cleanup runs
+            # BEFORE the terminal status write so the job stays in list_jobs(active_only=True) while
+            # the checkout is removed (same ordering rationale as the merged-work path).
+            _clear_active_issue_if_matches(request.repo_path, num)
+            if request.cleanup_checkout_on_success:
+                _cleanup_issue_checkout(request.repo_path)
+            update_job(
+                job_id,
+                status="already_complete",
+                phase="completed",
+                status_text="Work already complete; no changes needed",
             )
             return
 

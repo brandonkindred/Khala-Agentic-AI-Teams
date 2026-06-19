@@ -323,7 +323,79 @@ class StopLossRule(_SpecNode):
     kind: Literal["stop_loss"] = "stop_loss"
     pct: float = Field(gt=0, le=1.0)
     basis: Literal["entry_price", "trailing_high", "trailing_low"] = "entry_price"
+    # Execution style for the structured close the engine emits when this rule
+    # fires. ``"market"`` (default) emits a guaranteed next-bar-open market close.
+    # ``"limit"`` emits a *resting* STOP_LIMIT at the rule's price floor/ceiling
+    # with the limit placed ``limit_offset_pct`` away on the protective side; it
+    # may **not** fill on a gap-through (the position stays open), which is the
+    # defining, intended trade-off of a stop-limit. ``"market"`` keeps the
+    # structured-exit "guaranteed close" invariant; ``"limit"`` relaxes it.
+    style: Literal["market", "limit"] = "market"
+    # Limit offset as a fraction of the stop level, consulted only when
+    # ``style == "limit"``. The limit sits below the stop for a long position
+    # (sell-stop-limit) and above it for a short (buy-stop-limit). Required when
+    # ``style == "limit"``; forbidden otherwise. Bounded strictly below 1.0: at
+    # exactly 1.0 a long-side limit would collapse to ``stop*(1-1)=0`` (a
+    # never-filling protective order), so the open interval keeps the limit
+    # strictly positive.
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
     note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_limit_style(self):
+        """Tie ``limit_offset_pct`` to ``style`` and restrict limit-style stops to
+        a static (``entry_price``) stop level.
+
+        Preconditions: ``style`` and ``basis`` are valid Literals (Pydantic
+        enforces this before this validator runs).
+        Postconditions: returns ``self`` unchanged when consistent; raises
+        ``ValueError`` when ``style == "limit"`` lacks ``limit_offset_pct``, uses
+        ``pct >= 1.0``, or uses a trailing basis, or when ``limit_offset_pct`` is
+        set without ``style == "limit"``.
+
+        A trailing basis moves the stop level every bar, so a *resting* limit
+        order against it would need continuous re-pricing — the same reason the
+        bracket path forbids combining ``trail_offset`` with ``limit_offset``. A
+        limit-style structured stop therefore requires the static
+        ``entry_price`` basis. ``pct`` must be ``< 1.0``: the rule is
+        side-agnostic, so it must resolve to a strictly-positive level for either
+        side it might apply to, and a long's level ``entry * (1 - pct)`` is
+        positive only when ``pct < 1.0`` (a short's ``entry * (1 + pct)`` always
+        is). ``pct == 1.0`` resolves a long to price 0, which has no valid
+        protective limit.
+        """
+        if self.style == "limit":
+            if self.limit_offset_pct is None:
+                raise ValueError(
+                    "StopLossRule.style='limit' requires limit_offset_pct "
+                    "(the limit's distance from the stop level, as a fraction)"
+                )
+            # ``StopLossRule`` is side-agnostic — it applies to whichever side
+            # the strategy opens — so a limit-style stop must resolve to a
+            # strictly-positive level for BOTH sides. A short's level is
+            # ``entry * (1 + pct)`` (always > 0), but a long's is
+            # ``entry * (1 - pct)``, which is > 0 only when ``pct < 1.0``. So
+            # ``pct < 1.0`` is the necessary, sufficient, side-agnostic bound;
+            # ``>= 1.0`` (rather than ``== 1.0``) also stays correct if the
+            # shared ``pct`` field cap is ever loosened past 1.0.
+            if self.pct >= 1.0:
+                raise ValueError(
+                    "StopLossRule.style='limit' requires pct < 1.0: the rule is "
+                    "side-agnostic and a long's resolved level entry*(1-pct) is "
+                    "non-positive at pct>=1.0 (price 0), which has no valid "
+                    "protective limit"
+                )
+            if self.basis != "entry_price":
+                raise ValueError(
+                    "StopLossRule.style='limit' is only supported with "
+                    "basis='entry_price'; a resting stop-limit needs a static "
+                    "stop level, and a trailing basis re-prices the stop each bar"
+                )
+        elif self.limit_offset_pct is not None:
+            raise ValueError(
+                "StopLossRule.limit_offset_pct is only valid when style='limit'"
+            )
+        return self
 
 
 class TakeProfitRule(_SpecNode):
@@ -361,6 +433,31 @@ def stop_caps_side(basis: str, side: str) -> bool:
     return False  # pragma: no cover - DSL Literal forbids other bases
 
 
+def protective_limit_price(stop_price: float, offset: float, *, closing_long: bool) -> float:
+    """Place a stop-limit's limit on the protective side of its stop.
+
+    Closing a long is a sell, so the limit sits *below* the stop
+    (``stop - offset``); closing a short is a buy, so it sits *above*
+    (``stop + offset``). This is the single source of the sign convention shared
+    by the DSL structured-exit path (``rule_compiler``) and the bracket-child
+    materializer (``fill_simulator``), and it matches ``OrderRequest.validate_prices``
+    (SHORT close requires ``limit <= stop``; LONG close requires ``limit >= stop``).
+
+    This helper owns only the *sign* convention; keeping the limit strictly
+    positive is the caller's responsibility. The DSL path bounds
+    ``limit_offset_pct < 1.0`` so ``offset < stop_price`` and the long-side limit
+    stays positive (re-asserted in ``_build_stop_limit_close``); the bracket path
+    accepts absolute offsets and owns its own bounds.
+
+    Preconditions: ``stop_price > 0`` and ``offset >= 0``.
+    Postconditions: returns ``stop_price - offset`` when ``closing_long`` (limit
+    on/below the stop), else ``stop_price + offset`` (limit on/above the stop).
+    """
+    assert stop_price > 0, "stop_price must be positive"
+    assert offset >= 0, "offset must be non-negative"
+    return stop_price - offset if closing_long else stop_price + offset
+
+
 def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[float]:
     """Worst-case stop fraction for ``side``: the FIRST side-compatible
     ``StopLossRule.pct`` in spec order, or ``None`` when no stop can fire for it.
@@ -372,6 +469,13 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
     for a monotonic move means it is tighter, so the first side-compatible stop
     is the true worst case. ``TradingService`` uses the ``None`` result to detect
     a side with no effective stop (the short-safety auto-stop injection).
+
+    A ``style="limit"`` stop is still counted as an effective stop here: it
+    bounds the *intended* loss at the same ``pct`` and so still suppresses the
+    short-safety auto-stop injection. A gap-through that leaves a limit-style
+    stop unfilled can let *realised* loss exceed ``pct`` — that residual risk is
+    surfaced via ``stop_limit_unfilled_triggers`` telemetry, not by treating the
+    rule as "no stop" (which would inject a redundant second stop).
 
     Preconditions: ``side`` is ``"long"`` or ``"short"``.
     Postconditions: returns the first matching ``StopLossRule.pct`` as a float,
@@ -556,7 +660,10 @@ def _format_rule(
         return f"{rule.side} when {_format_predicate(rule.when)}"
     if isinstance(rule, StopLossRule):
         prefix = _STOP_LOSS_BASIS_PREFIX.get(rule.basis, "")
-        return f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
+        base = f"{prefix}stop loss {_format_number(rule.pct * 100)}%"
+        if rule.style == "limit":
+            return f"{base} (limit, {_format_number(rule.limit_offset_pct * 100)}% offset)"
+        return base
     if isinstance(rule, TakeProfitRule):
         return f"take profit {_format_number(rule.pct * 100)}%"
     if isinstance(rule, SignalExitRule):
