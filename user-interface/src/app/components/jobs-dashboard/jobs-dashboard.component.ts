@@ -33,7 +33,7 @@ import type {
   ProductAnalysisStatusResponse,
   TeamProgressEntry,
 } from '../../models';
-import { COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
+import { ALREADY_COMPLETE, COMPLETED_WITH_FAILURES } from '../../models/job-status.model';
 import {
   type DashboardRow,
   type JobSource,
@@ -641,6 +641,9 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
     switch (job.unified.status) {
       case 'running': return 'status-running';
       case 'completed': return 'status-completed';
+      // already_complete is a terminal SUCCESS (the work was already done) — show it green like a
+      // clean completion, not the gray 'status-pending' default.
+      case ALREADY_COMPLETE: return 'status-completed';
       // Partial success: finished, but with failed tasks — flag it distinctly rather than
       // showing the same green as a clean completion.
       case COMPLETED_WITH_FAILURES: return 'status-completed-with-failures';
@@ -653,6 +656,8 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   getStatusLabel(job: DashboardRow): string {
     if (job.seDetail?.waitingForAnswers) return 'Waiting';
+    // 'already_complete' would otherwise render as 'Already_complete' (raw, with underscore).
+    if (job.unified.status === ALREADY_COMPLETE) return 'Already complete';
     return (job.unified.status ?? '').charAt(0).toUpperCase() + (job.unified.status ?? '').slice(1);
   }
 
@@ -821,7 +826,7 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   }
 
   canRestartJob(job: DashboardRow): boolean {
-    return ['completed', COMPLETED_WITH_FAILURES, 'failed', 'cancelled', 'interrupted', 'agent_crash'].includes(job.unified.status);
+    return ['completed', COMPLETED_WITH_FAILURES, ALREADY_COMPLETE, 'failed', 'cancelled', 'interrupted', 'agent_crash'].includes(job.unified.status);
   }
 
   canDeleteJob(job: DashboardRow): boolean {
@@ -1000,13 +1005,15 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
       case 'needs_human_review':
       case 'completed_with_errors':
       case COMPLETED_WITH_FAILURES:
+      case ALREADY_COMPLETE:
         // Terminal "the run finished" bucket — `needs_human_review` is the
         // Blogging team's terminal success state (see `TERMINAL_STATUSES` in
         // `blogging-dashboard.component.ts`); `completed_with_errors` is the
         // Investment Strategy Lab's partial-success terminal state (see
         // `STRATEGY_LAB_TERMINAL_STATUSES` in `investment_team/api/main.py`);
         // `completed_with_failures` is the Coding Team's partial-success
-        // terminal state (some tasks merged, others failed).
+        // terminal state (some tasks merged, others failed); `already_complete`
+        // is the Coding Team's "work was already done, no changes needed" success.
         // The Failed pill is reserved for runs that did not finish.
         return 'completed';
       default:
