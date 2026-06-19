@@ -39,6 +39,7 @@ from typing import Any, List, Tuple
 from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -866,7 +867,9 @@ def _emit_class(
 
     # Conformance gate checks #5/#6 require ``position.entry_price``
     # when stop-loss or take-profit rules exist.
-    has_engine_handled_exit = any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
+    has_engine_handled_exit = any(
+        isinstance(r, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule)) for r in exit_rules
+    )
     if has_engine_handled_exit:
         on_bar_lines.append(
             "        _entry_ref = position.entry_price if position is not None else None"

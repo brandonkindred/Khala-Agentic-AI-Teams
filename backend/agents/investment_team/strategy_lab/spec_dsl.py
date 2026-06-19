@@ -392,9 +392,7 @@ class StopLossRule(_SpecNode):
                     "stop level, and a trailing basis re-prices the stop each bar"
                 )
         elif self.limit_offset_pct is not None:
-            raise ValueError(
-                "StopLossRule.limit_offset_pct is only valid when style='limit'"
-            )
+            raise ValueError("StopLossRule.limit_offset_pct is only valid when style='limit'")
         return self
 
 
@@ -402,6 +400,70 @@ class TakeProfitRule(_SpecNode):
     kind: Literal["take_profit"] = "take_profit"
     pct: float = Field(gt=0)
     note: str = ""
+
+
+class TakeProfitLevel(_SpecNode):
+    """One rung of a laddered (scaled) take-profit.
+
+    ``pct`` is the profit target as a fraction off entry (e.g. ``0.05`` = +5% for
+    a long, −5% for a short). ``qty_fraction`` is the fraction of the position's
+    *original entry quantity* to close when this rung's target is reached.
+
+    Invariants (enforced by the owning :class:`ScaledTakeProfitRule`): within a
+    rule the ``pct`` values are strictly increasing (successively higher targets)
+    and the ``qty_fraction`` values sum to ``<= 1.0`` (the remainder rides the
+    other exits).
+    """
+
+    pct: float = Field(gt=0)
+    qty_fraction: float = Field(gt=0, le=1.0)
+    note: str = ""
+
+
+class ScaledTakeProfitRule(_SpecNode):
+    """Laddered take-profit: close a *fraction* of the position at each of several
+    successively higher targets, letting the remainder run.
+
+    Each :class:`TakeProfitLevel` fires at most once per position; a level's close
+    is sized as ``qty_fraction * original_entry_qty``. The engine emits one tranche
+    per bar (the lowest un-fired rung whose target the bar crosses), so a gap that
+    crosses several rungs at once scales out across consecutive bars. The remainder
+    ``(1 - sum(qty_fraction))`` is left open for the spec's stop-loss / trailing-stop
+    / signal exits to close.
+    """
+
+    kind: Literal["scaled_take_profit"] = "scaled_take_profit"
+    levels: list[TakeProfitLevel] = Field(min_length=1)
+    note: str = ""
+
+    @model_validator(mode="after")
+    def _validate_levels(self):
+        """Enforce a well-ordered ladder whose tranches do not over-close.
+
+        Preconditions: ``levels`` is non-empty and each level passed its own field
+        validation (``pct > 0``, ``0 < qty_fraction <= 1.0``).
+        Postconditions: returns ``self`` when ``pct`` is strictly increasing across
+        levels and ``sum(qty_fraction) <= 1.0`` (within a tiny tolerance); raises
+        ``ValueError`` otherwise. Strictly-increasing ``pct`` guarantees the engine
+        fires rungs in target order; the sum bound guarantees a non-negative
+        remainder so the ladder never closes more than the position.
+        """
+        prev_pct: Optional[float] = None
+        for level in self.levels:
+            if prev_pct is not None and level.pct <= prev_pct:
+                raise ValueError(
+                    "ScaledTakeProfitRule.levels must have strictly increasing pct "
+                    f"(each rung a higher target); got {level.pct} after {prev_pct}"
+                )
+            prev_pct = level.pct
+        total = math.fsum(level.qty_fraction for level in self.levels)
+        # Tolerance mirrors float-summation slack (e.g. 0.5 + 0.3 + 0.2 == 1.0).
+        if total > 1.0 + 1e-9:
+            raise ValueError(
+                "ScaledTakeProfitRule level qty_fraction values must sum to <= 1.0 "
+                f"(got {total}); the remainder rides the other exit rules"
+            )
+        return self
 
 
 class SignalExitRule(_SpecNode):
@@ -491,7 +553,7 @@ def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[flo
 # take-profit) plus signal-based exits.  The union is intentionally limited
 # to price-, P&L-, and signal-based exits.
 ExitRule = Annotated[
-    Union[StopLossRule, TakeProfitRule, SignalExitRule],
+    Union[StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
     Field(discriminator="kind"),
 ]
 
@@ -535,6 +597,8 @@ Predicate.model_rebuild()
 EntryRule.model_rebuild()
 StopLossRule.model_rebuild()
 TakeProfitRule.model_rebuild()
+TakeProfitLevel.model_rebuild()
+ScaledTakeProfitRule.model_rebuild()
 SignalExitRule.model_rebuild()
 FixedFractionSizing.model_rebuild()
 VolatilityTargetSizing.model_rebuild()
@@ -654,7 +718,7 @@ _STOP_LOSS_BASIS_PREFIX: dict[str, str] = {
 
 
 def _format_rule(
-    rule: Union[EntryRule, StopLossRule, TakeProfitRule, SignalExitRule],
+    rule: Union[EntryRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule],
 ) -> str:
     if isinstance(rule, EntryRule):
         return f"{rule.side} when {_format_predicate(rule.when)}"
@@ -666,6 +730,12 @@ def _format_rule(
         return base
     if isinstance(rule, TakeProfitRule):
         return f"take profit {_format_number(rule.pct * 100)}%"
+    if isinstance(rule, ScaledTakeProfitRule):
+        rungs = ", ".join(
+            f"{_format_number(level.qty_fraction * 100)}% at {_format_number(level.pct * 100)}%"
+            for level in rule.levels
+        )
+        return f"scaled take profit ({rungs})"
     if isinstance(rule, SignalExitRule):
         return f"exit when {_format_predicate(rule.when)}"
     raise TypeError(f"unknown rule variant: {type(rule).__name__}")

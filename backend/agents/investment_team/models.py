@@ -673,6 +673,13 @@ class BacktestExecutionDiagnostics(BaseModel):
     # exact-match conformance + alignment gates are unaffected, while analysis and
     # operability surfaces gain per-basis visibility.
     exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
+    # Per-rung firing counts for laddered ``ScaledTakeProfitRule`` exits, keyed by
+    # ``"<rule_index>:<level_index>"`` (e.g. ``"0:0"`` / ``"0:1"``). Each rung
+    # scales out at most once per position, so these distinguish which targets a
+    # ladder actually realised. Additive metadata: the ``scaled_take_profit``
+    # aggregate stays in ``exit_rule_firings`` and the close ``reason`` is
+    # byte-stable, so the exact-match conformance + alignment gates are unaffected.
+    scaled_take_profit_level_firings: Dict[str, int] = Field(default_factory=dict)
     # Fill-based counterpart of ``exit_rule_firings`` — counts engine-SUBMITTED
     # exit orders that actually FILLED (closed a position), keyed by rule kind,
     # with a per-symbol breakdown below. Counted off ``engine_exit_filled``

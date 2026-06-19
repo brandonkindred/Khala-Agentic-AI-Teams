@@ -12,6 +12,10 @@ Supported rule kinds (matching the discriminated ``ExitRule`` union in
   ``entry_price`` / ``trailing_high`` / ``trailing_low``.
 * ``TakeProfitRule(pct)`` — close when the bar's high (long) or low
   (short) clears the rule's price target.
+* ``ScaledTakeProfitRule(levels)`` — laddered take-profit: emit one
+  partial-close intent per crossed rung, each sized as a fraction of the
+  original entry qty. Each rung fires at most once (the dispatcher tracks
+  fired rungs); the remainder rides the other exit rules.
 * ``SignalExitRule(when)`` — close when a predicate fires.  Requires a
   ``HistoryView`` per symbol passed via the ``views`` keyword to
   :func:`evaluate_exit_rules`.  When no view is available, the rule is
@@ -33,6 +37,7 @@ from typing import Literal, Mapping, Optional, Sequence
 
 from ..spec_dsl import (
     ExitRule,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -40,7 +45,7 @@ from ..spec_dsl import (
 )
 from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
 
-ExitRuleKind = Literal["stop_loss", "take_profit", "signal_exit"]
+ExitRuleKind = Literal["stop_loss", "take_profit", "scaled_take_profit", "signal_exit"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +100,14 @@ class ExitIntent:
     # the stop for a long, above for a short).
     stop_price: Optional[float] = None
     limit_price: Optional[float] = None
+    # Partial-exit metadata for scaled (laddered) take-profits. ``qty_fraction``
+    # is the fraction of the position's *original entry qty* this intent closes
+    # (``1.0`` = full close, the default for every non-scaled intent).
+    # ``level_index`` identifies which rung of a ``ScaledTakeProfitRule`` fired
+    # (``None`` for every other rule kind), so the dispatcher can fire each rung
+    # at most once and diagnostics can count rungs separately.
+    qty_fraction: float = 1.0
+    level_index: Optional[int] = None
 
 
 def is_limit_stop_rule(rule: ExitRule) -> bool:
@@ -149,37 +162,99 @@ def evaluate_exit_rules(
         if bar is None:
             continue
         sym_view = views.get(symbol) if views is not None else None
+        stop = False
         for idx, rule in enumerate(rules):
-            if _rule_triggers(rule, position, bar, sym_view):
-                style = getattr(rule, "style", "market") or "market"
-                # A limit-style stop carries its fully-resolved stop level +
-                # protective-side limit so the dispatcher can rest a STOP_LIMIT
-                # without re-deriving prices. (Limit-style is restricted to the
-                # ``entry_price`` basis — see ``StopLossRule`` — so the level is a
-                # static offset off the entry price.)
-                stop_price: Optional[float] = None
-                limit_price: Optional[float] = None
-                if isinstance(rule, StopLossRule) and style == "limit":
-                    stop_price = _stop_loss_level(rule, position)
-                    offset = stop_price * rule.limit_offset_pct
-                    limit_price = protective_limit_price(
-                        stop_price, offset, closing_long=(position.side == "long")
-                    )
-                intents.append(
-                    ExitIntent(
-                        symbol=symbol,
-                        rule_kind=_kind_of(rule),
-                        rule_index=idx,
-                        note=getattr(rule, "note", "") or "",
-                        basis=getattr(rule, "basis", None),
-                        style=style,
-                        stop_price=stop_price,
-                        limit_price=limit_price,
-                    )
-                )
+            for intent in _intents_for_rule(rule, symbol, idx, position, bar, sym_view):
+                intents.append(intent)
                 if first_only:
+                    # ``first_only`` caps the result at one intent per position —
+                    # even within a scaled take-profit rule that crossed several
+                    # rungs this bar, only the lowest rung is returned.
+                    stop = True
                     break
+            if stop:
+                break
     return intents
+
+
+def _intents_for_rule(
+    rule: ExitRule,
+    symbol: str,
+    idx: int,
+    position: PositionState,
+    bar: BarSnapshot,
+    view: Optional[HistoryView],
+) -> list[ExitIntent]:
+    """Build the ``ExitIntent``\\ s a single ``rule`` triggers for one position.
+
+    Preconditions: ``position.qty > 0`` and ``bar`` is the symbol's current bar.
+    Postconditions: returns ``[]`` when the rule does not fire; one intent for a
+    triggered stop-loss / take-profit / signal-exit; and one intent **per crossed
+    rung** (in rung order) for a ``ScaledTakeProfitRule``. A limit-style stop's
+    intent carries its fully-resolved ``stop_price`` / ``limit_price``.
+    """
+    if isinstance(rule, ScaledTakeProfitRule):
+        return [
+            ExitIntent(
+                symbol=symbol,
+                rule_kind="scaled_take_profit",
+                rule_index=idx,
+                note=rule.levels[level_idx].note or rule.note or "",
+                level_index=level_idx,
+                qty_fraction=rule.levels[level_idx].qty_fraction,
+            )
+            for level_idx in _scaled_take_profit_levels(rule, position, bar)
+        ]
+
+    if not _rule_triggers(rule, position, bar, view):
+        return []
+
+    style = getattr(rule, "style", "market") or "market"
+    # A limit-style stop carries its fully-resolved stop level + protective-side
+    # limit so the dispatcher can rest a STOP_LIMIT without re-deriving prices.
+    # (Limit-style is restricted to the ``entry_price`` basis — see
+    # ``StopLossRule`` — so the level is a static offset off the entry price.)
+    stop_price: Optional[float] = None
+    limit_price: Optional[float] = None
+    if isinstance(rule, StopLossRule) and style == "limit":
+        stop_price = _stop_loss_level(rule, position)
+        offset = stop_price * rule.limit_offset_pct
+        limit_price = protective_limit_price(
+            stop_price, offset, closing_long=(position.side == "long")
+        )
+    return [
+        ExitIntent(
+            symbol=symbol,
+            rule_kind=_kind_of(rule),
+            rule_index=idx,
+            note=getattr(rule, "note", "") or "",
+            basis=getattr(rule, "basis", None),
+            style=style,
+            stop_price=stop_price,
+            limit_price=limit_price,
+        )
+    ]
+
+
+def _scaled_take_profit_levels(
+    rule: ScaledTakeProfitRule, position: PositionState, bar: BarSnapshot
+) -> list[int]:
+    """Indices of the ladder rungs whose target the bar crosses, in rung order.
+
+    Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (enforced by the
+    DSL), so the crossed indices are contiguous from 0.
+    Postconditions: returns ``[i for i, level in enumerate(rule.levels) if the
+    bar's favorable extreme reaches ``entry * (1 ± level.pct)``]`` — long uses the
+    bar high above ``entry*(1+pct)``, short uses the bar low below ``entry*(1-pct)``.
+    """
+    crossed: list[int] = []
+    for i, level in enumerate(rule.levels):
+        if position.side == "long":
+            if bar.high >= position.entry_price * (1.0 + level.pct):
+                crossed.append(i)
+        elif bar.low <= position.entry_price * (1.0 - level.pct):
+            crossed.append(i)
+    return crossed
 
 
 def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
@@ -212,6 +287,8 @@ def _kind_of(rule: ExitRule) -> ExitRuleKind:
         return "stop_loss"
     if isinstance(rule, TakeProfitRule):
         return "take_profit"
+    if isinstance(rule, ScaledTakeProfitRule):
+        return "scaled_take_profit"
     if isinstance(rule, SignalExitRule):
         return "signal_exit"
     raise TypeError(f"unknown ExitRule subclass: {type(rule).__name__}")

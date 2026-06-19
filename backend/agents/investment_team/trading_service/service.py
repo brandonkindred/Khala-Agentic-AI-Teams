@@ -49,6 +49,7 @@ from ..strategy_lab.spec_dsl import (
     ExitRule,
     FixedFractionSizing,
     FixedNotionalSizing,
+    ScaledTakeProfitRule,
     StopLossRule,
     VolatilityTargetSizing,
     first_side_stop_factor,
@@ -258,6 +259,14 @@ class _TrackedPosition:
     just_opened: bool
     high_since_entry: float
     low_since_entry: float
+    # ``(rule_index, level_index)`` pairs of scaled-take-profit rungs already
+    # scaled out for THIS position. Each rung fires at most once; the dispatcher
+    # consults this set when picking the next intent and adds to it on emission.
+    # Because a fresh ``_TrackedPosition`` is built whenever the underlying
+    # position is replaced (``entry_order_id`` change — see
+    # ``TradingService._update_position_tracker``), the set never leaks a fired
+    # rung across two distinct trades.
+    fired_tp_levels: set[tuple[int, int]] = field(default_factory=set)
 
     def snapshot(self, symbol: str, qty: float) -> PositionState:
         # ``PositionState`` (the public evaluator input) carries the
@@ -367,6 +376,26 @@ class _EngineExitDispatcher:
             sym, tracked, pos, cur_bar, exclude_resting_limit_stop=exclude_resting_limit_stop
         )
         if intent is None:
+            return
+
+        # Scaled (laddered) take-profit: this intent closes only one rung's
+        # fraction of the position and leaves the remainder open. Unlike a full
+        # close it must NOT oversize for scale-ins, retire the position's
+        # competing resting exits, cancel its entry continuations, or cancel a
+        # resting protective stop-limit — all of those assume the whole position
+        # is leaving. Emit the partial close, mark the rung fired so it can't
+        # re-emit before the close fills, and return.
+        if intent.rule_kind == "scaled_take_profit":
+            req = self._build_close_order(intent, tracked, pos)
+            if req is None:
+                return
+            pending_for_prev.append(req)
+            # Bind to the position so the stale-continuation guard drops this
+            # scale-out if a full exit (e.g. a stop) closes the position first.
+            self._register_binding(req, pos)
+            assert intent.level_index is not None  # set by the evaluator for this kind
+            tracked.fired_tp_levels.add((intent.rule_index, intent.level_index))
+            self._record_emission(req, intent, cur_bar, result)
             return
 
         # Issue #527 — size the close to cover any same-side scale-in
@@ -537,17 +566,30 @@ class _EngineExitDispatcher:
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
+        # Evaluate all triggered intents (vs. just the first) whenever the chosen
+        # intent depends on per-position runtime state the pure evaluator can't
+        # see: a resting limit-style stop to skip, or scaled-take-profit rungs
+        # that already fired for this position.
+        need_all = exclude_resting_limit_stop or self._has_scaled_take_profit_rule
         intents = evaluate_exit_rules(
             self.exit_rules,
             {sym: snapshot},
             {sym: bar_snap},
             views=self.views,
-            first_only=not exclude_resting_limit_stop,
+            first_only=not need_all,
         )
-        if not exclude_resting_limit_stop:
+        if not need_all:
             return intents[0] if intents else None
         for intent in intents:
-            if intent.style == "limit":
+            # The spec's (single) limit-style stop already rests as a STOP_LIMIT;
+            # skip it so a lower-priority rule can still fire and close.
+            if exclude_resting_limit_stop and intent.style == "limit":
+                continue
+            # A scaled-take-profit rung scales out at most once per position.
+            if (
+                intent.level_index is not None
+                and (intent.rule_index, intent.level_index) in tracked.fired_tp_levels
+            ):
                 continue
             return intent
         return None
@@ -563,10 +605,19 @@ class _EngineExitDispatcher:
         """
         return any(is_limit_stop_rule(r) for r in self.exit_rules)
 
+    @cached_property
+    def _has_scaled_take_profit_rule(self) -> bool:
+        """Whether the spec contains a laddered (``ScaledTakeProfitRule``) exit, so
+        the per-bar dispatch evaluates all triggered intents and consults the
+        position's fired-rung set instead of taking the first trigger blindly.
+
+        Postconditions: ``True`` iff any exit rule is a ``ScaledTakeProfitRule``.
+        Cached: ``exit_rules`` is immutable across the run.
+        """
+        return any(isinstance(r, ScaledTakeProfitRule) for r in self.exit_rules)
+
     @staticmethod
-    def _entry_continuations(
-        sym: str, pos: Position, order_book: OrderBook
-    ) -> List[PendingOrder]:
+    def _entry_continuations(sym: str, pos: Position, order_book: OrderBook) -> List[PendingOrder]:
         """The position's own in-flight entry continuations — the partially-filled
         ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` remainder of its entry order, identified
         by ``po.order_id == pos.entry_order_id`` and ``cumulative_filled_qty > 0``.
@@ -682,7 +733,16 @@ class _EngineExitDispatcher:
             if intent.rule_kind == "signal_exit"
             else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
-        qty = pos.qty + scale_in_qty
+        if intent.rule_kind == "scaled_take_profit":
+            # Partial scale-out: close this rung's fraction of the ORIGINAL entry
+            # qty (``scale_in_qty`` is irrelevant — we deliberately leave the rest
+            # open). ``original_qty`` is pinned at open; fall back to the live qty
+            # if it was never set. The fill simulator clips to the live qty, so a
+            # fraction larger than what remains simply closes the remainder.
+            base = pos.original_qty if pos.original_qty > 0 else pos.qty
+            qty = intent.qty_fraction * base
+        else:
+            qty = pos.qty + scale_in_qty
         if intent.style == "limit":
             req = self._build_stop_limit_close(intent, close_side, qty, reason)
         else:
@@ -853,6 +913,14 @@ class _EngineExitDispatcher:
         diag.exit_rule_firings_by_basis[basis_label] = (
             diag.exit_rule_firings_by_basis.get(basis_label, 0) + 1
         )
+        # Per-rung counts for scaled take-profits, additive and keyed by
+        # ``"{rule_index}:{level_index}"`` so each ladder rung is attributable
+        # without perturbing the byte-stable ``rule_kind`` / close ``reason``.
+        if intent.level_index is not None:
+            level_key = f"{intent.rule_index}:{intent.level_index}"
+            diag.scaled_take_profit_level_firings[level_key] = (
+                diag.scaled_take_profit_level_firings.get(level_key, 0) + 1
+            )
         _record_event(
             diag,
             "emitted",
@@ -1353,7 +1421,7 @@ def _apply_fill_outcome_events(
             # executed). Distinct, too, from emission-time ``exit_rule_firings``:
             # a limit-style stop can fire (emit) yet gap through unfilled, in
             # which case no engine fill is recorded here.
-            kind = ev.reason[len(ENGINE_EXIT_REASON_PREFIX):]
+            kind = ev.reason[len(ENGINE_EXIT_REASON_PREFIX) :]
             # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
             # matches the firing key (rule kind only).
             bracket = kind.find("[")

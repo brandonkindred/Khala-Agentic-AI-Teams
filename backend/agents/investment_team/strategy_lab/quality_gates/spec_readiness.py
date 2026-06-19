@@ -42,6 +42,7 @@ from ..spec_dsl import (
     IndicatorName,
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -395,11 +396,20 @@ def _identical_ref_verdict(pred: Predicate) -> Optional[tuple[str, str]]:
         return None
     ref = lhs_id.split(":", 1)[1]
     if pred.op in ("<", ">"):
-        return "false", f"both sides reference {ref} with op {pred.op!r} (a value is never strictly {'below' if pred.op == '<' else 'above'} itself)"
+        return (
+            "false",
+            f"both sides reference {ref} with op {pred.op!r} (a value is never strictly {'below' if pred.op == '<' else 'above'} itself)",
+        )
     if pred.op in ("<=", ">=", "=="):
-        return "true", f"both sides reference {ref} with op {pred.op!r} (a value always equals itself)"
+        return (
+            "true",
+            f"both sides reference {ref} with op {pred.op!r} (a value always equals itself)",
+        )
     if pred.op in ("cross_above", "cross_below"):
-        return "false", f"both sides reference {ref} with op {pred.op!r} (identical series move together and never cross)"
+        return (
+            "false",
+            f"both sides reference {ref} with op {pred.op!r} (identical series move together and never cross)",
+        )
     return None
 
 
@@ -644,12 +654,13 @@ class SpecReadinessGate(GateResultsMixin):
     # ------------------------------------------------------------------
     def _check_exit_completeness(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
         assert isinstance(ctx.spec, StrategySpec)
-        allowed_kinds = {"signal_exit", "stop_loss", "take_profit"}
+        allowed_kinds = {"signal_exit", "stop_loss", "take_profit", "scaled_take_profit"}
         if not ctx.spec.exit_rules:
             return (
                 self._critical(
                     "No exit rules — positions would never close. Add at "
-                    "least one of: signal_exit, stop_loss, take_profit."
+                    "least one of: signal_exit, stop_loss, take_profit, "
+                    "scaled_take_profit."
                 ),
             )
         if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
@@ -897,8 +908,17 @@ class SpecReadinessGate(GateResultsMixin):
 
         stop_losses = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
         take_profits = [r for r in ctx.spec.exit_rules if isinstance(r, TakeProfitRule)]
-        if stop_losses and take_profits:
-            min_tp = min(r.pct for r in take_profits)
+        # A laddered take-profit's FIRST rung is its effective profit target for
+        # the risk/reward ratio — that is the level the position starts realising
+        # gains at. Fold each ladder's lowest rung pct into the take-profit pool.
+        scaled_tp_first_rungs = [
+            min(level.pct for level in r.levels)
+            for r in ctx.spec.exit_rules
+            if isinstance(r, ScaledTakeProfitRule)
+        ]
+        tp_pcts = [r.pct for r in take_profits] + scaled_tp_first_rungs
+        if stop_losses and tp_pcts:
+            min_tp = min(tp_pcts)
             max_sl = max(r.pct for r in stop_losses)
             assert min_tp > 0 and max_sl > 0, "exit-rule pcts must be strictly positive"
             # Wider stops than profit targets are a deliberate risk/reward
