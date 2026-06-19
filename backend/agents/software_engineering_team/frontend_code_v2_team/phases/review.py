@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from strands import Agent
 
 from llm_service import LLMClient
+from software_engineering_team.shared.agent_review import run_qa_agent, run_security_agent
 from software_engineering_team.shared.llm_review import run_llm_review
 from software_engineering_team.shared.models import Task
 from software_engineering_team.shared.review_progress import call_code_review_agent
@@ -85,93 +86,6 @@ def _run_llm_review(
     )
 
 
-def _run_chunked_agent_review(
-    *,
-    run_chunk: Callable[[str], Any],
-    files: Dict[str, str],
-    source: str,
-    default_severity: str,
-    label: str,
-    task_id: str,
-    context: str = "",
-) -> List[ReviewIssue]:
-    """Run a quality agent over each file's raw source, one file at a time.
-
-    QA and security agents analyze *source*, so they are fed each file's raw
-    content — not the code-review renderer's ``### path ###`` headers or ``N:``
-    line-number prefixes, which would make the code syntactically invalid and
-    provoke bogus findings. A file larger than ``MAX_REVIEW_CODE_CHARS`` is
-    hard-split at character boundaries so no over-budget string is ever sent.
-
-    Preconditions:
-        - ``run_chunk(code)`` invokes the agent on one piece of raw source and
-          returns its raw issue/vulnerability items.
-        - ``files`` maps file paths to their full source text.
-
-    Postconditions:
-        - Each non-blank file's raw content is reviewed in full; a file over
-          ``MAX_REVIEW_CODE_CHARS`` is split into ≤-cap character pieces and every
-          piece is reviewed, so its tail is reviewed rather than truncated away.
-          Blank files contribute nothing.
-        - A finding's ``file_path`` defaults to the file actually sent when the
-          agent does not report a location, so every piece stays attributable.
-        - A piece whose ``run_chunk`` call fails is logged and skipped; issues
-          from the other pieces are still returned (one bad piece never aborts
-          the whole review).
-    """
-    from software_engineering_team.code_review_agent.coordinator import cap_chunk_content
-
-    blocks = [(path, content) for path, content in files.items() if content and content.strip()]
-    if not blocks:
-        return []
-    # One raw piece per file (split only when a file exceeds the per-call cap).
-    pieces = [
-        (path, piece)
-        for path, content in blocks
-        for piece in cap_chunk_content(content, MAX_REVIEW_CODE_CHARS)
-    ]
-    if len(pieces) > MANY_CHUNKS_WARN_THRESHOLD:
-        logger.warning(
-            "[%s] %s: %d pieces for %d file(s) — large review, many calls%s",
-            task_id,
-            label,
-            len(pieces),
-            len(blocks),
-            context,
-        )
-    issues: List[ReviewIssue] = []
-    for idx, (path, piece) in enumerate(pieces, start=1):
-        try:
-            items = run_chunk(piece)
-        except Exception as exc:
-            logger.warning(
-                "[%s] %s failed (piece %d/%d)%s: %s",
-                task_id,
-                label,
-                idx,
-                len(pieces),
-                context,
-                exc,
-            )
-            continue
-        for item in items or []:
-            issues.append(
-                ReviewIssue(
-                    source=source,
-                    severity=getattr(item, "severity", default_severity),
-                    description=getattr(item, "description", str(item)),
-                    # `location` may be present but None; fall back to file_path
-                    # then to the file we sent, so file_path is always a useful
-                    # string and tail pieces stay attributable.
-                    file_path=getattr(item, "location", None)
-                    or getattr(item, "file_path", None)
-                    or path,
-                    recommendation=getattr(item, "recommendation", ""),
-                )
-            )
-    return issues
-
-
 def _run_qa_agent(
     *,
     qa_agent: Any,
@@ -181,29 +95,26 @@ def _run_qa_agent(
     task_id: str,
     context: str = "",
 ) -> List[ReviewIssue]:
-    """Run the external QA agent over function-aware chunks of ``files``.
+    """Run the external QA agent over each file's raw, function-aware-split source.
+
+    Thin wrapper that delegates to the shared ``run_qa_agent``, injecting this
+    team's ``ReviewIssue`` factory and chunking constants.
 
     Preconditions:
         - ``qa_agent`` is not None and exposes ``.run(QAInput) -> QAOutput``.
 
-    Postconditions: see ``_run_chunked_agent_review``; QA bugs become
-    ``ReviewIssue``s with ``source="qa"``.
+    Postconditions: see ``software_engineering_team.shared.agent_review``; QA bugs
+    become ``ReviewIssue``s with ``source="qa"``.
     """
-    from qa_agent.models import QAInput as _QAInput
-
-    def _run_chunk(code: str) -> Any:
-        result = qa_agent.run(
-            _QAInput(code=code, language=language, task_description=task_description)
-        )
-        return getattr(result, "bugs_found", getattr(result, "issues", []))
-
-    return _run_chunked_agent_review(
-        run_chunk=_run_chunk,
+    return run_qa_agent(
+        qa_agent=qa_agent,
         files=files,
-        source="qa",
-        default_severity="medium",
-        label="QA agent",
+        language=language,
+        task_description=task_description,
         task_id=task_id,
+        issue_factory=ReviewIssue,
+        max_chars=MAX_REVIEW_CODE_CHARS,
+        warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
     )
 
@@ -217,30 +128,27 @@ def _run_security_agent(
     task_id: str,
     context: str = "",
 ) -> List[ReviewIssue]:
-    """Run the external security agent over function-aware chunks of ``files``.
+    """Run the external security agent over each file's raw, function-aware-split source.
+
+    Thin wrapper that delegates to the shared ``run_security_agent``, injecting
+    this team's ``ReviewIssue`` factory and chunking constants.
 
     Preconditions:
         - ``security_agent`` is not None and exposes
           ``.run(SecurityInput) -> SecurityOutput``.
 
-    Postconditions: see ``_run_chunked_agent_review``; vulnerabilities become
-    ``ReviewIssue``s with ``source="security"``.
+    Postconditions: see ``software_engineering_team.shared.agent_review``;
+    vulnerabilities become ``ReviewIssue``s with ``source="security"``.
     """
-    from security_agent.models import SecurityInput as _SecInput
-
-    def _run_chunk(code: str) -> Any:
-        result = security_agent.run(
-            _SecInput(code=code, language=language, task_description=task_description)
-        )
-        return getattr(result, "vulnerabilities", getattr(result, "issues", []))
-
-    return _run_chunked_agent_review(
-        run_chunk=_run_chunk,
+    return run_security_agent(
+        security_agent=security_agent,
         files=files,
-        source="security",
-        default_severity="high",
-        label="Security agent",
+        language=language,
+        task_description=task_description,
         task_id=task_id,
+        issue_factory=ReviewIssue,
+        max_chars=MAX_REVIEW_CODE_CHARS,
+        warn_threshold=MANY_CHUNKS_WARN_THRESHOLD,
         context=context,
     )
 

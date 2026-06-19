@@ -510,6 +510,8 @@ def test_run_qa_agent_chunks_large_input_without_dropping_tail():
     assert "fn_tail" in joined  # tail reviewed — old 60K cap dropped this
     assert codes[0].startswith("def fn_0000")  # raw source, no ### header / prefix
     _assert_raw_source(codes)
+    # Function-aware: every piece begins at a function boundary, never mid-body.
+    assert all(c.lstrip().startswith("def ") for c in codes)
     assert len(issues) == len(codes)  # a bug aggregated from every piece
     assert all(i.source == "qa" for i in issues)
 
@@ -590,6 +592,8 @@ def test_run_security_agent_chunks_large_input_without_dropping_tail():
     assert "fn_tail" in joined  # tail reviewed
     assert codes[0].startswith("def fn_0000")  # raw source, no ### header / prefix
     _assert_raw_source(codes)
+    # Function-aware: every piece begins at a function boundary, never mid-body.
+    assert all(c.lstrip().startswith("def ") for c in codes)
     assert len(issues) == len(codes)
     assert all(i.source == "security" for i in issues)
 
