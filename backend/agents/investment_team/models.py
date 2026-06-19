@@ -647,15 +647,17 @@ class BacktestExecutionDiagnostics(BaseModel):
     # exact-match conformance + alignment gates are unaffected, while analysis and
     # operability surfaces gain per-basis visibility.
     exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
-    # Fill-based counterpart of ``exit_rule_firings`` — counts engine exit orders
-    # that actually FILLED (closed a position), keyed by rule kind, with a
-    # per-symbol breakdown below. For a market close emission == fill, so these
-    # mirror ``exit_rule_firings``; for a ``style="limit"`` stop they diverge,
-    # because a STOP_LIMIT can fire (emit) but gap through its limit unfilled.
-    # Surfaced as observability telemetry (the fire-vs-fill gap), NOT as the
-    # conformance leak-check denominator: a fill count is derived from the same
-    # closed-trade ledger the gate iterates, so it cannot detect a leak in that
-    # ledger — the gate reconciles against the independent emission firings.
+    # Fill-based counterpart of ``exit_rule_firings`` — counts engine-SUBMITTED
+    # exit orders that actually FILLED (closed a position), keyed by rule kind,
+    # with a per-symbol breakdown below. Counted off ``engine_exit_filled``
+    # diagnostic events keyed by the order's un-reconciled ``engine_exit:<kind>``
+    # reason, so a *strategy* close whose ``TradeRecord.exit_reason`` was
+    # reconciled to ``engine_exit:*`` is NOT counted as an engine fill. For a
+    # market close emission == fill, so these mirror ``exit_rule_firings``; for a
+    # ``style="limit"`` stop they diverge, because a STOP_LIMIT can fire (emit)
+    # but gap through its limit unfilled. Surfaced as observability telemetry (the
+    # fire-vs-fill gap), NOT as the conformance leak-check denominator: the gate
+    # reconciles against the independent emission firings.
     exit_rule_fills: Dict[str, int] = Field(default_factory=dict)
     exit_rule_fills_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     # Count of stop-limit orders that triggered (stop level crossed) but could not

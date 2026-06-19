@@ -1320,28 +1320,25 @@ def _apply_fill_outcome_events(
                 reason=ev.reason,
                 detail=ev.detail,
             )
-
-    # Fill-based exit counter. Counted off the CLOSED TRADES (not the
-    # ``exit_filled`` diagnostic events, whose ``reason`` carries the fill kind
-    # — ``"full"`` / ``"partial"`` — not the order's engine reason). A closed
-    # trade IS a fill that closed a position, and its ``exit_reason`` is the same
-    # ``engine_exit:<kind>`` attribution the conformance gate reconciles against,
-    # so this stays consistent with that gate by construction. Distinct from
-    # emission-time ``exit_rule_firings``: a limit-style stop can fire (emit) yet
-    # gap through unfilled, leaving no closed trade — so it is not counted here.
-    for trade in outcome.closed_trades:
-        reason = trade.exit_reason or ""
-        if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
-            continue
-        kind = reason[len(ENGINE_EXIT_REASON_PREFIX):]
-        # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
-        # matches the firing key (rule kind only).
-        bracket = kind.find("[")
-        if bracket != -1:
-            kind = kind[:bracket]
-        diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
-        sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(trade.symbol, {})
-        sym_fills[kind] = sym_fills.get(kind, 0) + 1
+        elif ev.kind == "engine_exit_filled":
+            # An engine-SUBMITTED exit order actually filled and closed a
+            # position (``ev.reason`` is its un-reconciled ``engine_exit:<kind>``
+            # reason). This counts only true engine fills — distinct from the
+            # reconciled ``exit_reason`` on closed trades, which can relabel a
+            # *strategy* close as ``engine_exit:*`` and would otherwise inflate
+            # the fire-vs-fill telemetry (hiding a stop-limit that never
+            # executed). Distinct, too, from emission-time ``exit_rule_firings``:
+            # a limit-style stop can fire (emit) yet gap through unfilled, in
+            # which case no engine fill is recorded here.
+            kind = ev.reason[len(ENGINE_EXIT_REASON_PREFIX):]
+            # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
+            # matches the firing key (rule kind only).
+            bracket = kind.find("[")
+            if bracket != -1:
+                kind = kind[:bracket]
+            diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
+            sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
+            sym_fills[kind] = sym_fills.get(kind, 0) + 1
 
 
 class _StreamingEquityBuffer:

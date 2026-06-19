@@ -624,8 +624,9 @@ def test_diagnostic_events_default_to_empty_list(realistic: bool) -> None:
 
 # ---------------------------------------------------------------------------
 # Fill-based exit counter (engine_exit fills) in _apply_fill_outcome_events.
-# Counted off CLOSED TRADES (whose exit_reason carries the engine_exit:* label),
-# NOT the exit_filled diagnostic events (whose reason is the fill kind).
+# Counted off ``engine_exit_filled`` diagnostic events (emitted only when an
+# engine-SUBMITTED order closes a position, keyed by its un-reconciled reason),
+# NOT off closed-trade exit_reason (which can be reconciled for strategy closes).
 # ---------------------------------------------------------------------------
 
 
@@ -652,11 +653,28 @@ def _closed_trade(*, symbol: str, exit_reason: str | None, trade_num: int = 1):
     )
 
 
-def _outcome(*, closed_trades):
+def _engine_exit_filled_event(*, symbol: str, reason: str):
+    from investment_team.trading_service.engine.fill_simulator import FillDiagnosticEvent
+
+    return FillDiagnosticEvent(
+        kind="engine_exit_filled",
+        order_id="e1",
+        timestamp="2024-01-02T00:00:00",
+        symbol=symbol,
+        side="short",
+        order_type="stop_limit",
+        reason=reason,
+    )
+
+
+def _outcome(*, closed_trades=None, diagnostic_events=None):
     from investment_team.trading_service.engine.fill_simulator import FillOutcome
 
     return FillOutcome(
-        entry_fills=[], exit_fills=[], closed_trades=closed_trades, diagnostic_events=[]
+        entry_fills=[],
+        exit_fills=[],
+        closed_trades=closed_trades or [],
+        diagnostic_events=diagnostic_events or [],
     )
 
 
@@ -669,8 +687,8 @@ def test_engine_exit_fill_bumps_fill_based_counter() -> None:
 
     diag = BacktestExecutionDiagnostics()
     outcome = _outcome(
-        closed_trades=[
-            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
+        diagnostic_events=[
+            _engine_exit_filled_event(symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
         ]
     )
     _apply_fill_outcome_events(diag, outcome)
@@ -688,8 +706,10 @@ def test_signal_exit_fill_strips_index_suffix() -> None:
 
     diag = BacktestExecutionDiagnostics()
     outcome = _outcome(
-        closed_trades=[
-            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]")
+        diagnostic_events=[
+            _engine_exit_filled_event(
+                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]"
+            )
         ]
     )
     _apply_fill_outcome_events(diag, outcome)
@@ -699,20 +719,29 @@ def test_signal_exit_fill_strips_index_suffix() -> None:
     assert diag.exit_rule_fills.get("signal_exit") == 1
 
 
-def test_strategy_close_fill_is_not_counted() -> None:
+def test_reconciled_strategy_close_is_not_counted_as_engine_fill() -> None:
+    """A strategy close whose TradeRecord.exit_reason was reconciled to
+    engine_exit:* must NOT count as an engine fill — only an engine-SUBMITTED
+    order emits engine_exit_filled. Otherwise the fire-vs-fill telemetry would
+    hide a stop-limit that never executed.
+    """
     from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.service import _apply_fill_outcome_events
+    from investment_team.trading_service.service import (
+        ENGINE_EXIT_REASON_PREFIX,
+        _apply_fill_outcome_events,
+    )
 
     diag = BacktestExecutionDiagnostics()
+    # A closed trade reconciled to engine_exit:stop_loss, but NO engine_exit_filled
+    # event (the close was a strategy order; only its attribution was reconciled).
     outcome = _outcome(
         closed_trades=[
-            _closed_trade(symbol="AAA", exit_reason="strategy_market_exit"),
-            _closed_trade(symbol="AAA", exit_reason=None, trade_num=2),
-        ]
+            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
+        ],
+        diagnostic_events=[],
     )
     _apply_fill_outcome_events(diag, outcome)
 
-    # Only engine-stamped exits feed the fill counter.
     assert diag.exit_rule_fills == {}
     assert diag.exit_rule_fills_by_symbol == {}
 

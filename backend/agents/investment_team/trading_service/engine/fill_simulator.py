@@ -82,7 +82,7 @@ class FillDiagnosticEvent:
     what happened on this bar; the consumer picks the diagnostic shape.
     """
 
-    kind: str  # "entry_filled" | "exit_filled" | "rejected"
+    kind: str  # "entry_filled" | "exit_filled" | "rejected" | "stop_limit_unfilled" | "engine_exit_filled"
     order_id: str
     timestamp: str
     symbol: str
@@ -533,6 +533,25 @@ class FillSimulator:
                     self._record_exit_event(events, po, bar, exit_fill)
                 if trade is not None:
                     closed.append(trade)
+                    # Count an actual engine-order exit FILL only when an
+                    # engine-SUBMITTED order closed the position. ``trade.exit_reason``
+                    # can be reconciled to ``engine_exit:*`` for a *strategy* close
+                    # (see ``_fill_exit``); ``po.request.reason`` is the true,
+                    # un-reconciled order reason, so a reconciled strategy close
+                    # does not masquerade as an engine stop-limit fill in the
+                    # fire-vs-fill telemetry.
+                    if (po.request.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX):
+                        events.append(
+                            FillDiagnosticEvent(
+                                kind="engine_exit_filled",
+                                order_id=po.order_id,
+                                timestamp=bar.timestamp,
+                                symbol=po.request.symbol,
+                                side=po.request.side.value,
+                                order_type=po.request.order_type.value,
+                                reason=po.request.reason,
+                            )
+                        )
 
         return FillOutcome(
             entry_fills=entry_fills,
