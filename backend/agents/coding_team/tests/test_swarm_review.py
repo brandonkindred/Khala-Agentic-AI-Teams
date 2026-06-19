@@ -1139,6 +1139,27 @@ def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monk
     assert graph.get_task_for_agent("a1") is None  # agent freed
 
 
+def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatch):
+    """A 'done' verdict whose non-empty branch fails to merge (conflict/checkout failure) must FAIL
+    the task and cascade — not mark it merged, which would drop the work and could leave a conflicted
+    tree."""
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+    monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.add_task("t2", title="T2", dependencies=["t1"])
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    assert graph.get_task("t1").status == TaskStatus.FAILED  # not merged
+    assert graph.get_task("t1").resolved_without_changes is False
+    assert graph.get_task("t2").status == TaskStatus.FAILED  # dependent cascade-failed
+
+
 def test_escalate_fail_marks_failed_and_cascades(tmp_path, monkeypatch):
     _patch_git(monkeypatch)
     swarm, graph = _make_swarm(

@@ -1096,28 +1096,38 @@ class CodingTeamSwarm:
 
             branch = task.feature_branch or f"feature/{task.id}"
             has_changes = bool((branch_diff(self.path, DEVELOPMENT_BRANCH, branch) or "").strip())
-            if has_changes:
-                try:
-                    merged_ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
-                except Exception as e:  # noqa: BLE001 — terminate the stuck task regardless
-                    logger.warning("Merge of adjudicated-done branch %s raised: %s", task.id, e)
-                    merged_ok = False
-                if not merged_ok:
-                    logger.warning(
-                        "Merge of adjudicated-done branch %s did not apply cleanly; "
-                        "marking merged anyway",
-                        task.id,
-                    )
-                # Real work landed → NOT resolved-without-changes; the job publishes a real PR.
-                self.graph.update_task(
-                    task.id, resolved_without_changes=False, revision_feedback=feedback
-                )
-            else:
+            if not has_changes:
                 # Genuinely nothing landed — flag it resolved-without-changes so the job-level outcome
                 # reports "already complete" rather than presenting a non-existent diff as merged work.
                 self.graph.update_task(
                     task.id, resolved_without_changes=True, revision_feedback=feedback
                 )
+                self.graph.mark_branch_merged(task.id)
+                return
+            try:
+                merged_ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
+            except Exception as e:  # noqa: BLE001 — a raised merge is a failed merge, handled below
+                logger.warning("Merge of adjudicated-done branch %s raised: %s", task.id, e)
+                merged_ok = False
+            if not merged_ok:
+                # The Tech Lead judged the work done, but its branch will not integrate (merge
+                # conflict / checkout failure). Marking it merged would drop the work and could leave
+                # a conflicted tree, so FAIL the task (and cascade to dependents) to surface the gap
+                # rather than claim a success that never landed on ``development``.
+                logger.warning(
+                    "Adjudicated-done branch %s failed to merge into %s; marking FAILED, not merged",
+                    task.id,
+                    DEVELOPMENT_BRANCH,
+                )
+                self.graph.update_task(
+                    task.id, status=TaskStatus.FAILED, revision_feedback=feedback
+                )
+                self._cascade_fail_dependents(task.id)
+                return
+            # Real work landed → NOT resolved-without-changes; the job publishes a real PR.
+            self.graph.update_task(
+                task.id, resolved_without_changes=False, revision_feedback=feedback
+            )
             self.graph.mark_branch_merged(task.id)
             return
         if verdict == "continue":
