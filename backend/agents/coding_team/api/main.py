@@ -2567,7 +2567,7 @@ def _defer_terminal_success(job_id: str):
     """
 
     def _update(**kw: Any) -> None:
-        if kw.get("status") in ("completed", "completed_with_failures", "already_complete"):
+        if kw.get("status") in hitl.TERMINAL_SUCCESS_STATUSES:
             kw = {**kw, "status": "running", "phase": "publishing"}
         update_job(job_id, **kw)
 

@@ -60,13 +60,18 @@ _ANSWER_WAIT_POLL_INTERVAL_S = 5.0
 # endpoint's staleness window.
 ANSWER_WAIT_POLL_INTERVAL_S = _ANSWER_WAIT_POLL_INTERVAL_S
 
+# Terminal SUCCESS statuses for a coding-team job: the run finished and the outcome is a success —
+# a clean completion, a partial success (some tasks failed), or an already-complete no-op (the work
+# was already done, no changes needed). Single source of truth so every consumer (the publish-defer
+# gate in api/main.py, the all-terminal set below, the resume guard) agrees on which statuses are
+# terminal successes, and a future success status is added in exactly one place.
+TERMINAL_SUCCESS_STATUSES = frozenset({"completed", "completed_with_failures", "already_complete"})
+
 # Job statuses that mean "this job will never resume on its own"; the wait loop must stop polling.
-# ``already_complete`` is a terminal SUCCESS (work already done, no changes needed) and so belongs
-# here: a finished already-complete job must not look resumable to is_terminal() consumers (the
-# /resume endpoint and the auto-resume guard).
-_TERMINAL_STATUSES = frozenset(
-    {"failed", "cancelled", "completed", "completed_with_failures", "already_complete"}
-)
+# The terminal SUCCESS statuses plus the two terminal FAILURE statuses: ``already_complete`` is a
+# terminal success, so a finished already-complete job must not look resumable to is_terminal()
+# consumers (the /resume endpoint and the auto-resume guard).
+_TERMINAL_STATUSES = TERMINAL_SUCCESS_STATUSES | frozenset({"failed", "cancelled"})
 
 
 def heartbeat_timestamp() -> str:

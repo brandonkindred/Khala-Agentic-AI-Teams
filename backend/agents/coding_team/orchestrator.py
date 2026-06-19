@@ -59,12 +59,12 @@ def _no_change_revisit_cap() -> int:
     Postconditions:
         - Returns an int >= 1.
     """
-    raw = os.environ.get("CODING_TEAM_NO_CHANGE_REVISIT_CAP")
-    try:
-        cap = int(raw) if raw is not None and raw.strip() != "" else NO_CHANGE_REVISIT_CAP
-    except (TypeError, ValueError):
-        cap = NO_CHANGE_REVISIT_CAP
-    return max(1, cap)
+    # Reuse the shared defensive int-env parser (garbage/empty → default, value clamped to floor)
+    # rather than re-implementing the parse here; the floor of 1 keeps the guard from ever being
+    # disabled into an unbounded no-progress loop.
+    from software_engineering_team.shared.context_sizing import env_int
+
+    return env_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, floor=1)
 
 
 class _NoopBridge:
@@ -832,7 +832,8 @@ def run_coding_team_orchestrator(
     if getattr(swarm, "aborted", False):
         return
 
-    merged_tasks = [t for t in graph.get_tasks() if t.status == TaskStatus.MERGED]
+    all_tasks = graph.get_tasks()
+    merged_tasks = [t for t in all_tasks if t.status == TaskStatus.MERGED]
     merged_count = len(merged_tasks)
     failed_count = graph.count_with_status(TaskStatus.FAILED)
     # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
@@ -841,7 +842,15 @@ def run_coding_team_orchestrator(
     # landed), the issue's work was already complete — report that distinct terminal status so the
     # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
     # merges) stays a normal completion and publishes the real work.
-    already_complete = failed_count == 0 and merged_count > 0 and resolved_count == merged_count
+    #
+    # Require EVERY task to be terminal (MERGED or FAILED) before claiming already-complete: the
+    # swarm loop can exit at max_rounds with a task still TO_DO/IN_PROGRESS/IN_REVIEW, and reporting
+    # already_complete there (recommend-closing, no PR) would abandon genuinely unfinished work.
+    # Since this branch also requires failed_count == 0, "all terminal" means all MERGED.
+    all_terminal = (merged_count + failed_count) == len(all_tasks)
+    already_complete = (
+        all_terminal and failed_count == 0 and merged_count > 0 and resolved_count == merged_count
+    )
     # A job with failed tasks must not be presented as a clean success — surface a distinct
     # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     # current_activity=None travels in the terminal write itself so a transient
@@ -1094,6 +1103,35 @@ class CodingTeamSwarm:
         self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
         self._cascade_fail_dependents(task.id)
 
+    def _escalate_if_no_change(
+        self, task: Task, new_feedback: List[Dict[str, Any]], diff: Optional[str] = None
+    ) -> bool:
+        """Record this round's feedback + no-change progress, escalating to the Tech Lead at the cap.
+
+        The single choke-point for the prologue every revision path shares
+        (``_handle_incomplete_implementation``, ``_return_for_revision``, ``_request_revision``): the
+        feedback must be persisted BEFORE the no-change check so that, if this round trips the cap, the
+        Tech Lead adjudicates over the full history including this round's reason. Persisting it here
+        also means the caller's later status write need not re-pass ``revision_feedback``.
+
+        Preconditions:
+            - ``task`` is a non-terminal task tracked by this swarm's graph, being bounced this round.
+            - ``new_feedback`` is this round's feedback entries (one or more); ``diff`` is the task's
+              already-computed branch diff to reuse, or None to compute it from the branch.
+        Postconditions:
+            - ``new_feedback`` is appended to ``task.revision_feedback`` and the no-change
+              digest/counter are updated, both persisted via the graph.
+            - Returns True iff the no-change cap was reached and the task was handed to the Tech Lead
+              (the caller must stop and not bounce the task itself); False otherwise.
+        """
+        self.graph.update_task(
+            task.id, revision_feedback=list(task.revision_feedback or []) + list(new_feedback)
+        )
+        if self._note_revision_progress(task, diff=diff):
+            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+            return True
+        return False
+
     def _handle_incomplete_implementation(self, task: Task, result: Dict[str, Any]) -> None:
         """Bound an implementation that did not reach review so it cannot spin the loop to max_rounds.
 
@@ -1112,12 +1150,9 @@ class CodingTeamSwarm:
             "reason": reason,
             "requested_changes": [],
         }
-        feedback = list(task.revision_feedback or []) + [entry]
-        # Record the feedback before the no-change check so the Tech Lead, if we escalate, sees this
-        # round's reason in the history it adjudicates over.
-        self.graph.update_task(task.id, revision_feedback=feedback)
-        if self._note_revision_progress(task):
-            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+        # Records the feedback and, if this is a no-change loop, escalates to the Tech Lead (the
+        # feedback is now persisted, so the status writes below need not re-pass it).
+        if self._escalate_if_no_change(task, [entry]):
             return
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
@@ -1130,7 +1165,6 @@ class CodingTeamSwarm:
                 task.id,
                 status=TaskStatus.FAILED,
                 revision_count=revision_count,
-                revision_feedback=feedback,
             )
             self._cascade_fail_dependents(task.id)
             return
@@ -1139,7 +1173,6 @@ class CodingTeamSwarm:
             task.id,
             status=TaskStatus.IN_PROGRESS,
             revision_count=revision_count,
-            revision_feedback=feedback,
         )
 
     def _escalate_decision(self, task: Task, result: Dict[str, Any], update_fn: Callable) -> None:
@@ -1323,18 +1356,19 @@ class CodingTeamSwarm:
         loop is detected the task is escalated to the Tech Lead (terminal or a fresh window) and
         this returns False so the caller does not push the unchanged work into review.
         """
-        # Record the gate feedback before the no-change check so an escalation adjudicates over it.
-        self.graph.update_task(
-            task.id, revision_feedback=list(task.revision_feedback or []) + list(feedback)
-        )
-        if self._note_revision_progress(task):
-            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+        # Records the gate feedback and escalates on a no-change loop (so the Tech Lead adjudicates
+        # over this round's reason); the feedback is now persisted for the status writes below.
+        if self._escalate_if_no_change(task, feedback):
             return False
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
                 "Task %s exceeded max revisions (%d); accepting as-is", task.id, MAX_TASK_REVISIONS
             )
+            # Persist the final revision_count even when accepting as-is, so the task's recorded
+            # count is accurate and consistent with the FAILED/IN_PROGRESS paths (which all persist
+            # the bump). Otherwise a later bounce would re-derive the count from a stale value.
+            self.graph.update_task(task.id, revision_count=revision_count)
             return True  # accept despite issues
         # revision_feedback already carries this round's gate feedback (appended above, before the
         # no-change check); only the status/count change here, so do not re-append it.
@@ -1501,12 +1535,11 @@ class CodingTeamSwarm:
             "reason": review.get("reason", ""),
             "requested_changes": review.get("requested_changes") or [],
         }
-        feedback = list(task.revision_feedback or []) + [entry]
-        # Record this round's rejection before the no-change check so an escalation adjudicates over
-        # the full history including why the Tech Lead just bounced it.
-        self.graph.update_task(task.id, revision_feedback=feedback)
-        if self._note_revision_progress(task, diff=diff):
-            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+        # Records this round's rejection and escalates on a no-change loop (so the Tech Lead
+        # adjudicates over the full history, including why it just bounced the task); passes the
+        # reviewer's already-computed diff so the no-change check does not re-shell out to git. The
+        # feedback is now persisted for the status writes below.
+        if self._escalate_if_no_change(task, [entry], diff=diff):
             return
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
@@ -1520,7 +1553,6 @@ class CodingTeamSwarm:
                 task.id,
                 status=TaskStatus.FAILED,
                 revision_count=revision_count,
-                revision_feedback=feedback,
             )
             self._cascade_fail_dependents(task.id)
             return
@@ -1536,7 +1568,6 @@ class CodingTeamSwarm:
             task.id,
             status=TaskStatus.IN_PROGRESS,
             revision_count=revision_count,
-            revision_feedback=feedback,
         )
 
     def _fail_task(self, task: Task, review: Dict[str, Any], context: str) -> None:

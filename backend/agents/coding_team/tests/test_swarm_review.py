@@ -1259,6 +1259,80 @@ def test_whole_job_already_complete_when_all_resolved_without_changes(tmp_path, 
     assert updates[-1]["already_complete"] is True
 
 
+def test_not_already_complete_when_a_task_is_left_non_terminal(tmp_path, monkeypatch):
+    """already_complete requires EVERY task terminal: a resolved-without-changes task alongside a
+    still-pending (TO_DO) task is a normal completion, not an 'already complete, recommend closing'
+    no-op — the swarm can exit at max_rounds with unfinished work and must not abandon it."""
+
+    class StubTL:
+        def __init__(self, llm):
+            pass
+
+        def run_plan_to_task_graph(self, plan_input):
+            return {
+                "tasks": [{"id": "t1", "title": "T1"}, {"id": "t2", "title": "T2"}],
+                "stacks": [{"name": "backend", "tools_services": []}],
+                "already_complete": False,
+                "completion_evidence": "",
+            }
+
+    class StubSWE:
+        def __init__(self, *a, **k):
+            self.agent_id = k.get("agent_id", "backend")
+
+    class StubSwarm:
+        def __init__(self, *a, **k):
+            self.graph = k["graph"]
+
+        def run(self, **kw):
+            # t1 resolves as already-done; t2 is left TO_DO (the loop ran out of rounds before
+            # finishing it) — a non-terminal task that must block the already_complete verdict.
+            self.graph.update_task("t1", resolved_without_changes=True)
+            self.graph.mark_branch_merged("t1")
+
+    monkeypatch.setattr(orch_mod, "TechLeadAgent", StubTL)
+    monkeypatch.setattr(orch_mod, "SeniorSWEAgent", StubSWE)
+    monkeypatch.setattr(orch_mod, "CodingTeamSwarm", StubSwarm)
+
+    updates: List[Dict[str, Any]] = []
+    run_coding_team_orchestrator(
+        "j1",
+        tmp_path,
+        CodingTeamPlanInput(repo_path=str(tmp_path)),
+        update_job_fn=lambda **kw: updates.append(kw),
+        get_job_fn=lambda jid: {},
+        cache_dir=tmp_path,
+        get_llm=lambda key: None,
+    )
+
+    assert updates[-1]["status"] == "completed"  # not already_complete
+    assert updates[-1].get("already_complete") is not True
+
+
+def test_return_for_revision_persists_revision_count_on_accept_as_is(tmp_path, monkeypatch):
+    """When the gate path accepts a task as-is at the revision cap, the incremented revision_count
+    is persisted to the graph (consistent with the FAILED/IN_PROGRESS paths), not just bumped on a
+    discarded local."""
+    monkeypatch.setattr(orch_mod, "MAX_TASK_REVISIONS", 2)
+    # A changing diff each call → _note_revision_progress never escalates, so we reach the cap check.
+    counter = {"n": 0}
+
+    def changing_diff(*a, **k):
+        counter["n"] += 1
+        return f"diff {counter['n']}"
+
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", changing_diff)
+    swarm, graph = _make_swarm(tmp_path, StubTechLead(approved=False), [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", revision_count=1)  # one below the cap of 2
+
+    ready = swarm._return_for_revision(graph.get_task("t1"), [{"type": "build", "error": "boom"}])
+
+    assert ready is True  # accepted as-is at the cap
+    assert graph.get_task("t1").revision_count == 2  # the bump was persisted, not lost
+
+
 def test_planning_already_complete_short_circuits_swarm(tmp_path, monkeypatch):
     """When the Tech Lead judges the issue already done at planning time, no swarm runs."""
 
