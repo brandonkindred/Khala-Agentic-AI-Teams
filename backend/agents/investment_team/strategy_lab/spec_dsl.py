@@ -357,10 +357,12 @@ class StopLossRule(_SpecNode):
         order against it would need continuous re-pricing — the same reason the
         bracket path forbids combining ``trail_offset`` with ``limit_offset``. A
         limit-style structured stop therefore requires the static
-        ``entry_price`` basis. ``pct`` must be ``< 1.0`` so a long's resolved stop
-        ``entry * (1 - pct)`` stays strictly positive — a ``pct == 1.0`` stop
-        resolves to price 0 (a degenerate, never-meaningful level), which the
-        protective-limit geometry cannot place a limit against.
+        ``entry_price`` basis. ``pct`` must be ``< 1.0``: the rule is
+        side-agnostic, so it must resolve to a strictly-positive level for either
+        side it might apply to, and a long's level ``entry * (1 - pct)`` is
+        positive only when ``pct < 1.0`` (a short's ``entry * (1 + pct)`` always
+        is). ``pct == 1.0`` resolves a long to price 0, which has no valid
+        protective limit.
         """
         if self.style == "limit":
             if self.limit_offset_pct is None:
@@ -368,10 +370,19 @@ class StopLossRule(_SpecNode):
                     "StopLossRule.style='limit' requires limit_offset_pct "
                     "(the limit's distance from the stop level, as a fraction)"
                 )
+            # ``StopLossRule`` is side-agnostic — it applies to whichever side
+            # the strategy opens — so a limit-style stop must resolve to a
+            # strictly-positive level for BOTH sides. A short's level is
+            # ``entry * (1 + pct)`` (always > 0), but a long's is
+            # ``entry * (1 - pct)``, which is > 0 only when ``pct < 1.0``. So
+            # ``pct < 1.0`` is the necessary, sufficient, side-agnostic bound;
+            # ``>= 1.0`` (rather than ``== 1.0``) also stays correct if the
+            # shared ``pct`` field cap is ever loosened past 1.0.
             if self.pct >= 1.0:
                 raise ValueError(
-                    "StopLossRule.style='limit' requires pct < 1.0; a 100% stop "
-                    "resolves a long's level to price 0, which has no valid "
+                    "StopLossRule.style='limit' requires pct < 1.0: the rule is "
+                    "side-agnostic and a long's resolved level entry*(1-pct) is "
+                    "non-positive at pct>=1.0 (price 0), which has no valid "
                     "protective limit"
                 )
             if self.basis != "entry_price":
