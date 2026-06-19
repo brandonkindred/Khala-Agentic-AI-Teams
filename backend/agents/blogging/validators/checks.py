@@ -110,7 +110,21 @@ def check_reading_level(draft: str, brand_spec: BrandSpec) -> CheckResult:
             details={"fk_grade": None, "note": "textstat not installed; skip"},
         )
 
-    fk = textstat.flesch_kincaid_grade(draft)
+    try:
+        fk = textstat.flesch_kincaid_grade(draft)
+    except Exception as exc:  # noqa: BLE001 — readability is best-effort; never fail the pass
+        # textstat's syllable backend resolves an optional NLTK corpus (cmudict)
+        # at runtime; a missing/corrupt corpus raises (e.g. LookupError /
+        # zipfile.BadZipFile). Degrade to a skip rather than failing the whole
+        # validation pass over an optional readability metric.
+        return CheckResult(
+            name="reading_level",
+            status="PASS",
+            details={
+                "fk_grade": None,
+                "note": f"textstat unavailable at runtime; skip ({type(exc).__name__})",
+            },
+        )
     target = brand_spec.readability.target_grade_level
     max_grade = brand_spec.readability.max_grade_level
 

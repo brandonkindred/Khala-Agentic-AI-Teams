@@ -76,6 +76,41 @@ def test_resolve_endpoint_for_log_reflects_export_state(monkeypatch) -> None:
     assert _resolve_endpoint_for_log() == "http://traces:4318"
 
 
+def test_metric_exporter_opted_out_via_metrics_exporter_none(monkeypatch) -> None:
+    """OTEL_METRICS_EXPORTER=none suppresses OTLP metric export even with an endpoint.
+
+    Traces still ship to the OTLP endpoint (e.g. Tempo), but metrics stay off so a
+    traces-only collector is not flooded with rejected metric exports.
+    """
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.metric_exporter")
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
+    from shared_observability.otel import (
+        _build_metric_exporter,
+        _build_span_exporter,
+        _otlp_metrics_enabled,
+    )
+
+    monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", "http://collector:4318")
+    monkeypatch.delenv("OTEL_EXPORTER_OTLP_PROTOCOL", raising=False)
+
+    # Opted out: metrics suppressed, traces still export. OTEL_METRICS_EXPORTER is
+    # a comma-separated list per the OTel spec, so "none" anywhere disables it.
+    for val in ("none", " none ", "none,console", "otlp,none", "NONE"):
+        monkeypatch.setenv("OTEL_METRICS_EXPORTER", val)
+        assert _otlp_metrics_enabled() is False, val
+        assert _build_metric_exporter() is None, val
+    assert _build_span_exporter() is not None
+
+    # A list without "none" does not disable it.
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp,console")
+    assert _otlp_metrics_enabled() is True
+
+    # Default (var unset): endpoint configured → metric exporter is built.
+    monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
+    assert _otlp_metrics_enabled() is True
+    assert _build_metric_exporter() is not None
+
+
 def test_get_tracer_and_meter_surface_is_usable() -> None:
     """Tracer and meter returned by the helpers must support the common API."""
     from shared_observability import get_meter, get_tracer
