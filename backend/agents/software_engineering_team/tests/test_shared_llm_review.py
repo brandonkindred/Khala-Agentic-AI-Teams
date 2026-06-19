@@ -134,3 +134,32 @@ def test_run_llm_review_chunks_large_file_and_skips_failing_chunk(caplog):
         rec.levelno == logging.WARNING and "large review" in rec.getMessage()
         for rec in caplog.records
     )
+
+
+def test_run_llm_review_preserves_header_on_oversized_single_line():
+    """A single source line longer than the cap (a minified bundle) is hard-split,
+    and every prompt keeps the ### path ### header so a finding in any tail piece
+    stays attributable to its file."""
+    prompts: list[str] = []
+
+    def invoke(prompt: str) -> str:
+        prompts.append(prompt)
+        return "raw"
+
+    line = "DATA = '" + ("a" * 65_000) + "'"  # one unsplittable line over the cap
+    assert "\n" not in line and len(line) > 60_000
+
+    run_llm_review(
+        task=_task(),
+        files={"bundle.py": line},
+        prompt_template=_PROMPT,
+        parse_template=_parse_one_issue,
+        issue_factory=_Issue,
+        invoke_model=invoke,
+        max_chars=60_000,
+        warn_threshold=20,
+    )
+
+    assert len(prompts) > 1  # the oversized line was hard-split across prompts
+    assert not any(line in prompt for prompt in prompts)  # no single prompt holds it whole
+    assert all("### bundle.py ###" in prompt for prompt in prompts)  # header on every piece

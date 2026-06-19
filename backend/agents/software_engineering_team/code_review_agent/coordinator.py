@@ -344,6 +344,67 @@ def _segment_line_range(seg: FileSegment) -> Tuple[int, int]:
     return seg.start_line, seg.end_line
 
 
+def cap_chunk_content(content: str, max_chars: int) -> List[str]:
+    """Split content over ``max_chars`` into consecutive ≤``max_chars`` pieces.
+
+    Safety net for the one case ``build_review_chunks`` / ``split_block_into_segments``
+    cannot bound — a single source line longer than ``max_chars`` (minified bundle,
+    long one-line data literal) — which those functions return as one over-budget chunk
+    by contract. Callers feed each returned piece to an agent so no over-budget string
+    is ever sent (and then silently skipped on context overflow) unreviewed.
+
+    Preconditions:
+        - ``max_chars`` > 0.
+
+    Postconditions:
+        - ``"".join(result) == content`` (no content dropped or duplicated).
+        - Every returned piece has ``len`` ≤ ``max_chars``.
+        - ``content`` already ≤ ``max_chars`` yields exactly ``[content]`` (the common
+          path).
+    """
+    assert max_chars > 0, "max_chars must be positive"
+    if len(content) <= max_chars:
+        return [content]
+    return [content[i : i + max_chars] for i in range(0, len(content), max_chars)]
+
+
+def cap_review_chunk(chunk: ReviewChunk, max_chars: int) -> List[str]:
+    """Render a chunk into prompt pieces each ≤ ``max_chars``, keeping the file
+    header on every piece of an over-budget single-segment chunk.
+
+    For the code-review prompt the rendered ``chunk.content`` (``### path ###``
+    headers, original-line-number prefixes) must be preserved for line anchoring,
+    so a plain character split of ``chunk.content`` would strand tail pieces
+    without their file header and make findings unattributable. This keeps the
+    header on each piece instead.
+
+    Preconditions:
+        - ``max_chars`` > 0.
+
+    Postconditions:
+        - ``chunk.content`` ≤ ``max_chars`` yields ``[chunk.content]`` (the common
+          path).
+        - An over-budget chunk (one segment whose rendered content exceeds the cap
+          — a line longer than the cap) yields multiple pieces, each ≤ ``max_chars``
+          and each prefixed with the segment's ``### path ###`` header so a finding
+          in any piece stays attributable. The header counts against the budget.
+    """
+    assert max_chars > 0, "max_chars must be positive"
+    content = chunk.content
+    if len(content) <= max_chars:
+        return [content]
+    # build_review_chunks places an oversized segment alone, so an over-budget
+    # chunk holds exactly one segment; re-attach its header to every body piece.
+    if len(chunk.segments) == 1 and chunk.segments[0].path:
+        seg = chunk.segments[0]
+        header = f"### {seg.path} ###\n"
+        body_budget = max(1, max_chars - len(header))
+        return [header + piece for piece in cap_chunk_content(seg.prompt_content, body_budget)]
+    # Headerless (path == "") or, defensively, multi-segment: fall back to a raw
+    # character split — there is no per-piece header to preserve.
+    return cap_chunk_content(content, max_chars)
+
+
 def _segment_range_label(seg: FileSegment) -> str:
     """Describe the original-file line range a segment covers.
 
