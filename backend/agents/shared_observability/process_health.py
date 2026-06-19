@@ -10,7 +10,11 @@ Turns "the worker just died with no traceback" into something debuggable:
   container's cgroup memory usage (falling back to this process's RSS when not
   in a cgroup) and logs a WARNING as it approaches the cgroup / env memory
   budget, so the last line before an OOM-kill names the cause — the kernel's
-  SIGKILL itself is uncatchable and otherwise leaves no trace at all.
+  SIGKILL itself is uncatchable and otherwise leaves no trace at all. The same
+  thread polls the cgroup ``oom_kill`` counter (``memory.events``) and logs an
+  ERROR whenever it rises, turning an already-happened silent kill into an
+  explicit, durable log line — and, since it reports ``memory.peak`` alongside,
+  distinguishing a container-limit OOM from host/VM-wide (global) OOM.
 
 Everything here is best-effort and import-safe: a missing ``/proc``, missing
 cgroup files, or a platform without :mod:`faulthandler` degrade to no-ops and
@@ -43,6 +47,13 @@ _CGROUP_V1_LIMIT = "/sys/fs/cgroup/memory/memory.limit_in_bytes"
 # Current usage counters — the value the kernel OOM killer actually watches.
 _CGROUP_V2_CURRENT = "/sys/fs/cgroup/memory.current"
 _CGROUP_V1_USAGE = "/sys/fs/cgroup/memory/memory.usage_in_bytes"
+# Post-mortem OOM record: memory.events carries an ``oom_kill`` counter that the
+# kernel bumps whenever it SIGKILLs a process in this cgroup — the only durable
+# trace of an otherwise-silent worker death. memory.peak is the cgroup's usage
+# high-water mark; a peak far below memory.max with a rising oom_kill means the
+# kill came from *host/VM-wide* pressure (global OOM), not this container's limit.
+_CGROUP_V2_EVENTS = "/sys/fs/cgroup/memory.events"
+_CGROUP_V2_PEAK = "/sys/fs/cgroup/memory.peak"
 _PROC_STATUS = "/proc/self/status"
 
 # Values at/above this are the kernel's "no limit" sentinels (cgroup v1 reports
@@ -51,6 +62,10 @@ _UNLIMITED_BYTES = 1 << 62
 
 _DEFAULT_INTERVAL_S = 30.0
 _DEFAULT_THRESHOLD = 0.85
+# Below this fraction of the cgroup limit, a peak at OOM-kill time is treated as
+# evidence of host/VM-wide (global) OOM rather than the container hitting its own
+# budget — see ``_oom_check_tick``.
+_GLOBAL_OOM_PEAK_RATIO = 0.5
 
 _log: Optional[logging.Logger] = None
 _diagnostics_installed = False
@@ -234,6 +249,50 @@ def read_memory_usage_bytes() -> Optional[int]:
     return read_rss_bytes()
 
 
+def read_oom_kill_count(events_path: str = _CGROUP_V2_EVENTS) -> Optional[int]:
+    """Return the cgroup ``oom_kill`` counter, or None when unavailable.
+
+    ``memory.events`` is a multi-line ``key value`` file (so :func:`_read_int_file`
+    can't parse it); this extracts the ``oom_kill`` line. The counter is the
+    kernel's authoritative, durable record that it SIGKILLed a process in this
+    cgroup — it survives the dead worker, so polling it is the one reliable way to
+    surface an otherwise-silent OOM death.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a non-negative int parsed from the ``oom_kill`` line, or None
+          when the file is absent/unreadable (e.g. cgroup v1) or has no numeric
+          ``oom_kill`` entry. Never raises.
+    """
+    try:
+        with open(events_path, "r", encoding="utf-8") as fh:
+            lines = fh.readlines()
+    except OSError:
+        return None
+    for line in lines:
+        parts = line.split()
+        if len(parts) >= 2 and parts[0] == "oom_kill":
+            try:
+                return int(parts[1])
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def read_memory_peak_bytes(peak_path: str = _CGROUP_V2_PEAK) -> Optional[int]:
+    """Return the cgroup memory usage high-water mark in bytes, or None.
+
+    Preconditions:
+        - None.
+    Postconditions:
+        - Returns a non-negative byte count from ``memory.peak``, or None when the
+          file is absent/unreadable/non-numeric (e.g. cgroup v1). Never raises.
+    """
+    value = _read_int_file(peak_path)
+    return value if value is not None and value >= 0 else None
+
+
 def detect_memory_limit_bytes() -> Optional[int]:
     """Return the process memory budget in bytes, or None when there is no limit.
 
@@ -316,38 +375,129 @@ def _watchdog_tick(
     return warned, None
 
 
+def _oom_check_tick(
+    last_count: Optional[int],
+    *,
+    limit_bytes: Optional[int] = None,
+    events_reader: Optional[Callable[[], Optional[int]]] = None,
+    peak_reader: Optional[Callable[[], Optional[int]]] = None,
+) -> tuple[Optional[int], Optional[str]]:
+    """Evaluate one OOM-kill-counter sample.
+
+    Returns ``(new_count, message_or_None)``. A message is produced only when the
+    counter has *risen* since ``last_count`` — i.e. the kernel SIGKILLed a process
+    in this cgroup since the previous sample. The first observation (``last_count``
+    is None) just adopts the baseline silently, so pre-existing kills from before
+    the watchdog started are not re-reported as new.
+
+    ``limit_bytes`` is optional: a container with no ``mem_limit`` has no cgroup
+    budget yet can still be killed by host/VM-wide (global) OOM, so OOM detection
+    must work without one — the limit only enriches the log line.
+
+    Postconditions:
+        - ``message`` is non-None iff ``last_count is not None and current > last_count``.
+          On an unreadable counter the previous ``last_count`` is preserved and no
+          message is emitted. Never raises (readers are best-effort).
+    """
+    reader = events_reader if events_reader is not None else read_oom_kill_count
+    current = reader()
+    if current is None:
+        return last_count, None
+    if last_count is not None and current > last_count:
+        peak_fn = peak_reader if peak_reader is not None else read_memory_peak_bytes
+        peak = peak_fn()
+        peak_str = f"{_mb(peak)}MB" if peak else "unknown"
+        limit_str = f"{_mb(limit_bytes)}MB" if limit_bytes else "unset (no container limit)"
+        # Tailor the likely-cause hint to the evidence: a peak well under the limit
+        # (or no limit / unknown peak) points at host/VM-wide pressure, whereas a
+        # peak near the limit points at the container hitting its own budget.
+        looks_global = (
+            limit_bytes is None or peak is None or peak < limit_bytes * _GLOBAL_OOM_PEAK_RATIO
+        )
+        if looks_global:
+            cause = (
+                "the peak is well below the limit (or the limit/peak is unknown), so "
+                "the host/VM likely ran out of memory (global OOM) — raise Docker/VM "
+                "memory or reduce the running stack rather than this container's limit."
+            )
+        else:
+            cause = (
+                "the peak is near this container's limit, so the container likely "
+                "exceeded its own memory limit — raise its limit or reduce its usage."
+            )
+        message = (
+            f"OOM kill detected: cgroup oom_kill counter rose to {current} "
+            f"(was {last_count}) — the kernel SIGKILLed a process in this container "
+            f"with no traceback (a uvicorn worker simply vanishes and is restarted). "
+            f"container peak={peak_str} / limit={limit_str}. Likely cause: {cause}"
+        )
+        return current, message
+    return current, None
+
+
 def _watchdog_loop(
     *,
     team: str,
-    limit_bytes: int,
+    limit_bytes: Optional[int],
     threshold: float,
     interval_s: float,
     stop_event: threading.Event,
     logger: logging.Logger,
+    initial_oom_count: Optional[int] = None,
 ) -> None:
     """Sample memory on *interval_s* until *stop_event* is set, logging pressure.
+
+    When ``limit_bytes`` is None there is no budget to compare against, so the
+    pressure-threshold warning is skipped and the loop runs in OOM-detection-only
+    mode (the cgroup ``oom_kill`` counter still fires on a host/VM-wide kill of an
+    unbounded container).
+
+    ``initial_oom_count`` seeds the OOM-kill baseline from the value already read
+    at arm time, so a kill occurring between arming and the first tick is still
+    reported (and the counter file isn't read twice). Falls back to reading once
+    when not supplied (e.g. direct unit-test calls).
 
     Preconditions (enforced):
         - ``interval_s > 0`` — a non-positive interval would tight-loop this
           thread (``start_memory_watchdog`` already floors it at 1.0).
-        - ``limit_bytes > 0`` and ``0 < threshold <= 1``.
+        - ``0 < threshold <= 1``; ``limit_bytes`` is a positive byte count or None.
     Postconditions:
-        - Emits a WARNING via *logger* once per transition into memory pressure;
-          returns only after *stop_event* is set. A failing sample is swallowed
-          (a diagnostic thread must never crash the worker).
+        - Emits a WARNING via *logger* once per transition into memory pressure
+          (only when ``limit_bytes`` is set), and an ERROR when the cgroup
+          ``oom_kill`` counter rises (a worker was SIGKILLed since the last
+          sample); returns only after *stop_event* is set. A failing sample is
+          swallowed (a diagnostic thread must never crash the worker).
     """
     if interval_s <= 0:
         raise ValueError("interval_s must be > 0")
     warned = False
+    tick_error_logged = False
+    # Seed the OOM-kill baseline from the arm-time read so a kill between arming
+    # and the first tick isn't folded silently into a fresh baseline.
+    last_oom = initial_oom_count if initial_oom_count is not None else read_oom_kill_count()
     while not stop_event.wait(interval_s):
         try:
-            warned, message = _watchdog_tick(
-                limit_bytes=limit_bytes, threshold=threshold, warned=warned
-            )
-            if message:
-                logger.warning("[%s] %s", team, message)
+            if limit_bytes:
+                warned, message = _watchdog_tick(
+                    limit_bytes=limit_bytes, threshold=threshold, warned=warned
+                )
+                if message:
+                    logger.warning("[%s] %s", team, message)
+            last_oom, oom_message = _oom_check_tick(last_oom, limit_bytes=limit_bytes)
+            if oom_message:
+                logger.error("[%s] %s", team, oom_message)
+            # A clean tick re-arms the WARNING so a *new* failure episode (after a
+            # recovery) surfaces at WARNING again rather than staying at DEBUG.
+            tick_error_logged = False
         except Exception:  # noqa: BLE001 — a diagnostic thread must never crash the worker
-            logger.debug("memory watchdog tick failed", exc_info=True)
+            # Surface the *first* failure at WARNING so a persistent bug (e.g. in
+            # the pressure/oom check) isn't hidden at DEBUG forever; subsequent
+            # failures stay at DEBUG to avoid flooding the logs every interval.
+            if not tick_error_logged:
+                logger.warning("[%s] memory watchdog tick failed", team, exc_info=True)
+                tick_error_logged = True
+            else:
+                logger.debug("memory watchdog tick failed", exc_info=True)
 
 
 @dataclass
@@ -377,8 +527,11 @@ def start_memory_watchdog(
         - ``team`` is a non-empty identifier used in log lines.
     Postconditions:
         - Returns a :class:`Watchdog` (its daemon thread + stop event), or None
-          when disabled via env or when no memory limit can be detected. Never
-          raises (other than the ``team`` precondition).
+          when disabled via env or when neither a memory limit nor a readable
+          cgroup ``oom_kill`` counter is available (nothing to watch). Never
+          raises (other than the ``team`` precondition). When a limit is present
+          the thread emits pressure warnings + OOM detection; with only the
+          counter it runs in OOM-detection-only mode.
     """
     if not team:
         raise ValueError("team must be a non-empty identifier")
@@ -390,9 +543,21 @@ def start_memory_watchdog(
 
     if limit_bytes is None:
         limit_bytes = detect_memory_limit_bytes()
-    if not limit_bytes or limit_bytes <= 0:
-        log.debug("memory watchdog: no memory limit detected; not starting for %s", team)
+    has_limit = bool(limit_bytes and limit_bytes > 0)
+    # Even with no cgroup memory limit (an unbounded container), keep watching when
+    # the kernel's oom_kill counter is readable: such a container can still be
+    # SIGKILLed by host/VM-wide (global) OOM, and that counter is the only trace.
+    # Read it once here and reuse as the startup baseline below (one file read).
+    prior_oom = read_oom_kill_count()
+    oom_available = prior_oom is not None
+    if not has_limit and not oom_available:
+        log.debug(
+            "memory watchdog: no memory limit and no oom_kill counter; not starting for %s",
+            team,
+        )
         return None
+    if not has_limit:
+        limit_bytes = None  # OOM-detection-only mode (no pressure threshold)
 
     if interval_s is None:
         interval_s = _env_float("TEAM_MEMORY_WATCHDOG_INTERVAL_S", _DEFAULT_INTERVAL_S, minimum=1.0)
@@ -411,18 +576,51 @@ def start_memory_watchdog(
             "interval_s": interval_s,
             "stop_event": stop_event,
             "logger": log,
+            # Seed from the count read above so a kill between here and the first
+            # tick is reported and the counter file isn't read a second time.
+            "initial_oom_count": prior_oom,
         },
         name=f"mem-watchdog-{team}",
         daemon=True,
     )
     thread.start()
-    log.info(
-        "Memory watchdog armed for %s: warn at %.0f%% of %dMB (every %.0fs)",
-        team,
-        threshold * 100,
-        _mb(limit_bytes),
-        interval_s,
-    )
+    if limit_bytes:
+        log.info(
+            "Memory watchdog armed for %s: warn at %.0f%% of %dMB (every %.0fs)",
+            team,
+            threshold * 100,
+            _mb(limit_bytes),
+            interval_s,
+        )
+    else:
+        log.info(
+            "Memory watchdog armed for %s: OOM-kill detection only — no container "
+            "memory limit set, so only host/VM-wide kills are watched (every %.0fs)",
+            team,
+            interval_s,
+        )
+    # Surface the kernel's OOM-kill record + usage high-water mark at arm time.
+    # A non-zero prior count immediately tells an operator the container has
+    # already been OOM-killed (the symptom is otherwise silent), and a peak far
+    # below the limit points at host/VM-wide pressure rather than this limit.
+    # ``prior_oom`` was already read above (reused here to avoid a second read).
+    peak = read_memory_peak_bytes()
+    if prior_oom is not None or peak is not None:
+        log.info(
+            "Memory watchdog baseline for %s: prior oom_kills=%s, peak=%s of %s",
+            team,
+            prior_oom if prior_oom is not None else "n/a",
+            f"{_mb(peak)}MB" if peak is not None else "n/a",
+            f"{_mb(limit_bytes)}MB" if limit_bytes else "no limit",
+        )
+        if prior_oom:
+            log.warning(
+                "[%s] cgroup has %d prior OOM kill(s) since container start — a "
+                "worker was SIGKILLed (no traceback). Check host/VM memory if the "
+                "peak above is well under the limit.",
+                team,
+                prior_oom,
+            )
     return Watchdog(thread=thread, stop_event=stop_event)
 
 

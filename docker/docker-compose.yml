@@ -128,6 +128,10 @@ services:
       POSTGRES_PASSWORD: khala
       POSTGRES_DB: khala_jobs
       PYTHONUNBUFFERED: "1"
+      # NOTE: no OTEL_* vars here — the job-service image does not install the
+      # OpenTelemetry SDK and its app never calls init_otel(), so it emits no
+      # spans. Setting the endpoint would be a misleading no-op. Instrumenting
+      # job-service (deps + bootstrap) is a separate follow-up.
     extra_hosts:
       - "postgres:172.28.0.2"
     ports:
@@ -170,6 +174,14 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-postgres}
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
+      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-5}
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-128}
+      OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-2000}
       BLOG_PLANNING_MAX_ITERATIONS: ${BLOG_PLANNING_MAX_ITERATIONS:-5}
       BLOG_PLANNING_MAX_PARSE_RETRIES: ${BLOG_PLANNING_MAX_PARSE_RETRIES:-3}
       BLOG_PLANNING_MODEL: ${BLOG_PLANNING_MODEL:-}
@@ -218,6 +230,25 @@ services:
       JOB_SERVICE_URL: http://job-service:8085
       UNIFIED_API_BASE_URL: http://khala:8080
       AGENT_CACHE: /data/agents
+      # OpenTelemetry: export traces to the in-stack Tempo backend. Metrics stay
+      # on Prometheus scraping, so OTLP metric export is disabled. Override any of
+      # these via docker/.env to point at an external collector.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      # Harden span export so a slow/unavailable Tempo can't pile spans up in a
+      # memory-constrained worker: fail fast (5s vs 10s default) and cap the
+      # in-process span queue (512 vs 2048 default), flushing more often.
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-5}
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-128}
+      OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-2000}
+      # Fewer uvicorn workers per team = a materially smaller footprint on a
+      # memory-constrained host (each worker is a full interpreter).
+      TEAM_WORKERS: ${TEAM_WORKERS:-1}
+      # Sample memory + the cgroup oom_kill counter more often (10s vs 30s) so a
+      # silent OOM kill is surfaced promptly in the logs.
+      TEAM_MEMORY_WATCHDOG_INTERVAL_S: ${TEAM_MEMORY_WATCHDOG_INTERVAL_S:-10}
       TEAM_MODULE: software_engineering_team.api.main
       TEAM_NAME: software_engineering_team
       TEAM_PORT: "8091"
@@ -492,12 +523,25 @@ services:
       TEAM_PORT: "8100"
       TEAM_TEMPORAL_WORKER_MODULE: ""
       TEAM_TEMPORAL_WORKER_FUNC: ""
+      # These two are already inherited from *team-env-base; set explicitly here so
+      # the footprint knobs are self-evident on the OOM-prone service this PR
+      # targets (and to make the values greppable in the investment block itself).
+      TEAM_WORKERS: ${TEAM_WORKERS:-1}
+      TEAM_MEMORY_WATCHDOG_INTERVAL_S: ${TEAM_MEMORY_WATCHDOG_INTERVAL_S:-10}
+      # Cap concurrent Strategy Lab cycles per wave: each holds its own market
+      # data + LLM contexts in the single worker, so this bounds peak memory (the
+      # dominant OOM driver). Raise once the host/VM has more memory headroom.
+      STRATEGY_LAB_MAX_CONCURRENT_CYCLES: ${STRATEGY_LAB_MAX_CONCURRENT_CYCLES:-2}
     volumes: *team-volumes
     extra_hosts: *team-extra-hosts
     ports: ["8100:8100"]
     networks:
       stack: { ipv4_address: 172.28.0.18, aliases: [investment-service] }
     restart: unless-stopped
+    # NOTE: no per-container memory limit/reservation. The investment cgroup
+    # peaks well under any sane cap; observed OOM kills are host/VM-wide (global
+    # OOM), so a per-container limit doesn't help and a large reservation on a
+    # small VM is harmful. Fix VM headroom (Docker memory) + footprint instead.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8100/health"]
       interval: 15s
@@ -596,10 +640,10 @@ services:
     # same pairing the unified-api service uses.
     deploy:
       resources:
-        limits: { memory: 2G }
-        reservations: { memory: 1G }
-    mem_limit: 2g
-    mem_reservation: 1g
+        limits: { memory: 4G }
+        reservations: { memory: 2G }
+    mem_limit: 4g
+    mem_reservation: 2g
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8103/health"]
       interval: 15s
@@ -869,6 +913,14 @@ services:
       TEMPORAL_ADDRESS: temporal:7233
       JOB_SERVICE_URL: http://job-service:8085
       AGENT_CACHE: /data/agents
+      # OpenTelemetry: traces → Tempo; metrics stay on Prometheus scraping.
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT:-http://tempo:4318}
+      OTEL_EXPORTER_OTLP_PROTOCOL: ${OTEL_EXPORTER_OTLP_PROTOCOL:-http/protobuf}
+      OTEL_METRICS_EXPORTER: ${OTEL_METRICS_EXPORTER:-none}
+      OTEL_EXPORTER_OTLP_TIMEOUT: ${OTEL_EXPORTER_OTLP_TIMEOUT:-5}
+      OTEL_BSP_MAX_QUEUE_SIZE: ${OTEL_BSP_MAX_QUEUE_SIZE:-512}
+      OTEL_BSP_MAX_EXPORT_BATCH_SIZE: ${OTEL_BSP_MAX_EXPORT_BATCH_SIZE:-128}
+      OTEL_BSP_SCHEDULE_DELAY: ${OTEL_BSP_SCHEDULE_DELAY:-2000}
       # Knowledge-graph layer (Graphiti + Neo4j). NEO4J_BOLT_URL is the enablement
       # gate; it is always set in the stack so the graph layer is live.
       NEO4J_BOLT_URL: bolt://neo4j:7687
@@ -1046,6 +1098,46 @@ services:
       timeout: 5s
       retries: 5
 
+  # Tempo is the trace backend: every app container exports OTLP traces here
+  # (OTEL_EXPORTER_OTLP_ENDPOINT=http://tempo:4318). Grafana reads it back via the
+  # pre-provisioned "Tempo" datasource. Metrics are NOT sent here — they remain on
+  # Prometheus scraping (containers run OTEL_METRICS_EXPORTER=none).
+  tempo:
+    image: grafana/tempo:2.7.1
+    container_name: khala-stack-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    # The grafana/tempo image runs as uid 10001; uncomment if Tempo logs a
+    # permission error writing /var/tempo on first boot with a fresh volume.
+    # user: "0"
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    # Bind to localhost only: app containers export to `tempo:4318` and Grafana
+    # queries `tempo:3200` over the docker network, so these host mappings are
+    # just operator convenience — no need to expose the trace backend on the LAN.
+    ports:
+      - "127.0.0.1:3200:3200"
+      - "127.0.0.1:4317:4317"
+      - "127.0.0.1:4318:4318"
+    networks:
+      stack: { ipv4_address: 172.28.0.22, aliases: [tempo] }
+    restart: unless-stopped
+    # Bound Tempo's footprint on a shared, memory-constrained VM. Tempo was seen
+    # as a victim of host-wide (global) OOM; a self-cap keeps its contribution
+    # predictable (if it exceeds this it is restarted, visibly, rather than
+    # silently enlarging VM pressure on every other container).
+    # Both forms are intentional (same pairing as the team services): deploy.*
+    # applies under swarm, top-level mem_limit under plain `docker compose up`.
+    deploy:
+      resources:
+        limits: { memory: 1G }
+    mem_limit: 1g
+    healthcheck:
+      test: ["CMD-SHELL", "wget --spider -q http://localhost:3200/ready || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
 networks:
   stack:
     name: khala-stack
@@ -1066,4 +1158,5 @@ volumes:
   agents_data:
   prometheus_data:
   grafana_data:
+  tempo_data:
   neo4j_data:

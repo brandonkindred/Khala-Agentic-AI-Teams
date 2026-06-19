@@ -30,6 +30,36 @@ from typing import Any, Dict, List
 import pytest
 
 
+def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
+    """The Strategy Lab concurrency clamp bounds a request's max_parallel to the
+    env-configured ceiling and logs only when it actually lowers the value."""
+    import logging
+
+    from investment_team.api import main as api_main
+
+    monkeypatch.setattr(api_main, "_MAX_CONCURRENT_CYCLES", 2)
+    assert api_main._clamp_max_parallel(1) == 1  # below cap → unchanged
+    assert api_main._clamp_max_parallel(2) == 2  # at cap → unchanged
+    with caplog.at_level(logging.INFO, logger=api_main.logger.name):
+        assert api_main._clamp_max_parallel(5) == 2  # above cap → clamped + logged
+    assert any("concurrency capped to 2" in r.getMessage() for r in caplog.records)
+
+    # Default (cap == _MAX_PARALLEL) imposes no extra constraint up to the schema max.
+    monkeypatch.setattr(api_main, "_MAX_CONCURRENT_CYCLES", api_main._MAX_PARALLEL)
+    assert api_main._clamp_max_parallel(api_main._MAX_PARALLEL) == api_main._MAX_PARALLEL
+
+
+def test_run_strategy_lab_request_default_within_cap() -> None:
+    """The omitted max_parallel default must never exceed the configured schema
+    ceiling (_MAX_PARALLEL) — Pydantic v2 doesn't validate defaults, so the default
+    itself has to be derived from the cap."""
+    from investment_team.api import main as api_main
+
+    default_mp = api_main.RunStrategyLabRequest().max_parallel
+    assert default_mp == min(3, api_main._MAX_PARALLEL)
+    assert 1 <= default_mp <= api_main._MAX_PARALLEL
+
+
 class _InMemoryDict:
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}
