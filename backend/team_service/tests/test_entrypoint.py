@@ -22,6 +22,66 @@ def _compile(src: str) -> None:
     compile(src, "<wrapper>", "exec")
 
 
+def test_env_int_defaults_clamps_and_survives_garbage(monkeypatch) -> None:
+    """_env_int parses defensively and clamps to [minimum, maximum]."""
+    monkeypatch.delenv("X_WORKERS", raising=False)
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2  # unset → default
+    for bad in ("garbage", "", "   ", "inf", "1e999"):
+        monkeypatch.setenv("X_WORKERS", bad)
+        assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2  # → default
+    monkeypatch.setenv("X_WORKERS", "0")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 1  # floored
+    monkeypatch.setenv("X_WORKERS", "1000")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 16  # ceiling
+    monkeypatch.setenv("X_WORKERS", "4")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 4  # in range
+    monkeypatch.setenv("X_WORKERS", "99")
+    assert entrypoint._env_int("X_WORKERS", 2, minimum=1) == 99  # no maximum → unbounded
+
+
+def test_env_int_clamps_out_of_range_default(monkeypatch) -> None:
+    """The default fallback is clamped too, so the [minimum, maximum] postcondition
+    holds even when a caller passes an out-of-range default (var unset)."""
+    monkeypatch.delenv("X_WORKERS", raising=False)
+    assert entrypoint._env_int("X_WORKERS", 0, minimum=1, maximum=16) == 1  # below min
+    assert entrypoint._env_int("X_WORKERS", 99, minimum=1, maximum=16) == 16  # above max
+
+
+def test_env_int_normalizes_swapped_bounds(monkeypatch) -> None:
+    """minimum > maximum is normalized (swapped) so the clamp window is coherent."""
+    monkeypatch.setenv("X_WORKERS", "10")
+    # Caller mistakenly passes minimum=16 > maximum=1; normalized to [1, 16] → 10.
+    assert entrypoint._env_int("X_WORKERS", 1, minimum=16, maximum=1) == 10
+
+
+def test_env_int_warns_on_invalid_value(monkeypatch, caplog) -> None:
+    """A set-but-unparseable value falls back to the default AND logs a warning so
+    the misconfiguration isn't silent."""
+    import logging
+
+    monkeypatch.setenv("X_WORKERS", "abc")
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
+        assert entrypoint._env_int("X_WORKERS", 2, minimum=1, maximum=16) == 2
+    assert any("Invalid value for X_WORKERS" in r.getMessage() for r in caplog.records)
+
+
+def test_env_int_warns_on_fractional_truncation(monkeypatch, caplog) -> None:
+    """A fractional value (e.g. '2.5') is truncated AND warned, so the silent
+    truncation can't mask a misconfiguration; an integer-valued '2.0' is quiet."""
+    import logging
+
+    monkeypatch.setenv("X_WORKERS", "2.5")
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
+        assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
+    assert any("Fractional value for X_WORKERS" in r.getMessage() for r in caplog.records)
+
+    caplog.clear()
+    monkeypatch.setenv("X_WORKERS", "2.0")  # integer-valued float → no warning
+    with caplog.at_level(logging.WARNING, logger=entrypoint.logger.name):
+        assert entrypoint._env_int("X_WORKERS", 1, minimum=1, maximum=16) == 2
+    assert not any("Fractional value" in r.getMessage() for r in caplog.records)
+
+
 def test_wrapper_body_compiles_and_defines_app() -> None:
     body = entrypoint.build_wrapper_body("coding_team", "coding_team.api.main", "app")
     _compile(body)

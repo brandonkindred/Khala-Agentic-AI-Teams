@@ -18,3 +18,15 @@ psycopg_pool>=3.3,<4.0
 temporalio>=1.25,<2.0
 # Observability: exposes /metrics for Prometheus scraping
 prometheus-fastapi-instrumentator>=7.1,<8.0
+# OpenTelemetry tracing — required for init_otel()/instrument_fastapi_app() to
+# export spans to the OTLP endpoint (Tempo); without these the SDK import fails
+# and tracing silently no-ops. Mirrors backend/agents/blogging/requirements.txt.
+opentelemetry-sdk>=1.41,<2.0
+opentelemetry-exporter-otlp-proto-http>=1.41,<2.0
+# grpc exporter: only used when OTEL_EXPORTER_OTLP_PROTOCOL=grpc (default is
+# http/protobuf). Kept for parity with the other team images and so operators can
+# switch protocol via env without a rebuild; dormant otherwise.
+opentelemetry-exporter-otlp-proto-grpc>=1.41,<2.0
+opentelemetry-instrumentation-fastapi>=0.62b0,<1.0
+opentelemetry-instrumentation-httpx>=0.62b0,<1.0
+opentelemetry-instrumentation-logging>=0.62b0,<1.0

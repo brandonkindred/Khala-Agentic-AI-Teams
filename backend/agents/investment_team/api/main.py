@@ -137,6 +137,42 @@ def _env_positive_int(name: str, default: int) -> int:
 # it becomes the Pydantic Field `le=` constraint; operators can override via env.
 _MAX_BATCH_COUNT = _env_positive_int("STRATEGY_LAB_MAX_BATCH_COUNT", 100)
 
+# Upper bound on the request's ``max_parallel`` field (its Pydantic ``le=``).
+# Evaluated at import like ``_MAX_BATCH_COUNT`` so operators can raise the schema
+# ceiling on larger hosts without a code change; kept as a single named constant
+# so the concurrency-cap default below cannot silently drift from the schema max.
+_MAX_PARALLEL = _env_positive_int("STRATEGY_LAB_MAX_PARALLEL", 6)
+
+# Hard ceiling on how many Strategy Lab cycles run concurrently per wave,
+# independent of the request's ``max_parallel``. Each concurrent cycle holds its
+# own market data + LLM contexts in the single worker process, so on a
+# memory-constrained host this caps the worker's peak footprint (the dominant
+# driver of OOM kills). Defaults to ``_MAX_PARALLEL`` (the request field's max) so
+# by default it adds no extra constraint and request validation stays the primary
+# limit; operators opt into tighter caps via env.
+_MAX_CONCURRENT_CYCLES = _env_positive_int("STRATEGY_LAB_MAX_CONCURRENT_CYCLES", _MAX_PARALLEL)
+
+
+def _clamp_max_parallel(requested: int) -> int:
+    """Clamp a request's ``max_parallel`` to the env-configured concurrency cap.
+
+    Preconditions:
+        - ``requested >= 1``.
+    Postconditions:
+        - Returns ``min(requested, _MAX_CONCURRENT_CYCLES)``; logs an INFO only
+          when the cap actually lowers the requested value. No other side effects.
+    """
+    effective = min(requested, _MAX_CONCURRENT_CYCLES)
+    if effective < requested:
+        logger.info(
+            "Strategy Lab concurrency capped to %d (requested %d) via "
+            "STRATEGY_LAB_MAX_CONCURRENT_CYCLES",
+            effective,
+            requested,
+        )
+    return effective
+
+
 init_otel(service_name="investment-team", team_key="investment")
 
 
@@ -1246,9 +1282,13 @@ class RunStrategyLabRequest(BaseModel):
         ),
     )
     max_parallel: int = Field(
-        default=3,
+        # Cap the default at the configured ceiling: Pydantic v2 doesn't validate
+        # field defaults, so a bare `default=3` would slip past `le=_MAX_PARALLEL`
+        # for an omitted request when an operator lowers STRATEGY_LAB_MAX_PARALLEL
+        # below 3, bypassing the advertised cap.
+        default=min(3, _MAX_PARALLEL),
         ge=1,
-        le=6,
+        le=_MAX_PARALLEL,
         description="Max strategies to generate in parallel per wave (within a batch).",
     )
     # Paper-trading step (only runs when a cycle's backtest is flagged as winning)
@@ -1561,7 +1601,10 @@ def _strategy_lab_worker(
         batch_size = request.batch_size
         batch_count = request.batch_count
         total_cycles = batch_size * batch_count
-        max_parallel = request.max_parallel
+        # Clamp the request's concurrency to the env-configured ceiling so a
+        # memory-constrained host can bound the worker's peak footprint (each
+        # concurrent cycle holds its own market data + LLM contexts in-process).
+        max_parallel = _clamp_max_parallel(request.max_parallel)
 
         # Translate the user's positive category selection into the exclusion
         # list the design pipeline consumes. ``allowed_asset_classes`` is already

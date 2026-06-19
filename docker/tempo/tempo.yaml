@@ -1,0 +1,32 @@
+# Grafana Tempo — trace backend for the Khala stack.
+# Receives OTLP traces (HTTP :4318 / gRPC :4317) from every app container and
+# stores them locally. Metrics are NOT handled here — they stay on Prometheus
+# scraping (containers run with OTEL_METRICS_EXPORTER=none). Query API on :3200,
+# wired into Grafana as the "Tempo" datasource.
+server:
+  http_listen_port: 3200
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        http:
+          endpoint: 0.0.0.0:4318
+        grpc:
+          endpoint: 0.0.0.0:4317
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/blocks
+    wal:
+      path: /var/tempo/wal
+
+# Bound on-disk growth explicitly: the compactor deletes trace blocks older than
+# block_retention so the local /var/tempo volume can't fill unbounded on a
+# long-running stack. (Retention in Tempo lives under compactor.compaction, not
+# storage.trace.) 24h is plenty for local debugging.
+compactor:
+  compaction:
+    block_retention: 24h
