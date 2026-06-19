@@ -52,7 +52,15 @@ def _load_or_create_key() -> bytes:
 
 
 def _get_fernet() -> Fernet:
-    return Fernet(_load_or_create_key())
+    """Return the one process-wide Fernet instance shared across the platform.
+
+    Delegates to ``shared_postgres.secrets.get_fernet()`` so the unified API and
+    every team container encrypt/decrypt with a single cached Fernet (built once
+    from the same key) instead of each module rebuilding its own per call.
+    """
+    from shared_postgres.secrets import get_fernet
+
+    return get_fernet()
 
 
 def get_integration_fernet() -> Fernet:

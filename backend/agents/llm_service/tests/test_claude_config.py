@@ -85,6 +85,32 @@ def test_resolve_claude_model_accepts_claude_global_env(monkeypatch):
     assert c.resolve_claude_model(None) == "claude-haiku-4-5"
 
 
+def test_resolve_claude_model_warns_once_per_candidate(monkeypatch, caplog):
+    # A non-Claude LLM_MODEL under the Claude provider must warn at most once per
+    # distinct value, not on every call (resolve runs per get_client()).
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
+    c._warned_non_claude_models.discard("deepseek-v4-pro:cloud")
+    with caplog.at_level("WARNING"):
+        assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+        assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+        assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+    warnings = [r for r in caplog.records if "Ignoring non-Claude model" in r.getMessage()]
+    assert len(warnings) == 1
+
+
+def test_resolve_model_for_provider_dispatches(monkeypatch):
+    # Ollama provider -> resolve_model; Claude provider -> resolve_claude_model.
+    monkeypatch.setenv("LLM_MODEL", "llama3.1")
+    assert c.resolve_provider() == "ollama"
+    assert c.resolve_model_for_provider(None) == "llama3.1"
+
+    monkeypatch.setenv("LLM_PROVIDER", "claude")
+    # llama3.1 is not a Claude model, so the Claude path falls back to the default.
+    assert c.resolve_model_for_provider(None) == c.DEFAULT_CLAUDE_MODEL
+    monkeypatch.setenv("LLM_MODEL", "claude-sonnet-4-6")
+    assert c.resolve_model_for_provider(None) == "claude-sonnet-4-6"
+
+
 def test_resolve_claude_api_key_precedence(monkeypatch):
     assert c.resolve_claude_api_key() == ""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")

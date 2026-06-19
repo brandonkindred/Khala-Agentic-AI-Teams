@@ -69,14 +69,10 @@ def get_strands_model(
     """
     from . import config as llm_config
 
-    def _resolve_model_id(key: Optional[str]) -> str:
-        # Provider-aware: under LLM_PROVIDER=claude the Strands model_id / cache key
-        # must use the Claude model, not the Ollama-resolved one, or telemetry and
-        # the cache identity are tagged with the wrong (Ollama) model name.
-        if llm_config.resolve_provider() == "claude":
-            return llm_config.resolve_claude_model(key)
-        return llm_config.resolve_model(key)
-
+    # Provider-aware model id: under LLM_PROVIDER=claude the Strands model_id /
+    # cache key must use the Claude model, not the Ollama-resolved one, or
+    # telemetry and the cache identity are tagged with the wrong model name.
+    # ``resolve_model_for_provider`` is the shared chokepoint for that decision.
     base_url = llm_config.resolve_base_url()
 
     # Caller-supplied client bypasses the cache — they own the lifecycle and
@@ -92,11 +88,11 @@ def get_strands_model(
         return LLMClientModel(
             client,
             agent_key=agent_key,
-            model_id=client_model or _resolve_model_id(agent_key),
+            model_id=client_model or llm_config.resolve_model_for_provider(agent_key),
             response_format=response_format,
         )
 
-    model_id = _resolve_model_id(agent_key)
+    model_id = llm_config.resolve_model_for_provider(agent_key)
 
     # ``agent_key`` is part of the cache key so two agents that resolve to the
     # same model don't share one ``LLMClientModel`` (which would attribute every

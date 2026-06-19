@@ -230,27 +230,6 @@ def delete_secret(service: str, key: str) -> None:
         logger.warning("shared secret delete failed (%s/%s): %s", service, key, e)
 
 
-@timed_query(store=_STORE, op="delete_service_secrets")
-def delete_service_secrets(service: str) -> None:
-    """Remove every secret row for ``service``.
-
-    Preconditions: ``service`` is a non-empty string.
-    Postconditions: all rows for ``service`` are removed; a no-op when Postgres is
-        disabled. Never raises.
-    """
-    assert service, "service must be non-empty"
-    if not is_postgres_enabled():
-        return
-    try:
-        with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM encrypted_integration_credentials WHERE service = %s",
-                (service,),
-            )
-    except Exception as e:  # noqa: BLE001 - delete is best-effort
-        logger.warning("shared service secret delete failed (%s): %s", service, e)
-
-
 def _reset_fernet_for_testing() -> None:
     """Drop the cached Fernet so a test can swap the key/env. Tests only."""
     global _fernet

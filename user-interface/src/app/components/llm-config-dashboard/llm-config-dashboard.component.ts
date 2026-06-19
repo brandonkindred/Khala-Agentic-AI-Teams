@@ -142,7 +142,13 @@ export class LlmConfigDashboardComponent implements OnInit {
     try {
       return new URL(u).hostname.toLowerCase() === 'ollama.com';
     } catch {
-      return u.toLowerCase() === OLLAMA_CLOUD_URL;
+      // Scheme-less value (e.g. 'ollama.com' or 'ollama.com:443') — URL() throws,
+      // so re-parse with a scheme to compare the real host, not the raw string.
+      try {
+        return new URL(`https://${u}`).hostname.toLowerCase() === 'ollama.com';
+      } catch {
+        return false;
+      }
     }
   }
 
@@ -157,7 +163,15 @@ export class LlmConfigDashboardComponent implements OnInit {
       return;
     }
 
-    const body: LlmConfigUpdate = { provider: this.provider, model: this.model.trim() };
+    const model = this.model.trim();
+    if (!model) {
+      // An empty model would be skipped by the backend, silently leaving the
+      // previously stored (possibly cross-provider) model in place. Require one.
+      this.error = 'Please select or enter a model for the chosen provider.';
+      return;
+    }
+
+    const body: LlmConfigUpdate = { provider: this.provider, model };
     if (this.provider === 'ollama') {
       // Local mode with a cleared base URL falls back to the localhost default
       // rather than sending '' (which the backend skips, silently keeping the

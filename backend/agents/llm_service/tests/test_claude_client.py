@@ -295,6 +295,49 @@ def test_chat_tool_loop_messages_reach_invoke(monkeypatch):
     assert capture["messages"][-1]["content"][0]["type"] == "tool_result"
 
 
+def test_to_anthropic_messages_drops_orphan_tool_result():
+    # An assistant turn whose tool_calls are all non-dict yields no tool_use, so
+    # the following tool_result is an orphan and must be dropped (not left dangling
+    # as an Anthropic-invalid tool_result with no preceding tool_use).
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "go"},
+            {"role": "assistant", "content": "", "tool_calls": ["not-a-dict"]},
+            {"role": "tool", "tool_call_id": "x", "content": "r"},
+        ]
+    )
+    # Only the user turn survives; no dangling tool_result user turn.
+    assert msgs == [{"role": "user", "content": "go"}]
+
+
+def test_to_anthropic_messages_skips_empty_assistant_content():
+    # A plain assistant turn with empty/whitespace content is dropped — Anthropic
+    # rejects an empty assistant text block.
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "   "},
+            {"role": "assistant", "content": "real reply"},
+        ]
+    )
+    assert msgs == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "real reply"},
+    ]
+
+
+def test_chat_raises_when_no_messages_after_translation():
+    # System-only input has nothing to send; chat surfaces a clear error rather
+    # than letting an opaque Anthropic 400 escape.
+    client, _ = _make_client(_text_message("{}"))
+    with pytest.raises(LLMPermanentError):
+        client.chat([{"role": "system", "content": "be brief"}], objective="t")
+
+
 # ---------------------------------------------------------------------------
 # stop reasons
 # ---------------------------------------------------------------------------
@@ -308,8 +351,18 @@ def test_refusal_raises_permanent():
 
 def test_max_tokens_with_text_raises_truncated():
     client, _ = _make_client(_text_message("partial...", stop_reason="max_tokens"))
-    with pytest.raises(LLMTruncatedError):
+    with pytest.raises(LLMTruncatedError) as ei:
         client.complete("hi", objective="t")
+    assert "partial" in str(ei.value)
+
+
+def test_max_tokens_empty_output_raises_truncated_with_diagnostic():
+    # Truncation that produced no text (commonly thinking-token exhaustion) still
+    # raises, but the message says so rather than carrying a silent empty string.
+    client, _ = _make_client(_text_message("", stop_reason="max_tokens"))
+    with pytest.raises(LLMTruncatedError) as ei:
+        client.complete("hi", objective="t")
+    assert "no output" in str(ei.value).lower()
 
 
 def test_truncated_tool_call_raises_before_envelope():

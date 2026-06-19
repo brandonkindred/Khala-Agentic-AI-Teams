@@ -172,4 +172,24 @@ describe('LlmConfigDashboardComponent', () => {
     component.loadConfig();
     expect(component.success).toBeNull();
   });
+
+  it('blocks save with an error when the model is empty', () => {
+    component.provider = 'claude';
+    component.model = '   ';
+    component.save();
+    expect(apiSpy.updateConfig).not.toHaveBeenCalled();
+    expect(component.error).toContain('model');
+  });
+
+  it('treats a scheme-less ollama.com base URL as Cloud', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'ollama.com' }));
+    component.loadConfig();
+    expect(component.ollamaMode).toBe('cloud');
+  });
+
+  it('treats a scheme-less custom host as Local', () => {
+    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, ollama_base_url: 'my-ollama.internal:11434' }));
+    component.loadConfig();
+    expect(component.ollamaMode).toBe('local');
+  });
 });

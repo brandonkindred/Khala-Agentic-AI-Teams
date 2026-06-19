@@ -32,9 +32,6 @@ class _FakeCursor:
             self._row = (cipher,) if cipher is not None else None
         elif "INSERT" in s:
             self.store[(params[0], params[1])] = params[2]
-        elif s.startswith("DELETE") and len(params) == 1:  # delete_service_secrets
-            for k in [key for key in self.store if key[0] == params[0]]:
-                self.store.pop(k, None)
         elif s.startswith("DELETE"):
             self.store.pop((params[0], params[1]), None)
 
@@ -111,16 +108,6 @@ def test_get_secrets_empty_when_disabled(monkeypatch):
 
 def test_get_secrets_no_keys_returns_empty(store):
     assert secrets_mod.get_secrets("llm_config", []) == {}
-
-
-def test_delete_service_secrets_removes_all(store):
-    secrets_mod.set_secret("llm_config", "a", "1")
-    secrets_mod.set_secret("llm_config", "b", "2")
-    secrets_mod.set_secret("other", "c", "3")
-    secrets_mod.delete_service_secrets("llm_config")
-    assert ("llm_config", "a") not in store
-    assert ("llm_config", "b") not in store
-    assert ("other", "c") in store  # other service untouched
 
 
 def test_get_fernet_is_usable(store):

@@ -50,6 +50,11 @@ DEFAULT_MAX_OUTPUT_TOKENS = 32768
 # Default Claude model when no per-agent / global / runtime model is configured.
 DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 
+# Candidates already warned about in resolve_claude_model, so a non-Claude
+# LLM_MODEL under the Claude provider (e.g. the default deepseek model) logs once
+# per distinct value instead of on every get_client()/get_strands_model() call.
+_warned_non_claude_models: set[str] = set()
+
 # ---------------------------------------------------------------------------
 # Known Claude context windows (input tokens). Used by ClaudeLLMClient when
 # LLM_CONTEXT_SIZE is unset. The current Opus/Sonnet/Fable family ships a 1M
@@ -317,12 +322,14 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
             continue
         if _looks_like_claude_model(candidate):
             return candidate
-        logger.warning(
-            "Ignoring non-Claude model %r for the Claude provider; using default %s. "
-            "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
-            candidate,
-            DEFAULT_CLAUDE_MODEL,
-        )
+        if candidate not in _warned_non_claude_models:
+            _warned_non_claude_models.add(candidate)
+            logger.warning(
+                "Ignoring non-Claude model %r for the Claude provider; using default %s. "
+                "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
+                candidate,
+                DEFAULT_CLAUDE_MODEL,
+            )
     return DEFAULT_CLAUDE_MODEL
 
 
@@ -392,6 +399,23 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     return DEFAULT_FALLBACK_MODEL
 
 
+def resolve_model_for_provider(agent_key: Optional[str] = None) -> str:
+    """Resolve the model id for the *active* provider.
+
+    Single chokepoint for the "which model id under the current provider"
+    decision so the factory, the Strands adapter, and the config summary share one
+    rule instead of each re-deriving the ``provider == 'claude'`` branch: Claude ->
+    :func:`resolve_claude_model`; everything else (ollama/dummy) ->
+    :func:`resolve_model`.
+
+    Postconditions: returns a non-empty model id appropriate for
+        :func:`resolve_provider`. Never raises.
+    """
+    if resolve_provider() == "claude":
+        return resolve_claude_model(agent_key)
+    return resolve_model(agent_key)
+
+
 def resolve_base_url() -> str:
     """Return Ollama base URL (runtime -> ``LLM_BASE_URL`` env -> Ollama Cloud).
 
@@ -442,9 +466,10 @@ def get_llm_config_summary() -> str:
     """
     provider = resolve_provider()
     if provider == "ollama":
-        model = resolve_model(None)
-        base_url = resolve_base_url()
-        return f"provider={provider}, model={model}, base_url={base_url}"
+        return (
+            f"provider={provider}, model={resolve_model_for_provider(None)}, "
+            f"base_url={resolve_base_url()}"
+        )
     if provider == "claude":
-        return f"provider={provider}, model={resolve_claude_model(None)}"
+        return f"provider={provider}, model={resolve_model_for_provider(None)}"
     return f"provider={provider}"

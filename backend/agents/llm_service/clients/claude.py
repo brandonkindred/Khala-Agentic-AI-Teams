@@ -26,6 +26,7 @@ Invariants:
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -372,8 +373,16 @@ class ClaudeLLMClient(LLMClient):
                 "Claude refused the request (stop_reason=refusal). Do not retry the same prompt."
             )
         if stop_reason == "max_tokens":
+            # Distinguish "ran out of budget before emitting any output" (commonly
+            # thinking-token exhaustion) from a genuinely partial response, so the
+            # empty-partial_content case is diagnosable rather than a silent ''.
+            detail = (
+                "no output produced (likely thinking-token exhaustion); raise max_tokens"
+                if not text.strip()
+                else "response is partial"
+            )
             raise LLMTruncatedError(
-                "Claude response truncated due to token limit (stop_reason=max_tokens)",
+                f"Claude response truncated due to token limit (stop_reason=max_tokens): {detail}",
                 partial_content=text,
                 finish_reason="max_tokens",
             )
@@ -559,8 +568,6 @@ class ClaudeLLMClient(LLMClient):
                 response_text=value if kind == "text" else None,
             )
             if kind == "tools":
-                import json  # noqa: PLC0415
-
                 return json.dumps(value)
             return value
 
@@ -586,9 +593,11 @@ class ClaudeLLMClient(LLMClient):
         Postconditions: returns the ``{"__tool_calls__": [...]}`` envelope on tool
             use; otherwise a parsed ``dict`` (json mode) or ``str`` (text mode).
             OpenAI-style ``role:"tool"`` results and assistant ``tool_calls`` in
-            ``messages`` are translated to Anthropic blocks (never dropped). Raises
-            ``LLMJsonParseError`` (json mode, unparseable) or the unified ``LLM*``
-            errors. A telemetry record is emitted for the call.
+            ``messages`` are translated to Anthropic blocks (orphan tool results
+            with no matching tool_use are dropped). Raises ``LLMPermanentError``
+            when ``messages`` yields no user/assistant turn, ``LLMJsonParseError``
+            (json mode, unparseable), or the unified ``LLM*`` errors. A telemetry
+            record is emitted for the call.
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
@@ -599,6 +608,12 @@ class ClaudeLLMClient(LLMClient):
             caller = _caller_tag()
             self._log_request(caller=caller, think=think, kind=f"chat:{response_format}")
             system, anthropic_messages = _to_anthropic_messages(messages)
+            if not anthropic_messages:
+                # System-only (or otherwise empty) input has nothing to send;
+                # surface a clear error instead of an opaque Anthropic 400.
+                raise LLMPermanentError(
+                    "Claude chat requires at least one user/assistant message; got none after translation."
+                )
             if response_format == "json" and not tools:
                 system = (
                     f"{system.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
@@ -681,21 +696,37 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
       for one assistant turn in one user message).
     - plain ``user``/``assistant`` string turns pass through.
 
-    Preconditions: ``messages`` is a list of ``{role, content, ...}`` dicts.
-    Postconditions: returns ``(system_text, anthropic_messages)`` where every entry
-        has role ``user``/``assistant`` and Anthropic-valid content; no tool
-        result is ever silently dropped. Never raises for a reasonably-shaped list.
+    Preconditions: ``messages`` is a list of ``{role, content, ...}`` dicts that
+        includes at least one ``user``/``assistant`` turn with content (a
+        system-only conversation cannot be sent to Anthropic — the caller, e.g.
+        :meth:`ClaudeLLMClient.chat`, surfaces a clear error for that case).
+    Postconditions: returns ``(system_text, anthropic_messages)`` where every
+        emitted entry has role ``user``/``assistant`` and Anthropic-valid
+        (non-empty) content, and every emitted ``tool_result`` has a matching
+        ``tool_use`` earlier in the list (orphans are dropped, logged at debug, so
+        Anthropic never sees a dangling ``tool_result``). Never raises for a
+        reasonably-shaped list.
     """
-    import json  # noqa: PLC0415
-
     system_parts: list[str] = []
     out: list[dict] = []
     pending_tool_results: list[dict] = []
+    emitted_tool_use_ids: set[str] = set()
 
     def _flush_tool_results() -> None:
-        if pending_tool_results:
-            out.append({"role": "user", "content": list(pending_tool_results)})
-            pending_tool_results.clear()
+        if not pending_tool_results:
+            return
+        # Only emit a tool_result whose tool_use was actually sent; an orphan
+        # (its owning assistant turn was dropped, or ids never matched) would make
+        # Anthropic reject the whole request with "tool_result without tool_use".
+        valid = [r for r in pending_tool_results if r["tool_use_id"] in emitted_tool_use_ids]
+        dropped = len(pending_tool_results) - len(valid)
+        if dropped:
+            logger.debug(
+                "Dropping %d orphan tool_result block(s) with no matching tool_use", dropped
+            )
+        if valid:
+            out.append({"role": "user", "content": valid})
+        pending_tool_results.clear()
 
     for msg in messages or []:
         if not isinstance(msg, dict):
@@ -734,18 +765,26 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
                             args = json.loads(args)
                         except (json.JSONDecodeError, ValueError):
                             args = {}
+                    tool_use_id = str(tc.get("id") or "")
                     blocks.append(
                         {
                             "type": "tool_use",
-                            "id": str(tc.get("id") or ""),
+                            "id": tool_use_id,
                             "name": fn.get("name") or "",
                             "input": args if isinstance(args, dict) else {},
                         }
                     )
+                    emitted_tool_use_ids.add(tool_use_id)
                 if blocks:
                     out.append({"role": "assistant", "content": blocks})
                 continue
-            out.append({"role": "assistant", "content": content})
+            # Plain assistant turn: skip empty/whitespace/None content — Anthropic
+            # rejects an empty assistant text block with a 400.
+            if isinstance(content, str):
+                if content.strip():
+                    out.append({"role": "assistant", "content": content})
+            elif content:
+                out.append({"role": "assistant", "content": content})
             continue
         if role == "user":
             out.append({"role": "user", "content": content})
