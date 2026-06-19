@@ -462,7 +462,7 @@ class TestIssueToPlanInput:
         assert gh["owner"] == "o"
         assert gh["repo"] == "r"
         assert gh["number"] == 7
-        assert plan.existing_code_summary is None
+        assert plan.completed_work_summary is None
 
     def test_summarizes_closed_sub_issues(self) -> None:
         plan = issue_to_plan_input(
@@ -475,9 +475,11 @@ class TestIssueToPlanInput:
             owner="o",
             repo="r",
         )
-        assert plan.existing_code_summary is not None
-        assert "#8 Schema" in plan.existing_code_summary
-        assert "#9 Migrations" in plan.existing_code_summary
+        assert plan.completed_work_summary is not None
+        assert "#8 Schema" in plan.completed_work_summary
+        assert "#9 Migrations" in plan.completed_work_summary
+        # Closed sub-issues are completed-work evidence, not ordinary repo context.
+        assert plan.existing_code_summary is None
 
     def test_skips_open_sub_issues_in_summary(self) -> None:
         plan = issue_to_plan_input(
@@ -487,7 +489,7 @@ class TestIssueToPlanInput:
             owner="o",
             repo="r",
         )
-        assert plan.existing_code_summary is None
+        assert plan.completed_work_summary is None
 
 
 # ---------------------------------------------------------------------------
@@ -911,6 +913,65 @@ class TestEndpointFailures:
         assert "no merged tasks" in job["error"]
         assert gh.created_pulls == []
         assert any("produced no merged tasks" in b for _, b in gh.comments)
+
+    def test_only_resolved_without_changes_merge_is_not_publishable(
+        self, patched_app, monkeypatch
+    ) -> None:
+        """A completed_with_failures job whose only MERGED task landed no diff
+        (resolved_without_changes), alongside a failed task, has nothing real to publish: the hook
+        must report 'no merged tasks' and open NO PR, not push an empty branch / no-op PR."""
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+
+        def _no_real_merge(job_id: str, _rp, _plan, **kw):
+            kw["update_job_fn"](
+                status="completed_with_failures",
+                phase="completed",
+                task_graph_snapshot=[
+                    {"id": "t1", "status": "merged", "resolved_without_changes": True},
+                    {"id": "t2", "status": "failed"},
+                ],
+            )
+
+        monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _no_real_merge)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "failed"
+        assert "no merged tasks" in job["error"]
+        assert gh.created_pulls == []  # no no-op PR for synthetic no-diff merges
+        assert any("produced no merged tasks" in b for _, b in gh.comments)
+
+    def test_already_complete_recommends_closure_no_pr(self, patched_app, monkeypatch) -> None:
+        """When the orchestrator reports the work already done, the hook comments a closure
+        recommendation and opens NO pull request."""
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+
+        def _already_done(job_id: str, _rp, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                phase="completed",
+                already_complete=True,
+                completion_evidence="Sub-issues #12 and #13 already merged.",
+                task_graph_snapshot=[],
+            )
+
+        monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _already_done)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "already_complete"
+        assert gh.created_pulls == []  # no no-op PR
+        bodies = [b for _, b in gh.comments]
+        assert any("already complete" in b.lower() and "Recommend closing #1" in b for b in bodies)
+        assert any("#12 and #13" in b for b in bodies)
 
     def test_fast_forward_failure_sets_status_failed(self, patched_app, monkeypatch) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
@@ -1414,6 +1475,50 @@ class TestActiveIssueMarkerLifecycle:
         client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
         cleared = self._run(patched_app, monkeypatch, client, orchestrator=no_merge)
         assert cleared == []
+
+    def test_cleared_on_already_complete(self, patched_app, monkeypatch) -> None:
+        # An already-complete run is a clean no-op success: it must clear the marker like the normal
+        # publish-success path, not leave it behind (a later retry would treat stale local state as
+        # interrupted progress).
+        def already_done(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                already_complete=True,
+                completion_evidence="already merged",
+                task_graph_snapshot=[],
+            )
+
+        client = _FakeClient(issues=[_issue(3)], sub_map={3: []})
+        cleared = self._run(patched_app, monkeypatch, client, orchestrator=already_done)
+        assert cleared == [patched_app["repo_path"]]
+
+    def test_already_complete_removes_ephemeral_checkout_when_flagged(
+        self, patched_app, monkeypatch
+    ) -> None:
+        # The per-issue clone must also be removed on an already-complete run when
+        # cleanup_checkout_on_success is set — otherwise the clone leaks just like on the normal
+        # success path.
+        api = patched_app["api"]
+        removed: list[str] = []
+        monkeypatch.setattr(api, "_clear_active_issue_if_matches", lambda p, _n: None)
+        monkeypatch.setattr(api, "_cleanup_issue_checkout", lambda p: removed.append(p))
+
+        def already_done(_job_id, _repo, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                already_complete=True,
+                completion_evidence="already merged",
+                task_graph_snapshot=[],
+            )
+
+        monkeypatch.setattr(api, "run_coding_team_orchestrator", already_done)
+        patched_app["set_github"](_FakeClient(issues=[_issue(3)], sub_map={3: []}))
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(3, repo_path=patched_app["repo_path"], cleanup_checkout_on_success=True),
+        )
+        assert resp.status_code == 200
+        assert removed == [patched_app["repo_path"]]
 
     def test_retained_when_push_fails(self, patched_app, monkeypatch) -> None:
         api = patched_app["api"]

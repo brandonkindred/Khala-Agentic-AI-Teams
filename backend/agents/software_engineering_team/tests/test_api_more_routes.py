@@ -335,6 +335,19 @@ def test_restart_400_when_no_repo_path(client, fake_job_client):
     assert resp.status_code == 400
 
 
+def test_restart_accepts_already_complete_status(client, fake_job_client):
+    """A run-team job that delegated to the coding team can end as already_complete (a terminal
+    success like completed), so restart must accept that status. It still 400s here only because the
+    job has no repo_path — proving it passed the status gate rather than being rejected for status."""
+    job_id = "job-rst-ac"
+    fake_job_client.create_job(job_id, job_type="run_team")
+    fake_job_client.update_job(job_id, repo_path=None, status="already_complete")
+    resp = client.post(f"/run-team/{job_id}/restart")
+    assert resp.status_code == 400
+    # Passed the RESTARTABLE_STATUSES gate (not "cannot be restarted"); fails on the missing path.
+    assert "repo_path" in resp.json()["detail"]
+
+
 # ---------------------------------------------------------------------------
 # health
 # ---------------------------------------------------------------------------

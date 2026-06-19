@@ -408,6 +408,10 @@ def test_is_terminal():
     assert hitl.is_terminal({"status": "cancelled"})
     assert hitl.is_terminal({"cancel_requested": True})
     assert hitl.is_terminal({"status": "completed"})
+    assert hitl.is_terminal({"status": "completed_with_failures"})
+    # already_complete is a terminal success — a finished already-complete job must not look
+    # resumable to the /resume endpoint or the auto-resume guard.
+    assert hitl.is_terminal({"status": "already_complete"})
     assert not hitl.is_terminal({"status": "running"})
     assert not hitl.is_terminal({})
 

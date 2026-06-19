@@ -1,8 +1,15 @@
 import { TestBed } from '@angular/core/testing';
+import { Subject } from 'rxjs';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { RunTeamTrackingComponent } from './run-team-tracking.component';
 import type { JobStatusResponse, TaskStateEntry, PlanningHierarchy } from '../../models';
+
+// Make timer fire once synchronously so the poll callback runs in the test without a real interval.
+vi.mock('rxjs', async (importOriginal) => {
+  const rxjs = await importOriginal<typeof import('rxjs')>();
+  return { ...rxjs, timer: vi.fn(() => rxjs.of(0)) };
+});
 
 describe('RunTeamTrackingComponent work tree fallback initiative behavior', () => {
   const createComponent = (): RunTeamTrackingComponent => {
@@ -211,5 +218,32 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
       const initiativeRow = rows.find((row) => row.label === 'Initiative One');
       expect(initiativeRow?.status).toBe('completed');
     });
+  });
+});
+
+describe('RunTeamTrackingComponent polling stop conditions', () => {
+  it('stops polling on already_complete (a coding-team terminal success)', () => {
+    // A Subject (not of()) emits AFTER ngOnInit assigns pollSub, so the stop path nulls the real
+    // field rather than racing the synchronous subscription assignment.
+    const statusSubject = new Subject<JobStatusResponse>();
+    const apiSpy = { getJobStatus: vi.fn().mockReturnValue(statusSubject) };
+    TestBed.configureTestingModule({
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+    });
+    const component = TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
+    component.jobId = 'job-1';
+    component.ngOnInit();
+    statusSubject.next({
+      job_id: 'job-1',
+      status: 'already_complete',
+      task_results: [],
+      task_ids: [],
+      failed_tasks: [],
+    });
+
+    expect(component.status?.status).toBe('already_complete');
+    // Routed through isCodingTeamTerminalStatus, so the poll unsubscribed on this terminal success
+    // (a missing case here would leave the poll running forever).
+    expect((component as unknown as { pollSub: unknown }).pollSub).toBeNull();
   });
 });

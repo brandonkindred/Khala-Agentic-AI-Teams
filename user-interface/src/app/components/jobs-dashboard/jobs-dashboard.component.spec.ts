@@ -183,6 +183,16 @@ describe('JobsDashboardComponent', () => {
     expect(component.getStatusClass(clean)).toBe('status-completed');
   });
 
+  it('getStatusClass shows already_complete as a success (green), not the pending default', () => {
+    const job = { unified: { status: 'already_complete' }, seDetail: null } as any;
+    expect(component.getStatusClass(job)).toBe('status-completed');
+  });
+
+  it('getStatusLabel renders already_complete as a human label', () => {
+    const job = { unified: { status: 'already_complete' }, seDetail: null } as any;
+    expect(component.getStatusLabel(job)).toBe('Already complete');
+  });
+
   it('renders a single merged Job column (no separate Team/Type headers)', () => {
     component.jobs = [
       {
@@ -882,6 +892,7 @@ describe('JobsDashboardComponent', () => {
       expect(component.canRestartJob(makeJob('interrupted'))).toBe(true);
       expect(component.canRestartJob(makeJob('agent_crash'))).toBe(true);
       expect(component.canRestartJob(makeJob('completed_with_failures'))).toBe(true);
+      expect(component.canRestartJob(makeJob('already_complete'))).toBe(true);
       expect(component.canRestartJob(makeJob('failed', 'road_trip_planning'))).toBe(true);
       expect(component.canRestartJob(makeJob('completed', 'personal_assistant'))).toBe(true);
     });
@@ -957,16 +968,24 @@ describe('JobsDashboardComponent', () => {
         buildRow({ jobId: 'r', status: 'needs_human_review', source: 'blogging' }),
         buildRow({ jobId: 'e', status: 'completed_with_errors', source: 'investment' }),
         buildRow({ jobId: 'g', status: 'completed_with_failures', source: 'software_engineering' }),
+        buildRow({ jobId: 'a', status: 'already_complete', source: 'software_engineering' }),
       ];
       const counts = component.statusCounts;
-      expect(counts.completed).toBe(5);
+      expect(counts.completed).toBe(6);
       expect(counts.active).toBe(0);
       expect(counts.failed).toBe(0);
-      expect(counts.all).toBe(5);
+      expect(counts.all).toBe(6);
     });
 
     it('completed_with_failures (Coding Team partial success) buckets as completed, not active', () => {
       component.jobs = [buildRow({ jobId: 'g', status: 'completed_with_failures' })];
+      const counts = component.statusCounts;
+      expect(counts.completed).toBe(1);
+      expect(counts.active).toBe(0);
+    });
+
+    it('already_complete (Coding Team "work already done") buckets as completed, not active', () => {
+      component.jobs = [buildRow({ jobId: 'a', status: 'already_complete' })];
       const counts = component.statusCounts;
       expect(counts.completed).toBe(1);
       expect(counts.active).toBe(0);

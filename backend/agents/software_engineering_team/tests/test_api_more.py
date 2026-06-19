@@ -129,6 +129,18 @@ def test_cancel_terminal_job(client: TestClient, tmp_path: Path):
     assert r.status_code == 400
 
 
+def test_cancel_already_complete_job_is_terminal(client: TestClient, tmp_path: Path):
+    """already_complete is a terminal success (the coding team's "work already done") — cancelling it
+    must be refused like completed, not flip a finished job to cancelled."""
+    from software_engineering_team.shared.job_store import create_job, update_job
+
+    job_id = str(uuid.uuid4())
+    create_job(job_id, str(tmp_path), job_type="run_team")
+    update_job(job_id, status="already_complete")
+    r = client.post(f"/run-team/{job_id}/cancel")
+    assert r.status_code == 400
+
+
 # ---------------------------------------------------------------------------
 # /run-team/{job_id}/answers
 # ---------------------------------------------------------------------------

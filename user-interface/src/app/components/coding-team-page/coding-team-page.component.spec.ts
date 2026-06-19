@@ -330,6 +330,7 @@ describe('CodingTeamPageComponent', () => {
       expect(component.badgeClass('running')).toBe('running');
       expect(component.badgeClass('pending')).toBe('running');
       expect(component.badgeClass('completed')).toBe('completed');
+      expect(component.badgeClass('already_complete')).toBe('completed');
       expect(component.badgeClass('failed')).toBe('failed');
       expect(component.badgeClass('cancelled')).toBe('cancelled');
       expect(component.badgeClass('completed_with_failures')).toBe('warning');
