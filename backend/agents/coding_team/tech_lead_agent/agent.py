@@ -88,14 +88,23 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
         )
     if plan.assumptions:
         parts.append("Assumptions on record:\n" + "\n".join(f"- {a}" for a in plan.assumptions))
-    if plan.existing_code_summary:
-        # The single most important signal for an "already done" issue: work that is already
-        # merged/present. Without it the Tech Lead re-plans from scratch and invents tasks to redo
-        # finished work, which the engineers then spin on. Surfaced verbatim so the model can judge
-        # whether the plan is already satisfied and return already_complete instead of new tasks.
+    if plan.completed_work_summary:
+        # Evidence that the plan's work is already finished (e.g. closed/merged sub-issues). This is
+        # the signal the Tech Lead uses to return already_complete instead of inventing tasks to redo
+        # finished work. Kept distinct from existing_code_summary — only genuinely-done work, never
+        # ordinary repo context, may justify an already_complete verdict.
         parts.append(
             "Work already completed (already merged/done — do NOT recreate it):\n"
-            + plan.existing_code_summary
+            + plan.completed_work_summary
+        )
+    if plan.existing_code_summary:
+        # Existing repository code, surfaced purely as CONTEXT. It is current code the plan may well
+        # need to modify, so it is framed explicitly as "not completed work" — its mere presence must
+        # never on its own be read as "already done" (that is what drove a false already_complete on
+        # the main software-engineering path, where this field carries the whole repo's source).
+        parts.append(
+            "Existing repository code (context only — the plan may require changing it; this is NOT "
+            "completed work):\n" + plan.existing_code_summary
         )
     return "\n\n".join(p for p in parts if p)
 

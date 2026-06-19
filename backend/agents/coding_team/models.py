@@ -163,7 +163,19 @@ class CodingTeamPlanInput(BaseModel):
     )
     existing_code_summary: Optional[str] = Field(
         default=None,
-        description="Optional summary of existing codebase",
+        description=(
+            "Optional summary of EXISTING repository code, provided as planning context. This is "
+            "current code that the plan may still need to change — it is NOT completed work and "
+            "must never justify an already_complete verdict (use completed_work_summary for that)."
+        ),
+    )
+    completed_work_summary: Optional[str] = Field(
+        default=None,
+        description=(
+            "Optional evidence that the plan's work is ALREADY DONE (e.g. closed/merged GitHub "
+            "sub-issues). Unlike existing_code_summary, this is the basis for the Tech Lead's "
+            "already_complete short-circuit: only genuinely-finished work belongs here."
+        ),
     )
     resolved_questions: Optional[List[Dict[str, Any]]] = Field(
         default=None,

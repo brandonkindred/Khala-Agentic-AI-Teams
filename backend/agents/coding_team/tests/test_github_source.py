@@ -462,7 +462,7 @@ class TestIssueToPlanInput:
         assert gh["owner"] == "o"
         assert gh["repo"] == "r"
         assert gh["number"] == 7
-        assert plan.existing_code_summary is None
+        assert plan.completed_work_summary is None
 
     def test_summarizes_closed_sub_issues(self) -> None:
         plan = issue_to_plan_input(
@@ -475,9 +475,11 @@ class TestIssueToPlanInput:
             owner="o",
             repo="r",
         )
-        assert plan.existing_code_summary is not None
-        assert "#8 Schema" in plan.existing_code_summary
-        assert "#9 Migrations" in plan.existing_code_summary
+        assert plan.completed_work_summary is not None
+        assert "#8 Schema" in plan.completed_work_summary
+        assert "#9 Migrations" in plan.completed_work_summary
+        # Closed sub-issues are completed-work evidence, not ordinary repo context.
+        assert plan.existing_code_summary is None
 
     def test_skips_open_sub_issues_in_summary(self) -> None:
         plan = issue_to_plan_input(
@@ -487,7 +489,7 @@ class TestIssueToPlanInput:
             owner="o",
             repo="r",
         )
-        assert plan.existing_code_summary is None
+        assert plan.completed_work_summary is None
 
 
 # ---------------------------------------------------------------------------
