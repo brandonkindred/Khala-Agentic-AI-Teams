@@ -136,3 +136,11 @@ def test_put_stores_model_under_provider_specific_key(app_client):
     stored = {k: v for _s, k, v in calls["set"]}
     assert stored[route.runtime_config.KEY_OLLAMA_MODEL] == "llama3.2"
     assert route.runtime_config.KEY_CLAUDE_MODEL not in stored
+
+
+def test_provider_model_keys_cover_all_provider_options():
+    # Every provider the UI offers must have a storage key in PROVIDER_MODEL_KEYS,
+    # else PUT would KeyError (500) on save. Asserting equality makes the map an
+    # enforced single source: adding a provider to _PROVIDER_OPTIONS without a model
+    # key (or vice versa) fails here instead of in production.
+    assert set(route.runtime_config.PROVIDER_MODEL_KEYS) == set(route._PROVIDER_OPTIONS)

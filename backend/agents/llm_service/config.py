@@ -321,7 +321,9 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
     Claude-specific (the operator chose it explicitly for this provider), so it is
     trusted as-is: a free-typed custom/gateway Claude model is honored even when it
     doesn't match the heuristic. The runtime value is ranked above the global env so
-    a UI selection wins; per-agent env pinning still wins when set. The Ollama
+    a UI selection wins; a per-agent ``LLM_MODEL_<agent_key>`` pin outranks it but —
+    being a shared env candidate — is honored only when it passes
+    :func:`_looks_like_claude_model`. The Ollama
     ``AGENT_DEFAULT_MODELS`` table is deliberately never consulted.
 
     Postconditions: returns a non-empty model id string.
