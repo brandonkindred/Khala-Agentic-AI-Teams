@@ -349,21 +349,30 @@ class StopLossRule(_SpecNode):
         Preconditions: ``style`` and ``basis`` are valid Literals (Pydantic
         enforces this before this validator runs).
         Postconditions: returns ``self`` unchanged when consistent; raises
-        ``ValueError`` when ``style == "limit"`` lacks ``limit_offset_pct`` or
-        uses a trailing basis, or when ``limit_offset_pct`` is set without
-        ``style == "limit"``.
+        ``ValueError`` when ``style == "limit"`` lacks ``limit_offset_pct``, uses
+        ``pct >= 1.0``, or uses a trailing basis, or when ``limit_offset_pct`` is
+        set without ``style == "limit"``.
 
         A trailing basis moves the stop level every bar, so a *resting* limit
         order against it would need continuous re-pricing — the same reason the
         bracket path forbids combining ``trail_offset`` with ``limit_offset``. A
         limit-style structured stop therefore requires the static
-        ``entry_price`` basis.
+        ``entry_price`` basis. ``pct`` must be ``< 1.0`` so a long's resolved stop
+        ``entry * (1 - pct)`` stays strictly positive — a ``pct == 1.0`` stop
+        resolves to price 0 (a degenerate, never-meaningful level), which the
+        protective-limit geometry cannot place a limit against.
         """
         if self.style == "limit":
             if self.limit_offset_pct is None:
                 raise ValueError(
                     "StopLossRule.style='limit' requires limit_offset_pct "
                     "(the limit's distance from the stop level, as a fraction)"
+                )
+            if self.pct >= 1.0:
+                raise ValueError(
+                    "StopLossRule.style='limit' requires pct < 1.0; a 100% stop "
+                    "resolves a long's level to price 0, which has no valid "
+                    "protective limit"
                 )
             if self.basis != "entry_price":
                 raise ValueError(

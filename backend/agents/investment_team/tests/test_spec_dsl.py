@@ -340,6 +340,17 @@ def test_stop_loss_limit_style_rejects_trailing_basis():
         StopLossRule(pct=0.03, basis="trailing_high", style="limit", limit_offset_pct=0.005)
 
 
+def test_stop_loss_limit_style_rejects_full_pct():
+    # pct=1.0 is allowed for a market stop but not a limit stop: a long's level
+    # entry*(1-1.0) resolves to 0, which has no valid protective limit.
+    with pytest.raises(ValidationError, match="requires pct < 1.0"):
+        StopLossRule(pct=1.0, style="limit", limit_offset_pct=0.005)
+    # Just under 1.0 is accepted for limit style.
+    assert StopLossRule(pct=0.99, style="limit", limit_offset_pct=0.005).pct == 0.99
+    # pct=1.0 remains valid for the default market style.
+    assert StopLossRule(pct=1.0).style == "market"
+
+
 def test_stop_loss_limit_offset_pct_bounds():
     with pytest.raises(ValidationError):
         StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.0)
