@@ -42,6 +42,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderSide,
     OrderType,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 
@@ -320,19 +321,14 @@ def test_does_not_re_emit_while_engine_stop_limit_rests():
 
 
 # ---------------------------------------------------------------------------
-# Deferred retirement: a limit-style stop may not fill, so competing orders are
-# NOT retired at emission — only a guaranteed market close does that now.
+# Competing-order retirement: a limit-style stop still BINDS competing exits
+# (binding only retires them once the position actually closes), so an unbound
+# resting exit can't survive the close and open a reverse position. Only the
+# active entry-continuation cancel is deferred (it assumes the close fills).
 # ---------------------------------------------------------------------------
 
 
-def test_limit_style_does_not_retire_competing_resting_orders():
-    disp = _dispatcher(
-        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
-    )
-    tracker, portfolio, order_book = _long_setup()
-    result = TradingServiceResult()
-
-    # An unbound opposite-side strategy take-profit resting far above market.
+def _resting_take_profit(order_book) -> object:
     resting = OrderRequest(
         client_order_id="c1",
         symbol="AAA",
@@ -343,9 +339,19 @@ def test_limit_style_does_not_retire_competing_resting_orders():
         tif=TimeInForce.GTC,
         reason="strategy_take_profit",
     )
-    resting_po = order_book.submit(
+    return order_book.submit(
         resting, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
     )
+
+
+def test_limit_style_binds_competing_resting_orders():
+    disp = _dispatcher(
+        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
+    )
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+
+    resting_po = _resting_take_profit(order_book)
     assert resting_po.working_against_entry_order_id is None
 
     disp.maybe_emit(
@@ -357,31 +363,20 @@ def test_limit_style_does_not_retire_competing_resting_orders():
         result=result,
     )
 
-    # The resting strategy order is left untouched: the limit-style stop may
-    # gap through unfilled, so retiring now would strand it / risk a reverse.
-    assert resting_po.working_against_entry_order_id is None
+    # The competing take-profit is now bound to the position. When the
+    # stop-limit eventually fills and closes the position, the stale-continuation
+    # guard drops the bound take-profit — without this it would survive the
+    # close and later fire as a fresh reverse short. (Binding does not retire it
+    # early: while the position stays open the guard leaves a bound order alone.)
+    assert resting_po.working_against_entry_order_id == "o1"
 
 
-def test_market_style_still_retires_competing_resting_orders():
-    # Control: the default market stop retires competing orders immediately,
-    # because its close is guaranteed to fill.
+def test_market_style_binds_competing_resting_orders():
     disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
     tracker, portfolio, order_book = _long_setup()
     result = TradingServiceResult()
 
-    resting = OrderRequest(
-        client_order_id="c1",
-        symbol="AAA",
-        side=OrderSide.SHORT,
-        qty=100.0,
-        order_type=OrderType.LIMIT,
-        limit_price=200.0,
-        tif=TimeInForce.GTC,
-        reason="strategy_take_profit",
-    )
-    resting_po = order_book.submit(
-        resting, submitted_at="2024-01-05T00:00:00", submitted_equity=100_000.0
-    )
+    resting_po = _resting_take_profit(order_book)
 
     disp.maybe_emit(
         cur_bar=_bar(low=95),
@@ -393,3 +388,65 @@ def test_market_style_still_retires_competing_resting_orders():
     )
 
     assert resting_po.working_against_entry_order_id == "o1"
+
+
+def _partial_entry_continuation(order_book):
+    """A partially-filled entry whose REQUEUE remainder is still on the book —
+    a continuation of the position's own entry order (id ``o1``)."""
+    entry = OrderRequest(
+        client_order_id="c-o1",
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        order_type=OrderType.MARKET,
+        tif=TimeInForce.DAY,
+        unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+        reason="strategy_entry",
+    )
+    po = order_book.submit(entry, submitted_at="2024-01-08T00:00:00", submitted_equity=100_000.0)
+    po.order_id = "o1"  # matches the position's entry_order_id
+    po.cumulative_filled_qty = 60.0  # partially filled; 40 remainder requeued
+    return po
+
+
+def test_market_style_cancels_entry_continuation():
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+    _partial_entry_continuation(order_book)
+
+    disp.maybe_emit(
+        cur_bar=_bar(low=95),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=[],
+        order_book=order_book,
+        result=result,
+    )
+
+    # The guaranteed market close cancels the in-flight entry remainder so the
+    # position can't grow past what the close covers.
+    assert "o1" not in order_book
+
+
+def test_limit_style_does_not_cancel_entry_continuation():
+    disp = _dispatcher(
+        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
+    )
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+    _partial_entry_continuation(order_book)
+
+    disp.maybe_emit(
+        cur_bar=_bar(low=95),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=[],
+        order_book=order_book,
+        result=result,
+    )
+
+    # The limit-style stop may gap through unfilled, so the entry continuation
+    # is NOT cancelled at emission — the scale-in is preserved for the still-open
+    # position.
+    assert "o1" in order_book

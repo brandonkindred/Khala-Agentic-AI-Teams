@@ -623,44 +623,55 @@ def test_diagnostic_events_default_to_empty_list(realistic: bool) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Fill-based exit counter (engine_exit fills) in _apply_fill_outcome_events
+# Fill-based exit counter (engine_exit fills) in _apply_fill_outcome_events.
+# Counted off CLOSED TRADES (whose exit_reason carries the engine_exit:* label),
+# NOT the exit_filled diagnostic events (whose reason is the fill kind).
 # ---------------------------------------------------------------------------
 
 
-def _exit_filled_event(*, symbol: str, reason: str, order_type: str = "market"):
-    from investment_team.trading_service.engine.fill_simulator import FillDiagnosticEvent
+def _closed_trade(*, symbol: str, exit_reason: str | None, trade_num: int = 1):
+    from investment_team.models import TradeRecord
 
-    return FillDiagnosticEvent(
-        kind="exit_filled",
-        order_id="e1",
-        timestamp="2024-01-02T00:00:00",
+    return TradeRecord(
+        trade_num=trade_num,
+        entry_date="2024-01-01",
+        exit_date="2024-01-02",
         symbol=symbol,
-        side="short",
-        order_type=order_type,
-        reason=reason,
+        side="long",
+        entry_price=100.0,
+        exit_price=95.0,
+        shares=100.0,
+        position_value=10_000.0,
+        gross_pnl=-500.0,
+        net_pnl=-500.0,
+        return_pct=-5.0,
+        hold_days=1,
+        outcome="loss",
+        cumulative_pnl=-500.0,
+        exit_reason=exit_reason,
+    )
+
+
+def _outcome(*, closed_trades):
+    from investment_team.trading_service.engine.fill_simulator import FillOutcome
+
+    return FillOutcome(
+        entry_fills=[], exit_fills=[], closed_trades=closed_trades, diagnostic_events=[]
     )
 
 
 def test_engine_exit_fill_bumps_fill_based_counter() -> None:
     from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.engine.fill_simulator import FillOutcome
     from investment_team.trading_service.service import (
         ENGINE_EXIT_REASON_PREFIX,
         _apply_fill_outcome_events,
     )
 
     diag = BacktestExecutionDiagnostics()
-    outcome = FillOutcome(
-        entry_fills=[],
-        exit_fills=[],
-        closed_trades=[],
-        diagnostic_events=[
-            _exit_filled_event(
-                symbol="AAA",
-                reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
-                order_type="stop_limit",
-            )
-        ],
+    outcome = _outcome(
+        closed_trades=[
+            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss")
+        ]
     )
     _apply_fill_outcome_events(diag, outcome)
 
@@ -670,22 +681,16 @@ def test_engine_exit_fill_bumps_fill_based_counter() -> None:
 
 def test_signal_exit_fill_strips_index_suffix() -> None:
     from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.engine.fill_simulator import FillOutcome
     from investment_team.trading_service.service import (
         ENGINE_EXIT_REASON_PREFIX,
         _apply_fill_outcome_events,
     )
 
     diag = BacktestExecutionDiagnostics()
-    outcome = FillOutcome(
-        entry_fills=[],
-        exit_fills=[],
-        closed_trades=[],
-        diagnostic_events=[
-            _exit_filled_event(
-                symbol="AAA", reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]"
-            )
-        ],
+    outcome = _outcome(
+        closed_trades=[
+            _closed_trade(symbol="AAA", exit_reason=f"{ENGINE_EXIT_REASON_PREFIX}signal_exit[2]")
+        ]
     )
     _apply_fill_outcome_events(diag, outcome)
 
@@ -696,18 +701,83 @@ def test_signal_exit_fill_strips_index_suffix() -> None:
 
 def test_strategy_close_fill_is_not_counted() -> None:
     from investment_team.models import BacktestExecutionDiagnostics
-    from investment_team.trading_service.engine.fill_simulator import FillOutcome
     from investment_team.trading_service.service import _apply_fill_outcome_events
 
     diag = BacktestExecutionDiagnostics()
-    outcome = FillOutcome(
-        entry_fills=[],
-        exit_fills=[],
-        closed_trades=[],
-        diagnostic_events=[_exit_filled_event(symbol="AAA", reason="strategy_market_exit")],
+    outcome = _outcome(
+        closed_trades=[
+            _closed_trade(symbol="AAA", exit_reason="strategy_market_exit"),
+            _closed_trade(symbol="AAA", exit_reason=None, trade_num=2),
+        ]
     )
     _apply_fill_outcome_events(diag, outcome)
 
     # Only engine-stamped exits feed the fill counter.
     assert diag.exit_rule_fills == {}
     assert diag.exit_rule_fills_by_symbol == {}
+
+
+_ENTRY_ONLY_STRATEGY_CODE = textwrap.dedent('''\
+    """Enters one long and holds — the engine stop-loss is the sole closer."""
+    from contract import OrderSide, OrderType, Strategy
+
+
+    class EntryOnly(Strategy):
+        WINDOW = 5
+
+        def on_bar(self, ctx, bar):
+            history = ctx.history(bar.symbol, self.WINDOW)
+            if len(history) < self.WINDOW:
+                return
+            sma = sum(b.close for b in history) / self.WINDOW
+            if ctx.position(bar.symbol) is None and bar.close > sma:
+                ctx.submit_order(
+                    symbol=bar.symbol,
+                    side=OrderSide.LONG,
+                    qty=10,
+                    order_type=OrderType.MARKET,
+                    reason="entry_only",
+                )
+''')
+
+
+def test_engine_stop_fill_populates_fill_counter_end_to_end() -> None:
+    """Regression guard: in a real run the fill counter must be populated off the
+    CLOSED TRADES (whose exit_reason carries ``engine_exit:*``), not the
+    exit_filled diagnostic events (whose reason is the fill kind). An entry-only
+    strategy whose long is closed by an engine stop_loss must bump
+    ``exit_rule_fills``/``exit_rule_fills_by_symbol`` so the limit-style
+    conformance reconciliation has real data to reconcile against.
+    """
+    from investment_team.strategy_lab.spec_dsl import StopLossRule
+
+    market_data: Dict[str, List[OHLCVBar]] = {}
+    _uptrend_then_down_bars(market_data)
+
+    strategy = StrategySpec(
+        strategy_id="strat-923-fill-counter",
+        authored_by="tests",
+        asset_class="equity",
+        hypothesis="engine stop closes the held long",
+        signal_definition="entry-only + engine stop_loss",
+        timeframe="1d",
+        entry_rules=[
+            EntryRule(
+                side="long",
+                when=Predicate(
+                    lhs="bar.close", op=">", rhs=IndicatorRef(name="sma", params={"period": 5})
+                ),
+            )
+        ],
+        exit_rules=[StopLossRule(pct=0.05)],
+        strategy_code=_ENTRY_ONLY_STRATEGY_CODE,
+    )
+
+    run = run_backtest(strategy=strategy, config=_config(), market_data=market_data)
+    diagnostics = run.service_result.execution_diagnostics
+
+    assert run.service_result.error is None, run.service_result.error
+    # The engine stop fired and filled, producing a closed trade attributed to
+    # engine_exit:stop_loss — so the fill counter must reflect it.
+    assert diagnostics.exit_rule_fills.get("stop_loss", 0) >= 1
+    assert diagnostics.exit_rule_fills_by_symbol.get("AAA", {}).get("stop_loss", 0) >= 1

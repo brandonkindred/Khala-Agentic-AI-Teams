@@ -378,18 +378,24 @@ class _EngineExitDispatcher:
 
         pending_for_prev.append(req)
         self._register_binding(req, pos)
-        # Retirement/cancellation of competing orders assumes the position is
-        # closed by this emission. That holds for a market close (guaranteed
-        # next-bar fill) but NOT for a ``style="limit"`` stop: it can gap
-        # through its limit and rest unfilled, leaving the position live. Doing
-        # the retirement now would strand competing orders and risk an
-        # unintended reverse position on a later bar, so for a limit-style stop
-        # we defer all of it to the actual fill — the fill simulator binds the
-        # STOP_LIMIT to its position on arm and its stale-continuation guard
-        # retires the rest when (and only when) the close actually fills.
+        # Bind competing opposite-side exits to the position. This is safe for
+        # BOTH styles: binding only *retires* an order via the fill simulator's
+        # stale-continuation guard once the position is actually closed/replaced,
+        # so a ``style="limit"`` stop that gaps through and rests leaves the
+        # bound competing orders working. Binding is what prevents an unbound
+        # competing exit (e.g. a resting take-profit) from surviving the close
+        # and later firing as a fresh reverse entry — so it must run for the
+        # limit-style stop too, not just the guaranteed market close.
+        self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
+        self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
+        # Cancelling the entry continuation, by contrast, *actively* removes a
+        # legitimate scale-in remainder on the assumption the close will fill.
+        # A market close is guaranteed next bar; a limit-style stop may gap
+        # through unfilled, so deferring this avoids stripping a scale-in for a
+        # position that stays open. (If a limit-style close later fills while an
+        # entry continuation is still in flight, ``_fill_exit`` clips the close
+        # to the live qty — residual exposure, not a reverse position.)
         if intent.style != "limit":
-            self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
-            self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
             self._cancel_pending_entry_continuations(sym, pos, order_book)
         self._record_emission(req, intent, cur_bar, result)
 
@@ -1182,22 +1188,6 @@ def _apply_fill_outcome_events(
                 reason=ev.reason,
                 detail=ev.detail,
             )
-            # Fill-based exit counter: an engine-emitted exit that actually
-            # filled (reason ``engine_exit:<kind>``). Distinct from emission-time
-            # ``exit_rule_firings`` — a limit-style stop can fire (emit) yet gap
-            # through unfilled, so conformance reconciles against fills. Strategy
-            # closes carry their own reason and are excluded.
-            reason = ev.reason or ""
-            if reason.startswith(ENGINE_EXIT_REASON_PREFIX):
-                kind = reason[len(ENGINE_EXIT_REASON_PREFIX):]
-                # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the
-                # fill key matches the firing key (rule kind only).
-                bracket = kind.find("[")
-                if bracket != -1:
-                    kind = kind[:bracket]
-                diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
-                sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
-                sym_fills[kind] = sym_fills.get(kind, 0) + 1
         elif ev.kind == "rejected":
             _increment_rejection(diagnostics, ev.reason)
             _record_event(
@@ -1226,6 +1216,28 @@ def _apply_fill_outcome_events(
                 reason=ev.reason,
                 detail=ev.detail,
             )
+
+    # Fill-based exit counter. Counted off the CLOSED TRADES (not the
+    # ``exit_filled`` diagnostic events, whose ``reason`` carries the fill kind
+    # — ``"full"`` / ``"partial"`` — not the order's engine reason). A closed
+    # trade IS a fill that closed a position, and its ``exit_reason`` is the same
+    # ``engine_exit:<kind>`` attribution the conformance gate reconciles against,
+    # so this stays consistent with that gate by construction. Distinct from
+    # emission-time ``exit_rule_firings``: a limit-style stop can fire (emit) yet
+    # gap through unfilled, leaving no closed trade — so it is not counted here.
+    for trade in outcome.closed_trades:
+        reason = trade.exit_reason or ""
+        if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
+            continue
+        kind = reason[len(ENGINE_EXIT_REASON_PREFIX):]
+        # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
+        # matches the firing key (rule kind only).
+        bracket = kind.find("[")
+        if bracket != -1:
+            kind = kind[:bracket]
+        diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
+        sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(trade.symbol, {})
+        sym_fills[kind] = sym_fills.get(kind, 0) + 1
 
 
 class _StreamingEquityBuffer:

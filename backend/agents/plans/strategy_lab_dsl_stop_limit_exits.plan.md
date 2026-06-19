@@ -21,10 +21,10 @@ todos:
     content: 'DONE — Extended the _should_evaluate in-flight guard (service.py) to also recognize a resting STOP_LIMIT engine exit, not just a pending MARKET, so a limit-style stop is emitted once per position and rests/latches across bars (fill simulator owns arm/latch/gap-through) instead of being re-emitted every bar — this IS the "resting structured exit" concept. Implemented via the order book (the resting opposite-side engine STOP_LIMIT is the source of truth) rather than a separate _TrackedPosition marker, avoiding state-sync drift.'
     status: completed
   - id: retirement-bindings-live-position
-    content: Make _retire_competing_resting_orders and _cancel_pending_entry_continuations NOT treat the position as closed when the emitted exit is a non-filling stop-limit still resting; defer retirement/cancellation to the actual fill so an unfilled stop-limit cannot leave the position live while bindings think it is gone (which would risk an unintended reverse position on a later bar).
+    content: 'DONE (revised after review) — Keep BINDING competing exits (_retire_competing_resting_orders, _bind_same_bar_queued_exits) for the limit-style stop too: binding only retires an order via the fill simulator stale-continuation guard once the position is actually closed/replaced, so a non-filling stop-limit that rests leaves bound orders working — and binding is exactly what stops an unbound competing exit (e.g. a resting take-profit) from surviving the close and firing as a reverse entry. Only defer the ACTIVE cancel (_cancel_pending_entry_continuations), which strips a legitimate scale-in on the assumption the close fills. (Initial pass over-deferred all three, leaving competing exits unbound; corrected so only the active cancel is style-gated.)'
     status: completed
   - id: fill-based-firings-counter
-    content: Add a fill-based exit counter (e.g. exit_rule_fills / exit_rule_fills_by_symbol) to BacktestExecutionDiagnostics, bumped when an engine exit order actually fills (next to the existing stop_limit_unfilled_triggers handling in _apply_fill_outcome_events), distinct from the emission-time exit_rule_firings bumped in _record_emission.
+    content: 'DONE (revised after review) — Added exit_rule_fills / exit_rule_fills_by_symbol to BacktestExecutionDiagnostics, counted in _apply_fill_outcome_events off outcome.closed_trades (whose exit_reason carries the engine_exit:* label), NOT the exit_filled diagnostic events — those stamp the fill KIND ("full"/"partial") as their reason, so counting them never matched the engine prefix in real runs. Counting closed trades keeps the fill counter consistent-by-construction with the conformance gate, which reconciles the same exit_reason attribution. Distinct from emission-time exit_rule_firings.'
     status: completed
   - id: conformance-fill-based
     content: Update exit_rule_conformance._check_stop_loss to reconcile below-floor trades against the fill-based counter (not emissions), and tolerate "fired but did not fill" for limit-style stop rules so a legitimate gap-through non-fill does not read as a leak (false critical) and a real leak is not masked.
@@ -147,7 +147,7 @@ flowchart TD
     G --> H
     H --> I{"style?"}
     I -->|market| J["retire competing / cancel continuations NOW<br/>(close is guaranteed)"]
-    I -->|limit NEW| K["DEFER retirement to fill<br/>mark _TrackedPosition.resting_structured_exit"]
+    I -->|limit NEW| K["BIND competing exits (safe; retire only on close)<br/>defer only the active entry-continuation cancel"]
     J --> L["_record_emission: exit_rule_firings++"]
     K --> L
     L --> M["fill simulator (next bar)"]
@@ -194,14 +194,24 @@ sequenceDiagram
 ```
 
 The fill-based counter (`exit_rule_fills` / `exit_rule_fills_by_symbol`) is bumped
-in `_apply_fill_outcome_events` (`service.py:~1135`, next to the existing
-`stop_limit_unfilled_triggers` bump) when an engine exit order actually fills.
-`exit_rule_firings` stays emission-based so the rule-firing-rate gate is unaffected.
+in `_apply_fill_outcome_events` off `outcome.closed_trades` — *not* the
+`exit_filled` diagnostic events. The events stamp the fill *kind*
+(`"full"`/`"partial"`) as their `reason`, so matching the `engine_exit:` prefix
+against them never fires in a real run; a closed trade's `exit_reason` carries the
+`engine_exit:<kind>` label (the same attribution the conformance gate reconciles),
+so counting closed trades keeps the counter consistent-by-construction with the
+gate. `exit_rule_firings` stays emission-based so the rule-firing-rate gate is
+unaffected.
 
 ### Resting structured-exit lifecycle
 
 A limit-style structured stop is a small state machine owned by the engine across
-bars. The retirement of competing orders moves from emission time to fill time.
+bars. Competing exits are still **bound** at emission (binding only retires them
+via the stale-continuation guard once the position is actually closed, so it is
+safe even when the stop-limit rests unfilled — and it is what prevents an unbound
+competing exit from later opening a reverse position). Only the *active*
+entry-continuation cancel is deferred, since it strips a scale-in on the
+assumption the close fills.
 
 ```mermaid
 stateDiagram-v2
@@ -235,7 +245,7 @@ long as retirement does not run early* (the reason for deferring it).
 |---|---|---|
 | `_build_close_order` always emits MARKET | `service.py:504` | Branch on `intent.style`; emit STOP_LIMIT with limit-price geometry reused from the bracket path |
 | Conformance reconciles below-floor trades vs firings 1:1 | `exit_rule_conformance.py` `_check_stop_loss` | Reconcile vs the new fill-based counter; tolerate fired-not-filled for limit-style rules |
-| Retirement bindings assume position closed on emission | `service.py` `_retire_competing_resting_orders`, `_cancel_pending_entry_continuations` | Skip when the emitted exit is a non-filling resting stop-limit; defer to the fill outcome |
+| Retirement bindings assume position closed on emission | `service.py` `_retire_competing_resting_orders`, `_cancel_pending_entry_continuations` | Still BIND competing exits for limit-style (binding retires them only on actual close, and is what prevents an unbound competing exit from later reversing); defer only the ACTIVE entry-continuation cancel to the fill |
 
 ### Touch-point summary
 
