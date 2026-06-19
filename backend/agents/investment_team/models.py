@@ -365,6 +365,32 @@ class StrategySpec(BaseModel):
             return normalize_asset_class(v)
         return normalize_asset_class_strict(v)
 
+    @model_validator(mode="after")
+    def _validate_single_limit_stop(self) -> "StrategySpec":
+        """At most one limit-style stop-loss per spec.
+
+        A ``style="limit"`` stop rests a STOP_LIMIT that the engine tracks across
+        bars and de-duplicates against on re-trigger. Allowing several of them
+        introduces ambiguous "which resting order is this rule's" bookkeeping
+        (same/overlapping stop levels, layered fallbacks) for a configuration no
+        real strategy needs — the designer authors a single protective
+        stop-limit. Bounding it to one keeps the resting-exit dispatch
+        unambiguous.
+
+        Preconditions: ``exit_rules`` is the validated rule list.
+        Postconditions: returns ``self`` when at most one exit rule is a
+        limit-style stop; raises ``ValueError`` otherwise.
+        """
+        limit_stops = sum(
+            1 for r in self.exit_rules if getattr(r, "style", "market") == "limit"
+        )
+        if limit_stops > 1:
+            raise ValueError(
+                f"at most one limit-style stop-loss (style='limit') is allowed "
+                f"per spec; got {limit_stops}"
+            )
+        return self
+
 
 class ValidationCheck(BaseModel):
     name: str
@@ -647,6 +673,19 @@ class BacktestExecutionDiagnostics(BaseModel):
     # exact-match conformance + alignment gates are unaffected, while analysis and
     # operability surfaces gain per-basis visibility.
     exit_rule_firings_by_basis: Dict[str, int] = Field(default_factory=dict)
+    # Fill-based counterpart of ``exit_rule_firings`` — counts engine-SUBMITTED
+    # exit orders that actually FILLED (closed a position), keyed by rule kind,
+    # with a per-symbol breakdown below. Counted off ``engine_exit_filled``
+    # diagnostic events keyed by the order's un-reconciled ``engine_exit:<kind>``
+    # reason, so a *strategy* close whose ``TradeRecord.exit_reason`` was
+    # reconciled to ``engine_exit:*`` is NOT counted as an engine fill. For a
+    # market close emission == fill, so these mirror ``exit_rule_firings``; for a
+    # ``style="limit"`` stop they diverge, because a STOP_LIMIT can fire (emit)
+    # but gap through its limit unfilled. Surfaced as observability telemetry (the
+    # fire-vs-fill gap), NOT as the conformance leak-check denominator: the gate
+    # reconciles against the independent emission firings.
+    exit_rule_fills: Dict[str, int] = Field(default_factory=dict)
+    exit_rule_fills_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     # Count of stop-limit orders that triggered (stop level crossed) but could not
     # fill on the trigger bar because the bar gapped through the limit price. A
     # triggered-but-unfilled stop-limit leaves the position open — the defining,

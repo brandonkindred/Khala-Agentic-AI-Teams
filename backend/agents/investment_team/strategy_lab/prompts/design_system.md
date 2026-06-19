@@ -52,7 +52,7 @@ Bare bar fields are addressed by the string literals `"bar.close"`, `"bar.high"`
 
 - **`entry_rules`**: list of objects with `{"kind": "entry", "side": "long"|"short", "when": Predicate, "note": str}`.
 - **`exit_rules`**: list of one or more of:
-  - `{"kind": "stop_loss", "pct": 0<float<=1.0, "basis": "entry_price"|"trailing_high"|"trailing_low", "note": str}` — note `pct` is a fraction (`0.03` = 3%), not a percent.
+  - `{"kind": "stop_loss", "pct": 0<float<=1.0, "basis": "entry_price"|"trailing_high"|"trailing_low", "style": "market"|"limit", "limit_offset_pct": 0<float<1.0, "note": str}` — `pct` is a fraction (`0.03` = 3%), not a percent. `style` defaults to `"market"` (a guaranteed close); set `style: "limit"` ONLY to author a stop-limit exit that protects the fill price at the cost of execution (it may gap through unfilled and leave the position open — see the stop-order semantics reference). `style: "limit"` REQUIRES `limit_offset_pct` (the limit's distance from the stop, as a fraction, strictly `0<…<1.0`), requires `pct < 1.0` (a 100% stop has no valid limit), and is only allowed with `basis: "entry_price"`. Omit `style` and `limit_offset_pct` for an ordinary market stop.
   - `{"kind": "take_profit", "pct": float>0, "note": str}` — `pct` is a fraction.
   - `{"kind": "signal_exit", "when": Predicate, "note": str}`.
   Bar-counting "time stops" are deliberately NOT a supported kind — real traders close on price, P&L, or signal reversal, not on an arbitrary "exit after N bars" trigger.

@@ -308,6 +308,107 @@ def test_format_stop_loss_trailing_low():
     assert format_rules_for_prompt([rule]) == "trailing-low stop loss 5%"
 
 
+# ---------------------------------------------------------------------------
+# StopLossRule.style="limit" — DSL surface for stop-limit exits.
+# ---------------------------------------------------------------------------
+
+
+def test_stop_loss_defaults_to_market_style():
+    rule = StopLossRule(pct=0.03)
+    assert rule.style == "market"
+    assert rule.limit_offset_pct is None
+
+
+def test_stop_loss_limit_style_accepts_offset():
+    rule = StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.005)
+    assert rule.style == "limit"
+    assert rule.limit_offset_pct == 0.005
+
+
+def test_stop_loss_limit_style_requires_offset():
+    with pytest.raises(ValidationError, match="requires limit_offset_pct"):
+        StopLossRule(pct=0.03, style="limit")
+
+
+def test_stop_loss_market_style_forbids_offset():
+    with pytest.raises(ValidationError, match="only valid when style='limit'"):
+        StopLossRule(pct=0.03, limit_offset_pct=0.005)
+
+
+def test_stop_loss_limit_style_rejects_trailing_basis():
+    with pytest.raises(ValidationError, match="only supported with basis='entry_price'"):
+        StopLossRule(pct=0.03, basis="trailing_high", style="limit", limit_offset_pct=0.005)
+
+
+def test_strategy_spec_rejects_multiple_limit_stops():
+    from investment_team.models import StrategySpec
+
+    def _spec(exit_rules):
+        return StrategySpec(
+            strategy_id="s1",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            exit_rules=exit_rules,
+        )
+
+    # Two limit-style stops are rejected (the resting-exit dispatch supports one).
+    with pytest.raises(ValidationError, match="at most one limit-style stop-loss"):
+        _spec(
+            [
+                StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.005),
+                StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01),
+            ]
+        )
+    # One limit stop alongside a market stop and a take-profit is fine.
+    spec = _spec(
+        [
+            StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.005),
+            StopLossRule(pct=0.10),  # market-style
+            TakeProfitRule(pct=0.05),
+        ]
+    )
+    assert sum(1 for r in spec.exit_rules if getattr(r, "style", "market") == "limit") == 1
+
+
+def test_stop_loss_limit_style_rejects_full_pct():
+    # pct=1.0 is allowed for a market stop but not a limit stop: a long's level
+    # entry*(1-1.0) resolves to 0, which has no valid protective limit.
+    with pytest.raises(ValidationError, match="requires pct < 1.0"):
+        StopLossRule(pct=1.0, style="limit", limit_offset_pct=0.005)
+    # Just under 1.0 is accepted for limit style.
+    assert StopLossRule(pct=0.99, style="limit", limit_offset_pct=0.005).pct == 0.99
+    # pct=1.0 remains valid for the default market style.
+    assert StopLossRule(pct=1.0).style == "market"
+
+
+def test_stop_loss_limit_offset_pct_bounds():
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.0)
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=1.5)
+    # Strictly below 1.0: at exactly 1.0 a long-side limit collapses to
+    # stop*(1-1)=0 (a never-filling protective order), so 1.0 is rejected.
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=1.0)
+    # Just under 1.0 is accepted.
+    assert StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.99).limit_offset_pct == 0.99
+
+
+def test_format_stop_loss_limit_style():
+    rule = StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.005)
+    assert format_rules_for_prompt([rule]) == "stop loss 3% (limit, 0.5% offset)"
+
+
+def test_format_stop_loss_market_style_unchanged_with_style_field():
+    # Explicitly setting style="market" must render byte-identically to the
+    # default, so existing rendering callers are unaffected.
+    rule = StopLossRule(pct=0.03, style="market")
+    assert format_rules_for_prompt([rule]) == "stop loss 3%"
+
+
 def test_format_indicator_source_default_omitted():
     rule = EntryRule(
         side="long",
