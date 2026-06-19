@@ -30,7 +30,7 @@ import json
 import logging
 import os
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from .. import config as llm_config
 from ..attribution import (
@@ -172,19 +172,23 @@ class ClaudeLLMClient(LLMClient):
         api_key: str = "",
         timeout: float = 900.0,
         max_retries: int = 2,
+        on_reasoning: Optional[Callable[[str], None]] = None,
     ) -> None:
         """Construct a Claude client.
 
         Preconditions: ``model`` is a non-empty Claude model id; ``timeout`` > 0;
-            ``max_retries`` >= 0. ``api_key`` may be empty here — it is validated on
-            first use so the client can be constructed in environments that resolve
-            the key lazily.
+            ``max_retries`` >= 0; ``on_reasoning`` is callable or ``None``.
+            ``api_key`` may be empty here — it is validated on first use so the
+            client can be constructed in environments that resolve the key lazily.
+        Postconditions: a ready client; when ``on_reasoning`` is set, thinking-token
+            deltas are streamed to it during each call (mirrors the Ollama client).
         """
         assert model, "model must be non-empty"
         self.model = model
         self.api_key = api_key or ""
         self.timeout = timeout
         self.max_retries = max(0, int(max_retries))
+        self.on_reasoning = on_reasoning
         self._client: Any = None
 
     # ------------------------------------------------------------------
@@ -237,9 +241,13 @@ class ClaudeLLMClient(LLMClient):
         env = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
         if env:
             try:
-                return max(1, min(int(env), CLAUDE_MAX_OUTPUT_TOKENS))
+                env_int = int(env)
             except ValueError:
-                pass
+                env_int = 0
+            # A non-positive env value is treated as "unset" (mirrors the explicit
+            # path above), never coerced to a 1-token cap that truncates every call.
+            if env_int > 0:
+                return min(env_int, CLAUDE_MAX_OUTPUT_TOKENS)
         return DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
 
     def _thinking_kwargs(self, think: "bool | str | None") -> dict:
@@ -262,6 +270,30 @@ class ClaudeLLMClient(LLMClient):
             kwargs["output_config"] = {"effort": resolved}
         return kwargs
 
+    def _emit_reasoning(self, event: Any) -> None:
+        """Forward one streamed thinking-token delta to ``on_reasoning`` (best-effort).
+
+        Preconditions: ``event`` is a streamed Anthropic event object.
+        Postconditions: calls ``self.on_reasoning(text)`` for a ``thinking_delta``
+            event with non-empty text; a callback exception is logged, never raised.
+            A no-op when ``on_reasoning`` is ``None`` or the event is not a thinking
+            delta.
+        """
+        if self.on_reasoning is None:
+            return
+        if getattr(event, "type", None) != "content_block_delta":
+            return
+        delta = getattr(event, "delta", None)
+        if getattr(delta, "type", None) != "thinking_delta":
+            return
+        text = getattr(delta, "thinking", "") or ""
+        if not text:
+            return
+        try:
+            self.on_reasoning(text)
+        except Exception:  # noqa: BLE001 - reasoning sink must never break a call
+            logger.debug("on_reasoning callback raised", exc_info=True)
+
     def _invoke(
         self,
         *,
@@ -279,8 +311,9 @@ class ClaudeLLMClient(LLMClient):
 
         Postconditions: returns the assembled final message on success. Raises
             ``LLMRateLimitError`` (429), ``LLMTemporaryError`` (5xx / connection),
-            or ``LLMPermanentError`` (other 4xx / any other Anthropic SDK error)
-            otherwise — no raw ``anthropic`` exception escapes the unified hierarchy.
+            or ``LLMPermanentError`` (other 4xx / any other Anthropic SDK error, or
+            any non-Anthropic exception raised client-side) otherwise — no raw
+            exception escapes the unified hierarchy.
         """
         anthropic = _import_anthropic()
         client = self._get_client()
@@ -297,6 +330,12 @@ class ClaudeLLMClient(LLMClient):
         kwargs.update(self._thinking_kwargs(think))
         try:
             with client.messages.stream(**kwargs) as stream:
+                if self.on_reasoning is not None:
+                    # Forward thinking-token deltas to the per-caller sink while the
+                    # stream is consumed; get_final_message() still returns the fully
+                    # assembled message afterward.
+                    for event in stream:
+                        self._emit_reasoning(event)
                 return stream.get_final_message()
         except anthropic.RateLimitError as e:
             raise LLMRateLimitError(
@@ -328,6 +367,12 @@ class ClaudeLLMClient(LLMClient):
             # / stream-parsing failures) so callers only ever see the unified
             # hierarchy. Unknown faults are treated as permanent (not blindly retried).
             raise LLMPermanentError(f"Claude SDK error: {e}", cause=e) from e
+        except (LLMRateLimitError, LLMTemporaryError, LLMPermanentError, LLMTruncatedError):
+            raise
+        except Exception as e:  # noqa: BLE001 - even a non-Anthropic error maps to the hierarchy
+            # e.g. a TypeError from a thinking/output_config kwarg an older SDK
+            # rejects client-side, before any HTTP call — never let it escape raw.
+            raise LLMPermanentError(f"Claude call failed: {e}", cause=e) from e
 
     def _content_from_message(self, message: Any) -> tuple[str, Any]:
         """Reduce a final message to ``(kind, value)``.
@@ -337,8 +382,9 @@ class ClaudeLLMClient(LLMClient):
         text blocks. Maps ``stop_reason`` edge cases onto the unified hierarchy.
 
         Postconditions: raises ``LLMPermanentError`` on a ``refusal`` stop reason
-            and ``LLMTruncatedError`` on a ``max_tokens`` stop reason — both are
-            checked BEFORE returning a tool envelope, so a tool call truncated at
+            and ``LLMTruncatedError`` on a ``max_tokens`` or ``pause_turn`` stop
+            reason — all are checked BEFORE returning a tool envelope, so a tool
+            call truncated at
             the token cap (possibly incomplete arguments) surfaces as a truncation
             error rather than a "successful" tool invocation. A ``"text"`` value
             may be empty (the caller decides whether that is an error).
@@ -386,6 +432,16 @@ class ClaudeLLMClient(LLMClient):
                 partial_content=text,
                 finish_reason="max_tokens",
             )
+        if stop_reason == "pause_turn":
+            # Anthropic paused a long turn and expects the caller to resend to
+            # resume. We do not support resume, so surface it as a truncation rather
+            # than silently returning the partial text/tool envelope as if complete.
+            raise LLMTruncatedError(
+                "Claude turn paused (stop_reason=pause_turn); resume is not supported, "
+                "so the response is incomplete. Lower the work per turn or raise max_tokens.",
+                partial_content=text,
+                finish_reason="pause_turn",
+            )
         if tool_calls:
             logger.info("Claude returned %d tool call(s)", len(tool_calls))
             return "tools", {"__tool_calls__": tool_calls}
@@ -402,7 +458,14 @@ class ClaudeLLMClient(LLMClient):
         prompt_text: Optional[str] = None,
         response_text: Optional[str] = None,
     ) -> None:
-        """Record one LLM call to telemetry, sourcing attribution from contextvars."""
+        """Record one LLM call to telemetry, sourcing attribution from contextvars.
+
+        Preconditions: ``status`` is a telemetry status string; ``message`` is the
+            final Anthropic message or ``None``.
+        Postconditions: emits one ``record_llm_call`` row (token counts read from
+            ``message.usage``); any telemetry failure is swallowed so it never breaks
+            the LLM call. Never raises.
+        """
         usage = getattr(message, "usage", None)
         prompt_tokens = int(getattr(usage, "input_tokens", 0) or 0)
         completion_tokens = int(getattr(usage, "output_tokens", 0) or 0)
@@ -429,6 +492,12 @@ class ClaudeLLMClient(LLMClient):
             logger.debug("Failed to record Claude LLM telemetry", exc_info=True)
 
     def _log_request(self, *, caller: str, think: "bool | str | None", kind: str) -> None:
+        """Log one structured 'LLM request' line for this call.
+
+        Preconditions: ``kind`` is a short request-kind tag (e.g. ``"json"``).
+        Postconditions: emits one info log line with attribution + model + resolved
+            thinking level; no secrets are logged. Never raises.
+        """
         attr = current_attribution()
         logger.info(
             "LLM request (%s): rid=%s agent=%s team=%s objective=%s caller=%s provider=claude model=%s think=%s",
@@ -462,7 +531,7 @@ class ClaudeLLMClient(LLMClient):
         ``temperature`` is accepted for interface compatibility but never sent to
         the Anthropic API.
 
-        Preconditions: ``objective`` is a non-empty string.
+        Preconditions: ``objective`` and ``prompt`` are non-empty strings.
         Postconditions: returns a parsed ``dict`` — either the JSON object the model
             produced (via the shared repair-tolerant parser) or, on tool use, the
             ``{"__tool_calls__": [...]}`` envelope. Raises ``LLMJsonParseError`` when
@@ -471,15 +540,22 @@ class ClaudeLLMClient(LLMClient):
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
             self._log_request(caller=caller, think=think, kind="json")
-            system = (
-                f"{system_prompt.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
-                if system_prompt and system_prompt.strip()
-                else _JSON_ONLY_INSTRUCTION
-            )
+            if tools:
+                # With tools, forcing "JSON only" fights the tool-use protocol and
+                # biases the model away from tool_use blocks, so omit it (mirrors chat()).
+                system = system_prompt.strip() if system_prompt and system_prompt.strip() else None
+            else:
+                system = (
+                    f"{system_prompt.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
+                    if system_prompt and system_prompt.strip()
+                    else _JSON_ONLY_INSTRUCTION
+                )
             max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
             t0 = time.monotonic()
             message = self._invoke(
@@ -536,7 +612,7 @@ class ClaudeLLMClient(LLMClient):
         tool invocation is returned as a JSON string of the ``__tool_calls__``
         envelope (matching the Ollama client).
 
-        Preconditions: ``objective`` is a non-empty string.
+        Preconditions: ``objective`` and ``prompt`` are non-empty strings.
         Postconditions: returns the model's text, or a JSON string of the
             ``{"__tool_calls__": [...]}`` envelope on tool use. Raises the unified
             ``LLM*`` errors on transport/refusal/truncation. A telemetry record is
@@ -544,6 +620,8 @@ class ClaudeLLMClient(LLMClient):
         """
         if not objective or not objective.strip():
             raise ValueError("objective must be a non-empty string")
+        if not prompt or not prompt.strip():
+            raise ValueError("prompt must be a non-empty string")
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
@@ -650,6 +728,8 @@ class ClaudeLLMClient(LLMClient):
                     error_type="json_parse",
                     latency_ms=latency_ms,
                     caller=caller,
+                    prompt_text=json.dumps(messages, default=str),
+                    response_text=value,
                 )
                 raise
             self._record(status="success", message=message, latency_ms=latency_ms, caller=caller)
@@ -774,7 +854,10 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
                             "input": args if isinstance(args, dict) else {},
                         }
                     )
-                    emitted_tool_use_ids.add(tool_use_id)
+                    # Only track non-empty ids: an empty id would let an orphan
+                    # tool_result (also empty id) false-match and reach Anthropic.
+                    if tool_use_id:
+                        emitted_tool_use_ids.add(tool_use_id)
                 if blocks:
                     out.append({"role": "assistant", "content": blocks})
                 continue
@@ -787,6 +870,12 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
                 out.append({"role": "assistant", "content": content})
             continue
         if role == "user":
-            out.append({"role": "user", "content": content})
+            # Mirror the assistant branch: skip empty/whitespace/None content —
+            # Anthropic rejects an empty content block with a 400.
+            if isinstance(content, str):
+                if content.strip():
+                    out.append({"role": "user", "content": content})
+            elif content:
+                out.append({"role": "user", "content": content})
     _flush_tool_results()
     return "\n\n".join(system_parts), out

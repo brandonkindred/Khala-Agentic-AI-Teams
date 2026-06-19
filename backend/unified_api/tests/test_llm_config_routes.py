@@ -114,3 +114,14 @@ def test_put_requires_postgres(app_client, monkeypatch):
     resp = client.put("/api/llm-config", json={"provider": "claude"})
     assert resp.status_code == 503
     assert calls["set"] == []  # nothing persisted
+
+
+def test_get_reports_resolved_ollama_model(app_client):
+    # _build_response routes through resolve_model_for_provider, so the effective
+    # Ollama model (here from env) is surfaced — the UI never disagrees with agents.
+    client, _calls, mp = app_client
+    mp.setenv("LLM_PROVIDER", "ollama")
+    mp.setenv("LLM_MODEL", "llama3.2")
+    body = client.get("/api/llm-config").json()
+    assert body["provider"] == "ollama"
+    assert body["model"] == "llama3.2"

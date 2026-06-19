@@ -60,3 +60,22 @@ def test_clear_client_cache_drops_claude(monkeypatch):
     clear_client_cache()
     c2 = get_client(None)
     assert c1 is not c2
+
+
+def test_on_reasoning_returns_fresh_uncached_claude_client():
+    def cb(_s: str) -> None:
+        return None
+
+    c1 = get_client(None, on_reasoning=cb)
+    c2 = get_client(None, on_reasoning=cb)
+    assert isinstance(c1, ClaudeLLMClient)
+    assert c1 is not c2  # per-caller callback must never be cached
+    assert c1.on_reasoning is cb
+
+
+def test_clear_client_cache_also_clears_strands_cache():
+    from llm_service import strands_provider
+
+    strands_provider._model_cache[("m", "u", "json", None)] = object()
+    clear_client_cache()
+    assert strands_provider._model_cache == {}

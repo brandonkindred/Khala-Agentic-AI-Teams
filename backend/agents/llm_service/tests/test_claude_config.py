@@ -55,6 +55,48 @@ def test_resolve_claude_model_ignores_ollama_agent_defaults():
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
+def test_resolve_claude_model_skips_non_claude_runtime(monkeypatch):
+    # A non-Claude runtime model (e.g. the default deepseek) is ignored, not sent
+    # to Anthropic; a second call hits the "already warned" branch (lock path).
+    monkeypatch.setattr(
+        c, "_runtime", lambda key: "deepseek-v4-pro:cloud" if key == "model" else ""
+    )
+    c._warned_non_claude_models.discard("deepseek-v4-pro:cloud")
+    assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+    assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+
+
+def test_resolve_model_reads_runtime(monkeypatch):
+    # The Ollama path honors the runtime (UI) model, ranked above LLM_MODEL.
+    monkeypatch.setattr(c, "_runtime", lambda key: "llama3.2" if key == "model" else "")
+    assert c.resolve_model(None) == "llama3.2"
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
+    assert c.resolve_model(None) == "llama3.2"  # runtime still wins over global env
+    monkeypatch.setenv("LLM_MODEL_backend", "qwen3-coder:480b-cloud")
+    assert c.resolve_model("backend") == "qwen3-coder:480b-cloud"  # per-agent env wins
+
+
+def test_resolve_model_falls_back_without_runtime(monkeypatch):
+    monkeypatch.setattr(c, "_runtime", lambda key: "")
+    assert c.resolve_model(None) == c.DEFAULT_FALLBACK_MODEL
+    monkeypatch.setenv("LLM_MODEL", "llama3.1")
+    assert c.resolve_model(None) == "llama3.1"
+
+
+def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
+    # The chokepoint routes ollama -> resolve_model, which now reads runtime.
+    runtime = {"provider": "ollama", "model": "llama3.2"}
+    monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
+    assert c.resolve_model_for_provider(None) == "llama3.2"
+
+
+def test_claude_model_options_track_context_table():
+    # The UI suggestion list is derived from the context table (single source),
+    # and the default model is always present.
+    assert c.CLAUDE_MODEL_OPTIONS == list(c.KNOWN_CLAUDE_CONTEXT.keys())
+    assert c.DEFAULT_CLAUDE_MODEL in c.CLAUDE_MODEL_OPTIONS
+
+
 def test_looks_like_claude_model():
     for m in (
         "claude-opus-4-8",

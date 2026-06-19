@@ -119,6 +119,142 @@ def test_complete_json_tool_call_envelope():
     assert call["function"]["arguments"] == {"city": "Paris"}
 
 
+def test_complete_json_with_tools_omits_json_instruction():
+    # With tools, the "JSON only" instruction must NOT be appended (it fights tool use).
+    client, capture = _make_client(_tool_message("f", {}))
+    client.complete_json("q", objective="t", system_prompt="Be terse.", tools=[{"name": "f"}])
+    assert capture["system"] == "Be terse."
+    assert "JSON" not in capture["system"]
+
+
+def test_complete_json_with_tools_no_system_prompt_sends_no_system():
+    client, capture = _make_client(_tool_message("f", {}))
+    client.complete_json("q", objective="t", tools=[{"name": "f"}])
+    assert "system" not in capture
+
+
+def test_complete_json_requires_prompt():
+    client, _ = _make_client(_text_message("{}"))
+    with pytest.raises(ValueError):
+        client.complete_json("   ", objective="t")
+
+
+def test_complete_requires_prompt():
+    client, _ = _make_client(_text_message("hi"))
+    with pytest.raises(ValueError):
+        client.complete("", objective="t")
+
+
+def test_pause_turn_raises_truncated():
+    client, _ = _make_client(_text_message("partial", stop_reason="pause_turn"))
+    with pytest.raises(LLMTruncatedError):
+        client.complete("q", objective="t")
+
+
+def test_max_tokens_env_zero_is_treated_as_unset(monkeypatch):
+    from llm_service.clients.claude import DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
+
+    monkeypatch.setenv("LLM_MAX_TOKENS", "0")
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t")
+    assert capture["max_tokens"] == DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
+
+
+def test_non_anthropic_error_mapped_to_permanent():
+    # A client-side error (e.g. a bad kwarg an older SDK rejects) must not escape raw.
+    client, _ = _make_client(exc=TypeError("unexpected keyword argument 'output_config'"))
+    with pytest.raises(LLMPermanentError):
+        client.complete("q", objective="t")
+
+
+def test_on_reasoning_receives_thinking_deltas():
+    captured: list[str] = []
+
+    class _IterStream:
+        def __init__(self, msg):
+            self._msg = msg
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_a):
+            return False
+
+        def __iter__(self):
+            yield SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="thinking_delta", thinking="step1 "),
+            )
+            yield SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="text_delta", text="ignored"),
+            )
+            yield SimpleNamespace(
+                type="content_block_delta",
+                delta=SimpleNamespace(type="thinking_delta", thinking="step2"),
+            )
+
+        def get_final_message(self):
+            return self._msg
+
+    class _Msgs:
+        def stream(self, **_kw):
+            return _IterStream(_text_message("done"))
+
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk", on_reasoning=captured.append)
+    client._client = SimpleNamespace(messages=_Msgs())
+    assert client.complete("q", objective="t") == "done"
+    assert "".join(captured) == "step1 step2"
+
+
+def test_chat_json_parse_error_records_prompt_and_response(monkeypatch):
+    import llm_service.clients.claude as mod
+    from llm_service.interface import LLMJsonParseError
+
+    records: list[dict] = []
+    monkeypatch.setattr(mod, "record_llm_call", lambda **kw: records.append(kw))
+    client, _ = _make_client(_text_message("not json"))
+    with pytest.raises(LLMJsonParseError):
+        client.chat([{"role": "user", "content": "q"}], objective="t", response_format="json")
+    errors = [r for r in records if r.get("status") == "error"]
+    assert errors and errors[0]["response_text"] == "not json"
+    assert errors[0]["prompt_text"]  # non-empty serialized messages
+
+
+def test_to_anthropic_messages_skips_empty_user_content():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": ""},
+            {"role": "user", "content": "hello"},
+            {"role": "user", "content": "   "},
+        ]
+    )
+    assert msgs == [{"role": "user", "content": "hello"}]
+
+
+def test_to_anthropic_messages_drops_empty_id_tool_result():
+    from llm_service.clients.claude import _to_anthropic_messages
+
+    _system, msgs = _to_anthropic_messages(
+        [
+            {"role": "user", "content": "hi"},
+            {
+                "role": "assistant",
+                "tool_calls": [{"id": "", "function": {"name": "f", "arguments": "{}"}}],
+            },
+            {"role": "tool", "tool_call_id": "", "content": "result"},
+        ]
+    )
+    # The orphan tool_result with an empty id must not be emitted to Anthropic.
+    has_tool_result = any(
+        isinstance(m["content"], list) and any(b.get("type") == "tool_result" for b in m["content"])
+        for m in msgs
+    )
+    assert not has_tool_result
+
+
 def test_complete_json_requires_objective():
     client, _ = _make_client(_text_message("{}"))
     with pytest.raises(ValueError):

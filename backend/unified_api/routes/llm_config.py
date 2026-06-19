@@ -33,13 +33,8 @@ router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
 # Curated options surfaced to the settings UI. The model fields also accept free
 # text, so these are suggestions, not a closed set.
 _PROVIDER_OPTIONS = ["ollama", "claude"]
-_CLAUDE_MODEL_OPTIONS = [
-    "claude-opus-4-8",
-    "claude-opus-4-7",
-    "claude-sonnet-4-6",
-    "claude-haiku-4-5",
-    "claude-fable-5",
-]
+# Claude suggestions come from llm_config.CLAUDE_MODEL_OPTIONS (derived from the
+# context-window table) so this list can't drift from the model the client uses.
 _OLLAMA_MODEL_SUGGESTIONS = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
@@ -81,28 +76,35 @@ class LlmConfigResponse(BaseModel):
 
 
 def _build_response() -> LlmConfigResponse:
-    """Assemble the current effective config for the UI (no secrets)."""
-    provider = llm_config.resolve_provider()
-    if provider == "claude":
-        model = llm_config.resolve_claude_model(None)
-    else:
-        model = llm_config.resolve_model(None)
+    """Assemble the current effective config for the UI (no secrets).
+
+    Preconditions: none.
+    Postconditions: returns the effective provider, the active provider's resolved
+        model (via the shared ``resolve_model_for_provider`` chokepoint, so the UI
+        never disagrees with the model agents actually use), the Ollama base URL,
+        and ``*_configured`` booleans — API keys are never included. Never raises.
+    """
     return LlmConfigResponse(
-        provider=provider,
-        model=model,
+        provider=llm_config.resolve_provider(),
+        model=llm_config.resolve_model_for_provider(None),
         ollama_base_url=llm_config.resolve_base_url(),
         claude_api_key_configured=bool(llm_config.resolve_claude_api_key()),
         ollama_api_key_configured=bool(llm_config.resolve_ollama_api_key()),
         storage_available=is_postgres_enabled(),
         provider_options=list(_PROVIDER_OPTIONS),
-        claude_model_options=list(_CLAUDE_MODEL_OPTIONS),
+        claude_model_options=list(llm_config.CLAUDE_MODEL_OPTIONS),
         ollama_model_suggestions=list(_OLLAMA_MODEL_SUGGESTIONS),
     )
 
 
 @router.get("", response_model=LlmConfigResponse)
 async def get_llm_config() -> LlmConfigResponse:
-    """Return the effective LLM provider configuration (API keys masked)."""
+    """Return the effective LLM provider configuration (API keys masked).
+
+    Preconditions: none.
+    Postconditions: returns the current effective config; API keys are reported
+        only as ``*_configured`` booleans (never the key values).
+    """
     return _build_response()
 
 

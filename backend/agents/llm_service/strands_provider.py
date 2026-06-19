@@ -25,7 +25,7 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-_model_cache: dict[tuple[str, str, str], LLMClientModel] = {}
+_model_cache: dict[tuple[str, str, str, Optional[str]], LLMClientModel] = {}
 _cache_lock = threading.Lock()
 
 
@@ -120,7 +120,21 @@ def get_strands_model(
         return _model_cache[cache_key]
 
 
-def _clear_strands_model_cache_for_testing() -> None:
-    """Clear the Strands model cache. For use in tests only."""
+def clear_model_cache() -> None:
+    """Drop all cached Strands models so the next call rebuilds against new config.
+
+    Called by ``factory.clear_client_cache`` after a settings change: the cache key
+    ``(model_id, base_url, response_format, agent_key)`` omits the API-key
+    fingerprint, so without this an in-place key rotation would keep serving a
+    Strands adapter whose backing client still holds the old key.
+
+    Postconditions: the Strands model cache is empty afterward. Safe to call when
+        nothing is cached.
+    """
     with _cache_lock:
         _model_cache.clear()
+
+
+def _clear_strands_model_cache_for_testing() -> None:
+    """Clear the Strands model cache. For use in tests only."""
+    clear_model_cache()

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -54,6 +55,9 @@ DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
 # LLM_MODEL under the Claude provider (e.g. the default deepseek model) logs once
 # per distinct value instead of on every get_client()/get_strands_model() call.
 _warned_non_claude_models: set[str] = set()
+# Guards the check-then-add on the warn set so the "warn once per distinct model"
+# intent holds under concurrent get_client()/get_strands_model() calls.
+_warned_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
 # Known Claude context windows (input tokens). Used by ClaudeLLMClient when
@@ -71,6 +75,18 @@ KNOWN_CLAUDE_CONTEXT: dict[str, int] = {
 }
 
 DEFAULT_CLAUDE_CONTEXT = 200_000
+
+# Curated Claude model ids surfaced as suggestions by the settings UI. Derived
+# from KNOWN_CLAUDE_CONTEXT so the option list and the context-window table are a
+# single source of truth that cannot silently drift apart: every suggested model
+# has a known context window. The model field also accepts free text.
+CLAUDE_MODEL_OPTIONS: list[str] = list(KNOWN_CLAUDE_CONTEXT.keys())
+
+# Invariant: the default model must itself have a known context window (and thus
+# appear in the suggestion list), so it never falls back to DEFAULT_CLAUDE_CONTEXT.
+assert (
+    DEFAULT_CLAUDE_MODEL in KNOWN_CLAUDE_CONTEXT
+), "DEFAULT_CLAUDE_MODEL must be a key in KNOWN_CLAUDE_CONTEXT"
 
 # ---------------------------------------------------------------------------
 # Known model context (tokens) – used when /api/show is unavailable or not called
@@ -322,8 +338,11 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
             continue
         if _looks_like_claude_model(candidate):
             return candidate
-        if candidate not in _warned_non_claude_models:
-            _warned_non_claude_models.add(candidate)
+        with _warned_lock:
+            should_warn = candidate not in _warned_non_claude_models
+            if should_warn:
+                _warned_non_claude_models.add(candidate)
+        if should_warn:
             logger.warning(
                 "Ignoring non-Claude model %r for the Claude provider; using default %s. "
                 "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
@@ -384,13 +403,26 @@ def resolve_ollama_api_key() -> str:
 
 
 def resolve_model(agent_key: Optional[str] = None) -> str:
+    """Resolve the Ollama model id for ``agent_key``.
+
+    Ordered sources: ``LLM_MODEL_<agent_key>`` (per-agent env) -> runtime model
+    (the LLM Provider settings UI) -> ``LLM_MODEL`` (global env) ->
+    ``AGENT_DEFAULT_MODELS[agent_key]`` -> ``DEFAULT_FALLBACK_MODEL``. The runtime
+    (UI) value is ranked above the global env so a model chosen in the settings
+    page is honored — consistent with ``resolve_provider`` / ``resolve_base_url`` /
+    ``resolve_claude_model`` (whose Ollama counterpart this is).
+
+    Postconditions: returns a non-empty model id string. Never raises.
     """
-    Resolve model name: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
-    """
+    from . import runtime_config as _rc
+
     if agent_key:
-        per_agent = os.environ.get(f"LLM_MODEL_{agent_key}")
+        per_agent = (os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip()
         if per_agent:
-            return per_agent.strip()
+            return per_agent
+    runtime_model = _runtime(_rc.KEY_MODEL).strip()
+    if runtime_model:
+        return runtime_model
     global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
     if global_model:
         return global_model

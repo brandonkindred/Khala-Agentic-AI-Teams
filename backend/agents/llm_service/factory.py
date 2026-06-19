@@ -140,9 +140,10 @@ def get_client(
     When LLM_PROVIDER=dummy, returns DummyLLMClient. Otherwise returns OllamaLLMClient (cached by model, base_url, timeout).
 
     ``on_reasoning`` is an optional per-caller thinking-token sink. When provided,
-    a FRESH (uncached) OllamaLLMClient is returned so the callback never leaks into
-    the shared cache; the cached singleton path is used only when it is ``None``.
-    The dummy provider produces no reasoning, so the hook is irrelevant there.
+    a FRESH (uncached) provider client (Ollama or Claude) is returned so the
+    callback never leaks into the shared cache; the cached singleton path is used
+    only when it is ``None``. The dummy provider produces no reasoning, so the hook
+    is irrelevant there.
 
     When ``agent_key`` is provided, the returned object is an
     :class:`_AttributingClient` wrapper that binds that agent identity onto the
@@ -164,7 +165,7 @@ def get_client(
         return DummyLLMClient()
 
     if provider in ("claude", "anthropic"):
-        return _get_claude_client(agent_key)
+        return _get_claude_client(agent_key, on_reasoning=on_reasoning)
 
     model = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
@@ -194,7 +195,11 @@ def get_client(
     return _AttributingClient(client, agent_key) if agent_key else client
 
 
-def _get_claude_client(agent_key: Optional[str]) -> Union[ClaudeLLMClient, "_AttributingClient"]:
+def _get_claude_client(
+    agent_key: Optional[str],
+    *,
+    on_reasoning: Optional[Callable[[str], None]] = None,
+) -> Union[ClaudeLLMClient, "_AttributingClient"]:
     """Build/cache a :class:`ClaudeLLMClient` for ``agent_key``.
 
     Cached by ``(model, api_key_fingerprint, timeout)`` so a model, key, or timeout
@@ -203,12 +208,23 @@ def _get_claude_client(agent_key: Optional[str]) -> Union[ClaudeLLMClient, "_Att
     per-agent). Wrapped in :class:`_AttributingClient` when ``agent_key`` is
     truthy, mirroring the Ollama path.
 
-    Postconditions: returns a ready client; the underlying ``ClaudeLLMClient`` is
-        the cached singleton for its (model, key, timeout) tuple.
+    ``on_reasoning`` (a per-caller thinking-token sink) forces a FRESH, uncached
+    client so the callback never leaks into the shared cache — mirroring the Ollama
+    path; the cached singleton is used only when it is ``None``.
+
+    Postconditions: returns a ready client; with ``on_reasoning is None`` the
+        underlying ``ClaudeLLMClient`` is the cached singleton for its
+        (model, key, timeout) tuple, otherwise a distinct uncached client.
     """
     model = llm_config.resolve_claude_model(agent_key)
     api_key = llm_config.resolve_claude_api_key()
     timeout = llm_config.resolve_timeout(agent_key)
+    if on_reasoning is not None:
+        # Uncached: a per-job/per-caller callback must not be shared via the cache.
+        client = ClaudeLLMClient(
+            model=model, api_key=api_key, timeout=timeout, on_reasoning=on_reasoning
+        )
+        return _AttributingClient(client, agent_key) if agent_key else client
     fingerprint = sha256_fingerprint(api_key) if api_key else "no-key"
     cache_key = (model, fingerprint, timeout)
     with _cache_lock:
@@ -222,15 +238,27 @@ def _get_claude_client(agent_key: Optional[str]) -> Union[ClaudeLLMClient, "_Att
 
 
 def clear_client_cache() -> None:
-    """Drop all cached provider clients (Ollama + Claude).
+    """Drop all cached provider clients (Ollama + Claude) and Strands adapters.
 
     Called by the settings endpoint after a config change so the next
-    :func:`get_client` rebuilds against the new provider/model/key. Safe to call
-    when nothing is cached.
+    :func:`get_client` / :func:`get_strands_model` rebuilds against the new
+    provider/model/key. The Strands model cache is cleared too because its entries
+    pin a backing provider client built with the previous key (its cache key omits
+    the key fingerprint, so an in-place API-key rotation would otherwise be served
+    stale). Safe to call when nothing is cached.
+
+    Postconditions: the factory and Strands model caches are empty afterward.
     """
     with _cache_lock:
         _client_cache.clear()
         _claude_cache.clear()
+    # Lazy import to avoid a circular import (strands_provider imports get_client).
+    try:
+        from . import strands_provider
+
+        strands_provider.clear_model_cache()
+    except Exception:  # noqa: BLE001 - cache clear is best-effort
+        logger.debug("Failed to clear Strands model cache", exc_info=True)
 
 
 def _clear_client_cache_for_testing() -> None:

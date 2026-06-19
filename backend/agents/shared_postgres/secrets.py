@@ -80,7 +80,13 @@ def _load_or_create_key() -> bytes:
 
 
 def _get_fernet():
-    """Return the process-wide cached Fernet instance (lazy)."""
+    """Return the process-wide cached Fernet instance (lazy).
+
+    Preconditions: none.
+    Postconditions: returns the single ``cryptography.fernet.Fernet`` for this
+        process (built once from :func:`_load_or_create_key`) — the same instance
+        every call. Never raises for a missing key file; it is created.
+    """
     global _fernet
     if _fernet is not None:
         return _fernet
@@ -105,6 +111,44 @@ def get_fernet():
     return _get_fernet()
 
 
+# DDL for the shared secrets table. This store is shared infrastructure, so it
+# self-heals the table on first use: a team container may read runtime config
+# before the unified API has run its migration (which also declares this table in
+# unified_api/postgres). ``CREATE TABLE IF NOT EXISTS`` is idempotent and matches
+# that schema exactly, so the two never conflict.
+_SECRETS_TABLE_DDL = (
+    "CREATE TABLE IF NOT EXISTS encrypted_integration_credentials ("
+    "service TEXT NOT NULL, "
+    "credential_key TEXT NOT NULL, "
+    "ciphertext TEXT NOT NULL, "
+    "updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(), "
+    "PRIMARY KEY (service, credential_key))"
+)
+_table_ensured = False
+
+
+def _ensure_table() -> None:
+    """Idempotently create the shared secrets table on first use.
+
+    Preconditions: none (no-op when Postgres is disabled).
+    Postconditions: the ``encrypted_integration_credentials`` table exists after a
+        successful call; success is cached process-wide so later calls are free. A
+        DDL failure is logged and retried on the next call. Never raises.
+    """
+    global _table_ensured
+    if _table_ensured or not is_postgres_enabled():
+        return
+    with _LOCK:
+        if _table_ensured:
+            return
+        try:
+            with get_conn() as conn, conn.cursor() as cur:
+                cur.execute(_SECRETS_TABLE_DDL)
+            _table_ensured = True
+        except Exception as e:  # noqa: BLE001 - reads still fall back to ""; retried next call
+            logger.warning("shared secrets table ensure failed: %s", e)
+
+
 @timed_query(store=_STORE, op="get_secret")
 def get_secret(service: str, key: str) -> str:
     """Return the decrypted secret for ``(service, key)``, or ``""``.
@@ -117,6 +161,7 @@ def get_secret(service: str, key: str) -> str:
     assert service and key, "service and key must be non-empty"
     if not is_postgres_enabled():
         return ""
+    _ensure_table()
     row: Optional[tuple] = None
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -156,6 +201,7 @@ def get_secrets(service: str, keys: "list[str] | tuple[str, ...]") -> dict[str, 
     wanted = {k for k in keys if k}
     if not wanted or not is_postgres_enabled():
         return {}
+    _ensure_table()
     rows: list[tuple] = []
     try:
         with get_conn() as conn, conn.cursor() as cur:
@@ -192,6 +238,7 @@ def set_secret(service: str, key: str, value: str) -> None:
     assert service and key, "service and key must be non-empty"
     if not is_postgres_enabled():
         raise RuntimeError("POSTGRES_HOST is not set; cannot persist shared secrets.")
+    _ensure_table()
     if not value:
         delete_secret(service, key)
         return
@@ -219,6 +266,7 @@ def delete_secret(service: str, key: str) -> None:
     assert service and key, "service and key must be non-empty"
     if not is_postgres_enabled():
         return
+    _ensure_table()
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
@@ -231,7 +279,8 @@ def delete_secret(service: str, key: str) -> None:
 
 
 def _reset_fernet_for_testing() -> None:
-    """Drop the cached Fernet so a test can swap the key/env. Tests only."""
-    global _fernet
+    """Drop the cached Fernet + table-ensured flag so a test can swap key/env. Tests only."""
+    global _fernet, _table_ensured
     with _LOCK:
         _fernet = None
+        _table_ensured = False

@@ -20,8 +20,10 @@ class _FakeCursor:
     def __exit__(self, *_a):
         return False
 
-    def execute(self, sql, params):
+    def execute(self, sql, params=None):
         s = sql.strip().upper()
+        if s.startswith("CREATE TABLE"):  # idempotent _ensure_table() DDL (no params)
+            return
         if (
             "ANY(" in s
         ):  # batched get_secrets: SELECT key, ciphertext WHERE service AND key = ANY(...)
@@ -175,3 +177,23 @@ def test_load_or_create_key_generates_and_reuses_file(tmp_path, monkeypatch):
     # Second load reads the persisted file (same key).
     key2 = secrets_mod._load_or_create_key()
     assert key1 == key2
+
+
+def test_ensure_table_runs_once_on_first_use(store):
+    # The shared store self-heals its table on first use (no reliance on the
+    # unified API having run its migration first).
+    assert secrets_mod._table_ensured is False
+    secrets_mod.get_secret("llm_config", "x")
+    assert secrets_mod._table_ensured is True
+
+
+def test_ensure_table_swallows_ddl_error(monkeypatch):
+    monkeypatch.setattr(secrets_mod, "is_postgres_enabled", lambda: True)
+    secrets_mod._reset_fernet_for_testing()  # _table_ensured -> False
+
+    def _boom():
+        raise RuntimeError("ddl down")
+
+    monkeypatch.setattr(secrets_mod, "get_conn", _boom)
+    secrets_mod._ensure_table()  # must not raise
+    assert secrets_mod._table_ensured is False  # retried on the next call
