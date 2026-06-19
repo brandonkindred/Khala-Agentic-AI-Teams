@@ -131,10 +131,14 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     # Empty fields are intentionally skipped so a provider/model change does not
     # wipe a previously-stored API key the operator didn't re-enter.
     if body.model.strip():
-        # Store the model under the active provider's key so the two providers'
+        # Store the model under the active provider's key (single source: the shared
+        # PROVIDER_MODEL_KEYS map the resolvers read back from) so the two providers'
         # selections never collide and a provider switch stays lossless.
-        model_key = runtime_config.KEY_CLAUDE_MODEL if body.provider == "claude" else runtime_config.KEY_OLLAMA_MODEL
-        set_secret(runtime_config.SERVICE, model_key, body.model.strip())
+        set_secret(
+            runtime_config.SERVICE,
+            runtime_config.PROVIDER_MODEL_KEYS[body.provider],
+            body.model.strip(),
+        )
     if body.ollama_base_url.strip():
         set_secret(
             runtime_config.SERVICE,

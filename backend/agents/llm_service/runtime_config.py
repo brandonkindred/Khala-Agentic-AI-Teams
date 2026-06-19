@@ -47,6 +47,17 @@ ALL_KEYS = (
     KEY_OLLAMA_API_KEY,
 )
 
+# Authoritative provider -> model-key mapping for the write side (the
+# ``PUT /api/llm-config`` handler picks the storage key by provider). The values
+# are the same constants the per-provider resolvers read back
+# (``resolve_model`` -> ``KEY_OLLAMA_MODEL``, ``resolve_claude_model`` ->
+# ``KEY_CLAUDE_MODEL``), so the model a provider is saved under is always the one
+# its resolver reads. Adding a provider means one entry here plus its resolver.
+PROVIDER_MODEL_KEYS = {
+    "ollama": KEY_OLLAMA_MODEL,
+    "claude": KEY_CLAUDE_MODEL,
+}
+
 ENV_RUNTIME_TTL = "LLM_RUNTIME_CONFIG_TTL_S"
 _DEFAULT_TTL_S = 30.0
 

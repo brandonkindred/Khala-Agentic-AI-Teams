@@ -55,15 +55,25 @@ def test_resolve_claude_model_ignores_ollama_agent_defaults():
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
-def test_resolve_claude_model_skips_non_claude_runtime(monkeypatch):
-    # A non-Claude runtime model (e.g. the default deepseek) is ignored, not sent
-    # to Anthropic; a second call hits the "already warned" branch (lock path).
-    monkeypatch.setattr(
-        c, "_runtime", lambda key: "deepseek-v4-pro:cloud" if key == "claude_model" else ""
-    )
+def test_resolve_claude_model_skips_non_claude_env(monkeypatch):
+    # A non-Claude value in the SHARED LLM_MODEL env (its default is a non-Claude
+    # model) is ignored, not sent to Anthropic; a second call hits the "already
+    # warned" branch (lock path). The provider-specific runtime key is empty here.
+    monkeypatch.setattr(c, "_runtime", lambda key: "")
+    monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
     c._warned_non_claude_models.discard("deepseek-v4-pro:cloud")
     assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
     assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
+
+
+def test_resolve_claude_model_trusts_runtime_value(monkeypatch):
+    # The provider-specific runtime claude_model is trusted as-is (no heuristic),
+    # so a free-typed custom/gateway Claude model is honored even when it does not
+    # match _looks_like_claude_model.
+    monkeypatch.setattr(
+        c, "_runtime", lambda key: "opus-prod-alias" if key == "claude_model" else ""
+    )
+    assert c.resolve_claude_model(None) == "opus-prod-alias"
 
 
 def test_resolve_model_reads_runtime(monkeypatch):

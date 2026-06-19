@@ -293,9 +293,9 @@ def resolve_provider() -> str:
 def _looks_like_claude_model(model: str) -> bool:
     """Return True when ``model`` looks like an Anthropic/Claude model id.
 
-    Heuristic guard so a cross-provider model id (e.g. an Ollama model left in
-    ``LLM_MODEL`` or a stale runtime model from before a provider switch) is never
-    sent to the Anthropic API. Matches the Claude/Fable/Mythos families and the
+    Heuristic guard so a cross-provider model id (e.g. an Ollama model left in the
+    shared ``LLM_MODEL`` env, which defaults to a non-Claude model) is never sent to
+    the Anthropic API. Matches the Claude/Fable/Mythos families and the
     Bedrock/Vertex-style ``anthropic.``/``claude-`` prefixes.
 
     Postconditions: returns a bool; never raises. ``""`` -> False.
@@ -311,32 +311,36 @@ def _looks_like_claude_model(model: str) -> bool:
 def resolve_claude_model(agent_key: Optional[str] = None) -> str:
     """Resolve the Claude model id for ``agent_key``.
 
-    Ordered, **provider-validated** sources: ``LLM_MODEL_<agent_key>`` (per-agent
-    env) -> runtime model (the LLM Provider UI) -> ``LLM_MODEL`` (global env). Each
-    candidate is accepted only if :func:`_looks_like_claude_model`; a non-Claude
-    id (e.g. an Ollama model still in ``LLM_MODEL``, or a stale runtime model left
-    over from a provider switch) is skipped with a warning so it never reaches the
-    Anthropic API. Falls back to ``DEFAULT_CLAUDE_MODEL``. The Ollama
+    Ordered sources: ``LLM_MODEL_<agent_key>`` (per-agent env) -> runtime model
+    (the LLM Provider UI, stored under the Claude-specific ``KEY_CLAUDE_MODEL``) ->
+    ``LLM_MODEL`` (global env), falling back to ``DEFAULT_CLAUDE_MODEL``. The two
+    **env** candidates are shared with the Ollama path (the global ``LLM_MODEL``
+    defaults to a non-Claude model), so each is validated with
+    :func:`_looks_like_claude_model` and skipped with a warning when it isn't a
+    Claude id — it must never reach the Anthropic API. The **runtime** value is
+    Claude-specific (the operator chose it explicitly for this provider), so it is
+    trusted as-is: a free-typed custom/gateway Claude model is honored even when it
+    doesn't match the heuristic. The runtime value is ranked above the global env so
+    a UI selection wins; per-agent env pinning still wins when set. The Ollama
     ``AGENT_DEFAULT_MODELS`` table is deliberately never consulted.
 
-    Note the runtime (UI) value is ranked above the global ``LLM_MODEL`` env, so
-    a UI-selected Claude model is honored (consistent with ``resolve_provider`` /
-    ``resolve_base_url``); per-agent env pinning still wins when set.
-
-    Postconditions: returns a non-empty Claude-looking model id string.
+    Postconditions: returns a non-empty model id string.
     """
     from . import runtime_config as _rc
 
-    candidates: list[str] = []
+    # (candidate, trusted) in priority order. Env candidates are shared across
+    # providers so they are heuristic-validated; the provider-specific runtime
+    # selection is trusted without filtering.
+    candidates: list[tuple[str, bool]] = []
     if agent_key:
-        candidates.append((os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip())
-    candidates.append(_runtime(_rc.KEY_CLAUDE_MODEL).strip())
-    candidates.append((os.environ.get(ENV_LLM_MODEL) or "").strip())
+        candidates.append(((os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip(), False))
+    candidates.append((_runtime(_rc.KEY_CLAUDE_MODEL).strip(), True))
+    candidates.append(((os.environ.get(ENV_LLM_MODEL) or "").strip(), False))
 
-    for candidate in candidates:
+    for candidate, trusted in candidates:
         if not candidate:
             continue
-        if _looks_like_claude_model(candidate):
+        if trusted or _looks_like_claude_model(candidate):
             return candidate
         with _warned_lock:
             should_warn = candidate not in _warned_non_claude_models
