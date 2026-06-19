@@ -1,0 +1,418 @@
+"""Tests for ClaudeLLMClient — JSON/text/chat, tool calls, thinking mapping,
+error mapping, and telemetry. The Anthropic SDK is faked (no network)."""
+
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+import anthropic
+import httpx
+import pytest
+
+from llm_service.clients.claude import ClaudeLLMClient, _to_anthropic_tools
+from llm_service.interface import (
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMTemporaryError,
+    LLMTruncatedError,
+)
+
+# ---------------------------------------------------------------------------
+# Fakes
+# ---------------------------------------------------------------------------
+
+
+class _FakeStreamCtx:
+    def __init__(self, message=None, exc=None):
+        self._message = message
+        self._exc = exc
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_a):
+        return False
+
+    def get_final_message(self):
+        if self._exc is not None:
+            raise self._exc
+        return self._message
+
+
+class _FakeMessages:
+    def __init__(self, ctx, capture):
+        self._ctx = ctx
+        self._capture = capture
+
+    def stream(self, **kwargs):
+        self._capture.clear()
+        self._capture.update(kwargs)
+        return self._ctx
+
+
+class _FakeClient:
+    def __init__(self, ctx, capture):
+        self.messages = _FakeMessages(ctx, capture)
+
+
+def _text_message(text, *, stop_reason="end_turn", input_tokens=11, output_tokens=7):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=text)],
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(input_tokens=input_tokens, output_tokens=output_tokens),
+    )
+
+
+def _tool_message(name, tool_input, *, tool_id="toolu_1"):
+    return SimpleNamespace(
+        content=[SimpleNamespace(type="tool_use", id=tool_id, name=name, input=tool_input)],
+        stop_reason="tool_use",
+        usage=SimpleNamespace(input_tokens=3, output_tokens=2),
+    )
+
+
+def _make_client(message=None, exc=None, *, model="claude-opus-4-8"):
+    """Return (client, capture) with the Anthropic SDK call faked."""
+    capture: dict = {}
+    client = ClaudeLLMClient(model=model, api_key="sk-test")
+    client._client = _FakeClient(_FakeStreamCtx(message=message, exc=exc), capture)
+    return client, capture
+
+
+# ---------------------------------------------------------------------------
+# complete_json
+# ---------------------------------------------------------------------------
+
+
+def test_complete_json_parses_object():
+    client, _ = _make_client(_text_message('{"answer": 42}'))
+    out = client.complete_json("q", objective="test")
+    assert out == {"answer": 42}
+
+
+def test_complete_json_repairs_fenced_json():
+    client, _ = _make_client(_text_message('```json\n{"a": 1, "b": [1,2,3]}\n```'))
+    out = client.complete_json("q", objective="test")
+    assert out == {"a": 1, "b": [1, 2, 3]}
+
+
+def test_complete_json_never_sends_temperature():
+    client, capture = _make_client(_text_message('{"ok": true}'))
+    client.complete_json("q", objective="test", temperature=0.9)
+    assert "temperature" not in capture
+    assert "top_p" not in capture
+
+
+def test_complete_json_augments_system_prompt():
+    client, capture = _make_client(_text_message('{"ok": true}'))
+    client.complete_json("q", objective="test", system_prompt="Be terse.")
+    assert capture["system"].startswith("Be terse.")
+    assert "JSON" in capture["system"]
+
+
+def test_complete_json_tool_call_envelope():
+    client, _ = _make_client(_tool_message("get_weather", {"city": "Paris"}))
+    out = client.complete_json("q", objective="test", tools=[{"name": "get_weather"}])
+    assert "__tool_calls__" in out
+    call = out["__tool_calls__"][0]
+    assert call["function"]["name"] == "get_weather"
+    assert call["function"]["arguments"] == {"city": "Paris"}
+
+
+def test_complete_json_requires_objective():
+    client, _ = _make_client(_text_message("{}"))
+    with pytest.raises(ValueError):
+        client.complete_json("q", objective="  ")
+
+
+def test_complete_json_json_parse_error_propagates():
+    from llm_service.interface import LLMJsonParseError
+
+    client, _ = _make_client(_text_message("this is not json at all"))
+    with pytest.raises(LLMJsonParseError):
+        client.complete_json("q", objective="test")
+
+
+# ---------------------------------------------------------------------------
+# thinking / effort
+# ---------------------------------------------------------------------------
+
+
+def test_thinking_default_is_adaptive(monkeypatch):
+    monkeypatch.delenv("LLM_ENABLE_THINKING", raising=False)
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t")
+    assert capture["thinking"] == {"type": "adaptive"}
+    assert "output_config" not in capture
+
+
+def test_thinking_level_maps_to_effort():
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t", think="high")
+    assert capture["thinking"] == {"type": "adaptive"}
+    assert capture["output_config"] == {"effort": "high"}
+
+
+def test_thinking_disabled_omits_thinking():
+    client, capture = _make_client(_text_message("{}"))
+    client.complete_json("q", objective="t", think=False)
+    assert "thinking" not in capture
+    assert "output_config" not in capture
+
+
+# ---------------------------------------------------------------------------
+# complete / chat
+# ---------------------------------------------------------------------------
+
+
+def test_complete_returns_text():
+    client, _ = _make_client(_text_message("hello world"))
+    assert client.complete("hi", objective="t") == "hello world"
+
+
+def test_complete_tool_call_returns_json_string():
+    import json
+
+    client, _ = _make_client(_tool_message("do_it", {"x": 1}))
+    out = client.complete("hi", objective="t", tools=[{"name": "do_it"}])
+    parsed = json.loads(out)
+    assert parsed["__tool_calls__"][0]["function"]["name"] == "do_it"
+
+
+def test_chat_json_mode_parses():
+    client, _ = _make_client(_text_message('{"v": 1}'))
+    out = client.chat([{"role": "user", "content": "hi"}], objective="t")
+    assert out == {"v": 1}
+
+
+def test_chat_text_mode_returns_raw():
+    client, _ = _make_client(_text_message("prose response"))
+    out = client.chat([{"role": "user", "content": "hi"}], objective="t", response_format="text")
+    assert out == "prose response"
+
+
+def test_chat_splits_system_message():
+    client, capture = _make_client(_text_message('{"ok": 1}'))
+    client.chat(
+        [
+            {"role": "system", "content": "You are X."},
+            {"role": "user", "content": "hi"},
+        ],
+        objective="t",
+    )
+    assert "You are X." in capture["system"]
+    assert capture["messages"] == [{"role": "user", "content": "hi"}]
+
+
+def test_chat_rejects_bad_response_format():
+    client, _ = _make_client(_text_message("{}"))
+    with pytest.raises(ValueError):
+        client.chat([{"role": "user", "content": "hi"}], objective="t", response_format="xml")
+
+
+# ---------------------------------------------------------------------------
+# stop reasons
+# ---------------------------------------------------------------------------
+
+
+def test_refusal_raises_permanent():
+    client, _ = _make_client(_text_message("", stop_reason="refusal"))
+    with pytest.raises(LLMPermanentError):
+        client.complete("hi", objective="t")
+
+
+def test_max_tokens_with_text_raises_truncated():
+    client, _ = _make_client(_text_message("partial...", stop_reason="max_tokens"))
+    with pytest.raises(LLMTruncatedError):
+        client.complete("hi", objective="t")
+
+
+# ---------------------------------------------------------------------------
+# error mapping
+# ---------------------------------------------------------------------------
+
+
+def _http_error(cls, status, *, headers=None):
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    resp = httpx.Response(status, headers=headers or {}, request=req)
+    return cls("boom", response=resp, body=None)
+
+
+def test_rate_limit_maps_and_parses_retry_after():
+    err = _http_error(anthropic.RateLimitError, 429, headers={"retry-after": "30"})
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMRateLimitError) as ei:
+        client.complete("hi", objective="t")
+    assert ei.value.retry_after_seconds == 30.0
+
+
+def test_server_error_maps_temporary():
+    err = _http_error(anthropic.InternalServerError, 500)
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMTemporaryError):
+        client.complete("hi", objective="t")
+
+
+def test_client_error_maps_permanent():
+    err = _http_error(anthropic.BadRequestError, 400)
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMPermanentError):
+        client.complete("hi", objective="t")
+
+
+def test_connection_error_maps_temporary():
+    req = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    err = anthropic.APIConnectionError(message="conn", request=req)
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMTemporaryError):
+        client.complete("hi", objective="t")
+
+
+# ---------------------------------------------------------------------------
+# misc
+# ---------------------------------------------------------------------------
+
+
+def test_get_max_context_tokens_known_model():
+    client, _ = _make_client(_text_message("{}"), model="claude-opus-4-8")
+    assert client.get_max_context_tokens() == 1_000_000
+
+
+def test_missing_api_key_raises_permanent():
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="")
+    with pytest.raises(LLMPermanentError):
+        client.complete("hi", objective="t")
+
+
+def test_resolve_max_tokens_caps():
+    client, _ = _make_client(_text_message("{}"))
+    assert client._resolve_max_tokens(999_999) == 128_000
+    assert client._resolve_max_tokens(None) == 32_768
+    assert client._resolve_max_tokens(100) == 100
+
+
+def test_telemetry_recorded_with_tokens():
+    from llm_service import telemetry
+
+    telemetry.clear_call_log()
+    client, _ = _make_client(_text_message('{"ok": 1}', input_tokens=12, output_tokens=8))
+    client.complete_json("q", objective="record me")
+    calls = telemetry.get_recent_calls()
+    assert calls, "expected a telemetry record"
+    rec = calls[-1]
+    assert rec["model"] == "claude-opus-4-8"
+    assert rec["prompt_tokens"] == 12
+    assert rec["completion_tokens"] == 8
+    assert rec["total_tokens"] == 20
+    assert rec["status"] == "success"
+
+
+def test_complete_requires_objective():
+    client, _ = _make_client(_text_message("x"))
+    with pytest.raises(ValueError):
+        client.complete("q", objective="")
+
+
+def test_chat_requires_objective():
+    client, _ = _make_client(_text_message("{}"))
+    with pytest.raises(ValueError):
+        client.chat([{"role": "user", "content": "hi"}], objective="")
+
+
+def test_tools_kwarg_forwarded_with_valid_shape():
+    client, capture = _make_client(_text_message('{"ok": 1}'))
+    client.complete_json(
+        "q",
+        objective="t",
+        tools=[{"name": "f", "input_schema": {"type": "object"}}],
+    )
+    assert capture["tools"] == [
+        {"name": "f", "description": "", "input_schema": {"type": "object"}}
+    ]
+
+
+def test_to_anthropic_tools_skips_non_dict():
+    from llm_service.clients.claude import _to_anthropic_tools as t
+
+    assert t([None, 5, {"name": "g", "input_schema": {}}]) == [
+        {"name": "g", "description": "", "input_schema": {}}
+    ]
+
+
+def test_get_client_builds_and_caches_real_sdk_client():
+    client = ClaudeLLMClient(model="claude-opus-4-8", api_key="sk-real")
+    built = client._get_client()
+    assert isinstance(built, anthropic.Anthropic)
+    assert client._get_client() is built  # cached
+
+
+def test_plain_apistatuserror_429_maps_rate_limit():
+    err = _http_error(anthropic.APIStatusError, 429, headers={"retry-after": "12"})
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMRateLimitError) as ei:
+        client.complete("hi", objective="t")
+    assert ei.value.retry_after_seconds == 12.0
+
+
+def test_chat_tool_call_envelope():
+    client, _ = _make_client(_tool_message("act", {"k": 1}))
+    out = client.chat(
+        [{"role": "user", "content": "hi"}],
+        objective="t",
+        tools=[{"name": "act", "input_schema": {}}],
+    )
+    assert out["__tool_calls__"][0]["function"]["name"] == "act"
+
+
+def test_chat_json_parse_error_raises():
+    from llm_service.interface import LLMJsonParseError
+
+    client, _ = _make_client(_text_message("not json"))
+    with pytest.raises(LLMJsonParseError):
+        client.chat([{"role": "user", "content": "hi"}], objective="t")
+
+
+def test_chat_splits_assistant_and_ignores_non_dict():
+    client, capture = _make_client(_text_message("ok", stop_reason="end_turn"))
+    client.chat(
+        [
+            "garbage-non-dict",
+            {"role": "assistant", "content": "prior"},
+            {"role": "user", "content": "now"},
+        ],
+        objective="t",
+        response_format="text",
+    )
+    assert capture["messages"] == [
+        {"role": "assistant", "content": "prior"},
+        {"role": "user", "content": "now"},
+    ]
+
+
+def test_retry_after_seconds_variants():
+    from llm_service.clients.claude import _retry_after_seconds as r
+
+    assert r(SimpleNamespace(response=None)) is None  # no response
+    assert r(SimpleNamespace(response=SimpleNamespace(headers=object()))) is None  # no .get
+    assert r(SimpleNamespace(response=SimpleNamespace(headers={}))) is None  # missing header
+    assert r(SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "x"}))) is None  # bad
+    assert (
+        r(SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "0"}))) is None
+    )  # non-pos
+    assert r(SimpleNamespace(response=SimpleNamespace(headers={"retry-after": "9"}))) == 9.0
+
+
+def test_to_anthropic_tools_translates_both_shapes():
+    openai_shape = [
+        {
+            "type": "function",
+            "function": {"name": "f", "description": "d", "parameters": {"type": "object"}},
+        }
+    ]
+    out = _to_anthropic_tools(openai_shape)
+    assert out == [{"name": "f", "description": "d", "input_schema": {"type": "object"}}]
+
+    anthropic_shape = [{"name": "g", "description": "d2", "input_schema": {"type": "object"}}]
+    assert _to_anthropic_tools(anthropic_shape) == anthropic_shape
+    assert _to_anthropic_tools(None) is None
+    assert _to_anthropic_tools([]) is None

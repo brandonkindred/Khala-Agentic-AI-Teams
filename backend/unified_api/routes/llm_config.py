@@ -1,0 +1,149 @@
+"""LLM provider configuration API.
+
+Lets an operator choose the LLM provider (Ollama or Claude), the model, and the
+API keys from the UI instead of (or in addition to) environment variables. Values
+are stored Fernet-encrypted in the shared ``encrypted_integration_credentials``
+table under the ``llm_config`` service, so every team container reads them back
+through ``shared_postgres.secrets`` / ``llm_service.runtime_config`` — see
+``llm_service/README.md``.
+
+Endpoints:
+- ``GET  /api/llm-config`` -> effective provider/model/base URL, ``*_configured``
+  booleans (keys are never returned), and the curated option lists for the UI.
+- ``PUT  /api/llm-config`` -> validate and persist; empty fields leave the
+  existing stored value untouched. Requires Postgres.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Literal
+
+from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
+
+from llm_service import clear_client_cache, runtime_config
+from llm_service import config as llm_config
+from shared_postgres import is_postgres_enabled, set_secret
+
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
+
+# Curated options surfaced to the settings UI. The model fields also accept free
+# text, so these are suggestions, not a closed set.
+_PROVIDER_OPTIONS = ["ollama", "claude"]
+_CLAUDE_MODEL_OPTIONS = [
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-sonnet-4-6",
+    "claude-haiku-4-5",
+    "claude-fable-5",
+]
+_OLLAMA_MODEL_SUGGESTIONS = [
+    "deepseek-v4-pro:cloud",
+    "qwen3-coder:480b-cloud",
+    "llama3.1",
+    "llama3.2",
+]
+
+
+class LlmConfigUpdate(BaseModel):
+    """Request body for ``PUT /api/llm-config``.
+
+    Empty string fields leave the existing stored value untouched (so the UI can
+    save provider/model changes without re-entering API keys).
+    """
+
+    provider: Literal["ollama", "claude"] = Field(..., description="Active LLM provider.")
+    model: str = Field("", description="Model id for the active provider (empty = unchanged).")
+    ollama_base_url: str = Field(
+        "", description="Ollama base URL — local (http://host:11434) or cloud (https://ollama.com)."
+    )
+    claude_api_key: str = Field("", description="Anthropic API key (never returned by GET).")
+    ollama_api_key: str = Field("", description="Ollama Cloud API key (never returned by GET).")
+
+
+class LlmConfigResponse(BaseModel):
+    """Response for ``GET``/``PUT /api/llm-config`` — never includes API keys."""
+
+    provider: str
+    model: str
+    ollama_base_url: str
+    claude_api_key_configured: bool = Field(False, description="True when a Claude key is set (runtime or env).")
+    ollama_api_key_configured: bool = Field(False, description="True when an Ollama Cloud key is set (runtime or env).")
+    storage_available: bool = Field(
+        ..., description="False when POSTGRES_HOST is unset; PUT returns 503 and config is env-only."
+    )
+    provider_options: list[str]
+    claude_model_options: list[str]
+    ollama_model_suggestions: list[str]
+
+
+def _build_response() -> LlmConfigResponse:
+    """Assemble the current effective config for the UI (no secrets)."""
+    provider = llm_config.resolve_provider()
+    if provider == "claude":
+        model = llm_config.resolve_claude_model(None)
+    else:
+        model = llm_config.resolve_model(None)
+    return LlmConfigResponse(
+        provider=provider,
+        model=model,
+        ollama_base_url=llm_config.resolve_base_url(),
+        claude_api_key_configured=bool(llm_config.resolve_claude_api_key()),
+        ollama_api_key_configured=bool(llm_config.resolve_ollama_api_key()),
+        storage_available=is_postgres_enabled(),
+        provider_options=list(_PROVIDER_OPTIONS),
+        claude_model_options=list(_CLAUDE_MODEL_OPTIONS),
+        ollama_model_suggestions=list(_OLLAMA_MODEL_SUGGESTIONS),
+    )
+
+
+@router.get("", response_model=LlmConfigResponse)
+async def get_llm_config() -> LlmConfigResponse:
+    """Return the effective LLM provider configuration (API keys masked)."""
+    return _build_response()
+
+
+@router.put("", response_model=LlmConfigResponse)
+async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
+    """Persist the LLM provider configuration and refresh client caches.
+
+    Preconditions: Postgres is configured (``POSTGRES_HOST`` set) — otherwise
+        returns 503, since the runtime store is the only cross-container channel.
+    Postconditions: provider (and any non-empty model/base URL/key) are stored
+        encrypted; the runtime-config and provider-client caches are cleared in
+        this process so subsequent calls use the new config.
+    """
+    if not is_postgres_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "POSTGRES_HOST is not set; LLM provider config cannot be persisted. "
+                "Set Postgres env vars, or configure the provider via environment variables."
+            ),
+        )
+
+    set_secret(runtime_config.SERVICE, runtime_config.KEY_PROVIDER, body.provider)
+    # Empty fields are intentionally skipped so a provider/model change does not
+    # wipe a previously-stored API key the operator didn't re-enter.
+    if body.model.strip():
+        set_secret(runtime_config.SERVICE, runtime_config.KEY_MODEL, body.model.strip())
+    if body.ollama_base_url.strip():
+        set_secret(
+            runtime_config.SERVICE,
+            runtime_config.KEY_OLLAMA_BASE_URL,
+            body.ollama_base_url.strip(),
+        )
+    if body.claude_api_key.strip():
+        set_secret(runtime_config.SERVICE, runtime_config.KEY_CLAUDE_API_KEY, body.claude_api_key.strip())
+    if body.ollama_api_key.strip():
+        set_secret(runtime_config.SERVICE, runtime_config.KEY_OLLAMA_API_KEY, body.ollama_api_key.strip())
+
+    # Refresh local caches immediately; other containers pick up the change within
+    # the runtime-config TTL.
+    runtime_config.clear_cache()
+    clear_client_cache()
+    logger.info("LLM provider config updated: provider=%s", body.provider)
+    return _build_response()

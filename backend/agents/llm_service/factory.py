@@ -13,12 +13,16 @@ from typing import Any, Callable, Optional, Union
 
 from . import config as llm_config
 from .attribution import llm_attribution
-from .clients import DummyLLMClient, OllamaLLMClient
+from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
 from .interface import LLMClient
+from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
 
 _client_cache: dict[tuple[str, str, float], OllamaLLMClient] = {}
+# Claude clients cache by (model, api-key fingerprint) so a key or model change
+# yields a fresh client (and a stale key never lingers behind a cached client).
+_claude_cache: dict[tuple[str, str], ClaudeLLMClient] = {}
 _cache_lock = threading.Lock()
 
 
@@ -41,7 +45,11 @@ class _AttributingClient:
           wrapper holds no other mutable state and is cheap to construct.
     """
 
-    def __init__(self, inner: Union[DummyLLMClient, OllamaLLMClient], agent_key: str) -> None:
+    def __init__(
+        self,
+        inner: Union[DummyLLMClient, OllamaLLMClient, ClaudeLLMClient],
+        agent_key: str,
+    ) -> None:
         self._inner = inner
         self._agent_key = agent_key
 
@@ -155,6 +163,9 @@ def get_client(
         # there is no attribution to bind.
         return DummyLLMClient()
 
+    if provider in ("claude", "anthropic"):
+        return _get_claude_client(agent_key)
+
     model = llm_config.resolve_model(agent_key)
     base_url = llm_config.resolve_base_url()
     timeout = llm_config.resolve_timeout(agent_key)
@@ -183,7 +194,43 @@ def get_client(
     return _AttributingClient(client, agent_key) if agent_key else client
 
 
-def _clear_client_cache_for_testing() -> None:
-    """Clear the Ollama client cache. For use in tests only."""
+def _get_claude_client(agent_key: Optional[str]) -> Union[ClaudeLLMClient, "_AttributingClient"]:
+    """Build/cache a :class:`ClaudeLLMClient` for ``agent_key``.
+
+    Cached by ``(model, api_key_fingerprint)`` so a key or model change yields a
+    fresh client. Wrapped in :class:`_AttributingClient` when ``agent_key`` is
+    truthy, mirroring the Ollama path.
+
+    Postconditions: returns a ready client; the underlying ``ClaudeLLMClient`` is
+        the cached singleton for its (model, key) pair.
+    """
+    model = llm_config.resolve_claude_model(agent_key)
+    api_key = llm_config.resolve_claude_api_key()
+    timeout = llm_config.resolve_timeout(agent_key)
+    fingerprint = sha256_fingerprint(api_key) if api_key else "no-key"
+    cache_key = (model, fingerprint)
+    with _cache_lock:
+        client = _claude_cache.get(cache_key)
+        if client is None:
+            client = ClaudeLLMClient(model=model, api_key=api_key, timeout=timeout)
+            _claude_cache[cache_key] = client
+    if agent_key is None:
+        logger.info("LLM config: %s", llm_config.get_llm_config_summary())
+    return _AttributingClient(client, agent_key) if agent_key else client
+
+
+def clear_client_cache() -> None:
+    """Drop all cached provider clients (Ollama + Claude).
+
+    Called by the settings endpoint after a config change so the next
+    :func:`get_client` rebuilds against the new provider/model/key. Safe to call
+    when nothing is cached.
+    """
     with _cache_lock:
         _client_cache.clear()
+        _claude_cache.clear()
+
+
+def _clear_client_cache_for_testing() -> None:
+    """Clear the provider client caches. For use in tests only."""
+    clear_client_cache()

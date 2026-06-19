@@ -39,9 +39,33 @@ ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
 ENV_LLM_THINKING_LEVEL = "LLM_THINKING_LEVEL"
 ENV_LLM_THINKING_DOWNGRADE_RETRY = "LLM_THINKING_DOWNGRADE_RETRY"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
+# Claude / Anthropic API key. ``LLM_CLAUDE_API_KEY`` is the Khala-namespaced name;
+# ``ANTHROPIC_API_KEY`` is the SDK's own convention and is honored as a fallback.
+ENV_LLM_CLAUDE_API_KEY = "LLM_CLAUDE_API_KEY"
+ENV_ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 
 # Default cap for max_tokens (many APIs limit output to 32K even when context is 256K)
 DEFAULT_MAX_OUTPUT_TOKENS = 32768
+
+# Default Claude model when no per-agent / global / runtime model is configured.
+DEFAULT_CLAUDE_MODEL = "claude-opus-4-8"
+
+# ---------------------------------------------------------------------------
+# Known Claude context windows (input tokens). Used by ClaudeLLMClient when
+# LLM_CONTEXT_SIZE is unset. The current Opus/Sonnet/Fable family ships a 1M
+# window; Haiku 4.5 is 200K. Unlisted models fall back to a conservative default.
+# ---------------------------------------------------------------------------
+
+KNOWN_CLAUDE_CONTEXT: dict[str, int] = {
+    "claude-opus-4-8": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4-6": 1_000_000,
+    "claude-sonnet-4-6": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-haiku-4-5": 200_000,
+}
+
+DEFAULT_CLAUDE_CONTEXT = 200_000
 
 # ---------------------------------------------------------------------------
 # Known model context (tokens) – used when /api/show is unavailable or not called
@@ -211,9 +235,112 @@ DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
 # ---------------------------------------------------------------------------
 
 
+def _runtime(key: str) -> str:
+    """Return a runtime-config value (UI-managed, Postgres-backed), or ``""``.
+
+    Lazily delegates to :mod:`llm_service.runtime_config`. Any failure (Postgres
+    disabled, shared_postgres absent, read error) yields ``""`` so env-var
+    resolution remains the fallback. Never raises.
+    """
+    try:
+        from . import runtime_config
+
+        return runtime_config.get_runtime(key)
+    except Exception:  # noqa: BLE001 - runtime config is best-effort
+        return ""
+
+
 def resolve_provider() -> str:
-    """Return effective LLM provider: 'dummy' or 'ollama' (default)."""
-    return (os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
+    """Return effective LLM provider: 'dummy', 'claude', or 'ollama' (default).
+
+    Resolution order: runtime config (UI) -> ``LLM_PROVIDER`` env -> ``ollama``.
+    The ``anthropic`` alias normalizes to ``claude``.
+
+    Postconditions: returns a lowercase, stripped provider id; ``"anthropic"``
+        maps to ``"claude"``. Never raises.
+    """
+    from . import runtime_config as _rc
+
+    raw = (
+        (_runtime(_rc.KEY_PROVIDER) or os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
+    )
+    if raw in ("anthropic", "claude"):
+        return "claude"
+    return raw
+
+
+def resolve_claude_model(agent_key: Optional[str] = None) -> str:
+    """Resolve the Claude model id for ``agent_key``.
+
+    Order: ``LLM_MODEL_<agent_key>`` -> ``LLM_MODEL`` -> runtime model -> default
+    (``claude-opus-4-8``). Deliberately skips the Ollama ``AGENT_DEFAULT_MODELS``
+    table (those are Ollama model names, never valid Claude ids).
+
+    Postconditions: returns a non-empty Claude model id string.
+    """
+    from . import runtime_config as _rc
+
+    if agent_key:
+        per_agent = os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}")
+        if per_agent and per_agent.strip():
+            return per_agent.strip()
+    global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
+    if global_model:
+        return global_model
+    runtime_model = _runtime(_rc.KEY_MODEL).strip()
+    if runtime_model:
+        return runtime_model
+    return DEFAULT_CLAUDE_MODEL
+
+
+def resolve_claude_api_key() -> str:
+    """Return the Claude API key: runtime -> ``LLM_CLAUDE_API_KEY`` -> ``ANTHROPIC_API_KEY``.
+
+    Postconditions: returns the first non-empty source stripped of whitespace, or
+        ``""`` when none is configured (the client then surfaces a clear auth error
+        on first call). Never raises.
+    """
+    from . import runtime_config as _rc
+
+    runtime = _runtime(_rc.KEY_CLAUDE_API_KEY).strip()
+    if runtime:
+        return runtime
+    return (
+        os.environ.get(ENV_LLM_CLAUDE_API_KEY) or os.environ.get(ENV_ANTHROPIC_API_KEY) or ""
+    ).strip()
+
+
+def resolve_claude_context_size(model: str) -> int:
+    """Return the input-token context window for a Claude ``model``.
+
+    Order: ``LLM_CONTEXT_SIZE`` env (global override) -> ``KNOWN_CLAUDE_CONTEXT`` ->
+    ``DEFAULT_CLAUDE_CONTEXT`` (200K).
+
+    Postconditions: returns an int ``>= 2048``.
+    """
+    raw = os.environ.get(ENV_LLM_CONTEXT_SIZE)
+    if raw:
+        try:
+            return max(2048, int(raw))
+        except ValueError:
+            pass
+    return KNOWN_CLAUDE_CONTEXT.get(model, DEFAULT_CLAUDE_CONTEXT)
+
+
+def resolve_ollama_api_key() -> str:
+    """Return the Ollama Cloud API key: runtime -> ``OLLAMA_API_KEY`` -> ``LLM_OLLAMA_API_KEY``.
+
+    Postconditions: returns the first non-empty source stripped, else ``""`` (local
+        Ollama needs no key). Never raises.
+    """
+    from . import runtime_config as _rc
+
+    runtime = _runtime(_rc.KEY_OLLAMA_API_KEY).strip()
+    if runtime:
+        return runtime
+    return (
+        os.environ.get("OLLAMA_API_KEY") or os.environ.get(ENV_LLM_OLLAMA_API_KEY) or ""
+    ).strip()
 
 
 def resolve_model(agent_key: Optional[str] = None) -> str:
@@ -233,8 +360,19 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
 
 
 def resolve_base_url() -> str:
-    """Return Ollama base URL (default https://ollama.com for Ollama Cloud)."""
-    return (os.environ.get(ENV_LLM_BASE_URL) or "https://ollama.com").strip().rstrip("/")
+    """Return Ollama base URL (runtime -> ``LLM_BASE_URL`` env -> Ollama Cloud).
+
+    The runtime value lets the settings UI toggle between local Ollama
+    (``http://host:11434``) and Ollama Cloud (``https://ollama.com``).
+    """
+    from . import runtime_config as _rc
+
+    raw = (
+        _runtime(_rc.KEY_OLLAMA_BASE_URL)
+        or os.environ.get(ENV_LLM_BASE_URL)
+        or "https://ollama.com"
+    )
+    return raw.strip().rstrip("/")
 
 
 def resolve_timeout(agent_key: Optional[str] = None) -> float:
@@ -265,10 +403,15 @@ def resolve_context_size_for_model(model: str) -> Optional[int]:
 
 
 def get_llm_config_summary() -> str:
-    """Return a short summary of effective provider and model for logging."""
+    """Return a short summary of effective provider and model for logging.
+
+    Never includes API keys — only provider, model, and (for Ollama) base URL.
+    """
     provider = resolve_provider()
     if provider == "ollama":
         model = resolve_model(None)
         base_url = resolve_base_url()
         return f"provider={provider}, model={model}, base_url={base_url}"
+    if provider == "claude":
+        return f"provider={provider}, model={resolve_claude_model(None)}"
     return f"provider={provider}"

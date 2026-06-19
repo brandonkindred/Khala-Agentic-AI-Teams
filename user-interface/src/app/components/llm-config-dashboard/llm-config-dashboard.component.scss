@@ -1,0 +1,92 @@
+.llm-config {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 24px 16px;
+}
+
+.page-header {
+  margin-bottom: 16px;
+
+  h1 {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0 0 4px;
+    font-size: 1.5rem;
+  }
+
+  .subtitle {
+    margin: 0;
+    color: var(--mat-sys-on-surface-variant, #5f6368);
+    font-size: 0.9rem;
+
+    code {
+      background: rgba(0, 0, 0, 0.06);
+      padding: 1px 4px;
+      border-radius: 4px;
+    }
+  }
+}
+
+.loading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 24px 0;
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  font-size: 0.9rem;
+
+  mat-icon {
+    flex: 0 0 auto;
+  }
+}
+
+.banner-error {
+  background: #fdecea;
+  color: #b71c1c;
+}
+
+.banner-success {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.banner-warn {
+  background: #fff8e1;
+  color: #8d6e00;
+}
+
+.config-card {
+  .field-group {
+    margin-bottom: 20px;
+  }
+
+  .field-label {
+    display: block;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }
+
+  .provider-radio {
+    display: flex;
+    gap: 24px;
+    flex-wrap: wrap;
+  }
+
+  .full {
+    width: 100%;
+  }
+}
+
+mat-card-actions {
+  gap: 8px;
+  padding: 8px 16px 16px;
+}

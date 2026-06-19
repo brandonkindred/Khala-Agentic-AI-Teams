@@ -102,7 +102,9 @@ def _attribution_log_fields() -> str:
         rendered as ``-`` so the key is always present for log-grep predicates.
     """
     attr = current_attribution()
-    return f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
+    return (
+        f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
+    )
 
 
 # Default cap for max_tokens
@@ -423,11 +425,14 @@ class OllamaLLMClient(LLMClient):
             logger.debug("Failed to record LLM telemetry", exc_info=True)
 
     def _ollama_auth_headers(self) -> dict[str, str]:
-        """Return Authorization Bearer header for Ollama Cloud. Uses OLLAMA_API_KEY (or LLM_* overrides)."""
-        key = (
-            (os.environ.get("OLLAMA_API_KEY") or "")
-            or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY) or "")
-        ).strip()
+        """Return Authorization Bearer header for Ollama Cloud.
+
+        Resolves the key via :func:`llm_config.resolve_ollama_api_key` so a key set
+        through the settings UI (runtime config) takes effect, falling back to the
+        ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no header
+        (local Ollama needs none).
+        """
+        key = llm_config.resolve_ollama_api_key()
         if not key:
             return {}
         return {"Authorization": f"Bearer {key}"}

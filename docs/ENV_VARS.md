@@ -17,13 +17,26 @@ floor/ceiling unless a row states otherwise. Per-row notes call out only the cas
 Required for Ollama Cloud API.
 
 ### LLM_PROVIDER
-LLM provider selection.
+LLM provider selection: `dummy`, `ollama` (default), or `claude` (alias `anthropic`). Resolved per call
+as runtime config (the LLM Provider settings UI) → this env var → `ollama`.
 
 ### LLM_BASE_URL
-LLM server URL.
+LLM server URL (Ollama). Local (`http://host:11434`) or Ollama Cloud (`https://ollama.com`, default).
 
 ### LLM_MODEL
-Model name.
+Model name. For `LLM_PROVIDER=claude`, defaults to `claude-opus-4-8` when unset.
+
+### LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY
+Anthropic API key, **required for `LLM_PROVIDER=claude`**. `LLM_CLAUDE_API_KEY` is the Khala-namespaced
+name and wins; `ANTHROPIC_API_KEY` (the SDK's own convention) is the fallback. The runtime value set via
+the LLM Provider settings UI takes precedence over both. The Claude client uses the official `anthropic`
+Python SDK with streaming, adaptive thinking + `output_config.effort`, and never sends `temperature`/`top_p`.
+
+### LLM_RUNTIME_CONFIG_TTL_S
+TTL (seconds, default `30`) for the cross-container runtime LLM config written by the settings UI
+(`PUT /api/llm-config`) into the shared `encrypted_integration_credentials` table. Each team container
+caches the resolved provider/model/keys for this window, so a UI change propagates everywhere within the
+TTL. Garbage → default; negative floors to `0` (read-through every call). No effect when Postgres is unset.
 
 ### LLM_NUM_CTX_FALLBACK_TTL_S
 TTL (seconds, default `300`) for the Ollama client's provisional `num_ctx` fallback. When a model's
