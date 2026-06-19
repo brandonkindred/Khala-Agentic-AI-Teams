@@ -30,9 +30,9 @@ def test_returns_empty_when_postgres_disabled(monkeypatch):
 
 
 def test_reads_value_from_store(monkeypatch):
-    _fake_store(monkeypatch, {rc.KEY_PROVIDER: "claude", rc.KEY_MODEL: "claude-opus-4-8"})
+    _fake_store(monkeypatch, {rc.KEY_PROVIDER: "claude", rc.KEY_CLAUDE_MODEL: "claude-opus-4-8"})
     assert rc.get_runtime(rc.KEY_PROVIDER) == "claude"
-    assert rc.get_runtime(rc.KEY_MODEL) == "claude-opus-4-8"
+    assert rc.get_runtime(rc.KEY_CLAUDE_MODEL) == "claude-opus-4-8"
     assert rc.get_runtime(rc.KEY_CLAUDE_API_KEY) == ""
 
 
@@ -78,7 +78,7 @@ def test_load_returns_empty_when_batch_read_raises(monkeypatch):
     monkeypatch.setattr(rc, "_postgres_enabled", lambda: True)
     monkeypatch.setattr(secrets_mod, "get_secrets", _boom)
     # A failed batch read resolves every key to "" (env fallback), never raises.
-    assert rc.get_runtime(rc.KEY_MODEL) == ""
+    assert rc.get_runtime(rc.KEY_OLLAMA_MODEL) == ""
     assert rc.get_runtime(rc.KEY_PROVIDER) == ""
 
 

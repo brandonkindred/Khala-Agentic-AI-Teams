@@ -29,14 +29,19 @@ SERVICE = "llm_config"
 
 # Credential keys stored under the ``llm_config`` service.
 KEY_PROVIDER = "provider"
-KEY_MODEL = "model"
+# Per-provider model selections live under separate keys so a model chosen for one
+# provider never collides with (or leaks into) the other; a provider switch in the
+# UI is lossless (each provider remembers its own model).
+KEY_OLLAMA_MODEL = "ollama_model"
+KEY_CLAUDE_MODEL = "claude_model"
 KEY_CLAUDE_API_KEY = "claude_api_key"
 KEY_OLLAMA_BASE_URL = "ollama_base_url"
 KEY_OLLAMA_API_KEY = "ollama_api_key"
 
 ALL_KEYS = (
     KEY_PROVIDER,
-    KEY_MODEL,
+    KEY_OLLAMA_MODEL,
+    KEY_CLAUDE_MODEL,
     KEY_CLAUDE_API_KEY,
     KEY_OLLAMA_BASE_URL,
     KEY_OLLAMA_API_KEY,

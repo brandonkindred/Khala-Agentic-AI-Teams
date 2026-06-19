@@ -59,7 +59,7 @@ def test_resolve_claude_model_skips_non_claude_runtime(monkeypatch):
     # A non-Claude runtime model (e.g. the default deepseek) is ignored, not sent
     # to Anthropic; a second call hits the "already warned" branch (lock path).
     monkeypatch.setattr(
-        c, "_runtime", lambda key: "deepseek-v4-pro:cloud" if key == "model" else ""
+        c, "_runtime", lambda key: "deepseek-v4-pro:cloud" if key == "claude_model" else ""
     )
     c._warned_non_claude_models.discard("deepseek-v4-pro:cloud")
     assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
@@ -68,7 +68,7 @@ def test_resolve_claude_model_skips_non_claude_runtime(monkeypatch):
 
 def test_resolve_model_reads_runtime(monkeypatch):
     # The Ollama path honors the runtime (UI) model, ranked above LLM_MODEL.
-    monkeypatch.setattr(c, "_runtime", lambda key: "llama3.2" if key == "model" else "")
+    monkeypatch.setattr(c, "_runtime", lambda key: "llama3.2" if key == "ollama_model" else "")
     assert c.resolve_model(None) == "llama3.2"
     monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
     assert c.resolve_model(None) == "llama3.2"  # runtime still wins over global env
@@ -83,18 +83,19 @@ def test_resolve_model_falls_back_without_runtime(monkeypatch):
     assert c.resolve_model(None) == "llama3.1"
 
 
-def test_resolve_model_ignores_stale_claude_runtime(monkeypatch):
-    # A Claude model id left in the shared runtime KEY_MODEL must NOT be returned for
-    # the Ollama path; it falls through to env/default instead of reaching Ollama.
-    monkeypatch.setattr(c, "_runtime", lambda key: "claude-opus-4-8" if key == "model" else "")
-    assert c.resolve_model(None) == c.DEFAULT_FALLBACK_MODEL
-    monkeypatch.setenv("LLM_MODEL", "llama3.1")
-    assert c.resolve_model(None) == "llama3.1"
+def test_resolve_model_uses_provider_specific_runtime_keys(monkeypatch):
+    # Per-provider keys: resolve_model reads ONLY ollama_model and
+    # resolve_claude_model reads ONLY claude_model, so a value stored for one
+    # provider can never leak into the other (no heuristic filtering needed).
+    runtime = {"ollama_model": "llama3.2", "claude_model": "claude-opus-4-8"}
+    monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
+    assert c.resolve_model(None) == "llama3.2"
+    assert c.resolve_claude_model(None) == "claude-opus-4-8"
 
 
 def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
-    # The chokepoint routes ollama -> resolve_model, which now reads runtime.
-    runtime = {"provider": "ollama", "model": "llama3.2"}
+    # The chokepoint routes ollama -> resolve_model, which reads the Ollama key.
+    runtime = {"provider": "ollama", "ollama_model": "llama3.2"}
     monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
     assert c.resolve_model_for_provider(None) == "llama3.2"
 

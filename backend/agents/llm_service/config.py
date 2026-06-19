@@ -330,7 +330,7 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
     candidates: list[str] = []
     if agent_key:
         candidates.append((os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip())
-    candidates.append(_runtime(_rc.KEY_MODEL).strip())
+    candidates.append(_runtime(_rc.KEY_CLAUDE_MODEL).strip())
     candidates.append((os.environ.get(ENV_LLM_MODEL) or "").strip())
 
     for candidate in candidates:
@@ -406,13 +406,13 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     """Resolve the Ollama model id for ``agent_key``.
 
     Ordered sources: ``LLM_MODEL_<agent_key>`` (per-agent env) -> runtime model
-    (the LLM Provider settings UI) -> ``LLM_MODEL`` (global env) ->
+    (the LLM Provider settings UI, stored under the Ollama-specific
+    ``KEY_OLLAMA_MODEL``) -> ``LLM_MODEL`` (global env) ->
     ``AGENT_DEFAULT_MODELS[agent_key]`` -> ``DEFAULT_FALLBACK_MODEL``. The runtime
     (UI) value is ranked above the global env so a model chosen in the settings
     page is honored — consistent with ``resolve_provider`` / ``resolve_base_url`` /
-    ``resolve_claude_model`` (whose Ollama counterpart this is). A runtime model
-    that looks like a Claude id (the shared ``KEY_MODEL`` after a provider switch)
-    is skipped so it is never sent to Ollama.
+    ``resolve_claude_model`` (whose Ollama counterpart this is). The runtime model
+    is provider-specific, so no cross-provider filtering is needed here.
 
     Postconditions: returns a non-empty model id string. Never raises.
     """
@@ -422,12 +422,8 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
         per_agent = (os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip()
         if per_agent:
             return per_agent
-    runtime_model = _runtime(_rc.KEY_MODEL).strip()
-    # KEY_MODEL is shared with the Claude path; ignore a model that belongs to the
-    # other provider (mirrors resolve_claude_model's _looks_like_claude_model guard)
-    # so a stale Claude id left in runtime after a provider switch falls through to
-    # env/defaults instead of being sent to Ollama.
-    if runtime_model and not _looks_like_claude_model(runtime_model):
+    runtime_model = _runtime(_rc.KEY_OLLAMA_MODEL).strip()
+    if runtime_model:
         return runtime_model
     global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
     if global_model:

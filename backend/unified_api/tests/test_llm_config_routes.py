@@ -86,7 +86,7 @@ def test_put_persists_and_clears_caches(app_client):
     assert resp.status_code == 200
     stored = dict((k, v) for _s, k, v in calls["set"])
     assert stored[route.runtime_config.KEY_PROVIDER] == "claude"
-    assert stored[route.runtime_config.KEY_MODEL] == "claude-opus-4-8"
+    assert stored[route.runtime_config.KEY_CLAUDE_MODEL] == "claude-opus-4-8"
     assert stored[route.runtime_config.KEY_CLAUDE_API_KEY] == "sk-new"
     assert calls["cache_clears"] == 1
     assert calls["runtime_clears"] == 1
@@ -99,7 +99,8 @@ def test_put_skips_empty_fields(app_client):
     # provider always written; empty model/keys are NOT written (preserve existing).
     assert route.runtime_config.KEY_PROVIDER in keys
     assert route.runtime_config.KEY_CLAUDE_API_KEY not in keys
-    assert route.runtime_config.KEY_MODEL not in keys
+    assert route.runtime_config.KEY_CLAUDE_MODEL not in keys
+    assert route.runtime_config.KEY_OLLAMA_MODEL not in keys
 
 
 def test_put_rejects_invalid_provider(app_client):
@@ -125,3 +126,13 @@ def test_get_reports_resolved_ollama_model(app_client):
     body = client.get("/api/llm-config").json()
     assert body["provider"] == "ollama"
     assert body["model"] == "llama3.2"
+
+
+def test_put_stores_model_under_provider_specific_key(app_client):
+    # The model is persisted under the active provider's key (ollama here), so it
+    # never collides with a Claude selection in a shared slot.
+    client, calls, _mp = app_client
+    client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.2"})
+    stored = {k: v for _s, k, v in calls["set"]}
+    assert stored[route.runtime_config.KEY_OLLAMA_MODEL] == "llama3.2"
+    assert route.runtime_config.KEY_CLAUDE_MODEL not in stored
