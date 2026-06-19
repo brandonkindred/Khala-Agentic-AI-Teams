@@ -49,6 +49,17 @@ def test_clamp_max_parallel_caps_to_env_ceiling(monkeypatch, caplog) -> None:
     assert api_main._clamp_max_parallel(api_main._MAX_PARALLEL) == api_main._MAX_PARALLEL
 
 
+def test_run_strategy_lab_request_default_within_cap() -> None:
+    """The omitted max_parallel default must never exceed the configured schema
+    ceiling (_MAX_PARALLEL) — Pydantic v2 doesn't validate defaults, so the default
+    itself has to be derived from the cap."""
+    from investment_team.api import main as api_main
+
+    default_mp = api_main.RunStrategyLabRequest().max_parallel
+    assert default_mp == min(3, api_main._MAX_PARALLEL)
+    assert 1 <= default_mp <= api_main._MAX_PARALLEL
+
+
 class _InMemoryDict:
     def __init__(self) -> None:
         self._d: Dict[str, Any] = {}

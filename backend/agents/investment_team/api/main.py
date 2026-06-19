@@ -1282,7 +1282,11 @@ class RunStrategyLabRequest(BaseModel):
         ),
     )
     max_parallel: int = Field(
-        default=3,
+        # Cap the default at the configured ceiling: Pydantic v2 doesn't validate
+        # field defaults, so a bare `default=3` would slip past `le=_MAX_PARALLEL`
+        # for an omitted request when an operator lowers STRATEGY_LAB_MAX_PARALLEL
+        # below 3, bypassing the advertised cap.
+        default=min(3, _MAX_PARALLEL),
         ge=1,
         le=_MAX_PARALLEL,
         description="Max strategies to generate in parallel per wave (within a batch).",
