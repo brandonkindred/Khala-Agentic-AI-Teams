@@ -308,7 +308,9 @@ def test_does_not_re_emit_while_engine_stop_limit_rests():
         tif=TimeInForce.GTC,
         reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
     )
-    order_book.submit(resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0)
+    resting_po = order_book.submit(
+        resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0
+    )
 
     pending: list[OrderRequest] = []
     disp.maybe_emit(
@@ -323,12 +325,17 @@ def test_does_not_re_emit_while_engine_stop_limit_rests():
     # No new engine emission — the resting structured exit owns the close.
     assert _engine_orders(pending) == []
     assert result.execution_diagnostics.exit_rule_firings.get("stop_loss") in (None, 0)
+    # No replacement rule fired, so the resting stop-limit is NOT cancelled — it
+    # is still the position's active protection.
+    resting_ids = {po.order_id for po in order_book.pending_for_symbol("AAA")}
+    assert resting_po.order_id in resting_ids
 
 
 def test_other_rule_still_emits_while_stop_limit_rests():
     """A resting limit-style stop-limit must NOT block a DIFFERENT, higher-priority
     rule. A take-profit that triggers while the stop-limit rests still emits its
-    (market) close — its fill will retire the resting stop-limit via the binding.
+    (market) close, and the resting stop-limit is cancelled so it cannot fill
+    first at its stale limit price on a recovery bar and pre-empt the close.
     """
     # take_profit listed first so it wins when both could trigger; here only TP
     # triggers (price spiked up), the stop is resting from a prior gap-through.
@@ -352,7 +359,9 @@ def test_other_rule_still_emits_while_stop_limit_rests():
         tif=TimeInForce.GTC,
         reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
     )
-    order_book.submit(resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0)
+    resting_po = order_book.submit(
+        resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0
+    )
 
     pending: list[OrderRequest] = []
     # high=106 clears the 105 take-profit target (entry 100, +5%); low stays
@@ -371,6 +380,9 @@ def test_other_rule_still_emits_while_stop_limit_rests():
     assert engine[0].order_type == OrderType.MARKET  # take-profit market close
     assert f"{ENGINE_EXIT_REASON_PREFIX}take_profit" == engine[0].reason
     assert result.execution_diagnostics.exit_rule_firings.get("take_profit") == 1
+    # The redundant resting stop-limit is cancelled — no longer on the book.
+    resting_ids = {po.order_id for po in order_book.pending_for_symbol("AAA")}
+    assert resting_po.order_id not in resting_ids
 
 
 def test_lower_priority_rule_emits_when_limit_stop_first_and_both_trigger():
@@ -400,7 +412,9 @@ def test_lower_priority_rule_emits_when_limit_stop_first_and_both_trigger():
         tif=TimeInForce.GTC,
         reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
     )
-    order_book.submit(resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0)
+    resting_po = order_book.submit(
+        resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0
+    )
 
     pending: list[OrderRequest] = []
     # Wide bar: low=95 re-triggers the stop (floor 98) AND high=106 clears the
@@ -418,6 +432,9 @@ def test_lower_priority_rule_emits_when_limit_stop_first_and_both_trigger():
     engine = _engine_orders(pending)
     assert len(engine) == 1
     assert engine[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+    # The replaced resting stop-limit is cancelled so it can't fill first.
+    resting_ids = {po.order_id for po in order_book.pending_for_symbol("AAA")}
+    assert resting_po.order_id not in resting_ids
 
 
 # ---------------------------------------------------------------------------
