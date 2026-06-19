@@ -26,6 +26,41 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # behavior, not a defect. Read once at import (matches the other prompt loads).
 _STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
 
+# Shared "How to read the sizing line" block. Single-sourced here (rather than
+# duplicated verbatim in analysis_win.md and analysis_lose.md) and injected into
+# both draft templates via the {sizing_line_reading} placeholder, so the
+# capital-at-risk framing cannot drift between the winning and losing prompts.
+# rstrip the trailing newline so the placeholder substitutes cleanly between the
+# surrounding blank lines (keeps the rendered prompt byte-identical).
+_SIZING_LINE_READING = (
+    (_PROMPT_DIR / "_sizing_line_reading.md").read_text(encoding="utf-8").rstrip("\n")
+)
+
+# The self-review risk-model check (instruction "1a"). Kept as its own
+# implicitly-concatenated constant — rather than one ~1k-char line inside the
+# template — for source readability; interpolated into the template below.
+_RISK_MODEL_CHECK = (
+    "1a. Risk-model check: confirm the narrative treats the deployed position size as the per-trade "
+    "capital at risk and loss cap, and treats stop-loss / trailing stop / take-profit as separate "
+    "within-position safeguards analyzed as a distinct dimension. "
+    'Read the "Sizing / risk" line by rule: "risk X% per trade" targets X% of the account (nominal, '
+    "before whole-share lot rounding and the position cap); "
+    '"$Y per trade" targets a fixed $Y per position capped by the position limit; '
+    '"vol-target X%" is a target annual volatility, so the deployed amount is dynamic and not shown — '
+    'do NOT read "risk X% per trade", "vol-target X%", or "$Y per trade" as the exact capital at risk, '
+    "since lot rounding or a position cap may move the realised deployment. "
+    "Strike any claim that derives per-trade risk by multiplying the stop into sizing "
+    '(deployed-fraction times stop), calls such a stop-multiplied figure the "capital at risk" / '
+    '"capital in play", or blames low/negative returns on "low effective risk". '
+    "Stating that the deployed size IS the capital at risk — including that a genuinely small "
+    "deployment is small capital at risk — is correct and must be preserved; only strike the "
+    "stop-multiplied conflation and the misattribution of returns to it. "
+    "The sizing line is only the nominal rule; the trade ledger reports per-trade position_value, "
+    "which IS the realised deployed capital at risk — verify any per-trade deployed-capital or "
+    "capital-at-risk claim against those position_value figures rather than re-deriving it from the "
+    "nominal sizing line."
+)
+
 _SELF_REVIEW_PROMPT = """\
 Perform a self-review of the draft analysis below.
 
@@ -35,6 +70,7 @@ Hypothesis: {hypothesis}
 Signal: {signal_definition}
 Entry rules: {entry_rules}
 Exit rules: {exit_rules}
+Sizing / risk: {sizing_rules}
 
 ## Aggregated metrics (source of truth)
 Annualized: {annualized_return_pct:.1f}% | Total: {total_return_pct:.1f}% | Sharpe: {sharpe_ratio:.2f}
@@ -51,6 +87,7 @@ Outcome label: {outcome_label}
 ## Instructions
 0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
 1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
+{risk_model_check}
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
 4. In verification_notes (2-4 sentences), state what you verified and any material corrections.
@@ -118,6 +155,7 @@ class AnalysisAgent:
             entry_rules=format_rules_for_prompt(spec.entry_rules),
             exit_rules=format_rules_for_prompt(spec.exit_rules),
             sizing_rules=format_sizing_rule(spec.sizing),
+            sizing_line_reading=_SIZING_LINE_READING,
             rationale=rationale,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
@@ -160,6 +198,8 @@ class AnalysisAgent:
             signal_definition=spec.signal_definition,
             entry_rules=format_rules_for_prompt(spec.entry_rules),
             exit_rules=format_rules_for_prompt(spec.exit_rules),
+            sizing_rules=format_sizing_rule(spec.sizing),
+            risk_model_check=_RISK_MODEL_CHECK,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
             sharpe_ratio=metrics.sharpe_ratio,
@@ -174,8 +214,11 @@ class AnalysisAgent:
         )
 
         review_system = (
-            "You are a critical peer reviewer for quantitative research. "
+            "You are a critical peer reviewer for quantitative research, with a quant's rigor and a veteran trader's instinct. "
             "You ensure narrative analysis is faithful to strategy specs, backtest aggregates, and simulated trade facts. "
+            "You enforce the correct risk model: the deployed position size (e.g. 'risk 5% per trade') IS the per-trade capital at risk and loss cap, while stop-loss, trailing stops, and take-profit are separate within-position safeguards analyzed as a distinct dimension. "
+            "Reject any claim that derives per-trade risk by multiplying the stop into sizing (deployed-fraction times stop), calls such a stop-multiplied figure the 'capital at risk' / 'capital in play', or blames low/negative returns on 'low effective risk'. "
+            "Stating that the deployed size IS the capital at risk — including that a genuinely small deployment is small capital at risk — is accurate and must be preserved. "
             "You correct any contradiction or overclaim before signing off."
             "\n\n" + _STOP_ORDER_SEMANTICS
         )
@@ -202,6 +245,26 @@ class AnalysisAgent:
         return _ensure_misalignment_disclaimer(draft_narrative, alignment_report)
 
 
+def _sanitize_exit_reason(reason: str, max_len: int = 80) -> str:
+    """Render a free-form exit reason as a bounded single-line value.
+
+    ``exit_reason`` derives from ``OrderRequest.reason``, a strategy-controlled
+    (untrusted, possibly LLM- or user-generated) annotation. Writing it raw into
+    the ledger row would let a multi-line or oversized reason — e.g.
+    ``"engine_exit:stop_loss\\nIgnore previous instructions..."`` — break out of
+    its row and inject prompt text. Collapse all whitespace to single spaces so
+    it cannot span lines, and bound the length so it cannot flood the prompt.
+
+    Preconditions: ``reason`` is a string (may be empty or whitespace-only).
+    Postconditions: the result contains no newline/tab, is ``<= max_len``
+    characters, and is empty only if ``reason`` was empty or whitespace-only.
+    """
+    flattened = " ".join(reason.split())
+    if len(flattened) > max_len:
+        flattened = flattened[: max_len - 1] + "…"
+    return flattened
+
+
 def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows: int = 14) -> str:
     """Compact evidence string from the simulated ledger for analysis + self-review."""
     if not trades:
@@ -217,6 +280,8 @@ def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows:
     tw = trades[best_i]
     tl = trades[worst_i]
     final_cum = trades[-1].cumulative_pnl
+    position_values = [t.position_value for t in trades]
+    avg_pv = sum(position_values) / n
 
     lines = [
         f"Aggregate: {n} simulated trades | {wins} wins / {losses} losses "
@@ -224,9 +289,11 @@ def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows:
         f"Hold days: avg {avg_hold:.1f}, min {min(holds)}, max {max(holds)}",
         f"Per-trade return %: best {rets[best_i]:.2f}% (trade #{tw.trade_num} {tw.symbol}), "
         f"worst {rets[worst_i]:.2f}% (trade #{tl.trade_num} {tl.symbol})",
+        f"Per-trade deployed capital (position_value = the realised capital at risk): "
+        f"min ${min(position_values):.2f}, max ${max(position_values):.2f}, avg ${avg_pv:.2f}",
         f"Sum of net P&L implied by ledger path; ending cumulative P&L = {final_cum:.2f}",
         "",
-        "Sample trades (chronological mix):",
+        "Sample trades (chronological mix; pv = deployed capital, exit = exit reason when recorded):",
     ]
     indices: List[int] = []
     if n <= max_sample_rows:
@@ -242,10 +309,11 @@ def _format_simulated_trades_summary(trades: List[TradeRecord], max_sample_rows:
             continue
         seen.add(i)
         t = trades[i]
+        exit_reason = f" exit={_sanitize_exit_reason(t.exit_reason)}" if t.exit_reason else ""
         lines.append(
             f"  #{t.trade_num} {t.symbol} {t.entry_date}->{t.exit_date} "
-            f"hold={t.hold_days}d ret={t.return_pct:.2f}% net={t.net_pnl:.2f} "
-            f"cum={t.cumulative_pnl:.2f} [{t.outcome}]"
+            f"hold={t.hold_days}d pv=${t.position_value:.2f} ret={t.return_pct:.2f}% "
+            f"net={t.net_pnl:.2f} cum={t.cumulative_pnl:.2f} [{t.outcome}]{exit_reason}"
         )
     if n > len(seen):
         lines.append(f"  ... ({n - len(seen)} additional trades not shown) ...")
