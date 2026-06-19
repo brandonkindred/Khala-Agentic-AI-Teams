@@ -136,11 +136,10 @@ def evaluate_exit_rules(
     are ``ExitRule`` members; ``views`` (if given) maps symbols to ``HistoryView``.
     Postconditions: returns one ``ExitIntent`` per (open position × triggered rule)
     in spec order — at most one per position when ``first_only``, all triggered
-    otherwise. Positions with non-positive qty or no matching bar yield none. A
-    limit-style stop's ``stop_price``/``limit_price`` are resolved only on the
-    committed (``first_only``) path; in candidate-listing mode they are left
-    ``None`` (the caller acts only on the non-limit candidate it selects), so a
-    limit candidate from that mode must not be emitted without re-resolution.
+    otherwise. Positions with non-positive qty or no matching bar yield none. Each
+    limit-style stop intent carries its fully-resolved ``stop_price``/``limit_price``
+    regardless of ``first_only`` (``first_only`` controls only how many intents are
+    returned, never their contents).
     """
     intents: list[ExitIntent] = []
     for symbol, position in positions.items():
@@ -153,17 +152,14 @@ def evaluate_exit_rules(
         for idx, rule in enumerate(rules):
             if _rule_triggers(rule, position, bar, sym_view):
                 style = getattr(rule, "style", "market") or "market"
-                # Resolve the limit-style stop's static level + protective limit
-                # so the dispatcher can rest a STOP_LIMIT without re-deriving
-                # prices. Only do so on the committed (``first_only``) path: in
-                # candidate-listing mode the dispatcher acts only on the non-limit
-                # intent it selects, so resolving a limit candidate that will be
-                # discarded would be wasted work. (Limit-style is restricted to
-                # the ``entry_price`` basis — see ``StopLossRule`` — so the level
-                # is a static offset off the entry price.)
+                # A limit-style stop carries its fully-resolved stop level +
+                # protective-side limit so the dispatcher can rest a STOP_LIMIT
+                # without re-deriving prices. (Limit-style is restricted to the
+                # ``entry_price`` basis — see ``StopLossRule`` — so the level is a
+                # static offset off the entry price.)
                 stop_price: Optional[float] = None
                 limit_price: Optional[float] = None
-                if first_only and isinstance(rule, StopLossRule) and style == "limit":
+                if isinstance(rule, StopLossRule) and style == "limit":
                     stop_price = _stop_loss_level(rule, position)
                     offset = stop_price * rule.limit_offset_pct
                     limit_price = protective_limit_price(

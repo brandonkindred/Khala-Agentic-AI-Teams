@@ -507,7 +507,10 @@ class _EngineExitDispatcher:
         the limit stop is the only trigger). The pure evaluator stays unaware of
         order-book state; the skip decision lives here in the dispatcher.
 
-        Postconditions: returns an ``ExitIntent`` to emit, or ``None``.
+        Preconditions: ``tracked``/``pos`` describe the same open position
+        (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
+        Postconditions: returns an ``ExitIntent`` to emit, or ``None`` (no rule
+        triggered, or the only trigger is the excluded resting limit stop).
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)

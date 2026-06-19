@@ -211,22 +211,17 @@ def test_first_only_false_returns_all_triggered_in_spec_order() -> None:
     ]
 
 
-def test_limit_stop_prices_resolved_only_on_committed_path() -> None:
+def test_limit_stop_prices_resolved_regardless_of_first_only() -> None:
     pos = _long()
     rule = StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01)
     bars = {"AAA": _bar(low=94)}  # crosses the 95 floor (entry 100, -5%)
-    # Committed path (first_only=True, default) resolves the resting prices.
-    committed = evaluate_exit_rules([rule], {"AAA": pos}, bars)[0]
-    assert committed.style == "limit"
-    assert committed.stop_price == 95.0
-    assert committed.limit_price == 95.0 - 95.0 * 0.01
-    # Candidate-listing path (first_only=False) leaves them None — the dispatcher
-    # only acts on the non-limit candidate it selects, so resolving a discarded
-    # limit candidate would be wasted work.
-    candidate = evaluate_exit_rules([rule], {"AAA": pos}, bars, first_only=False)[0]
-    assert candidate.style == "limit"
-    assert candidate.stop_price is None
-    assert candidate.limit_price is None
+    # first_only controls only how many intents are returned, never their
+    # contents — a limit-style intent carries resolved prices in both modes.
+    for first_only in (True, False):
+        intent = evaluate_exit_rules([rule], {"AAA": pos}, bars, first_only=first_only)[0]
+        assert intent.style == "limit"
+        assert intent.stop_price == 95.0
+        assert intent.limit_price == 95.0 - 95.0 * 0.01
 
 
 def test_first_only_false_with_single_trigger_returns_one() -> None:
