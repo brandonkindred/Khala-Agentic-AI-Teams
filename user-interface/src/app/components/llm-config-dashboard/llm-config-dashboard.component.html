@@ -32,8 +32,12 @@
     <mat-card class="config-card">
       <mat-card-content>
         <section class="field-group">
-          <label class="field-label">Provider</label>
-          <mat-radio-group [(ngModel)]="provider" class="provider-radio" aria-label="LLM provider">
+          <div class="field-label" id="provider-label">Provider</div>
+          <mat-radio-group
+            [(ngModel)]="provider"
+            class="provider-radio"
+            aria-labelledby="provider-label"
+          >
             <mat-radio-button value="ollama">Ollama</mat-radio-button>
             <mat-radio-button value="claude">Claude (Anthropic)</mat-radio-button>
           </mat-radio-group>
@@ -41,12 +45,12 @@
 
         @if (provider === 'ollama') {
           <section class="field-group">
-            <label class="field-label">Ollama mode</label>
+            <div class="field-label" id="ollama-mode-label">Ollama mode</div>
             <mat-radio-group
               [ngModel]="ollamaMode"
               (ngModelChange)="onOllamaModeChange($event)"
               class="provider-radio"
-              aria-label="Ollama mode"
+              aria-labelledby="ollama-mode-label"
             >
               <mat-radio-button value="local">Local</mat-radio-button>
               <mat-radio-button value="cloud">Cloud</mat-radio-button>
