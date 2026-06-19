@@ -1142,9 +1142,13 @@ def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monk
 def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatch):
     """A 'done' verdict whose non-empty branch fails to merge (conflict/checkout failure) must FAIL
     the task and cascade — not mark it merged, which would drop the work and could leave a conflicted
-    tree."""
+    tree. It must also abort the half-applied merge so later tasks/publish run on a clean checkout."""
+    aborted: list[Any] = []
     monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
     monkeypatch.setattr(f"{GIT_UTILS}.merge_branch", lambda *a, **k: (False, "merge conflict"))
+    monkeypatch.setattr(
+        f"{GIT_UTILS}.abort_merge", lambda p, *a, **k: (aborted.append(p) or (True, "aborted"))
+    )
     swarm, graph = _make_swarm(
         tmp_path, StubTechLead(approved=False, adjudication_verdict="done"), [StubWorker("a1")]
     )
@@ -1158,6 +1162,7 @@ def test_escalate_done_failed_merge_marks_failed_not_merged(tmp_path, monkeypatc
     assert graph.get_task("t1").status == TaskStatus.FAILED  # not merged
     assert graph.get_task("t1").resolved_without_changes is False
     assert graph.get_task("t2").status == TaskStatus.FAILED  # dependent cascade-failed
+    assert aborted  # the conflicted merge was aborted before cascading
 
 
 def test_escalate_fail_marks_failed_and_cascades(tmp_path, monkeypatch):

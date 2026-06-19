@@ -1090,6 +1090,7 @@ class CodingTeamSwarm:
             # report as "already complete".
             from software_engineering_team.shared.git_utils import (
                 DEVELOPMENT_BRANCH,
+                abort_merge,
                 branch_diff,
                 merge_branch,
             )
@@ -1111,11 +1112,16 @@ class CodingTeamSwarm:
                 merged_ok = False
             if not merged_ok:
                 # The Tech Lead judged the work done, but its branch will not integrate (merge
-                # conflict / checkout failure). Marking it merged would drop the work and could leave
-                # a conflicted tree, so FAIL the task (and cascade to dependents) to surface the gap
-                # rather than claim a success that never landed on ``development``.
+                # conflict / checkout failure). A failed `git merge` leaves DEVELOPMENT_BRANCH
+                # mid-merge (conflict markers / MERGE_HEAD), so abort it first — otherwise later
+                # tasks and the GitHub publish step would run on a dirty, conflicted checkout.
+                # Then FAIL the task (and cascade to dependents) to surface the gap rather than
+                # claim a success that never landed on ``development``. abort_merge is best-effort:
+                # it is a harmless no-op when no merge is in progress (e.g. the checkout failed).
+                abort_merge(self.path)
                 logger.warning(
-                    "Adjudicated-done branch %s failed to merge into %s; marking FAILED, not merged",
+                    "Adjudicated-done branch %s failed to merge into %s; aborted the merge and "
+                    "marking FAILED, not merged",
                     task.id,
                     DEVELOPMENT_BRANCH,
                 )
