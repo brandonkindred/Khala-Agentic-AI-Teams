@@ -315,6 +315,9 @@ class TaskGraphService:
                     "changes_summary": t.changes_summary,
                     "revision_count": t.revision_count,
                     "revision_feedback": t.revision_feedback,
+                    "no_change_revisits": t.no_change_revisits,
+                    "last_change_digest": t.last_change_digest,
+                    "resolved_without_changes": t.resolved_without_changes,
                     "subtasks": [
                         {
                             "id": s.id,
@@ -368,6 +371,9 @@ class TaskGraphService:
                 changes_summary=tdata.get("changes_summary"),
                 revision_count=tdata.get("revision_count", 0),
                 revision_feedback=tdata.get("revision_feedback", []),
+                no_change_revisits=tdata.get("no_change_revisits", 0),
+                last_change_digest=tdata.get("last_change_digest", ""),
+                resolved_without_changes=tdata.get("resolved_without_changes", False),
             )
             self._tasks[task.id] = task
         self._agent_to_task = dict(snapshot.get("agent_task_map", {}))

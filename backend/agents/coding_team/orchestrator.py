@@ -8,6 +8,7 @@ Exposes run_coding_team_orchestrator for in-process call from software_engineeri
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import math
 import os
@@ -37,6 +38,31 @@ logger = logging.getLogger(__name__)
 
 CANCEL_KEY = "cancel_requested"
 MAX_TASK_REVISIONS = 20  # max times a task can be returned for revision before accepting
+
+# Cap on CONSECUTIVE no-change revision rounds — rounds where the engineer revisited a task it
+# already flagged done and produced no change to the branch diff. This is deliberately distinct from
+# MAX_TASK_REVISIONS: a revision that actually changes the code resets this counter and keeps the
+# full revision budget, so productive work is never throttled. Only zero-progress re-evaluation is
+# bounded — on reaching the cap the task is handed to the Tech Lead for direction instead of being
+# bounced again.
+NO_CHANGE_REVISIT_CAP = 3
+
+
+def _no_change_revisit_cap() -> int:
+    """Consecutive no-change revision rounds tolerated before escalating to the Tech Lead.
+
+    Configurable via CODING_TEAM_NO_CHANGE_REVISIT_CAP (default 3; garbage/empty → default; floored
+    at 1 so the guard can never be disabled into an unbounded no-progress loop).
+
+    Postconditions:
+        - Returns an int >= 1.
+    """
+    raw = os.environ.get("CODING_TEAM_NO_CHANGE_REVISIT_CAP")
+    try:
+        cap = int(raw) if raw is not None and raw.strip() != "" else NO_CHANGE_REVISIT_CAP
+    except (TypeError, ValueError):
+        cap = NO_CHANGE_REVISIT_CAP
+    return max(1, cap)
 
 
 class _NoopBridge:
@@ -717,6 +743,23 @@ def run_coding_team_orchestrator(
                     error="Tech Lead exceeded the open-question round cap",
                 )
             return
+        if out.get("already_complete"):
+            # The Tech Lead, now seeing the already-completed work, judged the issue's work already
+            # done and returned no tasks. Short-circuit to a clean terminal outcome instead of
+            # building duplicate tasks the engineers would spin on. The GitHub publish hook turns
+            # this status into a "recommend closing" comment with the evidence and creates no PR.
+            evidence = str(out.get("completion_evidence") or "").strip()
+            logger.info("Job %s: Tech Lead judged the work already complete: %s", job_id, evidence)
+            _update(
+                status="already_complete",
+                phase="completed",
+                status_text="Work already complete; no changes needed",
+                already_complete=True,
+                completion_evidence=evidence,
+                progress=100,
+                current_activity=None,
+            )
+            return
         tasks_raw = out.get("tasks") or []
         stacks_raw = out.get("stacks") or _DEFAULT_STACK_SPECS
         for t in tasks_raw:
@@ -787,13 +830,32 @@ def run_coding_team_orchestrator(
     if getattr(swarm, "aborted", False):
         return
 
-    merged_count = graph.count_with_status(TaskStatus.MERGED)
+    merged_tasks = [t for t in graph.get_tasks() if t.status == TaskStatus.MERGED]
+    merged_count = len(merged_tasks)
     failed_count = graph.count_with_status(TaskStatus.FAILED)
+    # Tasks the Tech Lead adjudicated as already-done (terminal MERGED but no real diff landed).
+    resolved_count = sum(1 for t in merged_tasks if t.resolved_without_changes)
+    # When nothing failed and every "merged" task was actually already-done (no real changes
+    # landed), the issue's work was already complete — report that distinct terminal status so the
+    # publish flow recommends closure instead of opening a no-op PR. A mixed result (some real
+    # merges) stays a normal completion and publishes the real work.
+    already_complete = failed_count == 0 and merged_count > 0 and resolved_count == merged_count
     # A job with failed tasks must not be presented as a clean success — surface a distinct
     # terminal status so downstream consumers (and the GitHub publish flow) can flag the gap.
     # current_activity=None travels in the terminal write itself so a transient
     # failure of an earlier best-effort clear cannot leave a terminal job serving
     # a stale mid-review activity entry.
+    if already_complete:
+        _update(
+            status="already_complete",
+            phase="completed",
+            status_text="Work already complete; no changes needed",
+            already_complete=True,
+            completion_evidence="The requested work was already present; no changes were needed.",
+            progress=100,
+            current_activity=None,
+        )
+        return
     _update(
         status="completed_with_failures" if failed_count else "completed",
         phase="completed",
@@ -894,14 +956,16 @@ class CodingTeamSwarm:
             return
 
         if result.get("status") == "in_review":
-            # Run quality gates as tools
-            if not self._run_quality_gates(swe, task, result, update_fn):
-                return  # task returned to TODO for revision
+            # Record the branch/summary BEFORE the gates so a gate-triggered revision (and its
+            # no-change check) reads the branch the engineer actually used, not a stale/absent one.
             self.graph.update_task(
                 task.id,
                 feature_branch=result.get("feature_branch"),
                 changes_summary=result.get("changes_summary"),
             )
+            # Run quality gates as tools
+            if not self._run_quality_gates(swe, task, result, update_fn):
+                return  # task returned to TODO for revision (or escalated to the Tech Lead)
             self.graph.set_task_in_review(task.id)
         else:
             # Any non-review outcome — status="failed" (the LLM call raised) or status="in_progress"
@@ -918,6 +982,106 @@ class CodingTeamSwarm:
                 result.get("error"),
             )
             self._handle_incomplete_implementation(task, result)
+
+    def _branch_digest(self, task: Task, diff: Optional[str] = None) -> str:
+        """Hash of the task's branch diff — the truthful 'did this round change anything' signal.
+
+        ``branch_diff`` normalizes to "" for both an empty diff and a non-git/failed path, so a task
+        that produced no change (or has no branch yet) hashes to a stable value and a repeat round
+        compares equal. Pass ``diff`` to reuse a diff the caller already computed (the review path
+        collects it for the reviewer) instead of paying for a second git invocation.
+
+        Postconditions:
+            - Returns a hex digest; identical change states across rounds yield identical digests.
+        """
+        if diff is None:
+            from software_engineering_team.shared.git_utils import DEVELOPMENT_BRANCH, branch_diff
+
+            branch = task.feature_branch or f"feature/{task.id}"
+            diff = branch_diff(self.path, DEVELOPMENT_BRANCH, branch)
+        return hashlib.sha256((diff or "").encode("utf-8", "replace")).hexdigest()
+
+    def _note_revision_progress(self, task: Task, diff: Optional[str] = None) -> bool:
+        """Record whether this revision round changed the code and report if the no-change cap is hit.
+
+        Compares the task's current branch-diff digest to the digest recorded at the previous bounce:
+        an identical digest means the engineer revisited the task without changing anything (a
+        no-progress re-evaluation) and bumps ``no_change_revisits``; a different digest means real
+        progress and resets the counter to 0. The first bounce only records a baseline.
+
+        Postconditions:
+            - ``task.last_change_digest`` reflects the current change state and ``no_change_revisits``
+              is incremented (no change) or reset to 0 (change), persisted via the graph.
+            - Returns True iff ``no_change_revisits`` has reached the configured no-change cap, i.e.
+              the caller should escalate to the Tech Lead instead of bouncing the task again.
+        """
+        digest = self._branch_digest(task, diff=diff)
+        if task.last_change_digest and task.last_change_digest == digest:
+            no_change = task.no_change_revisits + 1
+        else:
+            no_change = 0
+        self.graph.update_task(task.id, no_change_revisits=no_change, last_change_digest=digest)
+        return no_change >= _no_change_revisit_cap()
+
+    def _escalate_to_tech_lead(self, task: Task) -> None:
+        """Hand a task stuck in a no-change loop to the Tech Lead for direction; apply the verdict.
+
+        Invoked when ``_note_revision_progress`` reports the no-change cap is reached: rather than
+        bounce the same unchanged work again, give the Tech Lead the accumulated revision history
+        (the documentation of what has been tried) and act on the verdict — close it out as already
+        done, fail it terminally, or grant one more bounded window.
+
+        Postconditions:
+            - "done": task is MERGED with ``resolved_without_changes=True`` (terminal, agent freed,
+              dependents unblocked) and the reasoning recorded.
+            - "fail": task is FAILED and its dependents cascade-failed.
+            - "continue": ``no_change_revisits`` is reset to 0 (a fresh window) and the task returns
+              to its engineer IN_PROGRESS; the 20-revision cap still ultimately bounds it.
+        """
+        verdict_data = self.tech_lead.run_revision_adjudication(
+            task_title=task.title,
+            task_description=task.description,
+            acceptance_criteria=task.acceptance_criteria,
+            changes_summary=task.changes_summary or "",
+            revision_feedback=task.revision_feedback or [],
+        )
+        verdict = verdict_data.get("verdict", "fail")
+        reason = verdict_data.get("reason", "")
+        entry = {
+            "source": "tech_lead_adjudication",
+            "reason": f"[{verdict}] {reason}".strip(),
+            "requested_changes": [],
+        }
+        feedback = list(task.revision_feedback or []) + [entry]
+        logger.info(
+            "Task %s stalled (no change for %d round(s)); Tech Lead verdict=%s: %s",
+            task.id,
+            task.no_change_revisits,
+            verdict,
+            reason,
+        )
+        if verdict == "done":
+            # Mark merged so it is terminal, frees the agent, and unblocks dependents — but flag it
+            # as resolved-without-changes so the job-level outcome reports "already complete" rather
+            # than presenting a non-existent diff as real merged work.
+            self.graph.update_task(
+                task.id, resolved_without_changes=True, revision_feedback=feedback
+            )
+            self.graph.mark_branch_merged(task.id)
+            return
+        if verdict == "continue":
+            # One more bounded window: reset the no-change counter and return to the engineer. The
+            # revision_count / MAX_TASK_REVISIONS backstop still applies.
+            self.graph.update_task(
+                task.id,
+                status=TaskStatus.IN_PROGRESS,
+                no_change_revisits=0,
+                revision_feedback=feedback,
+            )
+            return
+        # "fail" (and any unexpected verdict — run_revision_adjudication fails closed to "fail").
+        self.graph.update_task(task.id, status=TaskStatus.FAILED, revision_feedback=feedback)
+        self._cascade_fail_dependents(task.id)
 
     def _handle_incomplete_implementation(self, task: Task, result: Dict[str, Any]) -> None:
         """Bound an implementation that did not reach review so it cannot spin the loop to max_rounds.
@@ -938,6 +1102,12 @@ class CodingTeamSwarm:
             "requested_changes": [],
         }
         feedback = list(task.revision_feedback or []) + [entry]
+        # Record the feedback before the no-change check so the Tech Lead, if we escalate, sees this
+        # round's reason in the history it adjudicates over.
+        self.graph.update_task(task.id, revision_feedback=feedback)
+        if self._note_revision_progress(task):
+            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+            return
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
@@ -1136,21 +1306,31 @@ class CodingTeamSwarm:
         return True
 
     def _return_for_revision(self, task: Task, feedback: List[Dict[str, Any]]) -> bool:
-        """Return a task to TODO for revision. Returns False (task not ready for review)."""
+        """Return a task to TODO for revision. Returns False (task not ready for review).
+
+        Returns True only when the revision budget is exhausted (accept as-is). When a no-change
+        loop is detected the task is escalated to the Tech Lead (terminal or a fresh window) and
+        this returns False so the caller does not push the unchanged work into review.
+        """
+        # Record the gate feedback before the no-change check so an escalation adjudicates over it.
+        self.graph.update_task(
+            task.id, revision_feedback=list(task.revision_feedback or []) + list(feedback)
+        )
+        if self._note_revision_progress(task):
+            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+            return False
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(
                 "Task %s exceeded max revisions (%d); accepting as-is", task.id, MAX_TASK_REVISIONS
             )
             return True  # accept despite issues
-        # Append to the accumulated history rather than overwriting it: a task may have prior
-        # Tech Lead feedback that must survive a later quality-gate failure, or the next engineer
-        # prompt would lose those requirements and the reviewer could reintroduce them.
+        # revision_feedback already carries this round's gate feedback (appended above, before the
+        # no-change check); only the status/count change here, so do not re-append it.
         self.graph.update_task(
             task.id,
             status=TaskStatus.TO_DO,
             revision_count=revision_count,
-            revision_feedback=list(task.revision_feedback or []) + list(feedback),
         )
         # Release the task before the next round (status went to TO_DO above): it must be genuinely
         # unassigned and its agent freed, or it stays mapped to its agent and can be double-assigned.
@@ -1284,9 +1464,13 @@ class CodingTeamSwarm:
                     logger.warning("Merge failed for %s: %s; marking merged anyway", task.id, e)
                     self.graph.mark_branch_merged(task.id)
             else:
-                self._request_revision(task, review)
+                # Pass the diff already collected for the reviewer so the no-change check reuses it
+                # rather than re-shelling out to git for the same branch.
+                self._request_revision(task, review, diff=diff)
 
-    def _request_revision(self, task: Task, review: Dict[str, Any]) -> None:
+    def _request_revision(
+        self, task: Task, review: Dict[str, Any], diff: Optional[str] = None
+    ) -> None:
         """Send a Tech-Lead-rejected task back to the SAME engineer for revision.
 
         Unlike the quality-gate path (_return_for_revision, which demotes to TO_DO and clears the
@@ -1307,6 +1491,12 @@ class CodingTeamSwarm:
             "requested_changes": review.get("requested_changes") or [],
         }
         feedback = list(task.revision_feedback or []) + [entry]
+        # Record this round's rejection before the no-change check so an escalation adjudicates over
+        # the full history including why the Tech Lead just bounced it.
+        self.graph.update_task(task.id, revision_feedback=feedback)
+        if self._note_revision_progress(task, diff=diff):
+            self._escalate_to_tech_lead(self.graph.get_task(task.id) or task)
+            return
         revision_count = task.revision_count + 1
         if revision_count >= MAX_TASK_REVISIONS:
             logger.warning(

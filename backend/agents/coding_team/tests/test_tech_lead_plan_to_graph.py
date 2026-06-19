@@ -137,6 +137,93 @@ def test_plan_text_passes_all_fields_uncut() -> None:
     assert big_arch in text
 
 
+def test_plan_text_includes_existing_code_summary() -> None:
+    """Already-completed work must reach the planning prompt so the Tech Lead can recognize it."""
+    plan = CodingTeamPlanInput(
+        requirements_title="X",
+        requirements_description="do the thing",
+        repo_path="/tmp",
+        existing_code_summary="Already-completed sub-issues:\n- #12 Add login\n- #13 Add logout",
+    )
+    text = tl_mod._plan_text(plan)
+    assert "#12 Add login" in text
+    assert "already merged/done" in text.lower() or "already completed" in text.lower()
+
+
+def test_plan_to_task_graph_already_complete(monkeypatch) -> None:
+    """already_complete + no tasks is surfaced with the evidence so the caller can short-circuit."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "tasks": [],
+            "stacks": [],
+            "already_complete": True,
+            "completion_evidence": "All sub-issues #12 and #13 are closed and merged.",
+        },
+    )
+    out = TechLeadAgent(model=object()).run_plan_to_task_graph(
+        CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
+    )
+    assert out["already_complete"] is True
+    assert "#12" in out["completion_evidence"]
+    assert out["tasks"] == []
+
+
+def test_plan_to_task_graph_already_complete_ignored_when_tasks_present(monkeypatch) -> None:
+    """A true flag alongside real tasks is contradictory; the tasks win (work is never dropped)."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    monkeypatch.setattr(
+        tl_mod,
+        "_agent_call_json",
+        lambda agent, prompt: {
+            "tasks": [{"id": "t1", "title": "Real task", "description": "", "dependencies": []}],
+            "stacks": [],
+            "already_complete": True,
+            "completion_evidence": "ignored",
+        },
+    )
+    out = TechLeadAgent(model=object()).run_plan_to_task_graph(
+        CodingTeamPlanInput(requirements_title="X", repo_path="/tmp")
+    )
+    assert out["already_complete"] is False
+    assert out["completion_evidence"] == ""
+    assert len(out["tasks"]) == 1
+
+
+def test_run_revision_adjudication_verdicts(monkeypatch) -> None:
+    """Each valid verdict is parsed through; the reason is preserved."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+    for verdict in ("done", "fail", "continue"):
+        monkeypatch.setattr(
+            tl_mod,
+            "_agent_call_json",
+            lambda agent, prompt, _v=verdict: {"verdict": _v.upper(), "reason": f"because {_v}"},
+        )
+        out = TechLeadAgent(model=object()).run_revision_adjudication(
+            "T1", "desc", ["ac"], "summary", [{"source": "tech_lead", "reason": "nope"}]
+        )
+        assert out["verdict"] == verdict
+        assert out["reason"] == f"because {verdict}"
+
+
+def test_run_revision_adjudication_fails_closed(monkeypatch) -> None:
+    """An LLM error or an unusable verdict must fail closed to 'fail', never re-enter the loop."""
+    monkeypatch.setattr(tl_mod, "Agent", lambda **kw: object())
+
+    def boom(agent, prompt):
+        raise RuntimeError("LLM down")
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", boom)
+    out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
+    assert out["verdict"] == "fail"
+
+    monkeypatch.setattr(tl_mod, "_agent_call_json", lambda agent, prompt: {"verdict": "maybe"})
+    out = TechLeadAgent(model=object()).run_revision_adjudication("T", "d", [], "s", [])
+    assert out["verdict"] == "fail"
+
+
 def test_run_groom_task_passes_full_inputs_to_llm(monkeypatch) -> None:
     """A large task description and plan context reach the groom prompt in full, never truncated."""
     captured: dict[str, str] = {}

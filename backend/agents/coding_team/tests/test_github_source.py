@@ -912,6 +912,34 @@ class TestEndpointFailures:
         assert gh.created_pulls == []
         assert any("produced no merged tasks" in b for _, b in gh.comments)
 
+    def test_already_complete_recommends_closure_no_pr(self, patched_app, monkeypatch) -> None:
+        """When the orchestrator reports the work already done, the hook comments a closure
+        recommendation and opens NO pull request."""
+        gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
+        patched_app["set_github"](gh)
+
+        def _already_done(job_id: str, _rp, _plan, **kw):
+            kw["update_job_fn"](
+                status="already_complete",
+                phase="completed",
+                already_complete=True,
+                completion_evidence="Sub-issues #12 and #13 already merged.",
+                task_graph_snapshot=[],
+            )
+
+        monkeypatch.setattr(patched_app["api"], "run_coding_team_orchestrator", _already_done)
+        resp = patched_app["client"].post(
+            "/run-from-github",
+            json=_body(1, repo_path=patched_app["repo_path"]),
+        )
+        assert resp.status_code == 200
+        job = patched_app["jobs"].get_job(resp.json()["job_id"])
+        assert job["status"] == "already_complete"
+        assert gh.created_pulls == []  # no no-op PR
+        bodies = [b for _, b in gh.comments]
+        assert any("already complete" in b.lower() and "Recommend closing #1" in b for b in bodies)
+        assert any("#12 and #13" in b for b in bodies)
+
     def test_fast_forward_failure_sets_status_failed(self, patched_app, monkeypatch) -> None:
         gh = _FakeClient(issues=[_issue(1)], sub_map={1: []})
         patched_app["set_github"](gh)

@@ -508,6 +508,25 @@ distinct escalations (`orchestrator.py:670-683`). A `FAILED` task cascades to
 every transitive dependent (`_cascade_fail_dependents` → `mark_dependents_failed`,
 `orchestrator.py:877-886`, `task_graph.py:246-281`).
 
+**No-change revisit guard → Tech Lead adjudication.** `MAX_TASK_REVISIONS = 20`
+bounds *productive* revisions — rounds that change the code — and must stay high
+because correct, good code can take many passes. A separate, smaller cap
+(`NO_CHANGE_REVISIT_CAP = 3`, env `CODING_TEAM_NO_CHANGE_REVISIT_CAP`) bounds only
+**no-change** rounds: the engineer revisiting work it already flagged done without
+altering the branch diff (the "is it done? maybe not, let me re-check everything"
+loop). Each bounce path runs `_note_revision_progress`, which hashes the task's
+branch diff (`branch_diff` vs `development`) and compares it to the digest recorded
+at the previous bounce — an identical digest bumps `no_change_revisits`, a changed
+digest resets it to 0. On reaching the cap the task is handed to the Tech Lead
+(`run_revision_adjudication`) instead of bounced again; the verdict is `done` (mark
+the task `MERGED` with `resolved_without_changes=True` — terminal, no diff landed),
+`fail` (terminal + cascade), or `continue` (reset the window, one more bounded
+pass). When a job's only terminal tasks are such already-done resolutions — or the
+Tech Lead judged the whole issue already complete at planning time (empty `tasks` +
+`already_complete`) — the job ends with the terminal status `already_complete`, and
+the `run-from-github` flow comments a closure recommendation on the issue rather
+than opening a no-op PR.
+
 ### Task Graph invariants enforced in code
 
 - **Assignment guard** (`task_graph.py:187-213`): assign only if the agent is
@@ -760,6 +779,7 @@ would otherwise do, all defensively hardened:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `CODING_TEAM_REVIEW_RETRIES` | Tech Lead `run_code_review` retry count (attempts = retries + 1) on transient failure. | `2` → 3 attempts |
+| `CODING_TEAM_NO_CHANGE_REVISIT_CAP` | Consecutive **no-change** revision rounds on one task before the Tech Lead adjudicates it (done/fail/continue). Distinct from `MAX_TASK_REVISIONS`; a round that changes the diff resets it. Floored at 1. | `3` |
 | `CODING_TEAM_ANSWER_WAIT_TIMEOUT_S` | Wall-clock cap (seconds) for a single HITL pause before the job times out and fails. | `3600` |
 | `GITHUB_TOKEN` | Fallback token for `run-from-github` (per-request `github_token` overrides). Needs Issues/PRs/Contents read-write + Metadata read. | — |
 | `GITHUB_API_URL` | REST base URL for the GitHub client; set for Enterprise. | `https://api.github.com` |

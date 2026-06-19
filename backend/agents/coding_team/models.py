@@ -96,6 +96,30 @@ class Task(BaseModel):
         default_factory=list,
         description="Feedback from prior revision rounds (quality gate or Tech Lead review)",
     )
+    no_change_revisits: int = Field(
+        default=0,
+        description=(
+            "Consecutive revision rounds that produced NO change to the task's branch diff "
+            "(the engineer revisited work already flagged done without altering the code). "
+            "Reset to 0 the moment a round changes the diff. Distinct from revision_count, which "
+            "counts every revision; this counts only zero-progress re-evaluations and caps them."
+        ),
+    )
+    last_change_digest: str = Field(
+        default="",
+        description=(
+            "Hash of the task's branch diff at the previous bounce, used to detect a round that "
+            "made no change. Empty until the first bounce records a baseline."
+        ),
+    )
+    resolved_without_changes: bool = Field(
+        default=False,
+        description=(
+            "True when the Tech Lead adjudicated a stalled (no-change) task as already complete: "
+            "the task is terminal (MERGED) but landed no diff, so the job-level outcome treats it "
+            "as 'already done' rather than real merged work."
+        ),
+    )
 
 
 class SeniorEngineerSpec(BaseModel):

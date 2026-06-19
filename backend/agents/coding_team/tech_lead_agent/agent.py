@@ -88,6 +88,15 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
         )
     if plan.assumptions:
         parts.append("Assumptions on record:\n" + "\n".join(f"- {a}" for a in plan.assumptions))
+    if plan.existing_code_summary:
+        # The single most important signal for an "already done" issue: work that is already
+        # merged/present. Without it the Tech Lead re-plans from scratch and invents tasks to redo
+        # finished work, which the engineers then spin on. Surfaced verbatim so the model can judge
+        # whether the plan is already satisfied and return already_complete instead of new tasks.
+        parts.append(
+            "Work already completed (already merged/done — do NOT recreate it):\n"
+            + plan.existing_code_summary
+        )
     return "\n\n".join(p for p in parts if p)
 
 
@@ -109,6 +118,9 @@ class TechLeadAgent:
         self._groom_agent = Agent(model=model, system_prompt=prompts.GROOM_TASK_SYSTEM)
         self._assignment_agent = Agent(model=model, system_prompt=prompts.ASSIGNMENT_SYSTEM)
         self._review_agent = Agent(model=model, system_prompt=prompts.CODE_REVIEW_SYSTEM)
+        self._adjudication_agent = Agent(
+            model=model, system_prompt=prompts.REVISION_ADJUDICATION_SYSTEM
+        )
 
     def run_plan_to_task_graph(self, plan: CodingTeamPlanInput) -> Dict[str, Any]:
         """
@@ -118,9 +130,11 @@ class TechLeadAgent:
         itself; the orchestrator pauses the job for the user rather than building tasks.
 
         Postconditions:
-            - Returns a dict with "tasks" (possibly empty), a non-empty "stacks" (defaulted), and
-              "open_questions" (possibly empty). Never decides an open question on the caller's
-              behalf.
+            - Returns a dict with "tasks" (possibly empty), a non-empty "stacks" (defaulted),
+              "open_questions" (possibly empty), "already_complete" (bool), and
+              "completion_evidence" (str). Never decides an open question on the caller's behalf.
+            - "already_complete" is True only when the work the plan describes is already finished;
+              the caller short-circuits to a clean terminal outcome instead of building tasks.
         """
         plan_text = _plan_text(plan)
         user = prompts.PLAN_TO_TASK_GRAPH_USER.format(plan_text=plan_text)
@@ -133,6 +147,8 @@ class TechLeadAgent:
                 "tasks": [],
                 "stacks": [{"name": "default", "tools_services": []}],
                 "open_questions": [],
+                "already_complete": False,
+                "completion_evidence": "",
             }
         tasks_raw = data.get("tasks") or []
         stacks_raw = data.get("stacks") or []
@@ -157,11 +173,71 @@ class TechLeadAgent:
                 stacks.append({"name": name, "tools_services": [str(x) for x in tools]})
         if not stacks:
             stacks = [{"name": "default", "tools_services": []}]
+        # already_complete only counts when the model also returned no tasks: a true flag alongside
+        # a non-empty task list is contradictory, so the tasks win (we never silently drop work).
+        already_complete = bool(data.get("already_complete")) and not tasks
         return {
             "tasks": tasks,
             "stacks": stacks,
             "open_questions": _normalize_open_questions(data.get("open_questions")),
+            "already_complete": already_complete,
+            "completion_evidence": str(data.get("completion_evidence") or "")
+            if already_complete
+            else "",
         }
+
+    def run_revision_adjudication(
+        self,
+        task_title: str,
+        task_description: str,
+        acceptance_criteria: List[str],
+        changes_summary: str,
+        revision_feedback: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Give direction on a task stuck in a no-change revision loop.
+
+        Called when an engineer has revisited a task several rounds in a row without changing the
+        code. The accumulated ``revision_feedback`` plus ``changes_summary`` is the documentation of
+        what has been tried; the Tech Lead reads it and decides whether the work is already done,
+        genuinely cannot be completed, or has a concrete remaining change worth one more window.
+
+        Preconditions:
+            - ``revision_feedback`` is the task's accumulated bounce history (possibly empty).
+        Postconditions:
+            - Returns ``{"verdict": "done"|"fail"|"continue", "reason": str}``. On any LLM/parse
+              failure, returns ``verdict="fail"`` with the diagnostic in ``reason`` — a stuck task
+              that cannot even be adjudicated must not be re-fed into the loop.
+        """
+        feedback_text = json.dumps(revision_feedback or [], indent=2)
+        user = prompts.REVISION_ADJUDICATION_USER.format(
+            task_title=task_title,
+            task_description=task_description,
+            acceptance_criteria=json.dumps(acceptance_criteria),
+            changes_summary=changes_summary or "(no changes recorded)",
+            revision_feedback=feedback_text,
+        )
+        user += "\n\nRespond with valid JSON only, no markdown fences."
+        try:
+            data = call_llm_with_retries(
+                lambda: _agent_call_json(self._adjudication_agent, user),
+                max_attempts=_review_retry_attempts(),
+            )
+        except Exception as e:  # noqa: BLE001 — a failed adjudication must not re-enter the loop
+            logger.warning("Tech Lead revision adjudication failed: %s", e)
+            return {
+                "verdict": "fail",
+                "reason": f"Could not adjudicate the stalled task: {e}",
+            }
+        verdict = str(data.get("verdict") or "").strip().lower()
+        if verdict not in ("done", "fail", "continue"):
+            # An unusable verdict is not a license to keep spinning — fail closed so the stuck task
+            # terminates with a recorded diagnostic rather than looping.
+            logger.warning("Tech Lead returned an unusable adjudication verdict: %r", data)
+            return {
+                "verdict": "fail",
+                "reason": f"Adjudication returned an unusable verdict: {data!r}",
+            }
+        return {"verdict": verdict, "reason": str(data.get("reason") or "")}
 
     def run_groom_task(
         self,

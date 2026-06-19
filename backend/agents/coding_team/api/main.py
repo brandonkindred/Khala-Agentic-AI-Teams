@@ -2567,7 +2567,7 @@ def _defer_terminal_success(job_id: str):
     """
 
     def _update(**kw: Any) -> None:
-        if kw.get("status") in ("completed", "completed_with_failures"):
+        if kw.get("status") in ("completed", "completed_with_failures", "already_complete"):
             kw = {**kw, "status": "running", "phase": "publishing"}
         update_job(job_id, **kw)
 
@@ -2658,6 +2658,24 @@ def _run_with_github_hooks(
             )
             _safe_comment(
                 client, owner, repo, num, f"Coding team job `{job_id}` did not complete: {reason}"
+            )
+            return
+
+        if job_after.get("already_complete"):
+            # The team determined the issue's work was already done (planning recognized it, or every
+            # task resolved as already-satisfied with no real diff). Recommend closing the issue and
+            # do NOT open a no-op PR — there is nothing to merge.
+            evidence = str(job_after.get("completion_evidence") or "").strip()
+            body = f"Coding team job `{job_id}`: this work appears to be already complete"
+            if evidence:
+                body += f" — {evidence}"
+            body += f"\n\nNo changes were needed. Recommend closing #{num}."
+            _safe_comment(client, owner, repo, num, body)
+            update_job(
+                job_id,
+                status="already_complete",
+                phase="completed",
+                status_text="Work already complete; no changes needed",
             )
             return
 
