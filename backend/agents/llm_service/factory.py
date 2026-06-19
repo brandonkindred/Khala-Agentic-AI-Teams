@@ -258,7 +258,9 @@ def clear_client_cache() -> None:
 
         strands_provider.clear_model_cache()
     except Exception:  # noqa: BLE001 - cache clear is best-effort
-        logger.debug("Failed to clear Strands model cache", exc_info=True)
+        # Warn (not debug): a swallowed failure here silently leaves a stale
+        # key-pinned Strands adapter after a config change — the bug this clears.
+        logger.warning("Failed to clear Strands model cache", exc_info=True)
 
 
 def _clear_client_cache_for_testing() -> None:

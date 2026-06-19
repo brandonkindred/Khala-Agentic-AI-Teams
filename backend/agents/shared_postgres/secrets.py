@@ -111,12 +111,12 @@ def get_fernet():
     return _get_fernet()
 
 
-# DDL for the shared secrets table. This store is shared infrastructure, so it
-# self-heals the table on first use: a team container may read runtime config
-# before the unified API has run its migration (which also declares this table in
-# unified_api/postgres). ``CREATE TABLE IF NOT EXISTS`` is idempotent and matches
-# that schema exactly, so the two never conflict.
-_SECRETS_TABLE_DDL = (
+# Canonical DDL for the shared secrets table. This store is shared infrastructure,
+# so it self-heals the table on first use: a team container may read runtime config
+# before the unified API has run its migration. ``unified_api/postgres`` imports
+# this same constant for its registered schema, so there is exactly one CREATE
+# TABLE definition; ``CREATE TABLE IF NOT EXISTS`` is idempotent.
+SECRETS_TABLE_DDL = (
     "CREATE TABLE IF NOT EXISTS encrypted_integration_credentials ("
     "service TEXT NOT NULL, "
     "credential_key TEXT NOT NULL, "
@@ -143,7 +143,7 @@ def _ensure_table() -> None:
             return
         try:
             with get_conn() as conn, conn.cursor() as cur:
-                cur.execute(_SECRETS_TABLE_DDL)
+                cur.execute(SECRETS_TABLE_DDL)
             _table_ensured = True
         except Exception as e:  # noqa: BLE001 - reads still fall back to ""; retried next call
             logger.warning("shared secrets table ensure failed: %s", e)

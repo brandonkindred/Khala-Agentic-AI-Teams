@@ -83,6 +83,15 @@ def test_resolve_model_falls_back_without_runtime(monkeypatch):
     assert c.resolve_model(None) == "llama3.1"
 
 
+def test_resolve_model_ignores_stale_claude_runtime(monkeypatch):
+    # A Claude model id left in the shared runtime KEY_MODEL must NOT be returned for
+    # the Ollama path; it falls through to env/default instead of reaching Ollama.
+    monkeypatch.setattr(c, "_runtime", lambda key: "claude-opus-4-8" if key == "model" else "")
+    assert c.resolve_model(None) == c.DEFAULT_FALLBACK_MODEL
+    monkeypatch.setenv("LLM_MODEL", "llama3.1")
+    assert c.resolve_model(None) == "llama3.1"
+
+
 def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
     # The chokepoint routes ollama -> resolve_model, which now reads runtime.
     runtime = {"provider": "ollama", "model": "llama3.2"}

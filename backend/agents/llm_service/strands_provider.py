@@ -128,6 +128,7 @@ def clear_model_cache() -> None:
     fingerprint, so without this an in-place key rotation would keep serving a
     Strands adapter whose backing client still holds the old key.
 
+    Preconditions: none.
     Postconditions: the Strands model cache is empty afterward. Safe to call when
         nothing is cached.
     """

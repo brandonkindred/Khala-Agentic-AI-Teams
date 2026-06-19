@@ -195,5 +195,8 @@ def test_ensure_table_swallows_ddl_error(monkeypatch):
         raise RuntimeError("ddl down")
 
     monkeypatch.setattr(secrets_mod, "get_conn", _boom)
-    secrets_mod._ensure_table()  # must not raise
-    assert secrets_mod._table_ensured is False  # retried on the next call
+    try:
+        secrets_mod._ensure_table()  # must not raise
+        assert secrets_mod._table_ensured is False  # retried on the next call
+    finally:
+        secrets_mod._reset_fernet_for_testing()  # don't leak the process-global flag

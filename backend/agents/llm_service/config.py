@@ -410,7 +410,9 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     ``AGENT_DEFAULT_MODELS[agent_key]`` -> ``DEFAULT_FALLBACK_MODEL``. The runtime
     (UI) value is ranked above the global env so a model chosen in the settings
     page is honored — consistent with ``resolve_provider`` / ``resolve_base_url`` /
-    ``resolve_claude_model`` (whose Ollama counterpart this is).
+    ``resolve_claude_model`` (whose Ollama counterpart this is). A runtime model
+    that looks like a Claude id (the shared ``KEY_MODEL`` after a provider switch)
+    is skipped so it is never sent to Ollama.
 
     Postconditions: returns a non-empty model id string. Never raises.
     """
@@ -421,7 +423,11 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
         if per_agent:
             return per_agent
     runtime_model = _runtime(_rc.KEY_MODEL).strip()
-    if runtime_model:
+    # KEY_MODEL is shared with the Claude path; ignore a model that belongs to the
+    # other provider (mirrors resolve_claude_model's _looks_like_claude_model guard)
+    # so a stale Claude id left in runtime after a provider switch falls through to
+    # env/defaults instead of being sent to Ollama.
+    if runtime_model and not _looks_like_claude_model(runtime_model):
         return runtime_model
     global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
     if global_model:

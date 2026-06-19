@@ -157,6 +157,32 @@ def _to_anthropic_tools(tools: Optional[list]) -> Optional[list]:
     return out or None
 
 
+def _require_text(name: str, value: str) -> None:
+    """Validate a required non-empty text argument.
+
+    Preconditions: ``name`` is the argument's display name.
+    Postconditions: returns ``None`` when ``value`` is a non-empty, non-whitespace
+        string; raises ``ValueError`` naming ``name`` otherwise.
+    """
+    if not value or not value.strip():
+        raise ValueError(f"{name} must be a non-empty string")
+
+
+def _json_system(system_prompt: Optional[str], tools: Optional[list]) -> Optional[str]:
+    """Build the system prompt for JSON mode.
+
+    Preconditions: none.
+    Postconditions: when ``tools`` are present, returns the stripped ``system_prompt``
+        (or ``None``) WITHOUT the JSON-only instruction — it would fight the tool-use
+        protocol; otherwise appends ``_JSON_ONLY_INSTRUCTION`` (alone when there is no
+        system prompt). Never raises.
+    """
+    base = system_prompt.strip() if system_prompt and system_prompt.strip() else ""
+    if tools:
+        return base or None
+    return f"{base}\n\n{_JSON_ONLY_INSTRUCTION}" if base else _JSON_ONLY_INSTRUCTION
+
+
 class ClaudeLLMClient(LLMClient):
     """LLM client backed by the official Anthropic SDK.
 
@@ -367,11 +393,12 @@ class ClaudeLLMClient(LLMClient):
             # / stream-parsing failures) so callers only ever see the unified
             # hierarchy. Unknown faults are treated as permanent (not blindly retried).
             raise LLMPermanentError(f"Claude SDK error: {e}", cause=e) from e
-        except (LLMRateLimitError, LLMTemporaryError, LLMPermanentError, LLMTruncatedError):
-            raise
         except Exception as e:  # noqa: BLE001 - even a non-Anthropic error maps to the hierarchy
             # e.g. a TypeError from a thinking/output_config kwarg an older SDK
-            # rejects client-side, before any HTTP call — never let it escape raw.
+            # rejects client-side, before any HTTP call. Log with a stack trace so a
+            # real bug in our request-building code is diagnosable rather than
+            # masquerading as an opaque provider failure; never let it escape raw.
+            logger.exception("Unexpected non-Anthropic error during Claude call")
             raise LLMPermanentError(f"Claude call failed: {e}", cause=e) from e
 
     def _content_from_message(self, message: Any) -> tuple[str, Any]:
@@ -538,24 +565,13 @@ class ClaudeLLMClient(LLMClient):
             the text is not parseable JSON, or the unified ``LLM*`` errors on
             transport/refusal/truncation. A telemetry record is emitted for the call.
         """
-        if not objective or not objective.strip():
-            raise ValueError("objective must be a non-empty string")
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt must be a non-empty string")
+        _require_text("objective", objective)
+        _require_text("prompt", prompt)
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
             self._log_request(caller=caller, think=think, kind="json")
-            if tools:
-                # With tools, forcing "JSON only" fights the tool-use protocol and
-                # biases the model away from tool_use blocks, so omit it (mirrors chat()).
-                system = system_prompt.strip() if system_prompt and system_prompt.strip() else None
-            else:
-                system = (
-                    f"{system_prompt.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
-                    if system_prompt and system_prompt.strip()
-                    else _JSON_ONLY_INSTRUCTION
-                )
+            system = _json_system(system_prompt, tools)
             max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
             t0 = time.monotonic()
             message = self._invoke(
@@ -618,10 +634,8 @@ class ClaudeLLMClient(LLMClient):
             ``LLM*`` errors on transport/refusal/truncation. A telemetry record is
             emitted for the call.
         """
-        if not objective or not objective.strip():
-            raise ValueError("objective must be a non-empty string")
-        if not prompt or not prompt.strip():
-            raise ValueError("prompt must be a non-empty string")
+        _require_text("objective", objective)
+        _require_text("prompt", prompt)
         team = current_attribution().team or _caller_team()
         with bind_request_id(new_request_id()), llm_attribution(objective=objective, team=team):
             caller = _caller_tag()
@@ -677,8 +691,7 @@ class ClaudeLLMClient(LLMClient):
             (json mode, unparseable), or the unified ``LLM*`` errors. A telemetry
             record is emitted for the call.
         """
-        if not objective or not objective.strip():
-            raise ValueError("objective must be a non-empty string")
+        _require_text("objective", objective)
         if response_format not in ("json", "text"):
             raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
         team = current_attribution().team or _caller_team()
@@ -692,12 +705,8 @@ class ClaudeLLMClient(LLMClient):
                 raise LLMPermanentError(
                     "Claude chat requires at least one user/assistant message; got none after translation."
                 )
-            if response_format == "json" and not tools:
-                system = (
-                    f"{system.strip()}\n\n{_JSON_ONLY_INSTRUCTION}"
-                    if system and system.strip()
-                    else _JSON_ONLY_INSTRUCTION
-                )
+            if response_format == "json":
+                system = _json_system(system, tools)
             resolved_max = self._resolve_max_tokens(max_tokens)
             t0 = time.monotonic()
             message = self._invoke(
