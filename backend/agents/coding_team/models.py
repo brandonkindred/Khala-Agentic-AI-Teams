@@ -164,9 +164,10 @@ class CodingTeamPlanInput(BaseModel):
     existing_code_summary: Optional[str] = Field(
         default=None,
         description=(
-            "Optional summary of EXISTING repository code, provided as planning context. This is "
-            "current code that the plan may still need to change — it is NOT completed work and "
-            "must never justify an already_complete verdict (use completed_work_summary for that)."
+            "Optional summary of EXISTING repository code. It is current code that may still need "
+            "changes — NOT completed work — and is deliberately NOT fed to the planning prompt, "
+            "because feeding repo source to the planner risks a false already_complete. Use "
+            "completed_work_summary for genuinely-finished work that should drive already_complete."
         ),
     )
     completed_work_summary: Optional[str] = Field(

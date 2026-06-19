@@ -97,15 +97,11 @@ def _plan_text(plan: CodingTeamPlanInput) -> str:
             "Work already completed (already merged/done — do NOT recreate it):\n"
             + plan.completed_work_summary
         )
-    if plan.existing_code_summary:
-        # Existing repository code, surfaced purely as CONTEXT. It is current code the plan may well
-        # need to modify, so it is framed explicitly as "not completed work" — its mere presence must
-        # never on its own be read as "already done" (that is what drove a false already_complete on
-        # the main software-engineering path, where this field carries the whole repo's source).
-        parts.append(
-            "Existing repository code (context only — the plan may require changing it; this is NOT "
-            "completed work):\n" + plan.existing_code_summary
-        )
+    # NOTE: existing_code_summary (the main SE path fills it with the whole repository's source) is
+    # deliberately NOT surfaced to the planner. Feeding repo code into the plan prompt risks a false
+    # already_complete — ordinary existing code read as "already done" — and the planner worked
+    # without it before this field was ever rendered. Only completed_work_summary (explicit
+    # finished-work evidence) reaches the prompt and drives already_complete.
     return "\n\n".join(p for p in parts if p)
 
 

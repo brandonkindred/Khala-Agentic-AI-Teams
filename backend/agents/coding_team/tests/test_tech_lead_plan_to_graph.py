@@ -151,10 +151,10 @@ def test_plan_text_includes_completed_work_summary() -> None:
     assert "already merged/done" in text.lower() or "already completed" in text.lower()
 
 
-def test_plan_text_renders_existing_code_as_context_not_completed_work() -> None:
-    """Existing repository code reaches the planner as neutral CONTEXT, never under the 'work
-    already completed / do NOT recreate' heading that drives already_complete — otherwise the main
-    SE path (where this field carries the whole repo) gets misclassified as already done."""
+def test_plan_text_omits_existing_code_summary_from_prompt() -> None:
+    """Existing repository code is deliberately NOT surfaced to the planner: feeding repo source into
+    the plan prompt risks a false already_complete on the main SE path (where this field carries the
+    whole repo). Only completed_work_summary reaches the prompt."""
     plan = CodingTeamPlanInput(
         requirements_title="X",
         requirements_description="do the thing",
@@ -162,10 +162,8 @@ def test_plan_text_renders_existing_code_as_context_not_completed_work() -> None
         existing_code_summary="def login():\n    ...  # current repo source for reference",
     )
     text = tl_mod._plan_text(plan)
-    assert "current repo source for reference" in text  # the context still reaches the planner
-    assert "context only" in text.lower()  # ...framed as context
-    assert "do NOT recreate" not in text  # ...never as already-completed work
-    assert "already merged/done" not in text
+    assert "current repo source for reference" not in text  # repo code never reaches the planner
+    assert "do NOT recreate" not in text  # and no already-completed framing is emitted
 
 
 def test_plan_to_task_graph_already_complete(monkeypatch) -> None:
