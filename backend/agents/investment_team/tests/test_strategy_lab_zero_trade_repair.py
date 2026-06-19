@@ -23,11 +23,13 @@ from investment_team.models import (
     BacktestExecutionDiagnostics,
     CoverageCategory,
     CoverageReport,
+    OpenPositionDiagnostic,
     StrategySpec,
 )
 from investment_team.strategy_lab import orchestrator as orchestrator_module
 from investment_team.strategy_lab import zero_trade_repair as zero_trade_repair_module
 from investment_team.strategy_lab.agents.zero_trade_repair import ZeroTradeRepairReport
+from investment_team.strategy_lab.exceptions import SpecImplementabilityError
 from investment_team.strategy_lab.orchestrator import StrategyLabOrchestrator
 from investment_team.strategy_lab.quality_gates.models import QualityGateResult
 from investment_team.strategy_lab.spec_dsl import (
@@ -1257,3 +1259,125 @@ def test_generic_refine_leaves_flag_unset() -> None:
     )
     assert recovery.ran_on_non_conforming_code is None
     assert conformance_calls == [], "generic-refine path must not re-run conformance"
+
+
+# ---------------------------------------------------------------------------
+# ENTRY_WITH_NO_EXIT routing (#874)
+# ---------------------------------------------------------------------------
+
+
+class _SpyRepairer:
+    """Records ``try_repair`` calls and returns a scripted outcome.
+
+    ``outcome=None`` asserts the method is never reached — used by the
+    ENTRY_WITH_NO_EXIT routing test, where the orchestrator must phase back
+    to redesign *before* the code-only repair loop.
+    """
+
+    def __init__(self, outcome: Optional[_ZeroTradeRepairOutcome] = None) -> None:
+        self._outcome = outcome
+        self.calls = 0
+
+    def try_repair(self, **_kwargs: Any) -> _ZeroTradeRepairOutcome:
+        self.calls += 1
+        assert self._outcome is not None, "try_repair must not be reached for this category"
+        return self._outcome
+
+
+def _entry_with_no_exit_exec_result() -> StrategyRunResult:
+    """Diagnostics for a non-firing engine-owned exit: entries filled, zero
+    closed trades, a position still open at the end of the window."""
+    diagnostics = BacktestExecutionDiagnostics(
+        zero_trade_category="ENTRY_WITH_NO_EXIT",
+        summary="3 entries filled but no exit ever fired across 20 bars",
+        bars_processed=20,
+        orders_emitted=3,
+        orders_accepted=3,
+        entries_filled=3,
+        exits_emitted=0,
+        closed_trades=0,
+        exit_rule_firings={},
+        open_positions_at_end=[
+            OpenPositionDiagnostic(
+                symbol="AAPL",
+                side="long",
+                qty=10.0,
+                entry_price=101.0,
+                entry_timestamp="2023-01-05",
+            )
+        ],
+    )
+    return StrategyRunResult(success=True, trades=[], execution_diagnostics=diagnostics)
+
+
+def test_entry_with_no_exit_routes_to_redesign() -> None:
+    """``ENTRY_WITH_NO_EXIT`` has no valid code-level repair, so the
+    orchestrator phases back to redesign / spec refinement via
+    ``SpecImplementabilityError`` instead of entering the code-only repair
+    loop or burning generic-refine rounds."""
+    orch = StrategyLabOrchestrator()
+    spy = _SpyRepairer(outcome=None)
+    orch.zero_trade_repairer = spy  # type: ignore[assignment]
+    events: List[tuple] = []
+
+    spec = _spec()
+    code = "# original code\n"
+    with pytest.raises(SpecImplementabilityError) as excinfo:
+        orch._handle_critical_anomalies(
+            spec=spec,
+            code=code,
+            trades=[],
+            metrics=_metrics_for(),
+            exec_result=_entry_with_no_exit_exec_result(),
+            market_data=_market_data(),
+            config=_config(),
+            critical_anomalies=[_critical_anomaly()],
+            all_gate_results=[],
+            refinement_attempts=[],
+            zero_trade_attempts=[],
+            round_num=0,
+            emit=lambda phase, data: events.append((phase, data)),
+        )
+
+    err = excinfo.value
+    assert err.failure_phase == "evaluation"
+    assert err.last_spec is spec
+    assert err.last_code == code
+    assert "exit_rules" in err.evidence
+    # The code-only repair loop must never be reached for this category.
+    assert spy.calls == 0
+    # A redesign-routing event is emitted for run-trace observability.
+    assert any(
+        phase == "coding" and data.get("sub_phase") == "routed_to_redesign"
+        for phase, data in events
+    )
+
+
+def test_other_zero_trade_category_still_uses_code_repair() -> None:
+    """A non-``ENTRY_WITH_NO_EXIT`` zero-trade category still flows through
+    the specialised code-only repair loop — the routing guard is scoped to
+    the one non-code-repairable category."""
+    orch = StrategyLabOrchestrator()
+    spy = _SpyRepairer(outcome=_committed_repair_outcome())
+    orch.zero_trade_repairer = spy  # type: ignore[assignment]
+    orch.predicate_conformance_gate.check = lambda code, spec, **kw: []
+
+    recovery = orch._handle_critical_anomalies(
+        spec=_spec(),
+        code="# original code\n",
+        trades=[],
+        metrics=_metrics_for(),
+        # NO_ORDERS_EMITTED -> specialised repair, not redesign routing.
+        exec_result=_zero_trade_exec_result(),
+        market_data=_market_data(),
+        config=_config(),
+        critical_anomalies=[_critical_anomaly()],
+        all_gate_results=[],
+        refinement_attempts=[],
+        zero_trade_attempts=[],
+        round_num=0,
+        emit=lambda *a, **k: None,
+    )
+
+    assert spy.calls == 1, "code-only repair must run for NO_ORDERS_EMITTED"
+    assert recovery.exhausted is False

@@ -1980,11 +1980,19 @@ class StrategyLabOrchestrator:
         ``max_rounds_exhausted=True``.
 
         Strategy:
-          1. If diagnostics carry a ``zero_trade_category`` AND there is
+          1. If diagnostics classify the failure as ``ENTRY_WITH_NO_EXIT``
+             (entries filled but engine-owned exits never fired), raise
+             ``SpecImplementabilityError`` to route the cycle back to
+             redesign / spec refinement. This category has no valid
+             code-level repair — exits are engine-owned, a manual close is
+             rejected by the conformance gate, and ``exit_rules`` spec edits
+             are dropped by the ``risk_limits``-only repair whitelist — so
+             only the designer (which can rewrite ``exit_rules``) can fix it.
+          2. Else if diagnostics carry a ``zero_trade_category`` AND there is
              market data, ask the specialised repair agent first. A
              committed proposal has already cleared safety + fresh
              backtest + anomaly gates, so we use it directly.
-          2. Otherwise (or if the repair did not commit), fall through
+          3. Otherwise (or if the repair did not commit), fall through
              to the generic refinement agent via ``_refine_or_exhaust``.
         """
         assert critical_anomalies, "_handle_critical_anomalies requires at least one critical"
@@ -1999,8 +2007,42 @@ class StrategyLabOrchestrator:
         if coverage_block:
             failure_details = f"{failure_details}\n{coverage_block}"
 
-        # ── 2: Specialised zero-trade repair (if diagnostics support it) ──
+        # ── 2: Route a non-firing engine-owned exit to redesign / spec refinement ──
+        # ``ENTRY_WITH_NO_EXIT`` (entries filled, exits never fired, positions
+        # still open at window end) has no actionable code-level repair: exits
+        # are engine-owned, a manual code close is rejected by the conformance
+        # gate, and ``exit_rules`` spec edits are dropped by the repair
+        # whitelist (``risk_limits`` only). The only real lever is the spec's
+        # exit rules, which only the designer can revise — so phase back to
+        # design instead of burning refinement rounds on the code-only repair
+        # loop, where the agent now correctly proposes nothing.
         diag = exec_result.execution_diagnostics
+        if diag is not None and diag.zero_trade_category == "ENTRY_WITH_NO_EXIT":
+            emit(
+                "coding",
+                {
+                    "sub_phase": "routed_to_redesign",
+                    "refinement_round": round_num,
+                    "via": "entry_with_no_exit",
+                },
+            )
+            raise SpecImplementabilityError(
+                (
+                    "ENTRY_WITH_NO_EXIT: entries filled but engine-owned exits "
+                    "never fired in the test window; positions remained open at "
+                    "the end. No code-level repair is possible (exits are "
+                    "engine-owned and exit_rules spec edits are not honoured by "
+                    "the code-repair loop). Revise spec.exit_rules — loosen or "
+                    "retune the stop-loss / take-profit / signal-exit rules so "
+                    f"exits can fire. Diagnostics:\n{failure_details}"
+                ),
+                failure_phase="evaluation",
+                last_spec=spec,
+                last_code=code,
+                drift_collector=drift_collector,
+            )
+
+        # ── 3: Specialised zero-trade repair (if diagnostics support it) ──
         if diag is not None and diag.zero_trade_category is not None:
             zt_outcome = self.zero_trade_repairer.try_repair(
                 spec=spec,
@@ -2072,7 +2114,7 @@ class StrategyLabOrchestrator:
                     ran_on_non_conforming_code=ztr_non_conforming,
                 )
 
-        # ── 3: Generic refinement (or exhaust the round budget) ──
+        # ── 4: Generic refinement (or exhaust the round budget) ──
         new_spec, new_code, exhausted = self._refine_or_exhaust(
             spec=spec,
             code=code,
