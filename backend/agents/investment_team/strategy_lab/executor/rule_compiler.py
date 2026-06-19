@@ -103,6 +103,7 @@ def evaluate_exit_rules(
     bars: Mapping[str, BarSnapshot],
     *,
     views: Optional[Mapping[str, HistoryView]] = None,
+    skip_limit_stops: bool = False,
 ) -> list[ExitIntent]:
     """Return one ``ExitIntent`` per (open position × first triggered rule).
 
@@ -115,6 +116,10 @@ def evaluate_exit_rules(
         symbol (passed via ``views``). When ``views`` is ``None`` or the
         symbol has no view, ``SignalExitRule`` is a silent no-op for
         backward compatibility.
+      * ``skip_limit_stops`` skips ``StopLossRule(style="limit")`` rules during
+        iteration (preserving the original spec ``rule_index`` of the rules that
+        do win). Used when such a stop already has a resting STOP_LIMIT, so a
+        lower-priority rule can fire instead of the already-in-flight stop.
     """
     intents: list[ExitIntent] = []
     for symbol, position in positions.items():
@@ -125,6 +130,12 @@ def evaluate_exit_rules(
             continue
         sym_view = views.get(symbol) if views is not None else None
         for idx, rule in enumerate(rules):
+            if (
+                skip_limit_stops
+                and isinstance(rule, StopLossRule)
+                and getattr(rule, "style", "market") == "limit"
+            ):
+                continue
             if _rule_triggers(rule, position, bar, sym_view):
                 style = getattr(rule, "style", "market") or "market"
                 # A limit-style stop carries its fully-resolved stop level and

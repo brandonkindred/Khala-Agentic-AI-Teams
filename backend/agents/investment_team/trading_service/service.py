@@ -60,7 +60,7 @@ from .engine.fill_simulator import (
     FillSimulator,
     FillSimulatorConfig,
 )
-from .engine.order_book import OrderBook
+from .engine.order_book import OrderBook, PendingOrder
 from .engine.portfolio import Portfolio, Position
 from .strategy.contract import (
     OrderRequest,
@@ -349,20 +349,20 @@ class _EngineExitDispatcher:
             return
         tracked, pos = gating
 
-        intent = self._evaluate(sym, tracked, pos, cur_bar)
-        if intent is None:
-            return
-
-        # Resting structured exit: a limit-style stop rests across bars. Suppress
-        # emitting a duplicate STOP_LIMIT for a position that already has one
-        # resting — but only for a same-style (limit) stop intent. A DIFFERENT
-        # rule (take-profit / signal-exit, or a market stop) is allowed to emit
-        # and close the position; its fill retires the resting stop-limit via the
-        # binding + stale-continuation guard. This is what keeps a gapped-through,
-        # long-resting stop-limit from blocking every other engine exit.
-        if intent.style == "limit" and self._has_resting_engine_stop_limit(
+        # Resting structured exit: while a limit-style stop's STOP_LIMIT is
+        # already resting on the book, treat that stop rule as already in-flight
+        # and SKIP it during evaluation. This both (a) suppresses a duplicate
+        # stop-limit emission and (b) lets a lower-priority rule (take-profit /
+        # signal-exit) still fire and close the position — its fill retires the
+        # resting stop-limit via the binding + stale-continuation guard. A plain
+        # ``return`` here would instead starve any rule listed after the stop on
+        # every bar the stop re-triggers. Only pay for the book scan when the
+        # spec actually has a limit-style stop.
+        skip_limit_stops = self._has_limit_stop_rule and self._has_resting_engine_stop_limit(
             sym, tracked.side, order_book
-        ):
+        )
+        intent = self._evaluate(sym, tracked, pos, cur_bar, skip_limit_stops=skip_limit_stops)
+        if intent is None:
             return
 
         # Issue #527 — size the close to cover any same-side scale-in
@@ -473,10 +473,16 @@ class _EngineExitDispatcher:
         tracked: _TrackedPosition,
         pos: Position,
         cur_bar,
+        *,
+        skip_limit_stops: bool = False,
     ) -> Optional[ExitIntent]:
         """Run the pure rule evaluator. Returns at most one intent per
         symbol — :func:`evaluate_exit_rules` stops at the first
         triggered rule per position.
+
+        ``skip_limit_stops`` skips ``StopLossRule(style="limit")`` rules during
+        evaluation (used when such a stop already has a STOP_LIMIT resting), so a
+        lower-priority rule can win instead of the already-in-flight stop.
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
@@ -485,8 +491,19 @@ class _EngineExitDispatcher:
             {sym: snapshot},
             {sym: bar_snap},
             views=self.views,
+            skip_limit_stops=skip_limit_stops,
         )
         return intents[0] if intents else None
+
+    @property
+    def _has_limit_stop_rule(self) -> bool:
+        """Whether the spec contains a ``style="limit"`` stop-loss rule. Lets the
+        per-bar dispatch skip the resting-order book scan for the common
+        market-only specs.
+
+        Postconditions: ``True`` iff any exit rule carries ``style == "limit"``.
+        """
+        return any(getattr(r, "style", "market") == "limit" for r in self.exit_rules)
 
     @staticmethod
     def _has_resting_engine_stop_limit(
@@ -512,27 +529,41 @@ class _EngineExitDispatcher:
         return False
 
     @staticmethod
-    def _sum_entry_continuation_remainder(
+    def _entry_continuations(
         sym: str, pos: Position, order_book: OrderBook
-    ) -> float:
-        """Unfilled remainder of the position's own in-flight entry continuation
-        (a partially-filled ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` entry, identified by
-        ``po.order_id == pos.entry_order_id``).
+    ) -> List[PendingOrder]:
+        """The position's own in-flight entry continuations — the partially-filled
+        ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` remainder of its entry order, identified
+        by ``po.order_id == pos.entry_order_id`` and ``cumulative_filled_qty > 0``.
+
+        Single source of the continuation-identity rule shared by the limit-style
+        oversize (:meth:`_sum_entry_continuation_remainder`) and the market-style
+        cancel (:meth:`_cancel_pending_entry_continuations`).
 
         Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
-        Postconditions: returns the summed unfilled qty (``>= 0``) of the entry
-        continuation still working, so a limit-style close can be oversized to
-        cover growth it does not cancel. ``_fill_exit`` clips to the live qty, so
-        the oversize is safe.
+        Postconditions: returns the matching pending orders (possibly empty).
         """
-        total = 0.0
-        for po in order_book.pending_for_symbol(sym):
-            if po.order_id != pos.entry_order_id:
-                continue
-            if po.cumulative_filled_qty <= 0:
-                continue
-            total += max(po.request.qty - po.cumulative_filled_qty, 0.0)
-        return total
+        return [
+            po
+            for po in order_book.pending_for_symbol(sym)
+            if po.order_id == pos.entry_order_id and po.cumulative_filled_qty > 0
+        ]
+
+    @classmethod
+    def _sum_entry_continuation_remainder(
+        cls, sym: str, pos: Position, order_book: OrderBook
+    ) -> float:
+        """Unfilled remainder of the position's in-flight entry continuation(s).
+
+        Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
+        Postconditions: returns the summed unfilled qty (``>= 0``), so a limit-style
+        close can be oversized to cover growth it does not cancel. ``_fill_exit``
+        clips to the live qty, so the oversize is safe.
+        """
+        return sum(
+            max(po.request.qty - po.cumulative_filled_qty, 0.0)
+            for po in cls._entry_continuations(sym, pos, order_book)
+        )
 
     @staticmethod
     def _sum_same_side_queued(
@@ -604,9 +635,9 @@ class _EngineExitDispatcher:
         also closed by this emission (see ``_sum_same_side_queued``).
 
         A ``style="limit"`` stop-loss intent builds a *resting* STOP_LIMIT
-        (GTC, ``REQUEUE_NEXT_BAR``) at ``intent.stop_price`` with the limit
-        ``intent.limit_offset_pct`` away on the protective side, rather than the
-        guaranteed market close every other intent uses. The fill simulator
+        (GTC, ``REQUEUE_NEXT_BAR``) from the evaluator-resolved ``intent.stop_price``
+        and ``intent.limit_price`` (see ``_build_stop_limit_close``), rather than
+        the guaranteed market close every other intent uses. The fill simulator
         owns its arm/latch/gap-through lifecycle from there.
         """
         self._next_seq += 1
@@ -751,16 +782,12 @@ class _EngineExitDispatcher:
         engine sized for and leaving residual exposure after
         ``_fill_exit`` clips at ``min(req.qty, existing_pos.qty)``.
 
-        Continuations are identified by ``po.order_id ==
-        pos.entry_order_id`` (exact — the strategy can't reuse an
-        engine-issued order_id, and same-side new strategy entries
-        have different order_ids).
+        Continuations are identified by :meth:`_entry_continuations`
+        (``po.order_id == pos.entry_order_id`` — the strategy can't reuse an
+        engine-issued order_id, and same-side new strategy entries have different
+        order_ids).
         """
-        for po in order_book.pending_for_symbol(sym):
-            if po.order_id != pos.entry_order_id:
-                continue
-            if po.cumulative_filled_qty <= 0:
-                continue
+        for po in self._entry_continuations(sym, pos, order_book):
             order_book.cancel(po.order_id)
 
     def _record_emission(

@@ -373,6 +373,53 @@ def test_other_rule_still_emits_while_stop_limit_rests():
     assert result.execution_diagnostics.exit_rule_firings.get("take_profit") == 1
 
 
+def test_lower_priority_rule_emits_when_limit_stop_first_and_both_trigger():
+    """Starvation guard: when the limit stop is listed BEFORE another rule and a
+    wide bar triggers both while the stop-limit rests, the lower rule must still
+    emit. The dispatcher skips the already-resting limit stop during evaluation
+    rather than standing the whole bar down (which would suppress the take-profit
+    on every bar the stop re-triggers).
+    """
+    disp = _dispatcher(
+        exit_rules=[
+            StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01),  # first
+            TakeProfitRule(pct=0.05),  # lower priority
+        ]
+    )
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+
+    resting = OrderRequest(
+        client_order_id="e1",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.STOP_LIMIT,
+        stop_price=98.0,
+        limit_price=97.0,
+        tif=TimeInForce.GTC,
+        reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+    )
+    order_book.submit(resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0)
+
+    pending: list[OrderRequest] = []
+    # Wide bar: low=95 re-triggers the stop (floor 98) AND high=106 clears the
+    # take-profit target (105). The stop is first in spec order, so without the
+    # skip the stop intent would win and the bar would be suppressed.
+    disp.maybe_emit(
+        cur_bar=_bar(high=106, low=95),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine = _engine_orders(pending)
+    assert len(engine) == 1
+    assert engine[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}take_profit"
+
+
 # ---------------------------------------------------------------------------
 # Competing-order retirement: a limit-style stop still BINDS competing exits
 # (binding only retires them once the position actually closes), so an unbound
