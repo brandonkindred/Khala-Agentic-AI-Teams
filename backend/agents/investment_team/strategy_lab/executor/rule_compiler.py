@@ -97,29 +97,39 @@ class ExitIntent:
     limit_price: Optional[float] = None
 
 
+def is_limit_stop_rule(rule: ExitRule) -> bool:
+    """Whether ``rule`` is a limit-style stop-loss — the only rule kind the
+    structured-exit path rests as a STOP_LIMIT. Single source of this predicate
+    (used by the dispatcher's ``_has_limit_stop_rule``).
+
+    Postconditions: ``True`` iff ``rule`` is a ``StopLossRule`` with
+    ``style == "limit"``.
+    """
+    return isinstance(rule, StopLossRule) and getattr(rule, "style", "market") == "limit"
+
+
 def evaluate_exit_rules(
     rules: Sequence[ExitRule],
     positions: Mapping[str, PositionState],
     bars: Mapping[str, BarSnapshot],
     *,
     views: Optional[Mapping[str, HistoryView]] = None,
-    skip_limit_stops: bool = False,
+    first_only: bool = True,
 ) -> list[ExitIntent]:
-    """Return one ``ExitIntent`` per (open position × first triggered rule).
+    """Return triggered ``ExitIntent``\\ s per open position, in spec priority order.
 
     Order semantics:
-      * Iterate rules in spec order; the first rule that fires for a given
-        position wins. Subsequent rules for the same position are skipped
-        on the same bar (only one close per position per bar).
+      * Iterate rules in spec order. With ``first_only`` (default), the first
+        rule that fires for a position wins and the rest are skipped (one close
+        per position per bar). With ``first_only=False``, all triggered rules for
+        the position are returned in spec order, so the caller can choose among
+        them (e.g. skip an exit whose structured order is already in flight) —
+        the pure evaluator stays unaware of any such runtime state.
       * Positions with no open qty (or missing from ``bars``) are skipped.
       * ``SignalExitRule`` evaluation requires a ``HistoryView`` for the
         symbol (passed via ``views``). When ``views`` is ``None`` or the
         symbol has no view, ``SignalExitRule`` is a silent no-op for
         backward compatibility.
-      * ``skip_limit_stops`` skips ``StopLossRule(style="limit")`` rules during
-        iteration (preserving the original spec ``rule_index`` of the rules that
-        do win). Used when such a stop already has a resting STOP_LIMIT, so a
-        lower-priority rule can fire instead of the already-in-flight stop.
     """
     intents: list[ExitIntent] = []
     for symbol, position in positions.items():
@@ -130,12 +140,6 @@ def evaluate_exit_rules(
             continue
         sym_view = views.get(symbol) if views is not None else None
         for idx, rule in enumerate(rules):
-            if (
-                skip_limit_stops
-                and isinstance(rule, StopLossRule)
-                and getattr(rule, "style", "market") == "limit"
-            ):
-                continue
             if _rule_triggers(rule, position, bar, sym_view):
                 style = getattr(rule, "style", "market") or "market"
                 # A limit-style stop carries its fully-resolved stop level and
@@ -163,7 +167,8 @@ def evaluate_exit_rules(
                         limit_price=limit_price,
                     )
                 )
-                break
+                if first_only:
+                    break
     return intents
 
 
