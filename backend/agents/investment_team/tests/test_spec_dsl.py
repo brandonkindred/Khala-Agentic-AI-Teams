@@ -340,6 +340,39 @@ def test_stop_loss_limit_style_rejects_trailing_basis():
         StopLossRule(pct=0.03, basis="trailing_high", style="limit", limit_offset_pct=0.005)
 
 
+def test_strategy_spec_rejects_multiple_limit_stops():
+    from investment_team.models import StrategySpec
+
+    def _spec(exit_rules):
+        return StrategySpec(
+            strategy_id="s1",
+            authored_by="t",
+            asset_class="stocks",
+            hypothesis="h",
+            signal_definition="s",
+            timeframe="1d",
+            exit_rules=exit_rules,
+        )
+
+    # Two limit-style stops are rejected (the resting-exit dispatch supports one).
+    with pytest.raises(ValidationError, match="at most one limit-style stop-loss"):
+        _spec(
+            [
+                StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.005),
+                StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01),
+            ]
+        )
+    # One limit stop alongside a market stop and a take-profit is fine.
+    spec = _spec(
+        [
+            StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.005),
+            StopLossRule(pct=0.10),  # market-style
+            TakeProfitRule(pct=0.05),
+        ]
+    )
+    assert sum(1 for r in spec.exit_rules if getattr(r, "style", "market") == "limit") == 1
+
+
 def test_stop_loss_limit_style_rejects_full_pct():
     # pct=1.0 is allowed for a market stop but not a limit stop: a long's level
     # entry*(1-1.0) resolves to 0, which has no valid protective limit.

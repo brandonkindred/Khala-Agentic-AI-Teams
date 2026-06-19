@@ -365,6 +365,32 @@ class StrategySpec(BaseModel):
             return normalize_asset_class(v)
         return normalize_asset_class_strict(v)
 
+    @model_validator(mode="after")
+    def _validate_single_limit_stop(self) -> "StrategySpec":
+        """At most one limit-style stop-loss per spec.
+
+        A ``style="limit"`` stop rests a STOP_LIMIT that the engine tracks across
+        bars and de-duplicates against on re-trigger. Allowing several of them
+        introduces ambiguous "which resting order is this rule's" bookkeeping
+        (same/overlapping stop levels, layered fallbacks) for a configuration no
+        real strategy needs — the designer authors a single protective
+        stop-limit. Bounding it to one keeps the resting-exit dispatch
+        unambiguous.
+
+        Preconditions: ``exit_rules`` is the validated rule list.
+        Postconditions: returns ``self`` when at most one exit rule is a
+        limit-style stop; raises ``ValueError`` otherwise.
+        """
+        limit_stops = sum(
+            1 for r in self.exit_rules if getattr(r, "style", "market") == "limit"
+        )
+        if limit_stops > 1:
+            raise ValueError(
+                f"at most one limit-style stop-loss (style='limit') is allowed "
+                f"per spec; got {limit_stops}"
+            )
+        return self
+
 
 class ValidationCheck(BaseModel):
     name: str
