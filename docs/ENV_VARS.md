@@ -121,6 +121,80 @@ Exposes HTTP log endpoint.
 
 ---
 
+## Observability (OpenTelemetry)
+
+Every team microservice, the unified API, the blogging service, and the job
+service bootstrap OpenTelemetry via `shared_observability.init_otel`. Metrics are
+collected by Prometheus scraping `/metrics`; traces are exported over OTLP. See
+`backend/agents/shared_observability/README.md` for the full SDK-honored list.
+
+### OTEL_EXPORTER_OTLP_ENDPOINT
+OTLP collector endpoint for trace (and, unless disabled, metric) export. When
+unset, no exporter is built and spans are created but not shipped. The docker
+stack defaults this to the in-stack Grafana Tempo backend (`http://tempo:4318`);
+point it at any external collector to override.
+
+### OTEL_EXPORTER_OTLP_PROTOCOL
+`http/protobuf` (default) or `grpc`.
+
+### OTEL_METRICS_EXPORTER
+Standard OTel selector. Set to `none` to skip OTLP metric export while still
+exporting traces — the docker stack uses this so metrics stay on Prometheus
+scraping and aren't pushed at the traces-only Tempo backend. Any other value (or
+unset) leaves OTLP metric export gated on `OTEL_EXPORTER_OTLP_ENDPOINT`.
+
+### OTEL_EXPORTER_OTLP_TIMEOUT
+Standard OTel exporter timeout in seconds (SDK default 10). The docker stack sets
+`5` so a slow/unavailable collector fails fast instead of stalling the in-process
+span-export thread inside a memory-constrained worker.
+
+### OTEL_BSP_MAX_QUEUE_SIZE / OTEL_BSP_MAX_EXPORT_BATCH_SIZE / OTEL_BSP_SCHEDULE_DELAY
+Standard OpenTelemetry `BatchSpanProcessor` knobs (SDK defaults 2048 / 512 /
+5000 ms). The docker stack sets `512` / `128` / `2000` to bound the in-process
+span buffer (so a stalled collector can't pile spans up in a worker that is
+already near its memory budget) and flush more often. `MAX_EXPORT_BATCH_SIZE`
+must be ≤ `MAX_QUEUE_SIZE`.
+
+---
+
+## Process Health and Worker Sizing
+
+`shared_observability.process_health` arms each team worker with fault
+diagnostics and a memory watchdog; `team_service/entrypoint.py` controls how many
+workers run. See `backend/agents/shared_observability/process_health.py`.
+
+### TEAM_WORKERS
+uvicorn worker processes per team service (default 2; parsed defensively, clamped
+to `[1, 16]`). Each worker is a full Python interpreter loading the whole app, so
+on a memory-constrained host fewer workers means a materially smaller footprint —
+the docker stack sets `1`. The upper bound of 16 prevents a misconfigured value
+from fork-bombing the host into resource exhaustion.
+
+### TEAM_MEMORY_WATCHDOG_INTERVAL_S
+Watchdog sample interval in seconds (default 30; floor 1). The same loop also
+polls the cgroup `oom_kill` counter, so a shorter interval surfaces a silent OOM
+kill sooner — the docker stack sets `10`. The watchdog logs an ERROR whenever the
+cgroup `memory.events` `oom_kill` counter rises (a worker was SIGKILLed with no
+traceback) and reports `memory.peak`; a peak far below the limit indicates a
+host/VM-wide (global) OOM rather than this container exceeding its own limit.
+Other watchdog knobs (`TEAM_MEMORY_WATCHDOG_ENABLED`, `_LIMIT_MB`, `_THRESHOLD`)
+are unchanged — see the Shared Infrastructure section.
+
+### STRATEGY_LAB_MAX_PARALLEL
+Investment team only. Upper bound (Pydantic `le=`) on a Strategy Lab request's
+`max_parallel` field, evaluated at import (default 6). Raise it to allow more
+parallelism per request on larger hosts without a code change; it also becomes
+the default ceiling for `STRATEGY_LAB_MAX_CONCURRENT_CYCLES`.
+
+### STRATEGY_LAB_MAX_CONCURRENT_CYCLES
+Investment team only. Hard ceiling on concurrent Strategy Lab cycles per wave
+(default = `STRATEGY_LAB_MAX_PARALLEL`, i.e. no extra constraint; floored at 1).
+Each concurrent cycle holds its own market data + LLM contexts in the single
+worker process, so this caps the worker's peak memory — the dominant OOM driver.
+The docker stack sets `2`.
+
+---
+
 ## Blogging and Medium
 
 ### BLOGGING_RUN_ARTIFACTS_ROOT

@@ -6,6 +6,7 @@ from validators.checks import (
     check_banned_patterns,
     check_banned_phrases,
     check_paragraph_length,
+    check_reading_level,
     check_required_sections,
 )
 from validators.runner import run_validators
@@ -93,6 +94,23 @@ def test_check_required_sections_fail(brand_spec):
     draft = "# Introduction\n\nNo Hook or Wrap up here."
     result = check_required_sections(draft, brand_spec)
     assert result.status == "FAIL"
+
+
+def test_check_reading_level_runtime_error_skips(brand_spec, monkeypatch):
+    """textstat failing at runtime (e.g. a missing/corrupt NLTK cmudict corpus →
+    BadZipFile) must degrade to a skip, not crash the validation pass."""
+    import zipfile
+
+    textstat = pytest.importorskip("textstat")  # CI installs it; skip locally if absent
+
+    def _boom(_draft):
+        raise zipfile.BadZipFile("File is not a zip file")
+
+    monkeypatch.setattr(textstat, "flesch_kincaid_grade", _boom)
+    result = check_reading_level("# Hook\n\nSome text here.", brand_spec)
+    assert result.status == "PASS"
+    assert result.details["fk_grade"] is None
+    assert "unavailable at runtime" in result.details["note"]
 
 
 def test_run_validators(tmp_path):
