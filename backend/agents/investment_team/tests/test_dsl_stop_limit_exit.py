@@ -28,7 +28,7 @@ from investment_team.strategy_lab.executor.rule_compiler import (
     PositionState,
     evaluate_exit_rules,
 )
-from investment_team.strategy_lab.spec_dsl import StopLossRule
+from investment_team.strategy_lab.spec_dsl import StopLossRule, TakeProfitRule
 from investment_team.trading_service.engine.order_book import OrderBook
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
@@ -154,8 +154,10 @@ def test_intent_carries_limit_style_and_resolved_stop_for_long():
     intent = intents[0]
     assert intent.rule_kind == "stop_loss"
     assert intent.style == "limit"
-    assert intent.limit_offset_pct == 0.01
     assert intent.stop_price == 98.0  # 100 * (1 - 0.02)
+    # Closing a long is a sell → limit on the protective side BELOW the stop.
+    assert intent.limit_price == 98.0 - 98.0 * 0.01  # 97.02
+    assert intent.limit_price < intent.stop_price
 
 
 def test_intent_carries_resolved_stop_for_short():
@@ -170,8 +172,11 @@ def test_intent_carries_resolved_stop_for_short():
     )
     # bar.high=103 crosses the 102 ceiling (100 * (1 + 0.02)).
     bars = {"AAA": BarSnapshot(high=103.0, low=99.0, close=101.0)}
-    intents = evaluate_exit_rules([rule], {"AAA": pos}, bars)
-    assert intents[0].stop_price == 102.0  # 100 * (1 + 0.02)
+    intent = evaluate_exit_rules([rule], {"AAA": pos}, bars)[0]
+    assert intent.stop_price == 102.0  # 100 * (1 + 0.02)
+    # Closing a short is a buy → limit on the protective side ABOVE the stop.
+    assert intent.limit_price == 102.0 + 102.0 * 0.01  # 103.02
+    assert intent.limit_price > intent.stop_price
 
 
 def test_market_style_intent_has_no_stop_price():
@@ -188,7 +193,7 @@ def test_market_style_intent_has_no_stop_price():
     intent = evaluate_exit_rules([rule], {"AAA": pos}, bars)[0]
     assert intent.style == "market"
     assert intent.stop_price is None
-    assert intent.limit_offset_pct is None
+    assert intent.limit_price is None
 
 
 # ---------------------------------------------------------------------------
@@ -320,6 +325,54 @@ def test_does_not_re_emit_while_engine_stop_limit_rests():
     assert result.execution_diagnostics.exit_rule_firings.get("stop_loss") in (None, 0)
 
 
+def test_other_rule_still_emits_while_stop_limit_rests():
+    """A resting limit-style stop-limit must NOT block a DIFFERENT, higher-priority
+    rule. A take-profit that triggers while the stop-limit rests still emits its
+    (market) close — its fill will retire the resting stop-limit via the binding.
+    """
+    # take_profit listed first so it wins when both could trigger; here only TP
+    # triggers (price spiked up), the stop is resting from a prior gap-through.
+    disp = _dispatcher(
+        exit_rules=[
+            TakeProfitRule(pct=0.05),
+            StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01),
+        ]
+    )
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+
+    resting = OrderRequest(
+        client_order_id="e1",
+        symbol="AAA",
+        side=OrderSide.SHORT,
+        qty=100.0,
+        order_type=OrderType.STOP_LIMIT,
+        stop_price=98.0,
+        limit_price=97.0,
+        tif=TimeInForce.GTC,
+        reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+    )
+    order_book.submit(resting, submitted_at="2024-01-09T00:00:00", submitted_equity=100_000.0)
+
+    pending: list[OrderRequest] = []
+    # high=106 clears the 105 take-profit target (entry 100, +5%); low stays
+    # above the stop floor so only the take-profit triggers this bar.
+    disp.maybe_emit(
+        cur_bar=_bar(high=106, low=104),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    engine = _engine_orders(pending)
+    assert len(engine) == 1
+    assert engine[0].order_type == OrderType.MARKET  # take-profit market close
+    assert f"{ENGINE_EXIT_REASON_PREFIX}take_profit" == engine[0].reason
+    assert result.execution_diagnostics.exit_rule_firings.get("take_profit") == 1
+
+
 # ---------------------------------------------------------------------------
 # Competing-order retirement: a limit-style stop still BINDS competing exits
 # (binding only retires them once the position actually closes), so an unbound
@@ -406,6 +459,10 @@ def _partial_entry_continuation(order_book):
     po = order_book.submit(entry, submitted_at="2024-01-08T00:00:00", submitted_equity=100_000.0)
     po.order_id = "o1"  # matches the position's entry_order_id
     po.cumulative_filled_qty = 60.0  # partially filled; 40 remainder requeued
+    # _fill_entry self-binds a partially-filled entry to its own id, which makes
+    # _sum_same_side_resting exclude it from the close oversize — so the close
+    # must pick up the remainder via _sum_entry_continuation_remainder instead.
+    po.working_against_entry_order_id = "o1"
     return po
 
 
@@ -450,3 +507,55 @@ def test_limit_style_does_not_cancel_entry_continuation():
     # is NOT cancelled at emission — the scale-in is preserved for the still-open
     # position.
     assert "o1" in order_book
+
+
+def test_limit_style_oversizes_close_to_cover_entry_continuation():
+    """Because the entry continuation is not cancelled for a limit-style stop, the
+    close is oversized to cover its still-unfilled remainder. If the continuation
+    fills before the stop-limit, the close still covers the grown position
+    (_fill_exit clips to live qty), so no residual exposure is stranded.
+    """
+    disp = _dispatcher(
+        exit_rules=[StopLossRule(pct=0.02, style="limit", limit_offset_pct=0.01)]
+    )
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+    _partial_entry_continuation(order_book)  # 40-share remainder still working
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(low=95),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    req = _engine_orders(pending)[0]
+    # pos.qty (100) + continuation remainder (100 - 60 = 40) = 140, counted once
+    # (the self-bound continuation is excluded from _sum_same_side_resting).
+    assert req.qty == 140.0
+
+
+def test_market_style_does_not_oversize_for_entry_continuation():
+    """Control: the market path cancels the continuation instead of oversizing,
+    so its close stays at pos.qty."""
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.02)])
+    tracker, portfolio, order_book = _long_setup()
+    result = TradingServiceResult()
+    _partial_entry_continuation(order_book)
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(low=95),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+
+    req = _engine_orders(pending)[0]
+    assert req.qty == 100.0
+    assert "o1" not in order_book  # continuation cancelled

@@ -345,6 +345,12 @@ def test_stop_loss_limit_offset_pct_bounds():
         StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.0)
     with pytest.raises(ValidationError):
         StopLossRule(pct=0.03, style="limit", limit_offset_pct=1.5)
+    # Strictly below 1.0: at exactly 1.0 a long-side limit collapses to
+    # stop*(1-1)=0 (a never-filling protective order), so 1.0 is rejected.
+    with pytest.raises(ValidationError):
+        StopLossRule(pct=0.03, style="limit", limit_offset_pct=1.0)
+    # Just under 1.0 is accepted.
+    assert StopLossRule(pct=0.03, style="limit", limit_offset_pct=0.99).limit_offset_pct == 0.99
 
 
 def test_format_stop_loss_limit_style():

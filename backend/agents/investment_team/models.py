@@ -652,9 +652,10 @@ class BacktestExecutionDiagnostics(BaseModel):
     # per-symbol breakdown below. For a market close emission == fill, so these
     # mirror ``exit_rule_firings``; for a ``style="limit"`` stop they diverge,
     # because a STOP_LIMIT can fire (emit) but gap through its limit unfilled.
-    # The exit-rule conformance gate reconciles below-floor trades against
-    # *fills* (not emissions) for limit-style stops so a legitimate gap-through
-    # non-fill is not read as a leak and a real leak is not masked.
+    # Surfaced as observability telemetry (the fire-vs-fill gap), NOT as the
+    # conformance leak-check denominator: a fill count is derived from the same
+    # closed-trade ledger the gate iterates, so it cannot detect a leak in that
+    # ledger — the gate reconciles against the independent emission firings.
     exit_rule_fills: Dict[str, int] = Field(default_factory=dict)
     exit_rule_fills_by_symbol: Dict[str, Dict[str, int]] = Field(default_factory=dict)
     # Count of stop-limit orders that triggered (stop level crossed) but could not

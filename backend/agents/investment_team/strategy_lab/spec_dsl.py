@@ -334,8 +334,11 @@ class StopLossRule(_SpecNode):
     # Limit offset as a fraction of the stop level, consulted only when
     # ``style == "limit"``. The limit sits below the stop for a long position
     # (sell-stop-limit) and above it for a short (buy-stop-limit). Required when
-    # ``style == "limit"``; forbidden otherwise.
-    limit_offset_pct: Optional[float] = Field(default=None, gt=0, le=1.0)
+    # ``style == "limit"``; forbidden otherwise. Bounded strictly below 1.0: at
+    # exactly 1.0 a long-side limit would collapse to ``stop*(1-1)=0`` (a
+    # never-filling protective order), so the open interval keeps the limit
+    # strictly positive.
+    limit_offset_pct: Optional[float] = Field(default=None, gt=0, lt=1.0)
     note: str = ""
 
     @model_validator(mode="after")
@@ -408,6 +411,31 @@ def stop_caps_side(basis: str, side: str) -> bool:
     if basis == "trailing_low":
         return side == "short"
     return False  # pragma: no cover - DSL Literal forbids other bases
+
+
+def protective_limit_price(stop_price: float, offset: float, *, closing_long: bool) -> float:
+    """Place a stop-limit's limit on the protective side of its stop.
+
+    Closing a long is a sell, so the limit sits *below* the stop
+    (``stop - offset``); closing a short is a buy, so it sits *above*
+    (``stop + offset``). This is the single source of the sign convention shared
+    by the DSL structured-exit path (``rule_compiler``) and the bracket-child
+    materializer (``fill_simulator``), and it matches ``OrderRequest.validate_prices``
+    (SHORT close requires ``limit <= stop``; LONG close requires ``limit >= stop``).
+
+    This helper owns only the *sign* convention; keeping the limit strictly
+    positive is the caller's responsibility. The DSL path bounds
+    ``limit_offset_pct < 1.0`` so ``offset < stop_price`` and the long-side limit
+    stays positive (re-asserted in ``_build_stop_limit_close``); the bracket path
+    accepts absolute offsets and owns its own bounds.
+
+    Preconditions: ``stop_price > 0`` and ``offset >= 0``.
+    Postconditions: returns ``stop_price - offset`` when ``closing_long`` (limit
+    on/below the stop), else ``stop_price + offset`` (limit on/above the stop).
+    """
+    assert stop_price > 0, "stop_price must be positive"
+    assert offset >= 0, "offset must be non-negative"
+    return stop_price - offset if closing_long else stop_price + offset
 
 
 def first_side_stop_factor(exit_rules: Sequence[Any], side: str) -> Optional[float]:

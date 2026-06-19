@@ -27,7 +27,7 @@ todos:
     content: 'DONE (revised after review) — Added exit_rule_fills / exit_rule_fills_by_symbol to BacktestExecutionDiagnostics, counted in _apply_fill_outcome_events off outcome.closed_trades (whose exit_reason carries the engine_exit:* label), NOT the exit_filled diagnostic events — those stamp the fill KIND ("full"/"partial") as their reason, so counting them never matched the engine prefix in real runs. Counting closed trades keeps the fill counter consistent-by-construction with the conformance gate, which reconciles the same exit_reason attribution. Distinct from emission-time exit_rule_firings.'
     status: completed
   - id: conformance-fill-based
-    content: Update exit_rule_conformance._check_stop_loss to reconcile below-floor trades against the fill-based counter (not emissions), and tolerate "fired but did not fill" for limit-style stop rules so a legitimate gap-through non-fill does not read as a leak (false critical) and a real leak is not masked.
+    content: 'DONE (revised after review) — _check_stop_loss reconciles below-floor trades against the independent emission FIRINGS for both styles, not a fill counter. A fill count is derived from the same closed-trade ledger the gate iterates, so reconciling against it is a tautology (fills >= tripped always) and the leak branch is unreachable — it cannot detect a leak in its own ledger. Firing-based reconciliation already tolerates "fired but did not fill": a non-filling stop-limit inflates the firing denominator only (more lenient), never a false critical. The exit_rule_fills counter is surfaced as fire-vs-fill telemetry in check() instead.'
     status: completed
   - id: prompts-designer
     content: Update strategy_lab/prompts/design_system.md and _stop_order_semantics.md so the designer LLM can author a well-formed limit-style StopLossRule (style + limit_offset_pct), stating the gap-through "may not fill, position stays open" trade-off and when to prefer market vs limit.
@@ -52,7 +52,7 @@ isProject: false
 
 ## Background
 
-PR #921 added `STOP_LIMIT` as a real, executable order type, but only on the
+An earlier change added `STOP_LIMIT` as a real, executable order type, but only on the
 **engine / bracket-attachment / custom-code** surface. The DSL *designer* still
 cannot author a stop-limit exit. Today a strategy author who needs one must set
 `requires_custom_code: true` or use a `StopAttachment(limit_offset=...)` bracket
@@ -77,7 +77,7 @@ three assumptions baked into the structured-exit code:
 
 ## What already exists (reuse, don't rebuild)
 
-The engine STOP_LIMIT machinery from PR #921 is complete and should be reused:
+The engine STOP_LIMIT machinery is already complete and should be reused:
 
 - `engine/execution_model.py` — `stop_limit_triggered` (trigger test) and
   `stop_limit_reference_price` (returns the limit price when filled, `None` on
@@ -233,7 +233,7 @@ stateDiagram-v2
 ```
 
 The `Armed` / `Filled` / gap-through transitions already exist in the fill
-simulator (PR #921). The new work is the `Resting` state's in-flight guard and
+simulator already. The new work is the `Resting` state's in-flight guard and
 moving retirement to the `Filled` transition. The `Discarded` path is the existing
 stale-continuation guard — it already drops an armed-but-unfilled stop-limit when a
 sibling exit closes the position, so the reverse-position risk is contained *as
@@ -273,7 +273,7 @@ long as retirement does not run early* (the reason for deferring it).
 
 ## Non-goals
 
-- No change to the bracket-attachment or custom-code STOP_LIMIT surfaces (PR #921).
+- No change to the existing bracket-attachment or custom-code STOP_LIMIT surfaces.
 - No change to take-profit, signal-exit, or trailing-stop semantics beyond what
   is needed to keep `first_side_stop_factor` / short-safety correct.
 - No new execution model; reuse `RealisticExecutionModel` / `OptimisticExecutionModel`.

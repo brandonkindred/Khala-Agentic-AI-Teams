@@ -573,9 +573,10 @@ def _limit_rule() -> StopLossRule:
 
 def test_limit_stop_tolerates_fired_but_not_filled() -> None:
     """A limit-style stop can fire (emit) on several bars yet gap through its
-    limit unfilled — those firings produce no closed trade. The gate must
-    reconcile against FILLS, so excess firings with no trades are tolerated and
-    do not manufacture a critical.
+    limit unfilled — those firings produce no closed trade. Firing-based
+    reconciliation tolerates this: the extra (non-filling) firings only inflate
+    the denominator, so one below-floor fill against three firings is no leak.
+    The exit_rule_fills telemetry surfaces the fire-vs-fill divergence.
     """
     gate = ExitRuleConformanceGate()
     # One below-floor engine-stopped trade (it filled); three firings total
@@ -596,15 +597,17 @@ def test_limit_stop_tolerates_fired_but_not_filled() -> None:
     fails = [r for r in results if not r.passed]
     assert fails == []
     info = next(
-        r for r in results if "StopLossRule" in r.details and "per-symbol fills" in r.details
+        r for r in results if "StopLossRule" in r.details and "per-symbol firings" in r.details
     )
     assert "fired-but-unfilled gap-throughs tolerated" in info.details
+    # The fill counter is surfaced as telemetry (not used for the leak check).
+    assert any("engine_exit_fills" in r.details for r in results)
 
 
-def test_limit_stop_leak_caught_by_fills_when_firings_would_mask() -> None:
-    """Two engine-attributed below-floor trades but only one recorded fill is a
-    real leak. Firing-based reconciliation (firings=2) would mask it; the
-    fill-based path (fills=1) flags the unaccounted trade.
+def test_limit_stop_leak_caught_when_firings_insufficient() -> None:
+    """A genuine leak is still caught for a limit-style stop: two engine-attributed
+    below-floor trades against only one firing means the dispatcher's emission
+    path and the close ledger disagree — flagged via the independent firing count.
     """
     gate = ExitRuleConformanceGate()
     trades = [
@@ -612,10 +615,8 @@ def test_limit_stop_leak_caught_by_fills_when_firings_would_mask() -> None:
         _trade(trade_num=2, return_pct=-7.0),
     ]
     diag = BacktestExecutionDiagnostics(
-        exit_rule_firings={"stop_loss": 2},
-        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 2}},
-        exit_rule_fills={"stop_loss": 1},
-        exit_rule_fills_by_symbol={"AAA": {"stop_loss": 1}},
+        exit_rule_firings={"stop_loss": 1},
+        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 1}},
     )
     results = gate.check(
         exit_rules=[_limit_rule()],
@@ -627,21 +628,19 @@ def test_limit_stop_leak_caught_by_fills_when_firings_would_mask() -> None:
     assert len(fails) == 1
     assert fails[0].severity == "critical"
     assert "1 unaccounted" in fails[0].details
-    assert "per-symbol fills" in fails[0].details
+    assert "per-symbol firings" in fails[0].details
 
 
-def test_limit_stop_zero_fills_with_engine_trade_is_a_leak() -> None:
-    """An engine-attributed below-floor *trade* means a position closed via the
-    engine stop — so a fill must exist. Zero recorded fills against such a trade
-    is a genuine bookkeeping leak, not a tolerated gap-through.
+def test_limit_stop_zero_firings_with_engine_trade_is_a_leak() -> None:
+    """A below-floor trade attributed to engine_exit:stop_loss with zero recorded
+    firings is a real leak — the engine claimed the close but never recorded
+    emitting it. Caught identically for limit-style and market-style.
     """
     gate = ExitRuleConformanceGate()
     trades = [_trade(return_pct=-6.0)]
     diag = BacktestExecutionDiagnostics(
-        exit_rule_firings={"stop_loss": 1},
-        exit_rule_firings_by_symbol={"AAA": {"stop_loss": 1}},
-        exit_rule_fills={},
-        exit_rule_fills_by_symbol={"AAA": {}},
+        exit_rule_firings={},
+        exit_rule_firings_by_symbol={"AAA": {}},
     )
     results = gate.check(
         exit_rules=[_limit_rule()],
