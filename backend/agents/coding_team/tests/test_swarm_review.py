@@ -1099,6 +1099,7 @@ def test_note_revision_progress_counts_no_change_then_resets(tmp_path, monkeypat
 
 
 def test_escalate_done_marks_resolved_without_changes(tmp_path, monkeypatch):
+    # _patch_git defaults to an EMPTY branch diff → genuinely nothing landed → resolved-without-changes.
     _patch_git(monkeypatch)
     tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
     swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
@@ -1112,6 +1113,30 @@ def test_escalate_done_marks_resolved_without_changes(tmp_path, monkeypatch):
     assert task.resolved_without_changes is True
     assert graph.get_task_for_agent("a1") is None  # agent freed
     assert tech_lead.adjudication_calls  # the history was handed to the Tech Lead
+
+
+def test_escalate_done_non_empty_branch_merges_and_preserves_work(tmp_path, monkeypatch):
+    """A 'done' verdict on a stalled but NON-empty branch merges the work (it is not a no-op), so the
+    real changes reach development and the PR — instead of being silently dropped and mis-reported as
+    an already-complete resolution."""
+    merge_calls: List[Any] = []
+    monkeypatch.setattr(f"{GIT_UTILS}.branch_diff", lambda *a, **k: "real unmerged changes")
+    monkeypatch.setattr(
+        f"{GIT_UTILS}.merge_branch", lambda *a, **k: (merge_calls.append(a) or (True, "ok"))
+    )
+    tech_lead = StubTechLead(approved=False, adjudication_verdict="done")
+    swarm, graph = _make_swarm(tmp_path, tech_lead, [StubWorker("a1")])
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    graph.update_task("t1", feature_branch="feature/t1")
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+
+    task = graph.get_task("t1")
+    assert task.status == TaskStatus.MERGED
+    assert task.resolved_without_changes is False  # real work landed → not a no-op resolution
+    assert merge_calls  # the branch was actually merged into development
+    assert graph.get_task_for_agent("a1") is None  # agent freed
 
 
 def test_escalate_fail_marks_failed_and_cascades(tmp_path, monkeypatch):
@@ -1138,11 +1163,42 @@ def test_escalate_continue_resets_window(tmp_path, monkeypatch):
     graph.assign_task_to_agent("t1", "a1")
     graph.update_task("t1", no_change_revisits=5)
 
+    graph.update_task("t1", last_change_digest="seeded-digest")
+
     swarm._escalate_to_tech_lead(graph.get_task("t1"))
 
     task = graph.get_task("t1")
     assert task.status == TaskStatus.IN_PROGRESS  # back to the engineer
     assert task.no_change_revisits == 0  # fresh window
+    assert task.last_change_digest == ""  # digest cleared so the next round is a fresh baseline
+
+
+def test_escalate_continue_clears_digest_so_cap_one_grants_a_real_window(tmp_path, monkeypatch):
+    """Regression: with CAP=1 a 'continue' must clear last_change_digest, or the next unchanged round
+    re-trips the cap immediately (the escalation bounce does not bump revision_count, so the churn is
+    not bounded by MAX_TASK_REVISIONS) and the task never gets a real revision window."""
+    import hashlib
+
+    monkeypatch.setenv("CODING_TEAM_NO_CHANGE_REVISIT_CAP", "1")
+    _patch_git(monkeypatch)  # constant empty diff → the branch stays unchanged across rounds
+    swarm, graph = _make_swarm(
+        tmp_path, StubTechLead(approved=False, adjudication_verdict="continue"), [StubWorker("a1")]
+    )
+    graph.add_task("t1", title="T1")
+    graph.assign_task_to_agent("t1", "a1")
+    # Seed a digest matching the (empty) branch so the task is mid-no-change-loop.
+    graph.update_task(
+        "t1", last_change_digest=hashlib.sha256(b"").hexdigest(), no_change_revisits=1
+    )
+
+    swarm._escalate_to_tech_lead(graph.get_task("t1"))
+    assert graph.get_task("t1").last_change_digest == ""  # cleared for a fresh baseline
+
+    # The very next no-change check is now a fresh baseline (no_change=0), NOT an immediate
+    # re-escalation — the engineer actually gets a round to change the code.
+    escalated = swarm._note_revision_progress(graph.get_task("t1"))
+    assert escalated is False
+    assert graph.get_task("t1").no_change_revisits == 0
 
 
 def test_return_for_revision_escalates_on_no_change(tmp_path, monkeypatch):

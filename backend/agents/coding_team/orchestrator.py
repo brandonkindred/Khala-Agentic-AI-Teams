@@ -1081,21 +1081,58 @@ class CodingTeamSwarm:
             reason,
         )
         if verdict == "done":
-            # Mark merged so it is terminal, frees the agent, and unblocks dependents — but flag it
-            # as resolved-without-changes so the job-level outcome reports "already complete" rather
-            # than presenting a non-existent diff as real merged work.
-            self.graph.update_task(
-                task.id, resolved_without_changes=True, revision_feedback=feedback
+            # "Done" means the task's goal is achieved — but the no-change cap only proves the branch
+            # stopped changing, NOT that it is empty. A stalled-but-non-empty branch carries real,
+            # unmerged work, so merge it (exactly like an approved review) before terminating;
+            # otherwise mark_branch_merged would flip the graph to MERGED while the code never reaches
+            # ``development`` and is silently dropped from the PR. Only a genuinely empty branch is a
+            # no-op resolution (work already present elsewhere) that the job-level outcome should
+            # report as "already complete".
+            from software_engineering_team.shared.git_utils import (
+                DEVELOPMENT_BRANCH,
+                branch_diff,
+                merge_branch,
             )
+
+            branch = task.feature_branch or f"feature/{task.id}"
+            has_changes = bool((branch_diff(self.path, DEVELOPMENT_BRANCH, branch) or "").strip())
+            if has_changes:
+                try:
+                    merged_ok, _ = merge_branch(self.path, branch, DEVELOPMENT_BRANCH)
+                except Exception as e:  # noqa: BLE001 — terminate the stuck task regardless
+                    logger.warning("Merge of adjudicated-done branch %s raised: %s", task.id, e)
+                    merged_ok = False
+                if not merged_ok:
+                    logger.warning(
+                        "Merge of adjudicated-done branch %s did not apply cleanly; "
+                        "marking merged anyway",
+                        task.id,
+                    )
+                # Real work landed → NOT resolved-without-changes; the job publishes a real PR.
+                self.graph.update_task(
+                    task.id, resolved_without_changes=False, revision_feedback=feedback
+                )
+            else:
+                # Genuinely nothing landed — flag it resolved-without-changes so the job-level outcome
+                # reports "already complete" rather than presenting a non-existent diff as merged work.
+                self.graph.update_task(
+                    task.id, resolved_without_changes=True, revision_feedback=feedback
+                )
             self.graph.mark_branch_merged(task.id)
             return
         if verdict == "continue":
-            # One more bounded window: reset the no-change counter and return to the engineer. The
-            # revision_count / MAX_TASK_REVISIONS backstop still applies.
+            # One more bounded window: reset the no-change counter AND clear the recorded digest so
+            # the next round is measured from a fresh baseline. Clearing last_change_digest is what
+            # makes "continue" an actual window — otherwise a task whose branch is still unchanged
+            # re-trips the cap on the very next round (acute at CODING_TEAM_NO_CHANGE_REVISIT_CAP=1)
+            # and re-enters adjudication immediately; and because the escalation bounce does not bump
+            # revision_count, that churn would not be bounded by MAX_TASK_REVISIONS. With the digest
+            # cleared the engineer gets a genuine round to change the code before any re-escalation.
             self.graph.update_task(
                 task.id,
                 status=TaskStatus.IN_PROGRESS,
                 no_change_revisits=0,
+                last_change_digest="",
                 revision_feedback=feedback,
             )
             return
