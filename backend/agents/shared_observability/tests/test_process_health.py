@@ -363,6 +363,40 @@ def test_watchdog_loop_survives_tick_errors(monkeypatch, caplog) -> None:
     assert any("memory watchdog tick failed" in r.getMessage() for r in caplog.records)
 
 
+def test_watchdog_loop_rewarns_after_recovery(monkeypatch, caplog) -> None:
+    """A fail → recover → fail sequence logs WARNING twice: the success resets the
+    once-per-episode flag so a new failure episode surfaces at WARNING again."""
+    stop = threading.Event()
+    seq = iter([("raise", None), ("ok", 0), ("raise", "stop")])
+
+    def reader(*_a, **_k):
+        try:
+            action, val = next(seq)
+        except StopIteration:
+            stop.set()
+            return 0
+        if action == "raise":
+            if val == "stop":
+                stop.set()
+            raise RuntimeError("boom")
+        return val
+
+    monkeypatch.setattr(ph, "read_memory_usage_bytes", reader)
+    monkeypatch.setattr(ph, "read_oom_kill_count", lambda *a, **k: None)
+    logger = logging.getLogger("test.ph.rewarn")
+    with caplog.at_level(logging.WARNING, logger="test.ph.rewarn"):
+        ph._watchdog_loop(
+            team="t",
+            limit_bytes=100,
+            threshold=0.5,
+            interval_s=0.01,
+            stop_event=stop,
+            logger=logger,
+        )
+    warnings = [r for r in caplog.records if "memory watchdog tick failed" in r.getMessage()]
+    assert len(warnings) == 2
+
+
 # ----------------------------------------------------------------- watchdog lifecycle
 
 

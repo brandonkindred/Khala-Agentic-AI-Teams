@@ -62,6 +62,10 @@ _UNLIMITED_BYTES = 1 << 62
 
 _DEFAULT_INTERVAL_S = 30.0
 _DEFAULT_THRESHOLD = 0.85
+# Below this fraction of the cgroup limit, a peak at OOM-kill time is treated as
+# evidence of host/VM-wide (global) OOM rather than the container hitting its own
+# budget — see ``_oom_check_tick``.
+_GLOBAL_OOM_PEAK_RATIO = 0.5
 
 _log: Optional[logging.Logger] = None
 _diagnostics_installed = False
@@ -407,7 +411,9 @@ def _oom_check_tick(
         # Tailor the likely-cause hint to the evidence: a peak well under the limit
         # (or no limit / unknown peak) points at host/VM-wide pressure, whereas a
         # peak near the limit points at the container hitting its own budget.
-        looks_global = limit_bytes is None or peak is None or peak < limit_bytes * 0.5
+        looks_global = (
+            limit_bytes is None or peak is None or peak < limit_bytes * _GLOBAL_OOM_PEAK_RATIO
+        )
         if looks_global:
             cause = (
                 "the peak is well below the limit (or the limit/peak is unknown), so "
@@ -480,6 +486,9 @@ def _watchdog_loop(
             last_oom, oom_message = _oom_check_tick(last_oom, limit_bytes=limit_bytes)
             if oom_message:
                 logger.error("[%s] %s", team, oom_message)
+            # A clean tick re-arms the WARNING so a *new* failure episode (after a
+            # recovery) surfaces at WARNING again rather than staying at DEBUG.
+            tick_error_logged = False
         except Exception:  # noqa: BLE001 — a diagnostic thread must never crash the worker
             # Surface the *first* failure at WARNING so a persistent bug (e.g. in
             # the pressure/oom check) isn't hidden at DEBUG forever; subsequent

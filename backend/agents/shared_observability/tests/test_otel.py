@@ -83,6 +83,7 @@ def test_metric_exporter_opted_out_via_metrics_exporter_none(monkeypatch) -> Non
     traces-only collector is not flooded with rejected metric exports.
     """
     pytest.importorskip("opentelemetry.exporter.otlp.proto.http.metric_exporter")
+    pytest.importorskip("opentelemetry.exporter.otlp.proto.http.trace_exporter")
     from shared_observability.otel import (
         _build_metric_exporter,
         _build_span_exporter,
