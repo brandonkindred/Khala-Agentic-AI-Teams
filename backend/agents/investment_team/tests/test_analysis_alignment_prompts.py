@@ -38,6 +38,7 @@ from investment_team.strategy_lab.agents.analysis import (
     _PROMPT_DIR,
     _RISK_MODEL_CHECK,
     _SELF_REVIEW_PROMPT,
+    _SIZING_LINE_READING,
     _format_alignment_status_section,
     format_misalignment_prefix,
 )
@@ -78,6 +79,7 @@ def _render_inputs() -> dict[str, object]:
         "entry_rules": format_rules_for_prompt([entry]),
         "exit_rules": format_rules_for_prompt(exits),
         "sizing_rules": format_sizing_rule(sizing),
+        "sizing_line_reading": _SIZING_LINE_READING,
         "rationale": "Validate SMA-cross trend following on the equity sleeve.",
         "annualized_return_pct": 12.5,
         "total_return_pct": 25.0,
@@ -487,6 +489,38 @@ def test_simulated_trades_summary_samples_large_ledger() -> None:
     shown_rows = [ln for ln in summary.splitlines() if ln.strip().startswith("#")]
     assert len(shown_rows) <= 14
     assert "(6 additional trades not shown)" in summary
+
+
+def test_format_simulated_trades_summary_empty_list() -> None:
+    """An empty ledger yields the sentinel "no trades" line, not a crash.
+
+    Guards the early-return so a refactor cannot regress it into an
+    IndexError (min/max over an empty range) or an empty evidence section.
+    """
+    from investment_team.strategy_lab.agents.analysis import _format_simulated_trades_summary
+
+    assert _format_simulated_trades_summary([]) == "No simulated trades in ledger."
+
+
+def test_sizing_line_reading_block_is_single_sourced() -> None:
+    """The "How to read the sizing line" block must live in ONE place — the
+    _sizing_line_reading.md fragment, injected via the {sizing_line_reading}
+    placeholder — not be duplicated verbatim across the win and lose templates,
+    so the capital-at-risk framing cannot drift between them. Both rendered
+    prompts must still carry the block.
+    """
+    win_tpl = (_PROMPT_DIR / "analysis_win.md").read_text(encoding="utf-8")
+    lose_tpl = (_PROMPT_DIR / "analysis_lose.md").read_text(encoding="utf-8")
+    for name, tpl in (("analysis_win", win_tpl), ("analysis_lose", lose_tpl)):
+        assert "{sizing_line_reading}" in tpl, f"{name} must inject the shared block."
+        assert "## How to read the sizing line" not in tpl, (
+            f"{name} must not embed the block verbatim (it is single-sourced)."
+        )
+    # The fragment is the single source of the block.
+    assert "## How to read the sizing line" in _SIZING_LINE_READING
+    # Regression: the block must still render into both prompts.
+    assert "## How to read the sizing line" in _render_win()
+    assert "## How to read the sizing line" in _render_lose()
 
 
 def test_analysis_system_prompt_carries_risk_model_and_no_forbidden_phrasing() -> None:

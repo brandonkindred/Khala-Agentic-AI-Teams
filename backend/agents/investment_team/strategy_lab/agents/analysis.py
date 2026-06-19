@@ -26,6 +26,16 @@ _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 # behavior, not a defect. Read once at import (matches the other prompt loads).
 _STOP_ORDER_SEMANTICS = (_PROMPT_DIR / "_stop_order_semantics.md").read_text(encoding="utf-8")
 
+# Shared "How to read the sizing line" block. Single-sourced here (rather than
+# duplicated verbatim in analysis_win.md and analysis_lose.md) and injected into
+# both draft templates via the {sizing_line_reading} placeholder, so the
+# capital-at-risk framing cannot drift between the winning and losing prompts.
+# rstrip the trailing newline so the placeholder substitutes cleanly between the
+# surrounding blank lines (keeps the rendered prompt byte-identical).
+_SIZING_LINE_READING = (
+    (_PROMPT_DIR / "_sizing_line_reading.md").read_text(encoding="utf-8").rstrip("\n")
+)
+
 # The self-review risk-model check (instruction "1a"). Kept as its own
 # implicitly-concatenated constant — rather than one ~1k-char line inside the
 # template — for source readability; interpolated into the template below.
@@ -145,6 +155,7 @@ class AnalysisAgent:
             entry_rules=format_rules_for_prompt(spec.entry_rules),
             exit_rules=format_rules_for_prompt(spec.exit_rules),
             sizing_rules=format_sizing_rule(spec.sizing),
+            sizing_line_reading=_SIZING_LINE_READING,
             rationale=rationale,
             annualized_return_pct=metrics.annualized_return_pct,
             total_return_pct=metrics.total_return_pct,
@@ -244,9 +255,9 @@ def _sanitize_exit_reason(reason: str, max_len: int = 80) -> str:
     its row and inject prompt text. Collapse all whitespace to single spaces so
     it cannot span lines, and bound the length so it cannot flood the prompt.
 
-    Preconditions: ``reason`` is a non-empty string.
+    Preconditions: ``reason`` is a string (may be empty or whitespace-only).
     Postconditions: the result contains no newline/tab, is ``<= max_len``
-    characters, and is empty only if ``reason`` was whitespace-only.
+    characters, and is empty only if ``reason`` was empty or whitespace-only.
     """
     flattened = " ".join(reason.split())
     if len(flattened) > max_len:
