@@ -330,8 +330,8 @@ def _read_repo_context(repo_path: Path) -> str:
     engineer reasons over this to implement a task, and clipping a file would
     hide code from it (mirroring the team's "inputs are never truncated"
     contract for the plan text, task description, and review diff). The 80-file
-    ceiling on ``sorted(repo_path.rglob("*"))`` is a deliberate cap on how many
-    files the briefing covers, not truncation of any file's content.
+    ceiling on the eligible-file list is a deliberate cap on how many files the
+    briefing covers, not truncation of any file's content.
 
     Preconditions:
         - ``repo_path`` is an existing directory.
@@ -343,21 +343,32 @@ def _read_repo_context(repo_path: Path) -> str:
     """
     extensions, exclude_dirs = _context_file_filters()
 
-    parts: List[str] = []
+    # Walk with os.walk and prune excluded dirs in place so the traversal never
+    # descends into node_modules/.git/etc. The old ``sorted(repo_path.rglob("*"))``
+    # stat-ed the *entire* tree (tens of thousands of files for any frontend repo)
+    # and sorted it before slicing — and worse, those excluded entries consumed the
+    # 80-entry budget, starving real source files. Collecting eligible files first,
+    # then sorting and capping, both fixes the stat storm and guarantees the cap
+    # covers real files.
+    eligible: List[Path] = []
     try:
-        for f in sorted(repo_path.rglob("*"))[:80]:
-            if not f.is_file() or f.suffix not in extensions:
-                continue
-            if any(skip in f.parts for skip in exclude_dirs):
-                continue
-            try:
-                content = f.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            rel = str(f.relative_to(repo_path))
-            parts.append(f"--- {rel} ---\n{content}\n")
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+            for name in filenames:
+                f = Path(dirpath) / name
+                if f.suffix in extensions:
+                    eligible.append(f)
     except Exception:
         pass
+
+    parts: List[str] = []
+    for f in sorted(eligible)[:80]:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        rel = str(f.relative_to(repo_path))
+        parts.append(f"--- {rel} ---\n{content}\n")
     return "\n".join(parts) if parts else "No files found"
 
 

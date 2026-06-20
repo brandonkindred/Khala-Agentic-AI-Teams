@@ -817,6 +817,25 @@ def test_read_repo_context_is_not_truncated(tmp_path):
     assert "VALUE_09" in ctx
 
 
+def test_read_repo_context_prunes_excluded_dirs(tmp_path):
+    """Files under excluded dirs (node_modules/.git) must not be walked or included,
+    and must not consume the 80-file budget ahead of real source files."""
+    (tmp_path / "real.py").write_text("REAL_SOURCE = 1")
+    nm = tmp_path / "node_modules" / "pkg"
+    nm.mkdir(parents=True)
+    (nm / "index.py").write_text("VENDORED = 1")
+    git = tmp_path / ".git"
+    git.mkdir()
+    (git / "config.py").write_text("GIT_INTERNAL = 1")
+
+    ctx = orch_mod._read_repo_context(tmp_path)
+
+    assert "real.py" in ctx
+    assert "REAL_SOURCE" in ctx
+    assert "VENDORED" not in ctx
+    assert "GIT_INTERNAL" not in ctx
+
+
 def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
     """The swarm re-reads repo context each round so files written in earlier rounds become visible
     to later implementations (instead of being recreated)."""
