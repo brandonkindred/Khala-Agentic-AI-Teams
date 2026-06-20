@@ -144,6 +144,54 @@ must be ≤ `MAX_QUEUE_SIZE`.
 
 ---
 
+## Software Engineering Observability & Learning
+
+The SE team instruments its pipeline on top of the OpenTelemetry layer above.
+Every `llm_service` call emits a span carrying `agent.name`, `task.id`,
+`job.id`, `phase`, `llm.model`, `llm.input_tokens`, `llm.output_tokens`,
+`cost.usd`, and `outcome`, plus a `khala.llm.cost_usd` counter. Per-job cost is
+accumulated and written to the job-store entry (`cost_usd`). DORA metrics and
+cost are exposed at `GET /api/se/metrics` (alias of
+`/api/software-engineering/metrics/dora`) and rendered in the Agent Console
+"Metrics" tab. Post-mortems and quality-gate rejections are distilled into the
+`se_learnings` Postgres table and the top-N relevant ones are injected into the
+Tech Lead's Design prompt. All Postgres-backed pieces no-op when `POSTGRES_HOST`
+is unset; there is **no** per-job budget cap.
+
+### LLM_PRICE_&lt;model&gt;
+Per-model price override for token→USD cost estimation, formatted
+`<usd_per_1k_input>/<usd_per_1k_output>`. `<model>` is the model name uppercased
+with each run of non-alphanumerics collapsed to `_` (e.g.
+`LLM_PRICE_DEEPSEEK_V4_PRO_CLOUD=0.0003/0.0012`). A malformed value is ignored
+(falls back to the built-in table); an unknown, unpriced model costs `$0` rather
+than a guessed amount.
+
+### SE_COST_FLUSH_INTERVAL_S
+Minimum seconds between flushes of a job's running cost to the job store
+(default `2`; garbage → `2`, negatives clamped to `0` = flush every call). The
+in-process accumulator is the fast path; the job-store `cost_usd` is the durable
+figure.
+
+### SE_TRACE_TO_POSTGRES
+When truthy (`true`/`1`/`yes`; default off), each SE-attributed LLM call is also
+persisted as a row in `se_agent_traces` — the substrate the metrics endpoint
+reads for per-job and total spend, so cost metrics work even without an OTLP
+collector. No-op when Postgres is disabled.
+
+### SE_TRACE_RETENTION_DAYS
+Retention window for `se_agent_traces` rows used by `trace_store.prune_traces`
+(default `30`; garbage → `30`, negatives clamped to `0`).
+
+### SE_LEARNINGS_TOPN
+Number of past-sprint learnings injected into the Tech Lead's Design prompt
+(default `5`, clamped to `[0, 50]`; `0` disables injection; garbage → `5`).
+
+### SE_LEARNINGS_RETENTION_DAYS
+Retention window (by `last_seen`) for `se_learnings` rows used by
+`learnings_store.prune_learnings` (default `365`).
+
+---
+
 ## Process Health and Worker Sizing
 
 `shared_observability.process_health` arms each team worker with fault
