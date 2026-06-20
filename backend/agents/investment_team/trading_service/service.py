@@ -259,14 +259,16 @@ class _TrackedPosition:
     just_opened: bool
     high_since_entry: float
     low_since_entry: float
-    # ``(rule_index, level_index)`` pairs of scaled-take-profit rungs already
-    # scaled out for THIS position. Each rung fires at most once; the dispatcher
-    # consults this set when picking the next intent and adds to it on emission.
-    # Because a fresh ``_TrackedPosition`` is built whenever the underlying
-    # position is replaced (``entry_order_id`` change — see
-    # ``TradingService._update_position_tracker``), the set never leaks a fired
-    # rung across two distinct trades.
-    fired_tp_levels: set[tuple[int, int]] = field(default_factory=set)
+    # Per scaled-take-profit rule (keyed by its ``rule_index`` in ``exit_rules``),
+    # the index of the next UN-FIRED rung for THIS position. Rungs scale out in
+    # strict order one tranche per bar, so a single cursor per ladder fully
+    # captures progress: the evaluator only ever offers the cursor rung and the
+    # dispatcher advances it by one on emission. An absent key means cursor 0 (no
+    # rung fired yet). Because a fresh ``_TrackedPosition`` is built whenever the
+    # underlying position is replaced (``entry_order_id`` change — see
+    # ``TradingService._update_position_tracker``), the cursor never leaks across
+    # two distinct trades.
+    scaled_cursor: Dict[int, int] = field(default_factory=dict)
 
     def snapshot(self, symbol: str, qty: float) -> PositionState:
         # ``PositionState`` (the public evaluator input) carries the
@@ -358,7 +360,7 @@ class _EngineExitDispatcher:
         gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
         if gating is None:
             return
-        tracked, pos, resting_limit_stop_id = gating
+        tracked, pos, resting_limit_stop_id, entry_continuation_in_flight = gating
         exclude_resting_limit_stop = resting_limit_stop_id is not None
 
         # Resting structured exit: when a limit-style STOP_LIMIT already rests on
@@ -391,12 +393,14 @@ class _EngineExitDispatcher:
             # continuation has not yet settled ``pos.original_qty`` (the fill
             # simulator BUMPS ``original_qty`` as each continuation slice fills),
             # so a rung sized off the current, smaller ``original_qty`` would
-            # under-close — and marking the rung fired would block the catch-up
-            # once the rest of the entry lands. Skip without marking it fired so
-            # the rung re-evaluates on a later bar, once the entry is complete
-            # and ``original_qty`` is stable. (A full close, by contrast, cancels
-            # the continuation outright — that path is unaffected.)
-            if self._entry_continuations(sym, pos, order_book):
+            # under-close — and advancing the cursor would block the catch-up once
+            # the rest of the entry lands. Skip without advancing the cursor so the
+            # rung re-evaluates on a later bar, once the entry is complete and
+            # ``original_qty`` is stable. (A full close, by contrast, cancels the
+            # continuation outright — that path is unaffected.) The
+            # ``entry_continuation_in_flight`` flag was derived in the single
+            # ``_should_evaluate`` order-book pass, so this needs no rescan.
+            if entry_continuation_in_flight:
                 return
             req = self._build_close_order(intent, tracked, pos)
             if req is None:
@@ -406,7 +410,10 @@ class _EngineExitDispatcher:
             # scale-out if a full exit (e.g. a stop) closes the position first.
             self._register_binding(req, pos)
             assert intent.level_index is not None  # set by the evaluator for this kind
-            tracked.fired_tp_levels.add((intent.rule_index, intent.level_index))
+            # The evaluator only offers the cursor rung, so the fired rung is the
+            # current cursor; advance it by one to the next un-fired rung.
+            assert intent.level_index == tracked.scaled_cursor.get(intent.rule_index, 0)
+            tracked.scaled_cursor[intent.rule_index] = intent.level_index + 1
             self._record_emission(req, intent, cur_bar, result)
             return
 
@@ -488,9 +495,9 @@ class _EngineExitDispatcher:
         position_tracker: Mapping[str, _TrackedPosition],
         portfolio: Portfolio,
         order_book: OrderBook,
-    ) -> Optional[tuple[_TrackedPosition, Position, Optional[str]]]:
-        """Return ``(tracked, pos, resting_limit_stop_id)`` if rule
-        evaluation should run for this symbol on this bar, else ``None``.
+    ) -> Optional[tuple[_TrackedPosition, Position, Optional[str], bool]]:
+        """Return ``(tracked, pos, resting_limit_stop_id, entry_continuation_in_flight)``
+        if rule evaluation should run for this symbol on this bar, else ``None``.
 
         Gates:
         * Tracker has the symbol (a position is open).
@@ -504,10 +511,12 @@ class _EngineExitDispatcher:
           higher-priority rule (take-profit / signal-exit) must still be able to
           fire and close the position while the stop-limit rests unfilled.
 
-        The single pending-order pass also derives the resting limit-stop's
-        ``order_id`` so ``maybe_emit`` can both (a) drop the in-flight limit stop
-        from the chosen intent and (b) cancel that resting STOP_LIMIT when a
-        different rule replaces it — without a second scan. A spec has at most one
+        The single pending-order pass also derives (a) the resting limit-stop's
+        ``order_id`` so ``maybe_emit`` can drop the in-flight limit stop from the
+        chosen intent and cancel that resting STOP_LIMIT when a different rule
+        replaces it, and (b) whether the position's own entry is still filling (a
+        same-side partially-filled continuation rests) so the scaled-take-profit
+        deferral needs no second order-book scan. A spec has at most one
         limit-style stop (enforced by ``StrategySpec``), so "an engine STOP_LIMIT
         rests" unambiguously means "that stop is in flight" — no per-order
         identity bookkeeping beyond the single id is needed. The id is only
@@ -517,10 +526,13 @@ class _EngineExitDispatcher:
         Preconditions: ``order_book`` is the live order book for this run, and
         ``position_tracker``/``portfolio`` reflect state as of the current bar.
         Postconditions: returns ``None`` when evaluation should be skipped;
-        otherwise the open ``(tracked, pos)`` and the ``order_id`` of the
+        otherwise the open ``(tracked, pos)``, the ``order_id`` of the
         already-resting limit-style stop (non-``None`` only when the spec has a
-        limit stop AND an engine STOP_LIMIT for this position is resting). A
-        non-``None`` id means the chosen intent must exclude that stop rule.
+        limit stop AND an engine STOP_LIMIT for this position is resting; a
+        non-``None`` id means the chosen intent must exclude that stop rule), and
+        ``entry_continuation_in_flight`` — ``True`` iff a scaled-take-profit spec
+        has a same-side partially-filled entry continuation still resting (so the
+        scaled deferral can read it without rescanning the book).
         """
         if sym not in position_tracker:
             return None
@@ -530,13 +542,25 @@ class _EngineExitDispatcher:
         tracked = position_tracker[sym]
         if tracked.just_opened:
             return None
-        # The resting-stop-limit fact only matters when the spec can author one;
-        # for market-only specs leave it None (and skip the per-order check).
+        # Both per-order facts below matter only when the spec can author the
+        # relevant rule; for the common case leave them off and skip the checks.
         track_resting = self._has_limit_stop_rule
+        track_continuation = self._has_scaled_take_profit_rule
         resting_limit_stop_id: Optional[str] = None
+        entry_continuation_in_flight = False
         for po in order_book.pending_for_symbol(sym):
             po_req = po.request
             if po_req.side == tracked.side:
+                # Same-side: the position's own partially-filled entry
+                # continuation (a REQUEUE_NEXT_BAR / TWAP_N remainder, identified
+                # by ``order_id == entry_order_id`` with some qty already filled).
+                # Captured here so the scaled deferral needs no second scan.
+                if (
+                    track_continuation
+                    and po.order_id == pos.entry_order_id
+                    and po.cumulative_filled_qty > 0
+                ):
+                    entry_continuation_in_flight = True
                 continue
             if not (po_req.reason or "").startswith(ENGINE_EXIT_REASON_PREFIX):
                 continue
@@ -545,7 +569,7 @@ class _EngineExitDispatcher:
                 return None
             if track_resting and po_req.order_type == OrderType.STOP_LIMIT:
                 resting_limit_stop_id = po.order_id
-        return tracked, pos, resting_limit_stop_id
+        return tracked, pos, resting_limit_stop_id, entry_continuation_in_flight
 
     def _evaluate(
         self,
@@ -571,6 +595,11 @@ class _EngineExitDispatcher:
         one rule. The pure evaluator stays unaware of order-book state; the skip
         decision lives here in the dispatcher.
 
+        Already-fired scaled-take-profit rungs need no skip pass here: the
+        position's ``scaled_cursor`` is handed to the evaluator, which only ever
+        offers the next un-fired rung, so each rule already contributes at most one
+        intent and the default single-trigger path applies.
+
         Preconditions: ``tracked``/``pos`` describe the same open position
         (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
         Postconditions: returns an ``ExitIntent`` to emit, or ``None`` (no rule
@@ -578,30 +607,20 @@ class _EngineExitDispatcher:
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
-        # Evaluate all triggered intents (vs. just the first) whenever the chosen
-        # intent depends on per-position runtime state the pure evaluator can't
-        # see: a resting limit-style stop to skip, or scaled-take-profit rungs
-        # that already fired for this position.
-        need_all = exclude_resting_limit_stop or self._has_scaled_take_profit_rule
         intents = evaluate_exit_rules(
             self.exit_rules,
             {sym: snapshot},
             {sym: bar_snap},
             views=self.views,
-            first_only=not need_all,
+            first_only=not exclude_resting_limit_stop,
+            scaled_cursors={sym: tracked.scaled_cursor},
         )
-        if not need_all:
+        if not exclude_resting_limit_stop:
             return intents[0] if intents else None
         for intent in intents:
             # The spec's (single) limit-style stop already rests as a STOP_LIMIT;
             # skip it so a lower-priority rule can still fire and close.
-            if exclude_resting_limit_stop and intent.style == "limit":
-                continue
-            # A scaled-take-profit rung scales out at most once per position.
-            if (
-                intent.level_index is not None
-                and (intent.rule_index, intent.level_index) in tracked.fired_tp_levels
-            ):
+            if intent.style == "limit":
                 continue
             return intent
         return None

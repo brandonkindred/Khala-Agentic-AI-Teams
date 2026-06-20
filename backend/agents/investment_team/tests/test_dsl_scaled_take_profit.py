@@ -157,28 +157,55 @@ def test_format_rule_renders_each_rung() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_long_bar_crossing_both_rungs_emits_two_intents_in_order() -> None:
+def test_ladder_offers_only_cursor_rung() -> None:
+    # The evaluator offers AT MOST one intent per ladder — the next un-fired rung
+    # (the cursor) — even on a bar that clears several targets at once. With no
+    # cursor supplied the cursor defaults to 0.
     rule = _ladder()
     bar = BarSnapshot(high=111.0, low=100.0, close=110.0)  # clears +5% and +10%
     intents = evaluate_exit_rules([rule], {"AAA": _long()}, {"AAA": bar}, first_only=False)
     assert [(i.rule_kind, i.level_index, i.qty_fraction) for i in intents] == [
         ("scaled_take_profit", 0, 0.5),
-        ("scaled_take_profit", 1, 0.3),
     ]
 
 
-def test_long_bar_crossing_only_first_rung_emits_one_intent() -> None:
+def test_cursor_selects_the_next_unfired_rung() -> None:
+    # As rungs fire, the dispatcher advances the cursor; the evaluator then offers
+    # the next rung. Walk the cursor across the ladder and off the end.
+    rule = _ladder()
+    bar = BarSnapshot(high=111.0, low=100.0, close=110.0)  # both targets reached
+    pos = {"AAA": _long()}
+
+    def rungs(cursor: int):
+        intents = evaluate_exit_rules(
+            [rule], pos, {"AAA": bar}, first_only=False, scaled_cursors={"AAA": {0: cursor}}
+        )
+        return [i.level_index for i in intents]
+
+    assert rungs(0) == [0]
+    assert rungs(1) == [1]  # rung 0 fired → cursor 1 offers rung 1
+    assert rungs(2) == []  # ladder exhausted
+
+
+def test_long_bar_crossing_only_first_rung_offers_rung0() -> None:
     rule = _ladder()
     bar = BarSnapshot(high=106.0, low=100.0, close=105.0)  # clears +5% only
     intents = evaluate_exit_rules([rule], {"AAA": _long()}, {"AAA": bar}, first_only=False)
     assert [i.level_index for i in intents] == [0]
+    # Cursor at rung 1, whose +10% target this bar has NOT reached → nothing.
+    intents = evaluate_exit_rules(
+        [rule], {"AAA": _long()}, {"AAA": bar}, first_only=False, scaled_cursors={"AAA": {0: 1}}
+    )
+    assert intents == []
 
 
-def test_short_bar_crossing_both_rungs() -> None:
+def test_short_cursor_walks_the_ladder() -> None:
     rule = _ladder()
     bar = BarSnapshot(high=100.0, low=89.0, close=90.0)  # clears -5% and -10%
-    intents = evaluate_exit_rules([rule], {"AAA": _short()}, {"AAA": bar}, first_only=False)
-    assert [i.level_index for i in intents] == [0, 1]
+    pos = {"AAA": _short()}
+    assert [i.level_index for i in evaluate_exit_rules([rule], pos, {"AAA": bar})] == [0]
+    i1 = evaluate_exit_rules([rule], pos, {"AAA": bar}, scaled_cursors={"AAA": {0: 1}})
+    assert [i.level_index for i in i1] == [1]
 
 
 def test_first_only_caps_scaled_intents_at_one() -> None:
@@ -196,25 +223,27 @@ def test_untriggered_ladder_emits_nothing() -> None:
     assert intents == []
 
 
-def test_rung_stays_eligible_via_watermark_after_retrace_long() -> None:
-    # A gap bar cleared both rungs (peak 111) and a later bar retraced below both
-    # targets. Eligibility is high-water-mark based, so both rungs remain crossed
-    # and the dispatcher can still scale them out on this (retraced) bar.
+def test_cursor_rung_stays_eligible_via_watermark_after_retrace_long() -> None:
+    # A gap bar cleared rung 1's target (peak 111); rung 0 already fired so the
+    # cursor is at 1. A later bar retraces below +10%, but eligibility is
+    # high-water-mark based, so the cursor rung stays eligible.
     rule = _ladder()  # rungs at +5% (105) and +10% (110)
     pos = PositionState(
         symbol="AAA",
         side="long",
         qty=100,
         entry_price=100.0,
-        high_since_entry=111.0,  # peak since entry cleared both targets
+        high_since_entry=111.0,  # peak since entry cleared rung 1's target
         low_since_entry=100.0,
     )
-    bar = BarSnapshot(high=104.0, low=102.0, close=103.0)  # now below both targets
-    intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": bar}, first_only=False)
-    assert [i.level_index for i in intents] == [0, 1]
+    bar = BarSnapshot(high=104.0, low=102.0, close=103.0)  # now below +10%
+    intents = evaluate_exit_rules(
+        [rule], {"AAA": pos}, {"AAA": bar}, first_only=False, scaled_cursors={"AAA": {0: 1}}
+    )
+    assert [i.level_index for i in intents] == [1]
 
 
-def test_rung_stays_eligible_via_watermark_after_retrace_short() -> None:
+def test_cursor_rung_stays_eligible_via_watermark_after_retrace_short() -> None:
     rule = _ladder()  # rungs at -5% (95) and -10% (90)
     pos = PositionState(
         symbol="AAA",
@@ -222,11 +251,13 @@ def test_rung_stays_eligible_via_watermark_after_retrace_short() -> None:
         qty=100,
         entry_price=100.0,
         high_since_entry=100.0,
-        low_since_entry=89.0,  # trough since entry cleared both targets
+        low_since_entry=89.0,  # trough since entry cleared rung 1's target
     )
-    bar = BarSnapshot(high=98.0, low=96.0, close=97.0)  # now above both targets
-    intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": bar}, first_only=False)
-    assert [i.level_index for i in intents] == [0, 1]
+    bar = BarSnapshot(high=98.0, low=96.0, close=97.0)  # now above -10%
+    intents = evaluate_exit_rules(
+        [rule], {"AAA": pos}, {"AAA": bar}, first_only=False, scaled_cursors={"AAA": {0: 1}}
+    )
+    assert [i.level_index for i in intents] == [1]
 
 
 def test_stop_loss_priority_when_listed_before_ladder() -> None:
