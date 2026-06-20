@@ -110,6 +110,31 @@ def test_close_pool_failure_is_swallowed(monkeypatch) -> None:
         pass  # shutdown must not raise
 
 
+def test_on_startup_failure_still_closes_pool(monkeypatch) -> None:
+    # A raising on_startup must NOT leak the pool register_team_schemas opened:
+    # teardown (close_pool) runs regardless.
+    import shared_postgres
+
+    closed = []
+    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: None)
+    monkeypatch.setattr(shared_postgres, "close_pool", lambda: closed.append(True))
+
+    def on_startup() -> None:
+        raise RuntimeError("startup boom")
+
+    app = create_team_app(
+        service_name="svc",
+        team_key="tk",
+        title="T",
+        postgres_schema=object(),
+        on_startup=on_startup,
+    )
+    with pytest.raises(RuntimeError, match="startup boom"):
+        with TestClient(app):
+            pass
+    assert closed == [True]  # pool closed despite the startup failure
+
+
 @pytest.mark.anyio
 async def test_maybe_call_handles_none_sync_and_async() -> None:
     ran = []

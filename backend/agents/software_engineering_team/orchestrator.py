@@ -3127,6 +3127,14 @@ def run_orchestrator(
             resolved_questions_override = resolved
             adapter_result.open_questions = []
 
+        # planning_only: spec intake + planning (+ any decision gate) are done;
+        # stop before execution per the documented contract. The Temporal path
+        # honors this independently; the thread path must too.
+        if planning_only:
+            logger.info("Planning-only run: stopping before execution (job %s)", job_id)
+            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+            return
+
         # Execution: delegate to the coding_team orchestrator (it replaces the former
         # Tech Lead + Architecture Expert + backend/frontend code-v2 worker pipeline).
         existing_code_summary = _truncate_for_context(_read_repo_code(path), 8000)

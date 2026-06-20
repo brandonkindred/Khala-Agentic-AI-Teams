@@ -61,7 +61,8 @@ def create_team_app(
         - ``service_name``/``team_key``/``title`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
         - ``on_startup`` runs after schema registration; ``on_shutdown`` runs
-          before the pool is closed.
+          before the pool is closed. Teardown (``on_shutdown`` + pool close) runs
+          even if ``on_startup`` raises, so a startup failure never leaks the pool.
     Postconditions:
         - :func:`init_otel` has been called and the returned app is OTel-
           instrumented. Its lifespan registers ``postgres_schema`` on startup and
@@ -82,8 +83,11 @@ def create_team_app(
                 register_team_schemas(postgres_schema)
             except Exception:
                 logger.exception("%s postgres schema registration failed", team_key)
-        await _maybe_call(on_startup)
+        # on_startup runs inside the try so that a raising hook still triggers
+        # teardown — register_team_schemas may have opened the process-wide pool
+        # above, and a startup failure must not leak it.
         try:
+            await _maybe_call(on_startup)
             yield
         finally:
             await _maybe_call(on_shutdown)

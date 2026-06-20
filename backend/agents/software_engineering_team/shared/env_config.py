@@ -90,7 +90,7 @@ def env_float(
         assert default <= ceiling, "default must respect the ceiling"
     raw = os.environ.get(name)
     try:
-        value = float(raw) if raw is not None else float(default)
+        value = float(raw.strip()) if raw is not None else float(default)
         if not math.isfinite(value):
             value = float(default)
     except (TypeError, ValueError):
