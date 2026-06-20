@@ -29,7 +29,14 @@ def app_client(monkeypatch):
     """A TestClient over a minimal app, with the secret store + caches stubbed."""
     calls: dict = {"set": [], "cache_clears": 0, "runtime_clears": 0}
     monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
-    monkeypatch.setattr(route, "set_secret", lambda svc, key, val: calls["set"].append((svc, key, val)))
+    # The PUT handler writes every changed key in one set_secrets() transaction.
+    # Flatten the batch into (svc, key, val) tuples so existing per-key assertions
+    # keep working while still proving the atomic call path is exercised.
+    monkeypatch.setattr(
+        route,
+        "set_secrets",
+        lambda svc, values: calls["set"].extend((svc, k, v) for k, v in values.items()),
+    )
     monkeypatch.setattr(
         route, "clear_client_cache", lambda: calls.__setitem__("cache_clears", calls["cache_clears"] + 1)
     )
@@ -173,6 +180,52 @@ def test_put_stores_model_under_provider_specific_key(app_client):
     stored = {k: v for _s, k, v in calls["set"]}
     assert stored[route.runtime_config.KEY_OLLAMA_MODEL] == "llama3.2"
     assert route.runtime_config.KEY_CLAUDE_MODEL not in stored
+
+
+def test_get_clears_runtime_cache_for_fresh_read(app_client):
+    # The settings GET drops the runtime-config TTL cache before resolving, so a
+    # read landing on a worker with a stale per-worker cache still reflects the
+    # committed store (multi-worker correctness).
+    client, calls, _mp = app_client
+    resp = client.get("/api/llm-config")
+    assert resp.status_code == 200
+    assert calls["runtime_clears"] == 1
+
+
+def test_put_writes_all_keys_in_one_transaction(app_client, monkeypatch):
+    # Every changed key must go through a single set_secrets() call so the write is
+    # atomic — a half-applied provider/model/key switch can never be committed.
+    client, _calls, _mp = app_client
+    batches: list[dict] = []
+    monkeypatch.setattr(route, "set_secrets", lambda svc, values: batches.append(dict(values)))
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "claude", "model": "claude-opus-4-8", "claude_api_key": "sk-new"},
+    )
+    assert resp.status_code == 200
+    assert len(batches) == 1  # one atomic write, not one-per-key
+    assert batches[0] == {
+        route.runtime_config.KEY_PROVIDER: "claude",
+        route.runtime_config.KEY_CLAUDE_MODEL: "claude-opus-4-8",
+        route.runtime_config.KEY_CLAUDE_API_KEY: "sk-new",
+    }
+
+
+def test_put_persists_ollama_base_url_and_api_key(app_client):
+    # Non-empty ollama base URL + cloud key are batched into the same atomic write.
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={
+            "provider": "ollama",
+            "ollama_base_url": "https://ollama.com",
+            "ollama_api_key": "ok-123",
+        },
+    )
+    assert resp.status_code == 200
+    stored = {k: v for _s, k, v in calls["set"]}
+    assert stored[route.runtime_config.KEY_OLLAMA_BASE_URL] == "https://ollama.com"
+    assert stored[route.runtime_config.KEY_OLLAMA_API_KEY] == "ok-123"
 
 
 def test_provider_model_keys_cover_all_provider_options():

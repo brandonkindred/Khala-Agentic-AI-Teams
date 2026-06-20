@@ -103,6 +103,59 @@ def test_get_secrets_batched_round_trip(store):
     assert out == {"provider": "claude", "model": "claude-opus-4-8"}  # absent omitted
 
 
+def test_set_secrets_batched_round_trip(store):
+    secrets_mod.set_secrets(
+        "llm_config",
+        {"provider": "claude", "claude_model": "claude-opus-4-8", "claude_api_key": "sk-x"},
+    )
+    # Each value is stored as ciphertext and decrypts back to the plaintext.
+    assert store[("llm_config", "claude_api_key")] != "sk-x"
+    assert secrets_mod.get_secret("llm_config", "provider") == "claude"
+    assert secrets_mod.get_secret("llm_config", "claude_model") == "claude-opus-4-8"
+    assert secrets_mod.get_secret("llm_config", "claude_api_key") == "sk-x"
+
+
+def test_set_secrets_uses_one_transaction(store, monkeypatch):
+    # All keys must be written within ONE connection/transaction so a partial
+    # failure can never commit a half-applied config.
+    secrets_mod.get_secret("llm_config", "warm")  # one-time _ensure_table() DDL
+    calls = {"n": 0}
+    real = secrets_mod.get_conn
+
+    def _counting(*a, **k):
+        calls["n"] += 1
+        return real(*a, **k)
+
+    monkeypatch.setattr(secrets_mod, "get_conn", _counting)
+    secrets_mod.set_secrets("llm_config", {"a": "1", "b": "2", "c": "3"})
+    assert calls["n"] == 1
+
+
+def test_set_secrets_empty_value_deletes_in_batch(store):
+    secrets_mod.set_secret("llm_config", "k", "v")
+    secrets_mod.set_secrets("llm_config", {"k": "", "j": "v2"})
+    assert ("llm_config", "k") not in store  # empty value removed the row
+    assert secrets_mod.get_secret("llm_config", "j") == "v2"
+
+
+def test_set_secrets_empty_mapping_is_noop(store):
+    secrets_mod.set_secrets("llm_config", {})  # must not raise, must not write
+    assert store == {}
+
+
+def test_set_secrets_when_disabled_raises(monkeypatch):
+    monkeypatch.setattr(secrets_mod, "is_postgres_enabled", lambda: False)
+    with pytest.raises(RuntimeError):
+        secrets_mod.set_secrets("llm_config", {"k": "v"})
+
+
+def test_set_secrets_blank_args_assert(store):
+    with pytest.raises(AssertionError):
+        secrets_mod.set_secrets("", {"k": "v"})
+    with pytest.raises(AssertionError):
+        secrets_mod.set_secrets("svc", {"": "v"})
+
+
 def test_get_secrets_empty_when_disabled(monkeypatch):
     monkeypatch.setattr(secrets_mod, "is_postgres_enabled", lambda: False)
     assert secrets_mod.get_secrets("llm_config", ["provider"]) == {}

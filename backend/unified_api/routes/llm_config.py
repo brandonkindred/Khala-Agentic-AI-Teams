@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
-from shared_postgres import is_postgres_enabled, set_secret
+from shared_postgres import is_postgres_enabled, set_secrets
 
 logger = logging.getLogger(__name__)
 
@@ -109,8 +109,15 @@ async def get_llm_config() -> LlmConfigResponse:
 
     Preconditions: none.
     Postconditions: returns the current effective config; API keys are reported
-        only as ``*_configured`` booleans (never the key values).
+        only as ``*_configured`` booleans (never the key values). The runtime-config
+        TTL cache is dropped first so the settings page always reflects the
+        committed store, even when this GET lands on a different worker than the
+        PUT that wrote it (a stale per-worker cache would otherwise show old
+        provider/model/key-configured flags). Reads still flow through the shared
+        ``resolve_*`` chokepoint — clearing the cache forces a fresh read without
+        bypassing the env-fallback/heuristic logic a raw snapshot would skip.
     """
+    runtime_config.clear_cache()
     return _build_response()
 
 
@@ -146,28 +153,25 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
             ),
         )
 
-    set_secret(runtime_config.SERVICE, runtime_config.KEY_PROVIDER, body.provider)
+    # Collect every changed key and persist them in ONE transaction (set_secrets),
+    # so a transient failure mid-write can never commit a half-switched config —
+    # e.g. provider=claude stored while the API key write fails, leaving every
+    # later LLM call broken until someone repairs the setting.
+    updates: dict[str, str] = {runtime_config.KEY_PROVIDER: body.provider}
     # Empty fields are intentionally skipped so a provider/model change does not
     # wipe a previously-stored API key the operator didn't re-enter.
     if body.model.strip():
         # Store the model under the active provider's key (single source: the shared
         # PROVIDER_MODEL_KEYS map the resolvers read back from) so the two providers'
         # selections never collide and a provider switch stays lossless.
-        set_secret(
-            runtime_config.SERVICE,
-            runtime_config.PROVIDER_MODEL_KEYS[body.provider],
-            body.model.strip(),
-        )
+        updates[runtime_config.PROVIDER_MODEL_KEYS[body.provider]] = body.model.strip()
     if body.ollama_base_url.strip():
-        set_secret(
-            runtime_config.SERVICE,
-            runtime_config.KEY_OLLAMA_BASE_URL,
-            body.ollama_base_url.strip(),
-        )
+        updates[runtime_config.KEY_OLLAMA_BASE_URL] = body.ollama_base_url.strip()
     if body.claude_api_key.strip():
-        set_secret(runtime_config.SERVICE, runtime_config.KEY_CLAUDE_API_KEY, body.claude_api_key.strip())
+        updates[runtime_config.KEY_CLAUDE_API_KEY] = body.claude_api_key.strip()
     if body.ollama_api_key.strip():
-        set_secret(runtime_config.SERVICE, runtime_config.KEY_OLLAMA_API_KEY, body.ollama_api_key.strip())
+        updates[runtime_config.KEY_OLLAMA_API_KEY] = body.ollama_api_key.strip()
+    set_secrets(runtime_config.SERVICE, updates)
 
     # Refresh local caches immediately; other containers pick up the change within
     # the runtime-config TTL.

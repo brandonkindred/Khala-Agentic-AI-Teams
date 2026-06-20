@@ -255,6 +255,57 @@ def set_secret(service: str, key: str, value: str) -> None:
         )
 
 
+@timed_query(store=_STORE, op="set_secrets")
+def set_secrets(service: str, values: "dict[str, str]") -> None:
+    """Encrypt and write several keys of one ``service`` in ONE transaction.
+
+    Atomic, transactional counterpart to :func:`set_secret`: every entry in
+    ``values`` is applied (non-empty value -> encrypted upsert, empty value ->
+    delete) inside a single pooled connection, so the whole batch commits
+    together or — on any failure — rolls back together. Use this when several
+    related keys must move as a unit (e.g. the LLM-config endpoint switching
+    provider + model + API key together), so a mid-write error can never leave a
+    partially-applied config behind.
+
+    Preconditions: ``service`` is a non-empty string; every key in ``values`` is
+        a non-empty string. An empty ``values`` mapping is a no-op (returns
+        without touching Postgres). When ``values`` is non-empty, Postgres must be
+        enabled (``POSTGRES_HOST`` set) — raises ``RuntimeError`` otherwise so the
+        caller fails loudly rather than silently dropping the write.
+    Postconditions: on success every ``(service, key)`` in ``values`` reflects its
+        new state (upserted or, for an empty value, removed). On any failure the
+        transaction is rolled back — no key is changed — and the exception
+        propagates. The batch is all-or-nothing.
+    """
+    assert service, "service must be non-empty"
+    assert all(key for key in values), "every secret key must be non-empty"
+    if not values:
+        return
+    if not is_postgres_enabled():
+        raise RuntimeError("POSTGRES_HOST is not set; cannot persist shared secrets.")
+    _ensure_table()
+    fernet = _get_fernet()
+    with get_conn() as conn, conn.cursor() as cur:
+        for key, value in values.items():
+            if not value:
+                cur.execute(
+                    "DELETE FROM encrypted_integration_credentials "
+                    "WHERE service = %s AND credential_key = %s",
+                    (service, key),
+                )
+                continue
+            encrypted = fernet.encrypt(value.encode()).decode()
+            cur.execute(
+                """
+                INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
+                VALUES (%s, %s, %s, NOW())
+                ON CONFLICT (service, credential_key)
+                DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
+                """,
+                (service, key, encrypted),
+            )
+
+
 @timed_query(store=_STORE, op="delete_secret")
 def delete_secret(service: str, key: str) -> None:
     """Remove the secret row for ``(service, key)``.
