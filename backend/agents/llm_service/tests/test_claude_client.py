@@ -710,3 +710,119 @@ def test_to_anthropic_tools_translates_both_shapes():
     assert _to_anthropic_tools(anthropic_shape) == anthropic_shape
     assert _to_anthropic_tools(None) is None
     assert _to_anthropic_tools([]) is None
+
+
+# ---------------------------------------------------------------------------
+# Slow rate-limit retry: a 429 that survives the Anthropic SDK's built-in
+# retries is retried on the shared LLM_RATE_LIMIT_* schedule, mirroring Ollama.
+# ---------------------------------------------------------------------------
+
+import llm_service.clients.claude as _claude_mod  # noqa: E402
+
+
+def _invoke_kwargs():
+    return dict(
+        system=None,
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None,
+        think=None,
+        max_tokens=16,
+    )
+
+
+@pytest.fixture
+def _fast_rate_limit(monkeypatch):
+    """Tiny, deterministic 429 schedule with no real sleeping; records waits."""
+    monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "0.01")
+    monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_MAX", "0.02")
+    waits: list[float] = []
+    monkeypatch.setattr(_claude_mod.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def test_rate_limit_retried_then_succeeds(monkeypatch, _fast_rate_limit):
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "3")
+    client = ClaudeLLMClient(model="claude-x", api_key="sk-test")
+    calls = {"n": 0}
+    sentinel = object()
+
+    def fake_invoke(**_kw):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise LLMRateLimitError("429", status_code=429, retry_after_seconds=None)
+        return sentinel
+
+    monkeypatch.setattr(client, "_invoke", fake_invoke)
+    assert client._invoke_with_rate_limit_retry(**_invoke_kwargs()) is sentinel
+    assert calls["n"] == 3  # 2 failures + 1 success
+    assert len(_fast_rate_limit) == 2  # slept once before each retry
+
+
+def test_rate_limit_exhausts_and_reraises(monkeypatch, _fast_rate_limit):
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "2")
+    client = ClaudeLLMClient(model="claude-x", api_key="sk-test")
+    calls = {"n": 0}
+
+    def always_429(**_kw):
+        calls["n"] += 1
+        raise LLMRateLimitError("429", status_code=429, retry_after_seconds=None)
+
+    monkeypatch.setattr(client, "_invoke", always_429)
+    with pytest.raises(LLMRateLimitError):
+        client._invoke_with_rate_limit_retry(**_invoke_kwargs())
+    assert calls["n"] == 3  # initial attempt + 2 retries
+    assert len(_fast_rate_limit) == 2
+
+
+def test_rate_limit_no_retry_when_disabled(monkeypatch, _fast_rate_limit):
+    # LLM_RATE_LIMIT_MAX_RETRIES=0 -> single attempt, no sleep, immediate raise.
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "0")
+    client = ClaudeLLMClient(model="claude-x", api_key="sk-test")
+    calls = {"n": 0}
+
+    def always_429(**_kw):
+        calls["n"] += 1
+        raise LLMRateLimitError("429", status_code=429)
+
+    monkeypatch.setattr(client, "_invoke", always_429)
+    with pytest.raises(LLMRateLimitError):
+        client._invoke_with_rate_limit_retry(**_invoke_kwargs())
+    assert calls["n"] == 1
+    assert _fast_rate_limit == []
+
+
+def test_rate_limit_honors_retry_after(monkeypatch, _fast_rate_limit):
+    # A provider Retry-After raises the wait to at least that value (within cap).
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "2")
+    monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_INITIAL", "0.01")
+    monkeypatch.setenv("LLM_RATE_LIMIT_BACKOFF_MAX", "100")
+    client = ClaudeLLMClient(model="claude-x", api_key="sk-test")
+    calls = {"n": 0}
+    sentinel = object()
+
+    def fake_invoke(**_kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMRateLimitError("429", status_code=429, retry_after_seconds=42.0)
+        return sentinel
+
+    monkeypatch.setattr(client, "_invoke", fake_invoke)
+    assert client._invoke_with_rate_limit_retry(**_invoke_kwargs()) is sentinel
+    assert _fast_rate_limit and _fast_rate_limit[0] >= 42.0
+
+
+def test_non_rate_limit_error_not_retried(monkeypatch, _fast_rate_limit):
+    # Only 429s are retried here; other LLM errors propagate immediately.
+    monkeypatch.setenv("LLM_RATE_LIMIT_MAX_RETRIES", "3")
+    client = ClaudeLLMClient(model="claude-x", api_key="sk-test")
+    calls = {"n": 0}
+
+    def boom(**_kw):
+        calls["n"] += 1
+        raise LLMTemporaryError("5xx", status_code=503)
+
+    monkeypatch.setattr(client, "_invoke", boom)
+    with pytest.raises(LLMTemporaryError):
+        client._invoke_with_rate_limit_retry(**_invoke_kwargs())
+    assert calls["n"] == 1
+    assert _fast_rate_limit == []

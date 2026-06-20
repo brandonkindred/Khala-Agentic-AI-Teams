@@ -43,6 +43,7 @@ from ..attribution import (
 from ..attribution import (
     caller_team as _caller_team,
 )
+from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -401,6 +402,59 @@ class ClaudeLLMClient(LLMClient):
             logger.exception("Unexpected non-Anthropic error during Claude call")
             raise LLMPermanentError(f"Claude call failed: {e}", cause=e) from e
 
+    def _invoke_with_rate_limit_retry(
+        self,
+        *,
+        system: Optional[str],
+        messages: list,
+        tools: Optional[list],
+        think: "bool | str | None",
+        max_tokens: int,
+    ) -> Any:
+        """Call :meth:`_invoke`, retrying 429s on the shared slow rate-limit schedule.
+
+        The Anthropic SDK's built-in ``max_retries`` already absorbs transient
+        429/5xx blips on a fast schedule; a 429 that survives it means the
+        account/budget is rate-limited and will not clear in seconds. So — mirroring
+        the Ollama client — the call is retried on the deliberately slow
+        ``LLM_RATE_LIMIT_*`` schedule (default first wait 300s, doubling to a 3600s
+        cap), honoring a parsed ``Retry-After`` when present. The sleep happens here,
+        above the HTTP stream context in :meth:`_invoke`, so no connection or shared
+        resource is held while waiting.
+
+        Preconditions: same as :meth:`_invoke`.
+        Postconditions: returns the assembled final message on success. Only
+            ``LLMRateLimitError`` is retried; after the configured number of
+            rate-limit retries is exhausted it is re-raised. All other ``LLM*``
+            errors propagate immediately.
+        """
+        max_retries, initial, cap = parse_rate_limit_retry_config()
+        rate_limit_attempt = 0
+        while True:
+            try:
+                return self._invoke(
+                    system=system,
+                    messages=messages,
+                    tools=tools,
+                    think=think,
+                    max_tokens=max_tokens,
+                )
+            except LLMRateLimitError as e:
+                if rate_limit_attempt >= max_retries:
+                    raise
+                wait = rate_limit_retry_delay(
+                    rate_limit_attempt, initial, cap, e.retry_after_seconds
+                )
+                logger.warning(
+                    "Claude 429 (rid=%s, rate-limit attempt %d/%d). Retrying in %.1fs",
+                    current_request_id() or "-",
+                    rate_limit_attempt + 1,
+                    max_retries + 1,
+                    wait,
+                )
+                time.sleep(wait)
+                rate_limit_attempt += 1
+
     def _content_from_message(self, message: Any) -> tuple[str, Any]:
         """Reduce a final message to ``(kind, value)``.
 
@@ -574,7 +628,7 @@ class ClaudeLLMClient(LLMClient):
             system = _json_system(system_prompt, tools)
             max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
             t0 = time.monotonic()
-            message = self._invoke(
+            message = self._invoke_with_rate_limit_retry(
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
                 tools=tools,
@@ -642,7 +696,7 @@ class ClaudeLLMClient(LLMClient):
             self._log_request(caller=caller, think=think, kind="text")
             resolved_max = self._resolve_max_tokens(max_tokens)
             t0 = time.monotonic()
-            message = self._invoke(
+            message = self._invoke_with_rate_limit_retry(
                 system=system_prompt or None,
                 messages=[{"role": "user", "content": prompt}],
                 tools=tools,
@@ -709,7 +763,7 @@ class ClaudeLLMClient(LLMClient):
                 system = _json_system(system, tools)
             resolved_max = self._resolve_max_tokens(max_tokens)
             t0 = time.monotonic()
-            message = self._invoke(
+            message = self._invoke_with_rate_limit_retry(
                 system=system or None,
                 messages=anthropic_messages,
                 tools=tools,
