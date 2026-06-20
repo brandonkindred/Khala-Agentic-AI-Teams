@@ -25,8 +25,35 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-_model_cache: dict[tuple[str, str, str, Optional[str]], LLMClientModel] = {}
+_model_cache: dict[tuple[str, str, str, Optional[str], str], LLMClientModel] = {}
 _cache_lock = threading.Lock()
+
+
+def _active_provider_key_fingerprint() -> str:
+    """Fingerprint of the active provider's API key, for cache-key invalidation.
+
+    Returns a stable short digest of the Claude or Ollama API key (whichever the
+    resolved provider uses), or ``"no-key"`` when none is configured. Including
+    this in the model cache key makes an in-place API-key rotation rebuild the
+    adapter even in containers that pick the new key up only via the runtime-config
+    TTL — those never call :func:`clear_model_cache` (it fires solely in the PUT
+    handler's process), so without the fingerprint a rotated key would keep being
+    served by a model wrapping a client built with the old key. Mirrors the
+    factory's Claude client cache, which already keys on the fingerprint.
+
+    Postconditions: returns a non-empty string; never raises.
+    """
+    from . import config as llm_config
+    from .util import sha256_fingerprint
+
+    provider = llm_config.resolve_provider()
+    if provider in ("claude", "anthropic"):
+        api_key = llm_config.resolve_claude_api_key()
+    elif provider == "ollama":
+        api_key = llm_config.resolve_ollama_api_key()
+    else:
+        api_key = ""
+    return sha256_fingerprint(api_key) if api_key else "no-key"
 
 
 def get_strands_model(
@@ -57,7 +84,7 @@ def get_strands_model(
     fresh client for a different model). When set, the cache is bypassed —
     each call returns a fresh ``LLMClientModel`` over the provided client,
     matching the adapter-side factory's contract. When omitted, results are
-    cached by ``(model_id, base_url, response_format)``.
+    cached by ``(model_id, base_url, response_format, agent_key, api_key_fingerprint)``.
 
     Args:
         agent_key: Optional agent identifier for per-agent model overrides.
@@ -98,7 +125,12 @@ def get_strands_model(
     # same model don't share one ``LLMClientModel`` (which would attribute every
     # later call to whichever agent constructed it first). Distinct keys get
     # distinct adapters, each backed by its own attribution-wrapped client.
-    cache_key = (model_id, base_url, response_format, agent_key)
+    # The active provider's API-key fingerprint is included so an in-place key
+    # rotation rebuilds the adapter even in containers that refresh config only via
+    # the runtime-config TTL (which never call clear_model_cache) — without it, a
+    # rotated key would keep being served by a model wrapping a stale client.
+    key_fingerprint = _active_provider_key_fingerprint()
+    cache_key = (model_id, base_url, response_format, agent_key, key_fingerprint)
 
     with _cache_lock:
         if cache_key not in _model_cache:
