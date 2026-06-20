@@ -31,10 +31,17 @@
   border: 0;
 }
 
-// Global focus indicator — visible amber ring on all interactive elements
+// Global focus indicator — visible amber ring on all interactive elements.
+// The outline is the primary indicator. The box-shadow is a resilient fallback:
+// components that override focus with `outline: none` virtually never also clear
+// box-shadow, so the ring stays visible even when a component drops the outline.
+// Both reference the same --kh-focus-ring token. No `!important` — that would
+// fight legitimate component hover box-shadows; outline (a property components
+// don't touch on focus) remains the canonical ring.
 :focus-visible {
-  outline: 2px solid var(--kh-accent);
+  outline: 2px solid var(--kh-focus-ring);
   outline-offset: 2px;
+  box-shadow: 0 0 0 2px var(--kh-focus-ring);
 }
 
 :focus:not(:focus-visible) {
