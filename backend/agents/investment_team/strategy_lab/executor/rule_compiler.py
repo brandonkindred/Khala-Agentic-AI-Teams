@@ -117,8 +117,10 @@ class ExitIntent:
 
         Lets the dispatcher branch on the *semantics* of the close rather than the
         producing rule kind, so the partial-exit path is not coupled to the literal
-        ``"scaled_take_profit"``. Postconditions: ``True`` iff ``level_index`` is set
-        (only laddered rungs carry one).
+        ``"scaled_take_profit"``.
+
+        Preconditions: none (reads only ``level_index``). Postconditions: ``True``
+        iff ``level_index`` is set (only laddered rungs carry one).
         """
         return self.level_index is not None
 

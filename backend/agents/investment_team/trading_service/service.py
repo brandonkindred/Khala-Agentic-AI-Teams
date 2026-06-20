@@ -249,7 +249,12 @@ class _ScaledLadderCursor:
 
     @property
     def mapping(self) -> Mapping[int, int]:
-        """The ``rule_index -> next un-fired rung`` view handed to the evaluator."""
+        """The ``rule_index -> next un-fired rung`` view handed to the evaluator.
+
+        Preconditions: none. Postconditions: returns the live cursor mapping (a
+        read-only view — callers must not mutate it; advancing goes through
+        :meth:`advance`), so a cursor advanced after this call is reflected.
+        """
         return self._next_rung
 
     def advance(self, rule_index: int, fired_rung: int) -> None:
@@ -506,7 +511,7 @@ class _EngineExitDispatcher:
         competing resting exits, cancels entry continuations (market style) and the
         replaced resting stop-limit (when one rested), and records the emission.
         """
-        # Issue #527 — size the close to cover any same-side scale-in
+        # Size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
         # at emission. Two sources, both BEFORE the engine close on the
         # next bar:
@@ -696,13 +701,19 @@ class _EngineExitDispatcher:
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
+        # Only pass the ladder cursor when the spec actually has a ladder — for the
+        # common no-ladder spec the evaluator ignores it (falls back to its shared
+        # empty cursor), so skip building a per-bar dict it would never read.
+        scaled_cursors = (
+            {sym: tracked.scaled_cursor.mapping} if self._has_scaled_take_profit_rule else None
+        )
         intents = evaluate_exit_rules(
             self.exit_rules,
             {sym: snapshot},
             {sym: bar_snap},
             views=self.views,
             first_only=not exclude_resting_limit_stop,
-            scaled_cursors={sym: tracked.scaled_cursor.mapping},
+            scaled_cursors=scaled_cursors,
         )
         if not exclude_resting_limit_stop:
             return intents[0] if intents else None
@@ -1049,7 +1060,7 @@ class _EngineExitDispatcher:
         # Per-rung counts for scaled take-profits, additive and keyed by
         # ``"{rule_index}:{level_index}"`` so each ladder rung is attributable
         # without perturbing the byte-stable ``rule_kind`` / close ``reason``.
-        if intent.level_index is not None:
+        if intent.is_partial:
             level_key = scaled_level_key(intent.rule_index, intent.level_index)
             diag.scaled_take_profit_level_firings[level_key] = (
                 diag.scaled_take_profit_level_firings.get(level_key, 0) + 1
