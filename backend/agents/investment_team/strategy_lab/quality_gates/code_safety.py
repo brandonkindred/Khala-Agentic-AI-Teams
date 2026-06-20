@@ -6,7 +6,7 @@ import ast
 from dataclasses import dataclass
 from typing import Any, ClassVar, Iterable, List
 
-from ..spec_dsl import SignalExitRule, StopLossRule, TakeProfitRule
+from ..spec_dsl import ScaledTakeProfitRule, SignalExitRule, StopLossRule, TakeProfitRule
 from .code_safety_ast import (
     _BANNED_CALL_PATTERNS,
     _LOOKAHEAD_PATTERNS,
@@ -92,9 +92,9 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
 
     Pre:  ``spec`` is a ``StrategySpec`` or ``None``.
     Post: True when ``spec.exit_rules`` contains at least one
-          ``StopLossRule``, ``TakeProfitRule``, or ``SignalExitRule``
-          (all enforced engine-side via ``evaluate_exit_rules`` /
-          ``_EngineExitDispatcher``).
+          ``StopLossRule``, ``TakeProfitRule``, ``ScaledTakeProfitRule``,
+          or ``SignalExitRule`` (all enforced engine-side via
+          ``evaluate_exit_rules`` / ``_EngineExitDispatcher``).
     Invariant: stop-loss/take-profit basis-vs-side coverage is NOT
           checked here — callers must additionally invoke
           :func:`_engine_exits_cover_sides` against the relevant
@@ -105,7 +105,10 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     exit_rules = getattr(spec, "exit_rules", None)
     if not exit_rules:
         return False
-    return any(isinstance(r, (StopLossRule, TakeProfitRule, SignalExitRule)) for r in exit_rules)
+    return any(
+        isinstance(r, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule))
+        for r in exit_rules
+    )
 
 
 def _spec_is_fully_engine_managed(spec: Any) -> bool:
@@ -445,17 +448,19 @@ def _engine_exits_cover_sides(spec: Any, sides: set[str]) -> bool:
           True iff for every side ∈ ``sides`` there exists a rule
           in ``spec.exit_rules`` that triggers on that side per the
           basis-vs-side compatibility map: ``TakeProfitRule``,
-          ``SignalExitRule``, and ``StopLossRule(basis="entry_price")``
-          cover both sides; ``StopLossRule(basis="trailing_high")``
-          covers only long; ``StopLossRule(basis="trailing_low")``
-          covers only short.
+          ``ScaledTakeProfitRule``, ``SignalExitRule``, and
+          ``StopLossRule(basis="entry_price")`` cover both sides;
+          ``StopLossRule(basis="trailing_high")`` covers only long;
+          ``StopLossRule(basis="trailing_low")`` covers only short.
     """
     if spec is None or not sides:
         return False
     exit_rules = getattr(spec, "exit_rules", None) or []
 
     def _rule_covers_side(rule: Any, side: str) -> bool:
-        if isinstance(rule, TakeProfitRule):
+        # A take-profit — flat or laddered — fires for either side (long on
+        # bar.high clearing the target, short on bar.low), so it covers both.
+        if isinstance(rule, (TakeProfitRule, ScaledTakeProfitRule)):
             return True
         if isinstance(rule, StopLossRule):
             basis = rule.basis

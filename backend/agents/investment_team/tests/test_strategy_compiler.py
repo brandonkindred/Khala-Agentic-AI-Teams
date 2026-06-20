@@ -31,6 +31,7 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedNotionalSizing,
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -152,6 +153,39 @@ def test_take_profit_present_no_inline_or_bracket() -> None:
     assert "LimitAttachment" not in code
     assert "attached_take_profit" not in code
     assert "position.entry_price" in code
+
+
+def test_scaled_take_profit_present_no_inline_or_bracket() -> None:
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.3},
+                ]
+            )
+        ],
+    )
+    code = compile_strategy(spec)
+    assert "ctx.submit_order" not in code
+    assert "position.entry_price" in code
+
+
+def test_safety_gate_accepts_scaled_take_profit_only_spec() -> None:
+    """A laddered take-profit is an engine-handled exit that covers both sides,
+    so an entries-only compiled strategy whose ONLY exit is a
+    ``ScaledTakeProfitRule`` must NOT trip the "no engine-handled exit" /
+    "uncovered side" safety criticals (regression: the gate's rule-type tuples
+    once omitted the new kind, producing a false-positive veto).
+    """
+    spec = _spec(
+        entry_rules=[_rsi_lt_30_entry()],
+        exit_rules=[ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 1.0}])],
+    )
+    code = compile_strategy(spec)
+    results = CodeSafetyChecker().check(code, spec)
+    assert not _critical_details(results)
 
 
 def test_trailing_stop_loss_compiles_without_inline_emission() -> None:
