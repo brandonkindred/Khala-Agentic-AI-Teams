@@ -59,22 +59,22 @@ describe('BloggingDashboardComponent', () => {
     expect(apiSpy.getJobs).toHaveBeenCalledWith(false);
   });
 
-  it('memoizes getStoryAgentMessages per status and rebuilds on a new status', () => {
-    const makeStatus = () =>
-      ({
-        current_gap_round: 0,
-        story_chat_history: [
-          { gap_round: 0, role: 'assistant', content: 'hi' },
-          { gap_round: 1, role: 'assistant', content: 'later round' },
-        ],
-      }) as unknown as NonNullable<typeof component.selectedJobStatus>;
+  it('getStoryAgentMessages reflects in-place status updates (no stale cache)', () => {
+    // The SSE 'update' handler mutates selectedJobStatus in place (Object.assign),
+    // so this must recompute — not cache on the object reference — or newly arrived
+    // agent messages would never render.
+    const status = {
+      current_gap_round: 0,
+      story_chat_history: [{ gap_round: 0, role: 'assistant', content: 'first' }],
+    } as unknown as NonNullable<typeof component.selectedJobStatus>;
+    component.selectedJobStatus = status;
+    expect(component.getStoryAgentMessages().length).toBe(1);
 
-    component.selectedJobStatus = makeStatus();
-    const msgs1 = component.getStoryAgentMessages();
-    expect(msgs1.length).toBe(1); // only the current round (0) + undefined-round messages
-    expect(component.getStoryAgentMessages()).toBe(msgs1); // cached on second call
-
-    component.selectedJobStatus = makeStatus(); // a poll delivers a fresh status object
-    expect(component.getStoryAgentMessages()).not.toBe(msgs1); // cache invalidated, rebuilt
+    // Simulate Object.assign-style in-place mutation from an SSE update.
+    status.story_chat_history = [
+      { gap_round: 0, role: 'assistant', content: 'first' },
+      { gap_round: 0, role: 'assistant', content: 'second' },
+    ] as typeof status.story_chat_history;
+    expect(component.getStoryAgentMessages().length).toBe(2); // reflects the update
   });
 });

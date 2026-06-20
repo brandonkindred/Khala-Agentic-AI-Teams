@@ -199,19 +199,27 @@ class ExecutionTracker:
                 "event_count": self._events_evicted + len(self._events),
             }
 
-    def events_since(self, index: int) -> List[dict]:
-        """Return events emitted at total-position ``index`` and later.
+    def events_since(self, index: int) -> "tuple[List[dict], int]":
+        """Return events emitted at total-position ``index`` and later, plus the next index.
 
-        Preconditions: ``index >= 0`` (a monotonic count of events the caller has
-            already consumed, as produced by ``snapshot()['event_count']`` / prior
-            calls).
-        Postconditions: returns the still-buffered events from total-position
-            ``index`` onward. If ``index`` predates the eviction window, the caller
-            fell behind and gets everything still buffered (no error). Never raises.
+        Preconditions: ``index >= 0`` — the ``next_index`` returned by a prior call
+            (start from ``0``). It is a *total-emitted* position, NOT a count of
+            events the caller buffered, so the caller must thread back the returned
+            ``next_index`` rather than incrementing by ``len(events)`` (the two
+            diverge once the buffer wraps).
+        Postconditions: returns ``(events, next_index)`` where ``events`` are the
+            still-buffered events from total-position ``index`` onward and
+            ``next_index`` is the total number of events emitted so far. If ``index``
+            predates the eviction window the caller fell behind and receives whatever
+            is still buffered; ``next_index`` then jumps past the lost range — so a
+            caller that threads it back never re-emits or duplicates an event. Never
+            raises.
         """
         with self._lock:
             start = max(0, index - self._events_evicted)
-            return list(self._events)[start:]
+            events = list(self._events)[start:]
+            next_index = self._events_evicted + len(self._events)
+            return events, next_index
 
     def reset(self) -> None:
         """Clear all tracked tasks and events.

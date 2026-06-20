@@ -356,7 +356,12 @@ def _read_repo_context(repo_path: Path) -> str:
             dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
             for name in filenames:
                 f = Path(dirpath) / name
-                if f.suffix in extensions:
+                # is_file() (not just suffix) guards against special files: a FIFO /
+                # socket / device named e.g. ``pipe.py`` would otherwise pass the
+                # suffix check and block read_text() forever (a hang the try/except
+                # below cannot catch). is_file() is False for those and for broken
+                # symlinks, matching the previous rglob path's filter.
+                if f.suffix in extensions and f.is_file():
                     eligible.append(f)
     except Exception:
         pass

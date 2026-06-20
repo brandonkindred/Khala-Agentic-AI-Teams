@@ -215,7 +215,12 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
 
   ngOnInit(): void {
     this.loadFilters();
-    this.startPolling();
+    // Don't start polling if the tab is already hidden on load; the
+    // visibilitychange handler starts it (with an immediate refresh) on return.
+    this.isTabHidden = typeof document !== 'undefined' && document.hidden;
+    if (!this.isTabHidden) {
+      this.startPolling();
+    }
     if (typeof document !== 'undefined') {
       document.addEventListener('visibilitychange', this.onVisibilityChange);
     }

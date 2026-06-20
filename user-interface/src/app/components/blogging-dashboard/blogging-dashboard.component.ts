@@ -784,23 +784,16 @@ export class BloggingDashboardComponent implements OnInit, OnDestroy {
     return status.story_gaps[idx] ?? null;
   }
 
-  // Identity-memoized on selectedJobStatus (replaced wholesale on every update,
-  // never mutated in place): the template calls this twice per change-detection
-  // cycle, so cache the filtered list and rebuild only when the status changes.
-  private _storyMsgsCacheStatus: BlogJobStatusResponse | null = null;
-  private _storyMsgsCache: NonNullable<BlogJobStatusResponse['story_chat_history']> = [];
-
+  // NB: not identity-memoized on selectedJobStatus — the SSE 'update' handler
+  // mutates that object in place (Object.assign), so its reference is stable while
+  // story_chat_history / current_gap_round change. Recompute each call; the chat
+  // list is small, and a stale cache would hide newly-arrived agent messages.
   getStoryAgentMessages(): NonNullable<BlogJobStatusResponse['story_chat_history']> {
-    if (this.selectedJobStatus === this._storyMsgsCacheStatus) {
-      return this._storyMsgsCache;
-    }
     const status = this.selectedJobStatus;
     const round = status?.current_gap_round ?? 0;
-    this._storyMsgsCacheStatus = status;
-    this._storyMsgsCache = (status?.story_chat_history ?? []).filter(
+    return (status?.story_chat_history ?? []).filter(
       (m) => m.gap_round === round || m.gap_round === undefined
     );
-    return this._storyMsgsCache;
   }
 
   // ---------------------------------------------------------------------------

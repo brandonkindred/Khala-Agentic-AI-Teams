@@ -836,6 +836,23 @@ def test_read_repo_context_prunes_excluded_dirs(tmp_path):
     assert "GIT_INTERNAL" not in ctx
 
 
+def test_read_repo_context_skips_special_files_without_hanging(tmp_path):
+    """A FIFO/special file with a code suffix must be skipped via is_file(), not read
+    — read_text() on a FIFO blocks forever (a hang the try/except cannot catch)."""
+    import os
+
+    if not hasattr(os, "mkfifo"):
+        pytest.skip("mkfifo not available on this platform")
+    (tmp_path / "real.py").write_text("REAL = 1")
+    os.mkfifo(str(tmp_path / "pipe.py"))  # code-suffixed special file
+
+    # If the is_file() guard regressed, this call would block forever on the FIFO.
+    ctx = orch_mod._read_repo_context(tmp_path)
+
+    assert "REAL = 1" in ctx
+    assert "pipe.py" not in ctx
+
+
 def test_repo_context_refreshed_between_rounds(tmp_path, monkeypatch):
     """The swarm re-reads repo context each round so files written in earlier rounds become visible
     to later implementations (instead of being recreated)."""
