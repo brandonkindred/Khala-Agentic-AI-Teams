@@ -670,6 +670,14 @@ def run_coding_team_orchestrator(
         return bool(data and data.get(CANCEL_KEY))
 
     # Create Task Graph with persist
+    # Tracks the last persisted (graph revision, phase, status_text) so a no-op
+    # call skips the snapshot + job-service write entirely. The swarm loop persists
+    # 3x per round and every graph mutation persists too, so on an idle round (or
+    # back-to-back triggers for the same state) most calls are redundant; durability
+    # is preserved because any real mutation bumps graph.revision and any phase /
+    # status change is part of the key, so every actual state change still writes.
+    _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
+
     def _persist_graph() -> None:
         # Persist the snapshot through the SAME store used for the resume read and cancel checks
         # (the injected update_job_fn). On the software-engineering path that is the SE job record;
@@ -677,6 +685,12 @@ def run_coding_team_orchestrator(
         # the central job service's UPDATE-WHERE matches no row and the write — hence resume — is
         # silently lost. The standalone coding_team path's default callback writes the same keys to
         # the coding_team record exactly as before.
+        if (
+            graph.revision == _persist_state["revision"]
+            and phase == _persist_state["phase"]
+            and status_text == _persist_state["status_text"]
+        ):
+            return
         snap = graph.snapshot()
         _update(
             task_graph_snapshot=snap["tasks"],
@@ -685,6 +699,9 @@ def run_coding_team_orchestrator(
             status_text=status_text,
             progress=_coding_progress(snap["tasks"], progress_base, progress_span),
         )
+        _persist_state["revision"] = graph.revision
+        _persist_state["phase"] = phase
+        _persist_state["status_text"] = status_text
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
     phase = "task_graph"

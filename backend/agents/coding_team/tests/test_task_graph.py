@@ -139,6 +139,28 @@ def test_persist_callback_called() -> None:
     assert len(calls) == 2
 
 
+def test_revision_bumps_on_mutation() -> None:
+    """revision advances on each mutation so a persister can skip no-op writes."""
+    tg = TaskGraphService(job_id="j1")
+    assert tg.revision == 0
+    tg.add_task("t1", title="T1")
+    after_add = tg.revision
+    assert after_add > 0
+    tg.assign_task_to_agent("t1", "agent-a")
+    assert tg.revision > after_add
+
+
+def test_revision_bumps_on_restore() -> None:
+    """A wholesale restore bumps revision so a following persist is not skipped."""
+    src = TaskGraphService(job_id="j1")
+    src.add_task("t1", title="T1")
+    snap = src.snapshot()
+    dst = TaskGraphService(job_id="j1")
+    before = dst.revision
+    dst.restore(snap)
+    assert dst.revision > before
+
+
 def test_create_task_graph() -> None:
     """create_task_graph returns a TaskGraphService."""
     tg = create_task_graph("job-1")
