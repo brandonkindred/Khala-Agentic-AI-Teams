@@ -46,6 +46,7 @@ from llm_service import (  # noqa: E402
     LLMTemporaryError,
     get_client,
     get_strands_model,
+    llm_attribution,
 )
 from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
     write_architecture_plan,
@@ -1546,20 +1547,28 @@ def _backend_code_v2_worker(
                 if isinstance(architecture, SystemArchitecture)
                 else (SystemArchitecture(overview=str(architecture)) if architecture else None)
             )
-            result = team_lead.run_workflow(
-                repo_path=repo_path,
-                task=task,
-                architecture=arch,
-                qa_agent=agents.get("qa"),
-                security_agent=agents.get("security"),
-                code_review_agent=agents.get("code_review"),
-                build_verifier=_run_build_verification,
-                doc_agent=agents.get("documentation"),
-                linting_tool_agent=agents.get("linting_tool_agent"),
-                tech_lead=agents.get("tech_lead"),
-                build_fix_specialist=agents.get("build_fix_specialist"),
-                job_updater=_job_updater,
-            )
+            # Attribute every LLM call this task makes to the job/task/phase so
+            # telemetry spans and per-job cost accounting can slice by them.
+            with llm_attribution(
+                team="software_engineering",
+                job_id=job_id,
+                task_id=task_id,
+                phase="execution",
+            ):
+                result = team_lead.run_workflow(
+                    repo_path=repo_path,
+                    task=task,
+                    architecture=arch,
+                    qa_agent=agents.get("qa"),
+                    security_agent=agents.get("security"),
+                    code_review_agent=agents.get("code_review"),
+                    build_verifier=_run_build_verification,
+                    doc_agent=agents.get("documentation"),
+                    linting_tool_agent=agents.get("linting_tool_agent"),
+                    tech_lead=agents.get("tech_lead"),
+                    build_fix_specialist=agents.get("build_fix_specialist"),
+                    job_updater=_job_updater,
+                )
             elapsed = time.monotonic() - task_start
             if result.success:
                 completed.add(task_id)
@@ -1644,18 +1653,24 @@ def _frontend_code_v2_worker(
                 if isinstance(architecture, SystemArchitecture)
                 else (SystemArchitecture(overview=str(architecture)) if architecture else None)
             )
-            result = team_lead.run_workflow(
-                repo_path=repo_path,
-                task=task,
-                architecture=arch,
-                qa_agent=agents.get("qa"),
-                security_agent=agents.get("security"),
-                code_review_agent=agents.get("code_review"),
-                build_verifier=_run_build_verification,
-                doc_agent=agents.get("documentation"),
-                linting_tool_agent=agents.get("linting_tool_agent"),
-                job_updater=_job_updater,
-            )
+            with llm_attribution(
+                team="software_engineering",
+                job_id=job_id,
+                task_id=task_id,
+                phase="execution",
+            ):
+                result = team_lead.run_workflow(
+                    repo_path=repo_path,
+                    task=task,
+                    architecture=arch,
+                    qa_agent=agents.get("qa"),
+                    security_agent=agents.get("security"),
+                    code_review_agent=agents.get("code_review"),
+                    build_verifier=_run_build_verification,
+                    doc_agent=agents.get("documentation"),
+                    linting_tool_agent=agents.get("linting_tool_agent"),
+                    job_updater=_job_updater,
+                )
             elapsed = time.monotonic() - task_start
             if result.success:
                 completed.add(task_id)

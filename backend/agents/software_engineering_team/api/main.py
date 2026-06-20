@@ -141,6 +141,21 @@ async def _lifespan(
 ):  # pragma: no cover  # integration-only: ASGI startup/shutdown hooks (Temporal + job store)
     """Start Temporal worker on startup if TEMPORAL_ADDRESS is set; mark jobs failed on shutdown."""
     try:
+        from software_engineering_team.shared.cost_tracker import register_cost_observer
+        from software_engineering_team.shared.trace_store import register_trace_observer
+
+        register_cost_observer()
+        register_trace_observer()
+    except Exception as e:
+        logger.warning("Could not register SE telemetry observers: %s", e)
+    try:
+        from shared_postgres import register_team_schemas
+        from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
+
+        register_team_schemas(SE_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("software_engineering postgres schema registration failed")
+    try:
         from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
 
         start_se_temporal_worker_thread()
@@ -155,6 +170,12 @@ async def _lifespan(
         logger.info("Marked all active SE jobs as failed (server shutdown)")
     except Exception as e:
         logger.warning("Could not mark SE jobs as failed on shutdown: %s", e)
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("software_engineering shared_postgres close_pool failed", exc_info=True)
 
 
 app = FastAPI(
@@ -2828,3 +2849,25 @@ def get_logs(
 def health() -> dict:
     """Health check endpoint."""
     return {"status": "ok"}
+
+
+@app.get("/metrics/dora")
+def metrics_dora(window_days: float = 30.0) -> dict:
+    """DORA metrics + cost over the last ``window_days`` (clamped to [1, 365]).
+
+    Reachable through the unified proxy at ``/api/software-engineering/metrics/dora``
+    (and the ``/api/se/metrics`` alias). Returns all-zero metrics when Postgres is
+    disabled rather than erroring, so the UI can render a "no data" state.
+    """
+    window = max(1.0, min(365.0, window_days))
+    from software_engineering_team.metrics.dora import compute_dora
+
+    try:
+        return compute_dora(window).to_dict()
+    except Exception:
+        logger.exception("failed to compute DORA metrics")
+        from software_engineering_team.metrics.dora import DoraMetrics
+
+        return DoraMetrics(
+            window_days=window, computed_at=datetime.now(timezone.utc).isoformat()
+        ).to_dict()
