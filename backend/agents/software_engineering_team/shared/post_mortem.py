@@ -309,7 +309,7 @@ def write_post_mortem(
         Path to the post-mortem file.
     """
     writer = PostMortemWriter(project_root=project_root)
-    return writer.write_failure(
+    path = writer.write_failure(
         agent_name=agent_name,
         task_description=task_description,
         original_prompt=original_prompt,
@@ -320,3 +320,12 @@ def write_post_mortem(
         max_continuation_cycles=max_continuation_cycles,
         max_decomposition_depth=max_decomposition_depth,
     )
+    # Close the loop: every post-mortem also becomes a learning the Tech Lead can
+    # see next sprint. Best-effort and a no-op without Postgres.
+    try:
+        from software_engineering_team.shared.post_mortem_ingest import learning_from_failure
+
+        learning_from_failure(agent_name, task_description, error)
+    except Exception:
+        logger.debug("post-mortem learning ingestion failed", exc_info=True)
+    return path

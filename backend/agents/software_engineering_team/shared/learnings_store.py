@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -50,6 +51,22 @@ def fingerprint(pattern: str, trigger: str, category: str) -> str:
     """
     raw = f"{_norm(pattern)}|{_norm(trigger)}|{_norm(category)}"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32]
+
+
+def _or_tsquery_terms(query_text: str, *, limit: int = 40) -> str:
+    """Build an OR ``to_tsquery`` string from the words in ``query_text``.
+
+    Relevance retrieval wants OR semantics (any shared term contributes), not
+    the AND semantics of ``plainto_tsquery`` — a long spec rarely shares *every*
+    word with a short learning. Words are lowercased, de-duplicated, filtered to
+    length >= 3, sanitized to alphanumerics (safe for ``to_tsquery``), and joined
+    with ``|``.
+
+    Postconditions: returns ``""`` when no usable term remains.
+    """
+    words = re.findall(r"[a-z0-9]+", query_text.lower())
+    terms = [w for w in dict.fromkeys(words) if len(w) >= 3][:limit]
+    return " | ".join(terms)
 
 
 def _retention_days() -> float:
@@ -131,20 +148,22 @@ def retrieve_learnings(
         raise ValueError("top_n must be >= 1")
     if not query_text or not query_text.strip():
         return []
+    # Cap the query text so a whole spec/architecture doc doesn't blow the tsquery.
+    tsquery = _or_tsquery_terms(query_text[:8000])
+    if not tsquery:
+        return []
     try:
         from shared_postgres import dict_row, get_conn, is_postgres_enabled
     except Exception:
         return []
     if not is_postgres_enabled():
         return []
-    # Cap the query text so a whole spec/architecture doc doesn't blow the tsquery.
-    q = query_text[:4000]
-    params: list = [q]
-    where = "search_tsv @@ plainto_tsquery('english', %s)"
+    params: list = [tsquery]
+    where = "search_tsv @@ to_tsquery('english', %s)"
     if category:
         where += " AND category = %s"
         params.append(category)
-    params.append(q)  # for the ts_rank in ORDER BY
+    params.append(tsquery)  # for the ts_rank in ORDER BY
     params.append(top_n)
     try:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
@@ -152,7 +171,7 @@ def retrieve_learnings(
                 "SELECT pattern, trigger, counter_measure, source, category, occurrences "
                 "FROM se_learnings "
                 f"WHERE {where} "
-                "ORDER BY ts_rank(search_tsv, plainto_tsquery('english', %s)) DESC, "
+                "ORDER BY ts_rank(search_tsv, to_tsquery('english', %s)) DESC, "
                 "         occurrences DESC, last_seen DESC "
                 "LIMIT %s",
                 tuple(params),

@@ -48,6 +48,11 @@ from llm_service import (  # noqa: E402
     get_strands_model,
     llm_attribution,
 )
+from software_engineering_team.shared import (  # noqa: E402
+    cost_tracker,
+    gate_outcomes,
+    se_events,
+)
 from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
     write_architecture_plan,
     write_tech_lead_plan,
@@ -1574,6 +1579,9 @@ def _backend_code_v2_worker(
                 completed.add(task_id)
                 completed_code_task_ids.append(task_id)
                 update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                se_events.record_event(
+                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
+                )
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
@@ -1676,6 +1684,9 @@ def _frontend_code_v2_worker(
                 completed.add(task_id)
                 completed_code_task_ids.append(task_id)
                 update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                se_events.record_event(
+                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
+                )
                 _log_task_completion_banner(
                     task_id=task_id,
                     task_title=getattr(task, "title", "") or task_id,
@@ -1966,6 +1977,13 @@ def _run_backend_frontend_workers(
                     error=str(e),
                     agent_crash_details=agent_crash_details,
                 )
+                se_events.record_event(
+                    se_events.CRASH_DETECTED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"exception_type": type(e).__name__},
+                )
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -1993,6 +2011,12 @@ def _run_backend_frontend_workers(
                                 agent_source_path, result.suggested_fixes
                             ):
                                 repair_applied = True
+                                se_events.record_event(
+                                    se_events.CRASH_RESOLVED,
+                                    job_id=job_id,
+                                    task_id=task_id,
+                                    phase="execution",
+                                )
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     backend_queue.append(task_id)
@@ -2323,6 +2347,13 @@ def _run_backend_frontend_workers(
                     error=str(e),
                     agent_crash_details=agent_crash_details,
                 )
+                se_events.record_event(
+                    se_events.CRASH_DETECTED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"exception_type": type(e).__name__},
+                )
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2350,6 +2381,12 @@ def _run_backend_frontend_workers(
                                 agent_source_path, result.suggested_fixes
                             ):
                                 repair_applied = True
+                                se_events.record_event(
+                                    se_events.CRASH_RESOLVED,
+                                    job_id=job_id,
+                                    task_id=task_id,
+                                    phase="execution",
+                                )
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     frontend_queue.append(task_id)
@@ -3298,6 +3335,10 @@ def run_orchestrator(
                     assigned_agent=getattr(t, "assignee", "unknown"),
                     dependencies=getattr(t, "dependencies", []) or [],
                 )
+                # DORA lead-time clock starts when a task enters execution.
+                se_events.record_event(
+                    se_events.TASK_CREATED, job_id=job_id, task_id=t.id, phase="design"
+                )
 
             # 6. Execute tasks: partition into prefix (devops/git_setup), backend, frontend
             completed = set()
@@ -3677,6 +3718,9 @@ def run_orchestrator(
                                 "Security (backend) found %s vulnerabilities",
                                 len(sec_result.vulnerabilities),
                             )
+                        gate_outcomes.record_gate_outcome(
+                            "security", sec_result, job_id=job_id, phase="integration"
+                        )
                 if has_frontend:
                     logger.info(
                         "Tech Lead requested security review - running Security agent on frontend repo"
@@ -3696,6 +3740,9 @@ def run_orchestrator(
                                 "Security (frontend) found %s vulnerabilities",
                                 len(sec_result.vulnerabilities),
                             )
+                        gate_outcomes.record_gate_outcome(
+                            "security", sec_result, job_id=job_id, phase="integration"
+                        )
 
             # Final documentation pass: always run comprehensive documentation review for each repo
             doc_agent = agents.get("documentation")
@@ -3790,6 +3837,12 @@ def run_orchestrator(
                     phase="completed",
                     status_text="All tasks completed successfully",
                 )
+                # A completed job is a deployment to the development/main line —
+                # the DORA deployment-frequency signal.
+                se_events.record_event(
+                    se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration"
+                )
+                cost_tracker.flush(job_id)
 
     except (
         CancellationError

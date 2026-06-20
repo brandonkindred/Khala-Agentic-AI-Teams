@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
@@ -37,6 +38,19 @@ from .prompts import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _learnings_top_n() -> int:
+    """Number of past-sprint learnings to inject into the Design prompt.
+
+    Postconditions: returns an int in ``[0, 50]``; garbage env → default 5,
+        values out of range are clamped (0 disables injection).
+    """
+    raw = os.environ.get("SE_LEARNINGS_TOPN", "5")
+    try:
+        return max(0, min(50, int(raw)))
+    except (TypeError, ValueError):
+        return 5
 
 
 def _agent_json(agent: Agent, prompt: str) -> dict:
@@ -475,7 +489,58 @@ class TechLeadAgent:
                 ]
             )
 
+        context_parts.extend(self._relevant_learnings_block(input_data))
+
         return "\n".join(context_parts)
+
+    def _relevant_learnings_block(self, input_data: "TechLeadInput") -> List[str]:
+        """Return a prompt block of the top-N learnings relevant to this initiative.
+
+        Retrieves from the ``se_learnings`` store by full-text relevance to the
+        spec + architecture text already in scope at Design. Strictly additive:
+        returns an empty list when Postgres is disabled or nothing matches, so
+        the prompt is byte-identical to before when there are no learnings.
+
+        Postconditions: returns ``[]`` or a non-empty list whose first element is
+            the section header; never raises (retrieval failures degrade to ``[]``).
+        """
+        top_n = _learnings_top_n()
+        if top_n < 1:
+            return []
+        try:
+            from software_engineering_team.shared.learnings_store import retrieve_learnings
+
+            reqs = input_data.requirements
+            arch_overview = (
+                input_data.architecture.overview if input_data.architecture else ""
+            )
+            query = "\n".join(
+                part
+                for part in (
+                    reqs.title,
+                    reqs.description,
+                    input_data.spec_content or "",
+                    arch_overview,
+                )
+                if part
+            )
+            learnings = retrieve_learnings(query, top_n=top_n)
+        except Exception:
+            logger.debug("learning retrieval failed; continuing without it", exc_info=True)
+            return []
+
+        if not learnings:
+            return []
+
+        lines = [
+            "",
+            "**RELEVANT LEARNINGS FROM PAST SPRINTS (apply these to avoid repeating prior failures):**",
+        ]
+        for item in learnings:
+            cm = f" | Counter-measure: {item.counter_measure}" if item.counter_measure else ""
+            trig = f" | Trigger: {item.trigger}" if item.trigger else ""
+            lines.append(f"- Pattern: {item.pattern}{trig}{cm}")
+        return lines
 
     def refine_task(
         self,

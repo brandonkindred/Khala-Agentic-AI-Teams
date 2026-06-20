@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -946,6 +946,26 @@ async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any
         if running_only:
             url += "?statuses=pending&statuses=running"
         resp = await client.get(url)
+        resp.raise_for_status()
+        return resp.json()
+
+
+@app.get("/api/se/metrics", tags=["software", "observability"])
+async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
+    """Alias for the SE team's DORA metrics, proxied to ``/metrics/dora``.
+
+    The SDLC review specified ``GET /api/se/metrics`` while the SE team itself
+    mounts under ``/api/software-engineering``; this thin alias satisfies that
+    contract by forwarding to the SE service's ``/metrics/dora`` route.
+    """
+    env_var = TEAM_SERVICE_URL_ENVS.get("software_engineering")
+    base = (os.environ.get(env_var, "").strip() if env_var else "") or ""
+    if not base:
+        raise HTTPException(status_code=503, detail="software engineering service URL not configured")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(
+            f"{base.rstrip('/')}/metrics/dora", params={"window_days": window_days}
+        )
         resp.raise_for_status()
         return resp.json()
 
