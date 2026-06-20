@@ -70,9 +70,6 @@ const RING_SHADOW = /box-shadow:[^;]*var\(\s*--kh-(?:focus-ring|accent)\s*\)/i;
 const BURNDOWN = new Set<string>([
   'src/app/components/accessibility-design-system/accessibility-design-system.component.scss',
   'src/app/components/accessibility-report/accessibility-report.component.scss',
-  'src/app/components/agent-console/agent-catalog/agent-catalog.component.scss',
-  'src/app/components/agent-console/agent-run-history/agent-run-history.component.scss',
-  'src/app/components/agent-console/backlog-tab/backlog-tab.component.scss',
   'src/app/components/agent-test-chat/agent-test-chat.component.scss',
   'src/app/components/agentic-team-dashboard/agentic-team-dashboard.component.scss',
   'src/app/components/branding-chat/branding-chat.component.scss',

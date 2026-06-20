@@ -61,7 +61,6 @@
     &:hover,
     &:focus-visible {
       background: var(--mat-sys-surface-container, #f0f0f0);
-      outline: none;
     }
 
     &.is-active {

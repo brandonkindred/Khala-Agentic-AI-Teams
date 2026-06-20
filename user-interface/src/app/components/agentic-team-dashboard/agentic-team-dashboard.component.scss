@@ -102,7 +102,7 @@
   }
 
   &:focus-visible {
-    outline: 2px solid #58a6ff;
+    outline: 2px solid var(--kh-focus-ring);
     outline-offset: 2px;
   }
 
