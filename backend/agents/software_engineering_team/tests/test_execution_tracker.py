@@ -184,3 +184,74 @@ def test_tracker_events_since_index():
     assert len(events) == 2
     events_after_one = tracker.events_since(1)
     assert len(events_after_one) == 1
+
+
+def test_events_are_bounded_by_cap(monkeypatch):
+    # The event buffer must not grow without bound; once full it drops the oldest.
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_EVENT_CAP", "100")
+    tracker = ExecutionTracker()
+    tracker.upsert_task("t1", "x", "a")
+    for _ in range(500):
+        tracker.observe_loop("t1", 1)
+    # 1 upsert + 500 loop events emitted, but buffer is capped at 100.
+    assert len(tracker._events) == 100
+    # event_count reflects the TOTAL emitted (so the SSE index stays meaningful).
+    assert tracker.snapshot()["event_count"] == 501
+
+
+def test_events_since_offsets_for_evicted(monkeypatch):
+    # After eviction, events_since(index) must still return the right tail using the
+    # total-emitted index the SSE consumer carries (not the buffer position).
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_EVENT_CAP", "100")
+    tracker = ExecutionTracker()
+    tracker.upsert_task("t1", "x", "a")
+    for _ in range(500):
+        tracker.observe_loop("t1", 1)
+    total = tracker.snapshot()["event_count"]  # 501
+    # Asking from the very latest index returns nothing new.
+    assert tracker.events_since(total) == []
+    # Asking from total-2 returns exactly the last 2 buffered events.
+    assert len(tracker.events_since(total - 2)) == 2
+    # A consumer that fell behind the eviction window still gets the buffer (no crash).
+    assert len(tracker.events_since(0)) == 100
+
+
+def test_tasks_are_bounded_by_cap(monkeypatch):
+    # Tasks left over from earlier jobs must not accumulate forever.
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_TASK_CAP", "100")
+    tracker = ExecutionTracker()
+    for i in range(250):
+        tracker.upsert_task(f"t{i}", "x", "a")
+    assert len(tracker._tasks) == 100
+    # FIFO eviction keeps the most recently inserted tasks.
+    task_ids = {t["task_id"] for t in tracker.snapshot()["tasks"]}
+    assert "t249" in task_ids
+    assert "t0" not in task_ids
+
+
+def test_existing_task_update_does_not_count_against_cap(monkeypatch):
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_TASK_CAP", "100")
+    tracker = ExecutionTracker()
+    tracker.upsert_task("keep", "x", "a")
+    for _ in range(500):
+        tracker.upsert_task("keep", "x", "a")  # updates, never grows the dict
+    assert len(tracker._tasks) == 1
+
+
+def test_reset_clears_state(monkeypatch):
+    tracker = ExecutionTracker()
+    tracker.upsert_task("t1", "x", "a")
+    tracker.observe_loop("t1", 1)
+    tracker.reset()
+    snap = tracker.snapshot()
+    assert snap["tasks"] == []
+    assert snap["event_count"] == 0
+    assert tracker.events_since(0) == []
+
+
+def test_event_cap_env_defensive(monkeypatch):
+    # Garbage -> default; below the floor -> clamped up.
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_EVENT_CAP", "not-a-number")
+    assert ExecutionTracker()._event_cap == 5000
+    monkeypatch.setenv("SE_EXECUTION_TRACKER_EVENT_CAP", "5")
+    assert ExecutionTracker()._event_cap == 100  # clamped to _MIN_CAP

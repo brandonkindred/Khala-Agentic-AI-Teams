@@ -1,11 +1,57 @@
-"""In-memory execution tracker with derived progress, loop, and timing metrics."""
+"""In-memory execution tracker with derived progress, loop, and timing metrics.
+
+The module-level :data:`execution_tracker` is a process-wide singleton shared by
+every SE job. To keep it from growing without bound over a long-lived server, both
+of its collections are capped:
+
+- ``_events`` is a bounded ``deque`` (it is appended on *every* task operation,
+  including once per loop iteration, so it is the dominant growth source). An
+  ``_events_evicted`` counter records how many were dropped off the front so the
+  SSE stream's monotonic index (total events emitted, not buffer position) keeps
+  pointing at the right place.
+- ``_tasks`` is a capped ``OrderedDict`` with FIFO eviction. A single job's task
+  set is far below the (generous) cap, so eviction only ever drops tasks left over
+  from earlier completed jobs.
+
+Caps are tunable via ``SE_EXECUTION_TRACKER_EVENT_CAP`` /
+``SE_EXECUTION_TRACKER_TASK_CAP`` (defensive parse: garbage -> default, values
+below the floor are clamped up).
+
+Invariants:
+    - ``len(_events) <= EVENT_CAP`` and ``len(_tasks) <= TASK_CAP`` at all times.
+    - ``_events_evicted`` is monotonically non-decreasing and equals the number of
+      events dropped off the front of ``_events`` since process start.
+"""
 
 from __future__ import annotations
 
+import os
+from collections import OrderedDict, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Dict, List
+from typing import Deque, List
+
+_DEFAULT_EVENT_CAP = 5000
+_DEFAULT_TASK_CAP = 5000
+_MIN_CAP = 100
+
+
+def _resolve_cap(env_name: str, default: int) -> int:
+    """Return a positive cap from ``env_name``, defaulting + clamping defensively.
+
+    Preconditions: ``default >= _MIN_CAP``.
+    Postconditions: returns an int ``>= _MIN_CAP``; a missing/unparseable env value
+        yields ``default``; a value below ``_MIN_CAP`` is clamped up. Never raises.
+    """
+    raw = os.environ.get(env_name)
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(_MIN_CAP, value)
 
 
 def _utc_now() -> datetime:
@@ -53,12 +99,27 @@ class ExecutionTask:
 
 class ExecutionTracker:
     def __init__(self) -> None:
-        self._tasks: Dict[str, ExecutionTask] = {}
-        self._events: List[dict] = []
+        self._event_cap = _resolve_cap("SE_EXECUTION_TRACKER_EVENT_CAP", _DEFAULT_EVENT_CAP)
+        self._task_cap = _resolve_cap("SE_EXECUTION_TRACKER_TASK_CAP", _DEFAULT_TASK_CAP)
+        self._tasks: "OrderedDict[str, ExecutionTask]" = OrderedDict()
+        self._events: Deque[dict] = deque(maxlen=self._event_cap)
+        self._events_evicted = 0
         self._lock = Lock()
 
     def _emit(self, event_type: str, payload: dict) -> None:
+        # When the bounded deque is full, the append drops one event off the front;
+        # count it so events_since()/event_count stay aligned with the consumer's
+        # monotonic (total-emitted) index.
+        if len(self._events) == self._event_cap:
+            self._events_evicted += 1
         self._events.append({"type": event_type, "timestamp": _iso(_utc_now()), "payload": payload})
+
+    def _store_task(self, task_id: str, task: ExecutionTask) -> None:
+        # FIFO eviction: a single job's task set stays well under the cap, so the
+        # only entries dropped are leftovers from earlier completed jobs.
+        if task_id not in self._tasks and len(self._tasks) >= self._task_cap:
+            self._tasks.popitem(last=False)
+        self._tasks[task_id] = task
 
     def upsert_task(
         self, task_id: str, title: str, assigned_agent: str, dependencies: List[str] | None = None
@@ -71,11 +132,14 @@ class ExecutionTracker:
                 if dependencies is not None:
                     existing.dependencies = dependencies
             else:
-                self._tasks[task_id] = ExecutionTask(
-                    task_id=task_id,
-                    title=title,
-                    assigned_agent=assigned_agent,
-                    dependencies=dependencies or [],
+                self._store_task(
+                    task_id,
+                    ExecutionTask(
+                        task_id=task_id,
+                        title=title,
+                        assigned_agent=assigned_agent,
+                        dependencies=dependencies or [],
+                    ),
                 )
             self._emit("task_upserted", {"task_id": task_id})
 
@@ -130,12 +194,36 @@ class ExecutionTracker:
             return {
                 "plan_progress_percent": percent,
                 "tasks": sorted(tasks, key=lambda t: t["task_id"]),
-                "event_count": len(self._events),
+                # Total events ever emitted (incl. evicted), so a consumer's index
+                # stays meaningful even after the buffer wraps.
+                "event_count": self._events_evicted + len(self._events),
             }
 
     def events_since(self, index: int) -> List[dict]:
+        """Return events emitted at total-position ``index`` and later.
+
+        Preconditions: ``index >= 0`` (a monotonic count of events the caller has
+            already consumed, as produced by ``snapshot()['event_count']`` / prior
+            calls).
+        Postconditions: returns the still-buffered events from total-position
+            ``index`` onward. If ``index`` predates the eviction window, the caller
+            fell behind and gets everything still buffered (no error). Never raises.
+        """
         with self._lock:
-            return self._events[index:]
+            start = max(0, index - self._events_evicted)
+            return list(self._events)[start:]
+
+    def reset(self) -> None:
+        """Clear all tracked tasks and events.
+
+        Postconditions: ``_tasks`` and ``_events`` are empty and ``_events_evicted``
+            is 0. Not called automatically (the singleton is shared across possibly
+            concurrent jobs); provided for tests and explicit lifecycle control.
+        """
+        with self._lock:
+            self._tasks.clear()
+            self._events.clear()
+            self._events_evicted = 0
 
 
 execution_tracker = ExecutionTracker()
