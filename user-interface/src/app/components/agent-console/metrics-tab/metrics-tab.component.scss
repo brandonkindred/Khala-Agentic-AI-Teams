@@ -1,0 +1,108 @@
+.metrics-tab {
+  padding: 1rem 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+
+  &__header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+
+    h2 {
+      margin: 0;
+    }
+
+    p {
+      margin: 0.25rem 0 0;
+      color: rgba(0, 0, 0, 0.6);
+    }
+  }
+
+  &__controls {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+
+  &__loading {
+    display: flex;
+    justify-content: center;
+    padding: 1.5rem;
+  }
+
+  &__error {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    color: #b00020;
+  }
+
+  &__grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 1rem;
+  }
+
+  &__cost {
+    margin-top: 0.5rem;
+  }
+
+  &__cost-header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+  }
+
+  &__cost-total {
+    font-size: 1.5rem;
+    font-weight: 600;
+  }
+
+  &__cost-table {
+    width: 100%;
+  }
+
+  &__empty {
+    color: rgba(0, 0, 0, 0.6);
+    margin: 0;
+  }
+
+  &__computed {
+    font-size: 0.75rem;
+    color: rgba(0, 0, 0, 0.5);
+    margin: 0;
+  }
+}
+
+.metric-card {
+  &__label {
+    font-size: 0.8rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: rgba(0, 0, 0, 0.6);
+  }
+
+  &__value {
+    font-size: 2rem;
+    font-weight: 600;
+    line-height: 1.2;
+    margin-top: 0.25rem;
+  }
+
+  &__unit {
+    font-size: 1rem;
+    font-weight: 400;
+    color: rgba(0, 0, 0, 0.6);
+    margin-left: 0.15rem;
+  }
+
+  &__sub {
+    font-size: 0.8rem;
+    color: rgba(0, 0, 0, 0.6);
+    margin-top: 0.25rem;
+  }
+}

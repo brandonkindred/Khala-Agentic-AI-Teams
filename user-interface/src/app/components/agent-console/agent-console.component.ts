@@ -10,11 +10,12 @@ import { BacklogTabComponent } from './backlog-tab/backlog-tab.component';
 import { SprintsTabComponent } from './sprints-tab/sprints-tab.component';
 import { FeedbackTabComponent } from './feedback-tab/feedback-tab.component';
 import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
+import { MetricsTabComponent } from './metrics-tab/metrics-tab.component';
 
 /**
  * Top-level page for the Agent Console.
  *
- * Hosts seven tabs, in template order:
+ * Hosts eight tabs, in template order:
  *   - **Catalog** (default) — browse and inspect every registered agent.
  *   - **Runner** — invoke any agent in a per-team warm Docker sandbox.
  *   - **Provisioning & Environments** — embeds the existing provisioning
@@ -26,6 +27,8 @@ import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
  *     phase 4 + the new PATCH /feedback/{id}/link route).
  *   - **Cognition** — operator surface for an agent's rule proposals
  *     (approve/reject), memory timeline, and rules.
+ *   - **Metrics** — Software Engineering DORA metrics (deployment frequency,
+ *     lead time, change-failure rate, MTTR) and LLM cost over a selectable window.
  */
 @Component({
   selector: 'app-agent-console',
@@ -42,6 +45,7 @@ import { CognitionTabComponent } from './cognition-tab/cognition-tab.component';
     SprintsTabComponent,
     FeedbackTabComponent,
     CognitionTabComponent,
+    MetricsTabComponent,
   ],
   templateUrl: './agent-console.component.html',
   styleUrl: './agent-console.component.scss',
