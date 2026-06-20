@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, HTTPException
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
@@ -46,35 +45,20 @@ from branding_team.shared.job_store import (
     update_job,
 )
 from branding_team.store import get_default_store
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="branding-team", team_key="branding")
-
-
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(BRANDING_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("branding postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("branding shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
-instrument_fastapi_app(app, team_key="branding")
+# Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
+app = create_team_app(
+    service_name="branding-team",
+    team_key="branding",
+    title="Branding Team API",
+    version="2.0.0",
+    postgres_schema=BRANDING_POSTGRES_SCHEMA,
+)
 
 branding_store = get_default_store()
 orchestrator = BrandingTeamOrchestrator()
