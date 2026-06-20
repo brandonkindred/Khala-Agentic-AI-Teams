@@ -79,3 +79,24 @@ def test_key_rotation_rebuilds_cached_model(monkeypatch):
     m3 = get_strands_model()  # fp-new -> rebuild
     assert m1 is m2
     assert m1 is not m3
+
+
+def test_provider_switch_rebuilds_cached_model(monkeypatch):
+    # A provider switch must rebuild the adapter even when model_id, base_url, and
+    # the key fingerprint all coincide (e.g. two keyless providers that resolve the
+    # same model_id) — otherwise a model wrapping the wrong provider's client would
+    # be served. The active provider is part of the cache key to guarantee this.
+    monkeypatch.setattr(cfg, "resolve_base_url", lambda: "http://host")
+    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak: "model-x")
+    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda: "no-key")
+    monkeypatch.setattr(sp, "get_client", lambda ak: object())
+    monkeypatch.setattr(sp, "LLMClientModel", lambda *a, **k: object())
+
+    providers = iter(["ollama", "ollama", "dummy"])
+    monkeypatch.setattr(cfg, "resolve_provider", lambda: next(providers))
+
+    m1 = get_strands_model()  # ollama -> build
+    m2 = get_strands_model()  # ollama -> cache hit (identical key)
+    m3 = get_strands_model()  # dummy: same model_id/base_url/fingerprint -> rebuild
+    assert m1 is m2
+    assert m1 is not m3

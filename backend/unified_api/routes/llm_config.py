@@ -129,7 +129,10 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
         returns 503, since the runtime store is the only cross-container channel.
     Postconditions: provider (and any non-empty model/base URL/key) are stored
         encrypted; the runtime-config and provider-client caches are cleared in
-        this process so subsequent calls use the new config.
+        this process so subsequent calls use the new config. The keyless-Claude
+        guard reads the API key off a freshly-reloaded runtime config (the TTL
+        cache is dropped first), so a key just stored by another worker is not
+        missed within the TTL window.
     """
     if not is_postgres_enabled():
         raise HTTPException(
@@ -139,6 +142,12 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
                 "Set Postgres env vars, or configure the provider via environment variables."
             ),
         )
+
+    # Drop the runtime-config TTL cache before the guard below resolves the Claude
+    # key: in a multi-worker deployment this worker may hold a stale cache that
+    # predates a key another worker just stored, which would otherwise make the
+    # guard falsely reject a valid switch (mirrors the fresh read the GET does).
+    runtime_config.clear_cache()
 
     # Refuse to switch the global provider to Claude unless a key will actually be
     # available (in this request, or already stored/in env). Otherwise the factory

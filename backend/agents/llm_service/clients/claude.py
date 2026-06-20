@@ -369,7 +369,9 @@ class ClaudeLLMClient(LLMClient):
                 f"Claude rate limited (429): {e}",
                 status_code=429,
                 cause=e,
-                retry_after_seconds=_retry_after_seconds(e),
+                retry_after_seconds=_retry_after_seconds(e)
+                if _honor_retry_after_enabled()
+                else None,
             ) from e
         except anthropic.APIStatusError as e:
             status = getattr(e, "status_code", None)
@@ -378,7 +380,9 @@ class ClaudeLLMClient(LLMClient):
                     f"Claude rate limited (429): {e}",
                     status_code=429,
                     cause=e,
-                    retry_after_seconds=_retry_after_seconds(e),
+                    retry_after_seconds=_retry_after_seconds(e)
+                    if _honor_retry_after_enabled()
+                    else None,
                 ) from e
             if status is not None and 500 <= status < 600:
                 raise LLMTemporaryError(
@@ -418,7 +422,8 @@ class ClaudeLLMClient(LLMClient):
         account/budget is rate-limited and will not clear in seconds. So — mirroring
         the Ollama client — the call is retried on the deliberately slow
         ``LLM_RATE_LIMIT_*`` schedule (default first wait 300s, doubling to a 3600s
-        cap), honoring a parsed ``Retry-After`` when present. The sleep happens here,
+        cap), honoring a parsed ``Retry-After`` when present and not disabled via
+        ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``. The sleep happens here,
         above the HTTP stream context in :meth:`_invoke`, so no connection or shared
         resource is held while waiting.
 
@@ -799,10 +804,27 @@ class ClaudeLLMClient(LLMClient):
             return result
 
 
+def _honor_retry_after_enabled() -> bool:
+    """Whether a 429 ``Retry-After`` should be honored (default: on).
+
+    Mirrors the Ollama client's gate so the ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``
+    kill-switch applies uniformly across providers — an operator who disables
+    trusting provider ``Retry-After`` headers gets that behavior for Claude too.
+
+    Preconditions: none.
+    Postconditions: returns ``False`` only for an explicit ``"false"``/``"0"``/
+        ``"no"`` (case-insensitive) ``LLM_RATE_LIMIT_HONOR_RETRY_AFTER``; unset or
+        any other value means enabled. Never raises.
+    """
+    return llm_config.env_flag_enabled(llm_config.ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER)
+
+
 def _retry_after_seconds(error: Any) -> Optional[float]:
     """Extract an integer-seconds ``retry-after`` from an Anthropic error.
 
-    Postconditions: returns a positive float or ``None``; never raises.
+    Postconditions: returns a positive float or ``None``; never raises. Whether a
+        parsed value is actually honored is gated by :func:`_honor_retry_after_enabled`
+        at the call site (mirrors the Ollama client).
     """
     resp = getattr(error, "response", None)
     headers = getattr(resp, "headers", None)

@@ -125,12 +125,17 @@ def get_strands_model(
     # same model don't share one ``LLMClientModel`` (which would attribute every
     # later call to whichever agent constructed it first). Distinct keys get
     # distinct adapters, each backed by its own attribution-wrapped client.
-    # The active provider's API-key fingerprint is included so an in-place key
-    # rotation rebuilds the adapter even in containers that refresh config only via
-    # the runtime-config TTL (which never call clear_model_cache) — without it, a
-    # rotated key would keep being served by a model wrapping a stale client.
+    # The active provider AND its API-key fingerprint are part of the key so a
+    # provider switch or an in-place key rotation rebuilds the adapter even in
+    # containers that refresh config only via the runtime-config TTL (which never
+    # call clear_model_cache). Without the provider, an ollama<->claude/dummy switch
+    # that happened to resolve the same model_id and key fingerprint (e.g. both
+    # providers keyless with a shared LLM_MODEL) would keep serving a model wrapping
+    # the wrong provider's client; without the fingerprint, a rotated key would keep
+    # being served by a model wrapping a stale client.
+    provider = llm_config.resolve_provider()
     key_fingerprint = _active_provider_key_fingerprint()
-    cache_key = (model_id, base_url, response_format, agent_key, key_fingerprint)
+    cache_key = (provider, model_id, base_url, response_format, agent_key, key_fingerprint)
 
     with _cache_lock:
         if cache_key not in _model_cache:
@@ -155,10 +160,11 @@ def get_strands_model(
 def clear_model_cache() -> None:
     """Drop all cached Strands models so the next call rebuilds against new config.
 
-    Called by ``factory.clear_client_cache`` after a settings change: the cache key
-    ``(model_id, base_url, response_format, agent_key)`` omits the API-key
-    fingerprint, so without this an in-place key rotation would keep serving a
-    Strands adapter whose backing client still holds the old key.
+    Called by ``factory.clear_client_cache`` after a settings change. The cache key
+    already includes the active provider and its API-key fingerprint, so most
+    settings changes are invalidated by the key itself; this explicit clear is the
+    belt-and-suspenders path that runs in the PUT handler's own process, dropping
+    every cached adapter immediately rather than waiting for the next differing key.
 
     Preconditions: none.
     Postconditions: the Strands model cache is empty afterward. Safe to call when

@@ -96,7 +96,9 @@ def test_put_persists_and_clears_caches(app_client):
     assert stored[route.runtime_config.KEY_CLAUDE_MODEL] == "claude-opus-4-8"
     assert stored[route.runtime_config.KEY_CLAUDE_API_KEY] == "sk-new"
     assert calls["cache_clears"] == 1
-    assert calls["runtime_clears"] == 1
+    # Cleared twice: once before the keyless-Claude guard reads the key (fresh read),
+    # and once after persisting so subsequent reads in this process see new config.
+    assert calls["runtime_clears"] == 2
 
 
 def test_put_skips_empty_fields(app_client):
@@ -121,6 +123,9 @@ def test_put_claude_without_key_rejected(app_client):
     assert resp.status_code == 400
     assert "without an API key" in resp.json()["detail"]
     assert calls["set"] == []  # nothing persisted
+    # The TTL cache is dropped before the guard resolves the key, so the guard reads
+    # committed state (a key just stored by another worker is not missed).
+    assert calls["runtime_clears"] == 1
 
 
 def test_put_claude_allowed_when_key_in_env(app_client):

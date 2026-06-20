@@ -530,6 +530,18 @@ def test_rate_limit_maps_and_parses_retry_after():
     assert ei.value.retry_after_seconds == 30.0
 
 
+def test_retry_after_not_honored_when_disabled(monkeypatch):
+    # The LLM_RATE_LIMIT_HONOR_RETRY_AFTER kill-switch must apply to Claude too
+    # (parity with the Ollama client): when disabled, a parsed Retry-After is
+    # dropped so only the computed backoff schedule governs the wait.
+    monkeypatch.setenv("LLM_RATE_LIMIT_HONOR_RETRY_AFTER", "false")
+    err = _http_error(anthropic.RateLimitError, 429, headers={"retry-after": "30"})
+    client, _ = _make_client(exc=err)
+    with pytest.raises(LLMRateLimitError) as ei:
+        client.complete("hi", objective="t")
+    assert ei.value.retry_after_seconds is None
+
+
 def test_server_error_maps_temporary():
     err = _http_error(anthropic.InternalServerError, 500)
     client, _ = _make_client(exc=err)
