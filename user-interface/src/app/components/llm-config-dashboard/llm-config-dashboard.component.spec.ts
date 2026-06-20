@@ -9,6 +9,8 @@ import type { LlmConfigResponse } from '../../models/llm-config.model';
 const BASE_CONFIG: LlmConfigResponse = {
   provider: 'ollama',
   model: 'deepseek-v4-pro:cloud',
+  ollama_model: '',
+  claude_model: '',
   ollama_base_url: 'https://ollama.com',
   claude_api_key_configured: false,
   ollama_api_key_configured: false,
@@ -129,13 +131,25 @@ describe('LlmConfigDashboardComponent', () => {
     expect(component.saving).toBe(false);
   });
 
-  it('onProviderChange resets the model to the new provider default', () => {
+  it('onProviderChange falls back to the first suggestion when no model is stored', () => {
+    // BASE_CONFIG has empty per-provider models, so the switch uses the default.
     component.model = 'deepseek-v4-pro:cloud';
     component.onProviderChange('claude');
     expect(component.provider).toBe('claude');
     expect(component.model).toBe('claude-opus-4-8'); // first claude option
     component.onProviderChange('ollama');
     expect(component.model).toBe('llama3.1'); // first ollama suggestion
+  });
+
+  it('onProviderChange restores each provider\'s saved model (lossless switch)', () => {
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, ollama_model: 'qwen3-coder:480b-cloud', claude_model: 'claude-sonnet-4-6' }),
+    );
+    component.loadConfig();
+    component.onProviderChange('claude');
+    expect(component.model).toBe('claude-sonnet-4-6'); // saved, not the first suggestion
+    component.onProviderChange('ollama');
+    expect(component.model).toBe('qwen3-coder:480b-cloud'); // saved, not the first suggestion
   });
 
   it('does not send a stale cross-provider model after a provider switch', () => {

@@ -11,6 +11,10 @@ export type LlmProvider = 'ollama' | 'claude';
 export interface LlmConfigResponse {
   provider: LlmProvider;
   model: string;
+  /** Effective Ollama model — lets the UI restore it when toggling provider. */
+  ollama_model: string;
+  /** Effective Claude model — lets the UI restore it when toggling provider. */
+  claude_model: string;
   ollama_base_url: string;
   claude_api_key_configured: boolean;
   ollama_api_key_configured: boolean;

@@ -152,6 +152,19 @@ def test_get_reports_resolved_ollama_model(app_client):
     assert body["model"] == "llama3.2"
 
 
+def test_get_reports_per_provider_models(app_client):
+    # Both providers' effective models are surfaced so the UI can restore the
+    # inactive one on a provider switch (lossless toggle).
+    client, _calls, mp = app_client
+    mp.setenv("LLM_PROVIDER", "ollama")
+    mp.setenv("LLM_MODEL", "llama3.2")
+    body = client.get("/api/llm-config").json()
+    assert body["ollama_model"] == "llama3.2"
+    # The non-Claude LLM_MODEL must not leak into the Claude slot; it falls back to
+    # the Claude default instead.
+    assert body["claude_model"] and body["claude_model"] != "llama3.2"
+
+
 def test_put_stores_model_under_provider_specific_key(app_client):
     # The model is persisted under the active provider's key (ollama here), so it
     # never collides with a Claude selection in a shared slot.

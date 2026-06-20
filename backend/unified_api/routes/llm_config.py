@@ -64,6 +64,8 @@ class LlmConfigResponse(BaseModel):
 
     provider: str
     model: str
+    ollama_model: str = Field("", description="Effective Ollama model (lets the UI restore it on a provider switch).")
+    claude_model: str = Field("", description="Effective Claude model (lets the UI restore it on a provider switch).")
     ollama_base_url: str
     claude_api_key_configured: bool = Field(False, description="True when a Claude key is set (runtime or env).")
     ollama_api_key_configured: bool = Field(False, description="True when an Ollama Cloud key is set (runtime or env).")
@@ -81,12 +83,16 @@ def _build_response() -> LlmConfigResponse:
     Preconditions: none.
     Postconditions: returns the effective provider, the active provider's resolved
         model (via the shared ``resolve_model_for_provider`` chokepoint, so the UI
-        never disagrees with the model agents actually use), the Ollama base URL,
-        and ``*_configured`` booleans — API keys are never included. Never raises.
+        never disagrees with the model agents actually use), each provider's
+        effective model (so the UI can restore the inactive one on a provider
+        switch), the Ollama base URL, and ``*_configured`` booleans — API keys are
+        never included. Never raises.
     """
     return LlmConfigResponse(
         provider=llm_config.resolve_provider(),
         model=llm_config.resolve_model_for_provider(None),
+        ollama_model=llm_config.resolve_model(None),
+        claude_model=llm_config.resolve_claude_model(None),
         ollama_base_url=llm_config.resolve_base_url(),
         claude_api_key_configured=bool(llm_config.resolve_claude_api_key()),
         ollama_api_key_configured=bool(llm_config.resolve_ollama_api_key()),

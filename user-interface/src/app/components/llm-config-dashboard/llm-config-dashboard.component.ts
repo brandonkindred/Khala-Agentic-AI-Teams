@@ -57,6 +57,10 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   provider: LlmProvider = 'ollama';
   model = '';
+  // Each provider's stored model, so toggling provider restores its own saved
+  // model instead of clobbering it with the default suggestion on save.
+  private ollamaModel = '';
+  private claudeModel = '';
   ollamaMode: OllamaMode = 'cloud';
   ollamaBaseUrl = OLLAMA_CLOUD_URL;
   claudeApiKey = '';
@@ -94,6 +98,8 @@ export class LlmConfigDashboardComponent implements OnInit {
   private applyConfig(cfg: LlmConfigResponse): void {
     this.provider = cfg.provider === 'claude' ? 'claude' : 'ollama';
     this.model = cfg.model || '';
+    this.ollamaModel = cfg.ollama_model || '';
+    this.claudeModel = cfg.claude_model || '';
     this.ollamaBaseUrl = cfg.ollama_base_url || OLLAMA_CLOUD_URL;
     this.ollamaMode = this.isOllamaCloudUrl(this.ollamaBaseUrl) ? 'cloud' : 'local';
     this.claudeApiKeyConfigured = cfg.claude_api_key_configured;
@@ -113,15 +119,17 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.ollamaBaseUrl = mode === 'cloud' ? OLLAMA_CLOUD_URL : OLLAMA_LOCAL_DEFAULT;
   }
 
-  /** React to a provider switch by resetting the model to the new provider's default.
+  /** React to a provider switch by loading that provider's own stored model.
    *
-   * Without this, a model id from the previous provider (e.g. an Ollama model)
-   * would be left in the field and persisted/sent under the new provider, which
-   * the API would reject. Defaults to the first curated option for the provider.
+   * Restores the provider's saved model so a switch is lossless (saving no longer
+   * overwrites it with a default), and never leaves a cross-provider model id in
+   * the field. Falls back to the first curated suggestion only when the provider
+   * has no stored model yet.
    */
   onProviderChange(provider: LlmProvider): void {
     this.provider = provider;
-    this.model = this.modelOptions.length ? this.modelOptions[0] : '';
+    const saved = provider === 'claude' ? this.claudeModel : this.ollamaModel;
+    this.model = saved || (this.modelOptions.length ? this.modelOptions[0] : '');
   }
 
   /** The model suggestions for the active provider. */
