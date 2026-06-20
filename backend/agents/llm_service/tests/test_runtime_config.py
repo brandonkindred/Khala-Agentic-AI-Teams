@@ -57,15 +57,6 @@ def test_zero_ttl_reads_through(monkeypatch):
     assert rc.get_runtime(rc.KEY_PROVIDER) == "claude"
 
 
-def test_snapshot_bypasses_cache(monkeypatch):
-    store = {rc.KEY_PROVIDER: "ollama"}
-    _fake_store(monkeypatch, store)
-    rc.get_runtime(rc.KEY_PROVIDER)  # prime cache with "ollama"
-    store[rc.KEY_PROVIDER] = "claude"
-    snap = rc.snapshot()
-    assert snap[rc.KEY_PROVIDER] == "claude"  # fresh read, not cached
-
-
 def test_unknown_key_asserts():
     with pytest.raises(AssertionError):
         rc.get_runtime("not_a_key")

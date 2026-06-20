@@ -147,13 +147,3 @@ def clear_cache() -> None:
     with _lock:
         _cache.clear()
         _cache_ts = 0.0
-
-
-def snapshot() -> dict[str, str]:
-    """Return a fresh, uncached copy of all runtime values (for the GET endpoint).
-
-    Postconditions: returns a dict over :data:`ALL_KEYS` read directly from the
-        store (bypassing the TTL cache), so a settings page always shows the
-        committed state. ``{}`` when Postgres is disabled.
-    """
-    return _load_all()

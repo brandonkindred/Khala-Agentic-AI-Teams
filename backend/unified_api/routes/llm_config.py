@@ -115,7 +115,7 @@ async def get_llm_config() -> LlmConfigResponse:
         PUT that wrote it (a stale per-worker cache would otherwise show old
         provider/model/key-configured flags). Reads still flow through the shared
         ``resolve_*`` chokepoint — clearing the cache forces a fresh read without
-        bypassing the env-fallback/heuristic logic a raw snapshot would skip.
+        bypassing the env-fallback/heuristic logic a direct uncached read would skip.
     """
     runtime_config.clear_cache()
     return _build_response()

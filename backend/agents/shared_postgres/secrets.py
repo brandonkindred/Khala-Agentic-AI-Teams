@@ -27,7 +27,7 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from shared_postgres.client import get_conn, is_postgres_enabled
 from shared_postgres.metrics import timed_query
@@ -224,6 +224,44 @@ def get_secrets(service: str, keys: "list[str] | tuple[str, ...]") -> dict[str, 
     return out
 
 
+# Single home for the credential-row SQL so the single-key (set_secret), batch
+# (set_secrets), and delete (delete_secret) paths share one statement and can't
+# drift apart when the table shape changes.
+_UPSERT_SECRET_SQL = """
+    INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
+    VALUES (%s, %s, %s, NOW())
+    ON CONFLICT (service, credential_key)
+    DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
+"""
+_DELETE_SECRET_SQL = (
+    "DELETE FROM encrypted_integration_credentials WHERE service = %s AND credential_key = %s"
+)
+
+
+def _upsert_secret_row(cur: Any, service: str, key: str, value: str) -> None:
+    """Encrypt ``value`` and stage an upsert of ``(service, key)`` on ``cur``.
+
+    Preconditions: ``cur`` is an open cursor whose connection's transaction the
+        caller owns (commit/rollback happens at the caller's ``get_conn`` exit);
+        ``service``/``key``/``value`` are non-empty strings.
+    Postconditions: one upsert is staged on ``cur`` (not committed here); the
+        plaintext ``value`` is never stored — only its Fernet ciphertext.
+    """
+    encrypted = _get_fernet().encrypt(value.encode()).decode()
+    cur.execute(_UPSERT_SECRET_SQL, (service, key, encrypted))
+
+
+def _delete_secret_row(cur: Any, service: str, key: str) -> None:
+    """Stage a delete of the ``(service, key)`` row on ``cur``.
+
+    Preconditions: ``cur`` is an open cursor whose connection's transaction the
+        caller owns; ``service``/``key`` are non-empty strings.
+    Postconditions: one delete is staged on ``cur`` (not committed here); a no-op
+        at the SQL level when the row is absent.
+    """
+    cur.execute(_DELETE_SECRET_SQL, (service, key))
+
+
 @timed_query(store=_STORE, op="set_secret")
 def set_secret(service: str, key: str, value: str) -> None:
     """Encrypt and upsert ``value`` for ``(service, key)``; delete when empty.
@@ -242,17 +280,8 @@ def set_secret(service: str, key: str, value: str) -> None:
     if not value:
         delete_secret(service, key)
         return
-    encrypted = _get_fernet().encrypt(value.encode()).decode()
     with get_conn() as conn, conn.cursor() as cur:
-        cur.execute(
-            """
-            INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
-            VALUES (%s, %s, %s, NOW())
-            ON CONFLICT (service, credential_key)
-            DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
-            """,
-            (service, key, encrypted),
-        )
+        _upsert_secret_row(cur, service, key, value)
 
 
 @timed_query(store=_STORE, op="set_secrets")
@@ -284,26 +313,12 @@ def set_secrets(service: str, values: "dict[str, str]") -> None:
     if not is_postgres_enabled():
         raise RuntimeError("POSTGRES_HOST is not set; cannot persist shared secrets.")
     _ensure_table()
-    fernet = _get_fernet()
     with get_conn() as conn, conn.cursor() as cur:
         for key, value in values.items():
-            if not value:
-                cur.execute(
-                    "DELETE FROM encrypted_integration_credentials "
-                    "WHERE service = %s AND credential_key = %s",
-                    (service, key),
-                )
-                continue
-            encrypted = fernet.encrypt(value.encode()).decode()
-            cur.execute(
-                """
-                INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
-                VALUES (%s, %s, %s, NOW())
-                ON CONFLICT (service, credential_key)
-                DO UPDATE SET ciphertext = EXCLUDED.ciphertext, updated_at = NOW()
-                """,
-                (service, key, encrypted),
-            )
+            if value:
+                _upsert_secret_row(cur, service, key, value)
+            else:
+                _delete_secret_row(cur, service, key)
 
 
 @timed_query(store=_STORE, op="delete_secret")
@@ -320,11 +335,7 @@ def delete_secret(service: str, key: str) -> None:
     _ensure_table()
     try:
         with get_conn() as conn, conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM encrypted_integration_credentials "
-                "WHERE service = %s AND credential_key = %s",
-                (service, key),
-            )
+            _delete_secret_row(cur, service, key)
     except Exception as e:  # noqa: BLE001 - delete is best-effort
         logger.warning("shared secret delete failed (%s/%s): %s", service, key, e)
 

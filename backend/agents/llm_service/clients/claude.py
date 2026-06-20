@@ -43,7 +43,7 @@ from ..attribution import (
 from ..attribution import (
     caller_team as _caller_team,
 )
-from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
+from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -447,17 +447,15 @@ class ClaudeLLMClient(LLMClient):
             except LLMRateLimitError as e:
                 if rate_limit_attempt >= max_retries:
                     raise
-                wait = rate_limit_retry_delay(
-                    rate_limit_attempt, initial, cap, e.retry_after_seconds
+                rate_limit_backoff_sleep(
+                    rate_limit_attempt,
+                    max_retries,
+                    initial,
+                    cap,
+                    e.retry_after_seconds,
+                    provider="Claude",
+                    request_id=current_request_id() or "-",
                 )
-                logger.warning(
-                    "Claude 429 (rid=%s, rate-limit attempt %d/%d). Retrying in %.1fs",
-                    current_request_id() or "-",
-                    rate_limit_attempt + 1,
-                    max_retries + 1,
-                    wait,
-                )
-                time.sleep(wait)
                 rate_limit_attempt += 1
 
     def _content_from_message(self, message: Any) -> tuple[str, Any]:

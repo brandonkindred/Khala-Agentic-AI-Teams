@@ -30,7 +30,7 @@ from ..attribution import (
 from ..attribution import (
     caller_team as _caller_team,
 )
-from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
+from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -310,23 +310,24 @@ def _rate_limit_backoff_sleep(
 ) -> None:
     """Sleep the slow 429 backoff for the given attempt index, logging one warning.
 
+    Thin wrapper over the shared :func:`llm_service.backoff.rate_limit_backoff_sleep`
+    so the Claude and Ollama clients share one 429 wait/log/sleep implementation;
+    this only supplies the Ollama request-id and attribution context for the log.
+
     Preconditions: ``0 <= rate_limit_attempt < rate_limit_max_retries``; the caller
         has already exited the concurrency semaphore and HTTP stream contexts —
         this sleep can be minutes long and must not hold a shared resource.
     Postconditions: sleeps ``rate_limit_retry_delay(...)`` seconds; never raises.
     """
-    wait = rate_limit_retry_delay(
-        rate_limit_attempt, rate_limit_initial, rate_limit_cap, retry_after_seconds
+    rate_limit_backoff_sleep(
+        rate_limit_attempt,
+        rate_limit_max_retries,
+        rate_limit_initial,
+        rate_limit_cap,
+        retry_after_seconds,
+        request_id=current_request_id() or "-",
+        context=_attribution_log_fields(),
     )
-    logger.warning(
-        "LLM 429 (rid=%s, %s, rate-limit attempt %d/%d). Retrying in %.1fs",
-        current_request_id() or "-",
-        _attribution_log_fields(),
-        rate_limit_attempt + 1,
-        rate_limit_max_retries + 1,
-        wait,
-    )
-    time.sleep(wait)
 
 
 _ollama_semaphore: Optional[threading.BoundedSemaphore] = None
