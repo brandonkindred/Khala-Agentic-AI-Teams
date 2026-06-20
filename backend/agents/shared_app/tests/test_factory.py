@@ -15,7 +15,9 @@ def _stub_otel(monkeypatch) -> None:
     """Neutralize OTel global side effects; record that they were invoked."""
     calls = {"init": [], "instrument": []}
     monkeypatch.setattr(factory, "init_otel", lambda **kw: calls["init"].append(kw))
-    monkeypatch.setattr(factory, "instrument_fastapi_app", lambda app, **kw: calls["instrument"].append(kw))
+    monkeypatch.setattr(
+        factory, "instrument_fastapi_app", lambda app, **kw: calls["instrument"].append(kw)
+    )
     factory._test_calls = calls  # type: ignore[attr-defined]
     yield
     delattr(factory, "_test_calls")
@@ -46,7 +48,9 @@ def test_postgres_schema_registers_on_startup_and_closes_on_shutdown(monkeypatch
     import shared_postgres
 
     events = []
-    monkeypatch.setattr(shared_postgres, "register_team_schemas", lambda s: events.append(("register", s)))
+    monkeypatch.setattr(
+        shared_postgres, "register_team_schemas", lambda s: events.append(("register", s))
+    )
     monkeypatch.setattr(shared_postgres, "close_pool", lambda: events.append(("close", None)))
 
     schema = object()

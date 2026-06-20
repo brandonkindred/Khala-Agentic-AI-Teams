@@ -72,7 +72,9 @@ def env_int(name: str, default: int, floor: int | None = None, ceiling: int | No
     return int(_clamp(value, floor, ceiling))
 
 
-def env_float(name: str, default: float, floor: float | None = None, ceiling: float | None = None) -> float:
+def env_float(
+    name: str, default: float, floor: float | None = None, ceiling: float | None = None
+) -> float:
     """Read a float tuning knob, clamped to ``[floor, ceiling]`` when supplied.
 
     Preconditions:

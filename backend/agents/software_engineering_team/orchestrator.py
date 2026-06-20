@@ -1537,7 +1537,9 @@ def _code_v2_worker(
             failed[tid] = f"{label} team not registered"
         return
 
-    while queue:  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
+    while (
+        queue
+    ):  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
         # Check for cancellation before starting each task
         if is_cancel_requested(job_id):
             logger.info("%s worker: cancellation detected, stopping", label)
@@ -3165,7 +3167,6 @@ def run_orchestrator(
         # already-complete result it already set. ``already_complete`` (the work was already
         # done — no changes needed) is a terminal success and is left intact.
         return
-
 
     except (
         CancellationError
