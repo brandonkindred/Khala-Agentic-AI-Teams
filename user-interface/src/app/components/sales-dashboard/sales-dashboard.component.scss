@@ -157,11 +157,11 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
 
-  &.status-running   { background: rgba(59, 130, 246, 0.15); color: #58a6ff; }
-  &.status-pending   { background: rgba(139, 148, 158, 0.12); color: #8b949e; }
-  &.status-completed { background: rgba(46, 160, 67, 0.15); color: #3fb950; }
-  &.status-failed    { background: rgba(248, 81, 73, 0.15); color: #f85149; }
-  &.status-cancelled { background: rgba(139, 148, 158, 0.1); color: #6e7681; }
+  &.status-running   { background: rgba(59, 130, 246, 0.15); color: var(--kh-info); }
+  &.status-pending   { background: rgba(139, 148, 158, 0.12); color: var(--kh-text-secondary); }
+  &.status-completed { background: rgba(46, 160, 67, 0.15); color: var(--kh-success); }
+  &.status-failed    { background: rgba(248, 81, 73, 0.15); color: var(--kh-error); }
+  &.status-cancelled { background: rgba(139, 148, 158, 0.1); color: var(--kh-text-tertiary); }
 }
 
 .status-error {

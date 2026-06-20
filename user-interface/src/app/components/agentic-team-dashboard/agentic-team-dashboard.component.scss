@@ -69,7 +69,7 @@
     font-size: 64px;
     width: 64px;
     height: 64px;
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     margin-bottom: 16px;
   }
 
@@ -79,7 +79,7 @@
   }
 
   p {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     margin: 0;
   }
 }
@@ -119,7 +119,7 @@
 }
 
 .team-card-description {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.875rem;
   line-height: 1.5;
   margin: 0;
@@ -147,7 +147,7 @@
 
     .team-description {
       margin: 4px 0 0;
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
       font-size: 0.875rem;
     }
   }
