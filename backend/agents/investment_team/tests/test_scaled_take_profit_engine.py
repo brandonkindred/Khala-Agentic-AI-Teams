@@ -44,6 +44,7 @@ from investment_team.trading_service.strategy.contract import (
     OrderSide,
     OrderType,
     TimeInForce,
+    UnfilledPolicy,
 )
 
 
@@ -248,6 +249,27 @@ def test_short_first_rung_emits_partial_buy_close() -> None:
     assert pending[0].qty == 50.0
 
 
+def test_scaled_close_requeues_capped_remainder() -> None:
+    # A fire-once rung can't re-emit, so its market close must requeue any
+    # participation-capped remainder (unlike a full-position exit, which re-fires
+    # next bar). Assert the emitted scale-out carries REQUEUE_NEXT_BAR.
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert pending[0].unfilled_policy == UnfilledPolicy.REQUEUE_NEXT_BAR
+
+
 def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_size() -> None:
     # A partial entry (50 of 100 filled) with a REQUEUE_NEXT_BAR continuation still
     # resting: pos.original_qty is only 50 so far and the fill simulator will BUMP
@@ -312,7 +334,13 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
 
 
 def _full_bar(
-    ts: str, *, open_price: float, high: float, low: float, close: float | None = None
+    ts: str,
+    *,
+    open_price: float,
+    high: float,
+    low: float,
+    close: float | None = None,
+    volume: float = 10_000_000.0,
 ) -> Bar:
     return Bar(
         symbol="AAA",
@@ -322,7 +350,7 @@ def _full_bar(
         high=high,
         low=low,
         close=close if close is not None else open_price,
-        volume=10_000_000.0,
+        volume=volume,
     )
 
 
@@ -394,3 +422,38 @@ def test_partial_market_close_reduces_qty_and_keeps_position_open(model) -> None
     assert "AAA" not in portfolio.positions or portfolio.positions["AAA"].qty == pytest.approx(0.0)
     assert len(outcome.closed_trades) == 1
     assert outcome.closed_trades[0].exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
+
+
+def test_capped_scaled_close_requeues_until_full_fraction_filled() -> None:
+    # End-to-end: a scale-out close that the participation cap clips fills only
+    # partially on a low-liquidity bar; with REQUEUE_NEXT_BAR the remainder keeps
+    # working and the rung's full fraction is realised once liquidity returns.
+    model = RealisticExecutionModel(participation_cap=0.10)
+    sim, order_book, portfolio = _make_simulator(model)
+    _open_long(sim, order_book, qty=100.0)  # high-volume entry bar → full fill
+
+    order_book.submit(
+        OrderRequest(
+            client_order_id="tp-0",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=50.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+            unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit",
+        ),
+        submitted_at="2024-01-02",
+        submitted_equity=100_000_000.0,
+    )
+    # Low-volume bar: cap (0.10 * 300 shares = 30) clips the 50-share close.
+    sim.process_bar(_full_bar("2024-01-03", open_price=105.0, high=106.0, low=104.0, volume=300.0))
+    pos = portfolio.positions["AAA"]
+    assert 50.0 < pos.qty < 100.0  # partially scaled out, remainder requeued
+    assert any(po.request.client_order_id == "tp-0" for po in order_book.pending_for_symbol("AAA"))
+
+    # Liquidity returns: the requeued remainder fills, completing the 50-share rung.
+    sim.process_bar(
+        _full_bar("2024-01-04", open_price=105.0, high=106.0, low=104.0, volume=10_000_000.0)
+    )
+    assert portfolio.positions["AAA"].qty == pytest.approx(50.0)

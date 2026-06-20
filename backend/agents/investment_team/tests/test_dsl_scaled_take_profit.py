@@ -190,9 +190,43 @@ def test_first_only_caps_scaled_intents_at_one() -> None:
 
 def test_untriggered_ladder_emits_nothing() -> None:
     rule = _ladder()
-    bar = BarSnapshot(high=103.0, low=99.0, close=101.0)  # below the +5% target
+    # Neither the current bar nor the since-entry watermark has reached +5%.
+    bar = BarSnapshot(high=103.0, low=99.0, close=101.0)
     intents = evaluate_exit_rules([rule], {"AAA": _long()}, {"AAA": bar}, first_only=False)
     assert intents == []
+
+
+def test_rung_stays_eligible_via_watermark_after_retrace_long() -> None:
+    # A gap bar cleared both rungs (peak 111) and a later bar retraced below both
+    # targets. Eligibility is high-water-mark based, so both rungs remain crossed
+    # and the dispatcher can still scale them out on this (retraced) bar.
+    rule = _ladder()  # rungs at +5% (105) and +10% (110)
+    pos = PositionState(
+        symbol="AAA",
+        side="long",
+        qty=100,
+        entry_price=100.0,
+        high_since_entry=111.0,  # peak since entry cleared both targets
+        low_since_entry=100.0,
+    )
+    bar = BarSnapshot(high=104.0, low=102.0, close=103.0)  # now below both targets
+    intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": bar}, first_only=False)
+    assert [i.level_index for i in intents] == [0, 1]
+
+
+def test_rung_stays_eligible_via_watermark_after_retrace_short() -> None:
+    rule = _ladder()  # rungs at -5% (95) and -10% (90)
+    pos = PositionState(
+        symbol="AAA",
+        side="short",
+        qty=100,
+        entry_price=100.0,
+        high_since_entry=100.0,
+        low_since_entry=89.0,  # trough since entry cleared both targets
+    )
+    bar = BarSnapshot(high=98.0, low=96.0, close=97.0)  # now above both targets
+    intents = evaluate_exit_rules([rule], {"AAA": pos}, {"AAA": bar}, first_only=False)
+    assert [i.level_index for i in intents] == [0, 1]
 
 
 def test_stop_loss_priority_when_listed_before_ladder() -> None:

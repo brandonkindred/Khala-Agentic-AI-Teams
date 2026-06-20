@@ -239,21 +239,34 @@ def _intents_for_rule(
 def _scaled_take_profit_levels(
     rule: ScaledTakeProfitRule, position: PositionState, bar: BarSnapshot
 ) -> list[int]:
-    """Indices of the ladder rungs whose target the bar crosses, in rung order.
+    """Indices of the ladder rungs whose target has been reached, in rung order.
+
+    Eligibility is high-water-mark based: a rung counts as crossed once the
+    position's favorable extreme SINCE ENTRY (the running watermark, extended by
+    this bar) has reached ``entry * (1 ± level.pct)``. Using the watermark rather
+    than only the current bar's high/low means a rung whose target a gap bar
+    cleared stays eligible even if a later bar retraces below it — so the
+    one-tranche-per-bar dispatcher still scales out every reached rung across
+    subsequent bars instead of forgetting a rung the price already hit.
 
     Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (enforced by the
-    DSL), so the crossed indices are contiguous from 0.
-    Postconditions: returns ``[i for i, level in enumerate(rule.levels) if the
-    bar's favorable extreme reaches ``entry * (1 ± level.pct)``]`` — long uses the
-    bar high above ``entry*(1+pct)``, short uses the bar low below ``entry*(1-pct)``.
+    DSL), so the crossed indices are contiguous from 0. ``position.high_since_entry``
+    / ``low_since_entry`` are the watermarks as of the prior bar (the dispatcher
+    extends them after evaluation), so the current bar's extreme is folded in here.
+    Postconditions: returns ``[i for i, level in enumerate(rule.levels)]`` whose
+    target the since-entry peak (long) / trough (short) has reached.
     """
     crossed: list[int] = []
-    for i, level in enumerate(rule.levels):
-        if position.side == "long":
-            if bar.high >= position.entry_price * (1.0 + level.pct):
+    if position.side == "long":
+        peak = max(position.high_since_entry, bar.high)
+        for i, level in enumerate(rule.levels):
+            if peak >= position.entry_price * (1.0 + level.pct):
                 crossed.append(i)
-        elif bar.low <= position.entry_price * (1.0 - level.pct):
-            crossed.append(i)
+    else:
+        trough = min(position.low_since_entry, bar.low)
+        for i, level in enumerate(rule.levels):
+            if trough <= position.entry_price * (1.0 - level.pct):
+                crossed.append(i)
     return crossed
 
 

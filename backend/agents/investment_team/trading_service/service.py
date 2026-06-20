@@ -768,6 +768,21 @@ class _EngineExitDispatcher:
                 order_type=OrderType.MARKET,
                 tif=TimeInForce.DAY,
                 reason=reason,
+                # A full-position exit (stop / take-profit / signal) self-heals a
+                # participation-capped partial fill: its rule re-triggers next bar
+                # and re-emits a fresh close for the residual, so the dropped
+                # remainder is closed then. A scaled rung fires AT MOST ONCE, so it
+                # cannot re-emit — without a requeue a capped fill would close less
+                # than the rung's fraction permanently. Force REQUEUE_NEXT_BAR on a
+                # scaled close so its remainder completes across bars regardless of
+                # the run's default policy. Leave every other exit's policy unset
+                # (``None``) so the service-level ``default_unfilled_policy`` still
+                # applies to it exactly as before.
+                unfilled_policy=(
+                    UnfilledPolicy.REQUEUE_NEXT_BAR
+                    if intent.rule_kind == "scaled_take_profit"
+                    else None
+                ),
             )
         try:
             req.validate_prices()
