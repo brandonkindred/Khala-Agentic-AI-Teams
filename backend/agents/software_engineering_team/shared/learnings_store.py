@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
+
+from software_engineering_team.shared.env_config import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -70,11 +71,7 @@ def _or_tsquery_terms(query_text: str, *, limit: int = 40) -> str:
 
 
 def _retention_days() -> float:
-    raw = os.environ.get("SE_LEARNINGS_RETENTION_DAYS", "365")
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return 365.0
+    return env_float("SE_LEARNINGS_RETENTION_DAYS", 365.0, 0.0)
 
 
 def upsert_learning(

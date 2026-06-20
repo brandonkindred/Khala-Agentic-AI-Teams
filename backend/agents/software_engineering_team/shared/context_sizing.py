@@ -10,9 +10,12 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
-import os
-
 from llm_service import LLMClient
+
+# Re-exported from the shared typed env-config helper so the int-knob parser
+# has a single implementation; imported here for the existing call sites below
+# (and the ``context_sizing.env_int`` import path that callers/tests rely on).
+from software_engineering_team.shared.env_config import env_int
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
@@ -29,27 +32,6 @@ CODE_REVIEW_ABS_CHUNK_CHARS = 80_000  # CODE_REVIEW_MAP_CHUNK_CHARS, floor 10_00
 CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS = 16_000  # CODE_REVIEW_SPEC_EXCERPT_CHARS, floor 1_000
 CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000  # CODE_REVIEW_ARCH_OVERVIEW_CHARS, floor 500
 CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
-
-
-def env_int(name: str, default: int, floor: int) -> int:
-    """Read an int tuning knob from the environment, defensively.
-
-    Preconditions:
-        - ``default`` >= ``floor``.
-
-    Postconditions:
-        - Returns ``default`` when the var is unset or unparseable; otherwise
-          the parsed value clamped to at least ``floor`` (never raises).
-    """
-    assert default >= floor, "default must respect the floor"
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except (TypeError, ValueError):
-        return default
-    return max(floor, value)
 
 
 def compute_max_chunk_chars(

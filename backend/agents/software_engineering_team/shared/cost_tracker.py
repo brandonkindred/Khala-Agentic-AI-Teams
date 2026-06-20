@@ -17,10 +17,11 @@ Invariants:
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from dataclasses import dataclass
+
+from software_engineering_team.shared.env_config import env_float
 
 logger = logging.getLogger(__name__)
 
@@ -41,11 +42,7 @@ def _flush_interval_s() -> float:
 
     Postconditions: returns a non-negative float; garbage env → default ``2.0``.
     """
-    raw = os.environ.get("SE_COST_FLUSH_INTERVAL_S", "2")
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return 2.0
+    return env_float("SE_COST_FLUSH_INTERVAL_S", 2.0, 0.0)
 
 
 def add_cost(job_id: str, cost_usd: float) -> float:

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List
 
 from strands import Agent
 
 from llm_service import compact_text, get_client, get_strands_model
+from software_engineering_team.shared.env_config import env_int
 from software_engineering_team.shared.models import (
     Task,
     TaskStatus,
@@ -46,11 +46,7 @@ def _learnings_top_n() -> int:
     Postconditions: returns an int in ``[0, 50]``; garbage env → default 5,
         values out of range are clamped (0 disables injection).
     """
-    raw = os.environ.get("SE_LEARNINGS_TOPN", "5")
-    try:
-        return max(0, min(50, int(raw)))
-    except (TypeError, ValueError):
-        return 5
+    return env_int("SE_LEARNINGS_TOPN", 5, 0, 50)
 
 
 def _agent_json(agent: Agent, prompt: str) -> dict:

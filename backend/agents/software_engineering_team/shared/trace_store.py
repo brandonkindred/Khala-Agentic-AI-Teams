@@ -10,30 +10,23 @@ Postgres is disabled. Writes never raise into the LLM call path.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
+
+from software_engineering_team.shared.env_config import env_bool, env_float
 
 logger = logging.getLogger(__name__)
 
 
 def _trace_enabled() -> bool:
     """True when ``SE_TRACE_TO_POSTGRES`` opts the Postgres trace sink in (default off)."""
-    return (os.environ.get("SE_TRACE_TO_POSTGRES", "") or "").strip().lower() in (
-        "true",
-        "1",
-        "yes",
-    )
+    return env_bool("SE_TRACE_TO_POSTGRES")
 
 
 def _retention_days() -> float:
-    raw = os.environ.get("SE_TRACE_RETENTION_DAYS", "30")
-    try:
-        return max(0.0, float(raw))
-    except (TypeError, ValueError):
-        return 30.0
+    return env_float("SE_TRACE_RETENTION_DAYS", 30.0, 0.0)
 
 
 def write_trace(record: Any) -> bool:
