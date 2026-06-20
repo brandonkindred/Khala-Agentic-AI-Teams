@@ -73,6 +73,24 @@ describe('StrategyLabComponent — asset categories', () => {
     expect(component.categoriesValid).toBe(false);
   });
 
+  it('memoizes pagedTrades and winCount per record', () => {
+    const record = {
+      lab_record_id: 'rec-1',
+      backtest: {
+        trades: [
+          { outcome: 'win', cumulative_pnl: 10 },
+          { outcome: 'loss', cumulative_pnl: 4 },
+          { outcome: 'win', cumulative_pnl: 9 },
+        ],
+      },
+    } as unknown as Parameters<typeof component.pagedTrades>[0];
+
+    const paged1 = component.pagedTrades(record);
+    expect(component.pagedTrades(record)).toBe(paged1); // stable reference (same record + page)
+    expect(component.winCount(record)).toBe(2);
+    expect(component.winCount(record)).toBe(2); // served from cache on the second call
+  });
+
   it('sends the selected categories in canonical order on the run request', () => {
     // Select out of canonical order; the payload must be reordered canonically.
     component.selectedCategories = ['forex', 'stocks'];
