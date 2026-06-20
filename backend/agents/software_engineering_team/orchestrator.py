@@ -1493,6 +1493,141 @@ def _pop_runnable_task(
     return None
 
 
+def _code_v2_worker(
+    *,
+    job_id: str,
+    queue: List[str],
+    all_tasks: Dict[str, Any],
+    completed: set,
+    failed: Dict[str, str],
+    completed_code_task_ids: List[str],
+    architecture: Any,
+    agents: Dict[str, Any],
+    repo_path: Path,
+    agents_key: str,
+    team_label: str,
+    label: str,
+    default_assignee: str,
+    forward_tech_lead: bool,
+    surface_rate_limit: bool,
+) -> None:
+    """Drain ``queue`` by calling a code-v2 team-lead's ``run_workflow``, one task at a time.
+
+    The backend (``backend_code_v2_team``) and frontend (``frontend_code_v2_team``) workers
+    are identical except for which team lead they invoke, their progress/log labels, and two
+    backend-only knobs — hence the parametrization. Designed to run in its own thread,
+    parallel with the sibling worker.
+
+    Preconditions:
+        - ``agents_key`` indexes the team lead in ``agents`` (``None`` ⇒ every queued task is
+          failed with "``label`` team not registered" and the worker returns immediately).
+        - ``forward_tech_lead`` forwards ``tech_lead``/``build_fix_specialist`` to
+          ``run_workflow`` (backend only); ``surface_rate_limit`` maps an
+          ``LLMRateLimitError`` to ``OLLAMA_WEEKLY_LIMIT_MESSAGE`` (backend only).
+    Postconditions:
+        - Each drained task ends in exactly one of ``completed`` (and
+          ``completed_code_task_ids``) or ``failed``; ``queue`` is left empty on normal exit.
+        - A ``TASK_MERGED`` event is recorded for every successful task.
+    """
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    team_lead = agents.get(agents_key)
+    if team_lead is None:
+        for tid in queue:
+            failed[tid] = f"{label} team not registered"
+        return
+
+    while queue:  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
+        # Check for cancellation before starting each task
+        if is_cancel_requested(job_id):
+            logger.info("%s worker: cancellation detected, stopping", label)
+            return
+
+        task_id = queue.pop(0)
+        task = all_tasks.get(task_id)
+        if not task:
+            continue
+
+        update_job(job_id, current_task=task_id)
+        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+        update_job_team_progress(job_id, team_label, current_task_id=task_id)
+        logger.info("[%s] >>> %s worker starting task", task_id, label)
+        task_start = time.monotonic()
+
+        def _job_updater(**kwargs: Any) -> None:
+            update_job_team_progress(job_id, team_label, **kwargs)
+
+        try:
+            arch = (
+                architecture
+                if isinstance(architecture, SystemArchitecture)
+                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
+            )
+            workflow_kwargs: Dict[str, Any] = dict(
+                repo_path=repo_path,
+                task=task,
+                architecture=arch,
+                qa_agent=agents.get("qa"),
+                security_agent=agents.get("security"),
+                code_review_agent=agents.get("code_review"),
+                build_verifier=_run_build_verification,
+                doc_agent=agents.get("documentation"),
+                linting_tool_agent=agents.get("linting_tool_agent"),
+                job_updater=_job_updater,
+            )
+            if forward_tech_lead:
+                workflow_kwargs["tech_lead"] = agents.get("tech_lead")
+                workflow_kwargs["build_fix_specialist"] = agents.get("build_fix_specialist")
+            # Attribute every LLM call this task makes to the job/task/phase so
+            # telemetry spans and per-job cost accounting can slice by them.
+            with llm_attribution(
+                team="software_engineering",
+                job_id=job_id,
+                task_id=task_id,
+                phase="execution",
+            ):
+                result = team_lead.run_workflow(**workflow_kwargs)
+            elapsed = time.monotonic() - task_start
+            if result.success:
+                completed.add(task_id)
+                completed_code_task_ids.append(task_id)
+                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                se_events.record_event(
+                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
+                )
+                _log_task_completion_banner(
+                    task_id=task_id,
+                    task_title=getattr(task, "title", "") or task_id,
+                    assignee=getattr(task, "assignee", default_assignee),
+                    elapsed_seconds=elapsed,
+                    description=getattr(task, "description", "") or "",
+                )
+            else:
+                reason = result.failure_reason or f"{label} workflow did not succeed"
+                failed[task_id] = reason
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
+                )
+                logger.warning("[%s] %s task failed: %s", task_id, label, reason)
+        except Exception as exc:
+            if surface_rate_limit and isinstance(exc, LLMRateLimitError):
+                failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
+                update_task_state(
+                    job_id,
+                    task_id,
+                    status="failed",
+                    finished_at=_iso_now(),
+                    error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
+                )
+                logger.warning("[%s] LLM rate limit exceeded in %s worker: %s", task_id, label, exc)
+            else:
+                failed[task_id] = f"{label} exception: {exc}"
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
+                )
+                logger.exception("[%s] %s worker exception", task_id, label)
+
+
 def _backend_code_v2_worker(
     *,
     job_id: str,
@@ -1505,107 +1640,24 @@ def _backend_code_v2_worker(
     agents: Dict[str, Any],
     repo_path: Path,
 ) -> None:
-    """
-    Worker that drains ``backend_code_v2_queue`` by calling the
-    backend team's (backend_code_v2_team) ``run_workflow``.
-    Designed to run in its own thread, parallel with frontend worker.
-    """
-    from software_engineering_team.shared.models import SystemArchitecture
-
-    team_lead = agents.get("backend")
-    if team_lead is None:
-        for tid in backend_code_v2_queue:
-            failed[tid] = "backend team not registered"
-        return
-
-    while (
-        backend_code_v2_queue
-    ):  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
-        # Check for cancellation before starting each task
-        if is_cancel_requested(job_id):
-            logger.info("Backend worker: cancellation detected, stopping")
-            return
-
-        task_id = backend_code_v2_queue.pop(0)
-        task = all_tasks.get(task_id)
-        if not task:
-            continue
-
-        update_job(job_id, current_task=task_id)
-        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-        update_job_team_progress(job_id, "backend-code-v2", current_task_id=task_id)
-        logger.info("[%s] >>> backend worker starting task", task_id)
-        task_start = time.monotonic()
-
-        def _job_updater(**kwargs: Any) -> None:
-            update_job_team_progress(job_id, "backend-code-v2", **kwargs)
-
-        try:
-            arch = (
-                architecture
-                if isinstance(architecture, SystemArchitecture)
-                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
-            )
-            # Attribute every LLM call this task makes to the job/task/phase so
-            # telemetry spans and per-job cost accounting can slice by them.
-            with llm_attribution(
-                team="software_engineering",
-                job_id=job_id,
-                task_id=task_id,
-                phase="execution",
-            ):
-                result = team_lead.run_workflow(
-                    repo_path=repo_path,
-                    task=task,
-                    architecture=arch,
-                    qa_agent=agents.get("qa"),
-                    security_agent=agents.get("security"),
-                    code_review_agent=agents.get("code_review"),
-                    build_verifier=_run_build_verification,
-                    doc_agent=agents.get("documentation"),
-                    linting_tool_agent=agents.get("linting_tool_agent"),
-                    tech_lead=agents.get("tech_lead"),
-                    build_fix_specialist=agents.get("build_fix_specialist"),
-                    job_updater=_job_updater,
-                )
-            elapsed = time.monotonic() - task_start
-            if result.success:
-                completed.add(task_id)
-                completed_code_task_ids.append(task_id)
-                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                se_events.record_event(
-                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
-                )
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee=getattr(task, "assignee", "backend"),
-                    elapsed_seconds=elapsed,
-                    description=getattr(task, "description", "") or "",
-                )
-            else:
-                reason = result.failure_reason or "backend workflow did not succeed"
-                failed[task_id] = reason
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
-                )
-                logger.warning("[%s] backend task failed: %s", task_id, reason)
-        except LLMRateLimitError as exc:
-            failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-            update_task_state(
-                job_id,
-                task_id,
-                status="failed",
-                finished_at=_iso_now(),
-                error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
-            )
-            logger.warning("[%s] LLM rate limit exceeded in backend worker: %s", task_id, exc)
-        except Exception as exc:
-            failed[task_id] = f"backend exception: {exc}"
-            update_task_state(
-                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
-            )
-            logger.exception("[%s] backend worker exception", task_id)
+    """Drain ``backend_code_v2_queue`` via ``backend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
+    _code_v2_worker(
+        job_id=job_id,
+        queue=backend_code_v2_queue,
+        all_tasks=all_tasks,
+        completed=completed,
+        failed=failed,
+        completed_code_task_ids=completed_code_task_ids,
+        architecture=architecture,
+        agents=agents,
+        repo_path=repo_path,
+        agents_key="backend",
+        team_label="backend-code-v2",
+        label="backend",
+        default_assignee="backend",
+        forward_tech_lead=True,
+        surface_rate_limit=True,
+    )
 
 
 def _frontend_code_v2_worker(
@@ -1620,87 +1672,24 @@ def _frontend_code_v2_worker(
     agents: Dict[str, Any],
     repo_path: Path,
 ) -> None:
-    """Worker that drains frontend_code_v2_queue by calling frontend_code_v2_team run_workflow."""
-    from software_engineering_team.shared.models import SystemArchitecture
-
-    team_lead = agents.get("frontend_code_v2")
-    if team_lead is None:
-        for tid in frontend_code_v2_queue:
-            failed[tid] = "frontend_code_v2 team not registered"
-        return
-
-    while frontend_code_v2_queue:  # pragma: no cover  # integration-only: drains queue by calling frontend-code-v2 run_workflow
-        # Check for cancellation before starting each task
-        if is_cancel_requested(job_id):
-            logger.info("Frontend worker: cancellation detected, stopping")
-            return
-
-        task_id = frontend_code_v2_queue.pop(0)
-        task = all_tasks.get(task_id)
-        if not task:
-            continue
-
-        update_job(job_id, current_task=task_id)
-        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-        update_job_team_progress(job_id, "frontend-code-v2", current_task_id=task_id)
-        logger.info("[%s] >>> frontend_code_v2 worker starting task", task_id)
-        task_start = time.monotonic()
-
-        def _job_updater(**kwargs: Any) -> None:
-            update_job_team_progress(job_id, "frontend-code-v2", **kwargs)
-
-        try:
-            arch = (
-                architecture
-                if isinstance(architecture, SystemArchitecture)
-                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
-            )
-            with llm_attribution(
-                team="software_engineering",
-                job_id=job_id,
-                task_id=task_id,
-                phase="execution",
-            ):
-                result = team_lead.run_workflow(
-                    repo_path=repo_path,
-                    task=task,
-                    architecture=arch,
-                    qa_agent=agents.get("qa"),
-                    security_agent=agents.get("security"),
-                    code_review_agent=agents.get("code_review"),
-                    build_verifier=_run_build_verification,
-                    doc_agent=agents.get("documentation"),
-                    linting_tool_agent=agents.get("linting_tool_agent"),
-                    job_updater=_job_updater,
-                )
-            elapsed = time.monotonic() - task_start
-            if result.success:
-                completed.add(task_id)
-                completed_code_task_ids.append(task_id)
-                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                se_events.record_event(
-                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
-                )
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee=getattr(task, "assignee", "frontend-code-v2"),
-                    elapsed_seconds=elapsed,
-                    description=getattr(task, "description", "") or "",
-                )
-            else:
-                reason = result.failure_reason or "frontend_code_v2 workflow did not succeed"
-                failed[task_id] = reason
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
-                )
-                logger.warning("[%s] frontend_code_v2 task failed: %s", task_id, reason)
-        except Exception as exc:
-            failed[task_id] = f"frontend_code_v2 exception: {exc}"
-            update_task_state(
-                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
-            )
-            logger.exception("[%s] frontend_code_v2 worker exception", task_id)
+    """Drain ``frontend_code_v2_queue`` via ``frontend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
+    _code_v2_worker(
+        job_id=job_id,
+        queue=frontend_code_v2_queue,
+        all_tasks=all_tasks,
+        completed=completed,
+        failed=failed,
+        completed_code_task_ids=completed_code_task_ids,
+        architecture=architecture,
+        agents=agents,
+        repo_path=repo_path,
+        agents_key="frontend_code_v2",
+        team_label="frontend-code-v2",
+        label="frontend_code_v2",
+        default_assignee="frontend-code-v2",
+        forward_tech_lead=False,
+        surface_rate_limit=False,
+    )
 
 
 def _run_backend_frontend_workers(
