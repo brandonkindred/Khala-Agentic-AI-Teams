@@ -25,7 +25,8 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-_model_cache: dict[tuple[str, str, str, Optional[str], str], LLMClientModel] = {}
+# Key: (provider, model_id, base_url, response_format, agent_key, key_fingerprint).
+_model_cache: dict[tuple[str, str, str, str, Optional[str], str], LLMClientModel] = {}
 _cache_lock = threading.Lock()
 
 
