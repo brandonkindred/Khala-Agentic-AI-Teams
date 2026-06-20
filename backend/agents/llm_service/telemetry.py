@@ -31,7 +31,9 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Callable, Deque, Dict, List, Optional
+
+from .pricing import estimate_cost_usd
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +61,10 @@ class LLMCallRecord:
     job_id: Optional[str] = None
     objective: str = ""
     request_id: str = ""
+    task_id: str = ""
+    phase: str = ""
+    cost_usd: float = 0.0
+    outcome: str = ""  # coarse result bucket; defaults to ``status``
     # Opt-in prompt/response capture (when LLM_CAPTURE_PROMPTS=true)
     prompt_preview: Optional[str] = None
     response_preview: Optional[str] = None
@@ -75,6 +81,8 @@ class LLMCallRecord:
             "total_tokens": self.total_tokens,
             "latency_ms": self.latency_ms,
             "status": self.status,
+            "cost_usd": self.cost_usd,
+            "outcome": self.outcome,
         }
         if self.error_type:
             d["error_type"] = self.error_type
@@ -84,6 +92,10 @@ class LLMCallRecord:
             d["objective"] = self.objective
         if self.request_id:
             d["request_id"] = self.request_id
+        if self.task_id:
+            d["task_id"] = self.task_id
+        if self.phase:
+            d["phase"] = self.phase
         return d
 
 
@@ -96,6 +108,63 @@ _log_lock = threading.Lock()
 
 # Whether to capture prompt/response content (can be large)
 _CAPTURE_PROMPTS = os.environ.get("LLM_CAPTURE_PROMPTS", "").lower() in ("true", "1", "yes")
+
+# Known coarse outcome buckets; any other status passes through verbatim.
+_KNOWN_OUTCOMES = frozenset({"success", "error", "rate_limited", "truncated"})
+
+
+# ---------------------------------------------------------------------------
+# Call observers
+# ---------------------------------------------------------------------------
+#
+# A generic post-record hook so a team (e.g. Software Engineering) can react to
+# every LLM call — accumulate per-job cost, persist a trace row — *without*
+# llm_service importing team code. Observers are called after the record is
+# buffered and the OTel span emitted; an observer raising is swallowed so one
+# team's bookkeeping never breaks another team's LLM call.
+
+_observers: List[Callable[["LLMCallRecord"], None]] = []
+_observers_lock = threading.Lock()
+
+
+def register_call_observer(observer: Callable[["LLMCallRecord"], None]) -> None:
+    """Register ``observer`` to be invoked with each new :class:`LLMCallRecord`.
+
+    Preconditions: ``observer`` is callable.
+    Postconditions: ``observer`` is invoked (best-effort, exceptions swallowed)
+        for every subsequent :func:`record_llm_call`. Re-registering the same
+        callable is a no-op, so module-import-time registration is idempotent.
+    """
+    with _observers_lock:
+        if observer not in _observers:
+            _observers.append(observer)
+
+
+def unregister_call_observer(observer: Callable[["LLMCallRecord"], None]) -> None:
+    """Remove a previously registered observer; no-op if absent (for tests)."""
+    with _observers_lock:
+        if observer in _observers:
+            _observers.remove(observer)
+
+
+def _notify_observers(record: "LLMCallRecord") -> None:
+    with _observers_lock:
+        observers = list(_observers)
+    for observer in observers:
+        try:
+            observer(record)
+        except Exception:
+            logger.debug("LLM call observer failed", exc_info=True)
+
+
+def _derive_outcome(status: str) -> str:
+    """Map a call ``status`` to its coarse outcome bucket.
+
+    Postconditions: returns the status verbatim when non-empty (the known
+        buckets — see :data:`_KNOWN_OUTCOMES` — plus any forward-compatible
+        value), and ``"unknown"`` for an empty status.
+    """
+    return status or "unknown"
 
 
 def record_llm_call(
@@ -113,18 +182,33 @@ def record_llm_call(
     job_id: Optional[str] = None,
     objective: str = "",
     request_id: str = "",
+    task_id: str = "",
+    phase: str = "",
+    cost_usd: Optional[float] = None,
+    outcome: str = "",
     prompt_text: Optional[str] = None,
     response_text: Optional[str] = None,
 ) -> LLMCallRecord:
     """Record an LLM call to the in-memory telemetry log.
 
-    Returns the created record for testing/inspection.
+    ``cost_usd`` defaults to an estimate from :func:`llm_service.pricing.estimate_cost_usd`
+    over the token counts when not supplied; ``outcome`` defaults to a coarse
+    bucket derived from ``status``. Returns the created record for
+    testing/inspection.
     """
     prompt_preview = None
     response_preview = None
     if _CAPTURE_PROMPTS:
         prompt_preview = (prompt_text or "")[:2000] if prompt_text else None
         response_preview = (response_text or "")[:2000] if response_text else None
+
+    if cost_usd is None:
+        try:
+            cost_usd = estimate_cost_usd(model, max(0, prompt_tokens), max(0, completion_tokens))
+        except Exception:
+            # Cost estimation must never break telemetry recording.
+            logger.debug("cost estimation failed for model %r", model, exc_info=True)
+            cost_usd = 0.0
 
     record = LLMCallRecord(
         timestamp=time.time(),
@@ -141,12 +225,17 @@ def record_llm_call(
         job_id=job_id,
         objective=objective,
         request_id=request_id,
+        task_id=task_id,
+        phase=phase,
+        cost_usd=cost_usd,
+        outcome=outcome or _derive_outcome(status),
         prompt_preview=prompt_preview,
         response_preview=response_preview,
     )
     with _log_lock:
         _call_log.append(record)
     _emit_otel_llm_span(record)
+    _notify_observers(record)
     return record
 
 
@@ -168,11 +257,13 @@ _otel_tracer: Any = None
 _otel_llm_calls: Any = None
 _otel_llm_tokens: Any = None
 _otel_llm_latency: Any = None
+_otel_llm_cost: Any = None
 
 
 def _ensure_otel_instruments() -> None:
     """Lazily acquire the tracer and metric instruments."""
     global _otel_initialized, _otel_tracer, _otel_llm_calls, _otel_llm_tokens, _otel_llm_latency
+    global _otel_llm_cost
 
     if _otel_initialized:
         return
@@ -195,12 +286,18 @@ def _ensure_otel_instruments() -> None:
             description="LLM call latency in milliseconds",
             unit="ms",
         )
+        _otel_llm_cost = meter.create_counter(
+            "khala.llm.cost_usd",
+            description="Estimated USD cost of LLM calls (prompt + completion)",
+            unit="USD",
+        )
     except Exception:
         logger.debug("OpenTelemetry instruments unavailable for llm_service", exc_info=True)
         _otel_tracer = None
         _otel_llm_calls = None
         _otel_llm_tokens = None
         _otel_llm_latency = None
+        _otel_llm_cost = None
 
 
 def _emit_otel_llm_span(record: LLMCallRecord) -> None:
@@ -212,23 +309,37 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
         attributes = {
             "khala.team": record.team or "unknown",
             "khala.agent_key": record.agent_key or "unknown",
+            # ``agent.name`` mirrors ``khala.agent_key`` under the attribute name
+            # the SDLC review specified; both are emitted for compatibility.
+            "agent.name": record.agent_key or "unknown",
             "khala.caller_tag": record.caller_tag or "",
             "llm.vendor": "ollama",
             "llm.request.model": record.model or "unknown",
+            "llm.model": record.model or "unknown",
             "llm.usage.prompt_tokens": record.prompt_tokens,
             "llm.usage.completion_tokens": record.completion_tokens,
             "llm.usage.total_tokens": record.total_tokens,
+            # Issue-named aliases for the input/output token counts.
+            "llm.input_tokens": record.prompt_tokens,
+            "llm.output_tokens": record.completion_tokens,
             "llm.latency_ms": record.latency_ms,
             "llm.status": record.status,
+            "cost.usd": record.cost_usd,
+            "outcome": record.outcome,
         }
         if record.error_type:
             attributes["llm.error_type"] = record.error_type
         if record.job_id:
             attributes["khala.job_id"] = record.job_id
+            attributes["job.id"] = record.job_id
         if record.objective:
             attributes["khala.objective"] = record.objective
         if record.request_id:
             attributes["khala.request_id"] = record.request_id
+        if record.task_id:
+            attributes["task.id"] = record.task_id
+        if record.phase:
+            attributes["phase"] = record.phase
 
         span_name = f"llm.call {record.agent_key or 'agent'}"
         span = _otel_tracer.start_span(span_name, attributes=attributes)
@@ -255,6 +366,8 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
             _otel_llm_tokens.add(record.total_tokens, metric_attrs)
         if _otel_llm_latency is not None and record.latency_ms:
             _otel_llm_latency.record(record.latency_ms, metric_attrs)
+        if _otel_llm_cost is not None and record.cost_usd:
+            _otel_llm_cost.add(record.cost_usd, metric_attrs)
     except Exception:
         logger.debug("Failed to emit OpenTelemetry LLM span", exc_info=True)
 

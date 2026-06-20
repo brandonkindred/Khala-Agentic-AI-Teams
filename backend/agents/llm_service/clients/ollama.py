@@ -416,6 +416,8 @@ class OllamaLLMClient(LLMClient):
                 job_id=attr.job_id or None,
                 objective=attr.objective,
                 request_id=current_request_id(),
+                task_id=attr.task_id,
+                phase=attr.phase,
                 prompt_text=prompt_text,
                 response_text=response_text,
             )

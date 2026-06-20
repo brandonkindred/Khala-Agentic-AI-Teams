@@ -78,6 +78,25 @@ def test_nested_inherits_and_overrides() -> None:
         assert outer.team == "t"
 
 
+def test_task_id_and_phase_inherit_and_override() -> None:
+    with llm_attribution(team="software_engineering", job_id="J1", phase="design"):
+        outer = current_attribution()
+        assert outer.phase == "design"
+        assert outer.task_id == ""
+        with llm_attribution(task_id="task-9", phase="execution"):
+            inner = current_attribution()
+            # task_id + phase set on inner; team + job_id inherited from outer.
+            assert inner.task_id == "task-9"
+            assert inner.phase == "execution"
+            assert inner.team == "software_engineering"
+            assert inner.job_id == "J1"
+        # Inner restored; outer phase intact, task_id still empty.
+        restored = current_attribution()
+        assert restored.phase == "design"
+        assert restored.task_id == ""
+    assert current_attribution() == LLMAttribution()
+
+
 def test_empty_string_override_is_distinct_from_none_inherit() -> None:
     with llm_attribution(objective="outer"):
         with llm_attribution(objective=""):
