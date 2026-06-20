@@ -5,15 +5,18 @@
   </a>
 </div>
 
-<h1>Coding Team</h1>
-<p class="subtitle">
-  Sub-team of <strong>Software Engineering</strong>: Tech Lead, stack-specialist Senior Engineers, and Task Graph.
-  The full SE pipeline invokes this team after planning; use this page for the assistant or direct API access at
-  <code>/api/coding-team</code>.
-</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Coding Team API" />
+<div class="page-header">
+  <div class="page-header__titles">
+    <h1>Coding Team</h1>
+    <p class="subtitle">
+      Sub-team of <strong>Software Engineering</strong>: Tech Lead, stack-specialist Senior Engineers, and Task Graph.
+      The full SE pipeline invokes this team after planning; use this page for the assistant or direct API access at
+      <code>/api/coding-team</code>.
+    </p>
+  </div>
+  <div class="page-header__status" aria-live="polite">
+    <app-health-indicator [healthCheck]="healthCheck" label="Coding Team API" />
+  </div>
 </div>
 
 <!-- ────────────────────────────────────────────────────────────────── -->

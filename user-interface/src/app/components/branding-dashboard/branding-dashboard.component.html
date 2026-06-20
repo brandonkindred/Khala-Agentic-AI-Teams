@@ -1,10 +1,13 @@
-<h1>Branding Team</h1>
-<p class="page-intro">
-  <strong>Chat</strong> with the branding assistant to build your brand. Use <strong>Edit details</strong> to enter structured fields directly.
-</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
+<div class="page-header">
+  <div class="page-header__titles">
+    <h1>Branding Team</h1>
+    <p class="page-intro">
+      <strong>Chat</strong> with the branding assistant to build your brand. Use <strong>Edit details</strong> to enter structured fields directly.
+    </p>
+  </div>
+  <div class="page-header__status" aria-live="polite">
+    <app-health-indicator [healthCheck]="healthCheck" label="Branding API" />
+  </div>
 </div>
 
 <app-branding-context-selector

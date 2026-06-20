@@ -13,8 +13,21 @@
   }
 }
 
-.header-row {
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--kh-space-4);
   margin-bottom: 1rem;
+}
+
+.page-header__titles {
+  min-width: 0;
+}
+
+.page-header__status {
+  flex-shrink: 0;
 }
 
 // ---------------------------------------------------------------------------

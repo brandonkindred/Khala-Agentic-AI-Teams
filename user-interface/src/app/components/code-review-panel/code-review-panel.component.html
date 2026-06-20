@@ -5,15 +5,18 @@
   </a>
 </div>
 
-<h1>Code Review</h1>
-<p class="subtitle">
-  Point the <strong>code reviewer agents</strong> at an open pull request. The reviewer reads the PR diff,
-  then posts a GitHub review with inline comments describing what's wrong and how to fix it —
-  requesting changes when it finds critical or high-severity issues.
-</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Coding Team API" />
+<div class="page-header">
+  <div class="page-header__titles">
+    <h1>Code Review</h1>
+    <p class="subtitle">
+      Point the <strong>code reviewer agents</strong> at an open pull request. The reviewer reads the PR diff,
+      then posts a GitHub review with inline comments describing what's wrong and how to fix it —
+      requesting changes when it finds critical or high-severity issues.
+    </p>
+  </div>
+  <div class="page-header__status" aria-live="polite">
+    <app-health-indicator [healthCheck]="healthCheck" label="Coding Team API" />
+  </div>
 </div>
 
 @if (loadingConfig) {
