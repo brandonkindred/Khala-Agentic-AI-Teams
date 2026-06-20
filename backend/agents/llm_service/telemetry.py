@@ -158,9 +158,9 @@ def _notify_observers(record: "LLMCallRecord") -> None:
 def _derive_outcome(status: str) -> str:
     """Map a call ``status`` to its coarse outcome bucket.
 
-    Postconditions: returns the status verbatim when non-empty (the known
-        buckets — see :data:`_KNOWN_OUTCOMES` — plus any forward-compatible
-        value), and ``"unknown"`` for an empty status.
+    Postconditions: returns the status verbatim when non-empty (the usual buckets
+        ``success`` / ``error`` / ``rate_limited`` / ``truncated``, plus any
+        forward-compatible value), and ``"unknown"`` for an empty status.
     """
     return status or "unknown"
 

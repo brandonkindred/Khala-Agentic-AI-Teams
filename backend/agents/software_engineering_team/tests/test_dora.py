@@ -114,30 +114,57 @@ def test_cost_is_folded_in() -> None:
 
 
 def test_change_failure_rate_clamped_to_one() -> None:
-    # More re-entries than merges (window-edge) must not produce >100%.
+    # Distinct re-entry tasks can exceed merged tasks at a window edge → clamp to 1.0.
     events = [
-        _ev(se_events.TASK_MERGED, task_id="t1"),
-        _ev(se_events.GATE_REENTRY, task_id="t1"),
-        _ev(se_events.GATE_REENTRY, task_id="t1"),
-        _ev(se_events.GATE_REENTRY, task_id="t1"),
+        _ev(se_events.TASK_MERGED, task_id="t1", job_id="j"),
+        _ev(se_events.GATE_REENTRY, task_id="t1", job_id="j"),
+        _ev(se_events.GATE_REENTRY, task_id="t2", job_id="j"),
+        _ev(se_events.GATE_REENTRY, task_id="t3", job_id="j"),
     ]
     m = compute_from_events(events, 30.0)
     assert m.merged_count == 1
-    assert m.gate_reentry_count == 3
-    assert m.change_failure_rate == 1.0
+    assert m.gate_reentry_count == 3  # three distinct tasks
+    assert m.change_failure_rate == 1.0  # clamped from 3.0
 
 
-def test_merged_count_deduplicated_by_task_id() -> None:
-    # A task re-queued after repair and merged twice counts once.
+def test_gate_reentry_deduplicated_per_job_task() -> None:
+    # Re-emitted re-entries for the same (job, task) — e.g. on resume — count once.
     events = [
-        _ev(se_events.TASK_CREATED, offset_s=0, task_id="t1"),
-        _ev(se_events.TASK_MERGED, offset_s=100, task_id="t1"),
-        _ev(se_events.TASK_MERGED, offset_s=300, task_id="t1"),
+        _ev(se_events.TASK_MERGED, task_id="t1", job_id="j"),
+        _ev(se_events.GATE_REENTRY, task_id="t1", job_id="j"),
+        _ev(se_events.GATE_REENTRY, task_id="t1", job_id="j"),
+    ]
+    m = compute_from_events(events, 30.0)
+    assert m.merged_count == 1
+    assert m.gate_reentry_count == 1  # deduped
+    assert m.change_failure_rate == pytest.approx(1.0)
+
+
+def test_merged_count_deduplicated_by_job_and_task_id() -> None:
+    # A task re-queued after repair and merged twice (same job) counts once...
+    events = [
+        _ev(se_events.TASK_CREATED, offset_s=0, task_id="t1", job_id="j"),
+        _ev(se_events.TASK_MERGED, offset_s=100, task_id="t1", job_id="j"),
+        _ev(se_events.TASK_MERGED, offset_s=300, task_id="t1", job_id="j"),
     ]
     m = compute_from_events(events, 30.0)
     assert m.merged_count == 1
     assert m.lead_time_sample_count == 1
     assert m.lead_time_seconds_median == pytest.approx(100.0)  # earliest merge only
+
+
+def test_same_task_id_across_jobs_not_collapsed() -> None:
+    # ...but two DIFFERENT jobs reusing a generic id ('task-1') must both count.
+    events = [
+        _ev(se_events.TASK_CREATED, offset_s=0, task_id="task-1", job_id="jA"),
+        _ev(se_events.TASK_MERGED, offset_s=100, task_id="task-1", job_id="jA"),
+        _ev(se_events.TASK_CREATED, offset_s=0, task_id="task-1", job_id="jB"),
+        _ev(se_events.TASK_MERGED, offset_s=200, task_id="task-1", job_id="jB"),
+    ]
+    m = compute_from_events(events, 30.0)
+    assert m.merged_count == 2
+    assert m.lead_time_sample_count == 2
+    assert m.lead_time_seconds_median == pytest.approx(150.0)  # median(100, 200)
 
 
 def test_lead_time_uses_created_ts_from_detail_across_boundary() -> None:

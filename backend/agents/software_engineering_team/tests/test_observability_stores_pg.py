@@ -93,15 +93,42 @@ def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
     monkeypatch.setattr(orchestrator.cost_tracker, "flush", lambda jid: None)
 
     orchestrator._emit_coding_team_metrics("job-ct")
+    # Idempotent: a resume/re-run must not double-count the deployment or re-entries.
+    orchestrator._emit_coding_team_metrics("job-ct")
 
     m = compute_dora(30.0)
-    assert m.deployment_count == 1  # one MERGE_TO_MAIN for the completed job
+    assert m.deployment_count == 1  # one MERGE_TO_MAIN despite two emit calls
     assert m.merged_count == 2  # t1 + t2 (t3 failed)
     assert m.gate_reentry_count == 1  # t2 needed revisions
     assert m.change_failure_rate == pytest.approx(0.5)
     assert m.lead_time_sample_count == 2
     # lead time ~30 min (job creation → merge), tolerant of test timing.
     assert m.lead_time_seconds_median == pytest.approx(1800, abs=60)
+
+
+def test_se_events_helpers(_schema) -> None:
+    from software_engineering_team.shared import se_events
+
+    assert se_events.job_has_events("jX") is False
+    se_events.record_event(se_events.CRASH_DETECTED, job_id="jX", task_id="t1")
+    assert se_events.job_has_events("jX") is True
+    assert se_events.job_has_events("jX", se_events.MERGE_TO_MAIN) is False
+    # One unresolved crash for t1.
+    assert se_events.unresolved_crashed_task_ids("jX") == {"t1"}
+    se_events.record_event(se_events.CRASH_RESOLVED, job_id="jX", task_id="t1")
+    assert se_events.unresolved_crashed_task_ids("jX") == set()
+
+
+def test_record_event_coerces_naive_ts_to_utc(_schema) -> None:
+    from datetime import datetime as _dt
+
+    from software_engineering_team.shared import se_events
+
+    naive = _dt(2026, 6, 1, 12, 0, 0)  # no tzinfo
+    se_events.record_event(se_events.MERGE_TO_MAIN, job_id="jZ", ts=naive)
+    rows = se_events.fetch_events_since(_dt(2026, 5, 1, tzinfo=timezone.utc))
+    jz = [r for r in rows if r["job_id"] == "jZ"]
+    assert jz and jz[0]["ts"].tzinfo is not None  # stored/returned tz-aware
 
 
 def test_trace_write_and_cost(_schema, monkeypatch) -> None:

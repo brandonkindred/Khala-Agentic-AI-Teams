@@ -1736,7 +1736,10 @@ def _run_backend_frontend_workers(
     llm_limit_exceeded = [False]  # mutable ref for workers
     llm_connectivity_failed = [False]  # frontend could not reach LLM after retries; pause job
     repaired_tasks = set()  # max 1 repair per task
-    crashed_tasks: set[str] = set()  # tasks that crashed and are awaiting a successful retry (MTTR)
+    # Tasks that crashed and are awaiting a successful retry (MTTR). Seeded from
+    # durable se_events so a crash detected in a prior run still resolves (and pairs
+    # for MTTR) when this resumed/retry run succeeds.
+    crashed_tasks: set[str] = se_events.unresolved_crashed_task_ids(job_id)
     agent_source_path = Path(__file__).resolve().parent  # software_engineering_team/
 
     def _remaining_queue_ids() -> List[str]:
@@ -1834,6 +1837,7 @@ def _run_backend_frontend_workers(
                 elapsed = time.monotonic() - task_start_time
                 failure_reason = workflow_result.failure_reason or "Backend workflow failed"
                 _refine_contract = False
+                crash_resolved_now = False
                 with state_lock:
                     if workflow_result.success:
                         completed.add(task_id)
@@ -1841,14 +1845,10 @@ def _run_backend_frontend_workers(
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                         # MTTR: a previously-crashed task is only *resolved* once it
                         # actually succeeds on retry (not when a fix was merely applied).
+                        # The event is emitted after the lock is released (below).
                         if task_id in crashed_tasks:
                             crashed_tasks.discard(task_id)
-                            se_events.record_event(
-                                se_events.CRASH_RESOLVED,
-                                job_id=job_id,
-                                task_id=task_id,
-                                phase="execution",
-                            )
+                            crash_resolved_now = True
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -1890,6 +1890,12 @@ def _run_backend_frontend_workers(
                                 elapsed,
                                 failed[task_id],
                             )
+                # Emit outside the lock: keep the blocking Postgres write off the
+                # critical section the other worker contends on.
+                if crash_resolved_now:
+                    se_events.record_event(
+                        se_events.CRASH_RESOLVED, job_id=job_id, task_id=task_id, phase="execution"
+                    )
                 if _refine_contract:
                     try:
                         project_planning_agent = agents.get("project_planning")
@@ -1995,7 +2001,10 @@ def _run_backend_frontend_workers(
                     phase="execution",
                     detail={"exception_type": type(e).__name__},
                 )
-                crashed_tasks.add(task_id)  # resolved only when the retry actually succeeds
+                # resolved only when the retry actually succeeds; mutate under the
+                # same lock the resolve path uses, so the shared set stays consistent.
+                with state_lock:
+                    crashed_tasks.add(task_id)
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2182,6 +2191,7 @@ def _run_backend_frontend_workers(
 
                 elapsed = time.monotonic() - task_start_time
                 failure_reason = workflow_result.failure_reason or "Frontend workflow failed"
+                crash_resolved_now = False
                 with state_lock:
                     if workflow_result.success:
                         completed.add(task_id)
@@ -2189,12 +2199,7 @@ def _run_backend_frontend_workers(
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                         if task_id in crashed_tasks:
                             crashed_tasks.discard(task_id)
-                            se_events.record_event(
-                                se_events.CRASH_RESOLVED,
-                                job_id=job_id,
-                                task_id=task_id,
-                                phase="execution",
-                            )
+                            crash_resolved_now = True
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -2223,6 +2228,10 @@ def _run_backend_frontend_workers(
                             elapsed,
                             failed[task_id],
                         )
+                if crash_resolved_now:
+                    se_events.record_event(
+                        se_events.CRASH_RESOLVED, job_id=job_id, task_id=task_id, phase="execution"
+                    )
                 logger.info(
                     "%s[%s] <<< Frontend worker done (completed=%s)",
                     log_prefix,
@@ -2368,7 +2377,10 @@ def _run_backend_frontend_workers(
                     phase="execution",
                     detail={"exception_type": type(e).__name__},
                 )
-                crashed_tasks.add(task_id)  # resolved only when the retry actually succeeds
+                # resolved only when the retry actually succeeds; mutate under the
+                # same lock the resolve path uses, so the shared set stays consistent.
+                with state_lock:
+                    crashed_tasks.add(task_id)
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2759,9 +2771,15 @@ def _emit_coding_team_metrics(job_id: str) -> None:
 
     Preconditions: ``job_id`` is a non-empty string.
     Postconditions: best-effort — never raises; emits nothing when the job or its
-        snapshot is unavailable or Postgres is disabled. Always flushes job cost.
+        snapshot is unavailable or Postgres is disabled. Idempotent per job (a
+        resumed/re-run job does not re-emit and double-count). Always flushes job cost.
     """
     try:
+        # Idempotency: a job whose terminal metrics were already emitted (i.e. it
+        # has a merge_to_main event) must not re-emit on resume/re-run, or it would
+        # double-count the deployment and re-add gate re-entries.
+        if se_events.job_has_events(job_id, se_events.MERGE_TO_MAIN):
+            return
         job = get_job(job_id) or {}
         snapshot = job.get("task_graph_snapshot") or []
         created_ts = _parse_iso(job.get("created_at"))
@@ -3925,9 +3943,7 @@ def run_orchestrator(
                 )
                 # A completed job is a deployment to the development/main line —
                 # the DORA deployment-frequency signal.
-                se_events.record_event(
-                    se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration"
-                )
+                se_events.record_event(se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration")
                 cost_tracker.flush(job_id)
 
     except (

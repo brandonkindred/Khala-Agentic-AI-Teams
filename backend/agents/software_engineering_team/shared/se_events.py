@@ -73,12 +73,17 @@ def record_event(
         return False
     if not is_postgres_enabled():
         return False
+    # Normalize to an aware UTC timestamp: a naive datetime would be read by
+    # Postgres in the session TimeZone, silently shifting DORA windows.
+    when = ts or _utc_now()
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
     try:
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (ts or _utc_now(), job_id, task_id, event_type, phase, gate, Json(detail or {})),
+                (when, job_id, task_id, event_type, phase, gate, Json(detail or {})),
             )
         return True
     except Exception:
@@ -112,6 +117,75 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
     except Exception:
         logger.debug("failed to fetch se_events since %s", cutoff, exc_info=True)
         return []
+
+
+def job_has_events(job_id: str, event_type: str = "") -> bool:
+    """Return True if any se_event exists for ``job_id`` (optionally of ``event_type``).
+
+    Used as an idempotency guard so a resumed/re-run job does not re-emit its
+    lifecycle events (which would double-count deployments / re-entries).
+
+    Postconditions: ``False`` when Postgres is disabled, ``job_id`` is empty, or
+        on error; never raises.
+    """
+    if not job_id:
+        return False
+    try:
+        from shared_postgres import get_conn, is_postgres_enabled
+    except Exception:
+        return False
+    if not is_postgres_enabled():
+        return False
+    try:
+        sql = "SELECT 1 FROM se_events WHERE job_id = %s"
+        params: list[Any] = [job_id]
+        if event_type:
+            sql += " AND event_type = %s"
+            params.append(event_type)
+        sql += " LIMIT 1"
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            return cur.fetchone() is not None
+    except Exception:
+        logger.debug("failed to check se_events for job %s", job_id, exc_info=True)
+        return False
+
+
+def unresolved_crashed_task_ids(job_id: str) -> set[str]:
+    """Return task ids for ``job_id`` with more CRASH_DETECTED than CRASH_RESOLVED.
+
+    Lets a later (resumed/retry) run know which tasks crashed in a prior run but
+    were never resolved, so a successful retry can still emit CRASH_RESOLVED and
+    MTTR pairs across runs.
+
+    Postconditions: empty set when Postgres is disabled or on error; never raises.
+    """
+    if not job_id:
+        return set()
+    try:
+        from shared_postgres import dict_row, get_conn, is_postgres_enabled
+    except Exception:
+        return set()
+    if not is_postgres_enabled():
+        return set()
+    try:
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT task_id, "
+                "  SUM((event_type = %s)::int) AS detected, "
+                "  SUM((event_type = %s)::int) AS resolved "
+                "FROM se_events WHERE job_id = %s AND event_type IN (%s, %s) "
+                "GROUP BY task_id",
+                (CRASH_DETECTED, CRASH_RESOLVED, job_id, CRASH_DETECTED, CRASH_RESOLVED),
+            )
+            return {
+                r["task_id"]
+                for r in cur.fetchall()
+                if r["task_id"] and int(r["detected"] or 0) > int(r["resolved"] or 0)
+            }
+    except Exception:
+        logger.debug("failed to read unresolved crashes for job %s", job_id, exc_info=True)
+        return set()
 
 
 def prune_events(retention_days: float) -> int:
@@ -148,5 +222,7 @@ __all__ = [
     "EVENT_TYPES",
     "record_event",
     "fetch_events_since",
+    "job_has_events",
+    "unresolved_crashed_task_ids",
     "prune_events",
 ]

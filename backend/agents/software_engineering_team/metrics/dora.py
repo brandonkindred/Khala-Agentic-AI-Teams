@@ -116,12 +116,13 @@ def compute_from_events(
 
     ordered = sorted((e for e in events if _event_ts(e)), key=lambda e: e["ts"])
 
-    # Earliest creation time per task → lead time.
-    created_by_task: dict[str, datetime] = {}
-    # Crash detections pending resolution, keyed by (job_id, task_id) so concurrent
-    # backend/frontend crashes in one job are not mis-paired.
+    # All per-task state is keyed by (job_id, task_id), not task_id alone: coding-team
+    # task ids are LLM-generated and job-local (e.g. "task-1"), so two jobs in the
+    # same window routinely reuse an id — keying by task_id alone would collide them.
+    created_by_task: dict[tuple[str, str], datetime] = {}
     detected: dict[tuple[str, str], list[datetime]] = defaultdict(list)
-    merged_task_ids: set[str] = set()
+    merged_keys: set[tuple[str, str]] = set()
+    reentry_keys: set[tuple[str, str]] = set()
     lead_times: list[float] = []
     mttrs: list[float] = []
 
@@ -129,31 +130,37 @@ def compute_from_events(
         etype = event.get("event_type")
         task_id = event.get("task_id") or ""
         job_id = event.get("job_id") or ""
+        key = (job_id, task_id)
         ts = event["ts"]
 
         if etype == se_events.TASK_CREATED:
-            created_by_task.setdefault(task_id, ts)
+            created_by_task.setdefault(key, ts)
         elif etype == se_events.MERGE_TO_MAIN:
             metrics.deployment_count += 1
         elif etype == se_events.GATE_REENTRY:
-            metrics.gate_reentry_count += 1
+            # A change either failed a gate or not — count distinct (job, task) once,
+            # so a resumed job re-emitting the event can't inflate the rate.
+            if not task_id or key not in reentry_keys:
+                if task_id:
+                    reentry_keys.add(key)
+                metrics.gate_reentry_count += 1
         elif etype == se_events.CRASH_DETECTED:
-            detected[(job_id, task_id)].append(ts)
+            detected[key].append(ts)
         elif etype == se_events.CRASH_RESOLVED:
-            pending = detected.get((job_id, task_id))
+            pending = detected.get(key)
             if pending:
                 start = pending.pop(0)
                 mttrs.append((ts - start).total_seconds())
                 metrics.crash_resolved_count += 1
 
         if etype == se_events.TASK_MERGED:
-            # Dedup by task_id (empty task_id is never deduped — count each).
-            if task_id and task_id in merged_task_ids:
+            # Dedup by (job_id, task_id) (empty task_id is never deduped — count each).
+            if task_id and key in merged_keys:
                 continue
             if task_id:
-                merged_task_ids.add(task_id)
+                merged_keys.add(key)
             metrics.merged_count += 1
-            created = _created_ts_from_detail(event) or created_by_task.get(task_id)
+            created = _created_ts_from_detail(event) or created_by_task.get(key)
             if created is not None:
                 lead = (ts - created).total_seconds()
                 if lead >= 0:

@@ -504,7 +504,14 @@ app.add_middleware(SecurityGatewayMiddleware)
 try:
     from shared_observability import instrument_fastapi_app
 
-    instrument_fastapi_app(app, team_key="unified_api")
+    # Anchored exclusions: this app hosts the /api/se/metrics business alias, whose
+    # path contains "metrics". Excluding only the exact scrape/health endpoints keeps
+    # the alias traced while still skipping the Prometheus /metrics endpoint.
+    instrument_fastapi_app(
+        app,
+        team_key="unified_api",
+        excluded_urls="^/health$,^/healthz$,^/ready$,^/metrics$",
+    )
 except Exception:
     logger.warning("OpenTelemetry FastAPI instrumentation unavailable", exc_info=True)
 
@@ -516,7 +523,8 @@ try:
     Instrumentator(
         should_group_status_codes=True,
         should_ignore_untemplated=True,
-        excluded_handlers=["/metrics", "/health"],
+        # Anchored so the /api/se/metrics alias is scraped while the scrape endpoint isn't.
+        excluded_handlers=["^/metrics$", "^/health$"],
     ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False, tags=["observability"])
 except Exception:
     logger.warning("prometheus instrumentator unavailable", exc_info=True)

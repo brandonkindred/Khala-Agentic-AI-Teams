@@ -1,7 +1,7 @@
 /**
  * Software Engineering DORA metrics + cost.
  * Mirrors the backend `DoraMetrics.to_dict()` returned by
- * `GET /api/software-engineering/metrics/dora` (and the `/api/se/metrics` alias).
+ * `GET /api/software-engineering/dora` (and the `/api/se/metrics` alias).
  */
 export interface SeMetrics {
   window_days: number;

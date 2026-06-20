@@ -6,7 +6,7 @@ import type { SeMetrics } from '../models/se-metrics.model';
 
 /**
  * Service for the Software Engineering DORA metrics endpoint.
- * Base URL from environment.softwareEngineeringApiUrl; hits `/metrics/dora`.
+ * Base URL from environment.softwareEngineeringApiUrl; hits `/dora`.
  */
 @Injectable({ providedIn: 'root' })
 export class SeMetricsApiService {
