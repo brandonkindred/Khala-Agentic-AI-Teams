@@ -192,12 +192,19 @@ export class JobsDashboardComponent implements OnInit, OnDestroy {
   /** Per-job progress history used by isStuck(). Key = `${source}::${jobId}`. */
   private progressHistory = new Map<string, ProgressSample>();
 
-  /** Tracks whether the browser tab is hidden so the live-refresh dot can
-   *  pause its pulse — polling itself still fires, but the visual signal
-   *  reflects that the user isn't actively watching. */
+  /** Tracks whether the browser tab is hidden. While hidden, polling is fully
+   *  suspended (no point fanning out 14+ team-list requests every 20s for a tab
+   *  the user isn't watching); it resumes with an immediate refresh on return. */
   private isTabHidden = false;
   private readonly onVisibilityChange = (): void => {
     this.isTabHidden = typeof document !== 'undefined' && document.hidden;
+    if (this.isTabHidden) {
+      this.pollSub?.unsubscribe();
+      this.pollSub = null;
+    } else if (!this.pollSub) {
+      // timer(0, …) fires an immediate fetch, so the view isn't left stale.
+      this.startPolling();
+    }
   };
 
   /** Drives the live-refresh dot: pulses when true, static when polling
