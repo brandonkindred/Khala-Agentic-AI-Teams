@@ -26,6 +26,7 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedNotionalSizing,
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -298,6 +299,51 @@ def test_rule4_no_exit_rules_is_critical() -> None:
     spec = _spec(exit_=[])
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("No exit rules" in c for c in _critical(results))
+
+
+def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
+    # A laddered take-profit summing to < 1.0 with no other full-position exit
+    # leaves the residual open forever — must be flagged critical.
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.3},
+                ]
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("close only a fraction" in c for c in _critical(results))
+
+
+def test_rule4_partial_ladder_with_stop_loss_is_ok() -> None:
+    # The stop closes the residual the ladder leaves open → exit-complete.
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_high"),
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+
+
+def test_rule4_full_closing_ladder_alone_is_ok() -> None:
+    # A ladder whose fractions sum to 1.0 fully closes the position on its own.
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                ]
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
 
 
 # ---------------------------------------------------------------------------
@@ -1243,15 +1289,11 @@ def test_rule9_check_a_stop_magnitude_does_not_change_verdict() -> None:
             risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
         )
         results = SpecReadinessGate().validate(spec, backtest_config=_config())
-        return any(
-            r.rule_id == "sizing:position_cap" for r in results if not r.passed
-        )
+        return any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
 
     signal_exit = [
         SignalExitRule(
-            when=Predicate(
-                lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0
-            )
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0)
         )
     ]
     tight = [StopLossRule(pct=0.01)]

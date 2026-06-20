@@ -248,6 +248,64 @@ def test_short_first_rung_emits_partial_buy_close() -> None:
     assert pending[0].qty == 50.0
 
 
+def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_size() -> None:
+    # A partial entry (50 of 100 filled) with a REQUEUE_NEXT_BAR continuation still
+    # resting: pos.original_qty is only 50 so far and the fill simulator will BUMP
+    # it to 100 once the rest fills. A rung firing now would close 0.5*50=25 and be
+    # marked fired, stranding the catch-up. The dispatcher must DEFER until the
+    # entry settles, then close 0.5*100=50.
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=50.0, entry_price=100.0)
+    portfolio.positions["AAA"].original_qty = 50.0  # only the first slice so far
+    order_book = OrderBook()
+    cont = order_book.submit(
+        OrderRequest(
+            client_order_id="c-o1",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+    assert cont.order_id == "o1"  # matches pos.entry_order_id, so it's a continuation
+    cont.cumulative_filled_qty = 50.0  # 50 filled, 50 still working
+    result = TradingServiceResult()
+    bar = _bar(high=106.0, low=100.0, close=105.0)  # +5% target reached
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    # Deferred: nothing emitted and the rung is NOT marked fired.
+    assert pending == []
+    assert tracker["AAA"].fired_tp_levels == set()
+
+    # Entry settles: continuation leaves the book, original_qty now reflects 100.
+    order_book.remove("o1", was_filled=True)
+    portfolio.positions["AAA"].original_qty = 100.0
+    portfolio.positions["AAA"].qty = 100.0
+    pending = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert [r.qty for r in pending] == [50.0]  # 0.5 * 100, not 0.5 * 50
+    assert tracker["AAA"].fired_tp_levels == {(0, 0)}
+
+
 # ---------------------------------------------------------------------------
 # Fill simulator: a partial MARKET close reduces qty and keeps the position open.
 # ---------------------------------------------------------------------------

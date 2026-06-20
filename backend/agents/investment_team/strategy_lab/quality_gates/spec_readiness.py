@@ -667,6 +667,32 @@ class SpecReadinessGate(GateResultsMixin):
             return (
                 self._critical(f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."),
             )
+        # A laddered take-profit whose rung fractions sum to < 1.0 closes only
+        # those tranches and leaves the residual position open indefinitely. That
+        # is exit-complete ONLY if some full-position exit also closes the runner
+        # (stop_loss / take_profit / signal_exit) or a ladder itself sums to a
+        # full close. A partial ladder as the sole exit would finish the backtest
+        # with an unclosed residual — the same "positions never close" failure
+        # this rule guards against.
+        full_close_kinds = {"signal_exit", "stop_loss", "take_profit"}
+        ladders = [r for r in ctx.spec.exit_rules if isinstance(r, ScaledTakeProfitRule)]
+        if ladders:
+            has_full_close_exit = any(
+                getattr(r, "kind", None) in full_close_kinds for r in ctx.spec.exit_rules
+            )
+            has_full_closing_ladder = any(
+                sum(level.qty_fraction for level in lad.levels) >= 1.0 - 1e-9 for lad in ladders
+            )
+            if not has_full_close_exit and not has_full_closing_ladder:
+                return (
+                    self._critical(
+                        "scaled_take_profit ladder(s) close only a fraction of the "
+                        "position (rung qty_fraction sums to < 1.0) and no other "
+                        "full-position exit (stop_loss / take_profit / signal_exit) "
+                        "closes the residual — the remainder would never close. Add "
+                        "a full-position exit or make a ladder's fractions sum to 1.0."
+                    ),
+                )
         return ()
 
     # ------------------------------------------------------------------

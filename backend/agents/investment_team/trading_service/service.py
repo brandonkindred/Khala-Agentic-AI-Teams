@@ -386,6 +386,18 @@ class _EngineExitDispatcher:
         # is leaving. Emit the partial close, mark the rung fired so it can't
         # re-emit before the close fills, and return.
         if intent.rule_kind == "scaled_take_profit":
+            # Defer the scale-out while the position's entry is still filling. A
+            # partially-filled entry with a resting REQUEUE_NEXT_BAR / TWAP_N
+            # continuation has not yet settled ``pos.original_qty`` (the fill
+            # simulator BUMPS ``original_qty`` as each continuation slice fills),
+            # so a rung sized off the current, smaller ``original_qty`` would
+            # under-close — and marking the rung fired would block the catch-up
+            # once the rest of the entry lands. Skip without marking it fired so
+            # the rung re-evaluates on a later bar, once the entry is complete
+            # and ``original_qty`` is stable. (A full close, by contrast, cancels
+            # the continuation outright — that path is unaffected.)
+            if self._entry_continuations(sym, pos, order_book):
+                return
             req = self._build_close_order(intent, tracked, pos)
             if req is None:
                 return
@@ -734,11 +746,13 @@ class _EngineExitDispatcher:
             else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
         if intent.rule_kind == "scaled_take_profit":
-            # Partial scale-out: close this rung's fraction of the ORIGINAL entry
-            # qty (``scale_in_qty`` is irrelevant — we deliberately leave the rest
-            # open). ``original_qty`` is pinned at open; fall back to the live qty
-            # if it was never set. The fill simulator clips to the live qty, so a
-            # fraction larger than what remains simply closes the remainder.
+            # Partial scale-out: close this rung's fraction of the full opened
+            # position (``scale_in_qty`` is irrelevant — we deliberately leave the
+            # rest open). ``original_qty`` is the cumulative entry-filled qty; the
+            # caller defers the rung until the entry has fully settled, so it now
+            # equals the full opened size. Fall back to the live qty if unset. The
+            # fill simulator clips to the live qty, so a fraction larger than what
+            # remains simply closes the remainder.
             base = pos.original_qty if pos.original_qty > 0 else pos.qty
             qty = intent.qty_fraction * base
         else:
