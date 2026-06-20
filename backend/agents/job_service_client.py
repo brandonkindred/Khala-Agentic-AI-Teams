@@ -46,6 +46,36 @@ def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
 
 
+# Process-wide cache of one JobServiceClient per (team, base_url). Stores create a
+# client on every operation otherwise; caching lets the pooled httpx.Client (and
+# its keep-alive connections) actually be reused across calls. Keyed including
+# base_url so explicit URLs don't collide; base_url=None entries resolve
+# JOB_SERVICE_URL per request (preserving pytest's late URL swap).
+_shared_clients: "Dict[tuple[str, str | None], JobServiceClient]" = {}
+_shared_clients_lock = threading.Lock()
+
+
+def get_job_service_client(team: str, base_url: str | None = None) -> "JobServiceClient":
+    """Return a process-wide cached :class:`JobServiceClient` for ``(team, base_url)``.
+
+    Preconditions: ``team`` is a non-empty string.
+    Postconditions: returns the same client instance for the same ``(team,
+        base_url)`` across calls (constructed lazily on first use), so the pooled
+        HTTP connections are reused. Never returns ``None``.
+    """
+    assert team, "team must be non-empty"
+    key = (team, base_url)
+    client = _shared_clients.get(key)
+    if client is not None:
+        return client
+    with _shared_clients_lock:
+        client = _shared_clients.get(key)
+        if client is None:
+            client = JobServiceClient(team=team, base_url=base_url)
+            _shared_clients[key] = client
+    return client
+
+
 class JobServiceClient:
     """HTTP client for the central job service."""
 
@@ -60,6 +90,38 @@ class JobServiceClient:
         self._explicit_base_url: str | None = base_url.rstrip("/") if base_url else None
         if not self._explicit_base_url and not _default_base_url():
             raise RuntimeError(_MISSING_URL_MSG)
+        # One pooled httpx.Client reused across all requests from this instance, so
+        # job operations (status updates, heartbeats, task-state merges — the hottest
+        # non-LLM path) reuse keep-alive connections instead of opening a fresh TCP
+        # connection per call. httpx.Client is safe for concurrent use across threads.
+        self._http: httpx.Client | None = None
+        self._http_lock = threading.Lock()
+
+    def _get_http(self) -> httpx.Client:
+        """Return the pooled httpx.Client, creating it on first use (double-checked).
+
+        Postconditions: returns a ready, reusable ``httpx.Client`` with connection
+            pooling; the same instance on every call until :meth:`close`.
+        """
+        if self._http is not None:
+            return self._http
+        with self._http_lock:
+            if self._http is None:
+                self._http = httpx.Client(
+                    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
+                )
+        return self._http
+
+    def close(self) -> None:
+        """Close the pooled HTTP client (releases keep-alive sockets).
+
+        Postconditions: the next request lazily rebuilds the client. Safe to call
+            when no client was ever created.
+        """
+        with self._http_lock:
+            if self._http is not None:
+                self._http.close()
+                self._http = None
 
     @property
     def _base_url(self) -> str:
@@ -90,12 +152,12 @@ class JobServiceClient:
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
         total_attempts = max_retries + 1
+        client = self._get_http()
         for attempt in range(total_attempts):
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(method, url, **kwargs)
-                    resp.raise_for_status()
-                    return resp
+                resp = client.request(method, url, timeout=timeout, **kwargs)
+                resp.raise_for_status()
+                return resp
             except (
                 httpx.ConnectError,
                 httpx.ReadTimeout,
@@ -404,7 +466,9 @@ class BaseJobStore:
     team: str = ""  # Override in subclass
 
     def _client(self) -> JobServiceClient:
-        return JobServiceClient(team=self.team)
+        # Reuse one pooled client per team instead of constructing a new client
+        # (and a new TCP connection) on every store operation.
+        return get_job_service_client(team=self.team)
 
     def create_job(self, job_id: str, *, status: str = JOB_STATUS_PENDING, **fields: Any) -> None:
         self._client().create_job(job_id, status=status, **fields)
