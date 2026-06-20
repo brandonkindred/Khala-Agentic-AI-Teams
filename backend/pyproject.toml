@@ -5,14 +5,16 @@ src = ["agents"]
 
 [tool.ruff.lint]
 select = [
-    "E",   # pycodestyle errors
-    "F",   # pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "W",   # pycodestyle warnings
-    "UP",  # pyupgrade
-    "B",   # flake8-bugbear
-    "SIM", # flake8-simplify
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "C901",   # mccabe cyclomatic complexity (threshold below)
+    "PLR0915", # pylint too-many-statements (threshold below)
 ]
 ignore = [
     "E501",  # line-length handled by formatter
@@ -25,17 +27,40 @@ ignore = [
 [tool.ruff.lint.isort]
 known-first-party = ["shared", "backend_agent", "frontend_team", "devops_agent", "qa_agent"]
 
+# Complexity gating. These thresholds are an initial high-water-mark chosen so
+# the current tree passes without edits: they block any NEW function that is
+# more complex / longer than today's worst non-exempt offenders, and are meant
+# to be ratcheted DOWN over time (toward the ruff defaults of 10 / 50) as the
+# grandfathered files below are refactored. New code should aim well under them.
+[tool.ruff.lint.mccabe]
+max-complexity = 40
+
+[tool.ruff.lint.pylint]
+max-statements = 150
+
 [tool.ruff.lint.per-file-ignores]
-"agents/**/tests/**" = ["N", "B", "E402"]
-"agents/**/agent_implementations/**" = ["E", "F"]
+# Tests and example scripts are exempt from complexity gating (setup-heavy by nature).
+"agents/**/tests/**" = ["N", "B", "E402", "C901", "PLR0915"]
+"agents/**/agent_implementations/**" = ["E", "F", "C901", "PLR0915"]
 "agents/**/api/main.py" = ["E402"]
 "agents/**/api/*.py" = ["E402"]
 "agents/blogging/blog_research_agent/agent.py" = ["E402"]
-"agents/software_engineering_team/orchestrator.py" = ["E402"]
+"agents/software_engineering_team/orchestrator.py" = ["E402", "C901", "PLR0915"]
 "agents/software_engineering_team/devops_team/orchestrator.py" = ["E402"]
 "agents/software_engineering_team/architect-agents/**" = ["E402"]
 "unified_api/main.py" = ["E402"]
 "unified_api/tests/**" = ["E402"]
+# Complexity debt: pre-existing functions above the thresholds above. Exempted
+# per-rule so the gate still applies to the rest of each file; refactor and
+# remove these entries to ratchet the thresholds down.
+"agents/software_engineering_team/frontend_team_deprecated/**" = ["C901", "PLR0915"]
+"agents/llm_service/clients/ollama.py" = ["C901", "PLR0915"]
+"agents/software_engineering_team/backend_agent/agent.py" = ["C901", "PLR0915"]
+"agents/team_assistant/api.py" = ["C901", "PLR0915"]
+"agents/investment_team/api/main.py" = ["PLR0915"]
+"agents/software_engineering_team/backend_code_v2_team/phases/execution.py" = ["PLR0915"]
+"agents/software_engineering_team/frontend_code_v2_team/phases/execution.py" = ["PLR0915"]
+"agents/software_engineering_team/product_requirements_analysis_agent/agent.py" = ["PLR0915"]
 
 [tool.pytest.ini_options]
 # Coverage is enforced in CI on every backend test job (see
