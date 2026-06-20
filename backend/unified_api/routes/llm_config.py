@@ -127,6 +127,19 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
             ),
         )
 
+    # Refuse to switch the global provider to Claude unless a key will actually be
+    # available (in this request, or already stored/in env). Otherwise the factory
+    # builds a ClaudeLLMClient with an empty key and every later call fails with
+    # LLMPermanentError until someone notices and fixes the setting.
+    if body.provider == "claude" and not body.claude_api_key.strip() and not llm_config.resolve_claude_api_key():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot switch the provider to Claude without an API key. Provide "
+                "claude_api_key, or set LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY first."
+            ),
+        )
+
     set_secret(runtime_config.SERVICE, runtime_config.KEY_PROVIDER, body.provider)
     # Empty fields are intentionally skipped so a provider/model change does not
     # wipe a previously-stored API key the operator didn't re-enter.

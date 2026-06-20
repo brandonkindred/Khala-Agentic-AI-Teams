@@ -93,7 +93,10 @@ def test_put_persists_and_clears_caches(app_client):
 
 
 def test_put_skips_empty_fields(app_client):
-    client, calls, _mp = app_client
+    client, calls, mp = app_client
+    # A Claude key is already configured (env here), so switching to Claude with
+    # empty model/key fields is allowed; those empty fields must still be skipped.
+    mp.setenv("ANTHROPIC_API_KEY", "sk-existing")
     client.put("/api/llm-config", json={"provider": "claude"})
     keys = [k for _s, k, _v in calls["set"]]
     # provider always written; empty model/keys are NOT written (preserve existing).
@@ -101,6 +104,27 @@ def test_put_skips_empty_fields(app_client):
     assert route.runtime_config.KEY_CLAUDE_API_KEY not in keys
     assert route.runtime_config.KEY_CLAUDE_MODEL not in keys
     assert route.runtime_config.KEY_OLLAMA_MODEL not in keys
+
+
+def test_put_claude_without_key_rejected(app_client):
+    # Switching to Claude with no key (request, runtime, or env) is rejected so the
+    # factory never builds a keyless ClaudeLLMClient that fails every later call.
+    client, calls, _mp = app_client
+    resp = client.put("/api/llm-config", json={"provider": "claude", "model": "claude-opus-4-8"})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+    assert calls["set"] == []  # nothing persisted
+
+
+def test_put_claude_allowed_when_key_in_env(app_client):
+    # An already-configured key (env here) satisfies the guard even when the request
+    # omits claude_api_key.
+    client, calls, mp = app_client
+    mp.setenv("ANTHROPIC_API_KEY", "sk-existing")
+    resp = client.put("/api/llm-config", json={"provider": "claude", "model": "claude-opus-4-8"})
+    assert resp.status_code == 200
+    stored = dict((k, v) for _s, k, v in calls["set"])
+    assert stored[route.runtime_config.KEY_PROVIDER] == "claude"
 
 
 def test_put_rejects_invalid_provider(app_client):
