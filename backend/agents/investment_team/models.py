@@ -381,9 +381,7 @@ class StrategySpec(BaseModel):
         Postconditions: returns ``self`` when at most one exit rule is a
         limit-style stop; raises ``ValueError`` otherwise.
         """
-        limit_stops = sum(
-            1 for r in self.exit_rules if getattr(r, "style", "market") == "limit"
-        )
+        limit_stops = sum(1 for r in self.exit_rules if getattr(r, "style", "market") == "limit")
         if limit_stops > 1:
             raise ValueError(
                 f"at most one limit-style stop-loss (style='limit') is allowed "
@@ -630,6 +628,17 @@ class OpenPositionDiagnostic(BaseModel):
     qty: float
     entry_price: float
     entry_timestamp: str
+
+
+def scaled_level_key(rule_index: int, level_index: int) -> str:
+    """Diagnostics key for one scaled-take-profit rung.
+
+    Single source of the ``scaled_take_profit_level_firings`` key format, shared by
+    the emitter (``_record_emission``) and the conformance gate so the two never
+    drift. Preconditions: both indices are non-negative. Postconditions: returns
+    ``"<rule_index>:<level_index>"`` (e.g. ``"0:1"``).
+    """
+    return f"{rule_index}:{level_index}"
 
 
 class BacktestExecutionDiagnostics(BaseModel):

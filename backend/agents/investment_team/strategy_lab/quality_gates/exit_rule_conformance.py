@@ -45,6 +45,7 @@ from ...models import (
     BacktestConfig,
     BacktestExecutionDiagnostics,
     TradeRecord,
+    scaled_level_key,
 )
 from ...trading_service.service import ENGINE_EXIT_REASON_PREFIX
 from ..spec_dsl import (
@@ -386,7 +387,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
         a non-empty trade ledger.
         """
         per_rung = {
-            level_idx: level_firings.get(f"{rule_index}:{level_idx}", 0)
+            level_idx: level_firings.get(scaled_level_key(rule_index, level_idx), 0)
             for level_idx in range(len(rule.levels))
         }
         total_firings = sum(per_rung.values())

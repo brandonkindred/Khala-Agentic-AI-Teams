@@ -29,6 +29,7 @@ from ..models import (
     BacktestExecutionDiagnostics,
     OrderLifecycleEvent,
     TradeRecord,
+    scaled_level_key,
 )
 from ..strategy_lab.executor.predicate_evaluator import (
     BarRecord,
@@ -230,6 +231,41 @@ def _build_exit_reconciler(
 
 
 @dataclass
+class _ScaledLadderCursor:
+    """A position's progress through its scaled-take-profit ladder(s).
+
+    Owns the "next un-fired rung" invariant so the pure evaluator (which *picks*
+    the rung to offer) and the dispatcher (which *advances* past a rung that
+    fired) share one definition instead of each doing index arithmetic. Keyed by
+    a ladder's ``rule_index`` in ``exit_rules``; an absent key means cursor ``0``
+    (no rung fired yet). Rungs fire in strict order one tranche per bar, so the
+    cursor rung is the only one the evaluator ever offers.
+
+    Invariant: a rung fires only when it equals its ladder's current cursor, and
+    firing advances the cursor by exactly one.
+    """
+
+    _next_rung: Dict[int, int] = field(default_factory=dict)
+
+    @property
+    def mapping(self) -> Mapping[int, int]:
+        """The ``rule_index -> next un-fired rung`` view handed to the evaluator."""
+        return self._next_rung
+
+    def advance(self, rule_index: int, fired_rung: int) -> None:
+        """Advance past the rung that just fired.
+
+        Preconditions: ``fired_rung`` is the ladder's current cursor (the only rung
+        the evaluator offers). Postconditions: the ladder's cursor becomes
+        ``fired_rung + 1``.
+        """
+        assert fired_rung == self._next_rung.get(rule_index, 0), (
+            "scaled rungs must fire in cursor order"
+        )
+        self._next_rung[rule_index] = fired_rung + 1
+
+
+@dataclass
 class _TrackedPosition:
     """Per-symbol state the parent engine maintains to evaluate exit rules.
 
@@ -259,16 +295,12 @@ class _TrackedPosition:
     just_opened: bool
     high_since_entry: float
     low_since_entry: float
-    # Per scaled-take-profit rule (keyed by its ``rule_index`` in ``exit_rules``),
-    # the index of the next UN-FIRED rung for THIS position. Rungs scale out in
-    # strict order one tranche per bar, so a single cursor per ladder fully
-    # captures progress: the evaluator only ever offers the cursor rung and the
-    # dispatcher advances it by one on emission. An absent key means cursor 0 (no
-    # rung fired yet). Because a fresh ``_TrackedPosition`` is built whenever the
-    # underlying position is replaced (``entry_order_id`` change — see
+    # Progress through this position's scaled-take-profit ladder(s). Because a
+    # fresh ``_TrackedPosition`` is built whenever the underlying position is
+    # replaced (``entry_order_id`` change — see
     # ``TradingService._update_position_tracker``), the cursor never leaks across
     # two distinct trades.
-    scaled_cursor: Dict[int, int] = field(default_factory=dict)
+    scaled_cursor: _ScaledLadderCursor = field(default_factory=_ScaledLadderCursor)
 
     def snapshot(self, symbol: str, qty: float) -> PositionState:
         # ``PositionState`` (the public evaluator input) carries the
@@ -380,43 +412,100 @@ class _EngineExitDispatcher:
         if intent is None:
             return
 
-        # Scaled (laddered) take-profit: this intent closes only one rung's
-        # fraction of the position and leaves the remainder open. Unlike a full
-        # close it must NOT oversize for scale-ins, retire the position's
-        # competing resting exits, cancel its entry continuations, or cancel a
-        # resting protective stop-limit — all of those assume the whole position
-        # is leaving. Emit the partial close, mark the rung fired so it can't
-        # re-emit before the close fills, and return.
-        if intent.rule_kind == "scaled_take_profit":
-            # Defer the scale-out while the position's entry is still filling. A
-            # partially-filled entry with a resting REQUEUE_NEXT_BAR / TWAP_N
-            # continuation has not yet settled ``pos.original_qty`` (the fill
-            # simulator BUMPS ``original_qty`` as each continuation slice fills),
-            # so a rung sized off the current, smaller ``original_qty`` would
-            # under-close — and advancing the cursor would block the catch-up once
-            # the rest of the entry lands. Skip without advancing the cursor so the
-            # rung re-evaluates on a later bar, once the entry is complete and
-            # ``original_qty`` is stable. (A full close, by contrast, cancels the
-            # continuation outright — that path is unaffected.) The
-            # ``entry_continuation_in_flight`` flag was derived in the single
-            # ``_should_evaluate`` order-book pass, so this needs no rescan.
-            if entry_continuation_in_flight:
-                return
-            req = self._build_close_order(intent, tracked, pos)
-            if req is None:
-                return
-            pending_for_prev.append(req)
-            # Bind to the position so the stale-continuation guard drops this
-            # scale-out if a full exit (e.g. a stop) closes the position first.
-            self._register_binding(req, pos)
-            assert intent.level_index is not None  # set by the evaluator for this kind
-            # The evaluator only offers the cursor rung, so the fired rung is the
-            # current cursor; advance it by one to the next un-fired rung.
-            assert intent.level_index == tracked.scaled_cursor.get(intent.rule_index, 0)
-            tracked.scaled_cursor[intent.rule_index] = intent.level_index + 1
-            self._record_emission(req, intent, cur_bar, result)
+        # A partial scale-out (a scaled-take-profit rung) and a full-position close
+        # have disjoint emission flows — the partial path deliberately skips every
+        # whole-position cleanup — so dispatch to the matching handler.
+        if intent.is_partial:
+            self._emit_partial_scale_out(
+                intent,
+                tracked=tracked,
+                pos=pos,
+                pending_for_prev=pending_for_prev,
+                entry_continuation_in_flight=entry_continuation_in_flight,
+                cur_bar=cur_bar,
+                result=result,
+            )
             return
 
+        self._emit_full_close(
+            intent,
+            sym=sym,
+            tracked=tracked,
+            pos=pos,
+            pending_for_prev=pending_for_prev,
+            order_book=order_book,
+            resting_limit_stop_id=resting_limit_stop_id,
+            cur_bar=cur_bar,
+            result=result,
+        )
+
+    def _emit_partial_scale_out(
+        self,
+        intent: ExitIntent,
+        *,
+        tracked: _TrackedPosition,
+        pos: Position,
+        pending_for_prev: List[OrderRequest],
+        entry_continuation_in_flight: bool,
+        cur_bar,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Emit a scaled-take-profit rung's PARTIAL close and advance the cursor.
+
+        A scale-out closes only one rung's fraction and leaves the rest of the
+        position open, so — unlike :meth:`_emit_full_close` — it must NOT oversize
+        for scale-ins, retire competing resting exits, cancel entry continuations,
+        or cancel a resting stop-limit (all assume the whole position is leaving).
+
+        Preconditions: ``intent.is_partial`` (``intent.level_index`` is set).
+        Postconditions: deferred to a later bar when the entry is still filling
+        (no-op); otherwise appends one partial close to ``pending_for_prev``, binds
+        it to the position, advances the ladder cursor past the fired rung, and
+        records the emission.
+        """
+        # Defer the scale-out while the position's entry is still filling. A
+        # partially-filled entry with a resting REQUEUE_NEXT_BAR / TWAP_N
+        # continuation has not yet settled ``pos.original_qty`` (the fill simulator
+        # BUMPS ``original_qty`` as each continuation slice fills), so a rung sized
+        # off the current, smaller ``original_qty`` would under-close — and
+        # advancing the cursor would block the catch-up once the rest of the entry
+        # lands. Skip without advancing the cursor so the rung re-evaluates once the
+        # entry is complete. The flag was derived in the single ``_should_evaluate``
+        # order-book pass, so this needs no rescan.
+        if entry_continuation_in_flight:
+            return
+        req = self._build_close_order(intent, tracked, pos)
+        if req is None:
+            return
+        pending_for_prev.append(req)
+        # Bind to the position so the stale-continuation guard drops this scale-out
+        # if a full exit (e.g. a stop) closes the position first.
+        self._register_binding(req, pos)
+        assert intent.level_index is not None  # is_partial guarantees this
+        tracked.scaled_cursor.advance(intent.rule_index, intent.level_index)
+        self._record_emission(req, intent, cur_bar, result)
+
+    def _emit_full_close(
+        self,
+        intent: ExitIntent,
+        *,
+        sym: str,
+        tracked: _TrackedPosition,
+        pos: Position,
+        pending_for_prev: List[OrderRequest],
+        order_book: OrderBook,
+        resting_limit_stop_id: Optional[str],
+        cur_bar,
+        result: "TradingServiceResult",
+    ) -> None:
+        """Emit a full-position close and run the whole-position cleanups.
+
+        Preconditions: ``intent`` closes the full position (stop-loss / take-profit
+        / signal-exit; ``not intent.is_partial``).
+        Postconditions: appends one close to ``pending_for_prev``, binds it, retires
+        competing resting exits, cancels entry continuations (market style) and the
+        replaced resting stop-limit (when one rested), and records the emission.
+        """
         # Issue #527 — size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
         # at emission. Two sources, both BEFORE the engine close on the
@@ -613,7 +702,7 @@ class _EngineExitDispatcher:
             {sym: bar_snap},
             views=self.views,
             first_only=not exclude_resting_limit_stop,
-            scaled_cursors={sym: tracked.scaled_cursor},
+            scaled_cursors={sym: tracked.scaled_cursor.mapping},
         )
         if not exclude_resting_limit_stop:
             return intents[0] if intents else None
@@ -764,7 +853,7 @@ class _EngineExitDispatcher:
             if intent.rule_kind == "signal_exit"
             else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
-        if intent.rule_kind == "scaled_take_profit":
+        if intent.is_partial:
             # Partial scale-out: close this rung's fraction of the full opened
             # position (``scale_in_qty`` is irrelevant — we deliberately leave the
             # rest open). ``original_qty`` is the cumulative entry-filled qty; the
@@ -797,11 +886,7 @@ class _EngineExitDispatcher:
                 # the run's default policy. Leave every other exit's policy unset
                 # (``None``) so the service-level ``default_unfilled_policy`` still
                 # applies to it exactly as before.
-                unfilled_policy=(
-                    UnfilledPolicy.REQUEUE_NEXT_BAR
-                    if intent.rule_kind == "scaled_take_profit"
-                    else None
-                ),
+                unfilled_policy=(UnfilledPolicy.REQUEUE_NEXT_BAR if intent.is_partial else None),
             )
         try:
             req.validate_prices()
@@ -965,7 +1050,7 @@ class _EngineExitDispatcher:
         # ``"{rule_index}:{level_index}"`` so each ladder rung is attributable
         # without perturbing the byte-stable ``rule_kind`` / close ``reason``.
         if intent.level_index is not None:
-            level_key = f"{intent.rule_index}:{intent.level_index}"
+            level_key = scaled_level_key(intent.rule_index, intent.level_index)
             diag.scaled_take_profit_level_firings[level_key] = (
                 diag.scaled_take_profit_level_firings.get(level_key, 0) + 1
             )

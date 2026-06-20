@@ -139,7 +139,7 @@ def test_first_rung_emits_partial_close_sized_to_original_qty() -> None:
     assert req.side == OrderSide.SHORT  # closing a long sells
     assert req.qty == 50.0  # 0.5 * original_qty(100)
     assert req.reason == f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
-    assert tracker["AAA"].scaled_cursor == {0: 1}  # rung 0 fired → cursor advanced
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}  # rung 0 fired → cursor advanced
     diag = result.execution_diagnostics
     assert diag.exit_rule_firings.get("scaled_take_profit") == 1
     assert diag.scaled_take_profit_level_firings == {"0:0": 1}
@@ -168,7 +168,7 @@ def test_each_rung_fires_at_most_once_and_in_order() -> None:
         seen.append([r.qty for r in pending])
 
     assert seen == [[50.0], [30.0], []]  # 0.5*100, then 0.3*100, then exhausted
-    assert tracker["AAA"].scaled_cursor == {0: 2}  # both rungs fired → cursor off the end
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 2}  # both rungs fired → cursor off the end
     assert result.execution_diagnostics.scaled_take_profit_level_firings == {"0:0": 1, "0:1": 1}
 
 
@@ -226,7 +226,7 @@ def test_stop_loss_listed_first_takes_full_close_over_ladder() -> None:
     assert len(pending) == 1
     assert pending[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
     assert pending[0].qty == 100.0  # full close
-    assert tracker["AAA"].scaled_cursor == {}  # ladder did not fire
+    assert tracker["AAA"].scaled_cursor.mapping == {}  # ladder did not fire
 
 
 def test_short_first_rung_emits_partial_buy_close() -> None:
@@ -309,7 +309,7 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
     )
     # Deferred: nothing emitted and the cursor is NOT advanced.
     assert pending == []
-    assert tracker["AAA"].scaled_cursor == {}
+    assert tracker["AAA"].scaled_cursor.mapping == {}
 
     # Entry settles: continuation leaves the book, original_qty now reflects 100.
     order_book.remove("o1", was_filled=True)
@@ -325,7 +325,7 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
         result=result,
     )
     assert [r.qty for r in pending] == [50.0]  # 0.5 * 100, not 0.5 * 50
-    assert tracker["AAA"].scaled_cursor == {0: 1}
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
 
 
 # ---------------------------------------------------------------------------

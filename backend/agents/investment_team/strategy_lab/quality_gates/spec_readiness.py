@@ -46,6 +46,8 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    has_full_position_exit,
+    ladder_closes_full_position,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -674,16 +676,12 @@ class SpecReadinessGate(GateResultsMixin):
         # full close. A partial ladder as the sole exit would finish the backtest
         # with an unclosed residual — the same "positions never close" failure
         # this rule guards against.
-        full_close_kinds = {"signal_exit", "stop_loss", "take_profit"}
         ladders = [r for r in ctx.spec.exit_rules if isinstance(r, ScaledTakeProfitRule)]
         if ladders:
-            has_full_close_exit = any(
-                getattr(r, "kind", None) in full_close_kinds for r in ctx.spec.exit_rules
+            covered = has_full_position_exit(ctx.spec.exit_rules) or any(
+                ladder_closes_full_position(lad) for lad in ladders
             )
-            has_full_closing_ladder = any(
-                sum(level.qty_fraction for level in lad.levels) >= 1.0 - 1e-9 for lad in ladders
-            )
-            if not has_full_close_exit and not has_full_closing_ladder:
+            if not covered:
                 return (
                     self._critical(
                         "scaled_take_profit ladder(s) close only a fraction of the "

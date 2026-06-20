@@ -110,6 +110,18 @@ class ExitIntent:
     qty_fraction: float = 1.0
     level_index: Optional[int] = None
 
+    @property
+    def is_partial(self) -> bool:
+        """Whether this intent closes only PART of the position (a scaled-take-profit
+        rung scale-out) and leaves the remainder open, vs. a full-position close.
+
+        Lets the dispatcher branch on the *semantics* of the close rather than the
+        producing rule kind, so the partial-exit path is not coupled to the literal
+        ``"scaled_take_profit"``. Postconditions: ``True`` iff ``level_index`` is set
+        (only laddered rungs carry one).
+        """
+        return self.level_index is not None
+
 
 def is_limit_stop_rule(rule: ExitRule) -> bool:
     """Whether ``rule`` is a limit-style stop-loss — the only rule kind the

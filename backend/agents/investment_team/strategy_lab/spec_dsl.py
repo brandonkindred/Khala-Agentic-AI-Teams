@@ -402,6 +402,13 @@ class TakeProfitRule(_SpecNode):
     note: str = ""
 
 
+# Relative slack absorbing float-summation noise when comparing a ladder's rung
+# ``qty_fraction`` values against 1.0 (e.g. ``0.5 + 0.3 + 0.2`` need not be exactly
+# 1.0). Single source of the tolerance shared by the DSL validator and the
+# downstream readiness gate so the "sums to a full close" boundary never drifts.
+LADDER_SUM_TOL = 1e-9
+
+
 class TakeProfitLevel(_SpecNode):
     """One rung of a laddered (scaled) take-profit.
 
@@ -457,8 +464,7 @@ class ScaledTakeProfitRule(_SpecNode):
                 )
             prev_pct = level.pct
         total = math.fsum(level.qty_fraction for level in self.levels)
-        # Tolerance mirrors float-summation slack (e.g. 0.5 + 0.3 + 0.2 == 1.0).
-        if total > 1.0 + 1e-9:
+        if total > 1.0 + LADDER_SUM_TOL:
             raise ValueError(
                 "ScaledTakeProfitRule level qty_fraction values must sum to <= 1.0 "
                 f"(got {total}); the remainder rides the other exit rules"
@@ -470,6 +476,33 @@ class SignalExitRule(_SpecNode):
     kind: Literal["signal_exit"] = "signal_exit"
     when: Predicate
     note: str = ""
+
+
+def ladder_closes_full_position(rule: "ScaledTakeProfitRule") -> bool:
+    """Whether a laddered take-profit's rungs together close the WHOLE position.
+
+    Preconditions: ``rule`` is a ``ScaledTakeProfitRule`` (its ``qty_fraction``
+    values sum to ``<= 1.0`` by construction).
+    Postconditions: ``True`` iff the rung fractions sum to ``1.0`` within
+    ``LADDER_SUM_TOL`` — i.e. the ladder leaves no residual for another exit to
+    close. Single source of the "ladder is a full close" test shared by the
+    readiness gate.
+    """
+    return math.fsum(level.qty_fraction for level in rule.levels) >= 1.0 - LADDER_SUM_TOL
+
+
+def has_full_position_exit(exit_rules: Sequence[Any]) -> bool:
+    """Whether ``exit_rules`` contains a rule that closes the FULL position.
+
+    A ``StopLossRule`` / ``TakeProfitRule`` / ``SignalExitRule`` each close the
+    whole position; a ``ScaledTakeProfitRule`` only scales out a fraction, so it
+    does NOT count. Single source of this test for the readiness gate's
+    partial-ladder-completeness check.
+
+    Preconditions: ``exit_rules`` is a sequence of ``ExitRule`` members.
+    Postconditions: ``True`` iff at least one rule is a full-position exit.
+    """
+    return any(isinstance(r, (StopLossRule, TakeProfitRule, SignalExitRule)) for r in exit_rules)
 
 
 def stop_caps_side(basis: str, side: str) -> bool:
