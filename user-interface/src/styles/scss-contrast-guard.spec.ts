@@ -102,9 +102,28 @@ const BURNDOWN = new Set<string>([
   'src/app/components/strategy-lab/strategy-lab.component.scss',
 ]);
 
-/** Strips CSS block comments so they can't masquerade as selectors or decls. */
-function stripBlockComments(source: string): string {
-  return source.replace(/\/\*[\s\S]*?\*\//g, '');
+/**
+ * Blanks out CSS line and block comments so commented-out rules and color
+ * examples in comments can't trip the detectors.
+ *
+ * Preconditions: `source` is SCSS/CSS text.
+ * Postconditions: returns a string of identical length with every comment
+ *   character replaced by a space and all newlines preserved, so line numbers
+ *   and brace/selector offsets are unchanged. A `//` immediately after `:` is
+ *   left intact so it does not eat `https://`-style protocols in values.
+ */
+function stripComments(source: string): string {
+  const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(/(?<!:)\/\/[^\n]*/g, blank);
+}
+
+/** 1-based line number of character offset `index` within `source`. */
+function lineAt(source: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i++) if (source[i] === '\n') line++;
+  return line;
 }
 
 /**
@@ -112,6 +131,12 @@ function stripBlockComments(source: string): string {
  * state, regardless of where `:focus`/`:focus-visible` sits in a grouped
  * selector list and regardless of nesting. Handles cases the old flat-`[^}]*`
  * regex missed, e.g. `&:focus-visible, &:hover { … }` and nested child rules.
+ *
+ * Preconditions: `source` is SCSS with comments already blanked (so `{`/`}`
+ *   inside comments don't skew the brace scan).
+ * Postconditions: returns the inner text of each focus-targeting block (outer
+ *   braces excluded); never throws on unbalanced input (an unclosed block
+ *   yields the remainder of the string).
  */
 function focusBlockBodies(source: string): string[] {
   const bodies: string[] = [];
@@ -133,20 +158,27 @@ function focusBlockBodies(source: string): string[] {
   return bodies;
 }
 
-/** Returns the list of offenses in a stylesheet (empty when clean). */
+/**
+ * Lists the accessibility offenses in one stylesheet.
+ *
+ * Preconditions: `source` is the full text of a component SCSS file.
+ * Postconditions: returns one message per offense (empty array when clean).
+ *   Detection runs on a comment-blanked copy, so commented-out CSS is ignored;
+ *   color matching spans wrapped declarations (value on a following line).
+ *   Pure function — no I/O, no mutation of inputs.
+ */
 function findOffenses(source: string): string[] {
-  const offenses: string[] = [];
+  const offenses: { line: number; message: string }[] = [];
+  const clean = stripComments(source);
 
-  source.split('\n').forEach((line, i) => {
-    if (line.trimStart().startsWith('//')) return;
-    if (LOW_CONTRAST_TEXT.test(line)) {
-      offenses.push(`L${i + 1}: low-contrast hardcoded text color on the dark theme — use a --kh-text-* / semantic token`);
-    } else if (NON_TOKEN_GRAY_TEXT.test(line)) {
-      offenses.push(`L${i + 1}: hardcoded gray text color bypasses the --kh-text-* tokens — use a --kh-text-* token`);
-    }
-  });
+  for (const m of clean.matchAll(new RegExp(LOW_CONTRAST_TEXT.source, 'gi'))) {
+    offenses.push({ line: lineAt(clean, m.index), message: 'low-contrast hardcoded text color on the dark theme — use a --kh-text-* / semantic token' });
+  }
+  for (const m of clean.matchAll(new RegExp(NON_TOKEN_GRAY_TEXT.source, 'gi'))) {
+    offenses.push({ line: lineAt(clean, m.index), message: 'hardcoded gray text color bypasses the --kh-text-* tokens — use a --kh-text-* token' });
+  }
 
-  for (const body of focusBlockBodies(stripBlockComments(source))) {
+  for (const body of focusBlockBodies(clean)) {
     // Only the block's OWN declarations — drop nested rules so a child's
     // `outline: none` (or a child's ring) doesn't taint the parent's verdict.
     let own = body;
@@ -157,11 +189,13 @@ function findOffenses(source: string): string[] {
     } while (own !== prev);
 
     if (OUTLINE_SUPPRESSED.test(own) && !RING_SHADOW.test(own)) {
-      offenses.push('focus state removes the outline with no accent ring — keep the outline or add box-shadow var(--kh-focus-ring)');
+      offenses.push({ line: 0, message: 'focus state removes the outline with no accent ring — keep the outline or add box-shadow var(--kh-focus-ring)' });
     }
   }
 
-  return offenses;
+  return offenses
+    .sort((a, b) => a.line - b.line)
+    .map(({ line, message }) => (line > 0 ? `L${line}: ${message}` : message));
 }
 
 // Resolve everything relative to this spec (…/src/styles/), so the guard is
@@ -229,5 +263,25 @@ describe('findOffenses detector', () => {
   it('does not flag non-text color properties or token usage', () => {
     expect(findOffenses('.x { background-color: #555; border-color: #ccc; }')).toHaveLength(0);
     expect(findOffenses('.x { color: var(--kh-text-secondary); }')).toHaveLength(0);
+  });
+
+  it('ignores CSS inside comments (commented-out rules and color examples)', () => {
+    expect(findOffenses('// &:focus-visible { outline: none; }\n.x { color: var(--kh-text-secondary); }')).toHaveLength(0);
+    expect(findOffenses('/* &:focus-visible { outline: none; } */\n.x { color: var(--kh-text-secondary); }')).toHaveLength(0);
+    expect(findOffenses('.x { color: var(--kh-text-muted); // legacy color: #888\n}')).toHaveLength(0);
+    expect(findOffenses('/* example: color: #555; */\n.x { color: var(--kh-text-primary); }')).toHaveLength(0);
+  });
+
+  it('does not let `//` eat a protocol in a value', () => {
+    expect(findOffenses(".x { background: url(https://cdn/x.png); color: #555; }")[0]).toMatch(/low-contrast/);
+  });
+
+  it('detects a color whose value wraps onto the next line', () => {
+    expect(findOffenses('.x {\n  color:\n    #555;\n}')).toHaveLength(1);
+  });
+
+  it('reports the correct 1-based line number past a multi-line block comment', () => {
+    // The block comment spans 2 lines; the offending color is on line 4.
+    expect(findOffenses('.a {\n/* note\n   here */\n  color: #555;\n}')[0]).toMatch(/^L4:/);
   });
 });
