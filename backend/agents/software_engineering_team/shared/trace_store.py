@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -54,7 +55,11 @@ def write_trace(record: Any) -> bool:
     if not is_postgres_enabled():
         return False
     try:
-        ts = datetime.fromtimestamp(getattr(record, "timestamp", 0.0) or 0.0, tz=timezone.utc)
+        # Use the record's own timestamp; fall back to *now* (not the 1970 epoch)
+        # for a missing/invalid value so the row stays inside cost-query windows.
+        raw_ts = getattr(record, "timestamp", None)
+        epoch = raw_ts if isinstance(raw_ts, (int, float)) and raw_ts > 0 else time.time()
+        ts = datetime.fromtimestamp(epoch, tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO se_agent_traces (ts, team, agent_key, job_id, task_id, phase, model, "

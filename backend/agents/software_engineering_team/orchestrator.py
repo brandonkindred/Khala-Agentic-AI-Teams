@@ -1736,6 +1736,7 @@ def _run_backend_frontend_workers(
     llm_limit_exceeded = [False]  # mutable ref for workers
     llm_connectivity_failed = [False]  # frontend could not reach LLM after retries; pause job
     repaired_tasks = set()  # max 1 repair per task
+    crashed_tasks: set[str] = set()  # tasks that crashed and are awaiting a successful retry (MTTR)
     agent_source_path = Path(__file__).resolve().parent  # software_engineering_team/
 
     def _remaining_queue_ids() -> List[str]:
@@ -1838,6 +1839,16 @@ def _run_backend_frontend_workers(
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                        # MTTR: a previously-crashed task is only *resolved* once it
+                        # actually succeeds on retry (not when a fix was merely applied).
+                        if task_id in crashed_tasks:
+                            crashed_tasks.discard(task_id)
+                            se_events.record_event(
+                                se_events.CRASH_RESOLVED,
+                                job_id=job_id,
+                                task_id=task_id,
+                                phase="execution",
+                            )
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -1984,6 +1995,7 @@ def _run_backend_frontend_workers(
                     phase="execution",
                     detail={"exception_type": type(e).__name__},
                 )
+                crashed_tasks.add(task_id)  # resolved only when the retry actually succeeds
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2011,12 +2023,6 @@ def _run_backend_frontend_workers(
                                 agent_source_path, result.suggested_fixes
                             ):
                                 repair_applied = True
-                                se_events.record_event(
-                                    se_events.CRASH_RESOLVED,
-                                    job_id=job_id,
-                                    task_id=task_id,
-                                    phase="execution",
-                                )
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     backend_queue.append(task_id)
@@ -2181,6 +2187,14 @@ def _run_backend_frontend_workers(
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                        if task_id in crashed_tasks:
+                            crashed_tasks.discard(task_id)
+                            se_events.record_event(
+                                se_events.CRASH_RESOLVED,
+                                job_id=job_id,
+                                task_id=task_id,
+                                phase="execution",
+                            )
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -2354,6 +2368,7 @@ def _run_backend_frontend_workers(
                     phase="execution",
                     detail={"exception_type": type(e).__name__},
                 )
+                crashed_tasks.add(task_id)  # resolved only when the retry actually succeeds
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2381,12 +2396,6 @@ def _run_backend_frontend_workers(
                                 agent_source_path, result.suggested_fixes
                             ):
                                 repair_applied = True
-                                se_events.record_event(
-                                    se_events.CRASH_RESOLVED,
-                                    job_id=job_id,
-                                    task_id=task_id,
-                                    phase="execution",
-                                )
                                 with state_lock:
                                     repaired_tasks.add(task_id)
                                     frontend_queue.append(task_id)
@@ -2725,6 +2734,74 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
         },
     )
     return requirements, spec_markdown
+
+
+def _parse_iso(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string to an aware datetime, or None when absent/invalid."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _emit_coding_team_metrics(job_id: str) -> None:
+    """Emit DORA lifecycle events from the coding-team run's persisted task graph.
+
+    The coding-team path runs entirely inside ``run_coding_team_orchestrator`` and
+    persists its task graph to the job record (``task_graph_snapshot``). This reads
+    that snapshot and emits, per merged task, a ``task_created`` + ``task_merged``
+    pair (lead time = job creation → task merge, with the creation time carried on
+    the merge event so it survives a metrics-window boundary), a ``gate_reentry``
+    when the task needed revisions (the change-failure signal), one ``merge_to_main``
+    for a completed job (deployment frequency), and a final cost flush.
+
+    Preconditions: ``job_id`` is a non-empty string.
+    Postconditions: best-effort — never raises; emits nothing when the job or its
+        snapshot is unavailable or Postgres is disabled. Always flushes job cost.
+    """
+    try:
+        job = get_job(job_id) or {}
+        snapshot = job.get("task_graph_snapshot") or []
+        created_ts = _parse_iso(job.get("created_at"))
+        created_iso = created_ts.isoformat() if created_ts else None
+        job_status = (job.get("status") or "").lower()
+        for t in snapshot:
+            if not isinstance(t, dict):
+                continue
+            tid = t.get("id") or ""
+            status = (t.get("status") or "").lower()
+            se_events.record_event(
+                se_events.TASK_CREATED, job_id=job_id, task_id=tid, phase="design", ts=created_ts
+            )
+            if status == "merged" and not t.get("resolved_without_changes"):
+                merged_ts = _parse_iso(t.get("merged_at"))
+                detail = {"created_ts": created_iso} if created_iso else None
+                se_events.record_event(
+                    se_events.TASK_MERGED,
+                    job_id=job_id,
+                    task_id=tid,
+                    phase="execution",
+                    ts=merged_ts,
+                    detail=detail,
+                )
+                # A merged task that needed >= 1 revision is a change that initially
+                # failed a quality gate — the DORA change-failure signal.
+                if int(t.get("revision_count") or 0) > 0:
+                    se_events.record_event(
+                        se_events.GATE_REENTRY,
+                        job_id=job_id,
+                        task_id=tid,
+                        phase="execution",
+                        ts=merged_ts,
+                    )
+        if job_status in ("completed", "completed_with_failures"):
+            se_events.record_event(se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration")
+    except Exception:
+        logger.debug("failed to emit coding-team DORA metrics for %s", job_id, exc_info=True)
+    finally:
+        cost_tracker.flush(job_id)
 
 
 def run_orchestrator(
@@ -3072,15 +3149,24 @@ def run_orchestrator(
             # the only thing that refreshes job activity DURING a multi-minute LLM
             # call — passing the raw get_client here made every long implement call
             # look like a stall to the UI's activity-based warning.
-            run_coding_team_orchestrator(
-                job_id,
-                str(path),
-                plan_input,
-                update_job_fn=lambda **kw: update_job(job_id, **kw),
-                get_job_fn=lambda jid: get_job(jid),
-                progress_base=base,
-                progress_span=span,
-            )
+            #
+            # Bind team/job_id attribution around the whole coding run so every LLM
+            # call it makes (sequential + via strands' asyncio.to_thread, which
+            # copies the context) is attributed to this SE job — that is what the
+            # cost tracker keys on. Without this the live path records no job cost.
+            with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
+                run_coding_team_orchestrator(
+                    job_id,
+                    str(path),
+                    plan_input,
+                    update_job_fn=lambda **kw: update_job(job_id, **kw),
+                    get_job_fn=lambda jid: get_job(jid),
+                    progress_base=base,
+                    progress_span=span,
+                )
+            # Emit DORA lifecycle events (deployment/lead-time/change-failure) from
+            # the coding-team task graph the run persisted, and flush final cost.
+            _emit_coding_team_metrics(job_id)
             # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
             # completed_with_failures / already_complete / failed / cancelled), so there is nothing
             # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an

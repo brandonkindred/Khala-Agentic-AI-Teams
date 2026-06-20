@@ -63,6 +63,25 @@ def _event_ts(event: dict[str, Any]) -> Optional[datetime]:
     return ts if isinstance(ts, datetime) else None
 
 
+def _created_ts_from_detail(event: dict[str, Any]) -> Optional[datetime]:
+    """Return the task creation time carried on a ``task_merged`` event's detail.
+
+    The emitter stamps ``detail.created_ts`` (ISO-8601) on the merge event so lead
+    time survives even when the matching ``task_created`` event predates the query
+    window. Returns ``None`` when absent or unparseable.
+    """
+    detail = event.get("detail")
+    raw = detail.get("created_ts") if isinstance(detail, dict) else None
+    if isinstance(raw, datetime):
+        return raw
+    if isinstance(raw, str) and raw:
+        try:
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return None
+
+
 def compute_from_events(
     events: list[dict[str, Any]],
     window_days: float,
@@ -78,6 +97,14 @@ def compute_from_events(
     Postconditions:
         - All counts and rates are ``>= 0``; division-by-zero is impossible
           (empty window → zeros, ``None`` medians, ``change_failure_rate`` 0.0).
+        - ``change_failure_rate`` is clamped to ``[0.0, 1.0]``.
+        - ``merged_count`` and lead-time samples are deduplicated by ``task_id``
+          (a task merged twice — e.g. re-queued after repair — counts once).
+        - Lead time prefers a ``created_ts`` carried on the ``task_merged`` event
+          detail, so a task whose ``task_created`` fell outside the window is not
+          dropped; it falls back to the in-window ``task_created`` otherwise.
+        - MTTR pairs ``crash_resolved`` with the oldest unmatched
+          ``crash_detected`` for the same ``(job_id, task_id)``.
     """
     if window_days <= 0:
         raise ValueError("window_days must be > 0")
@@ -91,7 +118,10 @@ def compute_from_events(
 
     # Earliest creation time per task → lead time.
     created_by_task: dict[str, datetime] = {}
-    detected_by_job: dict[str, list[datetime]] = defaultdict(list)
+    # Crash detections pending resolution, keyed by (job_id, task_id) so concurrent
+    # backend/frontend crashes in one job are not mis-paired.
+    detected: dict[tuple[str, str], list[datetime]] = defaultdict(list)
+    merged_task_ids: set[str] = set()
     lead_times: list[float] = []
     mttrs: list[float] = []
 
@@ -108,17 +138,22 @@ def compute_from_events(
         elif etype == se_events.GATE_REENTRY:
             metrics.gate_reentry_count += 1
         elif etype == se_events.CRASH_DETECTED:
-            detected_by_job[job_id].append(ts)
+            detected[(job_id, task_id)].append(ts)
         elif etype == se_events.CRASH_RESOLVED:
-            pending = detected_by_job.get(job_id)
+            pending = detected.get((job_id, task_id))
             if pending:
                 start = pending.pop(0)
                 mttrs.append((ts - start).total_seconds())
                 metrics.crash_resolved_count += 1
 
         if etype == se_events.TASK_MERGED:
+            # Dedup by task_id (empty task_id is never deduped — count each).
+            if task_id and task_id in merged_task_ids:
+                continue
+            if task_id:
+                merged_task_ids.add(task_id)
             metrics.merged_count += 1
-            created = created_by_task.get(task_id)
+            created = _created_ts_from_detail(event) or created_by_task.get(task_id)
             if created is not None:
                 lead = (ts - created).total_seconds()
                 if lead >= 0:
@@ -129,7 +164,10 @@ def compute_from_events(
     metrics.lead_time_sample_count = len(lead_times)
     metrics.mttr_seconds_median = _median(mttrs)
     if metrics.merged_count > 0:
-        metrics.change_failure_rate = round(metrics.gate_reentry_count / metrics.merged_count, 4)
+        # Clamp to [0,1]: re-entries can in principle exceed merges at a window edge.
+        metrics.change_failure_rate = round(
+            min(1.0, metrics.gate_reentry_count / metrics.merged_count), 4
+        )
 
     if cost:
         metrics.total_cost_usd = round(float(cost.get("total_cost_usd", 0.0) or 0.0), 6)

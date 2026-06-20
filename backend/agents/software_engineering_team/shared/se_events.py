@@ -53,11 +53,14 @@ def record_event(
     phase: str = "",
     gate: str = "",
     detail: Optional[dict] = None,
+    ts: Optional[datetime] = None,
 ) -> bool:
     """Append one lifecycle event to ``se_events``.
 
     Preconditions:
         - ``event_type`` is a non-empty string (ideally one of :data:`EVENT_TYPES`).
+        - ``ts``, when given, is a timezone-aware datetime (the real time of the
+          event); when omitted the current time is used.
     Postconditions:
         - Returns ``True`` when a row was written, ``False`` when Postgres is
           disabled or the write failed (failure is logged at DEBUG, never raised).
@@ -75,7 +78,7 @@ def record_event(
             cur.execute(
                 "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail) "
                 "VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                (_utc_now(), job_id, task_id, event_type, phase, gate, Json(detail or {})),
+                (ts or _utc_now(), job_id, task_id, event_type, phase, gate, Json(detail or {})),
             )
         return True
     except Exception:

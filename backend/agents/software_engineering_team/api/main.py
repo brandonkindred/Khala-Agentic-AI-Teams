@@ -2851,13 +2851,16 @@ def health() -> dict:
     return {"status": "ok"}
 
 
-@app.get("/metrics/dora")
+@app.get("/dora")
 def metrics_dora(window_days: float = 30.0) -> dict:
     """DORA metrics + cost over the last ``window_days`` (clamped to [1, 365]).
 
-    Reachable through the unified proxy at ``/api/software-engineering/metrics/dora``
-    (and the ``/api/se/metrics`` alias). Returns all-zero metrics when Postgres is
-    disabled rather than erroring, so the UI can render a "no data" state.
+    Reachable through the unified proxy at ``/api/software-engineering/dora`` (and
+    the ``/api/se/metrics`` alias). The path deliberately avoids ``metrics`` so it
+    is not swept into the OTel ``excluded_urls`` filter (which excludes scrape
+    endpoints named ``metrics``) — this business endpoint stays traced. Returns
+    all-zero metrics when Postgres is disabled rather than erroring, so the UI can
+    render a "no data" state.
     """
     window = max(1.0, min(365.0, window_days))
     from software_engineering_team.metrics.dora import compute_dora

@@ -71,6 +71,39 @@ def test_events_roundtrip_and_dora(_schema) -> None:
     assert m.merged_count == 1
 
 
+def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
+    """The live coding_team path's metrics helper turns a task graph into DORA events."""
+    from datetime import datetime, timedelta, timezone
+
+    from software_engineering_team import orchestrator
+    from software_engineering_team.metrics.dora import compute_dora
+
+    created = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    merged = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+    fake_job = {
+        "created_at": created.isoformat(),
+        "status": "completed",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+            {"id": "t2", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 2},
+            {"id": "t3", "status": "failed", "merged_at": None, "revision_count": 0},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: fake_job)
+    monkeypatch.setattr(orchestrator.cost_tracker, "flush", lambda jid: None)
+
+    orchestrator._emit_coding_team_metrics("job-ct")
+
+    m = compute_dora(30.0)
+    assert m.deployment_count == 1  # one MERGE_TO_MAIN for the completed job
+    assert m.merged_count == 2  # t1 + t2 (t3 failed)
+    assert m.gate_reentry_count == 1  # t2 needed revisions
+    assert m.change_failure_rate == pytest.approx(0.5)
+    assert m.lead_time_sample_count == 2
+    # lead time ~30 min (job creation → merge), tolerant of test timing.
+    assert m.lead_time_seconds_median == pytest.approx(1800, abs=60)
+
+
 def test_trace_write_and_cost(_schema, monkeypatch) -> None:
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from software_engineering_team.shared import trace_store

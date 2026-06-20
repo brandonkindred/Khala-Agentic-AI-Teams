@@ -26,6 +26,7 @@ Usage::
 from __future__ import annotations
 
 import logging
+import math
 import os
 import threading
 import time
@@ -108,9 +109,6 @@ _log_lock = threading.Lock()
 
 # Whether to capture prompt/response content (can be large)
 _CAPTURE_PROMPTS = os.environ.get("LLM_CAPTURE_PROMPTS", "").lower() in ("true", "1", "yes")
-
-# Known coarse outcome buckets; any other status passes through verbatim.
-_KNOWN_OUTCOMES = frozenset({"success", "error", "rate_limited", "truncated"})
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +206,12 @@ def record_llm_call(
         except Exception:
             # Cost estimation must never break telemetry recording.
             logger.debug("cost estimation failed for model %r", model, exc_info=True)
+            cost_usd = 0.0
+    else:
+        # A caller-supplied cost must not poison spans/counters/job totals with a
+        # negative or non-finite value; coerce to a safe non-negative finite float.
+        if not math.isfinite(cost_usd) or cost_usd < 0:
+            logger.debug("ignoring invalid caller cost_usd=%r for model %r", cost_usd, model)
             cost_usd = 0.0
 
     record = LLMCallRecord(
@@ -360,13 +364,16 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
             "model": record.model or "unknown",
             "status": record.status,
         }
+        # Record on every call regardless of zero values: a 0 ms latency is a real
+        # histogram sample, and a $0 (free local-model) call is real data — gating
+        # on truthiness would make "free"/"instant" indistinguishable from "no data".
         if _otel_llm_calls is not None:
             _otel_llm_calls.add(1, metric_attrs)
-        if _otel_llm_tokens is not None and record.total_tokens:
+        if _otel_llm_tokens is not None and record.total_tokens >= 0:
             _otel_llm_tokens.add(record.total_tokens, metric_attrs)
-        if _otel_llm_latency is not None and record.latency_ms:
+        if _otel_llm_latency is not None and record.latency_ms >= 0:
             _otel_llm_latency.record(record.latency_ms, metric_attrs)
-        if _otel_llm_cost is not None and record.cost_usd:
+        if _otel_llm_cost is not None and record.cost_usd >= 0:
             _otel_llm_cost.add(record.cost_usd, metric_attrs)
     except Exception:
         logger.debug("Failed to emit OpenTelemetry LLM span", exc_info=True)

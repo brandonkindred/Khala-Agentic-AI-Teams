@@ -1,4 +1,4 @@
-"""Tests for the SE DORA metrics endpoint (GET /metrics/dora)."""
+"""Tests for the SE DORA metrics endpoint (GET /dora)."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ def _client() -> TestClient:
 
 
 def test_metrics_dora_default_window() -> None:
-    resp = _client().get("/metrics/dora")
+    resp = _client().get("/dora")
     assert resp.status_code == 200
     body = resp.json()
     assert body["window_days"] == 30.0
@@ -32,7 +32,7 @@ def test_metrics_dora_default_window() -> None:
 
 
 def test_metrics_dora_window_is_clamped() -> None:
-    high = _client().get("/metrics/dora", params={"window_days": 10_000}).json()
+    high = _client().get("/dora", params={"window_days": 10_000}).json()
     assert high["window_days"] == 365.0
-    low = _client().get("/metrics/dora", params={"window_days": 0}).json()
+    low = _client().get("/dora", params={"window_days": 0}).json()
     assert low["window_days"] == 1.0

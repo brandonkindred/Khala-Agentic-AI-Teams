@@ -117,6 +117,17 @@ def test_outcome_defaults_to_status() -> None:
     assert rec.outcome == "rate_limited"
 
 
+def test_invalid_caller_cost_is_sanitized() -> None:
+    # Negative / non-finite caller-supplied cost must not poison the record.
+    assert record_llm_call(team="t", agent_key="a", model="m", cost_usd=-5.0).cost_usd == 0.0
+    assert (
+        record_llm_call(team="t", agent_key="a", model="m", cost_usd=float("inf")).cost_usd == 0.0
+    )
+    assert (
+        record_llm_call(team="t", agent_key="a", model="m", cost_usd=float("nan")).cost_usd == 0.0
+    )
+
+
 def test_otel_span_includes_cost_and_phase(monkeypatch) -> None:
     captured: dict = {}
 

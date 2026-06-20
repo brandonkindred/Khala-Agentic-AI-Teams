@@ -13,9 +13,9 @@ export class SeMetricsApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.softwareEngineeringApiUrl;
 
-  /** GET /metrics/dora?window_days=N */
+  /** GET /dora?window_days=N (DORA metrics + cost; path avoids "metrics" so it stays traced) */
   getMetrics(windowDays: number): Observable<SeMetrics> {
     const params = new HttpParams().set('window_days', String(windowDays));
-    return this.http.get<SeMetrics>(`${this.baseUrl}/metrics/dora`, { params });
+    return this.http.get<SeMetrics>(`${this.baseUrl}/dora`, { params });
   }
 }

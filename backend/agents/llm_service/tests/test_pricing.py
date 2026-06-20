@@ -53,6 +53,20 @@ def test_env_override_beats_table(monkeypatch) -> None:
     assert cost == pytest.approx(2.0)
 
 
+def test_non_finite_env_override_rejected(monkeypatch) -> None:
+    # inf/nan (e.g. a 1e400 typo) must not yield an infinite cost; fall back to table.
+    price = MODEL_PRICING["deepseek-v4-pro:cloud"]
+    monkeypatch.setenv("LLM_PRICE_DEEPSEEK_V4_PRO_CLOUD", "inf/0.001")
+    assert estimate_cost_usd("deepseek-v4-pro:cloud", 1000, 0) == pytest.approx(
+        price.usd_per_1k_input
+    )
+    monkeypatch.setenv("LLM_PRICE_DEEPSEEK_V4_PRO_CLOUD", "1e400/0")
+    cost = estimate_cost_usd("deepseek-v4-pro:cloud", 1000, 1000)
+    import math
+
+    assert math.isfinite(cost)
+
+
 def test_malformed_env_override_falls_back(monkeypatch) -> None:
     # Malformed override is ignored; falls back to the table value (not an error).
     monkeypatch.setenv("LLM_PRICE_DEEPSEEK_V4_PRO_CLOUD", "garbage")

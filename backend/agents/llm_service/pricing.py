@@ -24,6 +24,7 @@ a missing price surfaces as a visible zero rather than a fabricated number.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -82,17 +83,21 @@ def _price_for_model(model: str) -> ModelPrice | None:
           else ``None``. A malformed override is ignored (logged at WARNING) and
           resolution falls back to the table.
     """
-    raw = os.environ.get(_ENV_PREFIX + _normalize_model_for_env(model))
+    env_key = _ENV_PREFIX + _normalize_model_for_env(model)
+    raw = os.environ.get(env_key)
     if raw:
         try:
             in_str, out_str = raw.split("/", 1)
-            price = ModelPrice(max(0.0, float(in_str)), max(0.0, float(out_str)))
-            return price
+            in_val, out_val = float(in_str), float(out_str)
+            # Reject non-finite (inf/nan) so a typo can't produce an infinite cost
+            # that poisons spans, the cost counter, and the per-job total.
+            if not (math.isfinite(in_val) and math.isfinite(out_val)):
+                raise ValueError("non-finite price")
+            return ModelPrice(max(0.0, in_val), max(0.0, out_val))
         except (ValueError, TypeError):
             logger.warning(
-                "Ignoring malformed %s%s=%r (expected '<in_per_1k>/<out_per_1k>')",
-                _ENV_PREFIX,
-                _normalize_model_for_env(model),
+                "Ignoring invalid %s=%r (expected finite '<in_per_1k>/<out_per_1k>')",
+                env_key,
                 raw,
             )
     return MODEL_PRICING.get(model)
@@ -104,9 +109,9 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
     Preconditions:
         - ``input_tokens >= 0`` and ``output_tokens >= 0``.
     Postconditions:
-        - Returns a non-negative float. An unknown model (no table entry and no
-          ``LLM_PRICE_*`` override) returns ``0.0`` and logs at DEBUG — the cost
-          is never guessed.
+        - Returns a finite, non-negative float. An unknown model (no table entry
+          and no ``LLM_PRICE_*`` override) returns ``0.0`` and logs at DEBUG — the
+          cost is never guessed.
     """
     if input_tokens < 0 or output_tokens < 0:
         # Explicit validation (not ``assert``) so the contract holds under -O.
@@ -117,9 +122,11 @@ def estimate_cost_usd(model: str, input_tokens: int, output_tokens: int) -> floa
     if price is None:
         logger.debug("No price for model %r; cost reported as $0", model)
         return 0.0
-    return (input_tokens / 1000.0) * price.usd_per_1k_input + (
+    cost = (input_tokens / 1000.0) * price.usd_per_1k_input + (
         output_tokens / 1000.0
     ) * price.usd_per_1k_output
+    # Defensive: never return a non-finite cost even if a price slipped through.
+    return cost if math.isfinite(cost) else 0.0
 
 
 __all__ = ["ModelPrice", "MODEL_PRICING", "estimate_cost_usd"]

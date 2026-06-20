@@ -116,6 +116,39 @@ def test_record_gate_outcome_prefers_failing_criterion(monkeypatch) -> None:
     assert learnings[0]["trigger"] == "B login works"
 
 
+def test_record_gate_outcome_does_not_mislabel_passing_criterion(monkeypatch) -> None:
+    # all_satisfied=False but every listed criterion passed → fall back to the
+    # summary, never label a satisfied criterion as the failure.
+    learnings: list = []
+    from software_engineering_team.shared import se_events
+
+    monkeypatch.setattr(se_events, "record_event", lambda *a, **k: True)
+    monkeypatch.setattr(
+        learnings_store, "upsert_learning", lambda **kw: learnings.append(kw) or True
+    )
+    result = SimpleNamespace(
+        all_satisfied=False,
+        summary="overall gate failed",
+        per_criterion=[
+            SimpleNamespace(criterion="A passes", satisfied=True),
+            SimpleNamespace(criterion="B passes", satisfied=True),
+        ],
+    )
+    gate_outcomes.record_gate_outcome("acceptance", result)
+    assert learnings[0]["trigger"] == "overall gate failed"
+
+
+def test_first_issue_returns_passing_only_for_plain_issue_lists() -> None:
+    # Plain issue lists (no `satisfied` attr) still surface items[0].
+    result = SimpleNamespace(
+        issues=[SimpleNamespace(description="first"), SimpleNamespace(description="second")]
+    )
+    assert gate_outcomes._first_issue(result).description == "first"
+    # All-satisfied per_criterion → None (no failing entry).
+    crit = SimpleNamespace(per_criterion=[SimpleNamespace(criterion="ok", satisfied=True)])
+    assert gate_outcomes._first_issue(crit) is None
+
+
 # --- Tech Lead learnings block ---------------------------------------------
 
 

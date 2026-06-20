@@ -22,11 +22,9 @@ describe('SeMetricsApiService', () => {
 
   afterEach(() => httpMock.verify());
 
-  it('GETs /metrics/dora with the window_days param', () => {
+  it('GETs /dora with the window_days param', () => {
     service.getMetrics(30).subscribe();
-    const req = httpMock.expectOne(
-      (r) => r.url === `${baseUrl}/metrics/dora`,
-    );
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/dora`);
     expect(req.request.method).toBe('GET');
     expect(req.request.params.get('window_days')).toBe('30');
     req.flush({});
@@ -34,7 +32,7 @@ describe('SeMetricsApiService', () => {
 
   it('passes a custom window', () => {
     service.getMetrics(7).subscribe();
-    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/metrics/dora`);
+    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/dora`);
     expect(req.request.params.get('window_days')).toBe('7');
     req.flush({});
   });
