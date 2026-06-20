@@ -140,6 +140,28 @@ a {
   line-height: 1.7;
 }
 
+// Page header that pairs a title block (left) with a status/action slot pinned
+// to the top-right — the same arrangement the dashboard-shell uses, for pages
+// that render their own header instead of going through the shell. Distinct
+// from the stacked `.page-header` above; named with the `kh-` prefix so the two
+// never collide.
+.kh-page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--kh-space-4);
+  margin-bottom: 1rem;
+
+  &__titles {
+    min-width: 0;
+  }
+
+  &__status {
+    flex-shrink: 0;
+  }
+}
+
 // ============================================================================
 // Card System — Glassmorphism-Inspired
 // ============================================================================
