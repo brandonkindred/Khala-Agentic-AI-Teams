@@ -439,7 +439,7 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     return DEFAULT_FALLBACK_MODEL
 
 
-def resolve_model_for_provider(agent_key: Optional[str] = None) -> str:
+def resolve_model_for_provider(agent_key: Optional[str] = None, provider: Optional[str] = None) -> str:
     """Resolve the model id for the *active* provider.
 
     Single chokepoint for the "which model id under the current provider"
@@ -448,10 +448,14 @@ def resolve_model_for_provider(agent_key: Optional[str] = None) -> str:
     :func:`resolve_claude_model`; everything else (ollama/dummy) ->
     :func:`resolve_model`.
 
+    Preconditions: ``provider`` is the already-resolved active provider id, or
+        ``None`` to resolve it here (a caller that already has it passes it to
+        avoid a redundant :func:`resolve_provider` lock acquisition).
     Postconditions: returns a non-empty model id appropriate for
         :func:`resolve_provider`. Never raises.
     """
-    if resolve_provider() == "claude":
+    active = provider or resolve_provider()
+    if active == "claude":
         return resolve_claude_model(agent_key)
     return resolve_model(agent_key)
 

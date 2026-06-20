@@ -30,7 +30,7 @@ _model_cache: dict[tuple[str, str, str, str, Optional[str], str], LLMClientModel
 _cache_lock = threading.Lock()
 
 
-def _active_provider_key_fingerprint() -> str:
+def _active_provider_key_fingerprint(provider: Optional[str] = None) -> str:
     """Fingerprint of the active provider's API key, for cache-key invalidation.
 
     Returns a stable short digest of the Claude or Ollama API key (whichever the
@@ -42,12 +42,16 @@ def _active_provider_key_fingerprint() -> str:
     served by a model wrapping a client built with the old key. Mirrors the
     factory's Claude client cache, which already keys on the fingerprint.
 
+    Preconditions: ``provider`` is the already-resolved active provider id, or
+        ``None`` to resolve it here (callers on the hot path pass it to avoid a
+        redundant ``resolve_provider`` lock acquisition).
     Postconditions: returns a non-empty string; never raises.
     """
     from . import config as llm_config
     from .util import sha256_fingerprint
 
-    provider = llm_config.resolve_provider()
+    if provider is None:
+        provider = llm_config.resolve_provider()
     if provider in ("claude", "anthropic"):
         api_key = llm_config.resolve_claude_api_key()
     elif provider == "ollama":
@@ -97,6 +101,12 @@ def get_strands_model(
     """
     from . import config as llm_config
 
+    # Resolve the active provider ONCE and thread it through the model-id and
+    # fingerprint helpers below. They would each re-resolve it otherwise, so a
+    # single cached lookup took the runtime-config lock for the provider key three
+    # times; this collapses that to one.
+    provider = llm_config.resolve_provider()
+
     # Provider-aware model id: under LLM_PROVIDER=claude the Strands model_id /
     # cache key must use the Claude model, not the Ollama-resolved one, or
     # telemetry and the cache identity are tagged with the wrong model name.
@@ -116,11 +126,11 @@ def get_strands_model(
         return LLMClientModel(
             client,
             agent_key=agent_key,
-            model_id=client_model or llm_config.resolve_model_for_provider(agent_key),
+            model_id=client_model or llm_config.resolve_model_for_provider(agent_key, provider=provider),
             response_format=response_format,
         )
 
-    model_id = llm_config.resolve_model_for_provider(agent_key)
+    model_id = llm_config.resolve_model_for_provider(agent_key, provider=provider)
 
     # ``agent_key`` is part of the cache key so two agents that resolve to the
     # same model don't share one ``LLMClientModel`` (which would attribute every
@@ -134,8 +144,7 @@ def get_strands_model(
     # providers keyless with a shared LLM_MODEL) would keep serving a model wrapping
     # the wrong provider's client; without the fingerprint, a rotated key would keep
     # being served by a model wrapping a stale client.
-    provider = llm_config.resolve_provider()
-    key_fingerprint = _active_provider_key_fingerprint()
+    key_fingerprint = _active_provider_key_fingerprint(provider)
     cache_key = (provider, model_id, base_url, response_format, agent_key, key_fingerprint)
 
     with _cache_lock:

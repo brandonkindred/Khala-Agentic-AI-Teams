@@ -67,12 +67,12 @@ def test_key_rotation_rebuilds_cached_model(monkeypatch):
     # lets a TTL-refreshed key reach agents without a process restart. get_client
     # and LLMClientModel are stubbed so no real provider client is constructed.
     monkeypatch.setattr(cfg, "resolve_base_url", lambda: "http://host")
-    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak: "model-x")
+    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak, provider=None: "model-x")
     monkeypatch.setattr(sp, "get_client", lambda ak: object())
     monkeypatch.setattr(sp, "LLMClientModel", lambda *a, **k: object())
 
     fingerprints = iter(["fp-old", "fp-old", "fp-new"])
-    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda: next(fingerprints))
+    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda *_a: next(fingerprints))
 
     m1 = get_strands_model()  # fp-old -> build
     m2 = get_strands_model()  # fp-old -> cache hit
@@ -87,8 +87,8 @@ def test_provider_switch_rebuilds_cached_model(monkeypatch):
     # same model_id) — otherwise a model wrapping the wrong provider's client would
     # be served. The active provider is part of the cache key to guarantee this.
     monkeypatch.setattr(cfg, "resolve_base_url", lambda: "http://host")
-    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak: "model-x")
-    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda: "no-key")
+    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak, provider=None: "model-x")
+    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda *_a: "no-key")
     monkeypatch.setattr(sp, "get_client", lambda ak: object())
     monkeypatch.setattr(sp, "LLMClientModel", lambda *a, **k: object())
 
@@ -100,3 +100,34 @@ def test_provider_switch_rebuilds_cached_model(monkeypatch):
     m3 = get_strands_model()  # dummy: same model_id/base_url/fingerprint -> rebuild
     assert m1 is m2
     assert m1 is not m3
+
+
+def test_get_strands_model_resolves_provider_once(monkeypatch):
+    # The hot path must resolve the provider a single time per call and thread it
+    # into the model-id + fingerprint helpers (it took the runtime lock 3x before).
+    calls = {"n": 0}
+
+    def _counting_provider():
+        calls["n"] += 1
+        return "ollama"
+
+    monkeypatch.setattr(cfg, "resolve_provider", _counting_provider)
+    monkeypatch.setattr(cfg, "resolve_base_url", lambda: "http://host")
+    monkeypatch.setattr(cfg, "resolve_model", lambda ak=None: "model-x")
+    monkeypatch.setattr(cfg, "resolve_ollama_api_key", lambda: "")
+    monkeypatch.setattr(sp, "get_client", lambda ak: object())
+    monkeypatch.setattr(sp, "LLMClientModel", lambda *a, **k: object())
+
+    get_strands_model()
+    assert calls["n"] == 1
+
+
+def test_provider_threads_into_helpers_without_extra_resolve(monkeypatch):
+    # resolve_model_for_provider / _active_provider_key_fingerprint must honor an
+    # explicitly-passed provider and NOT re-resolve it.
+    monkeypatch.setattr(cfg, "resolve_provider", lambda: pytest.fail("should not re-resolve"))
+    monkeypatch.setattr(cfg, "resolve_claude_model", lambda ak=None: "claude-x")
+    monkeypatch.setattr(cfg, "resolve_claude_api_key", lambda: "sk-abc")
+    assert cfg.resolve_model_for_provider(None, provider="claude") == "claude-x"
+    fp = _active_provider_key_fingerprint("claude")
+    assert fp not in ("", "no-key")
