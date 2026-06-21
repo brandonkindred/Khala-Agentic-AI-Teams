@@ -20,6 +20,7 @@ Invariants:
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Optional
 
@@ -81,11 +82,12 @@ def parse_float(
 ) -> float:
     """Parse a float env var, defaulting and clamping defensively.
 
-    Preconditions: ``env_name`` is non-empty; ``default`` is a number; when both
-        ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
+    Preconditions: ``env_name`` is non-empty; ``default`` is a finite number; when
+        both ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
     Postconditions: returns the parsed value clamped to ``[minimum, maximum]``
-        (whichever bounds are provided); an unset, blank, or unparseable value
-        yields ``default`` (also clamped). Never raises on a bad env value.
+        (whichever bounds are provided); an unset, blank, unparseable, or
+        non-finite (``inf``/``nan``) value yields ``default`` (also clamped). Never
+        raises on a bad env value.
     """
     assert env_name, "env_name must be non-empty"
     assert minimum is None or maximum is None or minimum <= maximum, "minimum must be <= maximum"
@@ -97,6 +99,11 @@ def parse_float(
             value = float(raw.strip())
         except (TypeError, ValueError):
             value = float(default)
+    # Reject inf/nan from the env: a non-finite value defeats clamp comparisons
+    # (always False for nan) and can busy-loop/crash a consumer using it as an
+    # interval. Fall back to the (finite) default.
+    if not math.isfinite(value):
+        value = float(default)
     if minimum is not None and value < minimum:
         value = float(minimum)
     if maximum is not None and value > maximum:

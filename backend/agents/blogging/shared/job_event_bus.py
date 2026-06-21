@@ -31,7 +31,6 @@ touch the subscription.
 from __future__ import annotations
 
 import logging
-import os
 import threading
 import time
 from collections import deque
@@ -45,14 +44,10 @@ logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
-        return default
+    # Canonical defensive int parsing (unset/blank/unparseable -> default).
+    from shared_env import parse_int
+
+    return parse_int(name, default)
 
 
 # Idle subscriptions older than this are reaped. Pipeline jobs run on the order

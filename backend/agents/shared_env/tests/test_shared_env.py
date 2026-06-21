@@ -102,3 +102,11 @@ def test_float_returns_float_type(monkeypatch):
     out = parse_float("F", 1.0)
     assert out == 3.0
     assert isinstance(out, float)
+
+
+@pytest.mark.parametrize("value", ["inf", "-inf", "nan", "Infinity", "NaN"])
+def test_float_rejects_non_finite(monkeypatch, value):
+    # A non-finite env value (inf/nan) must fall back to the finite default,
+    # not propagate to a consumer that uses it as an interval/limit.
+    monkeypatch.setenv("F", value)
+    assert parse_float("F", 2.5) == 2.5

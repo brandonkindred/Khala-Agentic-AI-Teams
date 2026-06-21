@@ -14,10 +14,11 @@ Three axes are bounded:
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 from fastapi import HTTPException, Request
+
+from shared_env import parse_float, parse_int
 
 DEFAULT_MAX_PAYLOAD_BYTES = 1 * 1024 * 1024  # 1 MiB
 DEFAULT_MAX_OUTPUT_BYTES = 1 * 1024 * 1024  # 1 MiB
@@ -34,11 +35,11 @@ RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
 
 
 def max_payload_bytes() -> int:
-    return int(os.getenv("AGENT_INVOKE_MAX_PAYLOAD_BYTES", str(DEFAULT_MAX_PAYLOAD_BYTES)))
+    return parse_int("AGENT_INVOKE_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
 
 
 def max_output_bytes() -> int:
-    return int(os.getenv("AGENT_INVOKE_MAX_OUTPUT_BYTES", str(DEFAULT_MAX_OUTPUT_BYTES)))
+    return parse_int("AGENT_INVOKE_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
 
 
 def max_writeback_bytes() -> int:
@@ -52,18 +53,12 @@ def max_writeback_bytes() -> int:
     back to the default, so a malformed setting can never raise on the invoke
     response path or shrink the cap to a value that drops every audit entry.
     """
-    raw = os.getenv("AGENT_COGNITION_WRITEBACK_MAX_BYTES")
-    if raw is None:
-        return DEFAULT_MAX_WRITEBACK_BYTES
-    try:
-        value = int(raw)
-    except (TypeError, ValueError):
-        return DEFAULT_MAX_WRITEBACK_BYTES
+    value = parse_int("AGENT_COGNITION_WRITEBACK_MAX_BYTES", DEFAULT_MAX_WRITEBACK_BYTES)
     return value if value > 0 else DEFAULT_MAX_WRITEBACK_BYTES
 
 
 def default_exec_timeout_s() -> float:
-    return float(os.getenv("AGENT_EXEC_TIMEOUT_S", str(DEFAULT_EXEC_TIMEOUT_S)))
+    return parse_float("AGENT_EXEC_TIMEOUT_S", DEFAULT_EXEC_TIMEOUT_S)
 
 
 async def read_json_capped(request: Request, *, max_bytes: int) -> Any:

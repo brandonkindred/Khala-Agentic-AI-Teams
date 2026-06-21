@@ -33,7 +33,6 @@ documented default, out-of-range values clamp to the floor/ceiling):
 from __future__ import annotations
 
 import logging
-import math
 import os
 import sys
 import threading
@@ -116,6 +115,10 @@ def _env_float(
 ) -> float:
     """Parse a float from env var *name*, defensively, then clamp.
 
+    Thin wrapper over the canonical :func:`shared_env.parse_float` (which also
+    rejects ``inf``/``nan`` — a non-finite interval would busy-loop/crash the
+    watchdog), kept for the existing call sites in this module.
+
     Preconditions:
         - ``minimum <= maximum`` when both are provided; *default* is finite.
     Postconditions:
@@ -123,22 +126,9 @@ def _env_float(
           *default* when the var is unset/blank/non-numeric or parses to a
           non-finite value (``inf``/``nan``). Never raises.
     """
-    raw = os.environ.get(name)
-    value = default
-    if raw is not None and raw.strip():
-        try:
-            value = float(raw)
-        except (TypeError, ValueError):
-            value = default
-    # Reject inf/nan: a non-finite interval busy-loops or crashes the watchdog,
-    # and clamp comparisons (</>) are always False for nan so they can't catch it.
-    if not math.isfinite(value):
-        value = default
-    if minimum is not None and value < minimum:
-        value = minimum
-    if maximum is not None and value > maximum:
-        value = maximum
-    return value
+    from shared_env import parse_float
+
+    return parse_float(name, default, minimum=minimum, maximum=maximum)
 
 
 def _positive_int_or_none(raw: Optional[str]) -> Optional[int]:
