@@ -157,8 +157,14 @@ def create_blog_job(
 def _brief_label(brief: str, fallback: str) -> str:
     """First non-blank line of the brief (truncated), or ``fallback``.
 
-    Robust to a brief that is empty or whose leading lines are blank — picks the
-    first line with visible content rather than indexing ``splitlines()[0]``.
+    Preconditions:
+        - ``fallback`` is a non-empty string (callers pass the job id).
+        - ``brief`` may be any string, empty, ``None``, or whitespace-only.
+    Postconditions:
+        - Returns the first line with visible content, stripped and truncated to
+          120 chars; or ``fallback`` when no such line exists.
+        - Never raises (robust to empty / blank-led briefs rather than indexing
+          ``splitlines()[0]``).
     """
     for line in (brief or "").splitlines():
         if line.strip():

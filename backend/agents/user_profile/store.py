@@ -78,6 +78,10 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
                 (user_id,),
             )
             row = cur.fetchone()
+    # Postcondition: the row exists (INSERT ... ON CONFLICT guarantees it; there
+    # is no DELETE path for profiles). A None here is a broken invariant, not a
+    # caller error — surface it rather than dereference None.
+    assert row is not None, f"user_profiles row missing for {user_id!r} after ensure"
     return UserProfile(
         user_id=row["user_id"],
         display_name=row["display_name"] or "",
@@ -128,6 +132,10 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
             params,
         )
         row = cur.fetchone()
+    # Postcondition: get_profile() above ensured the row, and there is no DELETE
+    # path for profiles, so RETURNING always yields it. A None is a broken
+    # invariant — surface it rather than dereference None.
+    assert row is not None, f"user_profiles row missing for {user_id!r} after update"
     return UserProfile(
         user_id=row["user_id"],
         display_name=row["display_name"] or "",
@@ -197,11 +205,24 @@ def record_association_safe(
     label: str = "",
     role: str = "owner",
 ) -> None:
-    """Best-effort wrapper around :func:`record_association`.
+    """Best-effort linking for artifact-create paths.
 
-    A profile-link failure (Postgres disabled, transient error) must never
-    break artifact creation, so this swallows and logs every exception.
+    Postconditions:
+        - Never raises: an *operational* failure (Postgres disabled, transient
+          error) is logged and swallowed so it cannot break artifact creation.
+        - Invalid inputs (empty ``artifact_type``/``team``/``artifact_id``) are a
+          caller bug; they are logged and skipped here rather than passed to
+          :func:`record_association` (whose precondition would assert) — so this
+          wrapper never hides a contract failure inside a broad ``except``.
     """
+    if not (artifact_type and team and artifact_id):
+        logger.warning(
+            "user_profile: skipping association with empty fields type=%r team=%r id=%r",
+            artifact_type,
+            team,
+            artifact_id,
+        )
+        return
     try:
         record_association(
             artifact_type,
@@ -211,7 +232,7 @@ def record_association_safe(
             label=label,
             role=role,
         )
-    except Exception:  # noqa: BLE001 - best-effort, never propagate
+    except Exception:  # noqa: BLE001 - operational best-effort, never propagate
         logger.warning(
             "user_profile: failed to record association type=%s team=%s id=%s",
             artifact_type,

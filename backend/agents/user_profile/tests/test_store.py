@@ -101,3 +101,19 @@ def test_record_association_safe_swallows_errors(monkeypatch):
     monkeypatch.setattr(up_store, "record_association", _boom)
     # Must not raise.
     up_store.record_association_safe("brand", "branding", "brand_1")
+
+
+def test_record_association_safe_skips_empty_inputs(monkeypatch, db):
+    """Empty fields are a caller bug: skipped+logged, never passed to the strict
+    record_association (whose precondition would assert)."""
+    called = False
+
+    def _spy(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(up_store, "record_association", _spy)
+    up_store.record_association_safe("", "branding", "brand_1")
+    up_store.record_association_safe("brand", "", "brand_1")
+    up_store.record_association_safe("brand", "branding", "")
+    assert called is False
