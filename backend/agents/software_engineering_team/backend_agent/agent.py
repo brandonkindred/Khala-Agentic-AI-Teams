@@ -1957,68 +1957,12 @@ class BackendExpertAgent:
                     ]
                 # Escalate when same error repeats: add failing test content and clearer instructions
                 if consecutive_same_build_failures >= 2:
-                    failing_test_file = (
-                        _extract_failing_test_file_from_build_errors(build_errors)
-                        if _is_pytest_assertion_failure(build_errors)
-                        else None
+                    self._escalate_qa_issues_for_repeated_build_failure(
+                        qa_issues,
+                        build_errors=build_errors,
+                        consecutive_failures=consecutive_same_build_failures,
+                        repo_path=repo_path,
                     )
-                    escalation_desc = (
-                        f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
-                        "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
-                        "Do not add new features or refactor. Follow the Suggestion and Playbook in the error output."
-                    )
-                    escalation_suggestion = (
-                        "Apply the minimal fix indicated by the error message. "
-                        "Re-read the Suggestion and Playbook sections above. "
-                        "Read the failing test's assertions line-by-line and ensure the implementation satisfies each one."
-                    )
-                    if failing_test_file:
-                        test_path = repo_path / failing_test_file
-                        if test_path.exists():
-                            try:
-                                test_content = test_path.read_text(
-                                    encoding="utf-8", errors="replace"
-                                )
-                                escalation_desc += (
-                                    f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
-                                    f"{test_content[:3000]}{'... [truncated]' if len(test_content) > 3000 else ''}\n```"
-                                )
-                                escalation_suggestion = (
-                                    f"The failing test is in {failing_test_file}. "
-                                    "Read its assertions line-by-line and ensure the implementation satisfies each one."
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            escalation_desc += f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
-                    qa_issues.insert(
-                        0,
-                        {
-                            "severity": "critical",
-                            "description": escalation_desc,
-                            "location": failing_test_file or "",
-                            "recommendation": escalation_suggestion,
-                        },
-                    )
-                    if consecutive_same_build_failures == 4:
-                        # Suggest that test expectations might be wrong
-                        qa_issues.insert(
-                            0,
-                            {
-                                "severity": "critical",
-                                "description": (
-                                    "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
-                                    "If the test asserts behavior that conflicts with the spec, you may need to update the test "
-                                    "rather than the implementation. Explain your reasoning. Either fix the implementation to "
-                                    "satisfy the test, or update the test if it incorrectly asserts behavior."
-                                ),
-                                "location": "",
-                                "recommendation": (
-                                    "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
-                                    "If the implementation is wrong, Fix the implementation to satisfy the test."
-                                ),
-                            },
-                        )
                 task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
@@ -3184,6 +3128,93 @@ class BackendExpertAgent:
                 spec_err,
             )
             return False
+
+    @staticmethod
+    def _escalate_qa_issues_for_repeated_build_failure(
+        qa_issues: List[Dict[str, Any]],
+        *,
+        build_errors: str,
+        consecutive_failures: int,
+        repo_path: Path,
+    ) -> None:
+        """Prepend escalation guidance to *qa_issues* when a build error repeats.
+
+        Mutates *qa_issues* in place: prepends a "focus only on this error"
+        issue (enriched with the failing test's contents when available), and
+        at exactly the 4th identical failure additionally prepends a "the test
+        expectations may be wrong" issue ahead of it.
+
+        Preconditions:
+            - *qa_issues* is the (possibly empty) list of issue dicts for the
+              upcoming regeneration; the caller gates on
+              ``consecutive_failures >= 2``.
+        Postconditions:
+            - One issue (two at the 4th failure) is inserted at the front of
+              *qa_issues*; no existing element is modified. Reading the failing
+              test is best-effort and never raises.
+        """
+        failing_test_file = (
+            _extract_failing_test_file_from_build_errors(build_errors)
+            if _is_pytest_assertion_failure(build_errors)
+            else None
+        )
+        escalation_desc = (
+            f"ESCALATION: This build error has occurred {consecutive_failures} times. "
+            "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
+            "Do not add new features or refactor. Follow the Suggestion and Playbook in the error output."
+        )
+        escalation_suggestion = (
+            "Apply the minimal fix indicated by the error message. "
+            "Re-read the Suggestion and Playbook sections above. "
+            "Read the failing test's assertions line-by-line and ensure the implementation satisfies each one."
+        )
+        if failing_test_file:
+            test_path = repo_path / failing_test_file
+            if test_path.exists():
+                try:
+                    test_content = test_path.read_text(encoding="utf-8", errors="replace")
+                    escalation_desc += (
+                        f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
+                        f"{test_content[:3000]}{'... [truncated]' if len(test_content) > 3000 else ''}\n```"
+                    )
+                    escalation_suggestion = (
+                        f"The failing test is in {failing_test_file}. "
+                        "Read its assertions line-by-line and ensure the implementation satisfies each one."
+                    )
+                except Exception:
+                    pass
+            else:
+                escalation_desc += (
+                    f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
+                )
+        qa_issues.insert(
+            0,
+            {
+                "severity": "critical",
+                "description": escalation_desc,
+                "location": failing_test_file or "",
+                "recommendation": escalation_suggestion,
+            },
+        )
+        if consecutive_failures == 4:
+            # Suggest that test expectations might be wrong
+            qa_issues.insert(
+                0,
+                {
+                    "severity": "critical",
+                    "description": (
+                        "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
+                        "If the test asserts behavior that conflicts with the spec, you may need to update the test "
+                        "rather than the implementation. Explain your reasoning. Either fix the implementation to "
+                        "satisfy the test, or update the test if it incorrectly asserts behavior."
+                    ),
+                    "location": "",
+                    "recommendation": (
+                        "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
+                        "If the implementation is wrong, Fix the implementation to satisfy the test."
+                    ),
+                },
+            )
 
     @staticmethod
     def _run_code_review(

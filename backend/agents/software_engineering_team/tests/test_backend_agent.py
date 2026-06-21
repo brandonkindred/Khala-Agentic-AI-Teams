@@ -1169,3 +1169,83 @@ def test_try_build_fix_specialist_swallows_specialist_error(tmp_path: Path) -> N
         iteration=5,
     )
     assert result is False
+
+
+def test_escalate_qa_issues_prepends_single_issue_at_two_failures(tmp_path: Path) -> None:
+    """At two consecutive failures, one focus-only escalation issue is prepended."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="ImportError: boom",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+    )
+    assert len(issues) == 1
+    assert "occurred 2 times" in issues[0]["description"]
+    assert issues[0]["location"] == ""
+    assert issues[0]["severity"] == "critical"
+
+
+def test_escalate_qa_issues_prepends_test_wrong_issue_first_at_fourth_failure(
+    tmp_path: Path,
+) -> None:
+    """At the 4th failure, the 'test may be wrong' issue is inserted ahead of the focus issue."""
+    issues = [{"severity": "low", "description": "pre-existing"}]
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="ImportError: boom",
+        consecutive_failures=4,
+        repo_path=tmp_path,
+    )
+    assert len(issues) == 3
+    assert "4th same failure" in issues[0]["description"]
+    assert "occurred 4 times" in issues[1]["description"]
+    assert issues[2]["description"] == "pre-existing"
+
+
+def test_escalate_qa_issues_embeds_failing_test_content(tmp_path: Path) -> None:
+    """When the failing test file exists, its contents are embedded in the escalation."""
+    test_file = "tests/test_thing.py"
+    (tmp_path / "tests").mkdir()
+    (tmp_path / test_file).write_text(
+        "def test_x():\n    assert add(1, 2) == 3\n", encoding="utf-8"
+    )
+    issues: list = []
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value=test_file,
+        ),
+    ):
+        BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+            issues,
+            build_errors="E   AssertionError",
+            consecutive_failures=2,
+            repo_path=tmp_path,
+        )
+    assert len(issues) == 1
+    assert "Failing test expectations" in issues[0]["description"]
+    assert "assert add(1, 2) == 3" in issues[0]["description"]
+    assert issues[0]["location"] == test_file
+
+
+def test_escalate_qa_issues_notes_missing_failing_test_file(tmp_path: Path) -> None:
+    """When the failing test file is named but absent, the escalation says so."""
+    issues: list = []
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value="tests/missing.py",
+        ),
+    ):
+        BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+            issues,
+            build_errors="E   AssertionError",
+            consecutive_failures=2,
+            repo_path=tmp_path,
+        )
+    assert len(issues) == 1
+    assert "file not found in repo" in issues[0]["description"]
+    assert issues[0]["location"] == "tests/missing.py"
