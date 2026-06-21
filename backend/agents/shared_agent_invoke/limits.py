@@ -35,11 +35,15 @@ RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
 
 
 def max_payload_bytes() -> int:
-    return parse_int("AGENT_INVOKE_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
+    # A non-positive cap would reject every request body; fall back to the
+    # default (matching max_writeback_bytes below) rather than disable the path.
+    value = parse_int("AGENT_INVOKE_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
+    return value if value > 0 else DEFAULT_MAX_PAYLOAD_BYTES
 
 
 def max_output_bytes() -> int:
-    return parse_int("AGENT_INVOKE_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
+    value = parse_int("AGENT_INVOKE_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
+    return value if value > 0 else DEFAULT_MAX_OUTPUT_BYTES
 
 
 def max_writeback_bytes() -> int:
@@ -58,7 +62,9 @@ def max_writeback_bytes() -> int:
 
 
 def default_exec_timeout_s() -> float:
-    return parse_float("AGENT_EXEC_TIMEOUT_S", DEFAULT_EXEC_TIMEOUT_S)
+    # A non-positive timeout would cancel work instantly; fall back to the default.
+    value = parse_float("AGENT_EXEC_TIMEOUT_S", DEFAULT_EXEC_TIMEOUT_S)
+    return value if value > 0 else DEFAULT_EXEC_TIMEOUT_S
 
 
 async def read_json_capped(request: Request, *, max_bytes: int) -> Any:

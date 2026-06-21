@@ -249,11 +249,9 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
     All LLM calls use streaming, so the timeout covers the full streamed response.
     Override with LLM_TIMEOUT if needed.
     """
-    raw = os.environ.get(ENV_LLM_TIMEOUT) or "900"
-    try:
-        return float(raw)
-    except ValueError:
-        return 900.0
+    from shared_env import parse_float
+
+    return parse_float(ENV_LLM_TIMEOUT, 900.0)
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
@@ -261,6 +259,9 @@ def resolve_context_size_for_model(model: str) -> Optional[int]:
     Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
     then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
     """
+    # Not expressible via shared_env.parse_int: an unset *or* invalid override must
+    # fall through to the model-specific KNOWN_MODEL_CONTEXT value (an Optional[int]),
+    # not a fixed default, and a valid override is clamped up to a 2048 floor.
     raw = os.environ.get(ENV_LLM_CONTEXT_SIZE)
     if raw:
         try:

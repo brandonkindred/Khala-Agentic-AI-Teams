@@ -438,6 +438,7 @@ class BaseJobStore:
         Postconditions: returns True and sets status to ``cancelled`` when the job
             exists and is pending/running; returns False (no write) otherwise.
         """
+        assert job_id, "cancel_job requires a non-empty job_id"
         job = self._client().get_job(job_id)
         if job is None or job.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}:
             return False
@@ -447,9 +448,11 @@ class BaseJobStore:
     def is_job_cancelled(self, job_id: str) -> bool:
         """Return True if the job exists and has been marked cancelled.
 
+        Preconditions: ``job_id`` is non-empty.
         Postconditions: pure read; returns a bool. Used as the cooperative-cancel
             poll inside orchestrators.
         """
+        assert job_id, "is_job_cancelled requires a non-empty job_id"
         job = self._client().get_job(job_id)
         return job is not None and job.get("status") == JOB_STATUS_CANCELLED
 
@@ -467,14 +470,17 @@ class BaseJobStore:
     def mark_all_running_jobs_failed(self, reason: str) -> List[str]:
         """Best-effort: mark all active jobs failed (e.g. on shutdown).
 
-        Postconditions: returns the failed job ids; a client error is logged and
-            swallowed (returns ``[]``) so a shutdown hook never raises. Teams that
-            want ``interrupted`` instead override this.
+        Preconditions: ``reason`` is a human-readable explanation (any string).
+        Postconditions: returns the failed job ids; a client error is logged with
+            its traceback and swallowed (returns ``[]``) so a shutdown hook never
+            raises. Teams that want ``interrupted`` instead override this.
         """
         try:
             return self._client().mark_all_active_jobs_failed(reason)
         except Exception as e:  # noqa: BLE001 - shutdown hook must not raise
-            logger.warning("mark_all_running_jobs_failed (%s): %s", self.team, e)
+            # exc_info so a real defect (not just an operational error) is
+            # diagnosable rather than hidden behind a one-line message.
+            logger.warning("mark_all_running_jobs_failed (%s): %s", self.team, e, exc_info=True)
             return []
 
     def reset_job(self, job_id: str) -> None:

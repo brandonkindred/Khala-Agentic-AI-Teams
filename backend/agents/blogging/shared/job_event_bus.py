@@ -44,9 +44,19 @@ logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
-    # Canonical defensive int parsing (unset/blank/unparseable -> default).
+    # Canonical defensive int parsing (unset/blank/unparseable -> default), but
+    # keep the original operator-visible warning when a *present* override can't
+    # be parsed (a typo'd tuning var) so a misconfig isn't silently swallowed.
+    import os
+
     from shared_env import parse_int
 
+    raw = os.environ.get(name, "").strip()
+    if raw:
+        try:
+            int(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r; using default %d", name, raw, default)
     return parse_int(name, default)
 
 

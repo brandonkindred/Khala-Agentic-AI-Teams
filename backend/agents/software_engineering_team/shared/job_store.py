@@ -56,7 +56,10 @@ DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 # Seconds after which a pending/running job with no recent heartbeat is marked failed.
 # Set via env JOB_STALE_AFTER_SECONDS (default 1800).
 def get_stale_after_seconds() -> float:
-    return parse_float("JOB_STALE_AFTER_SECONDS", 1800.0)
+    # A non-positive interval would mark every freshly-started job stale at once;
+    # fall back to the default rather than honor a degenerate override.
+    value = parse_float("JOB_STALE_AFTER_SECONDS", 1800.0)
+    return value if value > 0 else 1800.0
 
 
 _jobs_path_logged = False

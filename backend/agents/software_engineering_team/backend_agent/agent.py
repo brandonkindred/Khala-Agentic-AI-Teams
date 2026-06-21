@@ -417,6 +417,42 @@ def _is_pytest_assertion_failure(build_errors: str) -> bool:
     return "[pytest_assertion]" in build_errors or "failure_class=pytest_assertion" in build_errors
 
 
+# Sentinel distinguishing "caller did not precompute the failing-test context"
+# from a genuine ``None`` (no failing test). Lets the build-failure loop resolve
+# the context once per iteration and pass it to both the BuildFixSpecialist and
+# the escalation helper, while those helpers still resolve it themselves when
+# called directly (e.g. in unit tests).
+_UNSET: Any = object()
+
+
+def _resolve_failing_test_context(
+    build_errors: str, repo_path: Path
+) -> Tuple[Optional[str], Optional[str]]:
+    """Parse the failing pytest file from *build_errors* and read its full text.
+
+    Preconditions: none.
+    Postconditions: returns ``(failing_test_file, failing_test_content)`` — the
+        file path named in a pytest assertion failure (or None), and its full
+        text when the file exists and is readable (or None when there is no such
+        file, it is missing, or it can't be read). Never raises; the read is
+        best-effort. Callers slice ``failing_test_content`` as needed.
+    """
+    failing_test_file = (
+        _extract_failing_test_file_from_build_errors(build_errors)
+        if _is_pytest_assertion_failure(build_errors)
+        else None
+    )
+    failing_test_content: Optional[str] = None
+    if failing_test_file:
+        test_path = repo_path / failing_test_file
+        if test_path.exists():
+            try:
+                failing_test_content = test_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                failing_test_content = None
+    return failing_test_file, failing_test_content
+
+
 def _build_error_signature(build_errors: str) -> str:
     """Compute a signature for same-error detection.
     For pytest assertion failures, use the last 1200 chars (where assertion details
@@ -1883,6 +1919,15 @@ class BackendExpertAgent:
                         repeated_build_failure_reason[:800],
                     )
                     break
+                # Resolve the failing-test context once for the specialist and
+                # escalation paths (both gated on >=2 same failures) so the test
+                # file is parsed and read a single time per iteration.
+                failing_test_file: Optional[str] = None
+                failing_test_content: Optional[str] = None
+                if consecutive_same_build_failures >= 2:
+                    failing_test_file, failing_test_content = _resolve_failing_test_context(
+                        build_errors, repo_path
+                    )
                 # When same error repeats 2+ times, try BuildFixSpecialist for minimal targeted fix
                 if (
                     consecutive_same_build_failures >= 2
@@ -1894,6 +1939,8 @@ class BackendExpertAgent:
                         current_task=current_task,
                         task_id=task_id,
                         iteration=iteration,
+                        failing_test_file=failing_test_file,
+                        failing_test_content=failing_test_content,
                     )
                 ):
                     continue  # Re-run build verification
@@ -1962,6 +2009,8 @@ class BackendExpertAgent:
                         build_errors=build_errors,
                         consecutive_failures=consecutive_same_build_failures,
                         repo_path=repo_path,
+                        failing_test_file=failing_test_file,
+                        failing_test_content=failing_test_content,
                     )
                 task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
@@ -3041,6 +3090,8 @@ class BackendExpertAgent:
         current_task: Task,
         task_id: str,
         iteration: int,
+        failing_test_file: Any = _UNSET,
+        failing_test_content: Any = _UNSET,
     ) -> bool:
         """Attempt a minimal, targeted build fix via the BuildFixSpecialist.
 
@@ -3052,6 +3103,10 @@ class BackendExpertAgent:
             - ``build_fix_specialist`` is a runnable agent (not None); the caller
               gates on this and on the repeated-failure threshold.
             - ``repo_path`` is the backend repo root.
+            - ``failing_test_file``/``failing_test_content`` are the precomputed
+              :func:`_resolve_failing_test_context` result, or left ``_UNSET`` to
+              resolve here (the caller threads them so the test file is read once
+              per iteration across this and the escalation helper).
         Postconditions:
             - Returns True iff the specialist produced edits that were applied
               and written to disk — the caller re-runs build verification.
@@ -3061,30 +3116,23 @@ class BackendExpertAgent:
         """
         from software_engineering_team.shared.repo_writer import write_agent_output
 
+        if failing_test_file is _UNSET:
+            failing_test_file, failing_test_content = _resolve_failing_test_context(
+                build_errors, repo_path
+            )
+
         try:
             from build_fix_specialist.models import BuildFixInput
 
             affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)
             affected_code = _read_affected_files_code(repo_path, affected_paths)
-            failing_test_file = (
-                _extract_failing_test_file_from_build_errors(build_errors)
-                if _is_pytest_assertion_failure(build_errors)
-                else None
+            bf_failing_test_content = (
+                failing_test_content[:3000] if failing_test_content is not None else None
             )
-            failing_test_content = None
-            if failing_test_file:
-                test_path = repo_path / failing_test_file
-                if test_path.exists():
-                    try:
-                        failing_test_content = test_path.read_text(
-                            encoding="utf-8", errors="replace"
-                        )[:3000]
-                    except Exception:
-                        pass
             bf_result = build_fix_specialist.run(
                 BuildFixInput(
                     build_errors=build_errors[:4000],
-                    failing_test_content=failing_test_content,
+                    failing_test_content=bf_failing_test_content,
                     affected_files_code=affected_code,
                     task_description=current_task.description,
                 )
@@ -3136,6 +3184,8 @@ class BackendExpertAgent:
         build_errors: str,
         consecutive_failures: int,
         repo_path: Path,
+        failing_test_file: Any = _UNSET,
+        failing_test_content: Any = _UNSET,
     ) -> None:
         """Prepend escalation guidance to *qa_issues* when a build error repeats.
 
@@ -3148,16 +3198,19 @@ class BackendExpertAgent:
             - *qa_issues* is the (possibly empty) list of issue dicts for the
               upcoming regeneration; the caller gates on
               ``consecutive_failures >= 2``.
+            - ``failing_test_file``/``failing_test_content`` are the precomputed
+              :func:`_resolve_failing_test_context` result, or left ``_UNSET`` to
+              resolve here (the caller threads them to avoid re-reading the test
+              file already read for the BuildFixSpecialist this iteration).
         Postconditions:
             - One issue (two at the 4th failure) is inserted at the front of
               *qa_issues*; no existing element is modified. Reading the failing
               test is best-effort and never raises.
         """
-        failing_test_file = (
-            _extract_failing_test_file_from_build_errors(build_errors)
-            if _is_pytest_assertion_failure(build_errors)
-            else None
-        )
+        if failing_test_file is _UNSET:
+            failing_test_file, failing_test_content = _resolve_failing_test_context(
+                build_errors, repo_path
+            )
         escalation_desc = (
             f"ESCALATION: This build error has occurred {consecutive_failures} times. "
             "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
@@ -3169,21 +3222,17 @@ class BackendExpertAgent:
             "Read the failing test's assertions line-by-line and ensure the implementation satisfies each one."
         )
         if failing_test_file:
-            test_path = repo_path / failing_test_file
-            if test_path.exists():
-                try:
-                    test_content = test_path.read_text(encoding="utf-8", errors="replace")
-                    escalation_desc += (
-                        f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
-                        f"{test_content[:3000]}{'... [truncated]' if len(test_content) > 3000 else ''}\n```"
-                    )
-                    escalation_suggestion = (
-                        f"The failing test is in {failing_test_file}. "
-                        "Read its assertions line-by-line and ensure the implementation satisfies each one."
-                    )
-                except Exception:
-                    pass
-            else:
+            if failing_test_content is not None:
+                escalation_desc += (
+                    f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
+                    f"{failing_test_content[:3000]}"
+                    f"{'... [truncated]' if len(failing_test_content) > 3000 else ''}\n```"
+                )
+                escalation_suggestion = (
+                    f"The failing test is in {failing_test_file}. "
+                    "Read its assertions line-by-line and ensure the implementation satisfies each one."
+                )
+            elif not (repo_path / failing_test_file).exists():
                 escalation_desc += (
                     f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
                 )

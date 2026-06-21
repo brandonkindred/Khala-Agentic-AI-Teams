@@ -1249,3 +1249,94 @@ def test_escalate_qa_issues_notes_missing_failing_test_file(tmp_path: Path) -> N
     assert len(issues) == 1
     assert "file not found in repo" in issues[0]["description"]
     assert issues[0]["location"] == "tests/missing.py"
+
+
+def test_resolve_failing_test_context_reads_existing_file(tmp_path: Path) -> None:
+    """_resolve_failing_test_context returns the file and its full text when present."""
+    from backend_agent.agent import _resolve_failing_test_context
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_x.py").write_text("CONTENT", encoding="utf-8")
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value="tests/test_x.py",
+        ),
+    ):
+        file, content = _resolve_failing_test_context("E AssertionError", tmp_path)
+    assert file == "tests/test_x.py"
+    assert content == "CONTENT"
+
+
+def test_resolve_failing_test_context_no_pytest_failure(tmp_path: Path) -> None:
+    """Non-pytest build errors yield (None, None) and no disk access."""
+    from backend_agent.agent import _resolve_failing_test_context
+
+    file, content = _resolve_failing_test_context("ImportError: boom", tmp_path)
+    assert file is None and content is None
+
+
+def test_try_build_fix_specialist_uses_precomputed_test_content(tmp_path: Path) -> None:
+    """A precomputed failing_test_content is sliced into BuildFixInput without re-reading disk."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])  # no edits; we only inspect the call args
+    long_content = "x" * 5000
+    agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="E AssertionError",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="P1",
+        iteration=2,
+        failing_test_file="tests/test_x.py",
+        failing_test_content=long_content,
+    )
+    sent = spec.run.call_args[0][0]
+    assert sent.failing_test_content == long_content[:3000]
+
+
+def test_escalate_uses_precomputed_content_without_disk(tmp_path: Path) -> None:
+    """Precomputed content is embedded even when the file path is not on disk (no re-read)."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/test_x.py",  # intentionally not created on disk
+        failing_test_content="def test_x():\n    assert f() == 1\n",
+    )
+    assert len(issues) == 1
+    assert "assert f() == 1" in issues[0]["description"]
+    assert issues[0]["location"] == "tests/test_x.py"
+
+
+def test_escalate_precomputed_long_content_is_truncated(tmp_path: Path) -> None:
+    """Precomputed content over 3000 chars is marked truncated."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/test_x.py",
+        failing_test_content="y" * 4000,
+    )
+    assert "... [truncated]" in issues[0]["description"]
+
+
+def test_escalate_precomputed_missing_file_adds_note(tmp_path: Path) -> None:
+    """Precomputed (file, None) for an absent file still adds the 'file not found' note."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/missing.py",
+        failing_test_content=None,
+    )
+    assert len(issues) == 1
+    assert "file not found in repo" in issues[0]["description"]
