@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import logging
-import threading
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -53,6 +54,26 @@ from shared_postgres.metrics import timed_query
 logger = logging.getLogger(__name__)
 
 init_otel(service_name="branding-team", team_key="branding")
+
+
+def _max_concurrent_runs() -> int:
+    """Worker cap for the branding-run executor (env-tunable, clamped to >= 1)."""
+    raw = os.environ.get("BRANDING_MAX_CONCURRENT_RUNS", "4")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 4
+
+
+# Branding runs are submitted to a bounded pool instead of spawning an
+# unbounded daemon thread per request. The fixed worker count gives the
+# pipeline backpressure (extra submissions queue rather than fan out into
+# thousands of concurrent LLM pipelines) while the job row stays PENDING
+# until a worker picks it up.
+_run_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_max_concurrent_runs(),
+    thread_name_prefix="branding-run",
+)
 
 
 @asynccontextmanager
@@ -339,10 +360,7 @@ def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]
 
 
 def _brand_exists(brand_id: str) -> bool:
-    for client in branding_store.list_clients():
-        if branding_store.get_brand(client.id, brand_id):
-            return True
-    return False
+    return branding_store.brand_exists(brand_id)
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:
@@ -649,22 +667,18 @@ def _submit_brand_run(
         brand_id=brand_id,
         current_phase=target_phase.value if target_phase else None,
     )
-    thread = threading.Thread(
-        target=_run_branding_background,
-        args=(
-            job_id,
-            brand.mission,
-            human_review,
-            payload.brand_checks,
-            client_id,
-            brand_id,
-            payload.include_market_research,
-            payload.include_design_assets,
-            target_phase,
-        ),
-        daemon=True,
+    _run_executor.submit(
+        _run_branding_background,
+        job_id,
+        brand.mission,
+        human_review,
+        payload.brand_checks,
+        client_id,
+        brand_id,
+        payload.include_market_research,
+        payload.include_design_assets,
+        target_phase,
     )
-    thread.start()
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
@@ -945,15 +959,10 @@ def create_branding_conversation(
     suggested_questions: List[str] = []
 
     if initial_message:
+        # Freshly created conversation: no prior history, mission is the default.
         conversation_store.append_message(conversation_id, "user", initial_message)
-        messages, mission, _ = conversation_store.get(conversation_id) or (
-            [],
-            _default_mission(),
-            None,
-        )
-        msg_pairs = [(m.role, m.content) for m in messages]
         reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
-            msg_pairs[:-1], mission, initial_message
+            [], _default_mission(), initial_message
         )
         conversation_store.update_mission(conversation_id, updated_mission)
         conversation_store.append_message(conversation_id, "assistant", reply)
@@ -962,31 +971,10 @@ def create_branding_conversation(
             conversation_store.update_output(conversation_id, output)
 
         # Auto-create a brand when the user provided enough info in the initial message.
-        skip_save = req.skip_save
-        if not brand_id and not skip_save and _mission_has_brand_name(updated_mission):
-            client_id = _ensure_default_client()
-            brand = branding_store.create_brand(
-                client_id=client_id,
-                mission=updated_mission,
-                name=updated_mission.company_name,
+        if not brand_id and not req.skip_save and _mission_has_brand_name(updated_mission):
+            brand_id = _auto_create_brand_from_conversation(
+                conversation_id, updated_mission, output
             )
-            if brand:
-                conversation_store.set_brand(conversation_id, brand.id)
-                branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-                if output:
-                    branding_store.append_brand_version(client_id, brand.id, output)
-                brand_id = brand.id
-                logger.info(
-                    "Auto-created brand %s from initial message in conversation %s",
-                    brand.id,
-                    conversation_id,
-                )
-
-        messages, mission, latest_output = conversation_store.get(conversation_id) or (
-            [],
-            updated_mission,
-            output,
-        )
     else:
         reply = (
             "Hi! I'm your branding lead. I'll guide you through our 5-phase brand development framework — "
@@ -998,11 +986,12 @@ def create_branding_conversation(
             "Who is your target audience?",
             "What does your company do?",
         ]
-        messages, mission, latest_output = conversation_store.get(conversation_id) or (
-            [],
-            _default_mission(),
-            None,
-        )
+
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
+        messages, mission, latest_output = [], _default_mission(), None
+    else:
+        messages, mission, latest_output = state.messages, state.mission, state.latest_output
 
     return _conversation_to_response(
         conversation_id, brand_id, messages, mission, latest_output, suggested_questions
@@ -1011,27 +1000,57 @@ def create_branding_conversation(
 
 def _ensure_default_client() -> str:
     """Find or create a default workspace client; return client_id."""
-    clients = branding_store.list_clients()
+    clients = branding_store.list_clients(limit=1)
     if clients:
         return clients[0].id
     client = branding_store.create_client(name="My brands")
     return client.id
 
 
+def _auto_create_brand_from_conversation(
+    conversation_id: str,
+    mission: BrandingMission,
+    output: Optional[TeamOutput],
+) -> Optional[str]:
+    """Create a brand from an unattached conversation and link the two.
+
+    Preconditions:
+        ``conversation_id`` refers to an existing conversation that is not yet
+        attached to a brand, and ``mission`` carries a real (non-placeholder)
+        company name.
+    Postconditions:
+        On success the conversation is attached to the new brand, the brand
+        records the conversation id, and any ``output`` is appended as the
+        first version. Returns the new brand id, or None if creation failed.
+    """
+    client_id = _ensure_default_client()
+    brand = branding_store.create_brand(
+        client_id=client_id,
+        mission=mission,
+        name=mission.company_name,
+    )
+    if not brand:
+        return None
+    conversation_store.set_brand(conversation_id, brand.id)
+    branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
+    if output:
+        branding_store.append_brand_version(client_id, brand.id, output)
+    logger.info("Auto-created brand %s from conversation %s", brand.id, conversation_id)
+    return brand.id
+
+
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_branding_conversation_message(
     conversation_id: str, payload: SendMessageRequest
 ) -> ConversationStateResponse:
-    state = conversation_store.get(conversation_id)
-    if not state:
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    messages, mission, _ = state
-    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
+    brand_id = state.brand_id
     conversation_store.append_message(conversation_id, "user", payload.message)
-    msg_pairs = [(m.role, m.content) for m in messages]
-    msg_pairs.append(("user", payload.message))
+    history_pairs = [(m.role, m.content) for m in state.messages]
     reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
-        msg_pairs[:-1], mission, payload.message
+        history_pairs, state.mission, payload.message
     )
     conversation_store.update_mission(conversation_id, updated_mission)
     conversation_store.append_message(conversation_id, "assistant", reply)
@@ -1041,25 +1060,13 @@ def send_branding_conversation_message(
 
     # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
     if not brand_id and not payload.skip_save and _mission_has_brand_name(updated_mission):
-        client_id = _ensure_default_client()
-        brand = branding_store.create_brand(
-            client_id=client_id,
-            mission=updated_mission,
-            name=updated_mission.company_name,
-        )
-        if brand:
-            conversation_store.set_brand(conversation_id, brand.id)
-            branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-            if output:
-                branding_store.append_brand_version(client_id, brand.id, output)
-            brand_id = brand.id
-            logger.info("Auto-created brand %s from conversation %s", brand.id, conversation_id)
+        brand_id = _auto_create_brand_from_conversation(conversation_id, updated_mission, output)
 
-    messages, mission, latest_output = conversation_store.get(conversation_id) or (
-        [],
-        updated_mission,
-        output,
-    )
+    final = conversation_store.get_state(conversation_id)
+    if final is None:
+        messages, mission, latest_output = [], updated_mission, output
+    else:
+        messages, mission, latest_output = final.messages, final.mission, final.latest_output
     return _conversation_to_response(
         conversation_id, brand_id, messages, mission, latest_output, suggested_questions
     )
@@ -1067,13 +1074,16 @@ def send_branding_conversation_message(
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
 def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
-    state = conversation_store.get(conversation_id)
-    if not state:
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    messages, mission, latest_output = state
-    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, []
+        conversation_id,
+        state.brand_id,
+        state.messages,
+        state.mission,
+        state.latest_output,
+        [],
     )
 
 
@@ -1082,10 +1092,9 @@ def list_branding_conversations(
     brand_id: Optional[str] = None,
 ) -> List[ConversationSummaryResponse]:
     summaries = conversation_store.list_conversations(brand_id=brand_id)
-    brand_names: Dict[str, str] = {}
-    for client in branding_store.list_clients():
-        for brand in branding_store.list_brands_for_client(client.id):
-            brand_names[brand.id] = brand.name
+    # Resolve only the brand names referenced by these conversations instead
+    # of loading every brand of every client into memory.
+    brand_names = branding_store.get_brand_names([s.brand_id for s in summaries if s.brand_id])
     return [
         ConversationSummaryResponse(
             conversation_id=s.conversation_id,
@@ -1106,13 +1115,12 @@ def attach_conversation_to_brand(
     brand_id = payload.brand_id.strip()
     if not _brand_exists(brand_id):
         raise HTTPException(status_code=404, detail="Brand not found")
-    state = conversation_store.get(conversation_id)
-    if not state:
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     conversation_store.set_brand(conversation_id, brand_id)
-    messages, mission, latest_output = state
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, []
+        conversation_id, brand_id, state.messages, state.mission, state.latest_output, []
     )
 
 

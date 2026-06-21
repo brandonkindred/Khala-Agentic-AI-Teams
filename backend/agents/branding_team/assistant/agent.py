@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, List, Tuple
 
@@ -289,11 +290,27 @@ def _format_brief(mission: BrandingMission) -> Dict[str, Any]:
     }
 
 
+def _history_window() -> int:
+    """Max prior turns fed to the LLM (env-tunable, clamped to >= 1).
+
+    Both LLM stages re-send the conversation history every turn, so an
+    uncapped history makes each call grow without bound in tokens, latency,
+    and memory. Capping to the most recent turns keeps per-turn cost roughly
+    constant while preserving the immediate context the strategist needs.
+    """
+    raw = os.environ.get("BRANDING_ASSISTANT_HISTORY_WINDOW", "20")
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return 20
+
+
 def _format_history(messages: List[Tuple[str, str]]) -> str:
     if not messages:
         return "(No prior messages)"
+    recent = messages[-_history_window() :]
     return "\n".join(
-        f"{'Assistant' if role == 'assistant' else 'User'}: {content}" for role, content in messages
+        f"{'Assistant' if role == 'assistant' else 'User'}: {content}" for role, content in recent
     )
 
 

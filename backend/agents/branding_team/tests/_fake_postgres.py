@@ -58,7 +58,11 @@ class _FakeCursor:
             return
 
         if norm.startswith("select data from branding_clients"):
-            self._last_fetch_all = [{"data": c["data"]} for c in self._db["clients"].values()]
+            rows = [{"data": c["data"]} for c in self._db["clients"].values()]
+            if "limit" in norm:
+                limit, offset = params[0], params[1]
+                rows = rows[offset : offset + limit]
+            self._last_fetch_all = rows
             return
 
         if norm.startswith("select 1 from branding_clients where id"):
@@ -86,13 +90,39 @@ class _FakeCursor:
                 self._last_fetch_one = None
             return
 
+        if norm.startswith("select 1 from branding_brands where id"):
+            (brand_id,) = params
+            self._last_fetch_one = (1,) if brand_id in self._db["brands"] else None
+            return
+
+        if norm.startswith("select client_id, data from branding_brands where id"):
+            (brand_id,) = params
+            row = self._db["brands"].get(brand_id)
+            self._last_fetch_one = (
+                {"client_id": row["client_id"], "data": row["data"]} if row else None
+            )
+            return
+
+        if norm.startswith("select id, data from branding_brands where id = any"):
+            (wanted,) = params
+            wanted_set = set(wanted)
+            self._last_fetch_all = [
+                {"id": b["id"], "data": b["data"]}
+                for b in self._db["brands"].values()
+                if b["id"] in wanted_set
+            ]
+            return
+
         if norm.startswith("select data from branding_brands where client_id"):
-            (client_id,) = params
+            client_id = params[0]
             rows = [
                 {"data": b["data"]}
                 for b in self._db["brands"].values()
                 if b["client_id"] == client_id
             ]
+            if "limit" in norm:
+                limit, offset = params[1], params[2]
+                rows = rows[offset : offset + limit]
             self._last_fetch_all = rows
             return
 
@@ -118,6 +148,33 @@ class _FakeCursor:
                 "updated_at": updated_at,
             }
             self.rowcount = 1
+            return
+
+        if "from branding_conversations c" in norm and "where c.conversation_id" in norm:
+            (cid,) = params
+            conv = self._db["conversations"].get(cid)
+            if conv is None:
+                self._last_fetch_all = []
+                return
+            msgs = [m for m in self._db["conv_messages"] if m["conversation_id"] == cid]
+            msgs.sort(key=lambda m: m["id"])
+            base = {
+                "brand_id": conv["brand_id"],
+                "mission_json": conv["mission_json"],
+                "latest_output_json": conv["latest_output_json"],
+            }
+            if not msgs:
+                self._last_fetch_all = [{**base, "role": None, "content": None, "timestamp": None}]
+            else:
+                self._last_fetch_all = [
+                    {
+                        **base,
+                        "role": m["role"],
+                        "content": m["content"],
+                        "timestamp": m["timestamp"],
+                    }
+                    for m in msgs
+                ]
             return
 
         if norm.startswith(

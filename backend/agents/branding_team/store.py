@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
 from psycopg.rows import dict_row
@@ -65,9 +65,26 @@ class BrandingStore:
         return Client.model_validate(row["data"])
 
     @timed_query(store=_STORE, op="list_clients")
-    def list_clients(self) -> List[Client]:
+    def list_clients(self, limit: Optional[int] = None, offset: int = 0) -> List[Client]:
+        """Return clients, optionally paginated.
+
+        Preconditions:
+            ``limit`` is None or a positive int; ``offset`` is >= 0.
+        Postconditions:
+            When ``limit`` is None the full set is returned (insertion order);
+            otherwise at most ``limit`` rows starting at ``offset`` are
+            returned, ordered by ``created_at`` for stable paging.
+        """
+        assert limit is None or limit > 0, "limit must be None or a positive int"
+        assert offset >= 0, "offset must be >= 0"
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT data FROM branding_clients")
+            if limit is None:
+                cur.execute("SELECT data FROM branding_clients")
+            else:
+                cur.execute(
+                    "SELECT data FROM branding_clients ORDER BY created_at LIMIT %s OFFSET %s",
+                    (limit, offset),
+                )
             rows = cur.fetchall()
         return [Client.model_validate(r["data"]) for r in rows]
 
@@ -111,13 +128,89 @@ class BrandingStore:
             return None
         return Brand.model_validate(row["data"])
 
-    @timed_query(store=_STORE, op="list_brands_for_client")
-    def list_brands_for_client(self, client_id: str) -> List[Brand]:
+    @timed_query(store=_STORE, op="brand_exists")
+    def brand_exists(self, brand_id: str) -> bool:
+        """True if a brand with *brand_id* exists for any client.
+
+        Single indexed lookup — replaces scanning every client's brand list.
+
+        Postconditions:
+            Returns a bool; performs exactly one query and loads no JSONB.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM branding_brands WHERE id = %s LIMIT 1", (brand_id,))
+            return cur.fetchone() is not None
+
+    @timed_query(store=_STORE, op="get_brand_by_id")
+    def get_brand_by_id(self, brand_id: str) -> Optional[Tuple[str, Brand]]:
+        """Return ``(client_id, Brand)`` for *brand_id* regardless of client.
+
+        Single query — replaces the O(clients) scan callers used when they
+        hold a brand id but not its owning client.
+
+        Postconditions:
+            Returns None when no such brand exists, else the owning client id
+            paired with the validated Brand.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT data FROM branding_brands WHERE client_id = %s",
-                (client_id,),
+                "SELECT client_id, data FROM branding_brands WHERE id = %s",
+                (brand_id,),
             )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return row["client_id"], Brand.model_validate(row["data"])
+
+    @timed_query(store=_STORE, op="get_brand_names")
+    def get_brand_names(self, brand_ids: List[str]) -> Dict[str, str]:
+        """Return a ``{brand_id: name}`` map for the requested ids only.
+
+        Preconditions:
+            ``brand_ids`` is a list of brand id strings.
+        Postconditions:
+            The result contains an entry for every requested id that exists;
+            unknown ids are simply absent. Empty input yields an empty map
+            with no query issued.
+        """
+        unique_ids = list({bid for bid in brand_ids if bid})
+        if not unique_ids:
+            return {}
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT id, data FROM branding_brands WHERE id = ANY(%s)",
+                (unique_ids,),
+            )
+            rows = cur.fetchall()
+        return {r["id"]: Brand.model_validate(r["data"]).name for r in rows}
+
+    @timed_query(store=_STORE, op="list_brands_for_client")
+    def list_brands_for_client(
+        self, client_id: str, limit: Optional[int] = None, offset: int = 0
+    ) -> List[Brand]:
+        """Return a client's brands, optionally paginated.
+
+        Preconditions:
+            ``limit`` is None or a positive int; ``offset`` is >= 0.
+        Postconditions:
+            When ``limit`` is None all of the client's brands are returned;
+            otherwise at most ``limit`` rows starting at ``offset``, ordered by
+            ``created_at`` for stable paging.
+        """
+        assert limit is None or limit > 0, "limit must be None or a positive int"
+        assert offset >= 0, "offset must be >= 0"
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            if limit is None:
+                cur.execute(
+                    "SELECT data FROM branding_brands WHERE client_id = %s",
+                    (client_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT data FROM branding_brands WHERE client_id = %s "
+                    "ORDER BY created_at LIMIT %s OFFSET %s",
+                    (client_id, limit, offset),
+                )
             rows = cur.fetchall()
         return [Brand.model_validate(r["data"]) for r in rows]
 
