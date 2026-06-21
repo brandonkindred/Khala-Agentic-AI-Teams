@@ -671,22 +671,21 @@ def _ensure_material_theme_in_styles(
     Ensure styles.scss (or styles.css) has a Material prebuilt theme import.
     Appends it at the top if missing. Required for Angular Material components.
     """
+
+    def _transform(content: str) -> str:
+        if "material" in content.lower() and (
+            "prebuilt-themes" in content or "indigo-pink" in content
+        ):
+            return content
+        theme_line = "@use '@angular/material/prebuilt-themes/indigo-pink.css';\n"
+        return theme_line + content if content.strip() else theme_line
+
     for name in ("styles.scss", "styles.css"):
         styles_path = cwd / "src" / name
         if not styles_path.exists():
             continue
-        try:
-            content = styles_path.read_text(encoding="utf-8")
-            if "material" in content.lower() and (
-                "prebuilt-themes" in content or "indigo-pink" in content
-            ):
-                return
-            theme_line = "@use '@angular/material/prebuilt-themes/indigo-pink.css';\n"
-            new_content = theme_line + content if content.strip() else theme_line
-            styles_path.write_text(new_content, encoding="utf-8")
+        if patch_text_file(styles_path, _transform):
             logger.info("Repaired %s: added Material prebuilt theme import", name)
-        except Exception as e:
-            logger.warning("Could not repair %s for Material theme: %s", name, e)
         return
 
 
@@ -697,15 +696,12 @@ def _ensure_provide_animations_in_config(
     Ensure app.config.ts has provideAnimations in providers.
     Adds import and provider if missing. Required for Angular Material components.
     """
-    config_path = cwd / "src" / "app" / "app.config.ts"
-    if not config_path.exists():
-        return
-    try:
-        content = config_path.read_text(encoding="utf-8")
+
+    def _transform(content: str) -> str:
         if "provideAnimations" in content:
-            return
+            return content
         if "providers:" not in content:  # pragma: no cover
-            return
+            return content
         import_line = "import { provideAnimations } from '@angular/platform-browser/animations';\n"
         lines = content.split("\n")
         insert_idx = 0
@@ -715,23 +711,25 @@ def _ensure_provide_animations_in_config(
             elif insert_idx > 0 and not line.strip().startswith("import "):
                 break
         lines.insert(insert_idx, import_line.rstrip())
-        content = "\n".join(lines)
-        if "provideAnimations()" not in content:
-            if "provideHttpClient()," in content:
-                content = content.replace(
+        new_content = "\n".join(lines)
+        if "provideAnimations()" not in new_content:
+            if "provideHttpClient()," in new_content:
+                new_content = new_content.replace(
                     "provideHttpClient(),",
                     "provideHttpClient(),\n    provideAnimations(),",
                 )
-            elif "provideRouter(routes)," in content:
-                content = content.replace(
+            elif "provideRouter(routes)," in new_content:
+                new_content = new_content.replace(
                     "provideRouter(routes),",
                     "provideRouter(routes),\n    provideAnimations(),",
                 )
-        if "provideAnimations()" in content:
-            config_path.write_text(content, encoding="utf-8")
-            logger.info("Repaired app.config.ts: added provideAnimations")
-    except Exception as e:  # pragma: no cover
-        logger.warning("Could not repair app.config.ts for provideAnimations: %s", e)
+        # Only write when the provider was actually added; an orphan import with
+        # no anchor to attach the provider to is left out (original behavior).
+        return new_content if "provideAnimations()" in new_content else content
+
+    config_path = cwd / "src" / "app" / "app.config.ts"
+    if patch_text_file(config_path, _transform):
+        logger.info("Repaired app.config.ts: added provideAnimations")
 
 
 # Well-known Angular DI tokens that must be imported when used in app.config.ts
@@ -750,12 +748,7 @@ def _ensure_app_config_di_token_imports(
     """
     import re
 
-    config_path = cwd / "src" / "app" / "app.config.ts"
-    if not config_path.exists():
-        return
-    try:
-        content = config_path.read_text(encoding="utf-8")
-        changed = False
+    def _transform(content: str) -> str:
         for token, module in _APP_CONFIG_TOKEN_IMPORTS.items():
             if token not in content:
                 continue
@@ -783,7 +776,6 @@ def _ensure_app_config_di_token_imports(
                 new_line = f"import {{ {new_imports} }} from '{module}';"
                 old_line = match.group(0)
                 content = content.replace(old_line, new_line, 1)
-                changed = True
             else:
                 lines = content.split("\n")
                 insert_idx = 0
@@ -795,12 +787,11 @@ def _ensure_app_config_di_token_imports(
                 import_line = f"import {{ {token} }} from '{module}';\n"
                 lines.insert(insert_idx, import_line.rstrip())
                 content = "\n".join(lines)
-                changed = True
-        if changed:
-            config_path.write_text(content, encoding="utf-8")
-            logger.info("Repaired app.config.ts: ensured HTTP_INTERCEPTORS import")
-    except Exception as e:  # pragma: no cover
-        logger.warning("Could not repair app.config.ts for DI token imports: %s", e)
+        return content
+
+    config_path = cwd / "src" / "app" / "app.config.ts"
+    if patch_text_file(config_path, _transform):
+        logger.info("Repaired app.config.ts: ensured HTTP_INTERCEPTORS import")
 
 
 def _normalize_double_at_angular(
