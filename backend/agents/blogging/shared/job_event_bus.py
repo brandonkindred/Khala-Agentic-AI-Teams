@@ -33,10 +33,10 @@ touch the subscription.
 from __future__ import annotations
 
 import logging
-import os
 from typing import Any, Dict, Optional
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_env_config import env_int
 from shared_job_event_bus import BusState, Subscription
 from shared_job_event_bus import cleanup_job as _cleanup_job
 from shared_job_event_bus import publish as _publish
@@ -49,26 +49,15 @@ logger = logging.getLogger(__name__)
 __all__ = ["Subscription", "subscribe", "unsubscribe", "publish", "cleanup_job", "shutdown"]
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
-        return default
-
-
 # Idle subscriptions older than this are reaped. Pipeline jobs run on the order
 # of minutes; an hour is long enough to absorb slow/stalled jobs but short
 # enough to bound memory under pathological conditions.
-_SUB_TTL_SECONDS: float = float(_env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 3600))
+_SUB_TTL_SECONDS: float = float(env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 3600))
 # Hard cap on tracked jobs. When exceeded, the oldest (by creation time) are
 # evicted and their subscribers woken so they exit cleanly.
-_MAX_JOBS_TRACKED: int = _env_int("BLOGGING_EVENT_BUS_MAX_JOBS", 1024)
+_MAX_JOBS_TRACKED: int = env_int("BLOGGING_EVENT_BUS_MAX_JOBS", 1024)
 # Reaper wake-up interval.
-_REAPER_INTERVAL_SECONDS: float = float(_env_int("BLOGGING_EVENT_BUS_REAPER_INTERVAL", 300))
+_REAPER_INTERVAL_SECONDS: float = float(env_int("BLOGGING_EVENT_BUS_REAPER_INTERVAL", 300))
 
 # This team's independent bus namespace. The module-level aliases expose the
 # shared state for tests and the reaper; they reference the same objects, so

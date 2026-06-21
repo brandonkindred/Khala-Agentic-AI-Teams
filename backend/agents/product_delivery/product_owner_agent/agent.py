@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-import os
 from typing import Any, Callable, Protocol
 
 from product_delivery.models import (
@@ -34,6 +33,7 @@ from product_delivery.product_owner_agent.prompts import (
 )
 from product_delivery.scoring import RICEInputs, WSJFInputs, rice_score, wsjf_score
 from product_delivery.store import ProductDeliveryStore
+from shared_env_config import env_int
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +57,7 @@ def _max_stories_per_groom() -> int:
     ``score=0`` + a "deferred" rationale so they don't disappear from
     the planning view.
     """
-    return _env_int("PRODUCT_DELIVERY_GROOM_MAX_STORIES", default=200, minimum=1)
+    return env_int("PRODUCT_DELIVERY_GROOM_MAX_STORIES", 200, floor=1)
 
 
 def _max_prompt_bytes_per_groom() -> int:
@@ -74,30 +74,7 @@ def _max_prompt_bytes_per_groom() -> int:
     smallest model context budgets we use. Override with
     ``PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES``.
     """
-    return _env_int("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", default=65_536, minimum=1_024)
-
-
-def _env_int(name: str, *, default: int, minimum: int) -> int:
-    """Parse an int env var with a default + lower bound.
-
-    Centralises the "missing → default; non-int → warn + default;
-    below minimum → clamp" pattern shared by the two grooming cap
-    knobs above. Returns >= ``minimum`` always.
-    """
-    raw = os.environ.get(name)
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError:
-        logger.warning(
-            "%s=%r is not an int; using default %d",
-            name,
-            raw,
-            default,
-        )
-        return default
-    return max(minimum, value)
+    return env_int("PRODUCT_DELIVERY_GROOM_MAX_PROMPT_BYTES", 65_536, floor=1_024)
 
 
 class LLMScoringUnavailable(RuntimeError):
