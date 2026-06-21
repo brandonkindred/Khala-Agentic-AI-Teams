@@ -22,9 +22,6 @@ def _default_db() -> dict[str, Any]:
     return {"profiles": {}, "associations": {}}
 
 
-_COL = re.compile(r"(\w+)\s*=\s*%s")
-
-
 class _FakeCursor:
     def __init__(self, db: dict[str, Any], dict_rows: bool) -> None:
         self._db = db
@@ -50,7 +47,26 @@ class _FakeCursor:
             self._one = dict(row) if row else None
             return
 
+        if norm.startswith("insert into user_profiles") and "do update" in norm:
+            # upsert_profile: INSERT ... ON CONFLICT DO UPDATE ... RETURNING.
+            cols = ["user_id", "display_name", "email", "bio", "profile_json", "created_at", "updated_at"]
+            incoming = dict(zip(cols, params))
+            incoming["profile_json"] = _unwrap_json(incoming["profile_json"])
+            user_id = incoming["user_id"]
+            existing = self._db["profiles"].get(user_id)
+            if existing is None:
+                self._db["profiles"][user_id] = dict(incoming)
+            else:
+                # On conflict, apply only the columns named in the SET clause
+                # (each as ``col = excluded.col``), advancing them from EXCLUDED.
+                for col in re.findall(r"(\w+)\s*=\s*excluded\.\w+", norm):
+                    existing[col] = incoming[col]
+            self.rowcount = 1
+            self._one = dict(self._db["profiles"][user_id])
+            return
+
         if norm.startswith("insert into user_profiles"):
+            # get_profile ensure: INSERT ... ON CONFLICT DO NOTHING (3 params).
             user_id, created_at, updated_at = params
             self._db["profiles"].setdefault(
                 user_id,
@@ -65,23 +81,6 @@ class _FakeCursor:
                 },
             )
             self.rowcount = 1
-            return
-
-        if norm.startswith("update user_profiles set"):
-            # Ordered: SET cols..., then WHERE user_id. RETURNING columns carry
-            # no "= %s" so they don't appear in this match.
-            cols = _COL.findall(norm)
-            user_id = params[-1]
-            row = self._db["profiles"].get(user_id)
-            if row is None:
-                self.rowcount = 0
-                self._one = None
-                return
-            for col, val in zip(cols[:-1], params[:-1]):
-                row[col] = _unwrap_json(val) if col == "profile_json" else val
-            self.rowcount = 1
-            # Support UPDATE ... RETURNING.
-            self._one = dict(row)
             return
 
         # -- user_profile_associations ------------------------------------

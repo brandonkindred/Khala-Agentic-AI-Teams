@@ -47,6 +47,33 @@ def _ts(value: object) -> str:
     return str(value)
 
 
+def _profile_from_row(row: dict) -> UserProfile:
+    """Build a ``UserProfile`` from a ``user_profiles`` row dict."""
+    return UserProfile(
+        user_id=row["user_id"],
+        display_name=row["display_name"] or "",
+        email=row["email"] or "",
+        bio=row["bio"] or "",
+        preferences=row["profile_json"] or {},
+        created_at=_ts(row["created_at"]),
+        updated_at=_ts(row["updated_at"]),
+    )
+
+
+def _assoc_from_row(row: dict) -> Association:
+    """Build an ``Association`` from a ``user_profile_associations`` row dict."""
+    return Association(
+        id=row["id"],
+        user_id=row["user_id"],
+        artifact_type=row["artifact_type"],
+        team=row["team"],
+        artifact_id=row["artifact_id"],
+        label=row["label"] or "",
+        role=row["role"] or "owner",
+        created_at=_ts(row["created_at"]),
+    )
+
+
 @timed_query(store=_STORE, op="get_profile")
 def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
     """Return the profile for ``user_id``, creating it on first read.
@@ -82,15 +109,7 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
     # is no DELETE path for profiles). A None here is a broken invariant, not a
     # caller error — surface it rather than dereference None.
     assert row is not None, f"user_profiles row missing for {user_id!r} after ensure"
-    return UserProfile(
-        user_id=row["user_id"],
-        display_name=row["display_name"] or "",
-        email=row["email"] or "",
-        bio=row["bio"] or "",
-        preferences=row["profile_json"] or {},
-        created_at=_ts(row["created_at"]),
-        updated_at=_ts(row["updated_at"]),
-    )
+    return _profile_from_row(row)
 
 
 @timed_query(store=_STORE, op="upsert_profile")
@@ -104,47 +123,45 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
-    # Ensure the row exists so the UPDATE below always matches.
-    get_profile(user_id)
 
-    sets: list[str] = ["updated_at = %s"]
-    params: list[object] = [_now_iso()]
+    # Single atomic INSERT ... ON CONFLICT DO UPDATE ... RETURNING:
+    #  - first write for a user inserts the row (unset fields take column defaults);
+    #  - subsequent writes update only the fields the caller actually set, via the
+    #    EXCLUDED.* references in the SET clause (always advancing updated_at).
+    # One round-trip, no separate ensure-row read, no TOCTOU window.
+    now = _now_iso()
+    set_clauses = ["updated_at = EXCLUDED.updated_at"]
     if update.display_name is not None:
-        sets.append("display_name = %s")
-        params.append(update.display_name)
+        set_clauses.append("display_name = EXCLUDED.display_name")
     if update.email is not None:
-        sets.append("email = %s")
-        params.append(update.email)
+        set_clauses.append("email = EXCLUDED.email")
     if update.bio is not None:
-        sets.append("bio = %s")
-        params.append(update.bio)
+        set_clauses.append("bio = EXCLUDED.bio")
     if update.preferences is not None:
-        sets.append("profile_json = %s")
-        params.append(Json(update.preferences))
-    params.append(user_id)
+        set_clauses.append("profile_json = EXCLUDED.profile_json")
 
-    # UPDATE ... RETURNING builds the result in one round-trip instead of a
-    # second SELECT.
+    params = (
+        user_id,
+        update.display_name or "",
+        update.email or "",
+        update.bio or "",
+        Json(update.preferences or {}),
+        now,
+        now,
+    )
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = %s "
+            "INSERT INTO user_profiles "
+            "(user_id, display_name, email, bio, profile_json, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s) "
+            f"ON CONFLICT (user_id) DO UPDATE SET {', '.join(set_clauses)} "
             "RETURNING user_id, display_name, email, bio, profile_json, created_at, updated_at",
             params,
         )
         row = cur.fetchone()
-    # Postcondition: get_profile() above ensured the row, and there is no DELETE
-    # path for profiles, so RETURNING always yields it. A None is a broken
-    # invariant — surface it rather than dereference None.
-    assert row is not None, f"user_profiles row missing for {user_id!r} after update"
-    return UserProfile(
-        user_id=row["user_id"],
-        display_name=row["display_name"] or "",
-        email=row["email"] or "",
-        bio=row["bio"] or "",
-        preferences=row["profile_json"] or {},
-        created_at=_ts(row["created_at"]),
-        updated_at=_ts(row["updated_at"]),
-    )
+    # Postcondition: INSERT ... ON CONFLICT DO UPDATE always yields the row.
+    assert row is not None, f"user_profiles upsert returned no row for {user_id!r}"
+    return _profile_from_row(row)
 
 
 @timed_query(store=_STORE, op="record_association")
@@ -184,16 +201,9 @@ def record_association(
             (assoc_id, user_id, artifact_type, team, artifact_id, label, role, now),
         )
         row = cur.fetchone()
-    return Association(
-        id=row["id"],
-        user_id=row["user_id"],
-        artifact_type=row["artifact_type"],
-        team=row["team"],
-        artifact_id=row["artifact_id"],
-        label=row["label"] or "",
-        role=row["role"] or "owner",
-        created_at=_ts(row["created_at"]),
-    )
+    # Postcondition: INSERT ... ON CONFLICT DO UPDATE always yields the row.
+    assert row is not None, "record_association returned no row"
+    return _assoc_from_row(row)
 
 
 def record_association_safe(
@@ -267,19 +277,7 @@ def list_associations(
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(query, params)
         rows = cur.fetchall()
-    return [
-        Association(
-            id=r["id"],
-            user_id=r["user_id"],
-            artifact_type=r["artifact_type"],
-            team=r["team"],
-            artifact_id=r["artifact_id"],
-            label=r["label"] or "",
-            role=r["role"] or "owner",
-            created_at=_ts(r["created_at"]),
-        )
-        for r in rows
-    ]
+    return [_assoc_from_row(r) for r in rows]
 
 
 @timed_query(store=_STORE, op="remove_association")
