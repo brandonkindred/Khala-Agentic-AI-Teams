@@ -25,8 +25,8 @@
 // --------------------------------------------------------------------------
 
 .chat-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
   border-radius: 12px;
 }
 
@@ -34,7 +34,7 @@
   height: 560px;
   overflow-y: auto;
   padding: 1rem;
-  background: #0d1117;
+  background: var(--kh-surface-1);
   border-radius: 8px;
   margin-bottom: 1rem;
   display: flex;
@@ -58,23 +58,23 @@
 
   &.user {
     align-self: flex-end;
-    background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
-    color: #1a1207;
+    background: var(--kh-accent-gradient);
+    color: #09090b;
     border-bottom-right-radius: 4px;
 
-    ::ng-deep strong { color: #1a1207; }
+    ::ng-deep strong { color: #09090b; }
 
-    .message-time { color: rgba(26, 18, 7, 0.6); }
+    .message-time { color: rgba(9, 9, 11, 0.6); }
   }
 
   &.assistant {
     align-self: flex-start;
-    background: #21262d;
-    color: #f0f6fc;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-primary);
+    border: 1px solid var(--kh-border);
     border-bottom-left-radius: 4px;
 
-    ::ng-deep strong { color: #fde68a; font-weight: 600; }
+    ::ng-deep strong { color: var(--kh-accent-text); font-weight: 600; }
   }
 
   &.typing {
@@ -91,7 +91,7 @@
 
 .message-time {
   font-size: 0.72rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   margin-top: 6px;
 }
 
@@ -103,7 +103,7 @@
   span {
     width: 8px;
     height: 8px;
-    background: #fbbf24;
+    background: var(--kh-accent);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
 
@@ -117,11 +117,11 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #d4d4d8;
+  color: var(--kh-text-secondary);
   font-size: 0.85rem;
 
   mat-icon {
-    color: #fbbf24;
+    color: var(--kh-accent);
     font-size: 18px;
     width: 18px;
     height: 18px;
@@ -151,12 +151,12 @@
 
 .quick-reply-chip {
   font-size: 0.82rem;
-  border-color: rgba(251, 191, 36, 0.25);
-  color: #fde68a;
+  border-color: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
 
   &:hover:not([disabled]) {
-    background: rgba(251, 191, 36, 0.08);
-    border-color: #fbbf24;
+    background: var(--kh-accent-muted);
+    border-color: var(--kh-accent);
   }
 }
 
@@ -166,14 +166,14 @@
   gap: 0.75rem;
   margin-top: 12px;
   padding: 10px 14px;
-  background: rgba(248, 81, 73, 0.08);
-  border: 1px solid rgba(248, 81, 73, 0.3);
+  background: var(--kh-error-subtle);
+  border: 1px solid var(--kh-error-subtle);
   border-radius: 10px;
-  color: #fca5a5;
+  color: var(--kh-error);
   font-size: 0.88rem;
 
   mat-icon {
-    color: #f87171;
+    color: var(--kh-error);
     font-size: 20px;
     width: 20px;
     height: 20px;
@@ -211,15 +211,15 @@
   flex-direction: column;
   gap: 0.2rem;
   padding: 0.5rem 0;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  border-bottom: 1px solid var(--kh-border-subtle);
 
   &:last-child { border-bottom: none; }
-  &.empty .context-value { color: #6b7280; font-style: italic; }
+  &.empty .context-value { color: var(--kh-text-muted); font-style: italic; }
 }
 
 .context-label {
   font-size: 0.7rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   font-weight: 600;
@@ -229,7 +229,7 @@
 }
 
 .required-dot {
-  color: #fbbf24;
+  color: var(--kh-accent);
   font-size: 0.9rem;
   line-height: 1;
 }
@@ -250,7 +250,7 @@
       font-size: 16px;
       width: 16px;
       height: 16px;
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
     }
   }
 
@@ -259,7 +259,7 @@
 
 .context-value {
   font-size: 0.9rem;
-  color: #d4dde7;
+  color: var(--kh-text-secondary);
 }
 
 .context-edit {
@@ -270,14 +270,14 @@
 
 .context-edit-input {
   flex: 1;
-  background: #0d1117;
-  border: 1px solid rgba(251, 191, 36, 0.4);
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-accent-subtle);
   border-radius: 6px;
-  color: #f0f6fc;
+  color: var(--kh-text-primary);
   padding: 6px 10px;
   font-size: 0.88rem;
 
-  &:focus { border-color: #fbbf24; }
+  &:focus { border-color: var(--kh-accent); }
 }
 
 .chip-group {
@@ -285,7 +285,7 @@
 
   .chip-label {
     font-size: 0.7rem;
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     text-transform: uppercase;
     letter-spacing: 0.05em;
     font-weight: 600;
@@ -304,9 +304,9 @@
   display: inline-flex;
   align-items: center;
   gap: 2px;
-  background: rgba(251, 191, 36, 0.14);
-  color: #fde68a;
-  border: 1px solid rgba(251, 191, 36, 0.25);
+  background: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
+  border: 1px solid var(--kh-accent-subtle);
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 0.82rem;
@@ -314,7 +314,7 @@
 
   &.subtle {
     background: rgba(255, 255, 255, 0.05);
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     border-color: rgba(255, 255, 255, 0.1);
   }
 
@@ -341,14 +341,14 @@
   margin-top: 0.9rem;
   padding: 10px 12px;
   border-radius: 8px;
-  background: rgba(251, 191, 36, 0.08);
-  border: 1px solid rgba(251, 191, 36, 0.18);
+  background: var(--kh-accent-muted);
+  border: 1px solid var(--kh-accent-subtle);
   font-size: 0.82rem;
-  color: #fde68a;
+  color: var(--kh-accent-text);
   line-height: 1.4;
 
   mat-icon {
-    color: #fbbf24;
+    color: var(--kh-accent);
     font-size: 18px;
     width: 18px;
     height: 18px;
@@ -372,7 +372,7 @@
 
   h3, h4 {
     margin: 1rem 0 0.5rem;
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
     letter-spacing: -0.01em;
   }
 
@@ -381,17 +381,17 @@
     font-size: 0.82rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: #fde68a;
+    color: var(--kh-accent-text);
     font-weight: 600;
   }
 
   p {
     margin: 0 0 0.5rem;
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     line-height: 1.5;
     font-size: 0.9rem;
 
-    &.subtle { color: #8b949e; font-style: italic; }
+    &.subtle { color: var(--kh-text-tertiary); font-style: italic; }
   }
 }
 
@@ -407,12 +407,12 @@
   padding-left: 1.25rem;
 
   li {
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     font-size: 0.88rem;
     line-height: 1.5;
     margin-bottom: 0.35rem;
 
-    strong { color: #f0f6fc; }
+    strong { color: var(--kh-text-primary); }
   }
 }
 
@@ -429,7 +429,7 @@
 }
 
 .day-date {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.8rem;
   margin: 0.2rem 0 0;
 }
@@ -438,9 +438,9 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  background: rgba(251, 191, 36, 0.12);
-  color: #fde68a;
-  border: 1px solid rgba(251, 191, 36, 0.25);
+  background: var(--kh-accent-muted);
+  color: var(--kh-accent-text);
+  border: 1px solid var(--kh-accent-subtle);
   border-radius: 999px;
   padding: 4px 10px;
   font-size: 0.78rem;
@@ -455,12 +455,12 @@
 
 .drive-from {
   font-size: 0.82rem !important;
-  color: #8b949e !important;
+  color: var(--kh-text-tertiary) !important;
 }
 
 .day-summary {
   font-size: 0.92rem !important;
-  color: #d4dde7 !important;
+  color: var(--kh-text-secondary) !important;
   font-style: italic;
 }
 
@@ -468,7 +468,7 @@
 
 .accommodation-tip {
   font-size: 0.82rem !important;
-  color: #8b949e !important;
+  color: var(--kh-text-tertiary) !important;
 }
 
 .day-footer {
@@ -479,8 +479,8 @@
 
 .rework-btn {
   font-size: 0.82rem;
-  border-color: rgba(251, 191, 36, 0.25);
-  color: #fde68a;
+  border-color: var(--kh-accent-subtle);
+  color: var(--kh-accent-text);
 
   mat-icon {
     font-size: 16px;
@@ -490,8 +490,8 @@
   }
 
   &:hover {
-    background: rgba(251, 191, 36, 0.08);
-    border-color: #fbbf24;
+    background: var(--kh-accent-muted);
+    border-color: var(--kh-accent);
   }
 }
 
@@ -509,7 +509,7 @@
     justify-content: space-between;
     align-items: center;
     padding: 0.5rem 0;
-    border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+    border-bottom: 1px solid var(--kh-border-subtle);
     font-size: 0.85rem;
 
     &:last-child { border-bottom: none; }
@@ -517,11 +517,11 @@
 }
 
 .history-title {
-  color: #d4dde7;
+  color: var(--kh-text-secondary);
 }
 
 .history-meta {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.78rem;
 }
 

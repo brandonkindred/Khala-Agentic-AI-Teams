@@ -7,8 +7,8 @@
 .add-event-card,
 .preview-card,
 .empty-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-header {
     margin-bottom: 1rem;
@@ -20,7 +20,7 @@
       font-size: 1rem;
 
       mat-icon {
-        color: #58a6ff;
+        color: var(--kh-info);
       }
     }
   }
@@ -51,23 +51,23 @@
     font-size: 48px;
     width: 48px;
     height: 48px;
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     margin-bottom: 1rem;
   }
 
   p {
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     margin: 0.25rem 0;
 
     &.hint {
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
       font-size: 0.875rem;
     }
   }
 }
 
 .preview-card {
-  border-color: #3b82f6;
+  border-color: var(--kh-info);
 }
 
 .ambiguities {
@@ -75,11 +75,11 @@
   align-items: center;
   gap: 8px;
   padding: 12px;
-  background: rgba(210, 153, 34, 0.1);
-  border: 1px solid #d29922;
+  background: var(--kh-warning-subtle);
+  border: 1px solid var(--kh-warning);
   border-radius: 8px;
   margin-bottom: 1rem;
-  color: #d29922;
+  color: var(--kh-warning);
 
   mat-icon {
     font-size: 20px;
@@ -90,15 +90,15 @@
 
 .event-item {
   mat-icon[matListItemIcon] {
-    color: #58a6ff;
+    color: var(--kh-info);
   }
 
   [matListItemTitle] {
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
   }
 
   [matListItemLine] {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
   }
 }
 

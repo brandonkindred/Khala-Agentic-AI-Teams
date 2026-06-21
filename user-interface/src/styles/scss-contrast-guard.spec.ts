@@ -62,38 +62,12 @@ const RING_SHADOW = /box-shadow:[^;]*var\(\s*--kh-(?:focus-ring|accent)\s*\)/i;
 
 /**
  * Burndown allowlist — component SCSS files known to still violate the rules
- * above. The accessibility remediation removes entries here as each file is
- * migrated onto the `--kh-*` tokens; the guard then enforces them forever.
- * When this array is empty the whole UI is clean. DO NOT add new entries to
- * silence a failure on new code — fix the code instead.
+ * above. The accessibility remediation migrated every component onto the
+ * `--kh-*` tokens, so this list is now EMPTY and the guard enforces the rules
+ * across the whole UI. DO NOT add entries to silence a failure on new code —
+ * fix the code instead.
  */
-const BURNDOWN = new Set<string>([
-  'src/app/components/accessibility-design-system/accessibility-design-system.component.scss',
-  'src/app/components/accessibility-report/accessibility-report.component.scss',
-  'src/app/components/agent-test-chat/agent-test-chat.component.scss',
-  'src/app/components/branding-chat/branding-chat.component.scss',
-  'src/app/components/coding-team-monitor/coding-team-monitor.component.scss',
-  'src/app/components/flow-step-editor/flow-step-editor.component.scss',
-  'src/app/components/investment-chat/investment-chat.component.scss',
-  'src/app/components/investment-profile-form/investment-profile-form.component.scss',
-  'src/app/components/investment-promotion/investment-promotion.component.scss',
-  'src/app/components/investment-strategy/investment-strategy.component.scss',
-  'src/app/components/investment-workflow/investment-workflow.component.scss',
-  'src/app/components/pa-calendar/pa-calendar.component.scss',
-  'src/app/components/pa-chat/pa-chat.component.scss',
-  'src/app/components/pa-deals/pa-deals.component.scss',
-  'src/app/components/pa-documents/pa-documents.component.scss',
-  'src/app/components/pa-reservations/pa-reservations.component.scss',
-  'src/app/components/pa-tasks/pa-tasks.component.scss',
-  'src/app/components/persona-chat/persona-chat.component.scss',
-  'src/app/components/pipeline-test-runner/pipeline-test-runner.component.scss',
-  'src/app/components/process-designer-chat/process-designer-chat.component.scss',
-  'src/app/components/product-analysis-job-status/product-analysis-job-status.component.scss',
-  'src/app/components/road-trip-planning-dashboard/road-trip-planning-dashboard.component.scss',
-  'src/app/components/start-from-spec-form/start-from-spec-form.component.scss',
-  'src/app/components/startup-advisor-dashboard/startup-advisor-dashboard.component.scss',
-  'src/app/components/strategy-lab/strategy-lab.component.scss',
-]);
+const BURNDOWN = new Set<string>([]);
 
 /**
  * Blanks out CSS line and block comments so commented-out rules and color

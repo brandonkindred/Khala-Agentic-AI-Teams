@@ -74,8 +74,8 @@
 
 .goal-item {
   position: relative;
-  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
+  background: var(--mat-sys-surface-container, var(--kh-surface-2));
+  border: 1px solid var(--mat-sys-outline-variant, var(--kh-border));
   border-radius: 8px;
   padding: 16px;
   padding-right: 48px;
@@ -85,12 +85,12 @@
     position: absolute;
     top: 12px;
     right: 8px;
-    color: var(--mat-sys-error, #f44336);
+    color: var(--mat-sys-error, var(--kh-error));
   }
 }
 
 .no-items-text {
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
   font-style: italic;
   text-align: center;
   padding: 16px;
@@ -101,19 +101,19 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--mat-sys-error-container, #ffebee);
-  color: var(--mat-sys-on-error-container, #c62828);
+  background: var(--mat-sys-error-container, var(--kh-error-subtle));
+  color: var(--mat-sys-on-error-container, var(--kh-error));
   border-radius: 4px;
   margin-bottom: 16px;
 
   mat-icon {
-    color: var(--mat-sys-error, #f44336);
+    color: var(--mat-sys-error, var(--kh-error));
   }
 }
 
 .mode-hint {
   font-size: 0.85em;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
 }
 
 mat-divider {

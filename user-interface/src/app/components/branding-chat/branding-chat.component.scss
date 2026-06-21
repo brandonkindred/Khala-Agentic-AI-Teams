@@ -60,11 +60,11 @@
   &.user {
     align-self: flex-end;
     background: var(--kh-accent-gradient);
-    color: #000;
+    color: #09090b;
     border-bottom-right-radius: 4px;
 
     .message-time {
-      color: rgba(0, 0, 0, 0.6);
+      color: rgba(255, 255, 255, 0.7);
     }
   }
 

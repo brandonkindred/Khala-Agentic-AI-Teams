@@ -6,8 +6,8 @@
 }
 
 .sidebar-card, .chat-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
   height: 100%;
 }
 
@@ -23,7 +23,7 @@
 .quality-label, .sessions-label {
   display: block;
   font-size: 0.75rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 8px;
@@ -39,19 +39,19 @@
   margin-bottom: 6px;
 
   &.good {
-    color: #3fb950;
-    background: rgba(63, 185, 80, 0.1);
+    color: var(--kh-success);
+    background: var(--kh-success-subtle);
   }
   &.ok {
-    color: #d29922;
-    background: rgba(210, 153, 34, 0.1);
+    color: var(--kh-warning);
+    background: var(--kh-warning-subtle);
   }
   &.poor {
-    color: #f85149;
-    background: rgba(248, 81, 73, 0.1);
+    color: var(--kh-error);
+    background: var(--kh-error-subtle);
   }
   &.neutral {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     background: rgba(255, 255, 255, 0.04);
   }
 }
@@ -68,9 +68,9 @@
   border-radius: 2px;
   transition: width 0.3s ease;
 
-  &.good { background: #3fb950; }
-  &.ok { background: #d29922; }
-  &.poor { background: #f85149; }
+  &.good { background: var(--kh-success); }
+  &.ok { background: var(--kh-warning); }
+  &.poor { background: var(--kh-error); }
 }
 
 // Sessions section
@@ -79,7 +79,7 @@
 }
 
 .no-sessions {
-  color: #484f58;
+  color: var(--kh-text-muted);
   font-size: 0.85rem;
   margin: 8px 0;
 }
@@ -99,12 +99,12 @@
   gap: 4px;
 
   &:hover { background: rgba(255, 255, 255, 0.04); }
-  &.active { background: rgba(88, 166, 255, 0.1); border: 1px solid rgba(88, 166, 255, 0.2); }
+  &.active { background: var(--kh-info-subtle); border: 1px solid var(--kh-info-subtle); }
 
   .session-name {
     flex: 1;
     font-size: 0.85rem;
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -129,10 +129,10 @@
 
 .rename-input {
   flex: 1;
-  background: #0d1117;
-  border: 1px solid #58a6ff;
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-info);
   border-radius: 4px;
-  color: #f0f6fc;
+  color: var(--kh-text-primary);
   padding: 4px 8px;
   font-size: 0.85rem;
   outline: none;
@@ -163,23 +163,23 @@
 
   &.user {
     align-self: flex-end;
-    background: linear-gradient(135deg, #1f6feb, #58a6ff);
-    color: #fff;
+    background: var(--kh-accent-gradient);
+    color: #09090b;
     border-bottom-right-radius: 4px;
   }
 
   &.assistant {
     align-self: flex-start;
-    background: #21262d;
-    color: #f0f6fc;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-primary);
+    border: 1px solid var(--kh-border-subtle);
     border-bottom-left-radius: 4px;
   }
 }
 
 .message-time {
   font-size: 0.7rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   margin-top: 4px;
 }
 
@@ -191,7 +191,7 @@
   button {
     width: 32px;
     height: 32px;
-    color: #484f58;
+    color: var(--kh-text-muted);
 
     mat-icon {
       font-size: 16px;
@@ -200,13 +200,13 @@
     }
 
     &.active-up {
-      color: #3fb950;
-      background: rgba(63, 185, 80, 0.1);
+      color: var(--kh-success);
+      background: var(--kh-success-subtle);
     }
 
     &.active-down {
-      color: #f85149;
-      background: rgba(248, 81, 73, 0.1);
+      color: var(--kh-error);
+      background: var(--kh-error-subtle);
     }
   }
 }
@@ -220,7 +220,7 @@
     width: 8px;
     height: 8px;
     border-radius: 50%;
-    background: #484f58;
+    background: var(--kh-text-muted);
     animation: typing 1.4s infinite ease-in-out both;
 
     &:nth-child(1) { animation-delay: 0s; }
@@ -258,7 +258,7 @@
 }
 
 .error-text {
-  color: #f85149;
+  color: var(--kh-error);
   font-size: 0.85rem;
   margin-bottom: 8px;
 }
@@ -275,17 +275,17 @@
     font-size: 48px;
     width: 48px;
     height: 48px;
-    color: #484f58;
+    color: var(--kh-text-muted);
     margin-bottom: 16px;
   }
 
   h3 {
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
     margin: 0 0 8px;
   }
 
   p {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     margin: 0 0 16px;
   }
 }
