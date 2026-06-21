@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
@@ -39,19 +39,18 @@ try:
 except ImportError:
     slack_notify_pa_response = None
 
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="personal-assistant-team", team_key="personal_assistant")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="personal-assistant-team",
+    team_key="personal_assistant",
     title="Personal Assistant API",
     description="A comprehensive personal assistant that manages email, calendars, tasks, deals, and more.",
     version="0.1.0",
 )
-instrument_fastapi_app(app, team_key="personal_assistant")
 
 app.add_middleware(
     CORSMiddleware,
