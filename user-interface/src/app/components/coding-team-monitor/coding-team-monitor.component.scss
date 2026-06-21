@@ -123,7 +123,7 @@
 
   &.current &__node {
     background: var(--kh-info);
-    color: var(--kh-text-primary);
+    color: #09090b;
     border-color: var(--kh-info);
   }
 
@@ -134,13 +134,13 @@
 
   &.completed &__node {
     background: var(--kh-success);
-    color: var(--kh-text-primary);
+    color: #09090b;
     border-color: var(--kh-success);
   }
 
   &.failed &__node {
     background: var(--kh-error);
-    color: var(--kh-text-primary);
+    color: #09090b;
     border-color: var(--kh-error);
   }
 
