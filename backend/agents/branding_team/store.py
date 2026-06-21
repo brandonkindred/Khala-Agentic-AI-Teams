@@ -255,30 +255,36 @@ class BrandingStore:
         name: Optional[str] = None,
         conversation_id: Optional[str] = None,
     ) -> Optional[Brand]:
+        """Patch a brand's mutable fields in a single round trip.
+
+        Uses a server-side ``jsonb`` shallow merge (``data || patch``) so only
+        the changed keys travel to Postgres — the full brand document (mission
+        + every phase output + history) is never read back and re-serialised
+        just to flip ``status`` or attach a ``conversation_id``.
+
+        Postconditions:
+            Returns the updated Brand, or None when no such brand exists for
+            the given client.
+        """
+        patch: dict = {"updated_at": _now_iso()}
+        if mission is not None:
+            patch["mission"] = mission.model_dump(mode="json")
+        if status is not None:
+            patch["status"] = status.value
+        if name is not None:
+            patch["name"] = name
+        if conversation_id is not None:
+            patch["conversation_id"] = conversation_id
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
-                (brand_id, client_id),
+                "UPDATE branding_brands SET data = data || %s "
+                "WHERE id = %s AND client_id = %s RETURNING data",
+                (Json(patch), brand_id, client_id),
             )
             row = cur.fetchone()
-            if row is None:
-                return None
-            brand = Brand.model_validate(row["data"])
-            updates: dict = {"updated_at": _now_iso()}
-            if mission is not None:
-                updates["mission"] = mission
-            if status is not None:
-                updates["status"] = status
-            if name is not None:
-                updates["name"] = name
-            if conversation_id is not None:
-                updates["conversation_id"] = conversation_id
-            updated = brand.model_copy(update=updates)
-            cur.execute(
-                "UPDATE branding_brands SET data = %s WHERE id = %s AND client_id = %s",
-                (Json(updated.model_dump(mode="json")), brand_id, client_id),
-            )
-        return updated
+        if row is None:
+            return None
+        return Brand.model_validate(row["data"])
 
     @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(
@@ -287,6 +293,16 @@ class BrandingStore:
         brand_id: str,
         output: TeamOutput,
     ) -> Optional[Brand]:
+        """Append a new version, writing only the changed keys.
+
+        The new version number and history list are derived from the current
+        record, but the write is a ``jsonb`` shallow merge so untouched
+        top-level keys (e.g. ``mission``) are not re-serialised and re-sent.
+
+        Postconditions:
+            On success the brand's ``version`` increments by one, the output
+            is recorded as ``latest_output``, and a history entry is appended.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
@@ -303,18 +319,26 @@ class BrandingStore:
                 created_at=now,
                 status=output.status.value,
             )
+            new_history = list(brand.history) + [history_entry]
             updated = brand.model_copy(
                 update={
                     "latest_output": output,
                     "current_phase": output.current_phase,
                     "version": new_version,
-                    "history": list(brand.history) + [history_entry],
+                    "history": new_history,
                     "updated_at": now,
                 }
             )
+            patch = {
+                "latest_output": output.model_dump(mode="json"),
+                "current_phase": output.current_phase.value,
+                "version": new_version,
+                "history": [h.model_dump(mode="json") for h in new_history],
+                "updated_at": now,
+            }
             cur.execute(
-                "UPDATE branding_brands SET data = %s WHERE id = %s AND client_id = %s",
-                (Json(updated.model_dump(mode="json")), brand_id, client_id),
+                "UPDATE branding_brands SET data = data || %s WHERE id = %s AND client_id = %s",
+                (Json(patch), brand_id, client_id),
             )
         return updated
 

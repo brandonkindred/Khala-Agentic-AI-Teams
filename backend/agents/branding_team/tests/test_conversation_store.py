@@ -64,3 +64,34 @@ def test_get_state_includes_messages_and_brand_id(fake_pg: dict) -> None:
     assert len(messages) == 2
     assert mission.company_name == "Acme"
     assert latest_output is None
+
+
+def test_append_message_rejects_unknown_conversation_and_role(fake_pg: dict) -> None:
+    store = BrandingConversationStore()
+    cid = store.create(mission=_mission())
+    # Unknown conversation -> False, nothing inserted.
+    assert store.append_message("missing", "user", "hi") is False
+    # Invalid role -> False.
+    assert store.append_message(cid, "system", "nope") is False
+    # Valid -> True.
+    assert store.append_message(cid, "user", "hello") is True
+    state = store.get_state(cid)
+    assert state is not None
+    assert [(m.role, m.content) for m in state.messages] == [("user", "hello")]
+
+
+def test_get_by_brand_id_single_join(fake_pg: dict) -> None:
+    store = BrandingConversationStore()
+    cid = store.create(brand_id="brand_join", mission=_mission())
+    store.append_message(cid, "user", "one")
+    store.append_message(cid, "assistant", "two")
+
+    result = store.get_by_brand_id("brand_join")
+    assert result is not None
+    rcid, messages, mission, latest_output = result
+    assert rcid == cid
+    assert [m.content for m in messages] == ["one", "two"]
+    assert mission.company_name == "Acme"
+    assert latest_output is None
+
+    assert store.get_by_brand_id("brand_absent") is None

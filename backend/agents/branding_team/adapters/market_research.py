@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import threading
 import time
 from typing import Optional
 
@@ -10,10 +11,43 @@ import httpx
 
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 
-_POLL_INTERVAL_S = 2.0
-_TOTAL_TIMEOUT_S = 600.0
-_REQUEST_TIMEOUT_S = 30.0
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
+
+
+def _float_env(name: str, default: float) -> float:
+    """Parse a positive float env var, falling back to *default* on garbage."""
+    try:
+        value = float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _poll_interval_s() -> float:
+    return _float_env("BRANDING_MR_POLL_INTERVAL_S", 2.0)
+
+
+def _total_timeout_s() -> float:
+    return _float_env("BRANDING_MR_TOTAL_TIMEOUT_S", 600.0)
+
+
+def _request_timeout_s() -> float:
+    return _float_env("BRANDING_MR_REQUEST_TIMEOUT_S", 30.0)
+
+
+# One shared client instead of opening (and tearing down) a fresh connection
+# pool on every market-research request.
+_client_lock = threading.Lock()
+_client: Optional[httpx.Client] = None
+
+
+def _get_client() -> httpx.Client:
+    global _client
+    if _client is None:
+        with _client_lock:
+            if _client is None:
+                _client = httpx.Client()
+    return _client
 
 
 def _base_url() -> Optional[str]:
@@ -46,24 +80,27 @@ def request_market_research(mission: BrandingMission) -> Optional[CompetitiveSna
         "human_approved": True,
         "human_feedback": "Branding team requested competitive snapshot.",
     }
+    request_timeout = _request_timeout_s()
+    total_timeout = _total_timeout_s()
+    poll_interval = _poll_interval_s()
+    client = _get_client()
     try:
-        with httpx.Client(timeout=_REQUEST_TIMEOUT_S) as client:
-            submit = client.post(f"{root}/market-research/run", json=payload)
-            submit.raise_for_status()
-            job_id = submit.json().get("job_id")
-            if not job_id:
-                raise RuntimeError("Market research submit returned no job_id")
+        submit = client.post(f"{root}/market-research/run", json=payload, timeout=request_timeout)
+        submit.raise_for_status()
+        job_id = submit.json().get("job_id")
+        if not job_id:
+            raise RuntimeError("Market research submit returned no job_id")
 
-            deadline = time.monotonic() + _TOTAL_TIMEOUT_S
-            while True:
-                status = client.get(f"{root}/market-research/status/{job_id}")
-                status.raise_for_status()
-                data = status.json()
-                if data.get("status") in _TERMINAL_STATUSES:
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(f"Market research job {job_id} timed out after {_TOTAL_TIMEOUT_S}s")
-                time.sleep(_POLL_INTERVAL_S)
+        deadline = time.monotonic() + total_timeout
+        while True:
+            status = client.get(f"{root}/market-research/status/{job_id}", timeout=request_timeout)
+            status.raise_for_status()
+            data = status.json()
+            if data.get("status") in _TERMINAL_STATUSES:
+                break
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"Market research job {job_id} timed out after {total_timeout}s")
+            time.sleep(poll_interval)
     except (httpx.HTTPError, httpx.TimeoutException, ValueError, KeyError) as e:
         raise RuntimeError(f"Market research request failed: {e}") from e
 

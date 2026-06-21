@@ -168,26 +168,30 @@ class BrandingConversationStore:
 
     @timed_query(store=_STORE, op="append_message")
     def append_message(self, conversation_id: str, role: str, content: str) -> bool:
+        """Append a message and bump ``updated_at`` in a single statement.
+
+        A data-modifying CTE bumps the parent conversation's ``updated_at``
+        and only inserts the message when that conversation exists — replacing
+        the prior exists-check / insert / touch trio (three round trips, called
+        twice per chat turn) with one.
+
+        Postconditions:
+            Returns True iff the conversation existed and the message was
+            inserted; False for an unknown conversation or invalid role.
+        """
         if role not in ("user", "assistant"):
             return False
         ts = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM branding_conversations WHERE conversation_id = %s",
-                (conversation_id,),
+                "WITH conv AS ("
+                "UPDATE branding_conversations SET updated_at = %s "
+                "WHERE conversation_id = %s RETURNING conversation_id) "
+                "INSERT INTO branding_conv_messages (conversation_id, role, content, timestamp) "
+                "SELECT conversation_id, %s, %s, %s FROM conv RETURNING id",
+                (ts, conversation_id, role, content, ts),
             )
-            if cur.fetchone() is None:
-                return False
-            cur.execute(
-                "INSERT INTO branding_conv_messages "
-                "(conversation_id, role, content, timestamp) VALUES (%s, %s, %s, %s)",
-                (conversation_id, role, content, ts),
-            )
-            cur.execute(
-                "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-                (ts, conversation_id),
-            )
-        return True
+            return cur.fetchone() is not None
 
     @timed_query(store=_STORE, op="update_mission")
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
@@ -231,36 +235,40 @@ class BrandingConversationStore:
     def get_by_brand_id(
         self, brand_id: str
     ) -> Optional[tuple[str, List[_StoredMessage], BrandingMission, Optional[TeamOutput]]]:
-        """Return the single conversation for *brand_id*, or None."""
+        """Return the single conversation for *brand_id*, or None.
+
+        Single ``LEFT JOIN`` load (conversation + messages) — same pattern as
+        :meth:`get_state`, keyed by brand id.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT conversation_id, mission_json, latest_output_json "
-                "FROM branding_conversations WHERE brand_id = %s",
+                "SELECT c.conversation_id, c.mission_json, c.latest_output_json, "
+                "m.role, m.content, m.timestamp "
+                "FROM branding_conversations c "
+                "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
+                "WHERE c.brand_id = %s ORDER BY m.id",
                 (brand_id,),
             )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            cid = str(row["conversation_id"])
-            mission = BrandingMission.model_validate(row["mission_json"])
-            latest_output = (
-                TeamOutput.model_validate(row["latest_output_json"])
-                if row["latest_output_json"]
-                else None
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        head = rows[0]
+        cid = str(head["conversation_id"])
+        mission = BrandingMission.model_validate(head["mission_json"])
+        latest_output = (
+            TeamOutput.model_validate(head["latest_output_json"])
+            if head["latest_output_json"]
+            else None
+        )
+        messages = [
+            _StoredMessage(
+                role=r["role"],
+                content=r["content"],
+                timestamp=_row_ts(r["timestamp"]),
             )
-            cur.execute(
-                "SELECT role, content, timestamp FROM branding_conv_messages "
-                "WHERE conversation_id = %s ORDER BY id",
-                (cid,),
-            )
-            messages = [
-                _StoredMessage(
-                    role=r["role"],
-                    content=r["content"],
-                    timestamp=_row_ts(r["timestamp"]),
-                )
-                for r in cur.fetchall()
-            ]
+            for r in rows
+            if r["role"] is not None
+        ]
         return (cid, messages, mission, latest_output)
 
     @timed_query(store=_STORE, op="list_conversations")

@@ -65,6 +65,28 @@ def test_answer_question_updates_session_and_output() -> None:
     assert answered["latest_output"]["strategic_core"] is not None
 
 
+def test_answering_all_questions_regenerates_and_marks_ready() -> None:
+    """Debounce: intermediate answers skip regeneration; answering the last
+    open question triggers the full run and flips the session to ready."""
+    create = client.post("/sessions", json=_payload())
+    session = create.json()
+    session_id = session["session_id"]
+
+    latest = session
+    # Keep answering whichever question is still open until none remain.
+    while latest["open_questions"]:
+        qid = latest["open_questions"][0]["id"]
+        resp = client.post(
+            f"/sessions/{session_id}/questions/{qid}/answer",
+            json={"answer": "clarity, trust, craft"},
+        )
+        assert resp.status_code == 200
+        latest = resp.json()
+
+    assert latest["status"] == "ready_for_rollout"
+    assert latest["latest_output"]["strategic_core"] is not None
+
+
 def test_unknown_session_404() -> None:
     resp = client.get("/sessions/not-found")
     assert resp.status_code == 404

@@ -126,14 +126,19 @@ class _FakeCursor:
             self._last_fetch_all = rows
             return
 
-        if norm.startswith("update branding_brands set data"):
-            data, brand_id, client_id = params
+        if norm.startswith("update branding_brands set data = data ||"):
+            patch, brand_id, client_id = params
+            patch = _unwrap_json(patch)
             row = self._db["brands"].get(brand_id)
             if row and row["client_id"] == client_id:
-                row["data"] = _unwrap_json(data)
+                # Emulate Postgres ``jsonb || jsonb`` shallow merge.
+                row["data"] = {**row["data"], **patch}
                 self.rowcount = 1
+                if "returning data" in norm:
+                    self._last_fetch_one = {"data": row["data"]}
             else:
                 self.rowcount = 0
+                self._last_fetch_one = None
             return
 
         # -- conversations ------------------------------------------------
@@ -160,6 +165,37 @@ class _FakeCursor:
             msgs.sort(key=lambda m: m["id"])
             base = {
                 "brand_id": conv["brand_id"],
+                "mission_json": conv["mission_json"],
+                "latest_output_json": conv["latest_output_json"],
+            }
+            if not msgs:
+                self._last_fetch_all = [{**base, "role": None, "content": None, "timestamp": None}]
+            else:
+                self._last_fetch_all = [
+                    {
+                        **base,
+                        "role": m["role"],
+                        "content": m["content"],
+                        "timestamp": m["timestamp"],
+                    }
+                    for m in msgs
+                ]
+            return
+
+        if "from branding_conversations c" in norm and "where c.brand_id" in norm:
+            (brand_id,) = params
+            conv = next(
+                (c for c in self._db["conversations"].values() if c["brand_id"] == brand_id),
+                None,
+            )
+            if conv is None:
+                self._last_fetch_all = []
+                return
+            cid = conv["conversation_id"]
+            msgs = [m for m in self._db["conv_messages"] if m["conversation_id"] == cid]
+            msgs.sort(key=lambda m: m["id"])
+            base = {
+                "conversation_id": cid,
                 "mission_json": conv["mission_json"],
                 "latest_output_json": conv["latest_output_json"],
             }
@@ -205,6 +241,28 @@ class _FakeCursor:
                 for m in self._db["conv_messages"]
                 if m["conversation_id"] == cid
             ]
+            return
+
+        if norm.startswith("with conv as") and "insert into branding_conv_messages" in norm:
+            ts, cid, role, content, ts2 = params
+            conv = self._db["conversations"].get(cid)
+            if conv is None:
+                self._last_fetch_one = None
+                self.rowcount = 0
+                return
+            conv["updated_at"] = ts
+            new_id = next(self._ids)
+            self._db["conv_messages"].append(
+                {
+                    "id": new_id,
+                    "conversation_id": cid,
+                    "role": role,
+                    "content": content,
+                    "timestamp": ts2,
+                }
+            )
+            self._last_fetch_one = (new_id,)
+            self.rowcount = 1
             return
 
         if norm.startswith("insert into branding_conv_messages"):

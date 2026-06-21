@@ -907,11 +907,17 @@ def answer_branding_question(
     session.mission = _apply_answer(session.mission, question, payload.answer)
 
     open_questions = [q for q in session.questions if q.status == "open"]
-    human_review = HumanReview(
-        approved=not open_questions,
-        feedback="Answers applied and branding artifacts refreshed.",
-    )
-    session.latest_output = orchestrator.run(mission=session.mission, human_review=human_review)
+    # Debounce regeneration. Answers only refine Phase 1 inputs (values,
+    # differentiators, voice), and any artifacts rebuilt now would be rebuilt
+    # again on the next answer. So while questions remain we keep the existing
+    # artifacts untouched and regenerate the full ~40-agent pipeline exactly
+    # once — when the final question is answered.
+    if not open_questions:
+        human_review = HumanReview(
+            approved=True,
+            feedback="Answers applied and branding artifacts refreshed.",
+        )
+        session.latest_output = orchestrator.run(mission=session.mission, human_review=human_review)
     session_store.save(session_id, session)
     return _session_response(session_id, session)
 
