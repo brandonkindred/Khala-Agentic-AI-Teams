@@ -10,9 +10,8 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
-import os
-
 from llm_service import LLMClient
+from shared_env import parse_int
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
@@ -34,6 +33,9 @@ CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
 def env_int(name: str, default: int, floor: int) -> int:
     """Read an int tuning knob from the environment, defensively.
 
+    Thin wrapper over the canonical :func:`shared_env.parse_int` (floor == minimum),
+    kept for the existing call sites in this module.
+
     Preconditions:
         - ``default`` >= ``floor``.
 
@@ -42,14 +44,7 @@ def env_int(name: str, default: int, floor: int) -> int:
           the parsed value clamped to at least ``floor`` (never raises).
     """
     assert default >= floor, "default must respect the floor"
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except (TypeError, ValueError):
-        return default
-    return max(floor, value)
+    return parse_int(name, default, minimum=floor)
 
 
 def compute_max_chunk_chars(

@@ -27,6 +27,7 @@ from job_service_client import (
     JobServiceClient,
 )
 from shared_concurrency import BackgroundHeartbeat
+from shared_env import parse_float
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +56,7 @@ DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 # Seconds after which a pending/running job with no recent heartbeat is marked failed.
 # Set via env JOB_STALE_AFTER_SECONDS (default 1800).
 def get_stale_after_seconds() -> float:
-    try:
-        return float(os.getenv("JOB_STALE_AFTER_SECONDS", "1800"))
-    except (TypeError, ValueError):
-        return 1800.0
+    return parse_float("JOB_STALE_AFTER_SECONDS", 1800.0)
 
 
 _jobs_path_logged = False
