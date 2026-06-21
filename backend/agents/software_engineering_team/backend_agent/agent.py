@@ -1884,81 +1884,19 @@ class BackendExpertAgent:
                     )
                     break
                 # When same error repeats 2+ times, try BuildFixSpecialist for minimal targeted fix
-                if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
-                    try:
-                        from build_fix_specialist.models import BuildFixInput
-
-                        affected_paths = _extract_affected_file_paths_from_build_errors(
-                            build_errors, repo_path
-                        )
-                        affected_code = _read_affected_files_code(repo_path, affected_paths)
-                        failing_test_file = (
-                            _extract_failing_test_file_from_build_errors(build_errors)
-                            if _is_pytest_assertion_failure(build_errors)
-                            else None
-                        )
-                        failing_test_content = None
-                        if failing_test_file:
-                            test_path = repo_path / failing_test_file
-                            if test_path.exists():
-                                try:
-                                    failing_test_content = test_path.read_text(
-                                        encoding="utf-8", errors="replace"
-                                    )[:3000]
-                                except Exception:
-                                    pass
-                        bf_result = build_fix_specialist.run(
-                            BuildFixInput(
-                                build_errors=build_errors[:4000],
-                                failing_test_content=failing_test_content,
-                                affected_files_code=affected_code,
-                                task_description=current_task.description,
-                            )
-                        )
-                        if bf_result.edits:
-                            max_chars = compute_existing_code_chars(self.llm)
-                            ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
-                                repo_path, bf_result.edits, max_chars
-                            )
-                            if ok_apply and files_dict:
-                                ok_write, write_msg = write_agent_output(
-                                    repo_path,
-                                    type(
-                                        "R", (), {"files": files_dict, "summary": bf_result.summary}
-                                    )(),
-                                    subdir="",
-                                )
-                                if ok_write:
-                                    logger.info(
-                                        "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
-                                        task_id,
-                                        iteration,
-                                        len(files_dict),
-                                    )
-                                    continue  # Re-run build verification
-                                else:
-                                    logger.warning(
-                                        "[%s] WORKFLOW   BuildFixSpecialist write failed: %s",
-                                        task_id,
-                                        write_msg,
-                                    )
-                            else:
-                                logger.warning(
-                                    "[%s] WORKFLOW   BuildFixSpecialist apply failed: %s",
-                                    task_id,
-                                    msg_apply,
-                                )
-                        else:
-                            logger.info(
-                                "[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration",
-                                task_id,
-                            )
-                    except Exception as spec_err:
-                        logger.warning(
-                            "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
-                            task_id,
-                            spec_err,
-                        )
+                if (
+                    consecutive_same_build_failures >= 2
+                    and build_fix_specialist is not None
+                    and self._try_build_fix_specialist(
+                        repo_path=repo_path,
+                        build_errors=build_errors,
+                        build_fix_specialist=build_fix_specialist,
+                        current_task=current_task,
+                        task_id=task_id,
+                        iteration=iteration,
+                    )
+                ):
+                    continue  # Re-run build verification
                 # Collaborate with general problem solver before moving to other subtasks.
                 if problem_solver_agent is not None:
                     bug_issue = {
@@ -3149,6 +3087,103 @@ class BackendExpertAgent:
                 return True, last_result, ""
             last_error = build_errors or last_error
         return False, last_result, last_error
+
+    def _try_build_fix_specialist(
+        self,
+        *,
+        repo_path: Path,
+        build_errors: str,
+        build_fix_specialist: Any,
+        current_task: Task,
+        task_id: str,
+        iteration: int,
+    ) -> bool:
+        """Attempt a minimal, targeted build fix via the BuildFixSpecialist.
+
+        Invoked after the same build error repeats, before falling back to full
+        regeneration. Reads the affected files (and any failing pytest file),
+        asks the specialist for edits, then applies and writes them.
+
+        Preconditions:
+            - ``build_fix_specialist`` is a runnable agent (not None); the caller
+              gates on this and on the repeated-failure threshold.
+            - ``repo_path`` is the backend repo root.
+        Postconditions:
+            - Returns True iff the specialist produced edits that were applied
+              and written to disk — the caller re-runs build verification.
+            - Returns False on no edits / apply failure / write failure / any
+              error. Best-effort: never raises, so a specialist failure cannot
+              abort the workflow.
+        """
+        from software_engineering_team.shared.repo_writer import write_agent_output
+
+        try:
+            from build_fix_specialist.models import BuildFixInput
+
+            affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)
+            affected_code = _read_affected_files_code(repo_path, affected_paths)
+            failing_test_file = (
+                _extract_failing_test_file_from_build_errors(build_errors)
+                if _is_pytest_assertion_failure(build_errors)
+                else None
+            )
+            failing_test_content = None
+            if failing_test_file:
+                test_path = repo_path / failing_test_file
+                if test_path.exists():
+                    try:
+                        failing_test_content = test_path.read_text(
+                            encoding="utf-8", errors="replace"
+                        )[:3000]
+                    except Exception:
+                        pass
+            bf_result = build_fix_specialist.run(
+                BuildFixInput(
+                    build_errors=build_errors[:4000],
+                    failing_test_content=failing_test_content,
+                    affected_files_code=affected_code,
+                    task_description=current_task.description,
+                )
+            )
+            if not bf_result.edits:
+                logger.info(
+                    "[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration",
+                    task_id,
+                )
+                return False
+            max_chars = compute_existing_code_chars(self.llm)
+            ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
+                repo_path, bf_result.edits, max_chars
+            )
+            if not (ok_apply and files_dict):
+                logger.warning(
+                    "[%s] WORKFLOW   BuildFixSpecialist apply failed: %s", task_id, msg_apply
+                )
+                return False
+            ok_write, write_msg = write_agent_output(
+                repo_path,
+                type("R", (), {"files": files_dict, "summary": bf_result.summary})(),
+                subdir="",
+            )
+            if not ok_write:
+                logger.warning(
+                    "[%s] WORKFLOW   BuildFixSpecialist write failed: %s", task_id, write_msg
+                )
+                return False
+            logger.info(
+                "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
+                task_id,
+                iteration,
+                len(files_dict),
+            )
+            return True
+        except Exception as spec_err:
+            logger.warning(
+                "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
+                task_id,
+                spec_err,
+            )
+            return False
 
     @staticmethod
     def _run_code_review(

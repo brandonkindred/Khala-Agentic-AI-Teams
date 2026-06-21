@@ -1043,3 +1043,129 @@ def test_build_completion_package_contains_trace_and_gates() -> None:
     assert pkg["task_id"] == "BE-1"
     assert pkg["quality_gates"]["acceptance_trace"] == "pass"
     assert pkg["acceptance_criteria_trace"][0]["criterion"] == "Endpoint returns 201"
+
+
+def _make_bf_result(edits: list, summary: str = "fixed") -> MagicMock:
+    """Build a fake BuildFixSpecialist result with the given edits/summary."""
+    result = MagicMock()
+    result.edits = edits
+    result.summary = summary
+    return result
+
+
+def _bf_task(description: str = "do the thing") -> MagicMock:
+    task = MagicMock()
+    task.description = description
+    return task
+
+
+def test_try_build_fix_specialist_applies_and_writes_returns_true(tmp_path: Path) -> None:
+    """Edits that apply and write cleanly -> True so the caller re-runs the build."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()], summary="patched")
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(True, "", {"app/main.py": "x"}),
+        ),
+        patch(
+            "software_engineering_team.shared.repo_writer.write_agent_output",
+            return_value=(True, ""),
+        ),
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T1",
+            iteration=2,
+        )
+    assert result is True
+    spec.run.assert_called_once()
+
+
+def test_try_build_fix_specialist_no_edits_returns_false(tmp_path: Path) -> None:
+    """No edits -> False so the caller falls back to full regeneration."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])
+    result = agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="ImportError: No module named foo",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="T2",
+        iteration=2,
+    )
+    assert result is False
+
+
+def test_try_build_fix_specialist_apply_failure_returns_false(tmp_path: Path) -> None:
+    """A failed apply returns False and never attempts to write."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()])
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(False, "bad edit", {}),
+        ),
+        patch("software_engineering_team.shared.repo_writer.write_agent_output") as write_mock,
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T3",
+            iteration=3,
+        )
+    assert result is False
+    write_mock.assert_not_called()
+
+
+def test_try_build_fix_specialist_write_failure_returns_false(tmp_path: Path) -> None:
+    """A failed write returns False (the edits did not land)."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()])
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(True, "", {"app/main.py": "x"}),
+        ),
+        patch(
+            "software_engineering_team.shared.repo_writer.write_agent_output",
+            return_value=(False, "disk full"),
+        ),
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T4",
+            iteration=4,
+        )
+    assert result is False
+
+
+def test_try_build_fix_specialist_swallows_specialist_error(tmp_path: Path) -> None:
+    """A specialist failure is non-blocking: returns False, never raises."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.side_effect = RuntimeError("specialist boom")
+    result = agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="ImportError: No module named foo",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="T5",
+        iteration=5,
+    )
+    assert result is False
