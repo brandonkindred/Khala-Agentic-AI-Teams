@@ -520,7 +520,8 @@ def is_engine_handled_exit(rule: Any) -> bool:
     close or a partial scale-out — so this is exactly the union of
     :func:`is_full_position_exit` and :func:`is_partial_exit`. Defining it in terms
     of those two keeps the partition explicit and removes a separate membership
-    list to maintain. Postconditions: ``True`` for any ``ExitRule`` member.
+    list to maintain. Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` for any ``ExitRule`` member.
     """
     return is_full_position_exit(rule) or is_partial_exit(rule)
 
@@ -532,8 +533,8 @@ def is_entry_anchored_exit(rule: Any) -> bool:
     the entry, so a compiled custom strategy must expose that binding; a signal
     exit compares indicators, not the entry price, so it is excluded. Canonical
     source of the "needs entry_price" membership used by the synthesis compiler.
-    Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, or scaled
-    take-profit.
+    Preconditions: ``rule`` is an ``ExitRule`` member. Postconditions: ``True`` iff
+    ``rule`` is a stop-loss, take-profit, or scaled take-profit.
     """
     return isinstance(rule, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule))
 

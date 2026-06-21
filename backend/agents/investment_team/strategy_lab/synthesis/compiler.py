@@ -863,7 +863,8 @@ def _emit_class(
         on_bar_lines.append(f"        {varname} = {call_expr}")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
 
-    # Conformance gate checks #5/#6 require ``position.entry_price`` whenever an
+    # The conformance gate's stop-loss / take-profit enforcement checks require
+    # the compiled class to reference ``position.entry_price`` whenever an
     # entry-anchored exit (stop-loss / take-profit / scaled take-profit) exists.
     has_entry_anchored_exit = any(is_entry_anchored_exit(r) for r in exit_rules)
     if has_entry_anchored_exit:
