@@ -15,8 +15,11 @@ Invariants:
 
 from __future__ import annotations
 
+import logging
 import math
 import os
+
+logger = logging.getLogger(__name__)
 
 _TRUE = frozenset({"true", "1", "yes", "on"})
 _FALSE = frozenset({"false", "0", "no", "off"})
@@ -71,11 +74,13 @@ def env_int(name: str, default: int, floor: int | None = None, ceiling: int | No
         assert default <= ceiling, "default must respect the ceiling"
     raw = os.environ.get(name)
     if raw is None:
-        return int(default)
+        return int(_clamp(default, floor, ceiling))
     try:
         value = int(raw.strip())
     except (TypeError, ValueError):
-        return int(default)
+        # Set-but-unparseable is a misconfiguration worth surfacing (unset is not).
+        logger.warning("Invalid int for %s=%r; using default %d", name, raw, default)
+        return int(_clamp(default, floor, ceiling))
     return int(_clamp(value, floor, ceiling))
 
 
@@ -96,10 +101,14 @@ def env_float(
     if ceiling is not None:
         assert default <= ceiling, "default must respect the ceiling"
     raw = os.environ.get(name)
+    if raw is None:
+        return float(_clamp(default, floor, ceiling))
     try:
-        value = float(raw.strip()) if raw is not None else float(default)
-        if not math.isfinite(value):
-            value = float(default)
+        value = float(raw.strip())
     except (TypeError, ValueError):
+        logger.warning("Invalid float for %s=%r; using default %s", name, raw, default)
+        return float(_clamp(default, floor, ceiling))
+    if not math.isfinite(value):
+        logger.warning("Non-finite float for %s=%r; using default %s", name, raw, default)
         value = float(default)
     return float(_clamp(value, floor, ceiling))

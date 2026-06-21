@@ -218,9 +218,14 @@ def extract_files_from_content(content: str) -> Dict[str, str]:
     if not content or not content.strip():
         return {}
     stripped = content.strip()
-    for strategy in (_files_from_json_object(stripped), _files_from_json_codeblock(content)):
-        if strategy:
-            return strategy
+    # JSON strategies short-circuit: the codeblock regex only runs if the
+    # balanced-object scan found nothing.
+    files = _files_from_json_object(stripped)
+    if files:
+        return files
+    files = _files_from_json_codeblock(content)
+    if files:
+        return files
     return _files_from_fenced_blocks(content)
 
 

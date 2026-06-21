@@ -92,10 +92,8 @@ def test_app_lifespan_registers_schema_runs_scheduler_and_closes_pool(
             calls.append("yield")
 
     asyncio.run(_drive())
-    # register + start before yield; stop + close on teardown, in order.
-    assert calls[0] == "register"
-    assert {"start", "yield", "stop", "close"} <= set(calls)
-    assert calls.index("start") < calls.index("yield") < calls.index("close")
+    # Full ordering: register -> start -> yield -> stop -> close.
+    assert calls == ["register", "start", "yield", "stop", "close"]
 
 
 # ---------------------------------------------------------------------------

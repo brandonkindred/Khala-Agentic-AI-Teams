@@ -40,6 +40,34 @@ def test_env_int_unset_and_garbage_return_default(monkeypatch) -> None:
     assert env_int(_KNOB, 7, 1) == 7
 
 
+def test_env_int_logs_on_set_but_unparseable(monkeypatch, caplog) -> None:
+    # A set-but-unparseable value is a misconfiguration and is logged; unset is silent.
+    import logging
+
+    monkeypatch.delenv(_KNOB, raising=False)
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        env_int(_KNOB, 7, 1)
+    assert not caplog.records  # unset: no warning
+    monkeypatch.setenv(_KNOB, "1O24")
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        assert env_int(_KNOB, 7, 1) == 7
+    assert any("Invalid int" in r.message for r in caplog.records)
+
+
+def test_env_float_logs_on_unparseable_and_nonfinite(monkeypatch, caplog) -> None:
+    import logging
+
+    monkeypatch.setenv(_KNOB, "abc")
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        assert env_float(_KNOB, 1.5, 0.0) == pytest.approx(1.5)
+    assert any("Invalid float" in r.message for r in caplog.records)
+    caplog.clear()
+    monkeypatch.setenv(_KNOB, "inf")
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        assert env_float(_KNOB, 1.5, 0.0) == pytest.approx(1.5)
+    assert any("Non-finite" in r.message for r in caplog.records)
+
+
 def test_env_int_parses_and_clamps(monkeypatch) -> None:
     monkeypatch.setenv(_KNOB, "42")
     assert env_int(_KNOB, 7, 1) == 42
