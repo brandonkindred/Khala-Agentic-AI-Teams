@@ -68,15 +68,20 @@ class _FakeCursor:
             return
 
         if norm.startswith("update user_profiles set"):
-            cols = _COL.findall(norm)  # ordered: set cols..., then WHERE user_id
+            # Ordered: SET cols..., then WHERE user_id. RETURNING columns carry
+            # no "= %s" so they don't appear in this match.
+            cols = _COL.findall(norm)
             user_id = params[-1]
             row = self._db["profiles"].get(user_id)
             if row is None:
                 self.rowcount = 0
+                self._one = None
                 return
             for col, val in zip(cols[:-1], params[:-1]):
                 row[col] = _unwrap_json(val) if col == "profile_json" else val
             self.rowcount = 1
+            # Support UPDATE ... RETURNING.
+            self._one = dict(row)
             return
 
         # -- user_profile_associations ------------------------------------

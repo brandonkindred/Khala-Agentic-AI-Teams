@@ -100,7 +100,7 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         - ``updated_at`` is advanced.
     """
     assert user_id, "user_id must be non-empty"
-    # Ensure the row exists so the UPDATE below always hits.
+    # Ensure the row exists so the UPDATE below always matches.
     get_profile(user_id)
 
     sets: list[str] = ["updated_at = %s"]
@@ -119,12 +119,24 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
         params.append(Json(update.preferences))
     params.append(user_id)
 
-    with get_conn() as conn, conn.cursor() as cur:
+    # UPDATE ... RETURNING builds the result in one round-trip instead of a
+    # second SELECT.
+    with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = %s",
+            f"UPDATE user_profiles SET {', '.join(sets)} WHERE user_id = %s "
+            "RETURNING user_id, display_name, email, bio, profile_json, created_at, updated_at",
             params,
         )
-    return get_profile(user_id)
+        row = cur.fetchone()
+    return UserProfile(
+        user_id=row["user_id"],
+        display_name=row["display_name"] or "",
+        email=row["email"] or "",
+        bio=row["bio"] or "",
+        preferences=row["profile_json"] or {},
+        created_at=_ts(row["created_at"]),
+        updated_at=_ts(row["updated_at"]),
+    )
 
 
 @timed_query(store=_STORE, op="record_association")
@@ -136,7 +148,7 @@ def record_association(
     user_id: str = DEFAULT_USER_ID,
     label: str = "",
     role: str = "owner",
-) -> Optional[Association]:
+) -> Association:
     """Idempotently link an artifact to a profile.
 
     Preconditions:
@@ -144,9 +156,11 @@ def record_association(
     Postconditions:
         - Exactly one row exists for ``(user_id, artifact_type, artifact_id)``.
         - Re-recording the same triple refreshes ``label``/``role`` only.
+        - Always returns the persisted ``Association`` when preconditions hold.
 
-    Returns ``None`` only if the inputs are invalid; callers treat any
-    persistence failure as best-effort (see ``record_association_safe``).
+    A precondition violation is a caller bug and raises ``AssertionError``.
+    Callers that cannot tolerate a persistence failure use
+    ``record_association_safe``, which never raises.
     """
     assert artifact_type and team and artifact_id, "artifact_type, team, artifact_id required"
     assoc_id = f"assoc_{uuid4().hex[:12]}"

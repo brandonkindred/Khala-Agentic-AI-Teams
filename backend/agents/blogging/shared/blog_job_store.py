@@ -27,6 +27,7 @@ from shared_temporal.checkpoints import (  # noqa: F401
     submit_input,
     wait_for_input,
 )
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -146,21 +147,23 @@ def create_blog_job(
         "events": [],
     }
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
-    _link_job_to_profile(job_id, brief)
+    # Best-effort: link the blog job to the default profile. record_association_safe
+    # never raises, so a link failure can't break job creation.
+    record_association_safe(
+        ArtifactType.BLOG_POST, "blogging", job_id, label=_brief_label(brief, job_id)
+    )
 
 
-def _link_job_to_profile(job_id: str, brief: str) -> None:
-    """Best-effort: link a new blog job to the default user profile.
+def _brief_label(brief: str, fallback: str) -> str:
+    """First non-blank line of the brief (truncated), or ``fallback``.
 
-    Never raises — a profile-link failure must not break job creation.
+    Robust to a brief that is empty or whose leading lines are blank — picks the
+    first line with visible content rather than indexing ``splitlines()[0]``.
     """
-    try:
-        from user_profile import ArtifactType, record_association_safe
-
-        label = (brief or "").strip().splitlines()[0][:120] if brief else job_id
-        record_association_safe(ArtifactType.BLOG_POST, "blogging", job_id, label=label)
-    except Exception:  # noqa: BLE001 - best-effort
-        logger.debug("blogging: profile association skipped", exc_info=True)
+    for line in (brief or "").splitlines():
+        if line.strip():
+            return line.strip()[:120]
+    return fallback
 
 
 def reset_blog_job(

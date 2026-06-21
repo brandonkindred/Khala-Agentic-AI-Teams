@@ -23,6 +23,7 @@ from agentic_team_provisioning.models import (
 )
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,9 @@ class AgenticTeamStore:
                 "VALUES (%s, %s, %s, %s, %s)",
                 (team_id, name, description, now, now),
             )
-        self._link_to_profile(team_id, name)
+        # Best-effort: link the team to the default profile. record_association_safe
+        # never raises, so a link failure can't break team creation.
+        record_association_safe(ArtifactType.AGENTIC_TEAM, "agentic_team_provisioning", team_id, label=name)
         return AgenticTeam(
             team_id=team_id,
             name=name,
@@ -64,24 +67,6 @@ class AgenticTeamStore:
             created_at=now.isoformat(),
             updated_at=now.isoformat(),
         )
-
-    @staticmethod
-    def _link_to_profile(team_id: str, name: str) -> None:
-        """Best-effort: link a new agentic team to the default user profile.
-
-        Never raises — a profile-link failure must not break team creation.
-        """
-        try:
-            from user_profile import ArtifactType, record_association_safe
-
-            record_association_safe(
-                ArtifactType.AGENTIC_TEAM,
-                "agentic_team_provisioning",
-                team_id,
-                label=name,
-            )
-        except Exception:  # noqa: BLE001 - best-effort
-            pass
 
     @timed_query(store=_STORE, op="get_team")
     def get_team(self, team_id: str) -> Optional[AgenticTeam]:

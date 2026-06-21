@@ -16,6 +16,20 @@ def _patched_blog_client(monkeypatch, fake_job_client):
     return fake_job_client
 
 
+def test_brief_label_picks_first_nonblank_line() -> None:
+    """_brief_label is robust to empty/whitespace-led briefs (no IndexError)."""
+    from shared.blog_job_store import _brief_label
+
+    assert _brief_label("Hello\nworld", "fallback") == "Hello"
+    # Leading blank lines: must skip to the first line with visible content.
+    assert _brief_label("\n   \nReal title\nmore", "fallback") == "Real title"
+    # Whitespace-only and empty briefs fall back instead of raising.
+    assert _brief_label("\n   \n", "job-123") == "job-123"
+    assert _brief_label("", "job-123") == "job-123"
+    # Long first line is truncated to 120 chars.
+    assert len(_brief_label("x" * 500, "f")) == 120
+
+
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending blog jobs to interrupted with reason."""
     from shared.blog_job_store import (

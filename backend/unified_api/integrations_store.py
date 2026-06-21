@@ -58,6 +58,7 @@ from unified_api.integration_credentials import (
     get_credential,
     set_credential,
 )
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -66,15 +67,10 @@ def _link_integration_to_profile(service: str) -> None:
     """Best-effort: link an integration config to the default user profile.
 
     The integration is identified by its service name (``slack``, ``github``,
-    ``medium``); re-saving the config is idempotent. Never raises — a
-    profile-link failure must not break saving integration config.
+    ``medium``); re-saving the config is idempotent. ``record_association_safe``
+    never raises, so a profile-link failure can't break saving integration config.
     """
-    try:
-        from user_profile import ArtifactType, record_association_safe
-
-        record_association_safe(ArtifactType.INTEGRATION, "integrations", service, label=service)
-    except Exception:  # noqa: BLE001 - best-effort
-        logger.debug("integrations: profile association skipped for %s", service, exc_info=True)
+    record_association_safe(ArtifactType.INTEGRATION, "integrations", service, label=service)
 
 
 _DEFAULT_CACHE_DIR = ".agent_cache"

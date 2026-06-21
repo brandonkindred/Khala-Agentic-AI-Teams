@@ -20,6 +20,7 @@ from psycopg.types.json import Json
 
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
+from user_profile import ArtifactType, record_association_safe
 
 from .models import (
     Brand,
@@ -37,24 +38,6 @@ _STORE = "branding"
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
-
-
-def _link_to_profile(brand: Brand) -> None:
-    """Best-effort: link a newly created brand to the default user profile.
-
-    Never raises — a profile-link failure must not break brand creation.
-    """
-    try:
-        from user_profile import ArtifactType, record_association_safe
-
-        record_association_safe(
-            ArtifactType.BRAND,
-            "branding",
-            brand.id,
-            label=brand.name,
-        )
-    except Exception:  # noqa: BLE001 - best-effort
-        logger.debug("branding: profile association skipped", exc_info=True)
 
 
 class BrandingStore:
@@ -168,7 +151,9 @@ class BrandingStore:
                 "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
                 (brand_id, client_id, Json(brand.model_dump(mode="json"))),
             )
-        _link_to_profile(brand)
+        # Best-effort: link the brand to the default profile. record_association_safe
+        # never raises, so a link failure can't break brand creation.
+        record_association_safe(ArtifactType.BRAND, "branding", brand_id, label=brand.name)
         return brand
 
     @timed_query(store=_STORE, op="update_brand")
