@@ -251,7 +251,10 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
     """
     from shared_env import parse_float
 
-    return parse_float(ENV_LLM_TIMEOUT, 900.0)
+    # A non-positive timeout would make every streamed call fail instantly;
+    # fall back to the default rather than honor a degenerate override.
+    value = parse_float(ENV_LLM_TIMEOUT, 900.0)
+    return value if value > 0 else 900.0
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
