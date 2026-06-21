@@ -26,6 +26,7 @@ __all__ = ["Subscription", "subscribe", "unsubscribe", "publish", "cleanup_job"]
 _state = BusState()
 _lock = _state.lock
 _subscribers = _state.subscribers
+_job_created_at = _state.job_created_at
 
 
 def subscribe(job_id: str) -> Subscription:

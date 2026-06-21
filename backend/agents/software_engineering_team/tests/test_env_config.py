@@ -58,6 +58,20 @@ def test_env_int_default_must_respect_bounds() -> None:
         env_int(_KNOB, 100, ceiling=50)
 
 
+def test_clamp_rejects_inverted_bounds() -> None:
+    # floor > ceiling is a caller bug; _clamp raises ValueError (not assert) so
+    # it is enforced even under `python -O`, where the default-respects-bounds
+    # asserts in env_int/env_float are stripped.
+    from software_engineering_team.shared.env_config import _clamp
+
+    with pytest.raises(ValueError, match="floor"):
+        _clamp(7.0, 10.0, 5.0)
+    # one-sided bounds and floor == ceiling are fine
+    assert _clamp(7.0, None, 5.0) == 5.0
+    assert _clamp(1.0, 3.0, None) == 3.0
+    assert _clamp(9.0, 5.0, 5.0) == 5.0
+
+
 def test_env_float_unset_and_garbage_return_default(monkeypatch) -> None:
     monkeypatch.delenv(_KNOB, raising=False)
     assert env_float(_KNOB, 30.0, 0.0) == pytest.approx(30.0)

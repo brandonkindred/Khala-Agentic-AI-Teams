@@ -24,6 +24,14 @@ _FALSE = frozenset({"false", "0", "no", "off"})
 
 
 def _clamp(value: float, floor: float | None, ceiling: float | None) -> float:
+    """Clamp ``value`` to ``[floor, ceiling]`` (each bound optional).
+
+    Preconditions:
+        - When both bounds are given, ``floor <= ceiling`` (else the clamp order
+          is ill-defined and the ceiling would always win).
+    """
+    if floor is not None and ceiling is not None and floor > ceiling:
+        raise ValueError(f"floor ({floor}) must not exceed ceiling ({ceiling})")
     if floor is not None:
         value = max(floor, value)
     if ceiling is not None:
