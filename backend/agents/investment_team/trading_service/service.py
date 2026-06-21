@@ -17,7 +17,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from functools import cached_property
-from typing import Any, Callable, Dict, Iterable, List, Mapping, Optional, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence
 
 import numpy as np
 
@@ -321,6 +321,44 @@ class _TrackedPosition:
         )
 
 
+class _EvalGate(NamedTuple):
+    """What :meth:`_EngineExitDispatcher._should_evaluate` found for one bar.
+
+    A named result (vs. a bare 4-tuple) so the per-position gate facts are
+    self-documenting and safe to extend. ``resting_limit_stop_id`` is the
+    ``order_id`` of an already-resting engine STOP_LIMIT (or ``None``);
+    ``entry_continuation_in_flight`` is ``True`` when the position's own entry is
+    still filling (a same-side partially-filled continuation rests).
+    """
+
+    tracked: "_TrackedPosition"
+    pos: Position
+    resting_limit_stop_id: Optional[str]
+    entry_continuation_in_flight: bool
+
+
+@dataclass(frozen=True)
+class _EmitContext:
+    """The per-bar state both exit-emission handlers need.
+
+    Built once in :meth:`_EngineExitDispatcher.maybe_emit` after gating and
+    evaluation, then handed to :meth:`_emit_partial_scale_out` /
+    :meth:`_emit_full_close` so neither repeats a long shared parameter list —
+    new per-bar state is threaded by adding one field here, not by editing both
+    handler signatures.
+    """
+
+    sym: str
+    tracked: "_TrackedPosition"
+    pos: Position
+    pending_for_prev: List[OrderRequest]
+    order_book: OrderBook
+    cur_bar: Any
+    result: "TradingServiceResult"
+    resting_limit_stop_id: Optional[str]
+    entry_continuation_in_flight: bool
+
+
 @dataclass
 class _EngineExitDispatcher:
     """Per-run owner of engine-side ``exit_rules`` enforcement.
@@ -394,11 +432,10 @@ class _EngineExitDispatcher:
             return
 
         sym = cur_bar.symbol
-        gating = self._should_evaluate(sym, position_tracker, portfolio, order_book)
-        if gating is None:
+        gate = self._should_evaluate(sym, position_tracker, portfolio, order_book)
+        if gate is None:
             return
-        tracked, pos, resting_limit_stop_id, entry_continuation_in_flight = gating
-        exclude_resting_limit_stop = resting_limit_stop_id is not None
+        exclude_resting_limit_stop = gate.resting_limit_stop_id is not None
 
         # Resting structured exit: when a limit-style STOP_LIMIT already rests on
         # the book (``resting_limit_stop_id`` set), the spec's (single — see
@@ -412,49 +449,35 @@ class _EngineExitDispatcher:
         # fill first at its stale limit price on a recovery bar and pre-empt the
         # intended close.
         intent = self._evaluate(
-            sym, tracked, pos, cur_bar, exclude_resting_limit_stop=exclude_resting_limit_stop
+            sym,
+            gate.tracked,
+            gate.pos,
+            cur_bar,
+            exclude_resting_limit_stop=exclude_resting_limit_stop,
         )
         if intent is None:
             return
 
+        ctx = _EmitContext(
+            sym=sym,
+            tracked=gate.tracked,
+            pos=gate.pos,
+            pending_for_prev=pending_for_prev,
+            order_book=order_book,
+            cur_bar=cur_bar,
+            result=result,
+            resting_limit_stop_id=gate.resting_limit_stop_id,
+            entry_continuation_in_flight=gate.entry_continuation_in_flight,
+        )
         # A partial scale-out (a scaled-take-profit rung) and a full-position close
         # have disjoint emission flows — the partial path deliberately skips every
         # whole-position cleanup — so dispatch to the matching handler.
         if intent.is_partial:
-            self._emit_partial_scale_out(
-                intent,
-                tracked=tracked,
-                pos=pos,
-                pending_for_prev=pending_for_prev,
-                entry_continuation_in_flight=entry_continuation_in_flight,
-                cur_bar=cur_bar,
-                result=result,
-            )
-            return
+            self._emit_partial_scale_out(intent, ctx)
+        else:
+            self._emit_full_close(intent, ctx)
 
-        self._emit_full_close(
-            intent,
-            sym=sym,
-            tracked=tracked,
-            pos=pos,
-            pending_for_prev=pending_for_prev,
-            order_book=order_book,
-            resting_limit_stop_id=resting_limit_stop_id,
-            cur_bar=cur_bar,
-            result=result,
-        )
-
-    def _emit_partial_scale_out(
-        self,
-        intent: ExitIntent,
-        *,
-        tracked: _TrackedPosition,
-        pos: Position,
-        pending_for_prev: List[OrderRequest],
-        entry_continuation_in_flight: bool,
-        cur_bar,
-        result: "TradingServiceResult",
-    ) -> None:
+    def _emit_partial_scale_out(self, intent: ExitIntent, ctx: "_EmitContext") -> None:
         """Emit a scaled-take-profit rung's PARTIAL close and advance the cursor.
 
         A scale-out closes only one rung's fraction and leaves the rest of the
@@ -464,9 +487,9 @@ class _EngineExitDispatcher:
 
         Preconditions: ``intent.is_partial`` (``intent.level_index`` is set).
         Postconditions: deferred to a later bar when the entry is still filling
-        (no-op); otherwise appends one partial close to ``pending_for_prev``, binds
-        it to the position, advances the ladder cursor past the fired rung, and
-        records the emission.
+        (no-op); otherwise appends one partial close to ``ctx.pending_for_prev``,
+        binds it to the position, advances the ladder cursor past the fired rung,
+        and records the emission.
         """
         # Defer the scale-out while the position's entry is still filling. A
         # partially-filled entry with a resting REQUEUE_NEXT_BAR / TWAP_N
@@ -477,40 +500,30 @@ class _EngineExitDispatcher:
         # lands. Skip without advancing the cursor so the rung re-evaluates once the
         # entry is complete. The flag was derived in the single ``_should_evaluate``
         # order-book pass, so this needs no rescan.
-        if entry_continuation_in_flight:
+        if ctx.entry_continuation_in_flight:
             return
-        req = self._build_close_order(intent, tracked, pos)
+        req = self._build_close_order(intent, ctx.tracked, ctx.pos)
         if req is None:
             return
-        pending_for_prev.append(req)
+        ctx.pending_for_prev.append(req)
         # Bind to the position so the stale-continuation guard drops this scale-out
         # if a full exit (e.g. a stop) closes the position first.
-        self._register_binding(req, pos)
+        self._register_binding(req, ctx.pos)
         assert intent.level_index is not None  # is_partial guarantees this
-        tracked.scaled_cursor.advance(intent.rule_index, intent.level_index)
-        self._record_emission(req, intent, cur_bar, result)
+        ctx.tracked.scaled_cursor.advance(intent.rule_index, intent.level_index)
+        self._record_emission(req, intent, ctx.cur_bar, ctx.result)
 
-    def _emit_full_close(
-        self,
-        intent: ExitIntent,
-        *,
-        sym: str,
-        tracked: _TrackedPosition,
-        pos: Position,
-        pending_for_prev: List[OrderRequest],
-        order_book: OrderBook,
-        resting_limit_stop_id: Optional[str],
-        cur_bar,
-        result: "TradingServiceResult",
-    ) -> None:
+    def _emit_full_close(self, intent: ExitIntent, ctx: "_EmitContext") -> None:
         """Emit a full-position close and run the whole-position cleanups.
 
         Preconditions: ``intent`` closes the full position (stop-loss / take-profit
         / signal-exit; ``not intent.is_partial``).
-        Postconditions: appends one close to ``pending_for_prev``, binds it, retires
-        competing resting exits, cancels entry continuations (market style) and the
-        replaced resting stop-limit (when one rested), and records the emission.
+        Postconditions: appends one close to ``ctx.pending_for_prev``, binds it,
+        retires competing resting exits, cancels entry continuations (market style)
+        and the replaced resting stop-limit (when one rested), and records the
+        emission.
         """
+        sym, tracked, pos, order_book = ctx.sym, ctx.tracked, ctx.pos, ctx.order_book
         # Size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
         # at emission. Two sources, both BEFORE the engine close on the
@@ -527,7 +540,7 @@ class _EngineExitDispatcher:
         # clipped at fill time the engine close clips back down to the
         # actual ``existing_pos.qty`` — no over-close risk.
         scale_in_qty = self._sum_same_side_queued(
-            sym, tracked.side, pending_for_prev
+            sym, tracked.side, ctx.pending_for_prev
         ) + self._sum_same_side_resting(sym, tracked.side, order_book)
         # For a limit-style stop we do NOT cancel the position's in-flight entry
         # continuation (see below), so its still-unfilled remainder can grow the
@@ -542,7 +555,7 @@ class _EngineExitDispatcher:
         if req is None:
             return
 
-        pending_for_prev.append(req)
+        ctx.pending_for_prev.append(req)
         self._register_binding(req, pos)
         # Bind competing opposite-side exits to the position. This is safe for
         # BOTH styles: binding only *retires* an order via the fill simulator's
@@ -553,7 +566,7 @@ class _EngineExitDispatcher:
         # and later firing as a fresh reverse entry — so it must run for the
         # limit-style stop too, not just the guaranteed market close.
         self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
-        self._bind_same_bar_queued_exits(sym, tracked.side, pos, pending_for_prev)
+        self._bind_same_bar_queued_exits(sym, tracked.side, pos, ctx.pending_for_prev)
         # Cancelling the entry continuation, by contrast, *actively* removes a
         # legitimate scale-in remainder on the assumption the close will fill.
         # A market close is guaranteed next bar; a limit-style stop may gap
@@ -573,10 +586,10 @@ class _EngineExitDispatcher:
         # intended close would be dropped by the stale-continuation guard. Binding
         # alone cannot prevent this — it only retires the stop *after* the position
         # is gone, which is too late once the stop itself is what closed it.
-        if resting_limit_stop_id is not None:
+        if ctx.resting_limit_stop_id is not None:
             assert intent.style != "limit"  # excluded by _evaluate; never re-emit
-            order_book.cancel(resting_limit_stop_id)
-        self._record_emission(req, intent, cur_bar, result)
+            order_book.cancel(ctx.resting_limit_stop_id)
+        self._record_emission(req, intent, ctx.cur_bar, ctx.result)
 
     # ------------------------------------------------------------------
     # Sub-steps. Kept as private methods so subclasses or sibling unit
@@ -589,9 +602,9 @@ class _EngineExitDispatcher:
         position_tracker: Mapping[str, _TrackedPosition],
         portfolio: Portfolio,
         order_book: OrderBook,
-    ) -> Optional[tuple[_TrackedPosition, Position, Optional[str], bool]]:
-        """Return ``(tracked, pos, resting_limit_stop_id, entry_continuation_in_flight)``
-        if rule evaluation should run for this symbol on this bar, else ``None``.
+    ) -> Optional[_EvalGate]:
+        """Return an :class:`_EvalGate` if rule evaluation should run for this
+        symbol on this bar, else ``None``.
 
         Gates:
         * Tracker has the symbol (a position is open).
@@ -620,12 +633,13 @@ class _EngineExitDispatcher:
         Preconditions: ``order_book`` is the live order book for this run, and
         ``position_tracker``/``portfolio`` reflect state as of the current bar.
         Postconditions: returns ``None`` when evaluation should be skipped;
-        otherwise the open ``(tracked, pos)``, the ``order_id`` of the
-        already-resting limit-style stop (non-``None`` only when the spec has a
-        limit stop AND an engine STOP_LIMIT for this position is resting; a
-        non-``None`` id means the chosen intent must exclude that stop rule), and
-        ``entry_continuation_in_flight`` — ``True`` iff a scaled-take-profit spec
-        has a same-side partially-filled entry continuation still resting (so the
+        otherwise an :class:`_EvalGate` carrying the open ``(tracked, pos)``, the
+        ``order_id`` of the already-resting limit-style stop (non-``None`` only when
+        the spec has a limit stop AND an engine STOP_LIMIT for this position is
+        resting; a non-``None`` id means the chosen intent must exclude that stop
+        rule), and ``entry_continuation_in_flight`` — ``True`` iff a
+        scaled-take-profit spec has a same-side partially-filled entry continuation
+        still resting (so the
         scaled deferral can read it without rescanning the book).
         """
         if sym not in position_tracker:
@@ -663,7 +677,12 @@ class _EngineExitDispatcher:
                 return None
             if track_resting and po_req.order_type == OrderType.STOP_LIMIT:
                 resting_limit_stop_id = po.order_id
-        return tracked, pos, resting_limit_stop_id, entry_continuation_in_flight
+        return _EvalGate(
+            tracked=tracked,
+            pos=pos,
+            resting_limit_stop_id=resting_limit_stop_id,
+            entry_continuation_in_flight=entry_continuation_in_flight,
+        )
 
     def _evaluate(
         self,

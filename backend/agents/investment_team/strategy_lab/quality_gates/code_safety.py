@@ -6,7 +6,13 @@ import ast
 from dataclasses import dataclass
 from typing import Any, ClassVar, Iterable, List
 
-from ..spec_dsl import ScaledTakeProfitRule, SignalExitRule, StopLossRule, TakeProfitRule
+from ..spec_dsl import (
+    ScaledTakeProfitRule,
+    SignalExitRule,
+    StopLossRule,
+    TakeProfitRule,
+    is_engine_handled_exit,
+)
 from .code_safety_ast import (
     _BANNED_CALL_PATTERNS,
     _LOOKAHEAD_PATTERNS,
@@ -105,10 +111,7 @@ def _spec_has_engine_handled_exit(spec: Any) -> bool:
     exit_rules = getattr(spec, "exit_rules", None)
     if not exit_rules:
         return False
-    return any(
-        isinstance(r, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule, SignalExitRule))
-        for r in exit_rules
-    )
+    return any(is_engine_handled_exit(r) for r in exit_rules)
 
 
 def _spec_is_fully_engine_managed(spec: Any) -> bool:

@@ -491,18 +491,61 @@ def ladder_closes_full_position(rule: "ScaledTakeProfitRule") -> bool:
     return math.fsum(level.qty_fraction for level in rule.levels) >= 1.0 - LADDER_SUM_TOL
 
 
+def is_partial_exit(rule: Any) -> bool:
+    """Whether ``rule`` closes only PART of the position (a scaled scale-out).
+
+    Canonical single-rule classifier — the rule-level mirror of
+    ``ExitIntent.is_partial``. Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is a ``ScaledTakeProfitRule``.
+    """
+    return isinstance(rule, ScaledTakeProfitRule)
+
+
+def is_full_position_exit(rule: Any) -> bool:
+    """Whether ``rule`` closes the WHOLE position when it fires.
+
+    A stop-loss / take-profit / signal-exit each close the full position; a
+    laddered take-profit only scales out a fraction (see :func:`is_partial_exit`).
+    Canonical single source of the full-position membership so a new exit kind is
+    classified in one place. Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, or signal exit.
+    """
+    return isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule))
+
+
+def is_engine_handled_exit(rule: Any) -> bool:
+    """Whether the engine enforces ``rule`` (vs. it being strategy-code-owned).
+
+    Every structured exit rule is engine-enforced — it is either a full-position
+    close or a partial scale-out — so this is exactly the union of
+    :func:`is_full_position_exit` and :func:`is_partial_exit`. Defining it in terms
+    of those two keeps the partition explicit and removes a separate membership
+    list to maintain. Postconditions: ``True`` for any ``ExitRule`` member.
+    """
+    return is_full_position_exit(rule) or is_partial_exit(rule)
+
+
+def is_entry_anchored_exit(rule: Any) -> bool:
+    """Whether the engine enforces ``rule`` against ``position.entry_price``.
+
+    Stop-loss / take-profit / scaled-take-profit all trigger on price relative to
+    the entry, so a compiled custom strategy must expose that binding; a signal
+    exit compares indicators, not the entry price, so it is excluded. Canonical
+    source of the "needs entry_price" membership used by the synthesis compiler.
+    Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, or scaled
+    take-profit.
+    """
+    return isinstance(rule, (StopLossRule, TakeProfitRule, ScaledTakeProfitRule))
+
+
 def has_full_position_exit(exit_rules: Sequence[Any]) -> bool:
     """Whether ``exit_rules`` contains a rule that closes the FULL position.
 
-    A ``StopLossRule`` / ``TakeProfitRule`` / ``SignalExitRule`` each close the
-    whole position; a ``ScaledTakeProfitRule`` only scales out a fraction, so it
-    does NOT count. Single source of this test for the readiness gate's
-    partial-ladder-completeness check.
-
     Preconditions: ``exit_rules`` is a sequence of ``ExitRule`` members.
-    Postconditions: ``True`` iff at least one rule is a full-position exit.
+    Postconditions: ``True`` iff at least one rule satisfies
+    :func:`is_full_position_exit`.
     """
-    return any(isinstance(r, (StopLossRule, TakeProfitRule, SignalExitRule)) for r in exit_rules)
+    return any(is_full_position_exit(r) for r in exit_rules)
 
 
 def stop_caps_side(basis: str, side: str) -> bool:
