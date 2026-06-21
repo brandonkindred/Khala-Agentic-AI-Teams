@@ -87,7 +87,7 @@ def test_orchestrator_has_integration_phase() -> None:
     """Orchestrator runs Integration agent after backend and frontend workers."""
     orchestrator_path = Path(__file__).resolve().parent.parent / "orchestrator.py"
     content = orchestrator_path.read_text()
-    assert "integration_agent" in content or "Integration agent" in content
+    assert "IntegrationAgent" in content or "integration_agent" in content
     assert "Integration phase" in content or "integration phase" in content
 
 

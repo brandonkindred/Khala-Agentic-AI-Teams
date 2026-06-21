@@ -251,77 +251,6 @@ def test_apply_repair_fixes_applies_valid_replacement(tmp_path: Path):
     assert target.read_text(encoding="utf-8") == "alpha\nBETA\ngamma\n"
 
 
-def test_issues_to_dicts_with_simple_objects():
-    import orchestrator
-
-    class _QABug:
-        def model_dump(self):
-            return {"description": "q1"}
-
-    class _SecVuln:
-        def model_dump(self):
-            return {"description": "v1"}
-
-    qa_list, sec_list = orchestrator._issues_to_dicts([_QABug()], [_SecVuln()])
-    assert isinstance(qa_list, list) and qa_list and qa_list[0]["description"] == "q1"
-    assert isinstance(sec_list, list) and sec_list and sec_list[0]["description"] == "v1"
-
-
-def test_issues_to_dicts_with_none_inputs():
-    import orchestrator
-
-    qa_list, sec_list = orchestrator._issues_to_dicts(None, None)
-    assert qa_list == []
-    assert sec_list == []
-
-
-def test_code_review_issues_to_dicts_handles_empty():
-    import orchestrator
-
-    assert orchestrator._code_review_issues_to_dicts([]) == []
-
-
-def test_log_code_review_result_approved_path(caplog):
-    import orchestrator
-
-    review = MagicMock()
-    review.approved = True
-    review.summary = "looks good"
-    review.issues = []
-    # Should not raise
-    orchestrator._log_code_review_result(review, "task-1")
-
-
-def test_log_code_review_result_rejected_path(caplog):
-    import orchestrator
-
-    issue = MagicMock()
-    issue.severity = "major"
-    issue.category = "logic"
-    issue.description = "buggy"
-    issue.file_path = "a.py"
-    issue.suggestion = "fix"
-    review = MagicMock()
-    review.approved = False
-    review.summary = "issues found"
-    review.issues = [issue]
-    review.spec_compliance_notes = "ok"
-    # Should not raise
-    orchestrator._log_code_review_result(review, "task-1")
-
-
-def test_log_code_review_result_rejected_zero_issues_warns(caplog):
-    import orchestrator
-
-    review = MagicMock()
-    review.approved = False
-    review.summary = ""
-    review.issues = []
-    review.spec_compliance_notes = ""
-    # Should not raise; emits a warning about zero-issues-but-rejected
-    orchestrator._log_code_review_result(review, "task-1")
-
-
 def test_pop_runnable_task_picks_one_when_deps_met():
     import orchestrator
 
@@ -415,55 +344,6 @@ def test_backend_code_v2_worker_marks_failed_when_team_missing():
         repo_path=__import__("pathlib").Path("/tmp"),
     )
     assert failed == {"t1": "backend team not registered"}
-
-
-def test_frontend_has_typescript_returns_true_when_ts_files(tmp_path: Path):
-    import orchestrator
-
-    (tmp_path / "a.ts").write_text("x", encoding="utf-8")
-    assert orchestrator._frontend_has_typescript(tmp_path) is True
-
-
-def test_frontend_has_typescript_returns_false_for_empty_dir(tmp_path: Path):
-    import orchestrator
-
-    assert orchestrator._frontend_has_typescript(tmp_path) is False
-
-
-def test_initial_integration_outcome_not_run_when_inapplicable():
-    import orchestrator
-
-    out = orchestrator._initial_integration_outcome(
-        integration_agent=MagicMock(),
-        has_backend=True,
-        has_frontend=False,
-        completed_code_task_ids=["t1"],
-    )
-    assert out == "not_run"
-
-
-def test_initial_integration_outcome_failed_when_agent_missing():
-    import orchestrator
-
-    out = orchestrator._initial_integration_outcome(
-        integration_agent=None,
-        has_backend=True,
-        has_frontend=True,
-        completed_code_task_ids=["t1"],
-    )
-    assert out == "failed"
-
-
-def test_initial_integration_outcome_pending_when_runnable():
-    import orchestrator
-
-    out = orchestrator._initial_integration_outcome(
-        integration_agent=MagicMock(),
-        has_backend=True,
-        has_frontend=True,
-        completed_code_task_ids=["t1"],
-    )
-    assert out == "pending"
 
 
 def test_log_task_breakdown_does_not_raise():

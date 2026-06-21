@@ -632,15 +632,6 @@ MAX_CLARIFICATION_REFINEMENTS = 10  # Max times to refine a task based on specia
 MAX_CODE_REVIEW_ITERATIONS = 10  # Max rounds of code review -> fix -> re-review
 
 
-def _issues_to_dicts(
-    qa_bugs: Any, sec_vulns: Any
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Convert QA/Security outputs to dict lists for coding agent input."""
-    qa_list = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_bugs or [])]
-    sec_list = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_vulns or [])]
-    return qa_list, sec_list
-
-
 # _read_repo_code and _truncate_for_context are now in shared.repo_utils
 _read_repo_code = read_repo_code
 _truncate_for_context = truncate_for_context
@@ -674,93 +665,6 @@ def _build_coding_team_plan_input(
         open_questions=open_questions,
         assumptions=getattr(adapter_result, "assumptions", None) or [],
     )
-
-
-def _build_task_update(
-    task_id: str, agent_type: str, result: Any, status: str = "completed"
-) -> TaskUpdate:
-    """Construct a TaskUpdate from a specialist agent's output."""
-    summary = getattr(result, "summary", "") or ""
-    files_changed = list((getattr(result, "files", None) or {}).keys())
-    if not files_changed:
-        files_changed = list((getattr(result, "artifacts", None) or {}).keys())
-    needs_followup = bool(getattr(result, "needs_clarification", False))
-    return TaskUpdate(
-        task_id=task_id,
-        agent_type=agent_type,
-        status=status,
-        summary=summary,
-        files_changed=files_changed,
-        needs_followup=needs_followup,
-    )
-
-
-def _run_dbc_comments_review(
-    agents: dict,
-    repo_path: Path,
-    task_id: str,
-    language: str,
-    task_description: str,
-    architecture,
-) -> None:
-    """
-    Run the Design by Contract Comments agent on the current feature branch.
-    Adds DbC-compliant comments to all methods, functions, and classes.
-    Commits changes to the branch if any comments were added.
-
-    Preconditions:
-        - The current branch is the feature branch with code to review
-        - agents dict contains a "dbc_comments" key
-
-    Postconditions:
-        - If comments were added, they are committed to the current branch
-        - If code was already compliant, a praise message is logged
-        - Any failures are logged but do not block the pipeline
-    """
-    from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-
-    from software_engineering_team.shared.git_utils import write_files_and_commit
-
-    try:  # pragma: no cover  # integration-only: DbC agent runs live LLM + writes commits
-        dbc_code = _read_repo_code(repo_path)
-        if not dbc_code or dbc_code == "# No code files found":
-            logger.info("[%s] DbC: no code files to review, skipping", task_id)
-            return
-
-        dbc_result = agents["dbc_comments"].run(
-            DbcCommentsInput(
-                code=dbc_code,
-                language=language,
-                task_description=task_description,
-                architecture=architecture,
-            )
-        )
-
-        if not dbc_result.already_compliant and dbc_result.files:
-            ok, msg = write_files_and_commit(
-                repo_path,
-                dbc_result.files,
-                dbc_result.suggested_commit_message,
-            )
-            if ok:
-                logger.info(
-                    "[%s] DbC: added %s comments, updated %s -- committed to branch",
-                    task_id,
-                    dbc_result.comments_added,
-                    dbc_result.comments_updated,
-                )
-            else:
-                logger.warning("[%s] DbC: commit failed: %s", task_id, msg)
-        else:
-            logger.info(
-                "[%s] DbC: code complies with Design by Contract -- great job coding!",
-                task_id,
-            )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
-        # Non-blocking: DbC failure should never stop the pipeline
-        logger.warning("[%s] DbC: review failed (non-blocking): %s", task_id, e)
 
 
 def _run_tech_lead_review(
@@ -864,53 +768,6 @@ def _run_code_review(
         existing_codebase=existing_codebase,
     )
     return agents["code_review"].run(review_input)
-
-
-def _code_review_issues_to_dicts(issues: Any) -> List[Dict[str, Any]]:
-    """Convert CodeReviewIssue objects to dicts for coding agent input."""
-    return [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (issues or [])]
-
-
-def _log_code_review_result(review_result: Any, task_id: str) -> None:
-    """Log code review result with full issue details for debugging."""
-    if review_result.approved:
-        logger.info("[%s] Code review APPROVED", task_id)
-        if review_result.summary:
-            logger.info("[%s]   Summary: %s", task_id, review_result.summary[:300])
-        return
-    logger.warning(
-        "[%s] Code review REJECTED: %s issues (%s critical/major)",
-        task_id,
-        len(review_result.issues),
-        len([i for i in review_result.issues if i.severity in ("critical", "major")]),
-    )
-    for i, issue in enumerate(review_result.issues, 1):
-        logger.warning(
-            "[%s]   Issue %s: [%s] %s: %s (file: %s)",
-            task_id,
-            i,
-            issue.severity,
-            issue.category,
-            issue.description,
-            issue.file_path or "n/a",
-        )
-        if issue.suggestion:
-            logger.warning(
-                "[%s]     Suggestion: %s",
-                task_id,
-                issue.suggestion[:300],
-            )
-    if review_result.summary:
-        logger.info("[%s]   Review summary: %s", task_id, review_result.summary[:300])
-    if review_result.spec_compliance_notes:
-        logger.info(
-            "[%s]   Spec compliance: %s", task_id, review_result.spec_compliance_notes[:300]
-        )
-    if not review_result.issues:
-        logger.warning(
-            "[%s]   WARNING: Review rejected but returned 0 issues -- coding agent has nothing to fix!",
-            task_id,
-        )
 
 
 def _run_build_verification(
@@ -2452,58 +2309,6 @@ def _run_backend_frontend_workers(
     t_frontend.start()
     t_backend.join()
     t_frontend.join()
-
-
-def _frontend_has_typescript(frontend_dir: Path) -> bool:
-    """Return True when ``frontend_dir`` contains TypeScript source.
-
-    Matches what ``_read_repo_code`` pulls for the actual Integration
-    call (``.ts`` + ``.tsx`` + ``.html`` + ``.scss``). A React-style
-    TSX-only frontend would slip past a ``*.ts``-only check (PR #424
-    Codex P1 round 4) and bypass the integration gate the release
-    hook relies on. We check ``.ts`` and ``.tsx`` only — HTML/SCSS
-    without TS source isn't an integration-relevant frontend.
-    """
-    if not frontend_dir.is_dir():
-        return False
-    # Two rglob walks (rather than scanning every file once) so the
-    # any() short-circuits as soon as the first match hits.
-    return any(frontend_dir.rglob("*.ts")) or any(frontend_dir.rglob("*.tsx"))
-
-
-def _initial_integration_outcome(
-    *,
-    integration_agent: Any,
-    has_backend: bool,
-    has_frontend: bool,
-    completed_code_task_ids: Any,
-) -> str:
-    """Compute the *pre-run* integration outcome.
-
-    Returns one of:
-      * ``"not_run"`` — Integration not applicable (no backend or no
-        frontend or no completed code tasks). Release hook ships.
-      * ``"failed"`` — Integration was applicable but the agent is
-        missing from ``agents``. Treated as a misconfiguration, not
-        N/A (PR #424 Codex P2 round 3): an environment with both
-        backend and frontend code that has no integration agent
-        would otherwise silently mint a release without contract
-        validation. Release hook gates the ship.
-      * ``"pending"`` — Integration is applicable and the agent is
-        present; caller should run it and upgrade the outcome to
-        ``"succeeded"`` (clean return) or ``"failed"`` (the call
-        threw). Sentinel value, not visible to the release hook.
-
-    Centralising the static branching here keeps the new
-    misconfiguration handling unit-testable without driving the
-    whole ``run_orchestrator``.
-    """
-    integration_applicable = bool(has_backend and has_frontend and completed_code_task_ids)
-    if not integration_applicable:
-        return "not_run"
-    if integration_agent is None:
-        return "failed"
-    return "pending"
 
 
 def _maybe_ship_sprint_release(
