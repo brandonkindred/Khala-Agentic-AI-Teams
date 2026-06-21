@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, Response, UploadFile
+from fastapi import HTTPException, Response, UploadFile
 from fastapi.responses import FileResponse
 
 from agentic_team_provisioning.agent_env_provisioning import schedule_provision_step_agents
@@ -68,36 +67,18 @@ from agentic_team_provisioning.runtime.agent_builder import (
 )
 from agentic_team_provisioning.runtime.pipeline_runner import get_pipeline_runner
 from agentic_team_provisioning.testing.store import get_test_store
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="agentic-team-provisioning", team_key="agentic_team_provisioning")
-
-
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(AGENTIC_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("agentic_team_provisioning postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("agentic_team_provisioning shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="agentic-team-provisioning",
+    team_key="agentic_team_provisioning",
     title="Agentic Team Provisioning API",
     description="Create agentic teams and define their processes through conversation",
-    lifespan=_lifespan,
+    version="0.1.0",
+    postgres_schema=AGENTIC_POSTGRES_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="agentic_team_provisioning")
 
 _store = AgenticTeamStore()
 _agent = ProcessDesignerAgent()
