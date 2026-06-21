@@ -110,6 +110,195 @@ PLAYBOOK_GHA_WORKFLOW = (
 )
 
 
+def _parse_import_error(text: str) -> Optional[ParsedFailure]:
+    """ImportError: cannot import name 'Base' from 'app.database' (often the root cause)."""
+    m = re.search(
+        r"ImportError(?:\s+while importing[^:]*)?:\s*cannot import name ['\"]([^'\"]+)['\"] from ['\"]([^'\"]+)['\"]",
+        text,
+        re.IGNORECASE,
+    )
+    if not m:
+        return None
+    symbol, module = m.group(1), m.group(2)
+    file_match = re.search(r"tests/test_[^\s]+\.py", text)
+    return ParsedFailure(
+        failure_class=FailureClass.IMPORT_ERROR,
+        file_path=file_match.group(0) if file_match else None,
+        message=f"cannot import name '{symbol}' from '{module}'",
+        raw_excerpt=text[m.start() : m.end() + 200],
+        suggestion=f"Ensure {module} exports {symbol}. Add 'from .database import Base' or define Base in app/database.py.",
+        playbook_hint=PLAYBOOK_IMPORT_ERROR,
+    )
+
+
+def _parse_sql_no_such_table(text: str) -> Optional[ParsedFailure]:
+    """no such table: api_tokens (from sqlite3.OperationalError or similar)."""
+    m = re.search(r"no such table:\s*([a-zA-Z_]+)", text, re.IGNORECASE)
+    if not m:
+        return None
+    table = m.group(1)
+    return ParsedFailure(
+        failure_class=FailureClass.SQL_NO_SUCH_TABLE,
+        message=f"no such table: {table}",
+        raw_excerpt=text[m.start() : m.end() + 300],
+        suggestion=f"Create the {table} table: ensure the model is in Base.metadata and call Base.metadata.create_all(bind=engine) before queries.",
+        playbook_hint=PLAYBOOK_SQL_NO_SUCH_TABLE,
+    )
+
+
+def _collect_failing_tests(text: str) -> List[Tuple[str, Optional[str]]]:
+    """All ``FAILED path::test_name`` matches, deduped by (file, test_name), in order."""
+    failed_matches = re.findall(
+        r"FAILED\s+([a-zA-Z0-9_/.-]+test_[a-zA-Z0-9_]+\.py)(?:::(test_[a-zA-Z0-9_]+))?",
+        text,
+    )
+    seen: set = set()
+    failing_list: List[Tuple[str, Optional[str]]] = []
+    for m in failed_matches:
+        if isinstance(m, tuple):
+            file_path_part = (m[0] or "").strip()
+            test_name_part = (m[1] or "").strip() or None
+        else:
+            file_path_part = str(m).strip()
+            test_name_part = None
+        key = (file_path_part, test_name_part or "")
+        if key not in seen:
+            seen.add(key)
+            failing_list.append((file_path_part, test_name_part))
+    return failing_list
+
+
+def _resolve_test_file(
+    raw_excerpt: str, failing_list: List[Tuple[str, Optional[str]]], first_file: Optional[str]
+) -> Optional[str]:
+    """Prefer the traceback file when it is one of the failing tests; else the first FAILED file."""
+    tb_match = re.search(r"(tests/test_[a-zA-Z0-9_]+\.py):\d+", raw_excerpt)
+    traceback_file = tb_match.group(1) if tb_match else None
+    if traceback_file and any(f == traceback_file for (f, _) in failing_list):
+        return traceback_file
+    return first_file
+
+
+def _assertion_playbook_hint(
+    got_status: Optional[int], assertion_line: Optional[str], expected_got: Optional[str]
+) -> str:
+    """Append the status-code-specific (401/403/404) playbook to the base assertion hint."""
+    hint = PLAYBOOK_PYTEST_ASSERTION
+    if got_status == 401:
+        return hint + " " + PLAYBOOK_401_UNAUTHORIZED
+    if got_status == 403:
+        return hint + " " + PLAYBOOK_403_FORBIDDEN
+    if got_status == 404:
+        return hint + " " + PLAYBOOK_404_NOT_FOUND
+    if assertion_line and "401" in assertion_line and ("status_code" in assertion_line or expected_got):
+        return hint + " " + PLAYBOOK_401_UNAUTHORIZED
+    if assertion_line and "403" in assertion_line:
+        return hint + " " + PLAYBOOK_403_FORBIDDEN
+    if assertion_line and "404" in assertion_line:
+        return hint + " " + PLAYBOOK_404_NOT_FOUND
+    return hint
+
+
+def _assertion_message(
+    failing_list: List[Tuple[str, Optional[str]]],
+    failing_tests_display: List[str],
+    first_test: Optional[str],
+    assertion_line: Optional[str],
+    expected_got: Optional[str],
+) -> str:
+    """One-line failure summary, formatted for single vs. multiple failing tests."""
+    if len(failing_list) > 1:
+        msg_parts = [f"{len(failing_list)} tests failed: {', '.join(failing_tests_display[:10])}"]
+        if len(failing_tests_display) > 10:
+            msg_parts[0] += f" (+{len(failing_tests_display) - 10} more)"
+    else:
+        msg_parts = [f"{first_test} failed"] if first_test else []
+    if assertion_line:
+        msg_parts.append(assertion_line)
+    if expected_got:
+        msg_parts.append(f"({expected_got})")
+    if msg_parts:
+        return " ".join(msg_parts)
+    return "One or more tests failed (assertion or status code mismatch)"
+
+
+def _assertion_suggestion(
+    failing_list: List[Tuple[str, Optional[str]]],
+    failing_tests_display: List[str],
+    test_file: Optional[str],
+    first_test: Optional[str],
+    assertion_line: Optional[str],
+) -> str:
+    """Actionable fix suggestion, formatted for single vs. multiple failing tests."""
+    if len(failing_list) > 1:
+        suggestion = (
+            f"Fix the following failing tests: {', '.join(failing_tests_display[:15])}. "
+            "Ensure each test's requests satisfy the assertion (e.g. if assertion expects 200, "
+            "provide valid auth when the endpoint requires it)."
+        )
+        if len(failing_tests_display) > 15:
+            suggestion += f" ({len(failing_tests_display) - 15} more tests failed)"
+        return suggestion
+    suggestion_parts = []
+    if test_file:
+        suggestion_parts.append(f"Fix {test_file}")
+    if first_test:
+        suggestion_parts.append(f"({first_test})")
+    if assertion_line:
+        suggestion_parts.append(f"to satisfy: {assertion_line}")
+    if suggestion_parts:
+        return ". ".join(suggestion_parts) + "."
+    return "Review the failing test(s) and fix the implementation to match expectations."
+
+
+def _parse_pytest_assertion(text: str) -> Optional[ParsedFailure]:
+    """Pytest assertion/test failure: FAILED lines, traceback file, assertion + expected/got."""
+    if "= FAILURES =" not in text and "assert " not in text:
+        return None
+
+    raw_excerpt = text[-2500:] if len(text) > 2500 else text
+    assertion_line: Optional[str] = None
+    expected_got: Optional[str] = None
+    got_status: Optional[int] = None  # detected response code (e.g. 401) for a status_code assertion
+
+    failing_list = _collect_failing_tests(text)
+    failing_tests_display = [f"{f}::{t}" if t else f for (f, t) in failing_list]
+    first_file = failing_list[0][0] if failing_list else None
+    first_test = failing_list[0][1] if failing_list and failing_list[0][1] else None
+    test_file = _resolve_test_file(raw_excerpt, failing_list, first_file)
+
+    # AssertionError: assert 200 == 401  or  E       AssertionError: assert 200 == 401
+    assert_err_match = re.search(r"AssertionError:\s*(assert\s+[^\n]+)", text)
+    if assert_err_match:
+        assertion_line = assert_err_match.group(1).strip()[:200]
+
+    # E         +200  /  E         -401  (actual vs expected) -> got 401
+    expected_match = re.search(r"E\s+[+-]\s*(\d+)\s*\n\s*E\s+[+-]\s*(\d+)", text)
+    if expected_match:
+        v1, v2 = expected_match.group(1), expected_match.group(2)
+        # Pytest: E +N is expected, E -N is actual (got). So "expected v1, got v2".
+        expected_got = f"expected {v1}, got {v2}" if v1 != v2 else f"values {v1} vs {v2}"
+        if assertion_line and "status_code" in assertion_line:
+            try:
+                got_status = int(v2)
+            except ValueError:
+                pass
+
+    return ParsedFailure(
+        failure_class=FailureClass.PYTEST_ASSERTION,
+        file_path=test_file,
+        message=_assertion_message(
+            failing_list, failing_tests_display, first_test, assertion_line, expected_got
+        ),
+        raw_excerpt=raw_excerpt,
+        suggestion=_assertion_suggestion(
+            failing_list, failing_tests_display, test_file, first_test, assertion_line
+        ),
+        playbook_hint=_assertion_playbook_hint(got_status, assertion_line, expected_got),
+        failing_tests=failing_tests_display if failing_tests_display else None,
+    )
+
+
 def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
     """
     Parse pytest output into structured failures.
@@ -120,195 +309,16 @@ def parse_pytest_failure(stdout: str, stderr: str) -> List[ParsedFailure]:
     - AssertionError / test failures
     """
     text = (stdout or "") + "\n" + (stderr or "")
+
+    # ImportError / SQL no-such-table are usually the root cause — return early.
+    for early in (_parse_import_error(text), _parse_sql_no_such_table(text)):
+        if early is not None:
+            return [early]
+
     failures: List[ParsedFailure] = []
-
-    # ImportError: cannot import name 'Base' from 'app.database'
-    import_match = re.search(
-        r"ImportError(?:\s+while importing[^:]*)?:\s*cannot import name ['\"]([^'\"]+)['\"] from ['\"]([^'\"]+)['\"]",
-        text,
-        re.IGNORECASE,
-    )
-    if import_match:
-        symbol, module = import_match.group(1), import_match.group(2)
-        file_match = re.search(r"tests/test_[^\s]+\.py", text)
-        file_path = file_match.group(0) if file_match else None
-        failures.append(
-            ParsedFailure(
-                failure_class=FailureClass.IMPORT_ERROR,
-                file_path=file_path,
-                message=f"cannot import name '{symbol}' from '{module}'",
-                raw_excerpt=text[import_match.start() : import_match.end() + 200],
-                suggestion=f"Ensure {module} exports {symbol}. Add 'from .database import Base' or define Base in app/database.py.",
-                playbook_hint=PLAYBOOK_IMPORT_ERROR,
-            )
-        )
-        return failures  # Often the root cause; return early
-
-    # no such table: api_tokens (from sqlite3.OperationalError or similar)
-    sql_match = re.search(
-        r"no such table:\s*([a-zA-Z_]+)",
-        text,
-        re.IGNORECASE,
-    )
-    if sql_match:
-        table = sql_match.group(1)
-        failures.append(
-            ParsedFailure(
-                failure_class=FailureClass.SQL_NO_SUCH_TABLE,
-                message=f"no such table: {table}",
-                raw_excerpt=text[sql_match.start() : sql_match.end() + 300],
-                suggestion=f"Create the {table} table: ensure the model is in Base.metadata and call Base.metadata.create_all(bind=engine) before queries.",
-                playbook_hint=PLAYBOOK_SQL_NO_SUCH_TABLE,
-            )
-        )
-        return failures
-
-    # Pytest assertion failure - extract all FAILED lines, traceback file, assertion details
-    if "= FAILURES =" in text or "assert " in text:
-        raw_excerpt = text[-2500:] if len(text) > 2500 else text
-        assertion_line: Optional[str] = None
-        expected_got: Optional[str] = None
-        got_status: Optional[int] = (
-            None  # detected response code (e.g. 401) when assertion is status_code
-        )
-
-        # Collect ALL FAILED path::test_name (dedupe by (file, test_name))
-        failed_matches = re.findall(
-            r"FAILED\s+([a-zA-Z0-9_/.-]+test_[a-zA-Z0-9_]+\.py)(?:::(test_[a-zA-Z0-9_]+))?",
-            text,
-        )
-        seen: set = set()
-        failing_list: List[Tuple[str, Optional[str]]] = []
-        for m in failed_matches:
-            if isinstance(m, tuple):
-                file_path_part = (m[0] or "").strip()
-                test_name_part = (m[1] or "").strip() or None
-            else:
-                file_path_part = str(m).strip()
-                test_name_part = None
-            key = (file_path_part, test_name_part or "")
-            if key not in seen:
-                seen.add(key)
-                failing_list.append((file_path_part, test_name_part))
-        failing_tests_display: List[str] = [f"{f}::{t}" if t else f for (f, t) in failing_list]
-        first_file = failing_list[0][0] if failing_list else None
-        first_test = failing_list[0][1] if failing_list and failing_list[0][1] else None
-
-        # Traceback file:line (e.g. tests/test_task_endpoints.py:277) in raw excerpt
-        traceback_file: Optional[str] = None
-        tb_match = re.search(r"(tests/test_[a-zA-Z0-9_]+\.py):\d+", raw_excerpt)
-        if tb_match:
-            traceback_file = tb_match.group(1)
-        # Prefer traceback file when it appears in our failing list
-        test_file: Optional[str] = None
-        if traceback_file and any(f == traceback_file for (f, _) in failing_list):
-            test_file = traceback_file
-        else:
-            test_file = first_file
-
-        # AssertionError: assert 200 == 401  or  E       AssertionError: assert 200 == 401
-        assert_err_match = re.search(
-            r"AssertionError:\s*(assert\s+[^\n]+)",
-            text,
-        )
-        if assert_err_match:
-            assertion_line = assert_err_match.group(1).strip()[:200]
-
-        # E         +200  /  E         -401  (actual vs expected) -> got 401
-        expected_match = re.search(
-            r"E\s+[+-]\s*(\d+)\s*\n\s*E\s+[+-]\s*(\d+)",
-            text,
-        )
-        if expected_match:
-            v1, v2 = expected_match.group(1), expected_match.group(2)
-            # Pytest: E +N is expected, E -N is actual (got). So "expected v1, got v2".
-            expected_got = f"expected {v1}, got {v2}" if v1 != v2 else f"values {v1} vs {v2}"
-            # When assertion is status_code, the actual response code is "got" (v2)
-            if assertion_line and "status_code" in assertion_line:
-                try:
-                    got_status = int(v2)
-                except ValueError:
-                    pass
-
-        # Status-code-specific playbook (401, 403, 404)
-        playbook_hint = PLAYBOOK_PYTEST_ASSERTION
-        if got_status == 401:
-            playbook_hint = playbook_hint + " " + PLAYBOOK_401_UNAUTHORIZED
-        elif got_status == 403:
-            playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
-        elif got_status == 404:
-            playbook_hint = playbook_hint + " " + PLAYBOOK_404_NOT_FOUND
-        elif (
-            assertion_line
-            and "401" in assertion_line
-            and ("status_code" in assertion_line or expected_got)
-        ):
-            playbook_hint = playbook_hint + " " + PLAYBOOK_401_UNAUTHORIZED
-        elif assertion_line and "403" in assertion_line:
-            playbook_hint = playbook_hint + " " + PLAYBOOK_403_FORBIDDEN
-        elif assertion_line and "404" in assertion_line:
-            playbook_hint = playbook_hint + " " + PLAYBOOK_404_NOT_FOUND
-
-        # Message: single vs multiple failures
-        if len(failing_list) > 1:
-            msg_parts = [
-                f"{len(failing_list)} tests failed: {', '.join(failing_tests_display[:10])}"
-            ]
-            if len(failing_tests_display) > 10:
-                msg_parts[0] += f" (+{len(failing_tests_display) - 10} more)"
-            if assertion_line:
-                msg_parts.append(assertion_line)
-            if expected_got:
-                msg_parts.append(f"({expected_got})")
-            message = " ".join(msg_parts)
-        else:
-            msg_parts = []
-            if first_test:
-                msg_parts.append(f"{first_test} failed")
-            if assertion_line:
-                msg_parts.append(assertion_line)
-            if expected_got:
-                msg_parts.append(f"({expected_got})")
-            message = (
-                " ".join(msg_parts)
-                if msg_parts
-                else "One or more tests failed (assertion or status code mismatch)"
-            )
-
-        # Suggestion: single vs multiple
-        if len(failing_list) > 1:
-            suggestion = (
-                f"Fix the following failing tests: {', '.join(failing_tests_display[:15])}. "
-                "Ensure each test's requests satisfy the assertion (e.g. if assertion expects 200, "
-                "provide valid auth when the endpoint requires it)."
-            )
-            if len(failing_tests_display) > 15:
-                suggestion += f" ({len(failing_tests_display) - 15} more tests failed)"
-        else:
-            suggestion_parts = []
-            if test_file:
-                suggestion_parts.append(f"Fix {test_file}")
-            if first_test:
-                suggestion_parts.append(f"({first_test})")
-            if assertion_line:
-                suggestion_parts.append(f"to satisfy: {assertion_line}")
-            suggestion = (
-                ". ".join(suggestion_parts) + "."
-                if suggestion_parts
-                else "Review the failing test(s) and fix the implementation to match expectations."
-            )
-
-        failures.append(
-            ParsedFailure(
-                failure_class=FailureClass.PYTEST_ASSERTION,
-                file_path=test_file,
-                message=message,
-                raw_excerpt=raw_excerpt,
-                suggestion=suggestion,
-                playbook_hint=playbook_hint,
-                failing_tests=failing_tests_display if failing_tests_display else None,
-            )
-        )
+    assertion = _parse_pytest_assertion(text)
+    if assertion is not None:
+        failures.append(assertion)
 
     # Collection error (not ImportError)
     if "ERROR collecting" in text and FailureClass.IMPORT_ERROR not in [
