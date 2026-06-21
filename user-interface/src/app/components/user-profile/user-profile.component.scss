@@ -1,0 +1,110 @@
+.up-loading {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 2rem 0;
+}
+
+.up-banner {
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  font-size: 0.9rem;
+}
+
+.up-error {
+  background: #fdecea;
+  color: #8a1c12;
+}
+
+.up-success {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.up-card {
+  margin-bottom: 1.25rem;
+}
+
+.up-form {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  max-width: 32rem;
+
+  mat-form-field {
+    width: 100%;
+  }
+}
+
+.up-actions {
+  display: flex;
+  justify-content: flex-end;
+
+  button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+  }
+}
+
+.up-group {
+  margin-bottom: 1rem;
+}
+
+.up-group-title {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 1rem;
+  margin: 0 0 0.5rem;
+}
+
+.up-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.up-list-item {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.5rem 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.up-item-label {
+  font-weight: 500;
+}
+
+.up-item-meta {
+  color: rgba(0, 0, 0, 0.6);
+  font-size: 0.85rem;
+}
+
+.up-pill {
+  border-radius: 999px;
+  padding: 0.1rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.up-pill-on {
+  background: #e8f5e9;
+  color: #1b5e20;
+}
+
+.up-pill-off {
+  background: #eceff1;
+  color: #546e7a;
+}
+
+.up-empty {
+  color: rgba(0, 0, 0, 0.6);
+}
+
+.up-link {
+  display: inline-block;
+  margin-top: 0.75rem;
+}

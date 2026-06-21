@@ -55,6 +55,25 @@ def create_job(
         "submitted_answers": [],
     }
     _client(cache_dir).create_job(job_id, status="pending", **data)
+    _link_job_to_profile(job_id, repo_path)
+
+
+def _link_job_to_profile(job_id: str, repo_path: str) -> None:
+    """Best-effort: link a new coding project to the default user profile.
+
+    Never raises — a profile-link failure must not break job creation.
+    """
+    try:
+        from user_profile import ArtifactType, record_association_safe
+
+        record_association_safe(
+            ArtifactType.PROJECT,
+            "coding_team",
+            job_id,
+            label=repo_path or job_id,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("coding_team: profile association skipped", exc_info=True)
 
 
 def get_job(

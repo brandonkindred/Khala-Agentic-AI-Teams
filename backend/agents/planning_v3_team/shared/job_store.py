@@ -50,6 +50,25 @@ def create_job(
     }
     data.update(fields)
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **data)
+    _link_job_to_profile(job_id, repo_path)
+
+
+def _link_job_to_profile(job_id: str, repo_path: str) -> None:
+    """Best-effort: link a new planning project to the default user profile.
+
+    Never raises — a profile-link failure must not break job creation.
+    """
+    try:
+        from user_profile import ArtifactType, record_association_safe
+
+        record_association_safe(
+            ArtifactType.PROJECT,
+            "planning_v3",
+            job_id,
+            label=repo_path or job_id,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("planning_v3: profile association skipped", exc_info=True)
 
 
 def get_job(job_id: str, cache_dir: str | Path = DEFAULT_CACHE_DIR) -> Optional[Dict[str, Any]]:

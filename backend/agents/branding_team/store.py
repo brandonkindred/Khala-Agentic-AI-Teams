@@ -39,6 +39,24 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _link_to_profile(brand: Brand) -> None:
+    """Best-effort: link a newly created brand to the default user profile.
+
+    Never raises — a profile-link failure must not break brand creation.
+    """
+    try:
+        from user_profile import ArtifactType, record_association_safe
+
+        record_association_safe(
+            ArtifactType.BRAND,
+            "branding",
+            brand.id,
+            label=brand.name,
+        )
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("branding: profile association skipped", exc_info=True)
+
+
 class BrandingStore:
     """Postgres-backed store for clients and brands.
 
@@ -150,6 +168,7 @@ class BrandingStore:
                 "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
                 (brand_id, client_id, Json(brand.model_dump(mode="json"))),
             )
+        _link_to_profile(brand)
         return brand
 
     @timed_query(store=_STORE, op="update_brand")

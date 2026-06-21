@@ -146,6 +146,21 @@ def create_blog_job(
         "events": [],
     }
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
+    _link_job_to_profile(job_id, brief)
+
+
+def _link_job_to_profile(job_id: str, brief: str) -> None:
+    """Best-effort: link a new blog job to the default user profile.
+
+    Never raises — a profile-link failure must not break job creation.
+    """
+    try:
+        from user_profile import ArtifactType, record_association_safe
+
+        label = (brief or "").strip().splitlines()[0][:120] if brief else job_id
+        record_association_safe(ArtifactType.BLOG_POST, "blogging", job_id, label=label)
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("blogging: profile association skipped", exc_info=True)
 
 
 def reset_blog_job(

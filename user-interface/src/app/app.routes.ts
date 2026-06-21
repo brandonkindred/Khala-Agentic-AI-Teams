@@ -28,6 +28,7 @@ import { PersonaTestAuditPanelComponent } from './components/persona-test-audit-
 import { DeepthoughtDashboardComponent } from './components/deepthought-dashboard/deepthought-dashboard.component';
 import { RoadTripPlanningDashboardComponent } from './components/road-trip-planning-dashboard/road-trip-planning-dashboard.component';
 import { CodeReviewPanelComponent } from './components/code-review-panel/code-review-panel.component';
+import { UserProfileComponent } from './components/user-profile/user-profile.component';
 
 export const routes: Routes = [
   {
@@ -61,6 +62,7 @@ export const routes: Routes = [
       },
       { path: 'investment/strategy-lab', component: InvestmentStrategyLabPageComponent, data: { breadcrumb: 'Strategy Lab', title: 'Strategy Lab' } },
       { path: 'integrations', component: IntegrationsDashboardComponent, data: { breadcrumb: 'Integrations', title: 'Integrations' } },
+      { path: 'user-profile', component: UserProfileComponent, data: { breadcrumb: 'User Profile', title: 'User Profile' } },
       { path: 'sales', component: SalesDashboardComponent, data: { breadcrumb: 'Sales', title: 'Sales' } },
       { path: 'nutrition', component: NutritionDashboardComponent, data: { breadcrumb: 'Nutritionist', title: 'Nutritionist' } },
       { path: 'agentic-teams', component: AgenticTeamDashboardComponent, data: { breadcrumb: 'Agentic Teams', title: 'Agentic Teams' } },

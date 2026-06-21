@@ -61,6 +61,22 @@ from unified_api.integration_credentials import (
 
 logger = logging.getLogger(__name__)
 
+
+def _link_integration_to_profile(service: str) -> None:
+    """Best-effort: link an integration config to the default user profile.
+
+    The integration is identified by its service name (``slack``, ``github``,
+    ``medium``); re-saving the config is idempotent. Never raises — a
+    profile-link failure must not break saving integration config.
+    """
+    try:
+        from user_profile import ArtifactType, record_association_safe
+
+        record_association_safe(ArtifactType.INTEGRATION, "integrations", service, label=service)
+    except Exception:  # noqa: BLE001 - best-effort
+        logger.debug("integrations: profile association skipped for %s", service, exc_info=True)
+
+
 _DEFAULT_CACHE_DIR = ".agent_cache"
 _BROWSER_SESSION_ROOT_ENV = "INTEGRATIONS_BROWSER_SESSION_ROOT"
 _DEFAULT_BROWSER_SESSIONS_SUBDIR = "integrations/browser_sessions"
@@ -240,6 +256,7 @@ def set_slack_config(
             "bot_user_id": bot_user_id or existing.get("bot_user_id", ""),
         }
         _write_raw(data)
+    _link_integration_to_profile("slack")
 
 
 def set_slack_oauth_token(
@@ -390,6 +407,7 @@ def set_medium_config(
             "linked_name": str(existing.get("linked_name", "")).strip(),
         }
         _write_raw(data)
+    _link_integration_to_profile("medium")
 
 
 def set_medium_google_oauth_identity(
@@ -578,6 +596,7 @@ def set_github_config(
             "repo_path": repo_path.strip() or existing.get("repo_path", ""),
         }
         _write_raw(data)
+    _link_integration_to_profile("github")
 
 
 def clear_github_config() -> None:

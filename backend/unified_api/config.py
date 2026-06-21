@@ -243,6 +243,22 @@ TEAM_CONFIGS: dict[str, TeamConfig] = {
     # registration but the security gateway middleware picks up the
     # prefix in `_get_team_prefixes()` and discovery surfaces report
     # the team as live (`/teams`, `/health`, `/` show enabled=true).
+    # In-process module (not a proxy team): the unified API mounts the
+    # user_profile router directly via `app.include_router(...)`. Single
+    # cross-team user profile + artifact-association registry.
+    "user_profile": TeamConfig(
+        name="User Profile",
+        prefix="/api/user-profile",
+        description=(
+            "Single user profile and the registry linking it to artifacts produced by "
+            "other teams (brands, blog posts, projects, agentic teams, integrations). "
+            "In-process module mounted on the unified API."
+        ),
+        tags=["user-profile", "settings"],
+        cell="core_dev",
+        timeout_seconds=60.0,
+        in_process=True,
+    ),
     "product_delivery": TeamConfig(
         name="Product Delivery",
         prefix="/api/product-delivery",
