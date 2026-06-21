@@ -9,7 +9,7 @@
 .form-header-hint {
   margin: 0;
   font-size: 0.875rem;
-  color: var(--mat-sys-on-surface-variant, rgba(230, 237, 243, 0.6));
+  color: var(--kh-text-secondary);
   flex: 1;
   min-width: 240px;
 }
@@ -54,7 +54,7 @@
   gap: 0.5rem;
   padding: 2.5rem 1rem;
   text-align: center;
-  color: var(--mat-sys-on-surface-variant, rgba(230, 237, 243, 0.55));
+  color: var(--kh-text-tertiary);
 
   mat-icon {
     font-size: 2rem;
@@ -84,7 +84,7 @@
 
 .status-card {
   padding: 1rem 1.25rem;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(48, 54, 61, 0.8));
+  border: 1px solid var(--kh-border);
 }
 
 .status-header {
@@ -113,7 +113,7 @@
 .status-title {
   font-size: 1.05rem;
   font-weight: 600;
-  color: var(--mat-sys-on-surface, #e6edf3);
+  color: var(--kh-text-primary);
 }
 
 .status-sub {
@@ -121,7 +121,7 @@
   align-items: center;
   gap: 0.4rem;
   font-size: 0.85rem;
-  color: var(--mat-sys-on-surface-variant, rgba(230, 237, 243, 0.6));
+  color: var(--kh-text-secondary);
 }
 
 .status-sub-icon {
@@ -145,7 +145,7 @@
 .status-progress-label {
   margin-top: 0.25rem;
   font-size: 0.8rem;
-  color: var(--mat-sys-on-surface-variant, rgba(230, 237, 243, 0.55));
+  color: var(--kh-text-tertiary);
 }
 
 .status-pill {
@@ -157,10 +157,10 @@
   text-transform: uppercase;
   letter-spacing: 0.04em;
 
-  &.status-running   { background: rgba(59, 130, 246, 0.15); color: var(--kh-info); }
+  &.status-running   { background: var(--kh-info-subtle); color: var(--kh-info); }
   &.status-pending   { background: rgba(139, 148, 158, 0.12); color: var(--kh-text-secondary); }
-  &.status-completed { background: rgba(46, 160, 67, 0.15); color: var(--kh-success); }
-  &.status-failed    { background: rgba(248, 81, 73, 0.15); color: var(--kh-error); }
+  &.status-completed { background: var(--kh-success-subtle); color: var(--kh-success); }
+  &.status-failed    { background: var(--kh-error-subtle); color: var(--kh-error); }
   &.status-cancelled { background: rgba(139, 148, 158, 0.1); color: var(--kh-text-tertiary); }
 }
 
@@ -171,8 +171,8 @@
   margin-top: 0.75rem;
   padding: 0.6rem 0.75rem;
   border-radius: 6px;
-  background: rgba(248, 81, 73, 0.1);
-  color: #f85149;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   font-size: 0.85rem;
 }
 
@@ -182,7 +182,7 @@
   gap: 1rem;
   margin-top: 0.75rem;
   font-size: 0.75rem;
-  color: var(--mat-sys-on-surface-variant, rgba(230, 237, 243, 0.55));
+  color: var(--kh-text-tertiary);
 
   code {
     font-family: ui-monospace, monospace;
@@ -197,7 +197,7 @@
   gap: 0.5rem;
   padding: 0.6rem 0.85rem;
   border-radius: 6px;
-  background: rgba(248, 81, 73, 0.1);
-  color: #f85149;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   font-size: 0.85rem;
 }

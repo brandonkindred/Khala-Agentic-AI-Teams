@@ -43,7 +43,7 @@
   font-size: 1.8rem;
   width: 1.8rem;
   height: 1.8rem;
-  color: #81c784;
+  color: var(--kh-success);
 }
 
 .header-controls {
@@ -67,19 +67,19 @@
   border: 1px solid transparent;
 
   &.healthy {
-    color: #a5d6a7;
-    background: rgba(76, 175, 80, 0.12);
-    border-color: rgba(129, 199, 132, 0.45);
+    color: var(--kh-success);
+    background: var(--kh-success-subtle);
+    border-color: var(--kh-success);
   }
   &.checking {
-    color: #ce93d8;
-    background: rgba(156, 39, 176, 0.12);
-    border-color: rgba(206, 147, 216, 0.4);
+    color: var(--kh-accent-text);
+    background: var(--kh-accent-muted);
+    border-color: var(--kh-accent);
   }
   &.unhealthy {
-    color: #ef9a9a;
-    background: rgba(244, 67, 54, 0.1);
-    border-color: rgba(239, 154, 154, 0.45);
+    color: var(--kh-error);
+    background: var(--kh-error-subtle);
+    border-color: var(--kh-error);
   }
 }
 
@@ -119,20 +119,20 @@
   }
 
   .active & {
-    border-color: #81c784;
-    background: rgba(129, 199, 132, 0.15);
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: #81c784;
+      color: var(--kh-success);
     }
   }
 
   .completed & {
-    border-color: #4caf50;
-    background: rgba(76, 175, 80, 0.25);
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: #4caf50;
+      color: var(--kh-success);
     }
   }
 }
@@ -146,7 +146,7 @@
 
   .active & {
     opacity: 1;
-    color: #81c784;
+    color: var(--kh-success);
     font-weight: 600;
   }
 
@@ -164,7 +164,7 @@
   transition: background 0.2s ease;
 
   &.completed {
-    background: rgba(76, 175, 80, 0.5);
+    background: var(--kh-success);
   }
 }
 
@@ -236,8 +236,8 @@
     flex-direction: row-reverse;
 
     .message-bubble {
-      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-      color: #fff;
+      background: var(--kh-info);
+      color: #09090b;
       border-bottom-right-radius: 4px;
     }
 
@@ -251,8 +251,8 @@
     align-self: flex-start;
 
     .message-bubble {
-      background: #21262d;
-      color: #f0f6fc;
+      background: var(--kh-surface-3);
+      color: var(--kh-text-primary);
       border: 1px solid rgba(255, 255, 255, 0.08);
       border-bottom-left-radius: 4px;
     }
@@ -263,7 +263,7 @@
   width: 32px;
   height: 32px;
   border-radius: 50%;
-  background: rgba(129, 199, 132, 0.15);
+  background: var(--kh-success-subtle);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -273,7 +273,7 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #81c784;
+    color: var(--kh-success);
   }
 }
 
@@ -305,7 +305,7 @@
   span {
     width: 8px;
     height: 8px;
-    background: #8b949e;
+    background: var(--kh-border);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
 
@@ -361,16 +361,16 @@
   background: rgba(255, 255, 255, 0.08);
 
   &.dietary {
-    background: rgba(100, 181, 246, 0.15);
-    color: #90caf9;
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
   }
   &.allergy {
-    background: rgba(239, 154, 154, 0.15);
-    color: #ef9a9a;
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
   }
   &.goal {
-    background: rgba(206, 147, 216, 0.15);
-    color: #ce93d8;
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent-text);
   }
 }
 
@@ -388,8 +388,8 @@
   padding: 0.2rem 0.55rem;
   border-radius: 999px;
   font-size: 0.75rem;
-  background: rgba(129, 199, 132, 0.15);
-  color: #a5d6a7;
+  background: var(--kh-success-subtle);
+  color: var(--kh-success);
   font-weight: 500;
 }
 
@@ -414,12 +414,12 @@
   font-size: 0.72rem;
 
   &.emphasize {
-    background: rgba(129, 199, 132, 0.12);
-    color: #a5d6a7;
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
   }
   &.avoid {
-    background: rgba(239, 154, 154, 0.1);
-    color: #ef9a9a;
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
   }
 }
 
@@ -440,12 +440,12 @@
   transition: border-color 0.15s ease, background 0.15s ease;
 
   &:hover, &:focus-visible {
-    border-color: rgba(129, 199, 132, 0.4);
+    border-color: var(--kh-success);
   }
 
   &.selected {
-    border-color: rgba(129, 199, 132, 0.7);
-    background: rgba(76, 175, 80, 0.06);
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
   }
 }
 
@@ -467,8 +467,8 @@
   letter-spacing: 0.04em;
   padding: 0.1rem 0.4rem;
   border-radius: 4px;
-  background: rgba(100, 181, 246, 0.15);
-  color: #90caf9;
+  background: var(--kh-info-subtle);
+  color: var(--kh-info);
   flex-shrink: 0;
 }
 
@@ -554,12 +554,12 @@
   button {
     font-size: 0.78rem;
     border-color: rgba(255, 255, 255, 0.12);
-    color: #c9d1d9;
+    color: var(--kh-text-tertiary);
 
     &:hover {
       background: rgba(255, 255, 255, 0.04);
-      border-color: #81c784;
-      color: #81c784;
+      border-color: var(--kh-success);
+      color: var(--kh-success);
     }
   }
 }
