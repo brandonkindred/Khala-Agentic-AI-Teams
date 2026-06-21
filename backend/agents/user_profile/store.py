@@ -33,13 +33,29 @@ _STORE = "user_profile"
 #: later without a data-model change.
 DEFAULT_USER_ID = "default"
 
+#: Column list for ``user_profiles``, in the order ``_profile_from_row`` reads.
+#: Shared by every SELECT/INSERT/RETURNING so a schema change is edited once.
+_PROFILE_COLUMNS = "user_id, display_name, email, bio, profile_json, created_at, updated_at"
+
 
 def _now_iso() -> str:
+    """Return the current UTC time as an ISO-8601 string.
+
+    Postconditions:
+        - Result is a timezone-aware ISO-8601 string (never empty).
+    """
     return datetime.now(tz=timezone.utc).isoformat()
 
 
 def _ts(value: object) -> str:
-    """Render a DB timestamp value as an ISO string (or empty)."""
+    """Render a DB timestamp value as an ISO string.
+
+    Preconditions:
+        - ``value`` is a ``datetime``, ``None``, or a stringifiable value.
+    Postconditions:
+        - ``None`` → ``""``; a ``datetime`` → its ISO-8601 form; otherwise
+          ``str(value)``. Never raises.
+    """
     if value is None:
         return ""
     if isinstance(value, datetime):
@@ -48,7 +64,14 @@ def _ts(value: object) -> str:
 
 
 def _profile_from_row(row: dict) -> UserProfile:
-    """Build a ``UserProfile`` from a ``user_profiles`` row dict."""
+    """Build a ``UserProfile`` from a ``user_profiles`` row dict.
+
+    Preconditions:
+        - ``row`` contains every key in :data:`_PROFILE_COLUMNS`.
+    Postconditions:
+        - Returns a ``UserProfile`` whose ``user_id`` equals ``row['user_id']``,
+          with NULL text/JSON coerced to ``""``/`{}` and timestamps ISO-rendered.
+    """
     return UserProfile(
         user_id=row["user_id"],
         display_name=row["display_name"] or "",
@@ -61,7 +84,15 @@ def _profile_from_row(row: dict) -> UserProfile:
 
 
 def _assoc_from_row(row: dict) -> Association:
-    """Build an ``Association`` from a ``user_profile_associations`` row dict."""
+    """Build an ``Association`` from a ``user_profile_associations`` row dict.
+
+    Preconditions:
+        - ``row`` contains the keys ``id, user_id, artifact_type, team,
+          artifact_id, label, role, created_at``.
+    Postconditions:
+        - Returns an ``Association``; NULL ``label`` → ``""``, NULL ``role`` →
+          ``"owner"``, and ``created_at`` is ISO-rendered.
+    """
     return Association(
         id=row["id"],
         user_id=row["user_id"],
@@ -87,8 +118,7 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
     assert user_id, "user_id must be non-empty"
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "SELECT user_id, display_name, email, bio, profile_json, created_at, updated_at "
-            "FROM user_profiles WHERE user_id = %s",
+            f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
             (user_id,),
         )
         row = cur.fetchone()
@@ -100,8 +130,7 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
                 (user_id, now, now),
             )
             cur.execute(
-                "SELECT user_id, display_name, email, bio, profile_json, created_at, updated_at "
-                "FROM user_profiles WHERE user_id = %s",
+                f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
                 (user_id,),
             )
             row = cur.fetchone()
@@ -151,11 +180,10 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     )
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "INSERT INTO user_profiles "
-            "(user_id, display_name, email, bio, profile_json, created_at, updated_at) "
+            f"INSERT INTO user_profiles ({_PROFILE_COLUMNS}) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s) "
             f"ON CONFLICT (user_id) DO UPDATE SET {', '.join(set_clauses)} "
-            "RETURNING user_id, display_name, email, bio, profile_json, created_at, updated_at",
+            f"RETURNING {_PROFILE_COLUMNS}",
             params,
         )
         row = cur.fetchone()
