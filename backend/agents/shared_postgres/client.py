@@ -29,6 +29,8 @@ from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Optional
 
+from shared_env import parse_int
+
 logger = logging.getLogger(__name__)
 
 # Per-database connection pools. Created lazily on first ``get_conn`` call
@@ -58,14 +60,8 @@ def _dsn(database: Optional[str] = None) -> str:
 
 def _pool_sizes() -> tuple[int, int]:
     """Return ``(min_size, max_size)`` for the pool, from env vars."""
-    try:
-        min_size = int(os.environ.get("POSTGRES_POOL_MIN_SIZE", "2"))
-    except ValueError:
-        min_size = 2
-    try:
-        max_size = int(os.environ.get("POSTGRES_POOL_MAX_SIZE", "10"))
-    except ValueError:
-        max_size = 10
+    min_size = parse_int("POSTGRES_POOL_MIN_SIZE", 2)
+    max_size = parse_int("POSTGRES_POOL_MAX_SIZE", 10)
     if max_size < min_size:
         max_size = min_size
     return min_size, max_size

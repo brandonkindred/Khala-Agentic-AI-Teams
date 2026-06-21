@@ -74,6 +74,10 @@ KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
 def env_flag_enabled(env_name: str) -> bool:
     """Shared parser for default-on boolean env toggles.
 
+    Thin re-export of the canonical :func:`shared_env.env_flag_enabled` so there is
+    one implementation; kept here for the many call sites that import it from
+    ``llm_service.config``.
+
     Preconditions:
         - ``env_name`` is a non-empty environment variable name.
     Postconditions:
@@ -81,7 +85,9 @@ def env_flag_enabled(env_name: str) -> bool:
           (case-insensitive, whitespace-tolerant); unset or any other value
           means enabled. Never raises.
     """
-    return (os.environ.get(env_name) or "").strip().lower() not in ("false", "0", "no")
+    from shared_env import env_flag_enabled as _impl
+
+    return _impl(env_name)
 
 
 def thinking_enabled_by_default() -> bool:

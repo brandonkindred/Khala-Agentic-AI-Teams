@@ -1,0 +1,104 @@
+"""Shared, dependency-free environment-variable parsing.
+
+The platform reads many numeric / boolean env vars. Before this module each team
+hand-rolled its own "parse int/float with a default, optionally clamp to a
+floor/ceiling" helper (several mutually-incompatible variants) plus dozens of
+ad-hoc ``int(os.getenv(...))`` sites that crash on a garbage value instead of
+falling back. This module is the single canonical parser, matching the contract
+documented in ``docs/ENV_VARS.md``:
+
+    unset / blank / unparseable  -> the documented default
+    out of range                 -> clamped to the floor / ceiling
+
+Leaf module: standard library only, so any layer (``shared_postgres``,
+``llm_service``, every team) can import it without creating an import cycle.
+
+Invariants:
+    - No function raises on a malformed env value; misconfiguration degrades to
+      the documented default rather than crashing startup.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Optional
+
+__all__ = ["env_flag_enabled", "parse_float", "parse_int"]
+
+_FALSY = frozenset({"false", "0", "no"})
+
+
+def env_flag_enabled(env_name: str) -> bool:
+    """Return a default-on boolean env toggle.
+
+    Preconditions: ``env_name`` is a non-empty environment-variable name.
+    Postconditions: returns ``False`` only for an explicit ``"false"`` / ``"0"`` /
+        ``"no"`` (case-insensitive, whitespace-tolerant); an unset, blank, or any
+        other value means enabled. Never raises.
+    """
+    assert env_name, "env_name must be non-empty"
+    return (os.environ.get(env_name) or "").strip().lower() not in _FALSY
+
+
+def parse_int(
+    env_name: str,
+    default: int,
+    *,
+    minimum: Optional[int] = None,
+    maximum: Optional[int] = None,
+) -> int:
+    """Parse an integer env var, defaulting and clamping defensively.
+
+    Preconditions: ``env_name`` is non-empty; ``default`` is an ``int``; when both
+        ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
+    Postconditions: returns the parsed value clamped to ``[minimum, maximum]``
+        (whichever bounds are provided); an unset, blank, or unparseable value
+        yields ``default`` (also clamped). Never raises on a bad env value.
+    """
+    assert env_name, "env_name must be non-empty"
+    assert minimum is None or maximum is None or minimum <= maximum, "minimum must be <= maximum"
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        value = default
+    else:
+        try:
+            value = int(raw.strip())
+        except (TypeError, ValueError):
+            value = default
+    if minimum is not None and value < minimum:
+        value = minimum
+    if maximum is not None and value > maximum:
+        value = maximum
+    return value
+
+
+def parse_float(
+    env_name: str,
+    default: float,
+    *,
+    minimum: Optional[float] = None,
+    maximum: Optional[float] = None,
+) -> float:
+    """Parse a float env var, defaulting and clamping defensively.
+
+    Preconditions: ``env_name`` is non-empty; ``default`` is a number; when both
+        ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
+    Postconditions: returns the parsed value clamped to ``[minimum, maximum]``
+        (whichever bounds are provided); an unset, blank, or unparseable value
+        yields ``default`` (also clamped). Never raises on a bad env value.
+    """
+    assert env_name, "env_name must be non-empty"
+    assert minimum is None or maximum is None or minimum <= maximum, "minimum must be <= maximum"
+    raw = os.environ.get(env_name)
+    if raw is None or not raw.strip():
+        value = float(default)
+    else:
+        try:
+            value = float(raw.strip())
+        except (TypeError, ValueError):
+            value = float(default)
+    if minimum is not None and value < minimum:
+        value = float(minimum)
+    if maximum is not None and value > maximum:
+        value = float(maximum)
+    return value
