@@ -509,6 +509,28 @@ class OllamaLLMClient(LLMClient):
             )
         return self._record_fallback_num_ctx()
 
+    def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
+        """Resolve the output-token cap for a request.
+
+        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_TOKENS``, else
+        the model's context window — always capped at ``DEFAULT_MAX_OUTPUT_TOKENS``.
+
+        Preconditions: none.
+        Postconditions: returns an ``int`` ``<= DEFAULT_MAX_OUTPUT_TOKENS``; a
+            malformed ``LLM_MAX_TOKENS`` falls back to the model context. Never raises.
+        """
+        max_tokens = explicit
+        if max_tokens is None:
+            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
+            if env_max:
+                try:
+                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
+                except ValueError:
+                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+            else:
+                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+        return min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+
     def _record_fallback_num_ctx(self) -> int:
         """Record the provisional num_ctx fallback with the current time and return it.
 
@@ -1499,17 +1521,7 @@ class OllamaLLMClient(LLMClient):
             "no explanatory text, no Markdown, no code fences. "
             "If you use a code block, put only the JSON object inside it with no surrounding text."
         )
-        max_tokens = kwargs.pop("max_tokens", None)
-        if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
         tools = kwargs.pop("tools", None)
         payload: dict = {
             "model": self.model,
@@ -1754,16 +1766,7 @@ class OllamaLLMClient(LLMClient):
             self.model,
             think,
         )
-        env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-        if max_tokens is None:
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(max_tokens)
         payload: dict = {
             "model": self.model,
             "temperature": temperature,
@@ -1957,16 +1960,7 @@ class OllamaLLMClient(LLMClient):
             think,
             response_format,
         )
-        if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(max_tokens)
         payload: dict = {
             "model": self.model,
             "temperature": temperature,
