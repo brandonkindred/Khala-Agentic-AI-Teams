@@ -534,6 +534,7 @@ class OllamaLLMClient(LLMClient):
     def _begin_call_state(self) -> "tuple[str, Any]":
         """Tag the caller and reset per-call response contextvars.
 
+        Preconditions: none.
         Postconditions: returns ``(caller, attribution)`` and clears the usage /
             latency contextvars up front so a failed call never reports a previous
             call's token counts or latency. Never raises.

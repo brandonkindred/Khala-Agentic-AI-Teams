@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextvars
 import json
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -495,14 +496,22 @@ class SalesPodOrchestrator:
             (the agents wrap the thread-safe LLM client) and never raises (it
             returns ``None`` on failure).
         Postconditions: returns the non-``None`` results in the SAME order as
-            *prospects* — identical to the sequential loop, only concurrent.
+            *prospects* — identical to the sequential loop, only concurrent. Each
+            task runs inside a copy of the calling thread's context so the LLM
+            attribution/request-id contextvars propagate to the workers (a raw
+            ``ThreadPoolExecutor`` does not copy them; see ``llm_service.attribution``).
         """
         if not prospects:
             return []
         results: list = [None] * len(prospects)
         workers = min(self.config.pipeline_stage_workers, len(prospects))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            idx_by_future = {pool.submit(fn, p): i for i, p in enumerate(prospects)}
+            # A fresh context copy per task: a single Context can't be entered
+            # concurrently, and each worker must see the parent's attribution.
+            idx_by_future = {
+                pool.submit(contextvars.copy_context().run, fn, p): i
+                for i, p in enumerate(prospects)
+            }
             for fut in as_completed(idx_by_future):
                 results[idx_by_future[fut]] = fut.result()
         return [r for r in results if r is not None]
@@ -567,10 +576,10 @@ class SalesPodOrchestrator:
                     "",
                     ctx.insights_ctx,
                 )
+                return QualificationScore(prospect=p, **body.model_dump())
             except Exception:
                 logger.exception("sales.qualify.failed prospect_id=%s", p.id)
                 return None
-            return QualificationScore(prospect=p, **body.model_dump())
 
         qualified = self._map_prospects_parallel(prospects, _one)
         ctx.update("qualification", 50)
@@ -593,10 +602,10 @@ class SalesPodOrchestrator:
                     90,
                     ctx.insights_ctx,
                 )
+                return NurtureSequence(prospect=p, **body.model_dump())
             except Exception:
                 logger.exception("sales.nurture.failed prospect_id=%s", p.id)
                 return None
-            return NurtureSequence(prospect=p, **body.model_dump())
 
         nurture_seqs = self._map_prospects_parallel(nurture_prospects, _one)
         ctx.update("nurturing", 62)
@@ -629,10 +638,10 @@ class SalesPodOrchestrator:
                     ctx.vp,
                     ctx.insights_ctx,
                 )
+                return DiscoveryPlan(prospect=p, **body.model_dump())
             except Exception:
                 logger.exception("sales.discovery.failed prospect_id=%s", p.id)
                 return None
-            return DiscoveryPlan(prospect=p, **body.model_dump())
 
         plans = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("discovery", 75)
@@ -702,10 +711,10 @@ class SalesPodOrchestrator:
                     ctx.vp,
                     ctx.insights_ctx,
                 )
+                return ClosingStrategy(prospect=p, **body.model_dump())
             except Exception:
                 logger.exception("sales.close.failed prospect_id=%s", p.id)
                 return None
-            return ClosingStrategy(prospect=p, **body.model_dump())
 
         strategies = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("negotiation", 95)

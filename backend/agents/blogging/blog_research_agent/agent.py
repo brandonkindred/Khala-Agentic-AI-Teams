@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import contextvars
 import json
 import logging
 import re
@@ -243,10 +244,20 @@ class ResearchAgent:
                     self.cache.save_checkpoint(brief_input, "notes", notes=resolved)
                 return resolved
 
+            # Run each step inside a copy of this thread's context so the LLM
+            # attribution / request-id contextvars propagate to the workers — a
+            # raw ThreadPoolExecutor does not copy them (see llm_service.attribution).
             with ThreadPoolExecutor(max_workers=3) as executor:
-                notes_future = executor.submit(_resolve_notes)
-                academic_future = executor.submit(self._fetch_academic_papers, brief_input)
-                similar_future = executor.submit(self._get_similar_topics, brief_input, references)
+                notes_future = executor.submit(contextvars.copy_context().run, _resolve_notes)
+                academic_future = executor.submit(
+                    contextvars.copy_context().run, self._fetch_academic_papers, brief_input
+                )
+                similar_future = executor.submit(
+                    contextvars.copy_context().run,
+                    self._get_similar_topics,
+                    brief_input,
+                    references,
+                )
                 notes = notes_future.result()
                 academic_papers = academic_future.result()
                 similar_topics = similar_future.result()

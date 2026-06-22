@@ -1413,6 +1413,11 @@ def _run_one_strategy_lab_cycle(
     and the error message.
 
     Args:
+        prior_records: Precomputed prior-record snapshot, supplied by the wave
+            driver so the whole table isn't re-read + re-parsed per concurrent
+            cycle. Precondition: it must reflect pre-wave state (the caller reads
+            it once before launching the wave). When None, this cycle reads and
+            parses the snapshot itself (the path direct/test callers take).
         paper_trading_enabled: Opt-out flag; when False, every winning strategy
             records ``paper_trading_status = "skipped"`` with reason ``"disabled"``.
         paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``
@@ -1425,8 +1430,10 @@ def _run_one_strategy_lab_cycle(
 
     # When the caller (the wave driver) precomputes the prior records once per
     # wave, reuse that snapshot instead of re-reading + re-parsing the whole
-    # table in every concurrent cycle. Cycles in a wave all read the same
-    # pre-wave snapshot anyway (none persists mid-wave), so this is equivalent.
+    # table in every concurrent cycle. Each cycle persists only at its very end,
+    # long after every sibling has already read prior records at its start, so
+    # all cycles in a wave observe the same pre-wave snapshot; reading it once up
+    # front is equivalent (and strictly more deterministic).
     if prior_records is None:
         with _lock:
             raw_prior = list(_strategy_lab_records.values())
@@ -1786,9 +1793,10 @@ def _strategy_lab_worker(
                 wave_futures: Dict[Any, int] = {}
                 # Read + parse the prior records ONCE per wave and share the
                 # snapshot across all cycles in the wave, rather than having each
-                # concurrent cycle re-read and re-parse the whole table. Cycles in
-                # a wave all observe the same pre-wave state (none persists until
-                # the wave completes below), so this is behaviour-equivalent.
+                # concurrent cycle re-read and re-parse the whole table. Each cycle
+                # persists only at its end (after every sibling has already read at
+                # its start), so all cycles in a wave see the same pre-wave snapshot;
+                # reading it once here is equivalent and strictly more deterministic.
                 with _lock:
                     _raw_prior = list(_strategy_lab_records.values())
                 wave_prior_records = [StrategyLabRecord.parse_persisted(r) for r in _raw_prior]
