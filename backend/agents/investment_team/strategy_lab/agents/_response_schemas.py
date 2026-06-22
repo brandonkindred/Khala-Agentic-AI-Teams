@@ -2,12 +2,15 @@
 
 The Strategy Lab spec-authoring agents (design, design-review, refinement,
 zero-trade repair, alignment fix-proposer) emit JSON that is then recovered
-with a brace-counting extractor and validated with pydantic. When the
-underlying model supports structured outputs (Ollama ``format=<json-schema>``),
-passing the exact wire schema constrains the decoder so it can only emit
-conforming JSON — eliminating the malformed-JSON and schema-drift failure
-classes at the source. Pydantic validation downstream stays as
-defense-in-depth.
+with a brace-counting extractor and validated with pydantic. Each schema is
+embedded verbatim in the owning agent's prompt so the model is told the exact
+shape to emit; the Ollama transport routes through the ``llm_service`` client
+in ``json_object`` wire mode (see ``model_factory.get_strands_model``), which
+forces a JSON object on the wire. The prompt-embedded schema plus downstream
+pydantic validation enforce the response contract — they replaced the earlier
+strands-native decoder-level ``format=<json-schema>`` constraint, which (paired
+with thinking-enabled models on long code-emitting turns) could starve the
+content channel and yield an empty, brace-less response.
 
 This module derives one schema per agent from a *wire model* that mirrors the
 shape each agent actually asks the LLM to emit (not the richer persisted

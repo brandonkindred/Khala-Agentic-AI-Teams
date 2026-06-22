@@ -717,36 +717,20 @@ def test_get_strands_model_ollama_cloud_without_key_raises(monkeypatch: pytest.M
     assert "Cloud requires an API key" in str(exc.value)
 
 
-def test_get_strands_model_ollama_local_succeeds(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.strategy_lab.agents import model_factory
+def _patch_ollama_llm_service(monkeypatch: pytest.MonkeyPatch):
+    """Wire model_factory to the Ollama branch and capture the llm_service routing.
 
-    monkeypatch.setattr(model_factory, "resolve_provider", lambda: "ollama")
-    monkeypatch.setattr(model_factory, "resolve_model", lambda key: "llama3")
-    monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "http://localhost:11434")
-    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
-    monkeypatch.delenv("LLM_OLLAMA_API_KEY", raising=False)
-    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    The default Ollama path delegates to
+    ``llm_service.strands_adapter.get_strands_model`` (the hardened path). This
+    patches that source attribute with a recorder so tests can assert what
+    ``get_strands_model`` forwards. ``get_strands_model`` imports the adapter
+    lazily (``from llm_service.strands_adapter import get_strands_model``) at
+    call time, so patching the module attribute is picked up.
 
-    class _StubOllama:
-        def __init__(self, host=None, model_id=None):
-            self.host = host
-            self.model_id = model_id
-
-    import strands.models as strands_models
-
-    monkeypatch.setattr(strands_models, "OllamaModel", _StubOllama)
-    result = model_factory.get_strands_model()
-    assert isinstance(result, _StubOllama)
-    assert result.host == "http://localhost:11434"
-    assert result.model_id == "llama3"
-
-
-def _patch_ollama_local(monkeypatch: pytest.MonkeyPatch):
-    """Wire model_factory to the Ollama-local branch and capture kwargs.
-
-    Returns the recording stub class so tests can assert which kwargs
-    ``get_strands_model`` forwarded to ``OllamaModel``.
+    Returns ``(model_factory, recorder)`` where ``recorder.calls`` is a list of
+    the kwargs each routed call forwarded.
     """
+    import llm_service.strands_adapter as adapter
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.setattr(model_factory, "resolve_provider", lambda: "ollama")
@@ -756,21 +740,31 @@ def _patch_ollama_local(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("LLM_OLLAMA_API_KEY", raising=False)
     monkeypatch.delenv("OLLAMA_HOST", raising=False)
 
-    class _RecordingOllama:
-        # Mirror the real strands ``OllamaModel`` signature shape: the transport
-        # timeout travels via ``ollama_client_args`` (NOT a bare ``timeout=``,
-        # which strands warns-and-drops), and the schema travels via
-        # ``additional_args``.
-        def __init__(self, host=None, model_id=None, ollama_client_args=None, additional_args=None):
-            self.host = host
-            self.model_id = model_id
-            self.ollama_client_args = ollama_client_args
-            self.additional_args = additional_args
+    class _Recorder:
+        def __init__(self) -> None:
+            self.calls: list = []
 
-    import strands.models as strands_models
+        def __call__(self, *, agent_key=None, response_format="json", **kw):
+            self.calls.append({"agent_key": agent_key, "response_format": response_format, **kw})
+            return ("LLM_SERVICE_MODEL", agent_key, response_format)
 
-    monkeypatch.setattr(strands_models, "OllamaModel", _RecordingOllama)
-    return model_factory, _RecordingOllama
+    recorder = _Recorder()
+    monkeypatch.setattr(adapter, "get_strands_model", recorder)
+    return model_factory, recorder
+
+
+def test_get_strands_model_ollama_routes_through_llm_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The default Ollama path delegates to the hardened llm_service adapter
+    (carrying the empty/thinking-only-response handling) instead of building a
+    native strands ``OllamaModel``."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
+
+    result = model_factory.get_strands_model()
+
+    assert recorder.calls == [{"agent_key": "strategy_ideation", "response_format": "json"}]
+    assert result == ("LLM_SERVICE_MODEL", "strategy_ideation", "json")
 
 
 def test_structured_output_enabled_default_and_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -786,24 +780,43 @@ def test_structured_output_enabled_default_and_toggle(monkeypatch: pytest.Monkey
         assert model_factory.structured_output_enabled() is False
 
 
-def test_get_strands_model_applies_schema_as_format(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A response_schema is forwarded to Ollama via ``additional_args.format``."""
-    model_factory, _ = _patch_ollama_local(monkeypatch)
+def test_get_strands_model_response_schema_not_forwarded_to_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``response_schema`` is prompt-embedded by each agent, never forwarded to
+    the llm_service transport (which uses ``json_object`` wire mode). It must not
+    change the routing — independent of the legacy structured-output toggle."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
     monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
 
     schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-    result = model_factory.get_strands_model("strategy_design", response_schema=schema)
+    model_factory.get_strands_model("strategy_design", response_schema=schema)
 
-    assert result.additional_args == {"format": schema}
+    assert recorder.calls == [{"agent_key": "strategy_design", "response_format": "json"}]
+    assert all("response_schema" not in c and "format" not in c for c in recorder.calls)
 
 
-def test_get_strands_model_no_schema_leaves_format_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    model_factory, _ = _patch_ollama_local(monkeypatch)
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+def test_get_strands_model_forwards_response_format_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``response_format="text"`` (used by code synthesis, which emits a raw
+    Python file) is forwarded to the llm_service adapter so the turn is not
+    routed through ``json_object`` mode."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
 
-    result = model_factory.get_strands_model("strategy_design")
+    model_factory.get_strands_model("strategy_code_synthesis", response_format="text")
 
-    assert result.additional_args is None
+    assert recorder.calls == [{"agent_key": "strategy_code_synthesis", "response_format": "text"}]
+
+
+def test_get_strands_model_rejects_invalid_response_format(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An unknown ``response_format`` is a caller bug and raises ``ValueError``."""
+    model_factory, _ = _patch_ollama_llm_service(monkeypatch)
+
+    with pytest.raises(ValueError, match="response_format must be"):
+        model_factory.get_strands_model("strategy_design", response_format="xml")
 
 
 def test_resolve_strands_timeout_garbage_value_falls_back(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -857,7 +870,7 @@ def test_get_strands_model_rejects_non_positive_or_nonfinite_explicit_timeout(
 ) -> None:
     """An explicit non-positive/non-finite ``timeout`` raises ``ValueError`` — an
     explicit ``raise`` (not ``assert``) so the guard survives ``python -O``."""
-    model_factory, _ = _patch_ollama_local(monkeypatch)
+    model_factory, _ = _patch_ollama_llm_service(monkeypatch)
 
     with pytest.raises(ValueError, match="positive, finite"):
         model_factory.get_strands_model("strategy_design", timeout=bad)
@@ -870,36 +883,45 @@ def test_get_strands_model_rejects_non_numeric_explicit_timeout(
     """A non-numeric explicit ``timeout`` raises a clear ``TypeError`` at the
     boundary rather than an obscure one from ``math.isfinite`` (``bool`` counts
     as non-numeric here — ``True``/``False`` are not meaningful timeouts)."""
-    model_factory, _ = _patch_ollama_local(monkeypatch)
+    model_factory, _ = _patch_ollama_llm_service(monkeypatch)
 
     with pytest.raises(TypeError, match="must be a number"):
         model_factory.get_strands_model("strategy_design", timeout=bad)
 
 
-def test_get_strands_model_forwards_transport_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The resolved timeout reaches the Ollama transport via ``ollama_client_args``.
-
-    Regression: a bare ``timeout=`` kwarg is swallowed by strands'
-    ``**model_config`` (warned and dropped), so the timeout must travel through
-    the client-args channel to actually cancel a hung HTTP call.
-    """
-    model_factory, _ = _patch_ollama_local(monkeypatch)
+def test_get_strands_model_ollama_accepts_valid_timeout_then_routes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A valid explicit ``timeout`` passes the boundary check and routing still
+    occurs. On the Ollama path the transport timeout is owned by the llm_service
+    client (and the Strategy Lab envelope's wall-clock guard), so it is not
+    forwarded to the adapter."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
     monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "123")
 
-    result = model_factory.get_strands_model("strategy_design")
+    model_factory.get_strands_model("strategy_design", timeout=45.0)
 
-    assert result.ollama_client_args == {"timeout": 123.0}
+    assert recorder.calls == [{"agent_key": "strategy_design", "response_format": "json"}]
 
 
-def test_get_strands_model_toggle_off_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """With the toggle off, a supplied schema must NOT be applied."""
-    model_factory, _ = _patch_ollama_local(monkeypatch)
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "false")
-
+def test_get_strands_model_toggle_no_longer_gates_routing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The legacy ``STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`` toggle no longer
+    affects the transport: routing through llm_service is unchanged whether it is
+    on or off."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
     schema = {"type": "object"}
-    result = model_factory.get_strands_model("strategy_design", response_schema=schema)
 
-    assert result.additional_args is None
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "false")
+    model_factory.get_strands_model("strategy_design", response_schema=schema)
+    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
+    model_factory.get_strands_model("strategy_design", response_schema=schema)
+
+    assert recorder.calls == [
+        {"agent_key": "strategy_design", "response_format": "json"},
+        {"agent_key": "strategy_design", "response_format": "json"},
+    ]
 
 
 def test_get_strands_model_bedrock_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:

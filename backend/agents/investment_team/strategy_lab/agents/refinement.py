@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 # The JSON Schema the LLM response must conform to, rendered once for
-# injection into the prompt. This is the SAME schema passed to the model's
-# ``format`` field via ``get_strands_model(response_schema=REFINEMENT_SCHEMA)``,
-# so the prompt-level contract and the decoder-level constraint can never
-# drift. Provider-agnostic: it constrains the model even when structured
-# output is disabled or the provider is Bedrock (which ignores ``format``).
+# injection into the prompt. The Ollama transport now routes through the
+# ``llm_service`` client in ``json_object`` wire mode (see
+# ``get_strands_model``), so this prompt-embedded schema — together with the
+# pydantic narrowing below — is what enforces the response contract, rather
+# than a decoder-level ``format`` constraint. ``REFINEMENT_SCHEMA`` is still
+# passed to ``get_strands_model(response_schema=...)`` for signature
+# compatibility and to keep this prompt copy in lockstep with the wire model.
 _REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
 
 # Spliced into the shared JSON-correction re-prompt so a malformed-output retry
