@@ -767,35 +767,6 @@ def test_get_strands_model_ollama_routes_through_llm_service(
     assert result == ("LLM_SERVICE_MODEL", "strategy_ideation", "json")
 
 
-def test_structured_output_enabled_default_and_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.strategy_lab.agents import model_factory
-
-    monkeypatch.delenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", raising=False)
-    assert model_factory.structured_output_enabled() is True
-    for truthy in ("true", "1", "YES", "Yes"):
-        monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", truthy)
-        assert model_factory.structured_output_enabled() is True
-    for falsy in ("false", "0", "no", "off", ""):
-        monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", falsy)
-        assert model_factory.structured_output_enabled() is False
-
-
-def test_get_strands_model_response_schema_not_forwarded_to_transport(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """``response_schema`` is prompt-embedded by each agent, never forwarded to
-    the llm_service transport (which uses ``json_object`` wire mode). It must not
-    change the routing — independent of the legacy structured-output toggle."""
-    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
-
-    schema = {"type": "object", "properties": {"x": {"type": "string"}}}
-    model_factory.get_strands_model("strategy_design", response_schema=schema)
-
-    assert recorder.calls == [{"agent_key": "strategy_design", "response_format": "json"}]
-    assert all("response_schema" not in c and "format" not in c for c in recorder.calls)
-
-
 def test_get_strands_model_forwards_response_format_text(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -889,49 +860,47 @@ def test_get_strands_model_rejects_non_numeric_explicit_timeout(
         model_factory.get_strands_model("strategy_design", timeout=bad)
 
 
-def test_get_strands_model_ollama_accepts_valid_timeout_then_routes(
+def test_get_strands_model_explicit_timeout_forwarded_to_adapter_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A valid explicit ``timeout`` passes the boundary check and routing still
-    occurs. On the Ollama path the transport timeout is owned by the llm_service
-    client (and the Strategy Lab envelope's wall-clock guard), so it is not
-    forwarded to the adapter."""
+    """A valid explicit ``timeout`` on the Ollama path is honoured: the factory
+    builds a dedicated OllamaLLMClient carrying that read timeout and hands it to
+    the adapter via ``client=`` (rather than silently dropping it)."""
     model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
-    monkeypatch.setenv("STRATEGY_LAB_LLM_TIMEOUT", "123")
 
     model_factory.get_strands_model("strategy_design", timeout=45.0)
+
+    assert len(recorder.calls) == 1
+    call = recorder.calls[0]
+    assert call["agent_key"] == "strategy_design"
+    assert call["response_format"] == "json"
+    client = call["client"]
+    assert client.timeout == 45.0
+    assert client.model == "llama3"
+
+
+def test_get_strands_model_no_explicit_timeout_omits_client(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without an explicit timeout, no ``client=`` is forwarded — the adapter's
+    default (cached) client owns the transport timeout."""
+    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
+
+    model_factory.get_strands_model("strategy_design")
 
     assert recorder.calls == [{"agent_key": "strategy_design", "response_format": "json"}]
 
 
-def test_get_strands_model_toggle_no_longer_gates_routing(
+def test_get_strands_model_bedrock_carries_no_additional_args(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The legacy ``STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`` toggle no longer
-    affects the transport: routing through llm_service is unchanged whether it is
-    on or off."""
-    model_factory, recorder = _patch_ollama_llm_service(monkeypatch)
-    schema = {"type": "object"}
-
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "false")
-    model_factory.get_strands_model("strategy_design", response_schema=schema)
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
-    model_factory.get_strands_model("strategy_design", response_schema=schema)
-
-    assert recorder.calls == [
-        {"agent_key": "strategy_design", "response_format": "json"},
-        {"agent_key": "strategy_design", "response_format": "json"},
-    ]
-
-
-def test_get_strands_model_bedrock_ignores_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The Bedrock branch never carries a ``format`` constraint."""
+    """The Bedrock branch constructs a native BedrockModel with no ``format`` /
+    ``additional_args`` constraint."""
     from investment_team.strategy_lab.agents import model_factory
 
     monkeypatch.setattr(model_factory, "resolve_provider", lambda: "bedrock")
     monkeypatch.setattr(model_factory, "resolve_model", lambda key: "anthropic.claude-3-haiku")
     monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "")
-    monkeypatch.setenv("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
 
     class _StubBedrock:
         def __init__(self, **kwargs):
@@ -940,6 +909,6 @@ def test_get_strands_model_bedrock_ignores_schema(monkeypatch: pytest.MonkeyPatc
     import strands.models as strands_models
 
     monkeypatch.setattr(strands_models, "BedrockModel", _StubBedrock)
-    result = model_factory.get_strands_model(response_schema={"type": "object"})
+    result = model_factory.get_strands_model()
 
     assert "additional_args" not in result.kwargs

@@ -25,13 +25,11 @@ logger = logging.getLogger(__name__)
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
 # The JSON Schema the LLM response must conform to, rendered once for
-# injection into the prompt. The Ollama transport now routes through the
-# ``llm_service`` client in ``json_object`` wire mode (see
-# ``get_strands_model``), so this prompt-embedded schema — together with the
-# pydantic narrowing below — is what enforces the response contract, rather
-# than a decoder-level ``format`` constraint. ``REFINEMENT_SCHEMA`` is still
-# passed to ``get_strands_model(response_schema=...)`` for signature
-# compatibility and to keep this prompt copy in lockstep with the wire model.
+# injection into the prompt. The Ollama transport routes through the
+# ``llm_service`` client in ``json_object`` wire mode (see ``get_strands_model``),
+# which forces a JSON object on the wire but not a specific shape; this
+# prompt-embedded schema — together with the pydantic narrowing below — is what
+# pins the response to the expected ``strategy_code`` / ``changes_made`` shape.
 _REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
 
 # Spliced into the shared JSON-correction re-prompt so a malformed-output retry
@@ -222,7 +220,7 @@ class RefinementAgent:
         prompt = user_prompt
         for attempt in range(retries + 1):
             agent = Agent(
-                model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
+                model=get_strands_model("strategy_ideation"),
                 system_prompt=system_prompt,
                 tools=[],
             )

@@ -1,29 +1,29 @@
-"""Cached JSON-Schema providers for schema-constrained LLM decoding.
+"""Canonical JSON-Schema definitions for the Strategy Lab agents' LLM output.
 
 The Strategy Lab spec-authoring agents (design, design-review, refinement,
-zero-trade repair, alignment fix-proposer) emit JSON that is then recovered
-with a brace-counting extractor and validated with pydantic. Each schema is
-embedded verbatim in the owning agent's prompt so the model is told the exact
-shape to emit; the Ollama transport routes through the ``llm_service`` client
-in ``json_object`` wire mode (see ``model_factory.get_strands_model``), which
-forces a JSON object on the wire. The prompt-embedded schema plus downstream
-pydantic validation enforce the response contract — they replaced the earlier
-strands-native decoder-level ``format=<json-schema>`` constraint, which (paired
-with thinking-enabled models on long code-emitting turns) could starve the
-content channel and yield an empty, brace-less response.
+zero-trade repair, alignment fix-proposer) emit JSON that is recovered with a
+brace-counting extractor and validated with pydantic. The Ollama transport
+routes through the ``llm_service`` client in ``json_object`` wire mode (see
+``model_factory.get_strands_model``), which forces a JSON object on the wire but
+not a specific shape; the shape contract is enforced by pydantic validation
+downstream. The earlier strands-native decoder-level ``format=<json-schema>``
+constraint was retired because (paired with thinking-enabled models on long
+code-emitting turns) it could starve the content channel and yield an empty,
+brace-less response.
 
-This module derives one schema per agent from a *wire model* that mirrors the
-shape each agent actually asks the LLM to emit (not the richer persisted
-model — e.g. the designer emits ``rationale`` and never ``strategy_id`` or
-``audit``). Rule-shaped fields reuse the structured DSL types from
-``spec_dsl`` so the grammar enforces the entry/exit/sizing contract that the
-prose correction preamble currently fights after the fact.
+These constants remain the canonical machine-readable definition of each
+agent's wire shape: the refinement agent embeds ``REFINEMENT_SCHEMA`` verbatim
+in its prompt (``refinement._REFINEMENT_SCHEMA_JSON``), and all five are
+validated for well-formedness by the test-suite. Each is derived from a *wire
+model* that mirrors the shape the agent asks the LLM to emit (not the richer
+persisted model — e.g. the designer emits ``rationale`` and never
+``strategy_id`` or ``audit``). Rule-shaped fields reuse the structured DSL types
+from ``spec_dsl`` so the schema documents the entry/exit/sizing contract.
 
 Schemas are computed once at import and exposed as module-level constants.
 
 Invariants:
-  * Each ``*_SCHEMA`` constant is a JSON-Schema ``dict`` suitable for the
-    Ollama ``format`` field.
+  * Each ``*_SCHEMA`` constant is a JSON-serializable JSON-Schema ``dict``.
   * The wire models track the corresponding prompt template's documented
     output shape; when a prompt changes, update the matching wire model here.
 """

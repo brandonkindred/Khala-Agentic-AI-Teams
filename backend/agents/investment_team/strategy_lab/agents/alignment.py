@@ -38,7 +38,6 @@ from ..alignment_findings import AlignmentFinding, NearMissVerdict
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
-from ._response_schemas import ALIGNMENT_FIX_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
@@ -382,7 +381,7 @@ class TradeAlignmentAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation", response_schema=ALIGNMENT_FIX_SCHEMA),
+            model=get_strands_model("strategy_ideation"),
             system_prompt=system_prompt,
             tools=[],
         )

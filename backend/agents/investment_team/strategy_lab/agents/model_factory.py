@@ -16,7 +16,7 @@ import inspect
 import logging
 import math
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
 
@@ -26,27 +26,6 @@ logger = logging.getLogger(__name__)
 # non-positive / non-finite value. Mirrors the platform default so the resolver's
 # "positive, finite float" postcondition holds unconditionally.
 _DEFAULT_TRANSPORT_TIMEOUT = 900.0
-
-
-def structured_output_enabled() -> bool:
-    """Resolve the (legacy) toggle for schema-constrained LLM decoding.
-
-    Reads ``STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`` (default ``true``;
-    accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
-    insensitive; anything else disables).
-
-    Retained for backward compatibility. It no longer gates transport: the
-    default Ollama path routes through the ``llm_service`` client (``json_object``
-    wire mode), where the response contract is enforced by the schema embedded
-    in each agent's prompt plus pydantic validation downstream rather than a
-    strands-native decoder-level ``format`` constraint. ``get_strands_model`` no
-    longer consults this toggle.
-
-    Preconditions: none.
-    Postconditions: returns a ``bool``; never raises.
-    """
-    raw = os.environ.get("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
-    return raw.strip().lower() in {"true", "1", "yes"}
 
 
 def _resolve_strands_timeout(agent_key: str) -> float:
@@ -133,44 +112,6 @@ def _accepts_kwarg(target: Any, name: str) -> bool:
     )
 
 
-def _construct_ollama_with_timeout(model_cls, timeout: float, **kwargs):
-    """Construct a strands ``OllamaModel``, forwarding ``timeout`` as the
-    transport (httpx) read/connect timeout.
-
-    Retained as a tested transport-timeout helper. The default Ollama path in
-    :func:`get_strands_model` now routes through the hardened ``llm_service``
-    client instead of constructing the native ``OllamaModel`` here, so this is
-    no longer on that hot path; it stays as a self-contained, unit-tested
-    utility for any caller that still needs a native strands ``OllamaModel``.
-
-    strands' ``OllamaModel`` passes ``ollama_client_args`` straight to
-    ``ollama.AsyncClient(host, **client_args)``, which forwards them to httpx —
-    where ``timeout`` is the read/connect timeout, the only mechanism that
-    actually cancels a hung HTTP call. A bare ``timeout=`` (or ``client_args=``)
-    kwarg is swallowed by the constructor's ``**model_config``, which only
-    *warns* and then drops it, so it must never be used. The current strands
-    range (>=1.35,<2.0) declares ``ollama_client_args``; ``client_args`` (the
-    client-args name strands' *other* model providers use) is probed only as a
-    defensive fallback should a release within the pinned range unify on it. The
-    timeout is forwarded through whichever the installed signature explicitly
-    declares, degrading to "no transport timeout" (envelope wall-clock guard
-    only) if neither exists.
-
-    Preconditions: ``model_cls`` is the strands ``OllamaModel`` class (or a
-    stand-in); ``timeout > 0``.
-    Postconditions: returns a constructed model. The returned model carries the
-    transport timeout iff ``model_cls`` exposes a client-args channel.
-    """
-    for param in ("ollama_client_args", "client_args"):
-        if _accepts_kwarg(model_cls, param):
-            return model_cls(**kwargs, **{param: {"timeout": timeout}})
-    logger.warning(
-        "Strands OllamaModel exposes no client-args channel for a transport "
-        "timeout; relying on the envelope wall-clock guard only."
-    )
-    return model_cls(**kwargs)
-
-
 def _construct_bedrock_with_timeout(model_cls, timeout: float, **kwargs):
     """Construct a strands ``BedrockModel``, forwarding ``timeout`` as the
     botocore read/connect timeout via ``boto_client_config``.
@@ -207,7 +148,6 @@ def get_strands_model(
     agent_key: str = "strategy_ideation",
     *,
     timeout: Optional[float] = None,
-    response_schema: Optional[Dict[str, Any]] = None,
     response_format: str = "json",
 ):
     """Return a Strands ``Model`` instance for the given agent key.
@@ -239,26 +179,27 @@ def get_strands_model(
     hardening is provider-specific, and Bedrock has its own empty-response
     semantics).
 
-    ``timeout`` (seconds) is validated as a boundary contract when passed
-    explicitly, and forwarded as the transport read timeout on the Bedrock path.
-    On the Ollama path the transport timeout is owned by the llm_service client
-    (``resolve_timeout`` / ``LLM_TIMEOUT``); the Strategy Lab LLM envelope's
-    wall-clock guard (``STRATEGY_LAB_LLM_TIMEOUT``) still bounds every call on
-    top of it.
+    ``timeout`` (seconds), when passed explicitly, is validated as a boundary
+    contract and forwarded as the transport read timeout on **both** paths: on
+    Bedrock via ``boto_client_config``, and on Ollama by constructing a dedicated
+    (uncached) ``OllamaLLMClient`` with that timeout for the adapter. When it is
+    omitted, the transport timeout is owned by the llm_service client
+    (``resolve_timeout`` / ``LLM_TIMEOUT``) on the Ollama path and by
+    ``_resolve_strands_timeout`` on the Bedrock path. The Strategy Lab LLM
+    envelope's wall-clock guard (``STRATEGY_LAB_LLM_TIMEOUT``) bounds every call
+    on top of whichever transport timeout applies.
 
-    ``response_schema`` is retained for caller / signature compatibility. The
-    spec-authoring agents already embed the schema verbatim in their prompts and
-    validate the parsed payload with pydantic downstream; the llm_service
-    ``json_object`` wire mode plus that prompt-level schema and pydantic
-    validation replace the strands-native decoder-level ``format`` constraint.
+    The JSON-shape contract on the Ollama path is enforced by the ``json_object``
+    wire mode plus pydantic validation downstream (and, for the refinement agent,
+    a schema embedded verbatim in its prompt). This replaces the strands-native
+    decoder-level ``format`` constraint that the native ``OllamaModel`` path used.
 
-    Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
-    if given, is a JSON-serializable schema dict; ``response_format`` is
+    Preconditions: ``agent_key`` is a non-empty model key; ``response_format`` is
     ``"json"`` or ``"text"``. ``timeout``, if passed explicitly, must be a
     positive, finite *number* of seconds — a non-numeric value raises
     ``TypeError`` and a non-positive or non-finite value raises ``ValueError``.
     Postconditions: returns a constructed strands ``Model``. The chosen provider
-    / model never depends on ``response_schema`` or ``response_format``.
+    / model never depends on ``response_format``.
     """
     provider = resolve_provider()
     model_id = resolve_model(agent_key)
@@ -324,11 +265,26 @@ def get_strands_model(
 
     logger.info(
         "Strategy Lab LLM routed through llm_service: agent_key=%s model=%s host=%s "
-        "cloud=%s response_format=%s",
+        "cloud=%s response_format=%s explicit_timeout=%s",
         agent_key,
         model_id,
         host,
         bool(api_key),
         response_format,
+        timeout if timeout is not None else "-",
     )
+
+    # When the caller pins an explicit transport timeout, honour it: build a
+    # dedicated (uncached) client with that read timeout and hand it to the
+    # adapter. Otherwise the adapter's default client owns the timeout
+    # (``resolve_timeout`` / ``LLM_TIMEOUT``). Building the client only on the
+    # explicit-timeout path keeps the common path on the shared client cache.
+    if timeout is not None:
+        from llm_service.clients import OllamaLLMClient
+
+        explicit_client = OllamaLLMClient(model=model_id, base_url=base_url, timeout=float(timeout))
+        return _llm_service_strands_model(
+            agent_key=agent_key, response_format=response_format, client=explicit_client
+        )
+
     return _llm_service_strands_model(agent_key=agent_key, response_format=response_format)
