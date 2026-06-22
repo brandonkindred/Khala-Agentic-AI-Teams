@@ -316,30 +316,32 @@ class BrandingStore:
             concurrent delete between the read and the write).
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            # FOR UPDATE locks the row for the duration of this transaction
-            # (get_conn commits at block exit), so concurrent appends to the
-            # same brand serialise and no version increment is lost.
+            # Read only the two fields we need to compute the next version,
+            # not the whole brand document (which embeds the previous
+            # latest_output — every phase's output). FOR UPDATE locks the row
+            # for the transaction (get_conn commits at block exit) so
+            # concurrent appends serialise and no increment is lost.
             cur.execute(
-                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s FOR UPDATE",
+                "SELECT data->>'version' AS version, data->'history' AS history "
+                "FROM branding_brands WHERE id = %s AND client_id = %s FOR UPDATE",
                 (brand_id, client_id),
             )
             row = cur.fetchone()
             if row is None:
                 return None
-            brand = Brand.model_validate(row["data"])
             now = _now_iso()
-            new_version = brand.version + 1
+            new_version = int(row["version"] or 0) + 1
             history_entry = BrandVersionSummary(
                 version=new_version,
                 created_at=now,
                 status=output.status.value,
             )
-            new_history = list(brand.history) + [history_entry]
+            new_history = list(row["history"] or []) + [history_entry.model_dump(mode="json")]
             patch = {
                 "latest_output": output.model_dump(mode="json"),
                 "current_phase": output.current_phase.value,
                 "version": new_version,
-                "history": [h.model_dump(mode="json") for h in new_history],
+                "history": new_history,
                 "updated_at": now,
             }
             cur.execute(

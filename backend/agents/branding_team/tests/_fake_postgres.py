@@ -90,6 +90,20 @@ class _FakeCursor:
                 self._last_fetch_one = None
             return
 
+        if norm.startswith("select data->>'version'") and "from branding_brands" in norm:
+            brand_id, client_id = params
+            row = self._db["brands"].get(brand_id)
+            if row and row["client_id"] == client_id:
+                data = row["data"]
+                version = data.get("version", 0)
+                self._last_fetch_one = {
+                    "version": None if version is None else str(version),
+                    "history": data.get("history", []),
+                }
+            else:
+                self._last_fetch_one = None
+            return
+
         if norm.startswith("select 1 from branding_brands where id"):
             (brand_id,) = params
             self._last_fetch_one = (1,) if brand_id in self._db["brands"] else None

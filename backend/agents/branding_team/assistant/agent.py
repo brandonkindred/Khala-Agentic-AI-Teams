@@ -17,7 +17,7 @@ import json
 import logging
 import os
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from branding_team.models import BrandingMission, ColorPalette
 
@@ -52,25 +52,11 @@ def _single_call_enabled() -> bool:
 def _parse_single_call(raw: str) -> Tuple[str, Dict[str, Any], List[str]]:
     """Parse the single-call JSON → (reply, mission_update, suggested_questions).
 
-    Tolerates markdown fences / surrounding prose. Returns empty values on any
-    parse failure so the caller can substitute a graceful fallback.
+    Returns empty values on any parse failure so the caller can substitute a
+    graceful fallback.
     """
-    text = (raw or "").strip()
-    if not text:
-        return "", {}, []
-    cleaned = re.sub(r"^```(?:json)?\s*", "", text)
-    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-    parsed: Any = None
-    try:
-        parsed = json.loads(cleaned)
-    except (json.JSONDecodeError, TypeError):
-        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
-        if match:
-            try:
-                parsed = json.loads(match.group(0))
-            except (json.JSONDecodeError, TypeError):
-                parsed = None
-    if not isinstance(parsed, dict):
+    parsed = _loads_lenient(raw)
+    if parsed is None:
         return "", {}, []
     reply = str(parsed.get("reply") or "")
     mission_update = _coerce_mission(parsed.get("mission_update"))
@@ -88,19 +74,17 @@ def _coerce_mission(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
-    """Parse the silent extractor's JSON output → (mission_update, suggested_questions).
+def _loads_lenient(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse an LLM JSON object, tolerating markdown fences / surrounding prose.
 
-    Tolerates markdown fences and stray prose around a JSON object. Returns
-    empty values on any parse failure — the conversation reply is unaffected.
+    Returns the dict, or None when nothing parseable is found. Shared by the
+    two-stage extractor and the single-call parser.
     """
     text = (raw or "").strip()
     if not text:
-        return {}, []
-
+        return None
     cleaned = re.sub(r"^```(?:json)?\s*", "", text)
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-
     parsed: Any = None
     try:
         parsed = json.loads(cleaned)
@@ -111,8 +95,17 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
                 parsed = json.loads(match.group(0))
             except (json.JSONDecodeError, TypeError):
                 parsed = None
+    return parsed if isinstance(parsed, dict) else None
 
-    if not isinstance(parsed, dict):
+
+def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
+    """Parse the silent extractor's JSON output → (mission_update, suggested_questions).
+
+    Tolerates markdown fences and stray prose around a JSON object. Returns
+    empty values on any parse failure — the conversation reply is unaffected.
+    """
+    parsed = _loads_lenient(raw)
+    if parsed is None:
         logger.warning("Branding extractor produced unparseable output; treating as no-op")
         return {}, []
 
@@ -129,21 +122,30 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
     return mission_update, suggested_questions
 
 
-_MISSION_FIELD_NAMES = {
+# Single source of truth for the mission fields the assistant reads/writes,
+# grouped by how they merge. ``_format_brief``, ``_merge_mission_update`` and
+# ``_MISSION_FIELD_NAMES`` all derive from these so a new field is added once.
+_MISSION_STR_FIELDS = (
     "company_name",
     "company_description",
     "target_audience",
-    "values",
-    "differentiators",
     "desired_voice",
-    "existing_brand_material",
-    "color_inspiration",
-    "color_palettes",
-    "selected_palette_index",
     "visual_style",
     "typography_preference",
     "interface_density",
-}
+)
+_MISSION_LIST_FIELDS = (
+    "values",
+    "differentiators",
+    "existing_brand_material",
+    "color_inspiration",
+)
+# Structured fields with bespoke handling (not plain str/list).
+_MISSION_STRUCTURED_FIELDS = ("color_palettes", "selected_palette_index")
+
+_MISSION_FIELD_NAMES = (
+    set(_MISSION_STR_FIELDS) | set(_MISSION_LIST_FIELDS) | set(_MISSION_STRUCTURED_FIELDS)
+)
 
 
 def _contains_mission_field(obj: Any) -> bool:
@@ -261,22 +263,14 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
     """Merge update dict into current mission; only set keys present and non-empty where applicable."""
     data = current.model_dump()
 
-    for key in (
-        "company_name",
-        "company_description",
-        "target_audience",
-        "desired_voice",
-        "visual_style",
-        "typography_preference",
-        "interface_density",
-    ):
+    for key in _MISSION_STR_FIELDS:
         if key not in update:
             continue
         val = update[key]
         if isinstance(val, str) and val.strip():
             data[key] = val.strip()
 
-    for key in ("values", "differentiators", "existing_brand_material", "color_inspiration"):
+    for key in _MISSION_LIST_FIELDS:
         if key not in update:
             continue
         val = update[key]
@@ -311,24 +305,17 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
 
 
 def _format_brief(mission: BrandingMission) -> Dict[str, Any]:
-    return {
-        "company_name": mission.company_name or "",
-        "company_description": mission.company_description or "",
-        "target_audience": mission.target_audience or "",
-        "values": mission.values or [],
-        "differentiators": mission.differentiators or [],
-        "desired_voice": mission.desired_voice or "",
-        "existing_brand_material": mission.existing_brand_material or [],
-        "color_inspiration": mission.color_inspiration or [],
-        "color_palettes": [
-            p.model_dump() if hasattr(p, "model_dump") else p
-            for p in (mission.color_palettes or [])
-        ],
-        "selected_palette_index": mission.selected_palette_index,
-        "visual_style": mission.visual_style or "",
-        "typography_preference": mission.typography_preference or "",
-        "interface_density": mission.interface_density or "",
-    }
+    """Render the mission into the flat key/value brief the prompt templates
+    interpolate. Keys are derived from the shared field groups so the brief
+    can't drift from ``_merge_mission_update``."""
+    brief: Dict[str, Any] = {key: getattr(mission, key) or "" for key in _MISSION_STR_FIELDS}
+    for key in _MISSION_LIST_FIELDS:
+        brief[key] = getattr(mission, key) or []
+    brief["color_palettes"] = [
+        p.model_dump() if hasattr(p, "model_dump") else p for p in (mission.color_palettes or [])
+    ]
+    brief["selected_palette_index"] = mission.selected_palette_index
+    return brief
 
 
 def _history_window() -> int:

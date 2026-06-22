@@ -341,11 +341,6 @@ def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     return name_ok and desc_ok and audience_ok
 
 
-def _mission_fingerprint(mission: BrandingMission) -> str:
-    """Stable content fingerprint of a mission (the orchestrator's only input)."""
-    return mission.model_dump_json()
-
-
 def _run_orchestrator_if_ready(
     mission: BrandingMission,
     previous_mission: Optional[BrandingMission] = None,
@@ -355,18 +350,14 @@ def _run_orchestrator_if_ready(
 
     Returns None when the mission lacks the minimal required fields. The
     pipeline output is a pure function of the mission, so when the mission is
-    unchanged since the previous run (``previous_mission`` fingerprint matches)
-    we return ``previous_output`` instead of re-running ~40 agents — this is
-    the common case on the chat path, where most turns don't change the
-    mission.
+    unchanged since the previous run we return ``previous_output`` instead of
+    re-running ~40 agents — the common case on the chat path, where most turns
+    don't change the mission. Equality is a structural Pydantic compare; no
+    serialization needed.
     """
     if not _mission_has_minimal_required_fields(mission):
         return None
-    if (
-        previous_output is not None
-        and previous_mission is not None
-        and _mission_fingerprint(previous_mission) == _mission_fingerprint(mission)
-    ):
+    if previous_output is not None and previous_mission == mission:
         return previous_output
     return orchestrator.run(
         mission=mission,
