@@ -217,6 +217,7 @@ def evaluate_exit_rules_for_position(
     first_only: bool = True,
     cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
     exclude_limit_style: bool = False,
+    exclude_partial: bool = False,
 ) -> list[ExitIntent]:
     """Triggered ``ExitIntent``\\ s for ONE open position, in spec priority order.
 
@@ -226,7 +227,10 @@ def evaluate_exit_rules_for_position(
 
     ``exclude_limit_style`` drops any limit-style stop intent — used when that stop
     already rests as a STOP_LIMIT — so the first *non-resting* rule wins in a single
-    pass, with no "collect every trigger then filter" second walk.
+    pass, with no "collect every trigger then filter" second walk. ``exclude_partial``
+    drops any partial scale-out (scaled-take-profit rung) — used when the position's
+    entry is still filling, so a deferred rung does not pre-empt a lower-priority
+    full-position exit (e.g. a stop) that should still fire this bar.
 
     Preconditions: ``position.qty > 0``; ``bar`` exposes ``high``/``low``/``close``
     (a :class:`BarSnapshot`, or any structurally-compatible bar such as
@@ -234,7 +238,8 @@ def evaluate_exit_rules_for_position(
     un-fired rung.
     Postconditions: returns the triggered intents in spec order — at most one when
     ``first_only`` — each ``ScaledTakeProfitRule`` contributing at most its cursor
-    rung, and limit-style intents omitted when ``exclude_limit_style``.
+    rung; limit-style intents omitted when ``exclude_limit_style`` and partial
+    scale-outs omitted when ``exclude_partial``.
     """
     intents: list[ExitIntent] = []
     for idx, rule in enumerate(rules):
@@ -242,6 +247,8 @@ def evaluate_exit_rules_for_position(
         if intent is None:
             continue
         if exclude_limit_style and intent.style == "limit":
+            continue
+        if exclude_partial and intent.is_partial:
             continue
         intents.append(intent)
         if first_only:

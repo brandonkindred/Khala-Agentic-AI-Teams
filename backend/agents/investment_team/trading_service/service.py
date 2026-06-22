@@ -216,6 +216,13 @@ def _build_exit_reconciler(
             # deferred to the alignment gate, never reconciled here.
             if kind == "stop_loss" and getattr(rule, "basis", "entry_price") != "entry_price":
                 continue
+            # Scaled take-profits are PARTIAL, engine-emitted scale-outs — the
+            # strategy never authors them, and a manual FULL close is not one of
+            # their rungs — so they are not reconcilable to a strategy close. Skip
+            # explicitly (rather than relying on fall-through past the kind-dispatch
+            # below) and avoid evaluating the rung needlessly.
+            if kind == "scaled_take_profit":
+                continue
             if not evaluate_exit_rules([rule], {symbol: ps}, {symbol: bs}, views=views):
                 continue
             if kind == "take_profit":
@@ -439,7 +446,6 @@ class _EmitContext:
     cur_bar: Any
     result: "TradingServiceResult"
     resting_limit_stop_id: Optional[str]
-    entry_continuation_in_flight: bool
     # The symbol's pending-order snapshot from ``_should_evaluate`` — reused by the
     # full-close path instead of re-querying the order book per helper.
     pending: List[PendingOrder]
@@ -543,12 +549,17 @@ class _EngineExitDispatcher:
         # is emitted we cancel the resting stop-limit below — otherwise it could
         # fill first at its stale limit price on a recovery bar and pre-empt the
         # intended close.
+        # While the position's own entry is still filling, defer scale-outs (a rung
+        # sized off the not-yet-settled ``original_qty`` would under-close) by
+        # excluding partial intents — but keep evaluating so a lower-priority
+        # full-position exit (e.g. a stop after the ladder) can still fire this bar.
         intent = self._evaluate(
             sym,
             gate.tracked,
             gate.pos,
             cur_bar,
             exclude_resting_limit_stop=exclude_resting_limit_stop,
+            exclude_partial=gate.entry_continuation_in_flight,
         )
         if intent is None:
             return
@@ -562,7 +573,6 @@ class _EngineExitDispatcher:
             cur_bar=cur_bar,
             result=result,
             resting_limit_stop_id=gate.resting_limit_stop_id,
-            entry_continuation_in_flight=gate.entry_continuation_in_flight,
             pending=gate.pending,
         )
         # A partial scale-out (a scaled-take-profit rung) and a full-position close
@@ -581,23 +591,18 @@ class _EngineExitDispatcher:
         for scale-ins, retire competing resting exits, cancel entry continuations,
         or cancel a resting stop-limit (all assume the whole position is leaving).
 
-        Preconditions: ``intent.is_partial`` (``intent.level_index`` is set).
-        Postconditions: deferred to a later bar when the entry is still filling
-        (no-op); otherwise appends one partial close to ``ctx.pending_for_prev``,
-        binds it to the position, advances the ladder cursor past the fired rung,
-        and records the emission.
+        Deferral while the entry is still filling is handled UPSTREAM: ``maybe_emit``
+        excludes partial intents (``exclude_partial``) when an entry continuation is
+        in flight, so a deferred rung is simply never produced here — and a
+        lower-priority full-position exit can still fire that bar. This handler
+        therefore only ever runs for a rung that is ready to scale out now.
+
+        Preconditions: ``intent.is_partial`` (``intent.level_index`` is set) and the
+        position's entry has settled (no continuation in flight).
+        Postconditions: appends one partial close to ``ctx.pending_for_prev``, binds
+        it to the position, advances the ladder cursor past the fired rung, and
+        records the emission.
         """
-        # Defer the scale-out while the position's entry is still filling. A
-        # partially-filled entry with a resting REQUEUE_NEXT_BAR / TWAP_N
-        # continuation has not yet settled ``pos.original_qty`` (the fill simulator
-        # BUMPS ``original_qty`` as each continuation slice fills), so a rung sized
-        # off the current, smaller ``original_qty`` would under-close — and
-        # advancing the cursor would block the catch-up once the rest of the entry
-        # lands. Skip without advancing the cursor so the rung re-evaluates once the
-        # entry is complete. The flag was derived in the single ``_should_evaluate``
-        # order-book pass, so this needs no rescan.
-        if ctx.entry_continuation_in_flight:
-            return
         req = self._build_close_order(intent, ctx.tracked, ctx.pos)
         if req is None:
             return
@@ -814,6 +819,7 @@ class _EngineExitDispatcher:
         cur_bar,
         *,
         exclude_resting_limit_stop: bool = False,
+        exclude_partial: bool = False,
     ) -> Optional[ExitIntent]:
         """Run the pure rule evaluator and pick the intent to act on.
 
@@ -835,10 +841,17 @@ class _EngineExitDispatcher:
         offers the next un-fired rung, so each rule already contributes at most one
         intent and the default single-trigger path applies.
 
+        ``exclude_partial`` is set by ``maybe_emit`` while the position's entry is
+        still filling: a rung sized off the not-yet-settled ``original_qty`` would
+        under-close, so scale-outs are deferred — but a lower-priority full-position
+        exit (e.g. a stop listed after the ladder) must still be free to fire this
+        bar, so the rung is skipped rather than standing the whole bar down.
+
         Preconditions: ``tracked``/``pos`` describe the same open position
         (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
         Postconditions: returns an ``ExitIntent`` to emit, or ``None`` (no rule
-        triggered, or the only trigger is the excluded resting limit stop).
+        triggered, or the only trigger is an excluded resting limit stop / deferred
+        partial scale-out).
         """
         snapshot = tracked.snapshot(sym, pos.qty)
         # Hot path: evaluate this one position directly — no per-bar ``{sym: ...}``
@@ -861,6 +874,7 @@ class _EngineExitDispatcher:
             first_only=True,
             cursor_map=cursor_map,
             exclude_limit_style=exclude_resting_limit_stop,
+            exclude_partial=exclude_partial,
         )
         return intents[0] if intents else None
 

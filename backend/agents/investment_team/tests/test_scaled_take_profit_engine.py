@@ -21,6 +21,7 @@ import pytest
 
 from investment_team.execution.bar_safety import BarSafetyAssertion
 from investment_team.execution.risk_filter import RiskFilter, RiskLimits
+from investment_team.strategy_lab.executor.rule_compiler import PositionState
 from investment_team.strategy_lab.spec_dsl import ScaledTakeProfitRule, StopLossRule
 from investment_team.trading_service.engine.execution_model import (
     OptimisticExecutionModel,
@@ -36,6 +37,7 @@ from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
     TradingServiceResult,
     _EngineExitDispatcher,
+    _PositionStateView,
     _ScaledLadderCursor,
     _TrackedPosition,
 )
@@ -168,6 +170,19 @@ def test_snapshot_reuse_refreshes_entry_price_after_scale_in() -> None:
     second = tracked.snapshot("AAA", 150.0)
     assert second is first
     assert second.entry_price == 102.0  # reused view sees the new basis
+
+
+def test_position_state_view_matches_position_state_fields() -> None:
+    # _PositionStateView is a mutable structural twin of PositionState consumed by
+    # the evaluator across a duck-typed boundary. If a field is added/renamed on one
+    # and not the other, the reused hot-path view silently feeds the evaluator a
+    # missing/stale field with no type error. Lock the two shapes together so drift
+    # fails loudly here instead.
+    import dataclasses
+
+    view_fields = [f.name for f in dataclasses.fields(_PositionStateView)]
+    canonical_fields = [f.name for f in dataclasses.fields(PositionState)]
+    assert view_fields == canonical_fields
 
 
 # ---------------------------------------------------------------------------
@@ -440,6 +455,50 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
     )
     assert [r.qty for r in pending] == [50.0]  # 0.5 * 100, not 0.5 * 50
     assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
+
+
+def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
+    # While the entry continuation is in flight the scaled rung is deferred — but a
+    # lower-priority full-position stop (listed AFTER the ladder) must still fire
+    # this bar rather than being suppressed along with the deferred rung.
+    disp = _dispatcher(exit_rules=[_ladder(), StopLossRule(pct=0.03)])
+    order_book = OrderBook()
+    cont = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-AAA",
+            symbol="AAA",
+            side=OrderSide.LONG,
+            qty=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+    cont.cumulative_filled_qty = 50.0  # entry still filling → rung deferred
+    tracker = _tracker(OrderSide.LONG, entry_order_id=cont.order_id)
+    portfolio = _portfolio_with(
+        side=OrderSide.LONG, qty=50.0, entry_price=100.0, entry_order_id=cont.order_id
+    )
+    portfolio.positions["AAA"].original_qty = 50.0
+    result = TradingServiceResult()
+    # Bar reaches the +5% rung (high>=105) AND breaches the 3% stop (low<=97).
+    bar = _bar(high=106.0, low=96.0, close=98.0)
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    # The stop fired (full close) even though the rung was deferred; the ladder
+    # cursor did NOT advance (the rung is still pending for a settled-entry bar).
+    assert len(pending) == 1
+    assert "stop_loss" in pending[0].reason
+    assert tracker["AAA"].scaled_cursor.mapping == {}
 
 
 # ---------------------------------------------------------------------------

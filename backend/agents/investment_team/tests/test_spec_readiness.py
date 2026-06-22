@@ -346,6 +346,41 @@ def test_rule4_full_closing_ladder_alone_is_ok() -> None:
     assert not any("close only a fraction" in c for c in _critical(results))
 
 
+def _entry(side: str) -> EntryRule:
+    return EntryRule(
+        side=side,
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+    )
+
+
+def test_rule4_partial_ladder_with_side_mismatched_trailing_stop_is_critical() -> None:
+    # A SHORT-only spec whose only full-position exit is a trailing_high stop (which
+    # caps LONGS only) leaves the short residual uncloseable — the side-restricted
+    # stop does not cover the residual, so this must be critical.
+    spec = _spec(
+        entry=[_entry("short")],
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_high"),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("close only a fraction" in c for c in _critical(results))
+
+
+def test_rule4_partial_ladder_with_side_matched_trailing_stop_is_ok() -> None:
+    # The same short spec with a trailing_low stop (caps SHORTS) closes the residual.
+    spec = _spec(
+        entry=[_entry("short")],
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_low"),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+
+
 # ---------------------------------------------------------------------------
 # Rule 5: Sizing realisable
 # ---------------------------------------------------------------------------
