@@ -35,13 +35,22 @@ RESPONSE_ENVELOPE_OVERHEAD_BYTES = 64 * 1024
 
 
 def max_payload_bytes() -> int:
-    # A non-positive cap would reject every request body; fall back to the
-    # default (matching max_writeback_bytes below) rather than disable the path.
+    """Return the request-body cap (bytes) from ``AGENT_INVOKE_MAX_PAYLOAD_BYTES``.
+
+    Postconditions: returns the override when positive, else the 1 MiB default.
+    A non-positive override (which would reject every request body) falls back to
+    the default — matching :func:`max_writeback_bytes`. Never raises.
+    """
     value = parse_int("AGENT_INVOKE_MAX_PAYLOAD_BYTES", DEFAULT_MAX_PAYLOAD_BYTES)
     return value if value > 0 else DEFAULT_MAX_PAYLOAD_BYTES
 
 
 def max_output_bytes() -> int:
+    """Return the response ``output`` cap (bytes) from ``AGENT_INVOKE_MAX_OUTPUT_BYTES``.
+
+    Postconditions: returns the override when positive, else the 1 MiB default.
+    A non-positive override falls back to the default. Never raises.
+    """
     value = parse_int("AGENT_INVOKE_MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES)
     return value if value > 0 else DEFAULT_MAX_OUTPUT_BYTES
 
@@ -62,7 +71,12 @@ def max_writeback_bytes() -> int:
 
 
 def default_exec_timeout_s() -> float:
-    # A non-positive timeout would cancel work instantly; fall back to the default.
+    """Return the per-invoke execution timeout (seconds) from ``AGENT_EXEC_TIMEOUT_S``.
+
+    Postconditions: returns the override when positive, else the 60s default. A
+    non-positive override (which would cancel work instantly) falls back to the
+    default. Never raises.
+    """
     value = parse_float("AGENT_EXEC_TIMEOUT_S", DEFAULT_EXEC_TIMEOUT_S)
     return value if value > 0 else DEFAULT_EXEC_TIMEOUT_S
 

@@ -40,6 +40,13 @@ def test_cancel_active_job_marks_cancelled(store: _Store) -> None:
     assert store.is_job_cancelled("j1") is True
 
 
+def test_cancel_pending_job_marks_cancelled(store: _Store) -> None:
+    # A pending job is also a valid cancellable state (not just running).
+    store.create_job("p1", status=JOB_STATUS_PENDING)
+    assert store.cancel_job("p1") is True
+    assert store.is_job_cancelled("p1") is True
+
+
 def test_cancel_missing_job_returns_false(store: _Store) -> None:
     assert store.cancel_job("nope") is False
     assert store.is_job_cancelled("nope") is False
@@ -75,9 +82,7 @@ def test_mark_all_running_jobs_failed_returns_ids(store: _Store) -> None:
     assert store.get_job("a")["status"] == "failed"
 
 
-def test_mark_all_running_jobs_failed_swallows_client_error(
-    monkeypatch: pytest.MonkeyPatch, store: _Store
-) -> None:
+def test_mark_all_running_jobs_failed_swallows_client_error(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
     def _boom(*_: Any, **__: Any) -> None:
         raise RuntimeError("client down")
 

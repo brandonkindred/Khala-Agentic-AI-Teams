@@ -59,9 +59,14 @@ def _dsn(database: Optional[str] = None) -> str:
 
 
 def _pool_sizes() -> tuple[int, int]:
-    """Return ``(min_size, max_size)`` for the pool, from env vars."""
-    min_size = parse_int("POSTGRES_POOL_MIN_SIZE", 2)
-    max_size = parse_int("POSTGRES_POOL_MAX_SIZE", 10)
+    """Return ``(min_size, max_size)`` for the pool, from env vars.
+
+    Postconditions: both sizes are at least 1 (a zero/negative override is
+    clamped up, so the pool can never be configured empty), and
+    ``max_size >= min_size``.
+    """
+    min_size = parse_int("POSTGRES_POOL_MIN_SIZE", 2, minimum=1)
+    max_size = parse_int("POSTGRES_POOL_MAX_SIZE", 10, minimum=1)
     if max_size < min_size:
         max_size = min_size
     return min_size, max_size

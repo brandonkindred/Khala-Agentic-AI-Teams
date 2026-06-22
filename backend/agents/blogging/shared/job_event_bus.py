@@ -44,9 +44,18 @@ logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
-    # Canonical defensive int parsing (unset/blank/unparseable -> default), but
-    # keep the original operator-visible warning when a *present* override can't
-    # be parsed (a typo'd tuning var) so a misconfig isn't silently swallowed.
+    """Parse an int env var via the canonical ``shared_env.parse_int``, warning on a typo.
+
+    Postconditions: returns the parsed value, or ``default`` when the var is
+    unset/blank/unparseable. A *present but unparseable* override additionally
+    logs a warning so a typo'd tuning var is visible rather than silently
+    swallowed; an unset/blank var is silent.
+
+    The explicit ``int(raw)`` probe is deliberate: ``parse_int`` cannot warn, and
+    inferring "unparseable" from "result == default" would false-positive whenever
+    the override legitimately equals the default. ``os`` is imported locally
+    because this module has no module-level ``os`` dependency.
+    """
     import os
 
     from shared_env import parse_int

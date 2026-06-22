@@ -110,3 +110,21 @@ def test_float_rejects_non_finite(monkeypatch, value):
     # not propagate to a consumer that uses it as an interval/limit.
     monkeypatch.setenv("F", value)
     assert parse_float("F", 2.5) == 2.5
+
+
+def test_float_clamps_with_both_bounds(monkeypatch):
+    # Both minimum and maximum supplied: below floor clamps up, above ceiling
+    # clamps down, in-range passes through.
+    monkeypatch.setenv("F", "0.1")
+    assert parse_float("F", 1.0, minimum=0.5, maximum=2.0) == 0.5
+    monkeypatch.setenv("F", "3.0")
+    assert parse_float("F", 1.0, minimum=0.5, maximum=2.0) == 2.0
+    monkeypatch.setenv("F", "1.25")
+    assert parse_float("F", 1.0, minimum=0.5, maximum=2.0) == 1.25
+
+
+def test_float_default_is_also_clamped(monkeypatch):
+    # An unset var falls back to the default, which is itself clamped to bounds.
+    monkeypatch.delenv("F", raising=False)
+    assert parse_float("F", 0.1, minimum=0.5) == 0.5  # default below floor -> clamped up
+    assert parse_float("F", 9.0, maximum=2.0) == 2.0  # default above ceiling -> clamped down
