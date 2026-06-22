@@ -233,3 +233,52 @@ Strategist's reply just sent to the user:
 
 Output the JSON object now.\
 """
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Single-call mode (opt-in): one LLM call returns the prose reply AND the
+# structured extraction together. Trades the two-stage decoupling for lower
+# latency; the `reply` field is still run through the prose leak-guard.
+# ────────────────────────────────────────────────────────────────────────────
+
+SINGLE_CALL_SYSTEM_PROMPT = (
+    SYSTEM_PROMPT
+    + """
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+OUTPUT FORMAT (IMPORTANT)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Respond with a SINGLE JSON object only — no markdown fences, no text around it — with this shape:
+
+{
+  "reply": "<your natural-language message to the client — warm, expert prose, no JSON, no field names>",
+  "mission_update": { ...only brand fields newly provided or refined this turn; omit everything else, use {} if nothing... },
+  "suggested_questions": ["Question one?", "Question two?"]
+}
+
+The `reply` string is the only thing the client sees; write it exactly as the branding lead would speak. Put ALL structured data in `mission_update` / `suggested_questions`, never in `reply`."""
+)
+
+SINGLE_CALL_USER_TEMPLATE = """\
+Brand brief so far (for your reference only):
+- company_name: {company_name}
+- company_description: {company_description}
+- target_audience: {target_audience}
+- values: {values}
+- differentiators: {differentiators}
+- desired_voice: {desired_voice}
+- existing_brand_material: {existing_brand_material}
+- color_inspiration: {color_inspiration}
+- color_palettes: {color_palettes}
+- selected_palette_index: {selected_palette_index}
+- visual_style: {visual_style}
+- typography_preference: {typography_preference}
+- interface_density: {interface_density}
+
+Conversation so far:
+{conversation_history}
+
+User: {user_message}
+
+Output the single JSON object now (keys: reply, mission_update, suggested_questions).\
+"""

@@ -6,7 +6,6 @@ import concurrent.futures
 import logging
 import os
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -18,7 +17,7 @@ from pydantic import BaseModel, Field
 
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
-from branding_team.assistant.store import _default_mission
+from branding_team.assistant.store import _default_mission, _StoredMessage
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -254,27 +253,16 @@ class AttachConversationBrandRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class BrandingSession:
+class BrandingSession(BaseModel):
+    """Interactive-review session state.
+
+    A Pydantic model so persistence is just ``model_dump(mode="json")`` /
+    ``model_validate`` — no hand-rolled field-by-field (de)serialisation.
+    """
+
     mission: BrandingMission
     questions: List[BrandingQuestion]
     latest_output: TeamOutput
-
-
-def _session_to_dict(session: BrandingSession) -> dict:
-    return {
-        "mission": session.mission.model_dump(mode="json"),
-        "questions": [q.model_dump(mode="json") for q in session.questions],
-        "latest_output": session.latest_output.model_dump(mode="json"),
-    }
-
-
-def _session_from_dict(d: dict) -> BrandingSession:
-    return BrandingSession(
-        mission=BrandingMission.model_validate(d["mission"]),
-        questions=[BrandingQuestion.model_validate(q) for q in d["questions"]],
-        latest_output=TeamOutput.model_validate(d["latest_output"]),
-    )
 
 
 class BrandingSessionStore:
@@ -292,7 +280,7 @@ class BrandingSessionStore:
             cur.execute(
                 "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
                 "VALUES (%s, %s, %s)",
-                (session_id, Json(_session_to_dict(session)), now),
+                (session_id, Json(session.model_dump(mode="json")), now),
             )
         return session_id, session
 
@@ -306,7 +294,7 @@ class BrandingSessionStore:
             row = cur.fetchone()
         if row is None:
             return None
-        return _session_from_dict(row["session_json"])
+        return BrandingSession.model_validate(row["session_json"])
 
     @timed_query(store="branding_sessions", op="save")
     def save(self, session_id: str, session: BrandingSession) -> None:
@@ -316,7 +304,7 @@ class BrandingSessionStore:
             cur.execute(
                 "UPDATE branding_sessions SET session_json = %s, updated_at = %s "
                 "WHERE session_id = %s",
-                (Json(_session_to_dict(session)), now, session_id),
+                (Json(session.model_dump(mode="json")), now, session_id),
             )
 
 
@@ -353,10 +341,33 @@ def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     return name_ok and desc_ok and audience_ok
 
 
-def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]:
-    """If mission has minimal required fields, run orchestrator and return TeamOutput; else return None."""
+def _mission_fingerprint(mission: BrandingMission) -> str:
+    """Stable content fingerprint of a mission (the orchestrator's only input)."""
+    return mission.model_dump_json()
+
+
+def _run_orchestrator_if_ready(
+    mission: BrandingMission,
+    previous_mission: Optional[BrandingMission] = None,
+    previous_output: Optional[TeamOutput] = None,
+) -> Optional[TeamOutput]:
+    """Run the pipeline for *mission*, or reuse a cached result.
+
+    Returns None when the mission lacks the minimal required fields. The
+    pipeline output is a pure function of the mission, so when the mission is
+    unchanged since the previous run (``previous_mission`` fingerprint matches)
+    we return ``previous_output`` instead of re-running ~40 agents — this is
+    the common case on the chat path, where most turns don't change the
+    mission.
+    """
     if not _mission_has_minimal_required_fields(mission):
         return None
+    if (
+        previous_output is not None
+        and previous_mission is not None
+        and _mission_fingerprint(previous_mission) == _mission_fingerprint(mission)
+    ):
+        return previous_output
     return orchestrator.run(
         mission=mission,
         human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
@@ -777,14 +788,20 @@ def delete_branding_job(job_id: str) -> Dict[str, Any]:
     "/clients/{client_id}/brands/{brand_id}/request-market-research",
     response_model=CompetitiveSnapshot,
 )
-def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
+async def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
+    """Fetch a competitive snapshot for a brand from the Market Research team.
+
+    Async so the (potentially multi-minute) status polling yields to the event
+    loop instead of holding a worker thread. 404 if the brand is unknown; 503
+    if the market-research service is unconfigured or fails.
+    """
     brand = branding_store.get_brand(client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
     try:
-        from branding_team.adapters.market_research import request_market_research
+        from branding_team.adapters.market_research import request_market_research_async
 
-        snapshot = request_market_research(brand.mission)
+        snapshot = await request_market_research_async(brand.mission)
     except Exception:
         raise HTTPException(status_code=503, detail="Market research service unavailable")
     if not snapshot:
@@ -931,6 +948,16 @@ def answer_branding_question(
 # ---------------------------------------------------------------------------
 
 
+def _local_message(role: str, content: str) -> _StoredMessage:
+    """Build an in-memory message mirroring what ``append_message`` just wrote,
+    so a turn's response can be assembled without re-reading the row."""
+    return _StoredMessage(
+        role=role,
+        content=content,
+        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+    )
+
+
 def _conversation_to_response(
     conversation_id: str,
     brand_id: Optional[str],
@@ -967,18 +994,26 @@ def create_branding_conversation(
     conversation_id = conversation_store.create(brand_id=brand_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
+    # Track the response messages in memory (a fresh conversation has none yet)
+    # so we don't re-read the row we just wrote.
+    messages: List[_StoredMessage] = []
+    mission: BrandingMission = _default_mission()
+    latest_output: Optional[TeamOutput] = None
 
     if initial_message:
         # Freshly created conversation: no prior history, mission is the default.
         conversation_store.append_message(conversation_id, "user", initial_message)
+        messages.append(_local_message("user", initial_message))
         reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
             [], _default_mission(), initial_message
         )
         conversation_store.update_mission(conversation_id, updated_mission)
         conversation_store.append_message(conversation_id, "assistant", reply)
+        messages.append(_local_message("assistant", reply))
         output = _run_orchestrator_if_ready(updated_mission)
         if output is not None:
             conversation_store.update_output(conversation_id, output)
+        mission, latest_output = updated_mission, output
 
         # Auto-create a brand when the user provided enough info in the initial message.
         if not brand_id and not req.skip_save and _mission_has_brand_name(updated_mission):
@@ -991,17 +1026,12 @@ def create_branding_conversation(
             "starting with your Strategic Core. Let's begin: what's your company or product name?"
         )
         conversation_store.append_message(conversation_id, "assistant", reply)
+        messages.append(_local_message("assistant", reply))
         suggested_questions = [
             "What's your company name?",
             "Who is your target audience?",
             "What does your company do?",
         ]
-
-    state = conversation_store.get_state(conversation_id)
-    if state is None:
-        messages, mission, latest_output = [], _default_mission(), None
-    else:
-        messages, mission, latest_output = state.messages, state.mission, state.latest_output
 
     return _conversation_to_response(
         conversation_id, brand_id, messages, mission, latest_output, suggested_questions
@@ -1075,21 +1105,25 @@ def send_branding_conversation_message(
     )
     conversation_store.update_mission(conversation_id, updated_mission)
     conversation_store.append_message(conversation_id, "assistant", reply)
-    output = _run_orchestrator_if_ready(updated_mission)
-    if output is not None:
+    # Reuse the prior output when the mission is unchanged this turn; the
+    # short-circuit returns the same object, so identity tells us whether a
+    # fresh run happened and thus whether a write is needed.
+    output = _run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
+    if output is not None and output is not state.latest_output:
         conversation_store.update_output(conversation_id, output)
 
     # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
     if not brand_id and not payload.skip_save and _mission_has_brand_name(updated_mission):
         brand_id = _auto_create_brand_from_conversation(conversation_id, updated_mission, output)
 
-    final = conversation_store.get_state(conversation_id)
-    if final is None:
-        messages, mission, latest_output = [], updated_mission, output
-    else:
-        messages, mission, latest_output = final.messages, final.mission, final.latest_output
+    # Assemble the response from known state instead of re-reading the row.
+    messages = list(state.messages) + [
+        _local_message("user", payload.message),
+        _local_message("assistant", reply),
+    ]
+    latest_output = output if output is not None else state.latest_output
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, suggested_questions
+        conversation_id, brand_id, messages, updated_mission, latest_output, suggested_questions
     )
 
 

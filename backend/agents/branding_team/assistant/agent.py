@@ -24,6 +24,8 @@ from branding_team.models import BrandingMission, ColorPalette
 from .prompts import (
     EXTRACTION_SYSTEM_PROMPT,
     EXTRACTION_USER_TEMPLATE,
+    SINGLE_CALL_SYSTEM_PROMPT,
+    SINGLE_CALL_USER_TEMPLATE,
     SYSTEM_PROMPT,
     USER_TURN_TEMPLATE,
 )
@@ -35,6 +37,45 @@ _DEFAULT_SUGGESTIONS = [
     "Who is your target audience?",
     "What 3–5 values define your brand?",
 ]
+
+
+def _single_call_enabled() -> bool:
+    """True when the opt-in single-LLM-call assistant path is enabled."""
+    return os.environ.get("BRANDING_ASSISTANT_SINGLE_CALL", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def _parse_single_call(raw: str) -> Tuple[str, Dict[str, Any], List[str]]:
+    """Parse the single-call JSON → (reply, mission_update, suggested_questions).
+
+    Tolerates markdown fences / surrounding prose. Returns empty values on any
+    parse failure so the caller can substitute a graceful fallback.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "", {}, []
+    cleaned = re.sub(r"^```(?:json)?\s*", "", text)
+    cleaned = re.sub(r"\s*```$", "", cleaned).strip()
+    parsed: Any = None
+    try:
+        parsed = json.loads(cleaned)
+    except (json.JSONDecodeError, TypeError):
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group(0))
+            except (json.JSONDecodeError, TypeError):
+                parsed = None
+    if not isinstance(parsed, dict):
+        return "", {}, []
+    reply = str(parsed.get("reply") or "")
+    mission_update = _coerce_mission(parsed.get("mission_update"))
+    suggested_questions = _coerce_suggestions(parsed.get("suggested_questions"))
+    return reply, mission_update, suggested_questions
 
 
 def _coerce_suggestions(value: Any) -> List[str]:
@@ -331,7 +372,7 @@ class BrandingAssistantAgent:
     `mission_update` and `suggested_questions` from the same turn.
     """
 
-    def __init__(self, conversation_llm=None, extraction_llm=None, llm=None):  # noqa: ANN001
+    def __init__(self, conversation_llm=None, extraction_llm=None, llm=None, single_call_llm=None):  # noqa: ANN001
         # Backward compatibility: the legacy ``llm=`` argument drives BOTH
         # stages so tests and offline callers that inject a fake never hit a
         # live LLM. New code should pass ``conversation_llm`` and
@@ -341,6 +382,11 @@ class BrandingAssistantAgent:
                 conversation_llm = llm
             if extraction_llm is None:
                 extraction_llm = llm
+
+        # Optional single-call agent (one LLM round-trip producing reply +
+        # extraction together). Only used when BRANDING_ASSISTANT_SINGLE_CALL
+        # is set; built lazily so the default two-stage path is untouched.
+        self._single_call_agent = single_call_llm
 
         if conversation_llm is None or extraction_llm is None:
             from strands import Agent
@@ -366,6 +412,56 @@ class BrandingAssistantAgent:
         self._conversation_agent = conversation_llm
         self._extraction_agent = extraction_llm
 
+    def _get_single_call_agent(self):  # noqa: ANN201
+        if self._single_call_agent is None:
+            from strands import Agent
+
+            from llm_service import get_strands_model
+
+            self._single_call_agent = Agent(
+                model=get_strands_model("branding_assistant"),
+                system_prompt=SINGLE_CALL_SYSTEM_PROMPT,
+            )
+        return self._single_call_agent
+
+    def _respond_single_call(
+        self,
+        messages: List[Tuple[str, str]],
+        current_mission: BrandingMission,
+        user_message: str,
+    ) -> Tuple[str, BrandingMission, List[str]]:
+        """One-round-trip variant: a single LLM call returns the reply plus the
+        structured extraction. Opt-in via ``BRANDING_ASSISTANT_SINGLE_CALL`` —
+        halves per-turn latency at the cost of constraining the reply to JSON.
+        The prose leak-guard still applies to the ``reply`` field.
+        """
+        brief = _format_brief(current_mission)
+        history = _format_history(messages)
+        prompt = SINGLE_CALL_USER_TEMPLATE.format(
+            conversation_history=history, user_message=user_message, **brief
+        )
+        try:
+            raw = str(self._get_single_call_agent()(prompt)).strip()
+        except Exception:
+            logger.exception("Branding single-call LLM failed")
+            return (
+                "I'm here to help build your brand. Could you tell me your company name and what you do?",
+                current_mission,
+                list(_DEFAULT_SUGGESTIONS),
+            )
+
+        reply, mission_update, suggested_questions = _parse_single_call(raw)
+        reply_text = _strip_accidental_json(reply)
+        if not reply_text:
+            reply_text = (
+                "Thanks — let me make sure I'm following you. Could you tell me a bit more about "
+                "what this brand is for and who you want it to resonate with?"
+            )
+        if not suggested_questions:
+            suggested_questions = list(_DEFAULT_SUGGESTIONS)
+        updated_mission = _merge_mission_update(current_mission, mission_update)
+        return reply_text, updated_mission, suggested_questions
+
     def respond(
         self,
         messages: List[Tuple[str, str]],
@@ -378,6 +474,9 @@ class BrandingAssistantAgent:
         current_mission: mission state before this turn.
         user_message: latest user message.
         """
+        if _single_call_enabled():
+            return self._respond_single_call(messages, current_mission, user_message)
+
         brief = _format_brief(current_mission)
         history = _format_history(messages)
 
