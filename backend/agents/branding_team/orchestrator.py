@@ -174,6 +174,10 @@ class BrandingTeamOrchestrator:
         Runs the async graph on a worker thread when already inside a running
         event loop (so a nested ``asyncio.run`` does not clash), else directly.
 
+        Preconditions:
+            - ``mission`` is the (possibly store-resolved) mission to render into
+              the graph task prompt; ``target_phase`` is the phase to stop at, or
+              ``None`` to run the full pipeline.
         Postconditions:
             - Returns the raw multi-agent graph result for downstream extraction.
         """
@@ -196,6 +200,9 @@ class BrandingTeamOrchestrator:
     def _extract_phases(self, result, stop_idx):
         """Extract the up-to-five phase outputs from the graph result.
 
+        Preconditions:
+            - ``result`` is the object returned by :meth:`_invoke_graph`;
+              ``stop_idx`` is the index (0-4) of the last phase to extract.
         Postconditions:
             - ``strategic_core`` is always extracted; each later phase is
               extracted only when ``stop_idx`` reached it, else ``None``.
@@ -232,6 +239,9 @@ class BrandingTeamOrchestrator:
     ):
         """Map the highest produced phase output to a :class:`BrandPhase`.
 
+        Preconditions:
+            - Each phase argument is its extracted output or ``None`` when that
+              phase did not run; ``approved`` is the human-review decision.
         Postconditions:
             - Returns ``COMPLETE`` only when governance was produced *and*
               ``approved`` is true; otherwise the highest produced phase.
@@ -253,6 +263,10 @@ class BrandingTeamOrchestrator:
     def _run_integrations(mission, strategic_core, include_market_research, include_design_assets):
         """Run the optional market-research and design-asset integrations.
 
+        Preconditions:
+            - ``strategic_core`` is the phase-1 output (the design-asset input);
+              ``include_market_research``/``include_design_assets`` are the
+              request flags gating each integration.
         Postconditions:
             - Returns ``(competitive_snapshot, design_asset_result)``; each is
               ``None`` when its integration is disabled. Market-research failures
@@ -277,6 +291,10 @@ class BrandingTeamOrchestrator:
     def _determine_status(human_review, current_phase, stop_idx):
         """Derive the workflow status and human-facing summary for the output.
 
+        Preconditions:
+            - ``current_phase`` is the resolved :class:`BrandPhase`; ``stop_idx``
+              is the index of the last phase that ran; ``human_review`` carries
+              the approval decision.
         Postconditions:
             - Returns ``(WorkflowStatus, summary)`` for one of three cases:
               review pending (not approved), ready for rollout (complete), or

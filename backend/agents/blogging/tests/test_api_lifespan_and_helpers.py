@@ -156,8 +156,10 @@ def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
     fake_shared_postgres.close_pool = boom_close
     monkeypatch.setitem(sys.modules, "shared_postgres", fake_shared_postgres)
 
-    monkeypatch.setattr(_api_main, "_run_blogging_service_shutdown", lambda: None)
-
+    # NB: the real _run_blogging_service_shutdown runs on teardown — create_team_app
+    # captured it as on_shutdown at construction time, so it cannot be monkeypatched
+    # here. It is defensive, so the lifespan completing without raising is what proves
+    # the schema register/close failures (boom_*) are swallowed.
     app = _api_main.app
 
     async def _drive():

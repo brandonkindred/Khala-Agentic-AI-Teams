@@ -2563,6 +2563,9 @@ class DeleteStrategyLabRecordResponse(BaseModel):
 # Bounded thread-pool ceiling for the job-service fan-out helpers below. These
 # issue blocking sync HTTP calls, so threads (not asyncio) are the right tool;
 # the cap keeps a large server-side job list from spawning unbounded threads.
+# NB: _purge_strategy_lab_job_storage runs the four teams on an outer pool of 4,
+# so a full purge peaks at 4 x _PURGE_MAX_WORKERS = 64 transient threads against
+# the job service — keep both widths in mind when tuning either.
 _PURGE_MAX_WORKERS = 16
 
 

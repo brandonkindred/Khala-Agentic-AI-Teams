@@ -9,6 +9,7 @@ fakes elsewhere can't drift from the engine.
 from __future__ import annotations
 
 import os
+from contextlib import contextmanager
 from uuid import uuid4
 
 import pytest
@@ -27,11 +28,21 @@ class _Doc(BaseModel):
 
 
 class _StubCursor:
-    """Records the executed statement/params and returns a canned row."""
+    """Records the executed statement/params and returns a canned row.
+
+    Doubles as a context manager so it can stand in for a real
+    ``conn.cursor(...)`` in :func:`merge_jsonb_returning`'s ``with`` block.
+    """
 
     def __init__(self, result):
         self._result = result
         self.executed: list = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
 
     def execute(self, sql, params):
         self.executed.append((sql, list(params)))
@@ -84,6 +95,28 @@ def test_merge_via_cursor_coerces_model_and_handles_miss() -> None:
 def test_merge_via_cursor_rejects_empty_key() -> None:
     with pytest.raises(ValueError, match="at least one column"):
         merge_jsonb_via_cursor(_StubCursor(None), "t", key={}, patch={"a": 1})
+
+
+def test_merge_jsonb_returning_drives_connection(monkeypatch) -> None:
+    """Cover the get_conn() path of merge_jsonb_returning without a live DB."""
+    import shared_postgres.aggregate as agg
+
+    cur = _StubCursor({"data": {"x": 1, "y": 2}})
+
+    class _Conn:
+        def cursor(self, row_factory=None):
+            return cur
+
+    @contextmanager
+    def _fake_get_conn(database=None):
+        yield _Conn()
+
+    monkeypatch.setattr(agg, "get_conn", _fake_get_conn)
+    out = agg.merge_jsonb_returning("branding_brands", key={"id": "r1"}, patch={"y": 2})
+    assert out == {"x": 1, "y": 2}
+    sql, params = cur.executed[0]
+    assert sql.endswith("RETURNING data")
+    assert params[1:] == ["r1"]
 
 
 @pytest.mark.skipif(

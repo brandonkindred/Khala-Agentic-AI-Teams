@@ -145,15 +145,9 @@ class _FakeCursor:
                     self.rowcount = 0
                     self._last_fetch_one = None
                 return
-            # Legacy whole-document replace (retained for any non-merge writer).
-            data, brand_id, client_id = params
-            row = self._db["brands"].get(brand_id)
-            if row and row["client_id"] == client_id:
-                row["data"] = _unwrap_json(data)
-                self.rowcount = 1
-            else:
-                self.rowcount = 0
-            return
+            # Both branding brand writers go through the merge / jsonb_set paths
+            # above; any other UPDATE shape is unexpected and falls through to the
+            # AssertionError below (fail loud rather than silently whole-replace).
 
         # -- conversations ------------------------------------------------
         if norm.startswith("insert into branding_conversations"):
