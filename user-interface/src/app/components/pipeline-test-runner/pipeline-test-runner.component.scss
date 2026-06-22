@@ -55,7 +55,7 @@
   font-size: 0.85rem;
   color: var(--kh-text-secondary);
 
-  &:hover { background: rgba(255, 255, 255, 0.04); }
+  &:hover { background: var(--kh-glass); }
   &.active { background: var(--kh-info-subtle); border: 1px solid var(--kh-info-subtle); }
 
   .run-time { flex: 1; }
@@ -75,7 +75,7 @@
 .status-running { color: var(--kh-info) !important; background: var(--kh-info-subtle); }
 .status-waiting { color: var(--kh-warning) !important; background: var(--kh-warning-subtle); }
 .status-failed { color: var(--kh-error) !important; background: var(--kh-error-subtle); }
-.status-cancelled { color: var(--kh-text-tertiary) !important; background: rgba(255, 255, 255, 0.04); }
+.status-cancelled { color: var(--kh-text-tertiary) !important; background: var(--kh-glass); }
 
 // Step list
 .step-list {

@@ -144,7 +144,7 @@
   align-items: center;
   gap: 0.5rem;
   padding: 0.75rem 1rem;
-  background: var(--kh-warning-subtle, var(--kh-warning-subtle));
+  background: var(--kh-warning-subtle);
   color: var(--kh-warning, var(--kh-warning));
   border-radius: var(--kh-radius-md);
   margin-bottom: 1.25rem;
@@ -335,7 +335,7 @@
     font-size: 1.4rem;
     width: 1.4rem;
     height: 1.4rem;
-    color: #09090b;
+    color: var(--kh-text-on-accent);
   }
 
   &.winning-avatar { background: var(--kh-success); }
@@ -907,7 +907,7 @@
     border-color: var(--kh-success);
     background: var(--kh-success);
 
-    mat-icon { color: #09090b; }
+    mat-icon { color: var(--kh-text-on-accent); }
   }
 
   .phase-label { color: var(--kh-success); }

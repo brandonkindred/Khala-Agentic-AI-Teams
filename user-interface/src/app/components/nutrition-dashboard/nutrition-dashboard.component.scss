@@ -237,7 +237,7 @@
 
     .message-bubble {
       background: var(--kh-info);
-      color: #09090b;
+      color: var(--kh-text-on-accent);
       border-bottom-right-radius: 4px;
     }
 
@@ -253,7 +253,7 @@
     .message-bubble {
       background: var(--kh-surface-3);
       color: var(--kh-text-primary);
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      border: 1px solid var(--kh-glass-border);
       border-bottom-left-radius: 4px;
     }
   }
@@ -358,7 +358,7 @@
   padding: 0.15rem 0.5rem;
   border-radius: 999px;
   font-size: 0.75rem;
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--kh-glass);
 
   &.dietary {
     background: var(--kh-info-subtle);
@@ -434,7 +434,7 @@
 .meal-tile {
   padding: 0.65rem;
   border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--kh-glass-border);
   background: rgba(255, 255, 255, 0.02);
   cursor: pointer;
   transition: border-color 0.15s ease, background 0.15s ease;
@@ -557,7 +557,7 @@
     color: var(--kh-text-tertiary);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.04);
+      background: var(--kh-glass);
       border-color: var(--kh-success);
       color: var(--kh-success);
     }

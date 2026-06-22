@@ -52,7 +52,7 @@
   }
   &.neutral {
     color: var(--kh-text-tertiary);
-    background: rgba(255, 255, 255, 0.04);
+    background: var(--kh-glass);
   }
 }
 
@@ -98,7 +98,7 @@
   cursor: pointer;
   gap: 4px;
 
-  &:hover { background: rgba(255, 255, 255, 0.04); }
+  &:hover { background: var(--kh-glass); }
   &.active { background: var(--kh-info-subtle); border: 1px solid var(--kh-info-subtle); }
 
   .session-name {
@@ -135,7 +135,6 @@
   color: var(--kh-text-primary);
   padding: 4px 8px;
   font-size: 0.85rem;
-  outline: none;
 }
 
 .new-session-btn, .export-btn {
@@ -164,7 +163,7 @@
   &.user {
     align-self: flex-end;
     background: var(--kh-accent-gradient);
-    color: #09090b;
+    color: var(--kh-text-on-accent);
     border-bottom-right-radius: 4px;
   }
 

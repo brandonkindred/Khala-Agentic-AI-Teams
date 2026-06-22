@@ -59,10 +59,10 @@
   &.user {
     align-self: flex-end;
     background: var(--kh-accent-gradient);
-    color: #09090b;
+    color: var(--kh-text-on-accent);
     border-bottom-right-radius: 4px;
 
-    ::ng-deep strong { color: #09090b; }
+    ::ng-deep strong { color: var(--kh-text-on-accent); }
 
     .message-time { color: rgba(9, 9, 11, 0.6); }
   }

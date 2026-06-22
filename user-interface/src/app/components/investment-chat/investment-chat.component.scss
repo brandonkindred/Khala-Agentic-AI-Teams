@@ -104,7 +104,7 @@
 
     .message-bubble {
       background: var(--kh-accent-gradient);
-      color: #09090b;
+      color: var(--kh-text-on-accent);
       border-bottom-right-radius: 4px;
     }
 
@@ -227,7 +227,7 @@
     color: var(--kh-text-secondary);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.05);
+      background: var(--kh-glass);
       border-color: var(--kh-accent);
       color: var(--kh-accent);
     }

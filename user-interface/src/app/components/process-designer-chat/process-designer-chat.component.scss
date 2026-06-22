@@ -111,7 +111,7 @@
   &.user {
     align-self: flex-end;
     background: var(--kh-accent-gradient);
-    color: #09090b;
+    color: var(--kh-text-on-accent);
     border-bottom-right-radius: 4px;
 
     .message-time {

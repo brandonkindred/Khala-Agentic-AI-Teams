@@ -52,6 +52,11 @@ body {
   // touching call sites. Defaults to the accent, so there is no visual change.
   --kh-focus-ring:        var(--kh-accent);
 
+  // Foreground for text/icons that sit on a bright fill (accent gradient or a
+  // high-luminance semantic token used as a background). Near-black so it keeps
+  // high contrast on amber/green/blue/red fills.
+  --kh-text-on-accent:    #09090b;
+
   // ── Surface Layers (wider gaps for clear depth separation) ──────────────
   --kh-surface-0:         #000000;   // app background (pure black)
   --kh-surface-1:         #0a0a0a;   // sidebar, main content bg
