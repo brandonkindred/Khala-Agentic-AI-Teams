@@ -55,6 +55,11 @@ The stepper carries a small **handoff state** `{registryAgentId?, teamId?, proce
 pre‑seeds the next (the agent you just tested is the one offered for the roster; the team you just composed is the
 default persona target). This glue is the only genuinely new interaction concept.
 
+**Stepper navigation is forward‑only.** Clicking a previous stage indicator does *not* navigate backward — the
+indicators show progress, not links. Iteration happens only via the explicit Stage‑4 buttons **"fix an agent"**
+(→ Stage 2) and **"iterate roster"** (→ Stage 3). This keeps the journey guided while still allowing controlled
+back‑loops.
+
 ### 2.2 Navigation changes (`user-interface/src/app/models/navigation.model.ts`, `agentic-ai` group)
 
 ```
@@ -83,6 +88,28 @@ The three container shells — `AgentConsoleComponent` (7‑tab), `AgenticTeamDa
 `PersonaTestingDashboardComponent` — are **deleted**. Their useful children are **moved** into the Studio (see §4).
 The non‑journey console tabs (Provisioning, Backlog, Sprints, Feedback, Cognition) are **relocated to first‑class
 routes**, never parked in a legacy shell. After this, nothing routes to the old surfaces.
+
+**Relocated-route UIs (kept deliberately thin — no redesign):**
+
+- **`/product-delivery`** — a minimal `ProductDeliveryComponent` with a simple tabbed layout
+  (**Backlog · Sprints · Feedback**) that mounts the existing tab components directly, with no added chrome.
+- **`/cognition`** — renders the existing `CognitionTabComponent` as a full-page view, no wrapper chrome.
+
+These routes exist only so the cutover loses no functionality; their internals are unchanged from today's tabs.
+
+### 2.4 Handoff state management
+
+The four-stage handoff is managed by a single **`AgentStudioStateService`**, provided at the **Studio shell**
+level (one instance per Studio session). It holds the current `registryAgentId`, `teamId`, `processId`, and
+`personaId`.
+
+- **Read/write:** each stage component injects the service; user actions (select an agent, create/select a team,
+  pick a process, choose a persona) write to it. The stepper and each next stage **read** it to pre‑seed
+  themselves (e.g., Stage 3 offers the Stage‑2 agent as a roster candidate; Stage 4 defaults its target to the
+  Stage‑3 team).
+- **Persistence:** the service hydrates from / syncs to the server-side **draft API** (see §3.5). The draft is the
+  durable source of truth; the service may keep an in‑session `localStorage` cache for unsaved edits, but resume
+  across reloads/devices comes from the API, not local storage.
 
 ---
 
@@ -114,7 +141,10 @@ Each stage below gives: purpose · wireframe · reused vs new components · the 
 ```
 
 - **Reuse as‑is:** `agent-console/agent-catalog` (browse, filter, inspect drawer; calls `agent-catalog-api.service.ts` → `GET /api/agents`, `/api/agents/{id}`, schema endpoints).
-- **Folded in:** the **Provisioning** action (from the old console Provisioning tab) lives here as a per‑agent "Provision" affordance — provisioning is part of building/deploying an agent, so it belongs at this stage rather than a separate tab.
+- **Folded in (Provisioning):** the `[ Provision ▾ ]` button in the inspect drawer opens the existing
+  `agent-provisioning-dashboard` component in a **slide‑out panel** (modal on narrow viewports), letting the user
+  deploy the selected agent to a target environment. The provisioning flow itself is **unchanged** from today's
+  Provisioning tab — only its entry point moves here, because provisioning is part of building/deploying an agent.
 - **Handoff:** selecting an agent sets `registryAgentId`; **"Test this agent →"** advances to Stage 2 pre‑seeded.
 
 ### Stage 2 — Test Agent
@@ -139,7 +169,8 @@ Each stage below gives: purpose · wireframe · reused vs new components · the 
 ```
 
 - **Reuse as‑is:** `agent-console/agent-runner` (invoke‑in‑sandbox, saved inputs, run history, unified diff) — calls `agent-runner-api.service.ts` → `POST /api/agents/{id}/invoke`, `/runs`, `/saved-inputs`, `/diff`. Highest‑value reuse; near‑leaf component.
-- **Handoff:** **"Add to team →"** advances to Stage 3 carrying `registryAgentId`, so the tested agent is the default candidate for the roster.
+- **Sandbox status indicator (`● WARM`):** reuses the **existing** sandbox management in `agent-runner` — no new behavior. States are **COLD** (not initialized), **WARM** (initialized/ready), **HOT** (recently used). The runner warms the sandbox automatically when the agent is selected; the indicator reflects the runner's reported state.
+- **Handoff (`Add to team →`):** advances to Stage 3 with the current `registryAgentId` **pre‑selected as a candidate**. The agent is **NOT** automatically added to any roster — the user must add it explicitly via the Stage‑3 roster panel's "+ Add". This prevents accidental roster changes.
 
 ### Stage 3 — Compose Team
 
@@ -166,7 +197,8 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 
 - **Reuse as‑is:** `process-designer-chat` (LLM design mode, `@Input() team`); team CRUD, process/DAG editing, and roster‑validation display from `agentic-team-dashboard` (`agentic-team-api.service.ts`).
 - **New (one small component): Roster panel.** Lists roster entries with a **`source` badge** (`registry` ✦ / `generated` ⚙) and a delete control. **"+ Add"** offers two paths: **search registry agents** (→ new `POST …/teams/{id}/agents/from-registry`) or **suggest via chat** (existing LLM flow). Deleting calls new `DELETE …/teams/{id}/agents/{agent_name}`.
-- **Handoff:** sets `teamId` (+ `processId` when a process is selected); **"Test this team →"** advances to Stage 4.
+- **Roster validation — "fully staffed":** a roster is *fully staffed* when **every step in the process DAG has at least one assigned agent**, and each assigned agent has the **skills the step requires** (per the process design). This is exactly the existing logic in `roster_validation.py` (it reads the roster's `skills/capabilities/tools` list fields) — registry agents pass uniformly because the `from-registry` projection fills those fields (see §5.3). The `✓ fully staffed` / warning indicator surfaces that module's result; no new validation rules are introduced.
+- **Handoff (`Test this team →`):** **enabled only when the roster is fully staffed AND a process is selected.** Clicking it sets `teamId` + `processId` and advances to Stage 4. While disabled, the button shows a **tooltip** listing what's missing (e.g. "step *Review* has no agent" / "select a process").
 
 ### Stage 4 — Test Team with Personas
 
@@ -196,6 +228,23 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 - **Manual sub‑mode — reuse as‑is:** `agentic-team-test-panel` (composes `agent-test-chat` + `pipeline-test-runner`; drives `…/test-chat/*` and `…/test-pipeline/runs` + `/input`).
 - **Persona sub‑mode — reuse as‑is:** `start-test-dialog`, `persona-editor-dialog`, `persona-test-audit-panel` (from the old persona dashboard). The launcher is **pre‑seeded** with the current team as `target_team_key = "agentic_team:<teamId>"`; the agentic team appears in the dropdown automatically once the backend `/testable-teams` change lands (§5). Personas are picked from the library or created inline.
 - **Back‑loops:** "iterate roster" → Stage 3; "fix an agent" → Stage 2.
+
+### 3.5 Drafts & session resume (server‑side)
+
+The `[ Save draft ▾ ]` control in the Studio header lets a user **save and resume** an in‑progress journey across
+reloads and devices. **Persistence is server‑side** (chosen over client‑only so drafts survive device changes and
+match the persisted nature of teams/personas):
+
+- **Save** — `POST /api/agent-studio/drafts` with the current handoff state (`registryAgentId`, `teamId`,
+  `processId`, `personaId`) **plus** any partial work the stages hold (e.g. Stage‑2 test inputs, Stage‑3 roster
+  composition not yet committed to a team). Returns a `draft_id` (+ name/updated_at). Re‑saving updates in place.
+- **Load** — a header dropdown lists the current user's drafts via `GET /api/agent-studio/drafts`; selecting one
+  hydrates `AgentStudioStateService` (§2.4) and jumps the stepper to the furthest reachable stage.
+- **Scope** — drafts are **scoped to the authenticated user**; one user cannot see another's drafts.
+
+This makes draft persistence a **must‑have backend touchpoint** (see §5.5). The frontend `AgentStudioStateService`
+is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
+auto‑syncs, but the API is the source of truth.
 
 ---
 
@@ -254,7 +303,8 @@ sequenceDiagram
 1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`.
 2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams (cross‑service `GET …/agentic-team-provisioning/teams`, filtered to teams with ≥1 `complete` process). Without this the persona dropdown is empty.
 3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`.
-4. *(Recommended cleanup)* explicit `process_id` column on `user_agent_founder_runs` instead of overloading `repo_path` to carry the chosen process id.
+4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. Required because the header `Save draft` / load‑draft UX is non‑functional without it.
+5. *(Recommended cleanup)* explicit `process_id` column on `user_agent_founder_runs` instead of overloading `repo_path` to carry the chosen process id.
 
 **Nice‑to‑have (UX works without; flag as follow‑ups):** real registry‑agent invocation inside `pipeline_runner.py` (`source=="registry"` branch — Phase 1 runs them as LLM personas, acceptable for v1); surfacing not‑yet‑rostered registry agents in `recommend_agents_for_step`; faster persona poll interval for agentic runs.
 
@@ -276,11 +326,15 @@ sequenceDiagram
 
 ---
 
-## 7. Decisions to confirm at review
+## 7. Decisions
 
+**Resolved (review round 2):**
+- **Draft persistence → server‑side.** `POST/GET /api/agent-studio/drafts`, user‑scoped, cross‑device (see §3.5, §5.4).
+- **Relocation homes confirmed:** Provisioning → Stage 1; Backlog/Sprints/Feedback → `/product-delivery`; Cognition → `/cognition`. No legacy routes retained.
+
+**Still open:**
 1. **High‑fidelity Figma mockups** in addition to these wireframes? (Figma MCP is available.)
 2. **`process_id` column vs `repo_path` overload** on `user_agent_founder_runs` (recommend the column).
-3. **Relocation homes** for ex‑console tabs: Provisioning → Build stage; Backlog/Sprints/Feedback → `/product-delivery`; Cognition → `/cognition`. (No legacy routes retained.)
 
 ---
 
@@ -296,11 +350,12 @@ sequenceDiagram
 ## 9. Build sequence (post‑approval, for reference)
 
 1. Backend must‑haves (§5.1–5.3) — enables the persona‑drives‑team path end‑to‑end.
-2. Studio shell + stepper + handoff state; move catalog + runner into Stages 1–2.
-3. Compose stage: process designer + new roster panel (registry/generated, add/delete).
-4. Persona stage: manual + persona sub‑modes, pre‑seeded launcher, live audit.
-5. Relocate Provisioning / Product Delivery / Cognition; **delete** old routes, nav items, and shells.
-6. Verify the happy path (§ below) and the 90% coverage floor on new/changed code.
+2. Studio drafts API (§5.4) + `AgentStudioStateService` (§2.4) — the persistence spine the shell builds on.
+3. Studio shell + stepper + handoff state; move catalog + runner into Stages 1–2.
+4. Compose stage: process designer + new roster panel (registry/generated, add/delete).
+5. Persona stage: manual + persona sub‑modes, pre‑seeded launcher, live audit.
+6. Relocate Provisioning / Product Delivery / Cognition; **delete** old routes, nav items, and shells.
+7. Verify the happy path (§ below) and the 90% coverage floor on new/changed code.
 
 ## 10. Verification (of the eventual build)
 
