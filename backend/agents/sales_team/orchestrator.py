@@ -1119,9 +1119,17 @@ class SalesPodOrchestrator:
                 )
                 return []
 
+        # submit (not pool.map) so each call runs inside a fresh copy of this
+        # thread's context — the LLM attribution/request-id contextvars do not
+        # propagate to raw worker threads (see llm_service.attribution). Iterating
+        # the futures in submission order preserves pool.map's input ordering.
         with ThreadPoolExecutor(max_workers=self.config.decision_maker_workers) as pool:
-            for result in pool.map(_map_one, companies):
-                mapped.extend(result)
+            futures = [
+                pool.submit(contextvars.copy_context().run, _map_one, company)
+                for company in companies
+            ]
+            for fut in futures:
+                mapped.extend(fut.result())
 
         if not mapped:
             run_notes.append("No decision-makers identified across the company shortlist.")
@@ -1178,8 +1186,12 @@ class SalesPodOrchestrator:
                 return p, None
 
         dossiers: dict[str, ProspectDossier] = {}
+        # copy_context().run per task so attribution propagates into the workers
+        # (raw ThreadPoolExecutor does not copy contextvars; see llm_service.attribution).
         with ThreadPoolExecutor(max_workers=self.config.dossier_workers) as pool:
-            futures = [pool.submit(_build_one, p) for p in final_prospects]
+            futures = [
+                pool.submit(contextvars.copy_context().run, _build_one, p) for p in final_prospects
+            ]
             for fut in as_completed(futures):
                 p, dossier = fut.result()
                 if dossier is None:
