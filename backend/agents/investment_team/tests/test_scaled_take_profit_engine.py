@@ -36,6 +36,7 @@ from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
     TradingServiceResult,
     _EngineExitDispatcher,
+    _ScaledLadderCursor,
     _TrackedPosition,
 )
 from investment_team.trading_service.strategy.contract import (
@@ -111,6 +112,19 @@ def _bar(**kw) -> _MockBar:
     }
     defaults.update(kw)
     return _MockBar(**defaults)
+
+
+def test_cursor_advance_rejects_out_of_order_rung() -> None:
+    # advance() enforces fire-in-cursor-order with an explicit raise (holds under -O).
+    cursor = _ScaledLadderCursor()
+    cursor.advance(0, 0)  # rung 0 fires → cursor at 1
+    assert cursor.mapping == {0: 1}
+    with pytest.raises(ValueError, match="cursor order"):
+        cursor.advance(0, 0)  # rung 0 again (cursor is 1) → rejected
+    with pytest.raises(ValueError, match="cursor order"):
+        cursor.advance(0, 5)  # skip ahead → rejected
+    cursor.advance(0, 1)  # the in-order rung still advances
+    assert cursor.mapping == {0: 2}
 
 
 # ---------------------------------------------------------------------------

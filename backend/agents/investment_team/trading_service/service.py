@@ -261,12 +261,16 @@ class _ScaledLadderCursor:
         """Advance past the rung that just fired.
 
         Preconditions: ``fired_rung`` is the ladder's current cursor (the only rung
-        the evaluator offers). Postconditions: the ladder's cursor becomes
+        the evaluator offers); enforced with an explicit raise so the invariant
+        holds even under ``python -O``. Postconditions: the ladder's cursor becomes
         ``fired_rung + 1``.
         """
-        assert fired_rung == self._next_rung.get(rule_index, 0), (
-            "scaled rungs must fire in cursor order"
-        )
+        expected = self._next_rung.get(rule_index, 0)
+        if fired_rung != expected:
+            raise ValueError(
+                f"scaled rungs must fire in cursor order: rule {rule_index} got rung "
+                f"{fired_rung}, expected {expected}"
+            )
         self._next_rung[rule_index] = fired_rung + 1
 
 
@@ -292,6 +296,13 @@ class _TrackedPosition:
     limit fill at ``bar.low`` doesn't entitle a take-profit to fire from
     a pre-entry ``bar.high``) can't queue impossible close orders. The
     next bar's tracker update clears the flag.
+
+    Remaining fields: ``high_since_entry`` / ``low_since_entry`` are the running
+    watermarks since entry (consumed by trailing stops and laddered take-profit
+    eligibility); ``scaled_cursor`` is this position's progress through its
+    scaled-take-profit ladder(s). All three reset with the tracker on a position
+    swap (the ``entry_order_id`` change above), so no rung-fired / watermark state
+    leaks across two distinct trades.
     """
 
     side: OrderSide
@@ -362,6 +373,15 @@ class _EmitContext:
 @dataclass
 class _EngineExitDispatcher:
     """Per-run owner of engine-side ``exit_rules`` enforcement.
+
+    Per-bar pipeline (:meth:`maybe_emit`): gate the symbol
+    (:meth:`_should_evaluate` → :class:`_EvalGate`), pick the highest-priority
+    triggered intent (:meth:`_evaluate` over :func:`evaluate_exit_rules`), then
+    dispatch by close type — :meth:`_emit_partial_scale_out` for a laddered
+    scale-out rung (leaves the remainder and its protective orders working) or
+    :meth:`_emit_full_close` for a stop / take-profit / signal exit (runs the
+    whole-position cleanups). Shared per-bar state travels in an
+    :class:`_EmitContext`.
 
     Splits the per-bar engine-side enforcement loop into one method
     per concern so each can be tested and extended in isolation. Holds
@@ -509,8 +529,10 @@ class _EngineExitDispatcher:
         # Bind to the position so the stale-continuation guard drops this scale-out
         # if a full exit (e.g. a stop) closes the position first.
         self._register_binding(req, ctx.pos)
-        assert intent.level_index is not None  # is_partial guarantees this
-        ctx.tracked.scaled_cursor.advance(intent.rule_index, intent.level_index)
+        level_index = intent.level_index
+        if level_index is None:  # pragma: no cover - is_partial guarantees a level_index
+            raise ValueError("partial scale-out intent requires a level_index")
+        ctx.tracked.scaled_cursor.advance(intent.rule_index, level_index)
         self._record_emission(req, intent, ctx.cur_bar, ctx.result)
 
     def _emit_full_close(self, intent: ExitIntent, ctx: "_EmitContext") -> None:
@@ -526,8 +548,10 @@ class _EngineExitDispatcher:
         # Contract guard: only full closes reach here (the dispatch routes partials
         # to ``_emit_partial_scale_out``). This is what keeps the resting-stop-limit
         # cancel below unreachable for a partial scale-out, so a scale-out never
-        # strips the protective stop off the position's remainder.
-        assert not intent.is_partial, "_emit_full_close must not receive a partial scale-out"
+        # strips the protective stop off the position's remainder. Enforced with a
+        # raise (not an assert) so it holds even under ``python -O``.
+        if intent.is_partial:  # pragma: no cover - dispatch routes partials elsewhere
+            raise ValueError("_emit_full_close must not receive a partial scale-out")
         sym, tracked, pos, order_book = ctx.sym, ctx.tracked, ctx.pos, ctx.order_book
         # Size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
