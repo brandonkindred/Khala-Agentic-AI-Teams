@@ -311,7 +311,11 @@ class SalesPodOrchestrator:
         confidence_threshold: Optional[float] = None,
     ) -> OutreachSequence:
         """Emit -> wrap -> critic -> on revise, re-emit up to *max_refinements* times."""
-        threshold = confidence_threshold if confidence_threshold is not None else self.config.dossier_confidence_threshold
+        threshold = (
+            confidence_threshold
+            if confidence_threshold is not None
+            else self.config.dossier_confidence_threshold
+        )
         variants = self.outreach.generate_sequence(
             prospect.model_dump_json(indent=2),
             dossier,
@@ -321,7 +325,9 @@ class SalesPodOrchestrator:
             company_context,
             insights_context,
         )
-        sequence = _wrap_outreach_sequence(variants, prospect, dossier, confidence_threshold=threshold)
+        sequence = _wrap_outreach_sequence(
+            variants, prospect, dossier, confidence_threshold=threshold
+        )
 
         if icp is None or max_refinements < 1:
             return sequence
@@ -357,7 +363,10 @@ class SalesPodOrchestrator:
                 )
                 return sequence
             sequence = _wrap_outreach_sequence(
-                variants, prospect, dossier, confidence_threshold=threshold,
+                variants,
+                prospect,
+                dossier,
+                confidence_threshold=threshold,
             )
 
         return sequence
@@ -460,77 +469,136 @@ class SalesPodOrchestrator:
             prospects = ctx.request.existing_prospects
         else:
             prospects_result = self.prospector.prospect(
-                ctx.icp_json, ctx.product, ctx.vp, ctx.request.max_prospects,
-                ctx.company_context, ctx.insights_ctx,
+                ctx.icp_json,
+                ctx.product,
+                ctx.vp,
+                ctx.request.max_prospects,
+                ctx.company_context,
+                ctx.insights_ctx,
             )
             prospects = list(prospects_result.prospects)
         ctx.update("prospecting", 15)
         return prospects
 
+    def _map_prospects_parallel(
+        self, prospects: List[Prospect], fn: "Callable[[Prospect], object]"
+    ) -> list:
+        """Run ``fn(prospect)`` concurrently across *prospects*, preserving order.
+
+        Each pipeline stage makes one independent per-prospect LLM call; running
+        them in a bounded pool turns the stage's wall-clock from the sum of the
+        calls into roughly the slowest call. ``fn`` owns its own error handling
+        and returns ``None`` to skip a prospect (so each stage keeps its specific
+        log message), exactly as the previous sequential ``for`` loops did.
+
+        Preconditions: ``fn`` is side-effect-safe to call from worker threads
+            (the agents wrap the thread-safe LLM client) and never raises (it
+            returns ``None`` on failure).
+        Postconditions: returns the non-``None`` results in the SAME order as
+            *prospects* — identical to the sequential loop, only concurrent.
+        """
+        if not prospects:
+            return []
+        results: list = [None] * len(prospects)
+        workers = min(self.config.pipeline_stage_workers, len(prospects))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            idx_by_future = {pool.submit(fn, p): i for i, p in enumerate(prospects)}
+            for fut in as_completed(idx_by_future):
+                results[idx_by_future[fut]] = fut.result()
+        return [r for r in results if r is not None]
+
     def _run_outreach(
-        self, ctx: _RunContext, prospects: List[Prospect],
+        self,
+        ctx: _RunContext,
+        prospects: List[Prospect],
     ) -> tuple[List[OutreachSequence], dict[str, ProspectDossier]]:
         ctx.update("outreach", 20)
         logger.info("Sales pod [%s]: outreach stage for %d prospects", ctx.job_id, len(prospects))
         dossier_map = self.load_dossiers_for_prospects(prospects)
-        sequences: List[OutreachSequence] = []
-        for p in prospects:
+
+        def _one(p: Prospect) -> Optional[OutreachSequence]:
             dossier = dossier_map.get(p.id)
             if dossier is None:
                 logger.warning(
                     "sales.outreach.dossier_missing prospect_id=%s company=%s",
-                    p.id, p.company_name,
+                    p.id,
+                    p.company_name,
                 )
-                continue
+                return None
             try:
-                sequence = self._generate_outreach_with_critic(
-                    p, dossier, ctx.product, ctx.vp, ctx.cases, ctx.company_context,
-                    ctx.insights_ctx, ctx.request.icp,
+                return self._generate_outreach_with_critic(
+                    p,
+                    dossier,
+                    ctx.product,
+                    ctx.vp,
+                    ctx.cases,
+                    ctx.company_context,
+                    ctx.insights_ctx,
+                    ctx.request.icp,
                     max_refinements=ctx.config.critic_max_refinements,
                     confidence_threshold=ctx.config.dossier_confidence_threshold,
                 )
             except Exception:
                 logger.exception(
-                    "sales.outreach.failed prospect_id=%s company=%s", p.id, p.company_name,
+                    "sales.outreach.failed prospect_id=%s company=%s",
+                    p.id,
+                    p.company_name,
                 )
-                continue
-            sequences.append(sequence)
+                return None
+
+        sequences = self._map_prospects_parallel(prospects, _one)
         ctx.update("outreach", 35)
         return sequences, dossier_map
 
     def _run_qualification(
-        self, ctx: _RunContext, prospects: List[Prospect],
+        self,
+        ctx: _RunContext,
+        prospects: List[Prospect],
     ) -> List[QualificationScore]:
         ctx.update("qualification", 40)
         logger.info("Sales pod [%s]: qualification stage", ctx.job_id)
-        qualified: List[QualificationScore] = []
-        for p in prospects:
+
+        def _one(p: Prospect) -> Optional[QualificationScore]:
             try:
                 body = self.qualifier.qualify(
-                    p.model_dump_json(indent=2), ctx.product, ctx.vp, "", ctx.insights_ctx,
+                    p.model_dump_json(indent=2),
+                    ctx.product,
+                    ctx.vp,
+                    "",
+                    ctx.insights_ctx,
                 )
             except Exception:
                 logger.exception("sales.qualify.failed prospect_id=%s", p.id)
-                continue
-            qualified.append(QualificationScore(prospect=p, **body.model_dump()))
+                return None
+            return QualificationScore(prospect=p, **body.model_dump())
+
+        qualified = self._map_prospects_parallel(prospects, _one)
         ctx.update("qualification", 50)
         return qualified
 
     def _run_nurture(
-        self, ctx: _RunContext, nurture_prospects: List[Prospect],
+        self,
+        ctx: _RunContext,
+        nurture_prospects: List[Prospect],
     ) -> List[NurtureSequence]:
         ctx.update("nurturing", 55)
         logger.info("Sales pod [%s]: nurturing %d prospects", ctx.job_id, len(nurture_prospects))
-        nurture_seqs: List[NurtureSequence] = []
-        for p in nurture_prospects:
+
+        def _one(p: Prospect) -> Optional[NurtureSequence]:
             try:
                 body = self.nurture.build_sequence(
-                    p.model_dump_json(indent=2), ctx.product, ctx.vp, 90, ctx.insights_ctx,
+                    p.model_dump_json(indent=2),
+                    ctx.product,
+                    ctx.vp,
+                    90,
+                    ctx.insights_ctx,
                 )
             except Exception:
                 logger.exception("sales.nurture.failed prospect_id=%s", p.id)
-                continue
-            nurture_seqs.append(NurtureSequence(prospect=p, **body.model_dump()))
+                return None
+            return NurtureSequence(prospect=p, **body.model_dump())
+
+        nurture_seqs = self._map_prospects_parallel(nurture_prospects, _one)
         ctx.update("nurturing", 62)
         return nurture_seqs
 
@@ -542,10 +610,12 @@ class SalesPodOrchestrator:
     ) -> List[DiscoveryPlan]:
         ctx.update("discovery", 65)
         logger.info(
-            "Sales pod [%s]: discovery stage for %d prospects", ctx.job_id, len(qualified_prospects),
+            "Sales pod [%s]: discovery stage for %d prospects",
+            ctx.job_id,
+            len(qualified_prospects),
         )
-        plans: List[DiscoveryPlan] = []
-        for p in qualified_prospects:
+
+        def _one(p: Prospect) -> Optional[DiscoveryPlan]:
             qual_json = "{}"
             for q in qualified:
                 if q.prospect.company_name == p.company_name:
@@ -553,12 +623,18 @@ class SalesPodOrchestrator:
                     break
             try:
                 body = self.discovery.prepare(
-                    p.model_dump_json(indent=2), qual_json, ctx.product, ctx.vp, ctx.insights_ctx,
+                    p.model_dump_json(indent=2),
+                    qual_json,
+                    ctx.product,
+                    ctx.vp,
+                    ctx.insights_ctx,
                 )
             except Exception:
                 logger.exception("sales.discovery.failed prospect_id=%s", p.id)
-                continue
-            plans.append(DiscoveryPlan(prospect=p, **body.model_dump()))
+                return None
+            return DiscoveryPlan(prospect=p, **body.model_dump())
+
+        plans = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("discovery", 75)
         return plans
 
@@ -571,25 +647,35 @@ class SalesPodOrchestrator:
     ) -> List[SalesProposal]:
         ctx.update("proposal", 78)
         logger.info(
-            "Sales pod [%s]: proposal stage for %d prospects", ctx.job_id, len(qualified_prospects),
+            "Sales pod [%s]: proposal stage for %d prospects",
+            ctx.job_id,
+            len(qualified_prospects),
         )
-        proposals: List[SalesProposal] = []
         annual_cost = 25000.0
         qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)
-        for p in qualified_prospects:
+
+        def _one(p: Prospect) -> Optional[SalesProposal]:
             try:
-                proposal_obj = self._generate_proposal_with_critic(
-                    p, ctx.product, ctx.vp, annual_cost, "", ctx.cases,
-                    ctx.company_context, ctx.insights_ctx,
-                    dossier_map.get(p.id), qual_by_prospect_id.get(p.id),
+                return self._generate_proposal_with_critic(
+                    p,
+                    ctx.product,
+                    ctx.vp,
+                    annual_cost,
+                    "",
+                    ctx.cases,
+                    ctx.company_context,
+                    ctx.insights_ctx,
+                    dossier_map.get(p.id),
+                    qual_by_prospect_id.get(p.id),
                     max_refinements=ctx.config.critic_max_refinements,
                 )
             except Exception:
                 logger.exception("sales.proposal.failed prospect_id=%s", p.id)
-                continue
-            proposals.append(proposal_obj)
+                return None
+
+        proposals = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("proposal", 87)
         return proposals
 
@@ -601,8 +687,8 @@ class SalesPodOrchestrator:
     ) -> List[ClosingStrategy]:
         ctx.update("negotiation", 90)
         logger.info("Sales pod [%s]: closing strategy stage", ctx.job_id)
-        strategies: List[ClosingStrategy] = []
-        for p in qualified_prospects:
+
+        def _one(p: Prospect) -> Optional[ClosingStrategy]:
             prop_json = "{}"
             for prop in proposals:
                 if prop.prospect.company_name == p.company_name:
@@ -610,17 +696,25 @@ class SalesPodOrchestrator:
                     break
             try:
                 body = self.closer.develop_strategy(
-                    p.model_dump_json(indent=2), prop_json, ctx.product, ctx.vp, ctx.insights_ctx,
+                    p.model_dump_json(indent=2),
+                    prop_json,
+                    ctx.product,
+                    ctx.vp,
+                    ctx.insights_ctx,
                 )
             except Exception:
                 logger.exception("sales.close.failed prospect_id=%s", p.id)
-                continue
-            strategies.append(ClosingStrategy(prospect=p, **body.model_dump()))
+                return None
+            return ClosingStrategy(prospect=p, **body.model_dump())
+
+        strategies = self._map_prospects_parallel(qualified_prospects, _one)
         ctx.update("negotiation", 95)
         return strategies
 
     def _run_coaching(
-        self, ctx: _RunContext, prospects: List[Prospect],
+        self,
+        ctx: _RunContext,
+        prospects: List[Prospect],
     ) -> Optional[PipelineCoachingReport]:
         ctx.update("coaching", 97)
         logger.info("Sales pod [%s]: generating coaching report", ctx.job_id)
@@ -646,8 +740,10 @@ class SalesPodOrchestrator:
         if current_insights and current_insights.total_outcomes_analyzed > 0:
             logger.info(
                 "Sales pod [%s]: injecting learning insights v%d (%d outcomes, win_rate=%.0f%%)",
-                job_id, current_insights.insights_version,
-                current_insights.total_outcomes_analyzed, current_insights.win_rate * 100,
+                job_id,
+                current_insights.insights_version,
+                current_insights.total_outcomes_analyzed,
+                current_insights.win_rate * 100,
             )
 
         ctx = _RunContext(
@@ -664,7 +760,9 @@ class SalesPodOrchestrator:
             update=update_cb or _noop_update,
         )
         result = SalesPipelineResult(
-            job_id=job_id, entry_stage=ctx.entry, product_name=ctx.product,
+            job_id=job_id,
+            entry_stage=ctx.entry,
+            product_name=ctx.product,
         )
 
         # Stage 1 — Prospecting
@@ -693,7 +791,8 @@ class SalesPodOrchestrator:
         if qualified:
             advance = [q for q in qualified if q.recommended_action.lower().startswith("advance")]
             nurture_prospects = [
-                q.prospect for q in qualified
+                q.prospect
+                for q in qualified
                 if not q.recommended_action.lower().startswith("advance")
                 and not q.recommended_action.lower().startswith("disqualify")
             ]
@@ -717,7 +816,9 @@ class SalesPodOrchestrator:
         # Stage 7 — Negotiation / Closing
         if self._should_run(PipelineStage.NEGOTIATION, ctx.entry) and qualified_prospects:
             result.closing_strategies = self._run_negotiation(
-                ctx, qualified_prospects, result.proposals,
+                ctx,
+                qualified_prospects,
+                result.proposals,
             )
 
         # Coaching + outcomes
@@ -827,7 +928,14 @@ class SalesPodOrchestrator:
                 # outreach_only callers don't supply ICP — pass None and the
                 # critic-gated helper falls back to the unreviewed wrap path.
                 sequence = self._generate_outreach_with_critic(
-                    p, dossier, product_name, value_proposition, cases, company_context, ctx, None,
+                    p,
+                    dossier,
+                    product_name,
+                    value_proposition,
+                    cases,
+                    company_context,
+                    ctx,
+                    None,
                     max_refinements=self.config.critic_max_refinements,
                 )
             except Exception:
