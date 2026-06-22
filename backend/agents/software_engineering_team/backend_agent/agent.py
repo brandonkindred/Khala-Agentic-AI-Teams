@@ -1280,6 +1280,19 @@ def _task_requirements_with_test_expectations(task: Task, repo_path: Path) -> st
     return task_requirements_with_expectations(task, repo_path, "backend")
 
 
+@dataclass
+class _FileWriteOutput:
+    """Minimal ``write_agent_output`` payload (just ``files`` + ``summary``).
+
+    ``write_agent_output`` is duck-typed over any object exposing ``.files``; this
+    names the throwaway shim used when applying BuildFixSpecialist edits instead of
+    constructing an anonymous ``type(...)`` class inline.
+    """
+
+    files: Dict[str, str]
+    summary: str
+
+
 class BackendExpertAgent:
     """
     Backend expert that implements solutions in Python or Java.
@@ -3154,7 +3167,7 @@ class BackendExpertAgent:
                 return False
             ok_write, write_msg = write_agent_output(
                 repo_path,
-                type("R", (), {"files": files_dict, "summary": bf_result.summary})(),
+                _FileWriteOutput(files=files_dict, summary=bf_result.summary),
                 subdir="",
             )
             if not ok_write:

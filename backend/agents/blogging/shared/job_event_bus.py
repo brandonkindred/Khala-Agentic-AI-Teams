@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_env import parse_int
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +57,6 @@ def _env_int(name: str, default: int) -> int:
     inferring "unparseable" from "result == default" would false-positive whenever
     the override legitimately equals the default.
     """
-    from shared_env import parse_int
-
     raw = os.environ.get(name, "").strip()
     if raw:
         try:
