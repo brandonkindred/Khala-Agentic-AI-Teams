@@ -58,13 +58,13 @@ def _ts(value: object) -> str:
     """Render a DB timestamp value as an ISO string.
 
     Preconditions:
-        - ``value`` is a ``datetime``, ``None``, or a stringifiable value.
+        - ``value`` is a ``datetime`` (from Postgres) or an ISO string (from the
+          synthesized cold-start row). Timestamp columns are ``NOT NULL DEFAULT``
+          in the schema, so ``value`` is never ``None``.
     Postconditions:
-        - ``None`` → ``""``; a ``datetime`` → its ISO-8601 form; otherwise
-          ``str(value)``. Never raises.
+        - A ``datetime`` → its ISO-8601 form; any other value → ``str(value)``.
+          Never raises.
     """
-    if value is None:
-        return ""
     if isinstance(value, datetime):
         return value.isoformat()
     return str(value)

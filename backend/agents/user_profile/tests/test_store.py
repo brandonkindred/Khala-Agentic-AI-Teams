@@ -168,7 +168,6 @@ def test_remove_association(db):
 def test_ts_helper_renders_values():
     from datetime import datetime, timezone
 
-    assert up_store._ts(None) == ""
     dt = datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc)
     assert up_store._ts(dt) == dt.isoformat()
     assert up_store._ts("2026-01-02T00:00:00+00:00") == "2026-01-02T00:00:00+00:00"
