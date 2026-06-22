@@ -225,25 +225,31 @@ class ResearchAgent:
                 if self.cache:
                     self.cache.save_checkpoint(brief_input, "references", references=references)
 
-            # Step 7: Synthesize overview
-            _report("Synthesizing overview...", 0.78)
-            if (
-                cached_state and cached_state.notes is not None
-            ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
-                logger.info("Using cached notes")
-                notes = cached_state.notes
-            else:
-                notes = self._synthesize_overview(brief_input, references)
+            # Steps 7-9: synthesize overview (LLM), fetch academic papers (arXiv
+            # HTTP), and find similar topics (LLM) are mutually independent — none
+            # consumes another's output — so run them concurrently instead of as
+            # three sequential round-trips. The notes step keeps its
+            # resume-from-checkpoint short-circuit and checkpoint save.
+            _report("Synthesizing overview, searching arXiv, finding similar topics...", 0.78)
+
+            def _resolve_notes() -> Any:
+                if (
+                    cached_state and cached_state.notes is not None
+                ):  # pragma: no cover - resume-from-checkpoint branch; see Step 1.
+                    logger.info("Using cached notes")
+                    return cached_state.notes
+                resolved = self._synthesize_overview(brief_input, references)
                 if self.cache:
-                    self.cache.save_checkpoint(brief_input, "notes", notes=notes)
+                    self.cache.save_checkpoint(brief_input, "notes", notes=resolved)
+                return resolved
 
-            # Step 8: Fetch academic sources (arXiv)
-            _report("Searching arXiv for papers...", 0.85)
-            academic_papers = self._fetch_academic_papers(brief_input)
-
-            # Step 9: Similar topics (score > 70%)
-            _report("Finding similar topics...", 0.90)
-            similar_topics = self._get_similar_topics(brief_input, references)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                notes_future = executor.submit(_resolve_notes)
+                academic_future = executor.submit(self._fetch_academic_papers, brief_input)
+                similar_future = executor.submit(self._get_similar_topics, brief_input, references)
+                notes = notes_future.result()
+                academic_papers = academic_future.result()
+                similar_topics = similar_future.result()
 
             # Step 10: Compile document (Blog Post Research format)
             _report("Compiling research document...", 0.95)
