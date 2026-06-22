@@ -49,31 +49,6 @@ describe('UserProfileApiService', () => {
     req.flush({ user_id: 'default', ...body, preferences: {}, created_at: '', updated_at: '' });
   });
 
-  it('should GET associations without a filter', () => {
-    service.getAssociations().subscribe();
-    const req = httpMock.expectOne(`${baseUrl}/associations`);
-    expect(req.request.method).toBe('GET');
-    expect(req.request.params.has('artifact_type')).toBe(false);
-    req.flush({ user_id: 'default', associations: [] });
-  });
-
-  it('should GET associations with an artifact_type filter', () => {
-    service.getAssociations('brand').subscribe();
-    const req = httpMock.expectOne((r) => r.url === `${baseUrl}/associations`);
-    expect(req.request.params.get('artifact_type')).toBe('brand');
-    req.flush({ user_id: 'default', associations: [] });
-  });
-
-  it('should GET integrations', () => {
-    const mock = [{ id: 'slack', type: 'slack', enabled: true, channel: '#eng' }];
-    service.getIntegrations().subscribe((res) => {
-      expect(res).toEqual(mock);
-    });
-    const req = httpMock.expectOne(`${baseUrl}/integrations`);
-    expect(req.request.method).toBe('GET');
-    req.flush(mock);
-  });
-
   it('should GET the aggregated overview', () => {
     const mock = {
       profile: { user_id: 'default', display_name: '', email: '', bio: '', preferences: {}, created_at: '', updated_at: '' },

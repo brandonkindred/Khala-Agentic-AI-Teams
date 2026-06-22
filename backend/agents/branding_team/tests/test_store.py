@@ -64,7 +64,7 @@ def test_create_brand_records_profile_association(
     from user_profile import ArtifactType
 
     calls: list = []
-    monkeypatch.setattr(store_mod, "record_association_async", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(store_mod, "record_association_safe", lambda *a, **k: calls.append((a, k)))
 
     store = BrandingStore()
     client = store.create_client("Acme")

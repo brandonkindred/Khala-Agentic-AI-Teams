@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from job_service_client import JobServiceClient
-from user_profile import ArtifactType, record_association_async
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -56,8 +56,9 @@ def create_job(
         "submitted_answers": [],
     }
     _client(cache_dir).create_job(job_id, status="pending", **data)
-    # Best-effort, non-blocking: link the project to the default profile.
-    record_association_async(ArtifactType.PROJECT, "coding_team", job_id, label=repo_path or job_id)
+    # Best-effort: link the project to the default profile. record_association_safe
+    # never raises, so a link failure can't break job creation.
+    record_association_safe(ArtifactType.PROJECT, "coding_team", job_id, label=repo_path or job_id)
 
 
 def get_job(

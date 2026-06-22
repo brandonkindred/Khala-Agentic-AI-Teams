@@ -12,7 +12,6 @@ surface as structured log lines.
 from __future__ import annotations
 
 import logging
-from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
@@ -137,11 +136,24 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
                 "VALUES (%s, %s, %s) ON CONFLICT (user_id) DO NOTHING",
                 (user_id, now, now),
             )
-            cur.execute(
-                f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
-                (user_id,),
-            )
-            row = cur.fetchone()
+            if cur.rowcount == 1:
+                # We created the row, so its contents are known — no second SELECT.
+                row = {
+                    "user_id": user_id,
+                    "display_name": "",
+                    "email": "",
+                    "bio": "",
+                    "profile_json": {},
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            else:
+                # Lost an insert race; read the row the winner created.
+                cur.execute(
+                    f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
+                    (user_id,),
+                )
+                row = cur.fetchone()
     # Postcondition: the row exists (INSERT ... ON CONFLICT guarantees it; there
     # is no DELETE path for profiles). A None here is a broken invariant, not a
     # caller error — surface it rather than dereference None.
@@ -287,55 +299,6 @@ def record_association_safe(
             artifact_id,
             exc_info=True,
         )
-
-
-#: Small background pool for fire-and-forget association writes, so an
-#: artifact-create path is never blocked on the profile DB. Created lazily on
-#: first use to keep import side-effect-free.
-_assoc_executor: Optional[ThreadPoolExecutor] = None
-
-
-def _get_assoc_executor() -> ThreadPoolExecutor:
-    global _assoc_executor
-    if _assoc_executor is None:
-        _assoc_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="user_profile_assoc")
-    return _assoc_executor
-
-
-def record_association_async(
-    artifact_type: str,
-    team: str,
-    artifact_id: str,
-    *,
-    user_id: str = DEFAULT_USER_ID,
-    label: str = "",
-    role: str = "owner",
-) -> Optional[Future]:
-    """Fire-and-forget :func:`record_association_safe` on a background worker.
-
-    Keeps the link best-effort while removing the synchronous DB round-trip from
-    the caller's artifact-create path. Never raises; returns the ``Future`` (so
-    tests can await it) or ``None`` if dispatch itself failed.
-    """
-    try:
-        return _get_assoc_executor().submit(
-            record_association_safe,
-            artifact_type,
-            team,
-            artifact_id,
-            user_id=user_id,
-            label=label,
-            role=role,
-        )
-    except Exception:  # noqa: BLE001 - dispatch best-effort, never propagate
-        logger.warning(
-            "user_profile: failed to dispatch association type=%s team=%s id=%s",
-            artifact_type,
-            team,
-            artifact_id,
-            exc_info=True,
-        )
-        return None
 
 
 @timed_query(store=_STORE, op="list_associations")

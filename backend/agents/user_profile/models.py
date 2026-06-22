@@ -8,7 +8,7 @@ authentication exists.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from pydantic import BaseModel, Field
 
@@ -61,10 +61,3 @@ class Association(BaseModel):
     label: str = ""
     role: str = "owner"
     created_at: str = ""
-
-
-class AssociationList(BaseModel):
-    """Response envelope for a profile's associations."""
-
-    user_id: str
-    associations: List[Association] = Field(default_factory=list)

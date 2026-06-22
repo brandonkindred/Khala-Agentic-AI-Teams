@@ -71,10 +71,14 @@ class _FakeCursor:
 
         if norm.startswith("insert into user_profiles"):
             # get_profile ensure: INSERT ... ON CONFLICT DO NOTHING (3 params).
+            # rowcount mirrors Postgres: 1 when the row is newly inserted, 0 when
+            # the conflict target already existed (so get_profile knows whether it
+            # can synthesize the just-inserted row or must re-read the winner's).
             user_id, created_at, updated_at = params
-            self._db["profiles"].setdefault(
-                user_id,
-                {
+            if user_id in self._db["profiles"]:
+                self.rowcount = 0
+            else:
+                self._db["profiles"][user_id] = {
                     "user_id": user_id,
                     "display_name": "",
                     "email": "",
@@ -82,9 +86,8 @@ class _FakeCursor:
                     "profile_json": {},
                     "created_at": created_at,
                     "updated_at": updated_at,
-                },
-            )
-            self.rowcount = 1
+                }
+                self.rowcount = 1
             return
 
         # -- user_profile_associations ------------------------------------

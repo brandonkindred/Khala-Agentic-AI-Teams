@@ -20,7 +20,7 @@ def test_create_team_records_profile_association(
     import agentic_team_provisioning.assistant.store as store_mod
 
     calls: list = []
-    monkeypatch.setattr(store_mod, "record_association_async", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(store_mod, "record_association_safe", lambda *a, **k: calls.append((a, k)))
 
     store = AgenticTeamStore()
     team = store.create_team("My Team")

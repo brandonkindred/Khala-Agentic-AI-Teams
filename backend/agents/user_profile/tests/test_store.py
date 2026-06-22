@@ -30,6 +30,66 @@ def test_get_profile_rejects_empty_user_id(db):
         up_store.get_profile("")
 
 
+def test_get_profile_lost_insert_race_rereads_winner(monkeypatch):
+    """When a concurrent writer wins the insert, get_profile re-reads its row.
+
+    Models the race the synthesized-row fast path guards against: our SELECT
+    misses, but by the time our ``INSERT ... ON CONFLICT DO NOTHING`` runs the
+    row already exists (rowcount 0), so we must re-SELECT the winner's row rather
+    than synthesize our own.
+    """
+    from contextlib import contextmanager
+
+    winner_row = {
+        "user_id": "default",
+        "display_name": "Winner",
+        "email": "",
+        "bio": "",
+        "profile_json": {},
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+
+    class _RaceCursor:
+        def __init__(self):
+            self.rowcount = 0
+            self._one = None
+            self._selects = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, params=()):
+            norm = " ".join(sql.split()).lower()
+            if norm.startswith("select") and "from user_profiles" in norm:
+                self._selects += 1
+                # First SELECT misses; the post-insert SELECT finds the winner.
+                self._one = None if self._selects == 1 else dict(winner_row)
+            elif norm.startswith("insert into user_profiles"):
+                self.rowcount = 0  # a concurrent writer already inserted the row
+            else:  # pragma: no cover - no other SQL on this path
+                raise AssertionError(sql)
+
+        def fetchone(self):
+            return self._one
+
+    class _RaceConn:
+        def cursor(self, row_factory=None):
+            return _RaceCursor()
+
+    @contextmanager
+    def _fake_get_conn(database=None):
+        yield _RaceConn()
+
+    monkeypatch.setattr(up_store, "get_conn", _fake_get_conn)
+
+    profile = up_store.get_profile()
+    assert profile.display_name == "Winner"
+
+
 def test_upsert_profile_partial_update(db):
     up_store.get_profile()
     updated = up_store.upsert_profile(UserProfileUpdate(display_name="Brandon", bio="hi"))
@@ -103,31 +163,6 @@ def test_remove_association(db):
     assert up_store.list_associations() == []
     # Removing again is a no-op.
     assert up_store.remove_association(a.id) is False
-
-
-def test_record_association_async_dispatches(monkeypatch, db):
-    """The async wrapper runs record_association_safe on a background worker."""
-    captured: list = []
-    monkeypatch.setattr(up_store, "record_association_safe", lambda *a, **k: captured.append((a, k)))
-
-    f1 = up_store.record_association_async("brand", "branding", "b1", label="x")
-    f2 = up_store.record_association_async("project", "coding_team", "j2")  # reuses the executor
-    assert f1 is not None and f2 is not None
-    f1.result(timeout=5)
-    f2.result(timeout=5)
-
-    assert len(captured) == 2
-    assert (("brand", "branding", "b1"), {"user_id": "default", "label": "x", "role": "owner"}) in captured
-
-
-def test_record_association_async_dispatch_failure_returns_none(monkeypatch):
-    """If dispatch itself fails, the wrapper logs and returns None (never raises)."""
-
-    def _boom():
-        raise RuntimeError("no executor")
-
-    monkeypatch.setattr(up_store, "_get_assoc_executor", _boom)
-    assert up_store.record_association_async("brand", "branding", "b1") is None
 
 
 def test_ts_helper_renders_values():

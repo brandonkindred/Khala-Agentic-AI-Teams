@@ -24,7 +24,6 @@ from pydantic import BaseModel
 
 from user_profile import (
     Association,
-    AssociationList,
     UserProfile,
     UserProfileUpdate,
     get_profile,
@@ -83,19 +82,18 @@ def update_profile(update: UserProfileUpdate) -> UserProfile:
         raise _unavailable(exc) from exc
 
 
-@router.get("/associations", response_model=AssociationList)
+@router.get("/associations", response_model=list[Association])
 def read_associations(
     artifact_type: Annotated[
         ArtifactTypeFilter | None,
         Query(description="Optional filter: brand, blog_post, project, agentic_team, integration."),
     ] = None,
-) -> AssociationList:
+) -> list[Association]:
     """List artifacts linked to the current profile, newest first."""
     try:
-        items: list[Association] = list_associations(DEFAULT_USER_ID, artifact_type)
+        return list_associations(DEFAULT_USER_ID, artifact_type)
     except Exception as exc:  # noqa: BLE001
         raise _unavailable(exc) from exc
-    return AssociationList(user_id=DEFAULT_USER_ID, associations=items)
 
 
 def _integrations_list() -> list[IntegrationStatus]:

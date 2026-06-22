@@ -12,14 +12,13 @@ producers and the UI agree on the strings.
 
 from __future__ import annotations
 
-from .models import Association, AssociationList, UserProfile, UserProfileUpdate
+from .models import Association, UserProfile, UserProfileUpdate
 from .postgres import SCHEMA
 from .store import (
     DEFAULT_USER_ID,
     get_profile,
     list_associations,
     record_association,
-    record_association_async,
     record_association_safe,
     remove_association,
     upsert_profile,
@@ -41,14 +40,12 @@ __all__ = [
     "DEFAULT_USER_ID",
     "ArtifactType",
     "Association",
-    "AssociationList",
     "UserProfile",
     "UserProfileUpdate",
     "get_profile",
     "upsert_profile",
     "record_association",
     "record_association_safe",
-    "record_association_async",
     "list_associations",
     "remove_association",
 ]

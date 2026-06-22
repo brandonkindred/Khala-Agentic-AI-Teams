@@ -34,12 +34,6 @@ export interface Association {
   created_at: string;
 }
 
-/** Response envelope for GET /api/user-profile/associations. */
-export interface AssociationList {
-  user_id: string;
-  associations: Association[];
-}
-
 /** One row from GET /api/user-profile/integrations (pass-through). */
 export interface ProfileIntegration {
   id: string;

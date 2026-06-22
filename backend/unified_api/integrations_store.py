@@ -58,7 +58,7 @@ from unified_api.integration_credentials import (
     get_credential,
     set_credential,
 )
-from user_profile import ArtifactType, record_association_async
+from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
@@ -70,7 +70,7 @@ def _link_integration_to_profile(service: str) -> None:
     ``medium``); re-saving the config is idempotent. ``record_association_safe``
     never raises, so a profile-link failure can't break saving integration config.
     """
-    record_association_async(ArtifactType.INTEGRATION, "integrations", service, label=service)
+    record_association_safe(ArtifactType.INTEGRATION, "integrations", service, label=service)
 
 
 _DEFAULT_CACHE_DIR = ".agent_cache"

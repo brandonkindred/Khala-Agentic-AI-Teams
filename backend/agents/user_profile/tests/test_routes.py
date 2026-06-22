@@ -48,12 +48,12 @@ def test_associations_endpoint_lists_and_filters(client, monkeypatch):
 
     resp = client.get("/api/user-profile/associations")
     assert resp.status_code == 200
-    body = resp.json()
-    assert body["user_id"] == "default"
-    assert len(body["associations"]) == 2
+    items = resp.json()
+    assert isinstance(items, list)
+    assert len(items) == 2
 
     filtered = client.get("/api/user-profile/associations", params={"artifact_type": "brand"})
-    items = filtered.json()["associations"]
+    items = filtered.json()
     assert len(items) == 1
     assert items[0]["team"] == "branding"
 
