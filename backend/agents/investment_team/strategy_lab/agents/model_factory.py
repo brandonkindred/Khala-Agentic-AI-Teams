@@ -297,17 +297,24 @@ def get_strands_model(
 
     # Provider is "ollama" (the default). Fail fast on the one misconfiguration
     # the llm_service client would otherwise only surface at request time: an
-    # Ollama Cloud host with no API key. The host / key are resolved here exactly
-    # as the llm_service Ollama client resolves them.
-    host = os.environ.get("OLLAMA_HOST") or base_url
+    # Ollama Cloud base URL with no API key. Mirror the client's resolution
+    # exactly — the host is ``resolve_base_url()`` (``LLM_BASE_URL``, default the
+    # ollama.com cloud endpoint) and the key is ``OLLAMA_API_KEY`` /
+    # ``LLM_OLLAMA_API_KEY`` (``OllamaLLMClient._ollama_auth_headers``).
+    # ``OLLAMA_HOST`` is deliberately NOT consulted: the llm_service transport
+    # keys off ``resolve_base_url()`` only, so reading ``OLLAMA_HOST`` here would
+    # diverge from the client and mis-fire the guard (it could block a valid
+    # local config, or pass a keyless cloud config straight to a request-time
+    # failure).
+    host = base_url
     api_key = (
         os.environ.get("OLLAMA_API_KEY") or os.environ.get("LLM_OLLAMA_API_KEY") or ""
     ).strip()
     if not api_key and "ollama.com" in host:
         raise ValueError(
             "Ollama Cloud requires an API key. Set OLLAMA_API_KEY (or "
-            "LLM_OLLAMA_API_KEY), or point LLM_BASE_URL / OLLAMA_HOST "
-            "to a local Ollama server (e.g. http://localhost:11434)."
+            "LLM_OLLAMA_API_KEY), or point LLM_BASE_URL to a local Ollama "
+            "server (e.g. http://localhost:11434)."
         )
 
     # Route through the hardened llm_service path. Imported lazily so the module
