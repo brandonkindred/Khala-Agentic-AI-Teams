@@ -39,6 +39,18 @@ def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
 
 
+def _validate_pagination(limit: Optional[int], offset: int) -> None:
+    """Enforce pagination preconditions with real raises (survives ``python -O``).
+
+    Preconditions:
+        ``limit`` is None or a positive int; ``offset`` is >= 0.
+    """
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be None or a positive int")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+
+
 class BrandingStore:
     """Postgres-backed store for clients and brands.
 
@@ -75,8 +87,7 @@ class BrandingStore:
             When ``limit`` is None the full set is returned; otherwise at most
             ``limit`` rows starting at ``offset``.
         """
-        assert limit is None or limit > 0, "limit must be None or a positive int"
-        assert offset >= 0, "offset must be >= 0"
+        _validate_pagination(limit, offset)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
                 cur.execute("SELECT data FROM branding_clients ORDER BY created_at")
@@ -197,8 +208,7 @@ class BrandingStore:
             When ``limit`` is None all of the client's brands are returned;
             otherwise at most ``limit`` rows starting at ``offset``.
         """
-        assert limit is None or limit > 0, "limit must be None or a positive int"
-        assert offset >= 0, "offset must be >= 0"
+        _validate_pagination(limit, offset)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
                 cur.execute(
@@ -306,8 +316,11 @@ class BrandingStore:
             concurrent delete between the read and the write).
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # FOR UPDATE locks the row for the duration of this transaction
+            # (get_conn commits at block exit), so concurrent appends to the
+            # same brand serialise and no version increment is lost.
             cur.execute(
-                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s",
+                "SELECT data FROM branding_brands WHERE id = %s AND client_id = %s FOR UPDATE",
                 (brand_id, client_id),
             )
             row = cur.fetchone()

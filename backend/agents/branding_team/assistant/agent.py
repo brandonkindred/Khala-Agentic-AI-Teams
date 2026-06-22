@@ -306,6 +306,15 @@ def _history_window() -> int:
 
 
 def _format_history(messages: List[Tuple[str, str]]) -> str:
+    """Render the most recent conversation turns for the LLM prompt.
+
+    Args:
+        messages: prior turns as ``(role, content)`` tuples, oldest first.
+
+    Returns:
+        A newline-joined ``"Speaker: text"`` transcript of at most the last
+        ``_history_window()`` turns, or ``"(No prior messages)"`` when empty.
+    """
     if not messages:
         return "(No prior messages)"
     recent = messages[-_history_window() :]

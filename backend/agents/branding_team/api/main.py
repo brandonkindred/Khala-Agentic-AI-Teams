@@ -1009,11 +1009,16 @@ def create_branding_conversation(
 
 
 def _ensure_default_client() -> str:
-    """Find or create a default workspace client; return client_id."""
+    """Find or create a default workspace client; return client_id.
+
+    The default client name is configurable via ``BRANDING_DEFAULT_CLIENT_NAME``
+    (default ``"My brands"``) for multi-tenant deployments.
+    """
     clients = branding_store.list_clients(limit=1)
     if clients:
         return clients[0].id
-    client = branding_store.create_client(name="My brands")
+    name = os.environ.get("BRANDING_DEFAULT_CLIENT_NAME", "My brands")
+    client = branding_store.create_client(name=name)
     return client.id
 
 
@@ -1053,6 +1058,12 @@ def _auto_create_brand_from_conversation(
 def send_branding_conversation_message(
     conversation_id: str, payload: SendMessageRequest
 ) -> ConversationStateResponse:
+    """Append a user message, get the assistant's reply, and return updated state.
+
+    Runs the assistant on the latest turn, persists the mission/output it
+    derives, auto-creates and links a brand once enough info is present (unless
+    ``skip_save``), and returns the refreshed conversation (404 if unknown).
+    """
     state = conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1084,6 +1095,8 @@ def send_branding_conversation_message(
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
 def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
+    """Return the full stored state (messages, mission, output, brand) for a
+    conversation in a single query; 404 if it does not exist."""
     state = conversation_store.get_state(conversation_id)
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -1101,6 +1114,8 @@ def get_branding_conversation(conversation_id: str) -> ConversationStateResponse
 def list_branding_conversations(
     brand_id: Optional[str] = None,
 ) -> List[ConversationSummaryResponse]:
+    """List conversation summaries (optionally filtered by ``brand_id``),
+    resolving each attached brand's name in a single batched lookup."""
     summaries = conversation_store.list_conversations(brand_id=brand_id)
     # Resolve only the brand names referenced by these conversations instead
     # of loading every brand of every client into memory.
@@ -1122,6 +1137,8 @@ def list_branding_conversations(
 def attach_conversation_to_brand(
     conversation_id: str, payload: AttachConversationBrandRequest
 ) -> ConversationStateResponse:
+    """Attach an existing conversation to an existing brand and return the
+    updated state. 404 if either the brand or the conversation is unknown."""
     brand_id = payload.brand_id.strip()
     if not _brand_exists(brand_id):
         raise HTTPException(status_code=404, detail="Brand not found")

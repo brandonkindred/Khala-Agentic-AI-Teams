@@ -219,6 +219,18 @@ def test_list_clients_pagination(fake_pg: dict) -> None:
     assert ids <= {c.id for c in created}
 
 
+def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
+    store = BrandingStore()
+    with pytest.raises(ValueError):
+        store.list_clients(limit=0)
+    with pytest.raises(ValueError):
+        store.list_clients(limit=-1)
+    with pytest.raises(ValueError):
+        store.list_clients(offset=-1)
+    with pytest.raises(ValueError):
+        store.list_brands_for_client("client_x", limit=0)
+
+
 def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")

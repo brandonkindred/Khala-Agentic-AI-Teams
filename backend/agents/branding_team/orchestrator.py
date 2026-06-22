@@ -14,6 +14,7 @@ Phase gate logic:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, List, Optional
 
 from pydantic import ValidationError
@@ -40,6 +41,8 @@ from .models import (
 
 if TYPE_CHECKING:
     from .store import BrandingStore
+
+logger = logging.getLogger(__name__)
 
 
 def _build_phase_gates(up_to_phase: BrandPhase, approved: bool) -> List[PhaseGate]:
@@ -277,7 +280,14 @@ class BrandingTeamOrchestrator:
                             if parsed is not None:
                                 return parsed
         except Exception:
-            pass
+            # Malformed JSON / schema mismatch already returns None from
+            # _parse_model_from_text; reaching here means an unexpected error
+            # walking the graph result. Log it rather than swallow silently.
+            logger.warning(
+                "Unexpected error extracting phase output for node %s; using default",
+                node_id,
+                exc_info=True,
+            )
         return model_class()
 
 

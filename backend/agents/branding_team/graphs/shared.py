@@ -7,6 +7,7 @@ Provides:
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Any, Literal, Optional
 
 from strands import Agent
@@ -20,6 +21,7 @@ from llm_service import get_strands_model
 
 OutputMode = Literal["json", "text"]
 
+
 # Every branding agent resolves the *same* model (agent_key="branding"),
 # differing only by response format. Building the graph instantiates ~40
 # agents per run; without memoisation each one constructs a fresh
@@ -27,15 +29,12 @@ OutputMode = Literal["json", "text"]
 # client, so one instance per response format is safe to share across all
 # agents and all runs. The Agents themselves are NOT cached — they carry
 # per-invocation conversation state and must stay distinct per graph build.
-_MODEL_CACHE: dict[str, Any] = {}
-
-
+#
+# ``maxsize`` bounds the cache: ``OutputMode`` is a fixed two-value set
+# ("json"/"text"), so this never holds more than a couple of entries.
+@lru_cache(maxsize=4)
 def _branding_model(output_mode: OutputMode) -> Any:
-    cached = _MODEL_CACHE.get(output_mode)
-    if cached is None:
-        cached = get_strands_model("branding", response_format=output_mode)
-        _MODEL_CACHE[output_mode] = cached
-    return cached
+    return get_strands_model("branding", response_format=output_mode)
 
 
 def build_agent(
