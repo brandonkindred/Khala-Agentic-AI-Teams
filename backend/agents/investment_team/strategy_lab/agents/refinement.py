@@ -24,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Loaded once at import — the system prompt is static, so re-reading it from disk
+# on every refinement round is wasted I/O.
+_SYSTEM_PROMPT = (_PROMPT_DIR / "refinement_system.md").read_text(encoding="utf-8")
+
 # The JSON Schema the LLM response must conform to, rendered once for
 # injection into the prompt. The Ollama transport routes through the
 # ``llm_service`` client in ``json_object`` wire mode (see ``get_strands_model``),
@@ -127,7 +131,7 @@ class RefinementAgent:
         tighten-only semantics). Any other top-level keys in the LLM
         response are logged and discarded.
         """
-        system_prompt = (_PROMPT_DIR / "refinement_system.md").read_text(encoding="utf-8")
+        system_prompt = _SYSTEM_PROMPT
 
         metrics_section = ""
         if metrics:

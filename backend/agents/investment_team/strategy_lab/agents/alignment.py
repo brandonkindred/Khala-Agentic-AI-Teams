@@ -44,6 +44,13 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Loaded once at import — these system prompts are static, so re-reading them
+# from disk on every near-miss adjudication / propose-fix call is wasted I/O.
+# (The propose-fix prompt is held raw on purpose: it contains literal ``{...}``
+# code examples and must never pass through ``str.format``.)
+_NEAR_MISS_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_near_miss.md").read_text(encoding="utf-8")
+_PROPOSE_FIX_SYSTEM_PROMPT = (_PROMPT_DIR / "alignment_propose_fix.md").read_text(encoding="utf-8")
+
 
 def _alignment_max_attempts() -> int:
     """Resolve the envelope attempt count for the alignment fix-proposer.
@@ -290,7 +297,7 @@ class TradeAlignmentAgent:
         transport error, raises :class:`AlignmentAuditError` (the
         gate wraps this with a fail-closed default).
         """
-        system_prompt = (_PROMPT_DIR / "alignment_near_miss.md").read_text(encoding="utf-8")
+        system_prompt = _NEAR_MISS_SYSTEM_PROMPT
         user_prompt = _NEAR_MISS_USER_TEMPLATE.format(
             rule_id=rule_id,
             predicate_repr=predicate_repr,
@@ -346,10 +353,7 @@ class TradeAlignmentAgent:
         :class:`AlignmentAuditError`; the orchestrator's retry wrapper
         catches and falls closed.
         """
-        # Loaded raw on purpose — the propose-fix prompt contains
-        # literal ``{...}`` patterns in code examples, so it must not
-        # pass through ``str.format``.
-        system_prompt = (_PROMPT_DIR / "alignment_propose_fix.md").read_text(encoding="utf-8")
+        system_prompt = _PROPOSE_FIX_SYSTEM_PROMPT
 
         critical = [f for f in findings if f.severity == "critical" and not f.passed]
         info_warning = [f for f in findings if f not in critical]

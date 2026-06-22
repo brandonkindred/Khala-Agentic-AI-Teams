@@ -32,6 +32,10 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Loaded once at import — the system prompt is static, so re-reading it from disk
+# on every zero-trade repair is wasted I/O.
+_SYSTEM_PROMPT = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
 # specialized repair agent must not invent fields.
@@ -165,7 +169,7 @@ class ZeroTradeRepairAgent:
                 ),
             )
 
-        system_prompt = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+        system_prompt = _SYSTEM_PROMPT
 
         prior_text = (
             "None yet."
