@@ -287,19 +287,27 @@ def _next_scaled_rung(
     gap bar cleared stays eligible even after a later-bar retrace.
 
     Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (DSL-enforced);
-    ``0 <= cursor`` is the next un-fired rung; ``position.high_since_entry`` /
-    ``low_since_entry`` are the watermarks as of the prior bar.
+    ``0 <= cursor`` is the next un-fired rung (asserted); ``position.side`` is
+    ``"long"`` or ``"short"`` (any other value fails fast); ``position.high_since_entry``
+    / ``low_since_entry`` are the watermarks as of the prior bar.
     Postconditions: returns ``cursor`` when the cursor rung's target is reached and
     ``cursor`` is in range, else ``None`` (ladder exhausted or target not reached).
     """
+    assert cursor >= 0, "cursor must be non-negative (the next un-fired rung)"
     if cursor >= len(rule.levels):
         return None
     level = rule.levels[cursor]
     if position.side == "long":
         peak = max(position.high_since_entry, bar.high)
         return cursor if peak >= position.entry_price * (1.0 + level.pct) else None
-    trough = min(position.low_since_entry, bar.low)
-    return cursor if trough <= position.entry_price * (1.0 - level.pct) else None
+    if position.side == "short":
+        trough = min(position.low_since_entry, bar.low)
+        return cursor if trough <= position.entry_price * (1.0 - level.pct) else None
+    # ``side`` is a Literal["long", "short"]; fail fast rather than silently
+    # applying the short branch to an unexpected value.
+    raise ValueError(  # pragma: no cover - side is Literal["long", "short"]
+        f"Unsupported position side: {position.side!r}"
+    )
 
 
 def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:

@@ -965,6 +965,49 @@ def test_rule8_stop_loss_geq_take_profit_is_warning_not_critical() -> None:
     assert any("stop_loss.pct" in w for w in warnings), warnings
 
 
+def test_rule8_scaled_ladder_first_rung_folds_into_risk_reward_warning() -> None:
+    """A ladder's FIRST rung is its effective profit target: a wide stop versus
+    that first rung must surface the same risk/reward warning a plain take_profit
+    would. The second rung sits at 0.20 (above the 0.10 stop), so this only warns
+    if the check compares against ``levels[0].pct`` (0.05) — proving the ladder is
+    folded into the take-profit pool by its first rung, not its last (or omitted)."""
+    spec = _spec(
+        exit_=[
+            StopLossRule(pct=0.10),
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.20, "qty_fraction": 0.5},
+                ]
+            ),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("stop_loss.pct" in c for c in _critical(results))
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("stop_loss.pct" in w for w in warnings), warnings
+
+
+def test_rule8_scaled_ladder_healthy_first_rung_no_risk_reward_warning() -> None:
+    """When the ladder's first rung (0.10) sits above the stop (0.05), the
+    risk/reward ratio is healthy and no warning fires — confirming the FIRST rung
+    is what the check folds in (a ladder summing to 1.0 also keeps Rule 4 happy)."""
+    spec = _spec(
+        exit_=[
+            StopLossRule(pct=0.05),
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                    {"pct": 0.30, "qty_fraction": 0.5},
+                ]
+            ),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("stop_loss.pct" in w for w in warnings), warnings
+
+
 def test_rule8_max_position_pct_above_25_is_critical() -> None:
     spec = _spec(risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10})
     results = SpecReadinessGate().validate(spec, backtest_config=_config())

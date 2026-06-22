@@ -127,6 +127,17 @@ def test_cursor_advance_rejects_out_of_order_rung() -> None:
     assert cursor.mapping == {0: 2}
 
 
+def test_cursor_mapping_is_read_only_but_live() -> None:
+    # mapping is a read-only view: mutation raises, but it still reflects a
+    # later advance() (a live proxy, not a snapshot copy).
+    cursor = _ScaledLadderCursor()
+    view = cursor.mapping
+    with pytest.raises(TypeError):
+        view[0] = 99  # type: ignore[index]
+    cursor.advance(0, 0)
+    assert view == {0: 1}  # the same view reflects the advance
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher: partial-close sizing + at-most-once firing + diagnostics.
 # ---------------------------------------------------------------------------

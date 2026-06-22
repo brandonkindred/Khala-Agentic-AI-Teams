@@ -17,6 +17,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import date as date_cls
 from functools import cached_property
+from types import MappingProxyType
 from typing import Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence
 
 import numpy as np
@@ -251,11 +252,13 @@ class _ScaledLadderCursor:
     def mapping(self) -> Mapping[int, int]:
         """The ``rule_index -> next un-fired rung`` view handed to the evaluator.
 
-        Preconditions: none. Postconditions: returns the live cursor mapping (a
-        read-only view — callers must not mutate it; advancing goes through
-        :meth:`advance`), so a cursor advanced after this call is reflected.
+        Preconditions: none. Postconditions: returns a read-only
+        :class:`~types.MappingProxyType` over the live cursor mapping — mutation
+        attempts raise ``TypeError`` (advancing goes through :meth:`advance`),
+        while a cursor advanced after this call is still reflected (the proxy is a
+        live view, not a copy).
         """
-        return self._next_rung
+        return MappingProxyType(self._next_rung)
 
     def advance(self, rule_index: int, fired_rung: int) -> None:
         """Advance past the rung that just fired.
@@ -691,7 +694,13 @@ class _EngineExitDispatcher:
                 # Same-side: the position's own partially-filled entry
                 # continuation (a REQUEUE_NEXT_BAR / TWAP_N remainder, identified
                 # by ``order_id == entry_order_id`` with some qty already filled).
-                # Captured here so the scaled deferral needs no second scan.
+                # Both policies requeue the SAME order under its original
+                # ``order_id`` — the fill simulator calls ``order_book.requeue(
+                # po.order_id, ...)`` and never mints child orders with fresh ids
+                # (it's the same identity check the simulator itself uses for a
+                # ``is_partial_entry_continuation``), so this single test covers
+                # TWAP slices too. Captured here so the scaled deferral needs no
+                # second scan.
                 if (
                     track_continuation
                     and po.order_id == pos.entry_order_id

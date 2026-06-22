@@ -655,7 +655,21 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 4: Exit completeness.
     # ------------------------------------------------------------------
     def _check_exit_completeness(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        """Verify the spec's exit rules can fully close every position.
+
+        Preconditions: ``ctx.spec`` is a :class:`StrategySpec` (its ``exit_rules``
+        is the authored exit list).
+        Postconditions: returns a tuple of :class:`QualityGateResult` — a single
+        critical when there are no exit rules, when none is of an engine-closable
+        kind (``signal_exit`` / ``stop_loss`` / ``take_profit`` /
+        ``scaled_take_profit``), or when the only exits are scaled ladders summing
+        to < 1.0 with no full-position exit to close the residual; otherwise empty.
+        """
         assert isinstance(ctx.spec, StrategySpec)
+        # Classify by type, not a duck-typed ``kind`` attribute, so a malformed
+        # rule can't slip past the check; ``allowed_kinds`` mirrors these types
+        # purely for the failure message.
+        allowed_rule_types = (SignalExitRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule)
         allowed_kinds = {"signal_exit", "stop_loss", "take_profit", "scaled_take_profit"}
         if not ctx.spec.exit_rules:
             return (
@@ -665,7 +679,7 @@ class SpecReadinessGate(GateResultsMixin):
                     "scaled_take_profit."
                 ),
             )
-        if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
+        if not any(isinstance(r, allowed_rule_types) for r in ctx.spec.exit_rules):
             return (
                 self._critical(f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."),
             )

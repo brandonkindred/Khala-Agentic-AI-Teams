@@ -635,9 +635,11 @@ def scaled_level_key(rule_index: int, level_index: int) -> str:
 
     Single source of the ``scaled_take_profit_level_firings`` key format, shared by
     the emitter (``_record_emission``) and the conformance gate so the two never
-    drift. Preconditions: both indices are non-negative. Postconditions: returns
-    ``"<rule_index>:<level_index>"`` (e.g. ``"0:1"``).
+    drift. Preconditions: both indices are non-negative (asserted). Postconditions:
+    returns ``"<rule_index>:<level_index>"`` (e.g. ``"0:1"``).
     """
+    assert rule_index >= 0, "rule_index must be non-negative"
+    assert level_index >= 0, "level_index must be non-negative"
     return f"{rule_index}:{level_index}"
 
 
