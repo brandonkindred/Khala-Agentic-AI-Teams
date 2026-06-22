@@ -36,6 +36,44 @@ def test_iso_now_returns_iso_string():
     datetime.fromisoformat(out.replace("Z", "+00:00"))
 
 
+def test_partition_tasks_by_completion_splits_and_preserves_order():
+    import orchestrator
+
+    all_tasks = {"a": "ta", "b": "tb", "c": "tc", "d": "td"}
+    completed_ids = {"a", "c"}
+    remaining_ids = {"b", "d"}
+
+    completed, remaining = orchestrator._partition_tasks_by_completion(
+        all_tasks, completed_ids, remaining_ids
+    )
+    # Order follows all_tasks iteration order, matching the comprehensions it replaced.
+    assert completed == ["ta", "tc"]
+    assert remaining == ["tb", "td"]
+
+
+def test_partition_tasks_by_completion_id_in_both_sets_appears_in_both():
+    import orchestrator
+
+    all_tasks = {"a": "ta", "b": "tb"}
+    # "a" is both completed and still listed as remaining: it must appear in both
+    # lists, exactly as the two independent comprehensions produced.
+    completed, remaining = orchestrator._partition_tasks_by_completion(
+        all_tasks, {"a"}, {"a", "b"}
+    )
+    assert completed == ["ta"]
+    assert remaining == ["ta", "tb"]
+
+
+def test_partition_tasks_by_completion_empty_sets_yield_empty_lists():
+    import orchestrator
+
+    completed, remaining = orchestrator._partition_tasks_by_completion(
+        {"a": "ta"}, set(), set()
+    )
+    assert completed == []
+    assert remaining == []
+
+
 def test_convert_to_structured_questions_assigns_unique_ids_and_options():
     import orchestrator
 
