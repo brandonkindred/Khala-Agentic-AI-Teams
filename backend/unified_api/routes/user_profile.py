@@ -17,8 +17,10 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, HTTPException, Query
+from pydantic import BaseModel
 
 from user_profile import (
     Association,
@@ -34,6 +36,19 @@ from user_profile.store import DEFAULT_USER_ID
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/user-profile", tags=["user-profile"])
+
+#: Artifact-type filter values the registry understands. Restricting the query
+#: param to this set makes FastAPI return 422 for anything else.
+ArtifactTypeFilter = Literal["brand", "blog_post", "project", "agentic_team", "integration"]
+
+
+class IntegrationStatus(BaseModel):
+    """One row of GET /api/user-profile/integrations (mirrors the integrations list)."""
+
+    id: str
+    type: str
+    enabled: bool
+    channel: str | None = None
 
 
 def _unavailable(exc: Exception) -> HTTPException:
@@ -62,10 +77,10 @@ def update_profile(update: UserProfileUpdate) -> UserProfile:
 
 @router.get("/associations", response_model=AssociationList)
 def read_associations(
-    artifact_type: str | None = Query(
-        None,
-        description="Optional filter: brand, blog_post, project, agentic_team, integration.",
-    ),
+    artifact_type: Annotated[
+        ArtifactTypeFilter | None,
+        Query(description="Optional filter: brand, blog_post, project, agentic_team, integration."),
+    ] = None,
 ) -> AssociationList:
     """List artifacts linked to the current profile, newest first."""
     try:
@@ -75,14 +90,14 @@ def read_associations(
     return AssociationList(user_id=DEFAULT_USER_ID, associations=items)
 
 
-@router.get("/integrations")
-def read_integrations() -> list[dict]:
+@router.get("/integrations", response_model=list[IntegrationStatus])
+def read_integrations() -> list[IntegrationStatus]:
     """Pass-through to the shared integrations list so the profile page can
     show integration status without duplicating that logic."""
     try:
         from unified_api.integrations_store import get_integrations_list
 
-        return get_integrations_list()
+        return [IntegrationStatus(**item) for item in get_integrations_list()]
     except Exception as exc:  # noqa: BLE001
         logger.warning("user_profile: integrations list unavailable: %s", exc, exc_info=True)
         return []

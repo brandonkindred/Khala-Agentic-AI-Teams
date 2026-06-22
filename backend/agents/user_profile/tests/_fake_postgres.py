@@ -59,6 +59,9 @@ class _FakeCursor:
             else:
                 # On conflict, apply only the columns named in the SET clause
                 # (each as ``col = excluded.col``), advancing them from EXCLUDED.
+                # NOTE: this regex is coupled to the exact ``col = EXCLUDED.col``
+                # form emitted by ``store.upsert_profile``; if that SQL changes
+                # (aliases, line breaks), update this parser to match.
                 for col in re.findall(r"(\w+)\s*=\s*excluded\.\w+", norm):
                     existing[col] = incoming[col]
             self.rowcount = 1

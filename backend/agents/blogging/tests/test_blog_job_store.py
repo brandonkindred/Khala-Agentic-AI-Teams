@@ -30,6 +30,21 @@ def test_brief_label_picks_first_nonblank_line() -> None:
     assert len(_brief_label("x" * 500, "f")) == 120
 
 
+def test_create_blog_job_records_profile_association(tmp_path: Path, monkeypatch) -> None:
+    """create_blog_job links the new job to the default user profile (best-effort)."""
+    from shared import blog_job_store as bjs
+
+    from user_profile import ArtifactType
+
+    calls: list = []
+    monkeypatch.setattr(bjs, "record_association_safe", lambda *a, **k: calls.append((a, k)))
+
+    job_id = str(uuid.uuid4())
+    bjs.create_blog_job(job_id, "My Title\nbody", cache_dir=tmp_path)
+
+    assert calls == [((ArtifactType.BLOG_POST, "blogging", job_id), {"label": "My Title"})]
+
+
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending blog jobs to interrupted with reason."""
     from shared.blog_job_store import (

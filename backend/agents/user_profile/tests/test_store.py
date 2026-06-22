@@ -64,6 +64,28 @@ def test_record_association_validates_inputs(db):
         up_store.record_association("", "branding", "x")
 
 
+def test_record_association_requires_user_id(db):
+    with pytest.raises(AssertionError):
+        up_store.record_association("brand", "branding", "x", user_id="")
+
+
+def test_remove_association_requires_user_id(db):
+    with pytest.raises(AssertionError):
+        up_store.remove_association("assoc_1", user_id="")
+
+
+def test_record_association_safe_skips_empty_user_id(monkeypatch, db):
+    called = False
+
+    def _spy(*args, **kwargs):
+        nonlocal called
+        called = True
+
+    monkeypatch.setattr(up_store, "record_association", _spy)
+    up_store.record_association_safe("brand", "branding", "brand_1", user_id="")
+    assert called is False
+
+
 def test_list_associations_filters_by_type(db):
     up_store.record_association("brand", "branding", "brand_1", label="Acme")
     up_store.record_association("blog_post", "blogging", "job_1", label="Post")

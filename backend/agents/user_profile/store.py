@@ -35,6 +35,8 @@ DEFAULT_USER_ID = "default"
 
 #: Column list for ``user_profiles``, in the order ``_profile_from_row`` reads.
 #: Shared by every SELECT/INSERT/RETURNING so a schema change is edited once.
+#: Trusted literal only — never interpolate untrusted input here (it is f-string
+#: composed into SQL).
 _PROFILE_COLUMNS = "user_id, display_name, email, bio, profile_json, created_at, updated_at"
 
 
@@ -215,6 +217,7 @@ def record_association(
     Callers that cannot tolerate a persistence failure use
     ``record_association_safe``, which never raises.
     """
+    assert user_id, "user_id must be non-empty"
     assert artifact_type and team and artifact_id, "artifact_type, team, artifact_id required"
     assoc_id = f"assoc_{uuid4().hex[:12]}"
     now = _now_iso()
@@ -253,9 +256,10 @@ def record_association_safe(
           :func:`record_association` (whose precondition would assert) — so this
           wrapper never hides a contract failure inside a broad ``except``.
     """
-    if not (artifact_type and team and artifact_id):
+    if not (user_id and artifact_type and team and artifact_id):
         logger.warning(
-            "user_profile: skipping association with empty fields type=%r team=%r id=%r",
+            "user_profile: skipping association with empty fields user=%r type=%r team=%r id=%r",
+            user_id,
             artifact_type,
             team,
             artifact_id,
@@ -316,6 +320,7 @@ def remove_association(association_id: str, user_id: str = DEFAULT_USER_ID) -> b
         - Returns ``True`` iff a row was deleted.
     """
     assert association_id, "association_id must be non-empty"
+    assert user_id, "user_id must be non-empty"
     with get_conn() as conn, conn.cursor() as cur:
         cur.execute(
             "DELETE FROM user_profile_associations WHERE id = %s AND user_id = %s",
