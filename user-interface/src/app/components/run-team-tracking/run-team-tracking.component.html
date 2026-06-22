@@ -14,11 +14,11 @@
       <div class="phase-stepper">
         @for (phase of ALL_PHASES; track phase.id; let i = $index; let last = $last) {
           <div class="phase-step"
-               [class.completed]="isPhaseCompleted(phase.id)"
-               [class.current]="isCurrentPhase(phase.id)"
-               [class.pending]="isPhasePending(phase.id)"
+               [class.completed]="phaseStatuses[phase.id]?.completed"
+               [class.current]="phaseStatuses[phase.id]?.current"
+               [class.pending]="phaseStatuses[phase.id]?.pending"
                [class.has-connector]="!last"
-               [class.next-completed]="!last && isPhaseCompleted(ALL_PHASES[i + 1].id)">
+               [class.next-completed]="!last && phaseStatuses[ALL_PHASES[i + 1].id]?.completed">
             <div class="phase-node">
               <mat-icon>{{ phase.icon }}</mat-icon>
             </div>
