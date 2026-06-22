@@ -73,4 +73,18 @@ describe('UserProfileApiService', () => {
     expect(req.request.method).toBe('GET');
     req.flush(mock);
   });
+
+  it('should GET the aggregated overview', () => {
+    const mock = {
+      profile: { user_id: 'default', display_name: '', email: '', bio: '', preferences: {}, created_at: '', updated_at: '' },
+      associations: [],
+      integrations: [],
+    };
+    service.getOverview().subscribe((res) => {
+      expect(res).toEqual(mock);
+    });
+    const req = httpMock.expectOne(`${baseUrl}/overview`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mock);
+  });
 });

@@ -47,6 +47,13 @@ SCHEMA = TeamSchema(
         "ON user_profile_associations(user_id, artifact_type)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_assoc_unique "
         "ON user_profile_associations(user_id, artifact_type, artifact_id)",
+        # Serve list_associations' "WHERE user_id [AND artifact_type] ORDER BY
+        # created_at DESC" from the index instead of an in-memory sort: the
+        # first index covers the unfiltered list, the second the per-type list.
+        "CREATE INDEX IF NOT EXISTS idx_user_profile_assoc_user_created "
+        "ON user_profile_associations(user_id, created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_user_profile_assoc_user_type_created "
+        "ON user_profile_associations(user_id, artifact_type, created_at DESC)",
     ],
     table_names=[
         "user_profiles",

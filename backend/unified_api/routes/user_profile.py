@@ -51,6 +51,14 @@ class IntegrationStatus(BaseModel):
     channel: str | None = None
 
 
+class ProfileOverview(BaseModel):
+    """Aggregated payload for the profile page — one round-trip instead of three."""
+
+    profile: UserProfile
+    associations: list[Association]
+    integrations: list[IntegrationStatus]
+
+
 def _unavailable(exc: Exception) -> HTTPException:
     """Map a storage failure (e.g. Postgres disabled) to HTTP 503."""
     logger.warning("user_profile: storage unavailable: %s", exc, exc_info=True)
@@ -90,10 +98,8 @@ def read_associations(
     return AssociationList(user_id=DEFAULT_USER_ID, associations=items)
 
 
-@router.get("/integrations", response_model=list[IntegrationStatus])
-def read_integrations() -> list[IntegrationStatus]:
-    """Pass-through to the shared integrations list so the profile page can
-    show integration status without duplicating that logic."""
+def _integrations_list() -> list[IntegrationStatus]:
+    """Shared integration-status fetch (best-effort: empty list on failure)."""
     try:
         from unified_api.integrations_store import get_integrations_list
 
@@ -101,3 +107,26 @@ def read_integrations() -> list[IntegrationStatus]:
     except Exception as exc:  # noqa: BLE001
         logger.warning("user_profile: integrations list unavailable: %s", exc, exc_info=True)
         return []
+
+
+@router.get("/integrations", response_model=list[IntegrationStatus])
+def read_integrations() -> list[IntegrationStatus]:
+    """Pass-through to the shared integrations list so the profile page can
+    show integration status without duplicating that logic."""
+    return _integrations_list()
+
+
+@router.get("/overview", response_model=ProfileOverview)
+def read_overview() -> ProfileOverview:
+    """Profile + linked artifacts + integration status in a single response, so
+    the profile page loads in one round-trip instead of three."""
+    try:
+        profile = get_profile(DEFAULT_USER_ID)
+        associations = list_associations(DEFAULT_USER_ID)
+    except Exception as exc:  # noqa: BLE001
+        raise _unavailable(exc) from exc
+    return ProfileOverview(
+        profile=profile,
+        associations=associations,
+        integrations=_integrations_list(),
+    )

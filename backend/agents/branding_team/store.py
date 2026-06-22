@@ -20,7 +20,7 @@ from psycopg.types.json import Json
 
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
-from user_profile import ArtifactType, record_association_safe
+from user_profile import ArtifactType, record_association_async
 
 from .models import (
     Brand,
@@ -151,9 +151,10 @@ class BrandingStore:
                 "INSERT INTO branding_brands (id, client_id, data) VALUES (%s, %s, %s)",
                 (brand_id, client_id, Json(brand.model_dump(mode="json"))),
             )
-        # Best-effort: link the brand to the default profile. record_association_safe
-        # never raises, so a link failure can't break brand creation.
-        record_association_safe(ArtifactType.BRAND, "branding", brand_id, label=brand.name)
+        # Best-effort, non-blocking: link the brand to the default profile.
+        # record_association_async dispatches to a background worker and never
+        # raises, so a link failure can't break or slow brand creation.
+        record_association_async(ArtifactType.BRAND, "branding", brand_id, label=brand.name)
         return brand
 
     @timed_query(store=_STORE, op="update_brand")

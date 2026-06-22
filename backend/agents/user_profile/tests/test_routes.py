@@ -58,6 +58,37 @@ def test_associations_endpoint_lists_and_filters(client, monkeypatch):
     assert items[0]["team"] == "branding"
 
 
+def test_overview_aggregates_profile_associations_integrations(client, monkeypatch):
+    import unified_api.integrations_store as istore
+
+    from user_profile import store as up_store
+
+    up_store.record_association("brand", "branding", "brand_1", label="Acme")
+    monkeypatch.setattr(
+        istore,
+        "get_integrations_list",
+        lambda: [{"id": "slack", "type": "slack", "enabled": True, "channel": "#eng"}],
+    )
+
+    resp = client.get("/api/user-profile/overview")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["profile"]["user_id"] == "default"
+    assert len(body["associations"]) == 1
+    assert body["associations"][0]["team"] == "branding"
+    assert body["integrations"][0]["id"] == "slack"
+
+
+def test_overview_storage_unavailable_returns_503(monkeypatch):
+    import unified_api.routes.user_profile as routes_mod
+
+    app = FastAPI()
+    app.include_router(router)
+    tc = TestClient(app, raise_server_exceptions=False)
+    monkeypatch.setattr(routes_mod, "get_profile", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down")))
+    assert tc.get("/api/user-profile/overview").status_code == 503
+
+
 def test_integrations_passthrough(client, monkeypatch):
     import unified_api.integrations_store as istore
 

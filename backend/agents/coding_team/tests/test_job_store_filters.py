@@ -26,7 +26,7 @@ def test_create_job_records_profile_association(monkeypatch):
 
     monkeypatch.setattr(job_store, "_client", lambda cache_dir=None: _CreateClient())
     calls: List[Any] = []
-    monkeypatch.setattr(job_store, "record_association_safe", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(job_store, "record_association_async", lambda *a, **k: calls.append((a, k)))
 
     job_store.create_job("job_1", "my/repo")
     assert calls == [((ArtifactType.PROJECT, "coding_team", "job_1"), {"label": "my/repo"})]

@@ -17,23 +17,20 @@ const PROFILE = {
   updated_at: '',
 };
 
-const ASSOCIATIONS = {
-  user_id: 'default',
-  associations: [
-    { id: 'a1', user_id: 'default', artifact_type: 'brand', team: 'branding', artifact_id: 'brand_1', label: 'Acme', role: 'owner', created_at: '' },
-    { id: 'a2', user_id: 'default', artifact_type: 'project', team: 'coding_team', artifact_id: 'job_2', label: 'Repo', role: 'owner', created_at: '' },
-  ],
-};
+const ASSOCIATIONS = [
+  { id: 'a1', user_id: 'default', artifact_type: 'brand', team: 'branding', artifact_id: 'brand_1', label: 'Acme', role: 'owner', created_at: '' },
+  { id: 'a2', user_id: 'default', artifact_type: 'project', team: 'coding_team', artifact_id: 'job_2', label: 'Repo', role: 'owner', created_at: '' },
+];
 
 const INTEGRATIONS = [{ id: 'slack', type: 'slack', enabled: true, channel: '#eng' }];
+
+const OVERVIEW = { profile: PROFILE, associations: ASSOCIATIONS, integrations: INTEGRATIONS };
 
 describe('UserProfileComponent', () => {
   let component: UserProfileComponent;
   let fixture: ComponentFixture<UserProfileComponent>;
   let apiSpy: {
-    getProfile: ReturnType<typeof vi.fn>;
-    getAssociations: ReturnType<typeof vi.fn>;
-    getIntegrations: ReturnType<typeof vi.fn>;
+    getOverview: ReturnType<typeof vi.fn>;
     updateProfile: ReturnType<typeof vi.fn>;
   };
 
@@ -54,17 +51,15 @@ describe('UserProfileComponent', () => {
 
   beforeEach(() => {
     apiSpy = {
-      getProfile: vi.fn().mockReturnValue(of(PROFILE)),
-      getAssociations: vi.fn().mockReturnValue(of(ASSOCIATIONS)),
-      getIntegrations: vi.fn().mockReturnValue(of(INTEGRATIONS)),
+      getOverview: vi.fn().mockReturnValue(of(OVERVIEW)),
       updateProfile: vi.fn().mockReturnValue(of(PROFILE)),
     };
   });
 
-  it('should create and load profile data', async () => {
+  it('should create and load the profile in a single request', async () => {
     await setup();
     expect(component).toBeTruthy();
-    expect(apiSpy.getProfile).toHaveBeenCalled();
+    expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);
     expect(component.form.value.display_name).toBe('Brandon');
   });
 
@@ -81,7 +76,7 @@ describe('UserProfileComponent', () => {
   });
 
   it('should set an error when loading fails', async () => {
-    apiSpy.getProfile.mockReturnValue(throwError(() => new Error('boom')));
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
     await setup();
     expect(component.error).toBeTruthy();
     expect(component.loading).toBe(false);
@@ -113,7 +108,7 @@ describe('UserProfileComponent', () => {
   });
 
   it('should show no groups when there are no associations', async () => {
-    apiSpy.getAssociations.mockReturnValue(of({ user_id: 'default', associations: [] }));
+    apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, associations: [] }));
     await setup();
     expect(component.totalAssociations).toBe(0);
     expect(component.groups).toEqual([]);

@@ -37,7 +37,7 @@ def test_create_blog_job_records_profile_association(tmp_path: Path, monkeypatch
     from user_profile import ArtifactType
 
     calls: list = []
-    monkeypatch.setattr(bjs, "record_association_safe", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(bjs, "record_association_async", lambda *a, **k: calls.append((a, k)))
 
     job_id = str(uuid.uuid4())
     bjs.create_blog_job(job_id, "My Title\nbody", cache_dir=tmp_path)

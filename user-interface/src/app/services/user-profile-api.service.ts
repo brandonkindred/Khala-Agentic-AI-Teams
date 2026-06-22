@@ -5,6 +5,7 @@ import { environment } from '../../environments/environment';
 import type {
   AssociationList,
   ProfileIntegration,
+  ProfileOverview,
   UserProfile,
   UserProfileUpdate,
 } from '../models/user-profile.model';
@@ -43,5 +44,13 @@ export class UserProfileApiService {
   /** GET /api/user-profile/integrations — integration status pass-through. */
   getIntegrations(): Observable<ProfileIntegration[]> {
     return this.http.get<ProfileIntegration[]>(`${this.baseUrl}/integrations`);
+  }
+
+  /**
+   * GET /api/user-profile/overview — profile + associations + integrations in a
+   * single response, so the profile page loads in one round-trip.
+   */
+  getOverview(): Observable<ProfileOverview> {
+    return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`);
   }
 }

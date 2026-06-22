@@ -47,3 +47,10 @@ export interface ProfileIntegration {
   enabled: boolean;
   channel: string | null;
 }
+
+/** Aggregated payload from GET /api/user-profile/overview (one round-trip). */
+export interface ProfileOverview {
+  profile: UserProfile;
+  associations: Association[];
+  integrations: ProfileIntegration[];
+}

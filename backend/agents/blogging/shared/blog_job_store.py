@@ -27,7 +27,7 @@ from shared_temporal.checkpoints import (  # noqa: F401
     submit_input,
     wait_for_input,
 )
-from user_profile import ArtifactType, record_association_safe
+from user_profile import ArtifactType, record_association_async
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +147,8 @@ def create_blog_job(
         "events": [],
     }
     _client(cache_dir).create_job(job_id, status=JOB_STATUS_PENDING, **fields)
-    # Best-effort: link the blog job to the default profile. record_association_safe
-    # never raises, so a link failure can't break job creation.
-    record_association_safe(
+    # Best-effort, non-blocking: link the blog job to the default profile.
+    record_association_async(
         ArtifactType.BLOG_POST, "blogging", job_id, label=_brief_label(brief, job_id)
     )
 

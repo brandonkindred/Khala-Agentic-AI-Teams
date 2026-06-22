@@ -8,7 +8,6 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { RouterLink } from '@angular/router';
-import { forkJoin } from 'rxjs';
 import { DashboardShellComponent } from '../../shared/dashboard-shell/dashboard-shell.component';
 import { UserProfileApiService } from '../../services/user-profile-api.service';
 import type { Association, ProfileIntegration } from '../../models/user-profile.model';
@@ -73,22 +72,18 @@ export class UserProfileComponent implements OnInit {
     this.load();
   }
 
-  /** Load the profile, its associations, and integration status together. */
+  /** Load the profile, its associations, and integration status in one request. */
   load(): void {
     this.loading = true;
     this.error = null;
-    forkJoin({
-      profile: this.api.getProfile(),
-      associations: this.api.getAssociations(),
-      integrations: this.api.getIntegrations(),
-    }).subscribe({
+    this.api.getOverview().subscribe({
       next: ({ profile, associations, integrations }) => {
         this.form.patchValue({
           display_name: profile.display_name,
           email: profile.email,
           bio: profile.bio,
         });
-        this.groups = this.groupAssociations(associations.associations);
+        this.groups = this.groupAssociations(associations);
         this.integrations = integrations;
         this.loading = false;
       },

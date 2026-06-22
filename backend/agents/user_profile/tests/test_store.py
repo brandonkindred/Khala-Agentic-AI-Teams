@@ -105,6 +105,31 @@ def test_remove_association(db):
     assert up_store.remove_association(a.id) is False
 
 
+def test_record_association_async_dispatches(monkeypatch, db):
+    """The async wrapper runs record_association_safe on a background worker."""
+    captured: list = []
+    monkeypatch.setattr(up_store, "record_association_safe", lambda *a, **k: captured.append((a, k)))
+
+    f1 = up_store.record_association_async("brand", "branding", "b1", label="x")
+    f2 = up_store.record_association_async("project", "coding_team", "j2")  # reuses the executor
+    assert f1 is not None and f2 is not None
+    f1.result(timeout=5)
+    f2.result(timeout=5)
+
+    assert len(captured) == 2
+    assert (("brand", "branding", "b1"), {"user_id": "default", "label": "x", "role": "owner"}) in captured
+
+
+def test_record_association_async_dispatch_failure_returns_none(monkeypatch):
+    """If dispatch itself fails, the wrapper logs and returns None (never raises)."""
+
+    def _boom():
+        raise RuntimeError("no executor")
+
+    monkeypatch.setattr(up_store, "_get_assoc_executor", _boom)
+    assert up_store.record_association_async("brand", "branding", "b1") is None
+
+
 def test_ts_helper_renders_values():
     from datetime import datetime, timezone
 

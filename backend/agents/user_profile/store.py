@@ -12,6 +12,7 @@ surface as structured log lines.
 from __future__ import annotations
 
 import logging
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime, timezone
 from typing import List, Optional
 from uuid import uuid4
@@ -38,6 +39,11 @@ DEFAULT_USER_ID = "default"
 #: Trusted literal only — never interpolate untrusted input here (it is f-string
 #: composed into SQL).
 _PROFILE_COLUMNS = "user_id, display_name, email, bio, profile_json, created_at, updated_at"
+
+#: Column list for ``user_profile_associations``, in the order ``_assoc_from_row``
+#: reads. Shared by record_association (INSERT + RETURNING) and list_associations
+#: (SELECT) so a schema change is edited once. Trusted literal only.
+_ASSOC_COLUMNS = "id, user_id, artifact_type, team, artifact_id, label, role, created_at"
 
 
 def _now_iso() -> str:
@@ -223,12 +229,11 @@ def record_association(
     now = _now_iso()
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
-            "INSERT INTO user_profile_associations "
-            "(id, user_id, artifact_type, team, artifact_id, label, role, created_at) "
+            f"INSERT INTO user_profile_associations ({_ASSOC_COLUMNS}) "
             "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) "
             "ON CONFLICT (user_id, artifact_type, artifact_id) DO UPDATE "
             "SET label = EXCLUDED.label, role = EXCLUDED.role "
-            "RETURNING id, user_id, artifact_type, team, artifact_id, label, role, created_at",
+            f"RETURNING {_ASSOC_COLUMNS}",
             (assoc_id, user_id, artifact_type, team, artifact_id, label, role, now),
         )
         row = cur.fetchone()
@@ -284,6 +289,55 @@ def record_association_safe(
         )
 
 
+#: Small background pool for fire-and-forget association writes, so an
+#: artifact-create path is never blocked on the profile DB. Created lazily on
+#: first use to keep import side-effect-free.
+_assoc_executor: Optional[ThreadPoolExecutor] = None
+
+
+def _get_assoc_executor() -> ThreadPoolExecutor:
+    global _assoc_executor
+    if _assoc_executor is None:
+        _assoc_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="user_profile_assoc")
+    return _assoc_executor
+
+
+def record_association_async(
+    artifact_type: str,
+    team: str,
+    artifact_id: str,
+    *,
+    user_id: str = DEFAULT_USER_ID,
+    label: str = "",
+    role: str = "owner",
+) -> Optional[Future]:
+    """Fire-and-forget :func:`record_association_safe` on a background worker.
+
+    Keeps the link best-effort while removing the synchronous DB round-trip from
+    the caller's artifact-create path. Never raises; returns the ``Future`` (so
+    tests can await it) or ``None`` if dispatch itself failed.
+    """
+    try:
+        return _get_assoc_executor().submit(
+            record_association_safe,
+            artifact_type,
+            team,
+            artifact_id,
+            user_id=user_id,
+            label=label,
+            role=role,
+        )
+    except Exception:  # noqa: BLE001 - dispatch best-effort, never propagate
+        logger.warning(
+            "user_profile: failed to dispatch association type=%s team=%s id=%s",
+            artifact_type,
+            team,
+            artifact_id,
+            exc_info=True,
+        )
+        return None
+
+
 @timed_query(store=_STORE, op="list_associations")
 def list_associations(
     user_id: str = DEFAULT_USER_ID,
@@ -297,10 +351,7 @@ def list_associations(
         - When ``artifact_type`` is given, every result matches it.
     """
     assert user_id, "user_id must be non-empty"
-    query = (
-        "SELECT id, user_id, artifact_type, team, artifact_id, label, role, created_at "
-        "FROM user_profile_associations WHERE user_id = %s"
-    )
+    query = f"SELECT {_ASSOC_COLUMNS} FROM user_profile_associations WHERE user_id = %s"
     params: list[object] = [user_id]
     if artifact_type:
         query += " AND artifact_type = %s"

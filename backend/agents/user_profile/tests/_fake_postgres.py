@@ -6,7 +6,6 @@ run without a real Postgres (matching the default, non-integration suite).
 
 from __future__ import annotations
 
-import re
 from contextlib import contextmanager
 from typing import Any
 
@@ -57,13 +56,15 @@ class _FakeCursor:
             if existing is None:
                 self._db["profiles"][user_id] = dict(incoming)
             else:
-                # On conflict, apply only the columns named in the SET clause
-                # (each as ``col = excluded.col``), advancing them from EXCLUDED.
-                # NOTE: this regex is coupled to the exact ``col = EXCLUDED.col``
-                # form emitted by ``store.upsert_profile``; if that SQL changes
-                # (aliases, line breaks), update this parser to match.
-                for col in re.findall(r"(\w+)\s*=\s*excluded\.\w+", norm):
-                    existing[col] = incoming[col]
+                # On conflict, apply only the columns named in the SET clause.
+                # Slice the clause text (between "do update set" and "returning")
+                # and read each assignment's left-hand column — robust to the RHS
+                # form (EXCLUDED.col, literal, expression) the store emits.
+                set_clause = norm.split("do update set", 1)[1].split("returning", 1)[0]
+                for assignment in set_clause.split(","):
+                    col = assignment.split("=", 1)[0].strip()
+                    if col in incoming:
+                        existing[col] = incoming[col]
             self.rowcount = 1
             self._one = dict(self._db["profiles"][user_id])
             return
