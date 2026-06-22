@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_http import get_pooled_client
 
 logger = logging.getLogger(__name__)
 
@@ -92,10 +93,12 @@ class JobServiceClient:
         total_attempts = max_retries + 1
         for attempt in range(total_attempts):
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(method, url, **kwargs)
-                    resp.raise_for_status()
-                    return resp
+                # Reuse a process-wide pooled client (keep-alive connections)
+                # instead of opening/closing one per request.
+                client = get_pooled_client(timeout)
+                resp = client.request(method, url, **kwargs)
+                resp.raise_for_status()
+                return resp
             except (
                 httpx.ConnectError,
                 httpx.ReadTimeout,
