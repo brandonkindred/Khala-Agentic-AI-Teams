@@ -47,6 +47,48 @@ def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
 
 
+# ---------------------------------------------------------------------------
+# Cached per-team client factory
+#
+# Every team's job store independently re-implemented "get a JobServiceClient
+# for my team" — some constructing a fresh client on every call, others
+# hand-rolling a module-level lazy singleton.  This single factory replaces all
+# of those: it returns one shared client per team for the life of the process.
+# The client resolves JOB_SERVICE_URL per request (see ``_base_url``), so a
+# cached instance still honors a URL set after construction.
+# ---------------------------------------------------------------------------
+
+_client_cache: dict[str, "JobServiceClient"] = {}
+_client_cache_lock = threading.Lock()
+
+
+def get_job_service_client(team: str) -> "JobServiceClient":
+    """Return a process-wide cached :class:`JobServiceClient` for ``team``.
+
+    Preconditions:
+        - ``team`` is a non-empty string.
+    Postconditions:
+        - Returns the same instance for the same ``team`` across calls
+          (one client per team), constructed lazily on first request.
+    """
+    assert team, "team must be a non-empty string"
+    client = _client_cache.get(team)
+    if client is not None:
+        return client
+    with _client_cache_lock:
+        client = _client_cache.get(team)
+        if client is None:
+            client = JobServiceClient(team=team)
+            _client_cache[team] = client
+        return client
+
+
+def _clear_job_client_cache_for_testing() -> None:
+    """Drop all cached per-team clients.  Test-only seam for isolation."""
+    with _client_cache_lock:
+        _client_cache.clear()
+
+
 class JobServiceClient:
     """HTTP client for the central job service."""
 
@@ -407,7 +449,7 @@ class BaseJobStore:
     team: str = ""  # Override in subclass
 
     def _client(self) -> JobServiceClient:
-        return JobServiceClient(team=self.team)
+        return get_job_service_client(self.team)
 
     def create_job(self, job_id: str, *, status: str = JOB_STATUS_PENDING, **fields: Any) -> None:
         self._client().create_job(job_id, status=status, **fields)

@@ -25,6 +25,7 @@ from job_service_client import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JobServiceClient,
+    get_job_service_client,
 )
 from shared_concurrency import BackgroundHeartbeat
 
@@ -71,7 +72,7 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
             "Software engineering job store using JobServiceClient (team=software_engineering_team)"
         )
         _jobs_path_logged = True
-    return JobServiceClient(team="software_engineering_team")
+    return get_job_service_client("software_engineering_team")
 
 
 def create_job(
