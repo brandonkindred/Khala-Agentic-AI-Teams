@@ -96,7 +96,7 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
 
 
 # Single source of truth for the mission fields the assistant reads/writes,
-# grouped by how they merge. ``_format_brief``, ``_merge_mission_update`` and
+# grouped by how they merge. ``_brief_value``, ``_merge_mission_update`` and
 # ``_MISSION_FIELD_NAMES`` all derive from these so a new field is added once.
 _MISSION_STR_FIELDS = (
     "company_name",
@@ -294,26 +294,38 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
     return BrandingMission(**data)
 
 
-def _format_brief(mission: BrandingMission) -> Dict[str, Any]:
-    """Render the mission into the flat key/value brief the prompt templates
-    interpolate. Keys are derived from the shared field groups so the brief
-    can't drift from ``_merge_mission_update``."""
-    brief: Dict[str, Any] = {key: getattr(mission, key) or "" for key in _MISSION_STR_FIELDS}
-    for key in _MISSION_LIST_FIELDS:
-        brief[key] = getattr(mission, key) or []
-    brief["color_palettes"] = [
-        p.model_dump() if hasattr(p, "model_dump") else p for p in (mission.color_palettes or [])
-    ]
-    brief["selected_palette_index"] = mission.selected_palette_index
-    return brief
+def _brief_value(mission: BrandingMission, field: str) -> Any:
+    """Display value for one mission *field* in the prompt brief.
+
+    Preconditions:
+        ``field`` is a member of ``_MISSION_BRIEF_ORDER``.
+    Postconditions:
+        Returns the field's value normalized for display — ``""`` for empty
+        strings, ``[]`` for empty lists, dumped dicts for color palettes, and
+        the raw value (possibly None) for ``selected_palette_index``.
+    """
+    value = getattr(mission, field)
+    if field == "color_palettes":
+        return [p.model_dump() if hasattr(p, "model_dump") else p for p in (value or [])]
+    if field == "selected_palette_index":
+        return value
+    if field in _MISSION_LIST_FIELDS:
+        return value or []
+    return value or ""
 
 
 def _format_brief_block(mission: BrandingMission) -> str:
     """Render the mission brief as the ``- field: value`` block the prompt
-    templates interpolate via ``{brief_block}`` — built from the shared field
-    order so it can't drift from ``_format_brief``."""
-    brief = _format_brief(mission)
-    return "\n".join(f"- {field}: {brief[field]}" for field in _MISSION_BRIEF_ORDER)
+    templates interpolate via ``{brief_block}``.
+
+    Preconditions:
+        ``mission`` is a BrandingMission.
+    Postconditions:
+        Returns a newline-joined block with exactly one line per field in
+        ``_MISSION_BRIEF_ORDER`` (the shared order, so it can't drift from
+        ``_merge_mission_update``), without allocating an intermediate dict.
+    """
+    return "\n".join(f"- {field}: {_brief_value(mission, field)}" for field in _MISSION_BRIEF_ORDER)
 
 
 def _history_window() -> int:

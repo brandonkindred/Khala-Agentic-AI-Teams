@@ -59,8 +59,11 @@ def _apply_brand_patch(cur, brand_id: str, client_id: str, patch: dict) -> Optio
     caller's cursor (so it participates in the caller's transaction); returns
     None when no row matched (e.g. a concurrent delete).
     """
+    # ``%s::jsonb`` cast is required: psycopg adapts ``Json`` as the ``json``
+    # type, and Postgres has no ``jsonb || json`` operator (both operands of
+    # ``||`` must be jsonb).
     cur.execute(
-        "UPDATE branding_brands SET data = data || %s "
+        "UPDATE branding_brands SET data = data || %s::jsonb "
         "WHERE id = %s AND client_id = %s RETURNING data",
         (Json(patch), brand_id, client_id),
     )

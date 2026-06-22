@@ -24,6 +24,13 @@ def _run_blocking(coro: Awaitable[_T]) -> _T:
     Uses ``asyncio.run`` when no loop is running in this thread; otherwise
     runs it on a one-off worker thread so we never call ``asyncio.run`` inside
     an active loop.
+
+    Preconditions:
+        ``coro`` is an un-awaited awaitable/coroutine.
+    Postconditions:
+        Returns the awaitable's result, or propagates whatever it raises.
+        Does not call ``asyncio.run`` while a loop is already running in the
+        calling thread.
     """
     try:
         asyncio.get_running_loop()
@@ -50,6 +57,16 @@ def _base_url() -> Optional[str]:
 
 
 def _build_payload(mission: BrandingMission) -> dict:
+    """Build the Market Research ``/run`` request body from a mission.
+
+    Preconditions:
+        ``mission`` has at least ``company_name``, ``company_description`` and
+        ``target_audience`` populated.
+    Postconditions:
+        Returns a JSON-serialisable dict with the keys the market-research
+        ``run`` endpoint expects (product_concept, target_users, business_goal,
+        human_approved, human_feedback).
+    """
     product_concept = (
         f"Competitive and similar brands for {mission.company_name}: {mission.company_description}"
     )
@@ -73,8 +90,15 @@ async def request_market_research_async(
 
     The poll yields to the event loop between attempts, so an awaiting caller
     (e.g. an async endpoint) does not hold a worker thread for the lifetime of
-    a multi-minute job. Returns None when the service is unconfigured; raises
-    RuntimeError on transport/parse errors or terminal job failure.
+    a multi-minute job.
+
+    Preconditions:
+        ``mission`` carries the fields ``_build_payload`` requires.
+    Postconditions:
+        Returns a CompetitiveSnapshot on success, or None when the service is
+        unconfigured (neither base-URL env var set). Raises RuntimeError on
+        transport/parse errors, a missing job id, timeout, or terminal job
+        failure.
     """
     base = _base_url()
     if not base:

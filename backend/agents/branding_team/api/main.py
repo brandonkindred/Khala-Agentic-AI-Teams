@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import concurrent.futures
 import logging
 import os
@@ -783,7 +784,8 @@ async def request_market_research_for_brand(client_id: str, brand_id: str) -> Co
     loop instead of holding a worker thread. 404 if the brand is unknown; 503
     if the market-research service is unconfigured or fails.
     """
-    brand = branding_store.get_brand(client_id, brand_id)
+    # get_brand is a synchronous (blocking) DB call — run it off the event loop.
+    brand = await asyncio.to_thread(branding_store.get_brand, client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
     try:
@@ -938,7 +940,16 @@ def answer_branding_question(
 
 def _local_message(role: str, content: str) -> _StoredMessage:
     """Build an in-memory message mirroring what ``append_message`` just wrote,
-    so a turn's response can be assembled without re-reading the row."""
+    so a turn's response can be assembled without re-reading the row.
+
+    Preconditions:
+        ``role`` is ``"user"`` or ``"assistant"``; ``content`` is the message
+        text that was just persisted for this conversation.
+    Postconditions:
+        Returns a ``_StoredMessage`` with the given role/content and an
+        ISO-8601 UTC timestamp captured now (within sub-millisecond of the
+        persisted row's timestamp, which is also app-clock generated).
+    """
     return _StoredMessage(
         role=role,
         content=content,
@@ -1086,7 +1097,10 @@ def send_branding_conversation_message(
     if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     brand_id = state.brand_id
-    conversation_store.append_message(conversation_id, "user", payload.message)
+    # If the write does not land (conversation no longer exists), don't go on to
+    # build an in-memory response that claims the message was persisted.
+    if not conversation_store.append_message(conversation_id, "user", payload.message):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     history_pairs = [(m.role, m.content) for m in state.messages]
     reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
         history_pairs, state.mission, payload.message
