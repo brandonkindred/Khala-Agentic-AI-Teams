@@ -32,12 +32,14 @@ _FALSY = frozenset({"false", "0", "no"})
 def env_flag_enabled(env_name: str) -> bool:
     """Return a default-on boolean env toggle.
 
-    Preconditions: ``env_name`` is a non-empty environment-variable name.
+    Preconditions: ``env_name`` is a non-empty environment-variable name
+        (enforced with an explicit ``ValueError`` so the check survives ``-O``).
     Postconditions: returns ``False`` only for an explicit ``"false"`` / ``"0"`` /
         ``"no"`` (case-insensitive, whitespace-tolerant); an unset, blank, or any
-        other value means enabled. Never raises.
+        other value means enabled. Never raises on the env value.
     """
-    assert env_name, "env_name must be non-empty"
+    if not env_name:
+        raise ValueError("env_name must be non-empty")
     return (os.environ.get(env_name) or "").strip().lower() not in _FALSY
 
 
@@ -51,13 +53,16 @@ def parse_int(
     """Parse an integer env var, defaulting and clamping defensively.
 
     Preconditions: ``env_name`` is non-empty; ``default`` is an ``int``; when both
-        ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
+        ``minimum`` and ``maximum`` are given, ``minimum <= maximum``. Violations
+        raise ``ValueError`` (explicit, so the check survives ``-O``).
     Postconditions: returns the parsed value clamped to ``[minimum, maximum]``
         (whichever bounds are provided); an unset, blank, or unparseable value
         yields ``default`` (also clamped). Never raises on a bad env value.
     """
-    assert env_name, "env_name must be non-empty"
-    assert minimum is None or maximum is None or minimum <= maximum, "minimum must be <= maximum"
+    if not env_name:
+        raise ValueError("env_name must be non-empty")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError("minimum must be <= maximum")
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         value = default
@@ -84,13 +89,16 @@ def parse_float(
 
     Preconditions: ``env_name`` is non-empty; ``default`` is a finite number; when
         both ``minimum`` and ``maximum`` are given, ``minimum <= maximum``.
+        Violations raise ``ValueError`` (explicit, so the check survives ``-O``).
     Postconditions: returns the parsed value clamped to ``[minimum, maximum]``
         (whichever bounds are provided); an unset, blank, unparseable, or
         non-finite (``inf``/``nan``) value yields ``default`` (also clamped). Never
         raises on a bad env value.
     """
-    assert env_name, "env_name must be non-empty"
-    assert minimum is None or maximum is None or minimum <= maximum, "minimum must be <= maximum"
+    if not env_name:
+        raise ValueError("env_name must be non-empty")
+    if minimum is not None and maximum is not None and minimum > maximum:
+        raise ValueError("minimum must be <= maximum")
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
         value = float(default)

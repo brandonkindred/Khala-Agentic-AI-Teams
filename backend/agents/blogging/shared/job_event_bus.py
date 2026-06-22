@@ -31,6 +31,7 @@ touch the subscription.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import deque
@@ -53,11 +54,8 @@ def _env_int(name: str, default: int) -> int:
 
     The explicit ``int(raw)`` probe is deliberate: ``parse_int`` cannot warn, and
     inferring "unparseable" from "result == default" would false-positive whenever
-    the override legitimately equals the default. ``os`` is imported locally
-    because this module has no module-level ``os`` dependency.
+    the override legitimately equals the default.
     """
-    import os
-
     from shared_env import parse_int
 
     raw = os.environ.get(name, "").strip()

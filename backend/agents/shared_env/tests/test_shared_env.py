@@ -29,7 +29,7 @@ def test_flag_on_for_unset_or_other(monkeypatch, value):
 
 
 def test_flag_requires_name():
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         env_flag_enabled("")
 
 
@@ -70,7 +70,7 @@ def test_int_default_is_also_clamped(monkeypatch):
 
 
 def test_int_rejects_inverted_bounds(monkeypatch):
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         parse_int("N", 5, minimum=10, maximum=1)
 
 
