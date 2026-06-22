@@ -79,132 +79,36 @@ class BrandingTeamOrchestrator:
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
         the graph because their inputs come from the API request.
         """
-        # ---- Resolve brand from store if applicable ----
-        resolved_client_id: Optional[str] = client_id
-        if store and brand_id:
-            if client_id:
-                brand = store.get_brand(client_id, brand_id)
-            else:
-                brand = None
-                for c in store.list_clients():
-                    brand = store.get_brand(c.id, brand_id)
-                    if brand is not None:
-                        resolved_client_id = c.id
-                        break
-            if brand is not None:
-                mission = brand.mission
-                if resolved_client_id is None:
-                    resolved_client_id = brand.client_id
-        else:
-            resolved_client_id = client_id
-
+        # Resolve mission/owner from the store, then run and interpret the graph.
+        # Each step below is a small, separately-testable helper so this method
+        # reads as the pipeline outline rather than its mechanics.
+        mission, resolved_client_id = self._resolve_brand_mission(
+            store, client_id, brand_id, mission
+        )
         stop_idx = phase_index(target_phase) if target_phase else len(PHASE_ORDER) - 1
 
-        # ---- Build and invoke the graph ----
-        graph = build_branding_graph(target_phase=target_phase)
-        task = (
-            f"Create a comprehensive brand strategy for the following company.\n\n"
-            f"Branding Mission:\n{serialize_mission(mission)}"
+        result = self._invoke_graph(mission, target_phase)
+        (
+            strategic_core,
+            narrative,
+            visual_identity,
+            channel_activation,
+            governance,
+        ) = self._extract_phases(result, stop_idx)
+        current_phase = self._determine_current_phase(
+            narrative, visual_identity, channel_activation, governance, human_review.approved
         )
 
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = None
-
-        if loop and loop.is_running():
-            import concurrent.futures
-
-            with concurrent.futures.ThreadPoolExecutor() as pool:
-                result = pool.submit(lambda: asyncio.run(graph.invoke_async(task))).result()
-        else:
-            result = asyncio.run(graph.invoke_async(task))
-
-        # ---- Extract phase outputs from graph node results ----
-        strategic_core = self._extract_phase_output(
-            result, "phase1_strategic_core", StrategicCoreOutput
-        )
-        narrative = (
-            self._extract_phase_output(result, "phase2_narrative", NarrativeMessagingOutput)
-            if stop_idx >= 1
-            else None
-        )  # noqa: E501
-        visual_identity = (
-            self._extract_phase_output(result, "phase3_visual", VisualIdentityOutput)
-            if stop_idx >= 2
-            else None
-        )  # noqa: E501
-        channel_activation = (
-            self._extract_phase_output(result, "phase4_channel", ChannelActivationOutput)
-            if stop_idx >= 3
-            else None
-        )  # noqa: E501
-        governance = (
-            self._extract_phase_output(result, "phase5_governance", GovernanceOutput)
-            if stop_idx >= 4
-            else None
-        )
-
-        # ---- Determine current phase ----
-        current_phase = BrandPhase.STRATEGIC_CORE
-        if narrative is not None:
-            current_phase = BrandPhase.NARRATIVE_MESSAGING
-        if visual_identity is not None:
-            current_phase = BrandPhase.VISUAL_IDENTITY
-        if channel_activation is not None:
-            current_phase = BrandPhase.CHANNEL_ACTIVATION
-        if governance is not None:
-            current_phase = BrandPhase.GOVERNANCE
-            if human_review.approved:
-                current_phase = BrandPhase.COMPLETE
-
-        # ---- Run compliance checks (outside the graph) ----
+        # Compliance checks run outside the graph (their inputs come from the request).
         checks = self.compliance.evaluate(brand_checks or [], mission)
-
-        # ---- Integrations ----
-        competitive_snapshot = None
-        if include_market_research:
-            try:
-                from .adapters.market_research import request_market_research
-
-                competitive_snapshot = request_market_research(mission)
-            except Exception:
-                competitive_snapshot = None
-
-        design_asset_result = None
-        if include_design_assets:
-            from .adapters.design_assets import request_design_assets
-
-            design_asset_result = request_design_assets(strategic_core, mission.company_name)
-
-        # ---- Build brand book ----
+        competitive_snapshot, design_asset_result = self._run_integrations(
+            mission, strategic_core, include_market_research, include_design_assets
+        )
         brand_book = _build_brand_book(
             strategic_core, narrative, visual_identity, channel_activation, governance
         )
-
-        # ---- Phase gates ----
         phase_gates = _build_phase_gates(current_phase, human_review.approved)
-
-        # ---- Status determination ----
-        if not human_review.approved:
-            status = WorkflowStatus.NEEDS_HUMAN_DECISION
-            phase_label = (
-                PHASE_ORDER[min(stop_idx, len(PHASE_ORDER) - 1)].value.replace("_", " ").title()
-            )
-            mission_summary = (
-                f"Phase '{phase_label}' artifacts are ready for stakeholder review. "
-                f"Approval is required before advancing to the next phase."
-            )
-        elif current_phase == BrandPhase.COMPLETE:
-            status = WorkflowStatus.READY_FOR_ROLLOUT
-            mission_summary = (
-                "All five branding phases complete. The brand system is finalized and "
-                "ready for enterprise-wide rollout."
-            )
-        else:
-            status = WorkflowStatus.NEEDS_HUMAN_DECISION
-            phase_label = current_phase.value.replace("_", " ").title()
-            mission_summary = f"Phase '{phase_label}' approved. Artifacts are locked and the next phase can begin."
+        status, mission_summary = self._determine_status(human_review, current_phase, stop_idx)
 
         output = TeamOutput(
             status=status,
@@ -232,6 +136,172 @@ class BrandingTeamOrchestrator:
             store.append_brand_version(resolved_client_id, brand_id, output)
 
         return output
+
+    @staticmethod
+    def _resolve_brand_mission(store, client_id, brand_id, mission):
+        """Resolve the brand's mission and owning client from the store.
+
+        Preconditions:
+            - ``mission`` is the request-supplied mission (used as-is when no
+              stored brand is found).
+        Postconditions:
+            - Returns ``(mission, resolved_client_id)``. When ``store`` and
+              ``brand_id`` are set and the brand exists, ``mission`` is the
+              stored mission and ``resolved_client_id`` is its owner; otherwise
+              ``mission`` is unchanged and ``resolved_client_id`` is ``client_id``.
+        """
+        resolved_client_id = client_id
+        if store and brand_id:
+            if client_id:
+                brand = store.get_brand(client_id, brand_id)
+            else:
+                # Brand ids are globally unique, so resolve in one query rather
+                # than scanning every client (the former list_clients → get_brand
+                # N+1, which issued one query per client).
+                brand = store.get_brand_by_id(brand_id)
+                if brand is not None:
+                    resolved_client_id = brand.client_id
+            if brand is not None:
+                mission = brand.mission
+                if resolved_client_id is None:
+                    resolved_client_id = brand.client_id
+        return mission, resolved_client_id
+
+    @staticmethod
+    def _invoke_graph(mission, target_phase):
+        """Build the per-phase Strands graph and invoke it, returning the result.
+
+        Runs the async graph on a worker thread when already inside a running
+        event loop (so a nested ``asyncio.run`` does not clash), else directly.
+
+        Postconditions:
+            - Returns the raw multi-agent graph result for downstream extraction.
+        """
+        graph = build_branding_graph(target_phase=target_phase)
+        task = (
+            f"Create a comprehensive brand strategy for the following company.\n\n"
+            f"Branding Mission:\n{serialize_mission(mission)}"
+        )
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop and loop.is_running():
+            import concurrent.futures
+
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                return pool.submit(lambda: asyncio.run(graph.invoke_async(task))).result()
+        return asyncio.run(graph.invoke_async(task))
+
+    def _extract_phases(self, result, stop_idx):
+        """Extract the up-to-five phase outputs from the graph result.
+
+        Postconditions:
+            - ``strategic_core`` is always extracted; each later phase is
+              extracted only when ``stop_idx`` reached it, else ``None``.
+            - Returns the five outputs in pipeline order.
+        """
+        strategic_core = self._extract_phase_output(
+            result, "phase1_strategic_core", StrategicCoreOutput
+        )
+        narrative = (
+            self._extract_phase_output(result, "phase2_narrative", NarrativeMessagingOutput)
+            if stop_idx >= 1
+            else None
+        )
+        visual_identity = (
+            self._extract_phase_output(result, "phase3_visual", VisualIdentityOutput)
+            if stop_idx >= 2
+            else None
+        )
+        channel_activation = (
+            self._extract_phase_output(result, "phase4_channel", ChannelActivationOutput)
+            if stop_idx >= 3
+            else None
+        )
+        governance = (
+            self._extract_phase_output(result, "phase5_governance", GovernanceOutput)
+            if stop_idx >= 4
+            else None
+        )
+        return strategic_core, narrative, visual_identity, channel_activation, governance
+
+    @staticmethod
+    def _determine_current_phase(
+        narrative, visual_identity, channel_activation, governance, approved
+    ):
+        """Map the highest produced phase output to a :class:`BrandPhase`.
+
+        Postconditions:
+            - Returns ``COMPLETE`` only when governance was produced *and*
+              ``approved`` is true; otherwise the highest produced phase.
+        """
+        current_phase = BrandPhase.STRATEGIC_CORE
+        if narrative is not None:
+            current_phase = BrandPhase.NARRATIVE_MESSAGING
+        if visual_identity is not None:
+            current_phase = BrandPhase.VISUAL_IDENTITY
+        if channel_activation is not None:
+            current_phase = BrandPhase.CHANNEL_ACTIVATION
+        if governance is not None:
+            current_phase = BrandPhase.GOVERNANCE
+            if approved:
+                current_phase = BrandPhase.COMPLETE
+        return current_phase
+
+    @staticmethod
+    def _run_integrations(mission, strategic_core, include_market_research, include_design_assets):
+        """Run the optional market-research and design-asset integrations.
+
+        Postconditions:
+            - Returns ``(competitive_snapshot, design_asset_result)``; each is
+              ``None`` when its integration is disabled. Market-research failures
+              degrade to ``None`` (the pipeline must not fail on an integration).
+        """
+        competitive_snapshot = None
+        if include_market_research:
+            try:
+                from .adapters.market_research import request_market_research
+
+                competitive_snapshot = request_market_research(mission)
+            except Exception:
+                competitive_snapshot = None
+        design_asset_result = None
+        if include_design_assets:
+            from .adapters.design_assets import request_design_assets
+
+            design_asset_result = request_design_assets(strategic_core, mission.company_name)
+        return competitive_snapshot, design_asset_result
+
+    @staticmethod
+    def _determine_status(human_review, current_phase, stop_idx):
+        """Derive the workflow status and human-facing summary for the output.
+
+        Postconditions:
+            - Returns ``(WorkflowStatus, summary)`` for one of three cases:
+              review pending (not approved), ready for rollout (complete), or
+              approved mid-pipeline (next phase unlocked).
+        """
+        if not human_review.approved:
+            phase_label = (
+                PHASE_ORDER[min(stop_idx, len(PHASE_ORDER) - 1)].value.replace("_", " ").title()
+            )
+            return (
+                WorkflowStatus.NEEDS_HUMAN_DECISION,
+                f"Phase '{phase_label}' artifacts are ready for stakeholder review. "
+                f"Approval is required before advancing to the next phase.",
+            )
+        if current_phase == BrandPhase.COMPLETE:
+            return (
+                WorkflowStatus.READY_FOR_ROLLOUT,
+                "All five branding phases complete. The brand system is finalized and "
+                "ready for enterprise-wide rollout.",
+            )
+        phase_label = current_phase.value.replace("_", " ").title()
+        return (
+            WorkflowStatus.NEEDS_HUMAN_DECISION,
+            f"Phase '{phase_label}' approved. Artifacts are locked and the next phase can begin.",
+        )
 
     def run_phase(
         self,

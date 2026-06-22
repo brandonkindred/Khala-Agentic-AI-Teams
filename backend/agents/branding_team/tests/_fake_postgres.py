@@ -96,7 +96,56 @@ class _FakeCursor:
             self._last_fetch_all = rows
             return
 
+        # get_brand_by_id: id only, no client_id predicate. Placed after the
+        # (id AND client_id) and (client_id) branches so they win their queries.
+        if norm.startswith("select data from branding_brands where id ="):
+            (brand_id,) = params
+            row = self._db["brands"].get(brand_id)
+            self._last_fetch_one = {"data": row["data"]} if row else None
+            return
+
         if norm.startswith("update branding_brands set data"):
+            # Atomic version bump + history append (append_brand_version).
+            # Checked before the plain merge: this statement also contains
+            # ``|| %s::jsonb`` (the field patch), so ``jsonb_set`` disambiguates.
+            if "jsonb_set" in norm:
+                field_patch, now_iso, status_value, brand_id, client_id = params
+                row = self._db["brands"].get(brand_id)
+                if row and row["client_id"] == client_id:
+                    data = dict(row["data"])
+                    new_version = int(data.get("version") or 0) + 1
+                    data.update(_unwrap_json(field_patch))
+                    data["version"] = new_version
+                    history = list(data.get("history") or [])
+                    history.append(
+                        {
+                            "version": new_version,
+                            "created_at": now_iso,
+                            "status": status_value,
+                        }
+                    )
+                    data["history"] = history
+                    row["data"] = data
+                    self.rowcount = 1
+                    self._last_fetch_one = {"data": data}
+                else:
+                    self.rowcount = 0
+                    self._last_fetch_one = None
+                return
+            # Atomic shallow merge with RETURNING (update_brand).
+            if "|| %s::jsonb" in norm:
+                patch, brand_id, client_id = params
+                row = self._db["brands"].get(brand_id)
+                if row and row["client_id"] == client_id:
+                    merged = {**row["data"], **_unwrap_json(patch)}
+                    row["data"] = merged
+                    self.rowcount = 1
+                    self._last_fetch_one = {"data": merged}
+                else:
+                    self.rowcount = 0
+                    self._last_fetch_one = None
+                return
+            # Legacy whole-document replace (retained for any non-merge writer).
             data, brand_id, client_id = params
             row = self._db["brands"].get(brand_id)
             if row and row["client_id"] == client_id:

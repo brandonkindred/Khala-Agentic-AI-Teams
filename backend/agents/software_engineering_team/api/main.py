@@ -16,12 +16,11 @@ import tempfile
 import threading
 import time
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import PlainTextResponse, StreamingResponse
 from pydantic import BaseModel, Field, ValidationError, field_validator
@@ -39,8 +38,9 @@ from spec_parser import (  # noqa: E402
     validate_workspace_path_no_spec,
 )
 
+from shared_app import create_team_app  # noqa: E402
 from shared_concurrency import BackgroundHeartbeat  # noqa: E402
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA  # noqa: E402
 from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
 from software_engineering_team.shared.job_store import (  # noqa: E402
     JOB_STATUS_AGENT_CRASH,
@@ -69,8 +69,6 @@ from software_engineering_team.shared.logging_config import setup_logging  # noq
 
 setup_logging(level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-init_otel(service_name="software-engineering-team", team_key="software_engineering")
 
 _stale_monitor_started = False
 _stale_monitor_lock = threading.Lock()
@@ -135,11 +133,13 @@ def create_project_workspace(project_name: str, spec_content: bytes) -> Path:
     return workspace
 
 
-@asynccontextmanager
-async def _lifespan(
-    app: FastAPI,
-):  # pragma: no cover  # integration-only: ASGI startup/shutdown hooks (Temporal + job store)
-    """Start Temporal worker on startup if TEMPORAL_ADDRESS is set; mark jobs failed on shutdown."""
+def _se_startup() -> None:  # pragma: no cover - integration-only ASGI startup hook
+    """Register SE telemetry observers and start the Temporal worker if enabled.
+
+    Runs after the factory has registered the SE Postgres schema. Each step is
+    log-and-continue so a single failure never aborts app startup (and never
+    leaks the Postgres pool the factory may have opened).
+    """
     try:
         from software_engineering_team.shared.cost_tracker import register_cost_observer
         from software_engineering_team.shared.trace_store import register_trace_observer
@@ -149,20 +149,18 @@ async def _lifespan(
     except Exception as e:
         logger.warning("Could not register SE telemetry observers: %s", e)
     try:
-        from shared_postgres import register_team_schemas
-        from software_engineering_team.postgres import SCHEMA as SE_POSTGRES_SCHEMA
-
-        register_team_schemas(SE_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("software_engineering postgres schema registration failed")
-    try:
         from software_engineering_team.temporal.worker import start_se_temporal_worker_thread
 
         start_se_temporal_worker_thread()
     except Exception as e:
         logger.warning("Could not start SE Temporal worker: %s", e)
-    yield
-    # Shutdown: mark active jobs as failed so they can be resumed after restart
+
+
+def _se_shutdown() -> None:  # pragma: no cover - integration-only ASGI shutdown hook
+    """Mark active SE jobs as failed so they can be resumed after a restart.
+
+    Runs before the factory closes the Postgres pool. Log-and-continue.
+    """
     try:
         from software_engineering_team.shared.job_store import mark_all_running_jobs_failed
 
@@ -170,22 +168,23 @@ async def _lifespan(
         logger.info("Marked all active SE jobs as failed (server shutdown)")
     except Exception as e:
         logger.warning("Could not mark SE jobs as failed on shutdown: %s", e)
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("software_engineering shared_postgres close_pool failed", exc_info=True)
 
 
-app = FastAPI(
+# Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
+# Telemetry-observer registration and Temporal worker start run as the startup
+# hook (after schema registration); marking active jobs failed runs as the
+# shutdown hook (before the pool is closed).
+app = create_team_app(
+    service_name="software-engineering-team",
+    team_key="software_engineering",
     title="Software Engineering Team API",
     description="Async API: POST /run-team with work folder path returns job_id. "
     "GET /run-team/{job_id} polls status. Tech Lead orchestrates the full pipeline.",
     version="0.3.0",
-    lifespan=_lifespan,
+    postgres_schema=SE_POSTGRES_SCHEMA,
+    on_startup=_se_startup,
+    on_shutdown=_se_shutdown,
 )
-instrument_fastapi_app(app, team_key="software_engineering")
 
 app.add_middleware(
     CORSMiddleware,
@@ -2200,7 +2199,9 @@ def auto_answer_run_team_question(
 
     # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
     # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
+    real_options = [
+        o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"
+    ]
     if not real_options:
         raise HTTPException(
             status_code=422,
@@ -2711,7 +2712,9 @@ def auto_answer_product_analysis_question(
 
     # Filter out the synthetic {"id": "other"} placeholder before checking for real options;
     # _convert_to_pending_questions inserts it when a question has no structured options.
-    real_options = [o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"]
+    real_options = [
+        o for o in (question_data.get("options") or []) if (o.get("id") or "").lower() != "other"
+    ]
     if not real_options:
         raise HTTPException(
             status_code=422,

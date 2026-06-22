@@ -70,6 +70,23 @@ def test_get_brand_wrong_client_returns_none(fake_pg: dict) -> None:
     assert store.get_brand(c2.id, brand.id) is None
 
 
+def test_get_brand_by_id_resolves_without_client(fake_pg: dict) -> None:
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    mission = BrandingMission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+    brand = store.create_brand(client.id, mission)
+    assert brand is not None
+    found = store.get_brand_by_id(brand.id)
+    assert found is not None
+    assert found.id == brand.id
+    assert found.client_id == client.id
+    assert store.get_brand_by_id("brand_does_not_exist") is None
+
+
 def test_update_brand(fake_pg: dict) -> None:
     store = BrandingStore()
     client = store.create_client("Acme")

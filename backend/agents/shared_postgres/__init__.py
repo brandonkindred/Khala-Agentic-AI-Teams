@@ -20,6 +20,11 @@ Typical usage in a team's ``api/main.py`` lifespan::
         close_pool()
 """
 
+from shared_postgres.aggregate import (
+    build_merge_statement,
+    merge_jsonb_returning,
+    merge_jsonb_via_cursor,
+)
 from shared_postgres.client import close_pool, get_conn, is_postgres_enabled
 from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
@@ -59,11 +64,14 @@ __all__ = [
     "TEAM_POSTGRES_MODULES",
     "Json",
     "TeamSchema",
+    "build_merge_statement",
     "close_pool",
     "dict_row",
     "ensure_team_schema",
     "get_conn",
     "is_postgres_enabled",
+    "merge_jsonb_returning",
+    "merge_jsonb_via_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
     "timed_query",
