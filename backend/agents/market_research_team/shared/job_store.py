@@ -1,19 +1,22 @@
-"""Job store for the Market Research team — backed by JobServiceClient."""
+"""Job store for the Market Research team — a thin alias over BaseJobStore.
+
+The CRUD logic lives in ``shared_job_store.BaseJobStore``; this module binds it
+to the ``market_research_team`` namespace and re-exports the module-level
+function API that callers already import.
+"""
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
 
-from job_service_client import (
+from shared_job_store import (
     JOB_STATUS_CANCELLED,
     JOB_STATUS_COMPLETED,
     JOB_STATUS_FAILED,
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
-    JobServiceClient,
+    BaseJobStore,
 )
 
 __all__ = [
@@ -32,57 +35,15 @@ __all__ = [
     "update_job",
 ]
 
-logger = logging.getLogger(__name__)
-
 DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
-_client_instance: Optional[JobServiceClient] = None
+_store = BaseJobStore(team="market_research_team")
 
-
-def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
-    global _client_instance
-    if _client_instance is None:
-        _client_instance = JobServiceClient(team="market_research_team")
-    return _client_instance
-
-
-def create_job(job_id: str, **fields: Any) -> None:
-    _client().create_job(job_id, status=JOB_STATUS_PENDING, **fields)
-
-
-def get_job(job_id: str) -> Optional[Dict[str, Any]]:
-    return _client().get_job(job_id)
-
-
-def update_job(job_id: str, **fields: Any) -> None:
-    _client().update_job(job_id, **fields)
-
-
-def list_jobs(statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    return _client().list_jobs(statuses=statuses)
-
-
-def cancel_job(job_id: str) -> bool:
-    job = _client().get_job(job_id)
-    if job is None or job.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}:
-        return False
-    _client().update_job(job_id, status=JOB_STATUS_CANCELLED)
-    return True
-
-
-def is_job_cancelled(job_id: str) -> bool:
-    """Return True if the job exists and has been marked cancelled."""
-    job = _client().get_job(job_id)
-    return job is not None and job.get("status") == JOB_STATUS_CANCELLED
-
-
-def delete_job(job_id: str) -> bool:
-    return bool(_client().delete_job(job_id))
-
-
-def mark_all_running_jobs_failed(reason: str) -> None:
-    """Mark all pending or running jobs as failed (e.g. on server shutdown)."""
-    try:
-        _client().mark_all_active_jobs_failed(reason)
-    except Exception as e:  # pragma: no cover
-        logger.warning("mark_all_running_jobs_failed: %s", e)
+create_job = _store.create_job
+get_job = _store.get_job
+update_job = _store.update_job
+list_jobs = _store.list_jobs
+cancel_job = _store.cancel_job
+is_job_cancelled = _store.is_job_cancelled
+delete_job = _store.delete_job
+mark_all_running_jobs_failed = _store.mark_all_running_jobs_failed
