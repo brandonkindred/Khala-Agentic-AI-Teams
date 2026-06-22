@@ -302,6 +302,8 @@ class BrandingStore:
         Postconditions:
             On success the brand's ``version`` increments by one, the output
             is recorded as ``latest_output``, and a history entry is appended.
+            Returns None if the brand no longer exists at write time (e.g. a
+            concurrent delete between the read and the write).
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
@@ -320,15 +322,6 @@ class BrandingStore:
                 status=output.status.value,
             )
             new_history = list(brand.history) + [history_entry]
-            updated = brand.model_copy(
-                update={
-                    "latest_output": output,
-                    "current_phase": output.current_phase,
-                    "version": new_version,
-                    "history": new_history,
-                    "updated_at": now,
-                }
-            )
             patch = {
                 "latest_output": output.model_dump(mode="json"),
                 "current_phase": output.current_phase.value,
@@ -337,10 +330,14 @@ class BrandingStore:
                 "updated_at": now,
             }
             cur.execute(
-                "UPDATE branding_brands SET data = data || %s WHERE id = %s AND client_id = %s",
+                "UPDATE branding_brands SET data = data || %s "
+                "WHERE id = %s AND client_id = %s RETURNING data",
                 (Json(patch), brand_id, client_id),
             )
-        return updated
+            updated_row = cur.fetchone()
+        if updated_row is None:
+            return None
+        return Brand.model_validate(updated_row["data"])
 
 
 # ---------------------------------------------------------------------------

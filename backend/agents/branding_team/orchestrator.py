@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING, List, Optional
 
+from pydantic import ValidationError
+
 from .agents import BrandComplianceAgent
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
 from .graphs.top_level import build_branding_graph
@@ -306,16 +308,18 @@ def _parse_model_from_text(text: str, model_class):
     """
     if not text:
         return None
+    # ValidationError covers both malformed JSON and schema mismatch from
+    # model_validate_json; anything else is a genuine bug and should surface.
     try:
         return model_class.model_validate_json(text)
-    except Exception:
+    except ValidationError:
         pass
     start = text.find("{")
     end = text.rfind("}") + 1
     if start >= 0 and end > start:
         try:
             return model_class.model_validate_json(text[start:end])
-        except Exception:
+        except ValidationError:
             return None
     return None
 
