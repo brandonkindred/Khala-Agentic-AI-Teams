@@ -155,7 +155,11 @@ class _FakeCursor:
             self.rowcount = 1
             return
 
-        if "from branding_conversations c" in norm and "where c.conversation_id" in norm:
+        if (
+            "from branding_conversations c" in norm
+            and "where c.conversation_id" in norm
+            and "order by m.id" in norm
+        ):
             (cid,) = params
             conv = self._db["conversations"].get(cid)
             if conv is None:
@@ -182,7 +186,11 @@ class _FakeCursor:
                 ]
             return
 
-        if "from branding_conversations c" in norm and "where c.brand_id" in norm:
+        if (
+            "from branding_conversations c" in norm
+            and "where c.brand_id" in norm
+            and "order by m.id" in norm
+        ):
             (brand_id,) = params
             conv = next(
                 (c for c in self._db["conversations"].values() if c["brand_id"] == brand_id),

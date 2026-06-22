@@ -86,6 +86,10 @@ async def _lifespan(application: FastAPI):
     except Exception:
         logger.exception("branding postgres schema registration failed")
     yield
+    # Stop accepting new runs and cancel any still queued so worker threads
+    # don't outlive the app. Don't block teardown on an in-flight pipeline
+    # (a full run can take minutes); those threads finish on their own.
+    _run_executor.shutdown(wait=False, cancel_futures=True)
     try:
         from shared_postgres import close_pool
 

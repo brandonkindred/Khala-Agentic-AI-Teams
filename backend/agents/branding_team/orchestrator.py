@@ -293,7 +293,7 @@ def _collect_message_text(message) -> str:
     for block in message.get("content", []):
         if isinstance(block, dict) and block.get("text"):
             parts.append(block["text"])
-        elif hasattr(block, "text"):
+        elif getattr(block, "text", None):
             parts.append(block.text)
     return "".join(parts)
 

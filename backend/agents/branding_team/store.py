@@ -71,15 +71,15 @@ class BrandingStore:
         Preconditions:
             ``limit`` is None or a positive int; ``offset`` is >= 0.
         Postconditions:
-            When ``limit`` is None the full set is returned (insertion order);
-            otherwise at most ``limit`` rows starting at ``offset`` are
-            returned, ordered by ``created_at`` for stable paging.
+            Rows are ordered by ``created_at`` for a stable, repeatable order.
+            When ``limit`` is None the full set is returned; otherwise at most
+            ``limit`` rows starting at ``offset``.
         """
         assert limit is None or limit > 0, "limit must be None or a positive int"
         assert offset >= 0, "offset must be >= 0"
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
-                cur.execute("SELECT data FROM branding_clients")
+                cur.execute("SELECT data FROM branding_clients ORDER BY created_at")
             else:
                 cur.execute(
                     "SELECT data FROM branding_clients ORDER BY created_at LIMIT %s OFFSET %s",
@@ -193,16 +193,16 @@ class BrandingStore:
         Preconditions:
             ``limit`` is None or a positive int; ``offset`` is >= 0.
         Postconditions:
+            Rows are ordered by ``created_at`` for a stable, repeatable order.
             When ``limit`` is None all of the client's brands are returned;
-            otherwise at most ``limit`` rows starting at ``offset``, ordered by
-            ``created_at`` for stable paging.
+            otherwise at most ``limit`` rows starting at ``offset``.
         """
         assert limit is None or limit > 0, "limit must be None or a positive int"
         assert offset >= 0, "offset must be >= 0"
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
                 cur.execute(
-                    "SELECT data FROM branding_brands WHERE client_id = %s",
+                    "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at",
                     (client_id,),
                 )
             else:
