@@ -52,6 +52,14 @@ def test_cancel_missing_job_returns_false(store: _Store) -> None:
     assert store.is_job_cancelled("nope") is False
 
 
+def test_cancel_and_is_cancelled_reject_empty_job_id(store: _Store) -> None:
+    # Precondition enforced with an explicit ValueError (survives python -O).
+    with pytest.raises(ValueError):
+        store.cancel_job("")
+    with pytest.raises(ValueError):
+        store.is_job_cancelled("")
+
+
 def test_cancel_terminal_job_is_noop(store: _Store) -> None:
     store.create_job("done", status=JOB_STATUS_COMPLETED)
     assert store.cancel_job("done") is False

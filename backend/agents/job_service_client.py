@@ -438,7 +438,8 @@ class BaseJobStore:
         Postconditions: returns True and sets status to ``cancelled`` when the job
             exists and is pending/running; returns False (no write) otherwise.
         """
-        assert job_id, "cancel_job requires a non-empty job_id"
+        if not job_id:
+            raise ValueError("cancel_job requires a non-empty job_id")
         job = self._client().get_job(job_id)
         if job is None or job.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}:
             return False
@@ -452,7 +453,8 @@ class BaseJobStore:
         Postconditions: pure read; returns a bool. Used as the cooperative-cancel
             poll inside orchestrators.
         """
-        assert job_id, "is_job_cancelled requires a non-empty job_id"
+        if not job_id:
+            raise ValueError("is_job_cancelled requires a non-empty job_id")
         job = self._client().get_job(job_id)
         return job is not None and job.get("status") == JOB_STATUS_CANCELLED
 
