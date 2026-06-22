@@ -138,6 +138,12 @@ def is_limit_stop_rule(rule: ExitRule) -> bool:
     return isinstance(rule, StopLossRule) and getattr(rule, "style", "market") == "limit"
 
 
+# Shared immutable empty cursor map — never mutated, only ``.get()``-queried — so
+# the common no-ladder / no-cursor path allocates nothing per bar, and serves as
+# the default ``cursor_map`` for non-laddered specs.
+_EMPTY_CURSOR: Mapping[int, int] = {}
+
+
 def evaluate_exit_rules(
     rules: Sequence[ExitRule],
     positions: Mapping[str, PositionState],
@@ -187,24 +193,63 @@ def evaluate_exit_rules(
             continue
         sym_view = views.get(symbol) if views is not None else None
         cursor_map = (scaled_cursors or _EMPTY_CURSOR).get(symbol, _EMPTY_CURSOR)
-        stop = False
-        for idx, rule in enumerate(rules):
-            for intent in _intents_for_rule(rule, symbol, idx, position, bar, sym_view, cursor_map):
-                intents.append(intent)
-                if first_only:
-                    stop = True
-                    break
-            if stop:
-                break
+        intents.extend(
+            evaluate_exit_rules_for_position(
+                rules,
+                symbol,
+                position,
+                bar,
+                view=sym_view,
+                first_only=first_only,
+                cursor_map=cursor_map,
+            )
+        )
     return intents
 
 
-# Shared immutable empty cursor map — never mutated, only ``.get()``-queried — so
-# the common no-ladder / no-cursor path allocates nothing per bar.
-_EMPTY_CURSOR: Mapping[int, int] = {}
+def evaluate_exit_rules_for_position(
+    rules: Sequence[ExitRule],
+    symbol: str,
+    position: PositionState,
+    bar: BarSnapshot,
+    *,
+    view: Optional[HistoryView] = None,
+    first_only: bool = True,
+    cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
+    exclude_limit_style: bool = False,
+) -> list[ExitIntent]:
+    """Triggered ``ExitIntent``\\ s for ONE open position, in spec priority order.
+
+    The single-symbol core of :func:`evaluate_exit_rules`. The per-bar dispatcher
+    calls this directly, so the hot path never wraps a lone position/bar/cursor in
+    throwaway ``{symbol: ...}`` dicts.
+
+    ``exclude_limit_style`` drops any limit-style stop intent — used when that stop
+    already rests as a STOP_LIMIT — so the first *non-resting* rule wins in a single
+    pass, with no "collect every trigger then filter" second walk.
+
+    Preconditions: ``position.qty > 0``; ``bar`` exposes ``high``/``low``/``close``
+    (a :class:`BarSnapshot`, or any structurally-compatible bar such as
+    ``contract.Bar``); ``cursor_map`` maps a ladder ``rule_index`` to its next
+    un-fired rung.
+    Postconditions: returns the triggered intents in spec order — at most one when
+    ``first_only`` — each ``ScaledTakeProfitRule`` contributing at most its cursor
+    rung, and limit-style intents omitted when ``exclude_limit_style``.
+    """
+    intents: list[ExitIntent] = []
+    for idx, rule in enumerate(rules):
+        intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
+        if intent is None:
+            continue
+        if exclude_limit_style and intent.style == "limit":
+            continue
+        intents.append(intent)
+        if first_only:
+            break
+    return intents
 
 
-def _intents_for_rule(
+def _intent_for_rule(
     rule: ExitRule,
     symbol: str,
     idx: int,
@@ -212,35 +257,32 @@ def _intents_for_rule(
     bar: BarSnapshot,
     view: Optional[HistoryView],
     cursor_map: Mapping[int, int],
-) -> list[ExitIntent]:
-    """Build the ``ExitIntent``\\ s a single ``rule`` triggers for one position.
+) -> Optional[ExitIntent]:
+    """Build the single ``ExitIntent`` a ``rule`` triggers for one position.
 
     Preconditions: ``position.qty > 0`` and ``bar`` is the symbol's current bar;
     ``cursor_map`` maps a ladder ``rule_index`` to its next un-fired rung.
-    Postconditions: returns ``[]`` when the rule does not fire; one intent for a
-    triggered stop-loss / take-profit / signal-exit; and at most one intent — the
-    cursor rung, when its target is reached — for a ``ScaledTakeProfitRule``. A
-    limit-style stop's intent carries its fully-resolved ``stop_price`` /
-    ``limit_price``.
+    Postconditions: returns ``None`` when the rule does not fire; one intent for a
+    triggered stop-loss / take-profit / signal-exit; and the cursor-rung intent
+    (only when its target is reached) for a ``ScaledTakeProfitRule``. A limit-style
+    stop's intent carries its fully-resolved ``stop_price`` / ``limit_price``.
     """
     if isinstance(rule, ScaledTakeProfitRule):
         rung = _next_scaled_rung(rule, position, bar, cursor_map.get(idx, 0))
         if rung is None:
-            return []
+            return None
         level = rule.levels[rung]
-        return [
-            ExitIntent(
-                symbol=symbol,
-                rule_kind="scaled_take_profit",
-                rule_index=idx,
-                note=level.note or rule.note or "",
-                level_index=rung,
-                qty_fraction=level.qty_fraction,
-            )
-        ]
+        return ExitIntent(
+            symbol=symbol,
+            rule_kind="scaled_take_profit",
+            rule_index=idx,
+            note=level.note or rule.note or "",
+            level_index=rung,
+            qty_fraction=level.qty_fraction,
+        )
 
     if not _rule_triggers(rule, position, bar, view):
-        return []
+        return None
 
     style = getattr(rule, "style", "market") or "market"
     # A limit-style stop carries its fully-resolved stop level + protective-side
@@ -255,18 +297,16 @@ def _intents_for_rule(
         limit_price = protective_limit_price(
             stop_price, offset, closing_long=(position.side == "long")
         )
-    return [
-        ExitIntent(
-            symbol=symbol,
-            rule_kind=_kind_of(rule),
-            rule_index=idx,
-            note=getattr(rule, "note", "") or "",
-            basis=getattr(rule, "basis", None),
-            style=style,
-            stop_price=stop_price,
-            limit_price=limit_price,
-        )
-    ]
+    return ExitIntent(
+        symbol=symbol,
+        rule_kind=_kind_of(rule),
+        rule_index=idx,
+        note=getattr(rule, "note", "") or "",
+        basis=getattr(rule, "basis", None),
+        style=style,
+        stop_price=stop_price,
+        limit_price=limit_price,
+    )
 
 
 def _next_scaled_rung(

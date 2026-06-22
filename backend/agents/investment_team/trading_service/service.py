@@ -40,10 +40,12 @@ from ..strategy_lab.executor.predicate_evaluator import (
     evaluate_entry_rules as _evaluate_entry_rules_pred,
 )
 from ..strategy_lab.executor.rule_compiler import (
+    _EMPTY_CURSOR,
     BarSnapshot,
     ExitIntent,
     PositionState,
     evaluate_exit_rules,
+    evaluate_exit_rules_for_position,
     is_limit_stop_rule,
 )
 from ..strategy_lab.spec_dsl import (
@@ -247,6 +249,7 @@ class _ScaledLadderCursor:
     """
 
     _next_rung: Dict[int, int] = field(default_factory=dict)
+    _view: Optional[Mapping[int, int]] = field(default=None, init=False, repr=False, compare=False)
 
     @property
     def mapping(self) -> Mapping[int, int]:
@@ -256,9 +259,13 @@ class _ScaledLadderCursor:
         :class:`~types.MappingProxyType` over the live cursor mapping — mutation
         attempts raise ``TypeError`` (advancing goes through :meth:`advance`),
         while a cursor advanced after this call is still reflected (the proxy is a
-        live view, not a copy).
+        live view, not a copy). The proxy is built once and memoized (it wraps the
+        same underlying dict for the cursor's lifetime), so per-bar reads on the
+        hot path allocate nothing.
         """
-        return MappingProxyType(self._next_rung)
+        if self._view is None:
+            self._view = MappingProxyType(self._next_rung)
+        return self._view
 
     def advance(self, rule_index: int, fired_rung: int) -> None:
         """Advance past the rung that just fired.
@@ -757,30 +764,28 @@ class _EngineExitDispatcher:
         triggered, or the only trigger is the excluded resting limit stop).
         """
         snapshot = tracked.snapshot(sym, pos.qty)
-        bar_snap = BarSnapshot(high=cur_bar.high, low=cur_bar.low, close=cur_bar.close)
-        # Only pass the ladder cursor when the spec actually has a ladder — for the
-        # common no-ladder spec the evaluator ignores it (falls back to its shared
-        # empty cursor), so skip building a per-bar dict it would never read.
-        scaled_cursors = (
-            {sym: tracked.scaled_cursor.mapping} if self._has_scaled_take_profit_rule else None
+        # Hot path: evaluate this one position directly — no per-bar ``{sym: ...}``
+        # wrapper dicts, and no ``BarSnapshot`` rebuild (``cur_bar`` already exposes
+        # ``high``/``low``/``close``). The ladder cursor is passed only when the
+        # spec has a ladder; otherwise the shared empty cursor is used.
+        cursor_map = (
+            tracked.scaled_cursor.mapping if self._has_scaled_take_profit_rule else _EMPTY_CURSOR
         )
-        intents = evaluate_exit_rules(
+        view = self.views.get(sym) if self.views is not None else None
+        # ``exclude_resting_limit_stop`` skips the spec's (single) limit-style stop
+        # in the same pass — its STOP_LIMIT already rests, so the first non-resting
+        # rule wins without a collect-all-then-filter second walk.
+        intents = evaluate_exit_rules_for_position(
             self.exit_rules,
-            {sym: snapshot},
-            {sym: bar_snap},
-            views=self.views,
-            first_only=not exclude_resting_limit_stop,
-            scaled_cursors=scaled_cursors,
+            sym,
+            snapshot,
+            cur_bar,
+            view=view,
+            first_only=True,
+            cursor_map=cursor_map,
+            exclude_limit_style=exclude_resting_limit_stop,
         )
-        if not exclude_resting_limit_stop:
-            return intents[0] if intents else None
-        for intent in intents:
-            # The spec's (single) limit-style stop already rests as a STOP_LIMIT;
-            # skip it so a lower-priority rule can still fire and close.
-            if intent.style == "limit":
-                continue
-            return intent
-        return None
+        return intents[0] if intents else None
 
     @cached_property
     def _has_limit_stop_rule(self) -> bool:
