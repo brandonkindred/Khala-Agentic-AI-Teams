@@ -531,6 +531,19 @@ class OllamaLLMClient(LLMClient):
                 max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
         return min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
 
+    def _begin_call_state(self) -> "tuple[str, Any]":
+        """Tag the caller and reset per-call response contextvars.
+
+        Postconditions: returns ``(caller, attribution)`` and clears the usage /
+            latency contextvars up front so a failed call never reports a previous
+            call's token counts or latency. Never raises.
+        """
+        caller = _caller_tag()
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
+        return caller, current_attribution()
+
     def _record_fallback_num_ctx(self) -> int:
         """Record the provisional num_ctx fallback with the current time and return it.
 
@@ -1499,13 +1512,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
             current_request_id() or "-",
@@ -1749,13 +1756,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
             current_request_id() or "-",
@@ -1942,13 +1943,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",
             current_request_id() or "-",
