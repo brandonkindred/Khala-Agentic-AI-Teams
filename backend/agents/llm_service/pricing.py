@@ -71,6 +71,14 @@ def _normalize_model_for_env(model: str) -> str:
     Postconditions:
         - Returns ``model`` uppercased with each run of non-alphanumeric
           characters collapsed to one ``_`` and leading/trailing ``_`` stripped.
+
+    Note: the normalization is intentionally lossy (env var names can't carry
+    ``:``/``-``), so model ids differing only in separators collide — e.g.
+    ``deepseek-v4-pro:cloud`` and ``deepseek_v4_pro_cloud`` both map to
+    ``DEEPSEEK_V4_PRO_CLOUD``. This only affects the optional ``LLM_PRICE_*``
+    override convenience (the built-in ``MODEL_PRICING`` table is keyed by the
+    exact model string and never collides); operators with two such near-identical
+    ids should price them via the table rather than the env override.
     """
     return _NON_ALNUM.sub("_", model.upper()).strip("_")
 

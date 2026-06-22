@@ -2565,10 +2565,13 @@ def _emit_coding_team_metrics(job_id: str) -> None:
         resumed/re-run job does not re-emit and double-count). Always flushes job cost.
     """
     try:
-        # Idempotency: a job whose terminal metrics were already emitted (i.e. it
-        # has a merge_to_main event) must not re-emit on resume/re-run, or it would
-        # double-count the deployment and re-add gate re-entries.
-        if se_events.job_has_events(job_id, se_events.MERGE_TO_MAIN):
+        # Idempotency: this helper emits a job's whole lifecycle batch at once.
+        # task_created is emitted first, for every task, and ONLY by this helper —
+        # so its presence means the batch already ran. Guarding on it (rather than
+        # the terminal merge_to_main) is robust to a prior run that recorded task
+        # events but crashed before merge_to_main, while not tripping on unrelated
+        # events (e.g. crash_detected) the job may carry from other code paths.
+        if se_events.job_has_events(job_id, se_events.TASK_CREATED):
             return
         job = get_job(job_id) or {}
         snapshot = job.get("task_graph_snapshot") or []

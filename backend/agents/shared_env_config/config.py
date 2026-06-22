@@ -41,6 +41,20 @@ def _clamp(value: float, floor: float | None, ceiling: float | None) -> float:
     return value
 
 
+def _require_default_in_bounds(
+    default: float, floor: float | None, ceiling: float | None
+) -> None:
+    """Enforce the precondition that ``default`` lies within ``[floor, ceiling]``.
+
+    Raises (not ``assert``) so the contract holds under ``python -O``, where a
+    caller bug would otherwise let an out-of-range default be silently clamped.
+    """
+    if floor is not None and default < floor:
+        raise ValueError(f"default ({default}) must be >= floor ({floor})")
+    if ceiling is not None and default > ceiling:
+        raise ValueError(f"default ({default}) must be <= ceiling ({ceiling})")
+
+
 def env_bool(name: str, default: bool = False) -> bool:
     """Read a boolean env var.
 
@@ -68,10 +82,7 @@ def env_int(name: str, default: int, floor: int | None = None, ceiling: int | No
         - Returns ``default`` (clamped) when the var is unset or unparseable;
           otherwise the parsed value clamped to the supplied bounds. Never raises.
     """
-    if floor is not None:
-        assert default >= floor, "default must respect the floor"
-    if ceiling is not None:
-        assert default <= ceiling, "default must respect the ceiling"
+    _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)
     if raw is None:
         return int(_clamp(default, floor, ceiling))
@@ -96,10 +107,7 @@ def env_float(
           unparseable, or non-finite (``inf``/``nan``); otherwise the parsed value
           clamped to the supplied bounds. Never raises.
     """
-    if floor is not None:
-        assert default >= floor, "default must respect the floor"
-    if ceiling is not None:
-        assert default <= ceiling, "default must respect the ceiling"
+    _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)
     if raw is None:
         return float(_clamp(default, floor, ceiling))

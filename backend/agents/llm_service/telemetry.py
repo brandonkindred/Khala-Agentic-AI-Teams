@@ -257,6 +257,7 @@ def record_llm_call(
 # importing llm_service still works when the SDK is absent (e.g. tests).
 
 _otel_initialized: bool = False
+_otel_init_lock = threading.Lock()
 _otel_tracer: Any = None
 _otel_llm_calls: Any = None
 _otel_llm_tokens: Any = None
@@ -265,43 +266,48 @@ _otel_llm_cost: Any = None
 
 
 def _ensure_otel_instruments() -> None:
-    """Lazily acquire the tracer and metric instruments."""
+    """Lazily acquire the tracer and metric instruments (exactly once)."""
     global _otel_initialized, _otel_tracer, _otel_llm_calls, _otel_llm_tokens, _otel_llm_latency
     global _otel_llm_cost
 
     if _otel_initialized:
         return
-    _otel_initialized = True
-    try:
-        from shared_observability import get_meter, get_tracer
+    # Double-checked locking: concurrent first calls from record_llm_call must
+    # not both run the init block and create duplicate instruments.
+    with _otel_init_lock:
+        if _otel_initialized:
+            return
+        _otel_initialized = True
+        try:
+            from shared_observability import get_meter, get_tracer
 
-        _otel_tracer = get_tracer("khala.llm_service")
-        meter = get_meter("khala.llm_service")
-        _otel_llm_calls = meter.create_counter(
-            "khala.llm.calls",
-            description="Total LLM calls made by a Khala team/agent",
-        )
-        _otel_llm_tokens = meter.create_counter(
-            "khala.llm.tokens",
-            description="Total tokens consumed by LLM calls (prompt + completion)",
-        )
-        _otel_llm_latency = meter.create_histogram(
-            "khala.llm.latency_ms",
-            description="LLM call latency in milliseconds",
-            unit="ms",
-        )
-        _otel_llm_cost = meter.create_counter(
-            "khala.llm.cost_usd",
-            description="Estimated USD cost of LLM calls (prompt + completion)",
-            unit="USD",
-        )
-    except Exception:
-        logger.debug("OpenTelemetry instruments unavailable for llm_service", exc_info=True)
-        _otel_tracer = None
-        _otel_llm_calls = None
-        _otel_llm_tokens = None
-        _otel_llm_latency = None
-        _otel_llm_cost = None
+            _otel_tracer = get_tracer("khala.llm_service")
+            meter = get_meter("khala.llm_service")
+            _otel_llm_calls = meter.create_counter(
+                "khala.llm.calls",
+                description="Total LLM calls made by a Khala team/agent",
+            )
+            _otel_llm_tokens = meter.create_counter(
+                "khala.llm.tokens",
+                description="Total tokens consumed by LLM calls (prompt + completion)",
+            )
+            _otel_llm_latency = meter.create_histogram(
+                "khala.llm.latency_ms",
+                description="LLM call latency in milliseconds",
+                unit="ms",
+            )
+            _otel_llm_cost = meter.create_counter(
+                "khala.llm.cost_usd",
+                description="Estimated USD cost of LLM calls (prompt + completion)",
+                unit="USD",
+            )
+        except Exception:
+            logger.debug("OpenTelemetry instruments unavailable for llm_service", exc_info=True)
+            _otel_tracer = None
+            _otel_llm_calls = None
+            _otel_llm_tokens = None
+            _otel_llm_latency = None
+            _otel_llm_cost = None
 
 
 def _emit_otel_llm_span(record: LLMCallRecord) -> None:

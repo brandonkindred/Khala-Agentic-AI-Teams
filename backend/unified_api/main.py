@@ -972,10 +972,22 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
     base = (os.environ.get(env_var, "").strip() if env_var else "") or ""
     if not base:
         raise HTTPException(status_code=503, detail="software engineering service URL not configured")
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})
-        resp.raise_for_status()
-        return resp.json()
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})
+            resp.raise_for_status()
+            return resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Forward the upstream failure as a gateway error rather than a 500 with a
+        # leaked traceback.
+        raise HTTPException(
+            status_code=502,
+            detail=f"software engineering service returned {exc.response.status_code}",
+        ) from exc
+    except httpx.RequestError as exc:
+        raise HTTPException(
+            status_code=503, detail="software engineering service unreachable"
+        ) from exc
 
 
 @app.delete("/api/jobs/{team}/{job_id}", tags=["jobs"])

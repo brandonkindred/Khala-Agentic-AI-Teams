@@ -41,6 +41,22 @@ def test_publish_without_type_and_without_subscribers() -> None:
     assert "type" not in sub.events[0]
 
 
+def test_publish_bus_fields_are_authoritative() -> None:
+    # A caller-supplied "ts"/"type" must not override the bus's own values.
+    state = BusState()
+    sub = subscribe(state, "j3")
+    publish(
+        state,
+        "j3",
+        {"ts": "CALLER-TS", "type": "caller-type", "phase": "x"},
+        event_type="progress",
+    )
+    event = sub.events[0]
+    assert event["type"] == "progress"  # event_type wins over caller "type"
+    assert event["ts"] != "CALLER-TS"  # bus timestamp wins over caller "ts"
+    assert event["phase"] == "x"  # other caller fields preserved
+
+
 def test_unsubscribe_drops_empty_job_from_both_maps() -> None:
     state = BusState()
     sub = subscribe(state, "j3")

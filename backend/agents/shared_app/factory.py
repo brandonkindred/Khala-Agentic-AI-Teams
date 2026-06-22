@@ -72,6 +72,17 @@ def create_team_app(
     Invariants:
         - Postgres wiring fires iff ``postgres_schema is not None``.
     """
+    # Validate the required identifiers explicitly (not via assert, so the check
+    # holds under ``python -O``): empty values otherwise surface as obscure
+    # failures deep inside init_otel/FastAPI.
+    for _name, _value in (
+        ("service_name", service_name),
+        ("team_key", team_key),
+        ("title", title),
+    ):
+        if not isinstance(_value, str) or not _value:
+            raise ValueError(f"{_name} must be a non-empty string")
+
     init_otel(service_name=service_name, team_key=team_key)
 
     @asynccontextmanager

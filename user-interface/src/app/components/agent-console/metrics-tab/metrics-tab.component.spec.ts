@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
-import { of, throwError } from 'rxjs';
+import { Subject, of, throwError } from 'rxjs';
 import { MetricsTabComponent } from './metrics-tab.component';
 import { SeMetricsApiService } from '../../../services/se-metrics-api.service';
 import type { SeMetrics } from '../../../models/se-metrics.model';
@@ -54,6 +54,35 @@ describe('MetricsTabComponent', () => {
     const callCount = api.getMetrics.mock.calls.length;
     fixture.componentInstance.setWindow(7); // no-op
     expect(api.getMetrics.mock.calls.length).toBe(callCount);
+  });
+
+  it('cancels an in-flight request on rapid window change (no stale overwrite)', () => {
+    // First window's response never arrives; switching window cancels it so a
+    // late first-response can't overwrite the newer window's data.
+    const first$ = new Subject<SeMetrics>();
+    const second = { ...mockMetrics, deployment_count: 99 };
+    api.getMetrics = vi
+      .fn()
+      .mockReturnValueOnce(first$)
+      .mockReturnValueOnce(of(second));
+    const fixture = build();
+    fixture.detectChanges(); // init → subscribes to first$ (pending)
+    fixture.componentInstance.setWindow(7); // cancels first$, takes `second`
+    expect(fixture.componentInstance.metrics()).toEqual(second);
+    expect(first$.observed).toBe(false); // first subscription was torn down
+    // A late first-window emission must not overwrite the newer result.
+    first$.next({ ...mockMetrics, deployment_count: 1 });
+    expect(fixture.componentInstance.metrics()).toEqual(second);
+  });
+
+  it('unsubscribes on destroy', () => {
+    const pending$ = new Subject<SeMetrics>();
+    api.getMetrics = vi.fn().mockReturnValue(pending$);
+    const fixture = build();
+    fixture.detectChanges();
+    expect(pending$.observed).toBe(true);
+    fixture.destroy();
+    expect(pending$.observed).toBe(false);
   });
 
   it('surfaces API errors', () => {

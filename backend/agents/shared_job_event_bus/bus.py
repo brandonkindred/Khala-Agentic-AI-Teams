@@ -131,12 +131,15 @@ def publish(
         - A timestamped payload (``ts`` added; ``type`` set when *event_type* is given)
           is appended to every current subscriber's queue and their ``notify`` is set,
           refreshing each subscriber's ``last_activity``. No subscribers ⇒ no-op.
+        - The bus's ``ts`` (and ``type`` when *event_type* is given) are authoritative:
+          a caller-supplied ``ts``/``type`` in *event* cannot override them.
     """
-    payload: Dict[str, Any] = {}
+    # Copy the caller's event first, then stamp the bus's authoritative fields last
+    # so a caller-supplied "ts"/"type" can never overwrite them.
+    payload: Dict[str, Any] = dict(event)
     if event_type:
         payload["type"] = event_type
     payload["ts"] = datetime.now(timezone.utc).isoformat()
-    payload.update(event)
 
     now = time.monotonic()
     with state.lock:

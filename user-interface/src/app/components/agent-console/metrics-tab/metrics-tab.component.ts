@@ -1,11 +1,13 @@
 import {
   ChangeDetectionStrategy,
   Component,
+  OnDestroy,
   OnInit,
   computed,
   inject,
   signal,
 } from '@angular/core';
+import { Subscription } from 'rxjs';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatButtonModule } from '@angular/material/button';
@@ -47,8 +49,11 @@ interface JobCostRow {
   styleUrl: './metrics-tab.component.scss',
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
-export class MetricsTabComponent implements OnInit {
+export class MetricsTabComponent implements OnInit, OnDestroy {
   private readonly api = inject(SeMetricsApiService);
+
+  /** The in-flight metrics request, if any, so it can be cancelled. */
+  private loadSub?: Subscription;
 
   readonly windowOptions = WINDOW_OPTIONS;
   readonly windowDays = signal<number>(30);
@@ -68,6 +73,10 @@ export class MetricsTabComponent implements OnInit {
     this.load();
   }
 
+  ngOnDestroy(): void {
+    this.loadSub?.unsubscribe();
+  }
+
   setWindow(days: number): void {
     if (days === this.windowDays()) return;
     this.windowDays.set(days);
@@ -75,9 +84,13 @@ export class MetricsTabComponent implements OnInit {
   }
 
   load(): void {
+    // Cancel any in-flight request so a rapid window change can't let a stale,
+    // late-arriving response overwrite the newer one (HttpClient aborts the
+    // request when its subscription is torn down).
+    this.loadSub?.unsubscribe();
     this.loading.set(true);
     this.error.set(null);
-    this.api.getMetrics(this.windowDays()).subscribe({
+    this.loadSub = this.api.getMetrics(this.windowDays()).subscribe({
       next: (m) => {
         this.metrics.set(m);
         this.loading.set(false);

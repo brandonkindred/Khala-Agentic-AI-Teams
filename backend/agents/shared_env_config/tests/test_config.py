@@ -80,9 +80,10 @@ def test_env_int_parses_and_clamps(monkeypatch) -> None:
 
 
 def test_env_int_default_must_respect_bounds() -> None:
-    with pytest.raises(AssertionError):
+    # Raised (not asserted) so the contract holds under `python -O`.
+    with pytest.raises(ValueError, match="floor"):
         env_int(_KNOB, 0, floor=1)
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="ceiling"):
         env_int(_KNOB, 100, ceiling=50)
 
 
@@ -123,7 +124,7 @@ def test_env_float_non_finite_returns_default(monkeypatch, raw) -> None:
 
 
 def test_env_float_default_must_respect_bounds() -> None:
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="floor"):
         env_float(_KNOB, -1.0, floor=0.0)
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError, match="ceiling"):
         env_float(_KNOB, 10.0, ceiling=5.0)

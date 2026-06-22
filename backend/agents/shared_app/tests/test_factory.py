@@ -31,6 +31,19 @@ def test_create_team_app_wires_otel_and_returns_app() -> None:
     assert factory._test_calls["instrument"] == [{"team_key": "tk"}]
 
 
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"service_name": "", "team_key": "tk", "title": "T"},
+        {"service_name": "svc", "team_key": "", "title": "T"},
+        {"service_name": "svc", "team_key": "tk", "title": ""},
+    ],
+)
+def test_create_team_app_rejects_empty_required_strings(kwargs) -> None:
+    with pytest.raises(ValueError):
+        create_team_app(**kwargs)
+
+
 def test_no_postgres_schema_skips_db_wiring(monkeypatch) -> None:
     import shared_postgres
 
