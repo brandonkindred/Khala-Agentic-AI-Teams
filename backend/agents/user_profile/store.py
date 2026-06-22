@@ -74,17 +74,18 @@ def _profile_from_row(row: dict) -> UserProfile:
     """Build a ``UserProfile`` from a ``user_profiles`` row dict.
 
     Preconditions:
-        - ``row`` contains every key in :data:`_PROFILE_COLUMNS`.
+        - ``row`` contains every key in :data:`_PROFILE_COLUMNS`. Every text/JSON
+          column is ``NOT NULL DEFAULT`` in the schema, so values are never NULL.
     Postconditions:
         - Returns a ``UserProfile`` whose ``user_id`` equals ``row['user_id']``,
-          with NULL text/JSON coerced to ``""``/`{}` and timestamps ISO-rendered.
+          with timestamps ISO-rendered.
     """
     return UserProfile(
         user_id=row["user_id"],
-        display_name=row["display_name"] or "",
-        email=row["email"] or "",
-        bio=row["bio"] or "",
-        preferences=row["profile_json"] or {},
+        display_name=row["display_name"],
+        email=row["email"],
+        bio=row["bio"],
+        preferences=row["profile_json"],
         created_at=_ts(row["created_at"]),
         updated_at=_ts(row["updated_at"]),
     )
@@ -95,10 +96,10 @@ def _assoc_from_row(row: dict) -> Association:
 
     Preconditions:
         - ``row`` contains the keys ``id, user_id, artifact_type, team,
-          artifact_id, label, role, created_at``.
+          artifact_id, label, role, created_at``. ``label`` and ``role`` are
+          ``NOT NULL DEFAULT`` in the schema, so they are never NULL.
     Postconditions:
-        - Returns an ``Association``; NULL ``label`` → ``""``, NULL ``role`` →
-          ``"owner"``, and ``created_at`` is ISO-rendered.
+        - Returns an ``Association`` with ``created_at`` ISO-rendered.
     """
     return Association(
         id=row["id"],
@@ -106,8 +107,8 @@ def _assoc_from_row(row: dict) -> Association:
         artifact_type=row["artifact_type"],
         team=row["team"],
         artifact_id=row["artifact_id"],
-        label=row["label"] or "",
-        role=row["role"] or "owner",
+        label=row["label"],
+        role=row["role"],
         created_at=_ts(row["created_at"]),
     )
 

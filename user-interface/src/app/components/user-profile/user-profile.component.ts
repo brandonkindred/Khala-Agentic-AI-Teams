@@ -61,6 +61,8 @@ export class UserProfileComponent implements OnInit {
 
   groups: AssociationGroup[] = [];
   integrations: ProfileIntegration[] = [];
+  /** Total linked artifacts, computed once per load (not per change-detection tick). */
+  totalAssociations = 0;
 
   readonly form = this.fb.group({
     display_name: [''],
@@ -84,6 +86,7 @@ export class UserProfileComponent implements OnInit {
           bio: profile.bio,
         });
         this.groups = this.groupAssociations(associations);
+        this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);
         this.integrations = integrations;
         this.loading = false;
       },
@@ -128,10 +131,5 @@ export class UserProfileComponent implements OnInit {
       ...g,
       items: items.filter((a) => a.artifact_type === g.type),
     })).filter((g) => g.items.length > 0);
-  }
-
-  /** Total number of linked artifacts across all groups. */
-  get totalAssociations(): number {
-    return this.groups.reduce((sum, g) => sum + g.items.length, 0);
   }
 }

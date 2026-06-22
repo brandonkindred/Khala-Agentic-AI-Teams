@@ -59,13 +59,14 @@ def test_associations_endpoint_lists_and_filters(client, monkeypatch):
 
 
 def test_overview_aggregates_profile_associations_integrations(client, monkeypatch):
-    import unified_api.integrations_store as istore
+    import unified_api.routes.user_profile as routes_mod
 
     from user_profile import store as up_store
 
     up_store.record_association("brand", "branding", "brand_1", label="Acme")
+    # The route binds get_integrations_list at import; patch it in that namespace.
     monkeypatch.setattr(
-        istore,
+        routes_mod,
         "get_integrations_list",
         lambda: [{"id": "slack", "type": "slack", "enabled": True, "channel": "#eng"}],
     )
@@ -90,10 +91,10 @@ def test_overview_storage_unavailable_returns_503(monkeypatch):
 
 
 def test_integrations_passthrough(client, monkeypatch):
-    import unified_api.integrations_store as istore
+    import unified_api.routes.user_profile as routes_mod
 
     monkeypatch.setattr(
-        istore,
+        routes_mod,
         "get_integrations_list",
         lambda: [{"id": "slack", "type": "slack", "enabled": True, "channel": "#eng"}],
     )
@@ -103,12 +104,12 @@ def test_integrations_passthrough(client, monkeypatch):
 
 
 def test_integrations_passthrough_tolerates_failure(client, monkeypatch):
-    import unified_api.integrations_store as istore
+    import unified_api.routes.user_profile as routes_mod
 
     def _boom():
         raise RuntimeError("store down")
 
-    monkeypatch.setattr(istore, "get_integrations_list", _boom)
+    monkeypatch.setattr(routes_mod, "get_integrations_list", _boom)
     resp = client.get("/api/user-profile/integrations")
     assert resp.status_code == 200
     assert resp.json() == []

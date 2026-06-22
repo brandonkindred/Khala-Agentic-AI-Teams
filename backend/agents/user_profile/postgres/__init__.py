@@ -43,17 +43,14 @@ SCHEMA = TeamSchema(
             role          TEXT NOT NULL DEFAULT 'owner',
             created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_user_profile_assoc_user "
-        "ON user_profile_associations(user_id, artifact_type)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_user_profile_assoc_unique "
         "ON user_profile_associations(user_id, artifact_type, artifact_id)",
-        # Serve list_associations' "WHERE user_id [AND artifact_type] ORDER BY
-        # created_at DESC" from the index instead of an in-memory sort: the
-        # first index covers the unfiltered list, the second the per-type list.
-        "CREATE INDEX IF NOT EXISTS idx_user_profile_assoc_user_created "
-        "ON user_profile_associations(user_id, created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_user_profile_assoc_user_type_created "
-        "ON user_profile_associations(user_id, artifact_type, created_at DESC)",
+        # This single UNIQUE index is all the table needs: it enforces the
+        # idempotent ON CONFLICT upsert AND, as a leading-prefix B-tree, serves
+        # list_associations' "WHERE user_id [AND artifact_type]" lookups. The
+        # registry is single-tenant and small (tens-to-hundreds of rows), so the
+        # residual "ORDER BY created_at DESC" is an in-memory sort that costs far
+        # less than maintaining extra B-trees on every insert.
     ],
     table_names=[
         "user_profiles",

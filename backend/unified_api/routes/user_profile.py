@@ -22,6 +22,7 @@ from typing import Annotated, Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
+from unified_api.integrations_store import get_integrations_list
 from user_profile import (
     Association,
     UserProfile,
@@ -99,8 +100,6 @@ def read_associations(
 def _integrations_list() -> list[IntegrationStatus]:
     """Shared integration-status fetch (best-effort: empty list on failure)."""
     try:
-        from unified_api.integrations_store import get_integrations_list
-
         return [IntegrationStatus(**item) for item in get_integrations_list()]
     except Exception as exc:  # noqa: BLE001
         logger.warning("user_profile: integrations list unavailable: %s", exc, exc_info=True)
