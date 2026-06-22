@@ -157,6 +157,19 @@ def test_snapshot_reuses_one_view_and_reflects_updates() -> None:
     assert second.qty == 40.0 and second.high_since_entry == 110.0
 
 
+def test_snapshot_reuse_refreshes_entry_price_after_scale_in() -> None:
+    # entry_price is NOT fixed: a scale-in refreshes the tracker's weighted-average
+    # entry in place (see _update_position_tracker). The reused view must reflect it,
+    # else take-profit / stop / scaled-rung targets evaluate against a stale entry.
+    tracked = _tracker(OrderSide.LONG, entry_price=100.0)["AAA"]
+    first = tracked.snapshot("AAA", 100.0)
+    assert first.entry_price == 100.0
+    tracked.entry_price = 102.0  # scale-in weighted-average refresh
+    second = tracked.snapshot("AAA", 150.0)
+    assert second is first
+    assert second.entry_price == 102.0  # reused view sees the new basis
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher: partial-close sizing + at-most-once firing + diagnostics.
 # ---------------------------------------------------------------------------

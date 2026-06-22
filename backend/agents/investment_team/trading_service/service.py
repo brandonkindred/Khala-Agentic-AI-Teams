@@ -360,6 +360,13 @@ class _TrackedPosition:
     _snap: Optional[_PositionStateView] = field(default=None, init=False, repr=False, compare=False)
 
     def __post_init__(self) -> None:
+        """Derive the cached side conversions once.
+
+        Preconditions: ``side`` is ``OrderSide.LONG`` or ``OrderSide.SHORT``.
+        Postconditions: ``side_str`` is the evaluator's ``"long"``/``"short"``
+        form and ``close_side`` is the opposite ``OrderSide`` (the side that
+        closes this position) — both invariant for the tracker's life.
+        """
         self.side_str = "long" if self.side == OrderSide.LONG else "short"
         self.close_side = OrderSide.SHORT if self.side == OrderSide.LONG else OrderSide.LONG
 
@@ -368,9 +375,13 @@ class _TrackedPosition:
 
         Preconditions: ``qty`` is the live position qty for ``symbol``.
         Postconditions: returns a :class:`_PositionStateView` (structurally a
-        ``PositionState``) whose ``qty``/watermarks reflect this bar — the SAME
-        instance across bars, so the hot path allocates nothing after the first
-        call. ``symbol``/``side``/``entry_price`` are fixed for the tracker's life.
+        ``PositionState``) whose mutable fields (``qty``, watermarks, and
+        ``entry_price``) reflect this bar — the SAME instance across bars, so the
+        hot path allocates nothing after the first call. ``symbol``/``side`` are
+        fixed for the tracker's life; ``entry_price`` is NOT (``Portfolio.extend``
+        refreshes it to the weighted-average on a scale-in / partial-fill
+        continuation, mirrored onto the tracker by ``_update_position_tracker``),
+        so it is re-read here every bar.
         """
         snap = self._snap
         if snap is None:
@@ -384,6 +395,7 @@ class _TrackedPosition:
             )
             return self._snap
         snap.qty = qty
+        snap.entry_price = self.entry_price
         snap.high_since_entry = self.high_since_entry
         snap.low_since_entry = self.low_since_entry
         return snap
