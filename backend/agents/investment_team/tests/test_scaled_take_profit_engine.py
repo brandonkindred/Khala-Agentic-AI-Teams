@@ -138,6 +138,25 @@ def test_cursor_mapping_is_read_only_but_live() -> None:
     assert view == {0: 1}  # the same view reflects the advance
 
 
+def test_tracked_position_caches_side_conversions() -> None:
+    # side_str (evaluator input) and close_side (engine close) are derived once.
+    long_t = _tracker(OrderSide.LONG)["AAA"]
+    short_t = _tracker(OrderSide.SHORT)["AAA"]
+    assert long_t.side_str == "long" and long_t.close_side == OrderSide.SHORT
+    assert short_t.side_str == "short" and short_t.close_side == OrderSide.LONG
+
+
+def test_snapshot_reuses_one_view_and_reflects_updates() -> None:
+    # The hot path reuses a single evaluator view, mutated in place each bar.
+    tracked = _tracker(OrderSide.LONG, entry_price=100.0)["AAA"]
+    first = tracked.snapshot("AAA", 50.0)
+    assert (first.symbol, first.side, first.qty, first.entry_price) == ("AAA", "long", 50.0, 100.0)
+    tracked.high_since_entry = 110.0
+    second = tracked.snapshot("AAA", 40.0)
+    assert second is first  # same instance reused, not reallocated
+    assert second.qty == 40.0 and second.high_since_entry == 110.0
+
+
 # ---------------------------------------------------------------------------
 # Dispatcher: partial-close sizing + at-most-once firing + diagnostics.
 # ---------------------------------------------------------------------------

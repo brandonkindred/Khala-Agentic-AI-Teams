@@ -285,6 +285,28 @@ class _ScaledLadderCursor:
 
 
 @dataclass
+class _PositionStateView:
+    """Mutable, reusable stand-in for :class:`PositionState` on the hot path.
+
+    Structurally matches ``PositionState`` (identical field names), so the pure
+    evaluator reads it unchanged — but a single instance per tracked position is
+    mutated in place each bar instead of allocating a fresh frozen snapshot.
+
+    Invariant: only :meth:`_TrackedPosition.snapshot` mutates it, and the
+    evaluator treats it as read-only within one call (it never retains the
+    reference past the call — :class:`ExitIntent` copies the values it needs), so
+    reusing the instance across bars is safe.
+    """
+
+    symbol: str
+    side: str
+    qty: float
+    entry_price: float
+    high_since_entry: float
+    low_since_entry: float
+
+
+@dataclass
 class _TrackedPosition:
     """Per-symbol state the parent engine maintains to evaluate exit rules.
 
@@ -327,35 +349,63 @@ class _TrackedPosition:
     # ``TradingService._update_position_tracker``), the cursor never leaks across
     # two distinct trades.
     scaled_cursor: _ScaledLadderCursor = field(default_factory=_ScaledLadderCursor)
+    # Side conversions, fixed for the tracker's life and derived once in
+    # ``__post_init__``: the evaluator wants the side as a ``"long"/"short"``
+    # string, and the engine close wants the opposite ``OrderSide``. Caching them
+    # keeps the per-bar snapshot / close build from recomputing the conversion.
+    side_str: str = field(init=False, repr=False, compare=False)
+    close_side: OrderSide = field(init=False, repr=False, compare=False)
+    # Reusable per-bar evaluator view (see ``snapshot``), mutated in place so the
+    # hot path allocates no fresh ``PositionState``. Created lazily on first use.
+    _snap: Optional[_PositionStateView] = field(default=None, init=False, repr=False, compare=False)
 
-    def snapshot(self, symbol: str, qty: float) -> PositionState:
-        # ``PositionState`` (the public evaluator input) carries the
-        # side as a ``"long" | "short"`` Literal; convert at the
-        # boundary so internal dispatcher logic stays enum-typed.
-        return PositionState(
-            symbol=symbol,
-            side="long" if self.side == OrderSide.LONG else "short",
-            qty=qty,
-            entry_price=self.entry_price,
-            high_since_entry=self.high_since_entry,
-            low_since_entry=self.low_since_entry,
-        )
+    def __post_init__(self) -> None:
+        self.side_str = "long" if self.side == OrderSide.LONG else "short"
+        self.close_side = OrderSide.SHORT if self.side == OrderSide.LONG else OrderSide.LONG
+
+    def snapshot(self, symbol: str, qty: float) -> _PositionStateView:
+        """Reusable evaluator view of this position as of the current bar.
+
+        Preconditions: ``qty`` is the live position qty for ``symbol``.
+        Postconditions: returns a :class:`_PositionStateView` (structurally a
+        ``PositionState``) whose ``qty``/watermarks reflect this bar — the SAME
+        instance across bars, so the hot path allocates nothing after the first
+        call. ``symbol``/``side``/``entry_price`` are fixed for the tracker's life.
+        """
+        snap = self._snap
+        if snap is None:
+            self._snap = _PositionStateView(
+                symbol=symbol,
+                side=self.side_str,
+                qty=qty,
+                entry_price=self.entry_price,
+                high_since_entry=self.high_since_entry,
+                low_since_entry=self.low_since_entry,
+            )
+            return self._snap
+        snap.qty = qty
+        snap.high_since_entry = self.high_since_entry
+        snap.low_since_entry = self.low_since_entry
+        return snap
 
 
 class _EvalGate(NamedTuple):
     """What :meth:`_EngineExitDispatcher._should_evaluate` found for one bar.
 
-    A named result (vs. a bare 4-tuple) so the per-position gate facts are
+    A named result (vs. a bare tuple) so the per-position gate facts are
     self-documenting and safe to extend. ``resting_limit_stop_id`` is the
     ``order_id`` of an already-resting engine STOP_LIMIT (or ``None``);
     ``entry_continuation_in_flight`` is ``True`` when the position's own entry is
-    still filling (a same-side partially-filled continuation rests).
+    still filling (a same-side partially-filled continuation rests). ``pending`` is
+    the symbol's pending-order snapshot scanned to derive those facts — carried so
+    the full-close path reuses it instead of rebuilding it several more times.
     """
 
     tracked: "_TrackedPosition"
     pos: Position
     resting_limit_stop_id: Optional[str]
     entry_continuation_in_flight: bool
+    pending: List[PendingOrder]
 
 
 @dataclass(frozen=True)
@@ -378,6 +428,9 @@ class _EmitContext:
     result: "TradingServiceResult"
     resting_limit_stop_id: Optional[str]
     entry_continuation_in_flight: bool
+    # The symbol's pending-order snapshot from ``_should_evaluate`` — reused by the
+    # full-close path instead of re-querying the order book per helper.
+    pending: List[PendingOrder]
 
 
 @dataclass
@@ -498,6 +551,7 @@ class _EngineExitDispatcher:
             result=result,
             resting_limit_stop_id=gate.resting_limit_stop_id,
             entry_continuation_in_flight=gate.entry_continuation_in_flight,
+            pending=gate.pending,
         )
         # A partial scale-out (a scaled-take-profit rung) and a full-position close
         # have disjoint emission flows — the partial path deliberately skips every
@@ -563,6 +617,12 @@ class _EngineExitDispatcher:
         if intent.is_partial:  # pragma: no cover - dispatch routes partials elsewhere
             raise ValueError("_emit_full_close must not receive a partial scale-out")
         sym, tracked, pos, order_book = ctx.sym, ctx.tracked, ctx.pos, ctx.order_book
+        # ``pending`` is the symbol's pending-order snapshot already scanned by
+        # ``_should_evaluate`` this bar — reused here so the close path does not
+        # rebuild it per helper. When it is empty (the common close: nothing else
+        # working for the symbol) every order-book-derived term below is a no-op,
+        # so guard them behind it.
+        pending = ctx.pending
         # Size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
         # at emission. Two sources, both BEFORE the engine close on the
@@ -578,17 +638,17 @@ class _EngineExitDispatcher:
         # exit rule already fired. If any scale-in is rejected /
         # clipped at fill time the engine close clips back down to the
         # actual ``existing_pos.qty`` — no over-close risk.
-        scale_in_qty = self._sum_same_side_queued(
-            sym, tracked.side, ctx.pending_for_prev
-        ) + self._sum_same_side_resting(sym, tracked.side, order_book)
-        # For a limit-style stop we do NOT cancel the position's in-flight entry
-        # continuation (see below), so its still-unfilled remainder can grow the
-        # position before this close fills. Oversize the close to cover it; a
-        # market close instead cancels the continuation outright, so it does not
-        # need (and must not double-count) this term. ``_fill_exit`` clips the
-        # close to the live position qty, so oversizing never over-closes.
-        if intent.style == "limit":
-            scale_in_qty += self._sum_entry_continuation_remainder(sym, pos, order_book)
+        scale_in_qty = self._sum_same_side_queued(sym, tracked.side, ctx.pending_for_prev)
+        if pending:
+            scale_in_qty += self._sum_same_side_resting(tracked.side, pending)
+            # For a limit-style stop we do NOT cancel the position's in-flight
+            # entry continuation (see below), so its still-unfilled remainder can
+            # grow the position before this close fills. Oversize the close to
+            # cover it; a market close instead cancels the continuation outright,
+            # so it does not need (and must not double-count) this term.
+            # ``_fill_exit`` clips to the live qty, so oversizing never over-closes.
+            if intent.style == "limit":
+                scale_in_qty += self._sum_entry_continuation_remainder(pos, pending)
 
         req = self._build_close_order(intent, tracked, pos, scale_in_qty)
         if req is None:
@@ -596,15 +656,16 @@ class _EngineExitDispatcher:
 
         ctx.pending_for_prev.append(req)
         self._register_binding(req, pos)
-        # Bind competing opposite-side exits to the position. This is safe for
-        # BOTH styles: binding only *retires* an order via the fill simulator's
-        # stale-continuation guard once the position is actually closed/replaced,
-        # so a ``style="limit"`` stop that gaps through and rests leaves the
-        # bound competing orders working. Binding is what prevents an unbound
-        # competing exit (e.g. a resting take-profit) from surviving the close
-        # and later firing as a fresh reverse entry — so it must run for the
-        # limit-style stop too, not just the guaranteed market close.
-        self._retire_competing_resting_orders(sym, tracked.side, pos, order_book)
+        if pending:
+            # Bind competing opposite-side exits to the position. This is safe for
+            # BOTH styles: binding only *retires* an order via the fill simulator's
+            # stale-continuation guard once the position is actually closed/replaced,
+            # so a ``style="limit"`` stop that gaps through and rests leaves the
+            # bound competing orders working. Binding is what prevents an unbound
+            # competing exit (e.g. a resting take-profit) from surviving the close
+            # and later firing as a fresh reverse entry — so it must run for the
+            # limit-style stop too, not just the guaranteed market close.
+            self._retire_competing_resting_orders(tracked.side, pos, pending)
         self._bind_same_bar_queued_exits(sym, tracked.side, pos, ctx.pending_for_prev)
         # Cancelling the entry continuation, by contrast, *actively* removes a
         # legitimate scale-in remainder on the assumption the close will fill.
@@ -614,8 +675,8 @@ class _EngineExitDispatcher:
         # folded into ``scale_in_qty`` above, so if the limit close later fills
         # after the continuation grew the position, it still covers the grown
         # size (``_fill_exit`` clips to the live qty) — no residual exposure.
-        if intent.style != "limit":
-            self._cancel_pending_entry_continuations(sym, pos, order_book)
+        if intent.style != "limit" and pending:
+            self._cancel_pending_entry_continuations(pos, order_book, pending)
         # A resting limit-style STOP_LIMIT is excluded from evaluation, so when one
         # rests the chosen intent is always a *different*, market-style rule
         # (take-profit / signal-exit) — a guaranteed close next bar. Cancel the now
@@ -681,12 +742,12 @@ class _EngineExitDispatcher:
         still resting (so the
         scaled deferral can read it without rescanning the book).
         """
-        if sym not in position_tracker:
+        tracked = position_tracker.get(sym)
+        if tracked is None:
             return None
         pos = portfolio.positions.get(sym)
         if pos is None or pos.qty <= 0:
             return None
-        tracked = position_tracker[sym]
         if tracked.just_opened:
             return None
         # Both per-order facts below matter only when the spec can author the
@@ -695,7 +756,10 @@ class _EngineExitDispatcher:
         track_continuation = self._has_scaled_take_profit_rule
         resting_limit_stop_id: Optional[str] = None
         entry_continuation_in_flight = False
-        for po in order_book.pending_for_symbol(sym):
+        # Snapshot the symbol's pending orders ONCE here; the full-close path
+        # reuses this list rather than rebuilding it per helper.
+        pending = order_book.pending_for_symbol(sym)
+        for po in pending:
             po_req = po.request
             if po_req.side == tracked.side:
                 # Same-side: the position's own partially-filled entry
@@ -727,6 +791,7 @@ class _EngineExitDispatcher:
             pos=pos,
             resting_limit_stop_id=resting_limit_stop_id,
             entry_continuation_in_flight=entry_continuation_in_flight,
+            pending=pending,
         )
 
     def _evaluate(
@@ -810,7 +875,7 @@ class _EngineExitDispatcher:
         return any(isinstance(r, ScaledTakeProfitRule) for r in self.exit_rules)
 
     @staticmethod
-    def _entry_continuations(sym: str, pos: Position, order_book: OrderBook) -> List[PendingOrder]:
+    def _entry_continuations(pos: Position, pending: List[PendingOrder]) -> List[PendingOrder]:
         """The position's own in-flight entry continuations — the partially-filled
         ``REQUEUE_NEXT_BAR`` / ``TWAP_N`` remainder of its entry order, identified
         by ``po.order_id == pos.entry_order_id`` and ``cumulative_filled_qty > 0``.
@@ -819,29 +884,29 @@ class _EngineExitDispatcher:
         oversize (:meth:`_sum_entry_continuation_remainder`) and the market-style
         cancel (:meth:`_cancel_pending_entry_continuations`).
 
-        Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
+        Preconditions: ``pos`` is the open position; ``pending`` is the symbol's
+        pending-order snapshot for this bar.
         Postconditions: returns the matching pending orders (possibly empty).
         """
         return [
             po
-            for po in order_book.pending_for_symbol(sym)
+            for po in pending
             if po.order_id == pos.entry_order_id and po.cumulative_filled_qty > 0
         ]
 
     @classmethod
-    def _sum_entry_continuation_remainder(
-        cls, sym: str, pos: Position, order_book: OrderBook
-    ) -> float:
+    def _sum_entry_continuation_remainder(cls, pos: Position, pending: List[PendingOrder]) -> float:
         """Unfilled remainder of the position's in-flight entry continuation(s).
 
-        Preconditions: ``pos`` is the open position; ``order_book`` is the live book.
+        Preconditions: ``pos`` is the open position; ``pending`` is the symbol's
+        pending-order snapshot for this bar.
         Postconditions: returns the summed unfilled qty (``>= 0``), so a limit-style
         close can be oversized to cover growth it does not cancel. ``_fill_exit``
         clips to the live qty, so the oversize is safe.
         """
         return sum(
             max(po.request.qty - po.cumulative_filled_qty, 0.0)
-            for po in cls._entry_continuations(sym, pos, order_book)
+            for po in cls._entry_continuations(pos, pending)
         )
 
     @staticmethod
@@ -865,9 +930,8 @@ class _EngineExitDispatcher:
 
     @staticmethod
     def _sum_same_side_resting(
-        sym: str,
         tracked_side: OrderSide,
-        order_book: OrderBook,
+        pending: List[PendingOrder],
     ) -> float:
         """Sum the unfilled qty of same-side orders already resting
         on the book — i.e. scale-ins the strategy submitted on a
@@ -887,7 +951,7 @@ class _EngineExitDispatcher:
         ``pos.qty``.
         """
         total = 0.0
-        for po in order_book.pending_for_symbol(sym):
+        for po in pending:
             req = po.request
             if req.side != tracked_side:
                 continue
@@ -920,7 +984,7 @@ class _EngineExitDispatcher:
         owns its arm/latch/gap-through lifecycle from there.
         """
         self._next_seq += 1
-        close_side = OrderSide.SHORT if tracked.side == OrderSide.LONG else OrderSide.LONG
+        close_side = tracked.close_side
         reason = (
             f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}[{intent.rule_index}]"
             if intent.rule_kind == "signal_exit"
@@ -1020,10 +1084,9 @@ class _EngineExitDispatcher:
 
     def _retire_competing_resting_orders(
         self,
-        sym: str,
         tracked_side: OrderSide,
         pos: Position,
-        order_book: OrderBook,
+        pending: List[PendingOrder],
     ) -> None:
         """Bind any unbound opposite-side resting orders to the position
         so they retire when the engine close removes the position.
@@ -1042,8 +1105,12 @@ class _EngineExitDispatcher:
           left alone.
         * Partially filled orders are already bound to the position via
           ``_fill_exit``'s auto-binding.
+
+        ``pending`` is the symbol's pending-order snapshot for this bar; the
+        binding mutates each matching :class:`PendingOrder` in place, so it is
+        reflected on the live book regardless of the snapshot.
         """
-        for resting in order_book.pending_for_symbol(sym):
+        for resting in pending:
             if resting.working_against_entry_order_id is not None:
                 continue
             if resting.cumulative_filled_qty > 0:
@@ -1076,9 +1143,9 @@ class _EngineExitDispatcher:
 
     def _cancel_pending_entry_continuations(
         self,
-        sym: str,
         pos: Position,
         order_book: OrderBook,
+        pending: List[PendingOrder],
     ) -> None:
         """Cancel any in-flight continuation of the position's entry
         order. A partial-fill remainder (``REQUEUE_NEXT_BAR`` or
@@ -1087,12 +1154,12 @@ class _EngineExitDispatcher:
         engine sized for and leaving residual exposure after
         ``_fill_exit`` clips at ``min(req.qty, existing_pos.qty)``.
 
-        Continuations are identified by :meth:`_entry_continuations`
-        (``po.order_id == pos.entry_order_id`` — the strategy can't reuse an
-        engine-issued order_id, and same-side new strategy entries have different
-        order_ids).
+        Continuations are identified by :meth:`_entry_continuations` over the
+        bar's ``pending`` snapshot (``po.order_id == pos.entry_order_id`` — the
+        strategy can't reuse an engine-issued order_id, and same-side new strategy
+        entries have different order_ids); each match is cancelled on ``order_book``.
         """
-        for po in self._entry_continuations(sym, pos, order_book):
+        for po in self._entry_continuations(pos, pending):
             order_book.cancel(po.order_id)
 
     def _record_emission(
