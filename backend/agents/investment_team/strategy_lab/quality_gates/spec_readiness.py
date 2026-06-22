@@ -934,11 +934,10 @@ class SpecReadinessGate(GateResultsMixin):
         take_profits = [r for r in ctx.spec.exit_rules if isinstance(r, TakeProfitRule)]
         # A laddered take-profit's FIRST rung is its effective profit target for
         # the risk/reward ratio — that is the level the position starts realising
-        # gains at. Fold each ladder's lowest rung pct into the take-profit pool.
+        # gains at. Fold each ladder's first rung pct into the take-profit pool.
+        # ``levels[0]`` IS the lowest pct (the DSL enforces strictly-increasing pct).
         scaled_tp_first_rungs = [
-            min(level.pct for level in r.levels)
-            for r in ctx.spec.exit_rules
-            if isinstance(r, ScaledTakeProfitRule)
+            r.levels[0].pct for r in ctx.spec.exit_rules if isinstance(r, ScaledTakeProfitRule)
         ]
         tp_pcts = [r.pct for r in take_profits] + scaled_tp_first_rungs
         if stop_losses and tp_pcts:

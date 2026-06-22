@@ -86,12 +86,14 @@ def _portfolio_with(
     return p
 
 
-def _tracker(side: OrderSide, entry_price: float = 100.0) -> Dict[str, _TrackedPosition]:
+def _tracker(
+    side: OrderSide, entry_price: float = 100.0, entry_order_id: str = "o1"
+) -> Dict[str, _TrackedPosition]:
     return {
         "AAA": _TrackedPosition(
             side=side,
             entry_price=entry_price,
-            entry_order_id="o1",
+            entry_order_id=entry_order_id,
             just_opened=False,
             high_since_entry=entry_price,
             low_since_entry=entry_price,
@@ -208,6 +210,56 @@ def test_partial_scale_out_does_not_cancel_competing_resting_order() -> None:
     )
 
 
+def test_partial_scale_out_does_not_cancel_resting_limit_stop() -> None:
+    # A spec with BOTH a limit-style stop and a ladder: when the engine's resting
+    # STOP_LIMIT is on the book and a scale-out rung fires, the partial close must
+    # NOT cancel the stop — the remainder of the position still needs it. (A full
+    # close, by contrast, cancels the now-redundant resting stop-limit.)
+    disp = _dispatcher(
+        exit_rules=[StopLossRule(pct=0.04, style="limit", limit_offset_pct=0.01), _ladder()]
+    )
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    # The engine's resting protective STOP_LIMIT (closes the long; limit below stop).
+    order_book.submit(
+        OrderRequest(
+            client_order_id="rest-stoplimit",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=100.0,
+            order_type=OrderType.STOP_LIMIT,
+            stop_price=96.0,
+            limit_price=95.0,
+            tif=TimeInForce.GTC,
+            reason=f"{ENGINE_EXIT_REASON_PREFIX}stop_loss",
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    # Bar reaches the +5% rung target (high 106) but stays above the 96 stop floor
+    # (low 100), so only the scale-out rung fires while the STOP_LIMIT rests.
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    # The rung scaled out (50% partial close). The ladder is exit_rules[1] (the
+    # limit-stop is [0]), so its cursor is keyed by rule_index 1.
+    assert [r.qty for r in pending] == [50.0]
+    assert tracker["AAA"].scaled_cursor.mapping == {1: 1}
+    # ...and the resting protective STOP_LIMIT is STILL on the book — not cancelled.
+    assert any(
+        po.request.client_order_id == "rest-stoplimit"
+        for po in order_book.pending_for_symbol("AAA")
+    )
+
+
 def test_stop_loss_listed_first_takes_full_close_over_ladder() -> None:
     disp = _dispatcher(exit_rules=[StopLossRule(pct=0.03), _ladder()])
     tracker = _tracker(OrderSide.LONG)
@@ -277,13 +329,14 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
     # marked fired, stranding the catch-up. The dispatcher must DEFER until the
     # entry settles, then close 0.5*100=50.
     disp = _dispatcher(exit_rules=[_ladder()])
-    tracker = _tracker(OrderSide.LONG)
-    portfolio = _portfolio_with(side=OrderSide.LONG, qty=50.0, entry_price=100.0)
-    portfolio.positions["AAA"].original_qty = 50.0  # only the first slice so far
     order_book = OrderBook()
+    # Submit the entry order; only 50 of 100 filled, 50 still working as a
+    # continuation. Pin the tracked position to whatever order_id the book assigned
+    # (no hardcoded id) so ``_entry_continuations`` matches it as the position's own
+    # in-flight entry.
     cont = order_book.submit(
         OrderRequest(
-            client_order_id="c-o1",
+            client_order_id="entry-AAA",
             symbol="AAA",
             side=OrderSide.LONG,
             qty=100.0,
@@ -293,8 +346,12 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
         submitted_at="2024-01-09",
         submitted_equity=1_000_000.0,
     )
-    assert cont.order_id == "o1"  # matches pos.entry_order_id, so it's a continuation
     cont.cumulative_filled_qty = 50.0  # 50 filled, 50 still working
+    tracker = _tracker(OrderSide.LONG, entry_order_id=cont.order_id)
+    portfolio = _portfolio_with(
+        side=OrderSide.LONG, qty=50.0, entry_price=100.0, entry_order_id=cont.order_id
+    )
+    portfolio.positions["AAA"].original_qty = 50.0  # only the first slice so far
     result = TradingServiceResult()
     bar = _bar(high=106.0, low=100.0, close=105.0)  # +5% target reached
 
@@ -312,7 +369,7 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
     assert tracker["AAA"].scaled_cursor.mapping == {}
 
     # Entry settles: continuation leaves the book, original_qty now reflects 100.
-    order_book.remove("o1", was_filled=True)
+    order_book.remove(cont.order_id, was_filled=True)
     portfolio.positions["AAA"].original_qty = 100.0
     portfolio.positions["AAA"].qty = 100.0
     pending = []

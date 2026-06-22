@@ -523,6 +523,11 @@ class _EngineExitDispatcher:
         and the replaced resting stop-limit (when one rested), and records the
         emission.
         """
+        # Contract guard: only full closes reach here (the dispatch routes partials
+        # to ``_emit_partial_scale_out``). This is what keeps the resting-stop-limit
+        # cancel below unreachable for a partial scale-out, so a scale-out never
+        # strips the protective stop off the position's remainder.
+        assert not intent.is_partial, "_emit_full_close must not receive a partial scale-out"
         sym, tracked, pos, order_book = ctx.sym, ctx.tracked, ctx.pos, ctx.order_book
         # Size the close to cover any same-side scale-in
         # that could grow ``pos.qty`` past the snapshot the engine saw
@@ -888,9 +893,13 @@ class _EngineExitDispatcher:
             # position (``scale_in_qty`` is irrelevant — we deliberately leave the
             # rest open). ``original_qty`` is the cumulative entry-filled qty; the
             # caller defers the rung until the entry has fully settled, so it now
-            # equals the full opened size. Fall back to the live qty if unset. The
-            # fill simulator clips to the live qty, so a fraction larger than what
-            # remains simply closes the remainder.
+            # equals the full opened size. The ``> 0`` fallback to the live qty
+            # never mis-sizes in practice: the engine's fill path always pins
+            # ``original_qty`` at open, and the only state where it could be unset
+            # is a freshly opened position with no partial exits yet — where the
+            # live ``pos.qty`` still equals the original. (The fill simulator also
+            # clips to the live qty, so a fraction larger than what remains simply
+            # closes the remainder.)
             base = pos.original_qty if pos.original_qty > 0 else pos.qty
             qty = intent.qty_fraction * base
         else:
