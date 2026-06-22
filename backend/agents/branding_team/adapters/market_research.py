@@ -10,6 +10,7 @@ from typing import Awaitable, Optional, TypeVar
 
 import httpx
 
+from branding_team.config import env_float
 from branding_team.models import BrandingMission, CompetitiveSnapshot
 
 _TERMINAL_STATUSES = {"completed", "failed", "cancelled"}
@@ -32,25 +33,16 @@ def _run_blocking(coro: Awaitable[_T]) -> _T:
         return pool.submit(lambda: asyncio.run(coro)).result()  # type: ignore[arg-type]
 
 
-def _float_env(name: str, default: float) -> float:
-    """Parse a positive float env var, falling back to *default* on garbage."""
-    try:
-        value = float(os.environ.get(name, default))
-    except (TypeError, ValueError):
-        return default
-    return value if value > 0 else default
-
-
 def _poll_interval_s() -> float:
-    return _float_env("BRANDING_MR_POLL_INTERVAL_S", 2.0)
+    return env_float("BRANDING_MR_POLL_INTERVAL_S", 2.0, positive=True)
 
 
 def _total_timeout_s() -> float:
-    return _float_env("BRANDING_MR_TOTAL_TIMEOUT_S", 600.0)
+    return env_float("BRANDING_MR_TOTAL_TIMEOUT_S", 600.0, positive=True)
 
 
 def _request_timeout_s() -> float:
-    return _float_env("BRANDING_MR_REQUEST_TIMEOUT_S", 30.0)
+    return env_float("BRANDING_MR_REQUEST_TIMEOUT_S", 30.0, positive=True)
 
 
 def _base_url() -> Optional[str]:

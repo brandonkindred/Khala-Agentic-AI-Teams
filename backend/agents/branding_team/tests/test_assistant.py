@@ -14,7 +14,6 @@ from branding_team.assistant.agent import (
     BrandingAssistantAgent,
     _merge_mission_update,
     _parse_extraction,
-    _parse_single_call,
     _strip_accidental_json,
 )
 from branding_team.models import BrandingMission
@@ -232,50 +231,6 @@ def test_merge_mission_update() -> None:
     assert merged.company_name == "Acme"
     assert merged.target_audience == "Developers"
     assert merged.company_description == "To be discussed."
-
-
-def test_parse_single_call_extracts_reply_mission_and_suggestions() -> None:
-    raw = json.dumps(
-        {
-            "reply": "Acme — got it. What do you want to be known for?",
-            "mission_update": {"company_name": "Acme"},
-            "suggested_questions": ["What does Acme do?"],
-        }
-    )
-    reply, mission_update, suggestions = _parse_single_call(raw)
-    assert reply == "Acme — got it. What do you want to be known for?"
-    assert mission_update == {"company_name": "Acme"}
-    assert suggestions == ["What does Acme do?"]
-
-
-def test_parse_single_call_returns_empty_on_garbage() -> None:
-    assert _parse_single_call("not json") == ("", {}, [])
-
-
-def test_single_call_path_one_round_trip(monkeypatch) -> None:
-    """With BRANDING_ASSISTANT_SINGLE_CALL set, respond() makes ONE call that
-    yields reply + mission update + suggestions."""
-    monkeypatch.setenv("BRANDING_ASSISTANT_SINGLE_CALL", "1")
-    single = MagicMock(
-        return_value=json.dumps(
-            {
-                "reply": "Acme — got it. What's the work you want to be known for?",
-                "mission_update": {"company_name": "Acme"},
-                "suggested_questions": ["What does Acme do?"],
-            }
-        )
-    )
-    agent = BrandingAssistantAgent(single_call_llm=single)
-    mission = BrandingMission(
-        company_name="TBD", company_description="To be discussed.", target_audience="TBD"
-    )
-    reply, updated_mission, suggestions = agent.respond([], mission, "We're Acme")
-
-    assert "Acme" in reply
-    assert "{" not in reply
-    assert updated_mission.company_name == "Acme"
-    assert suggestions == ["What does Acme do?"]
-    single.assert_called_once()
 
 
 def test_branding_assistant_agent_two_stage_returns_natural_reply_and_extracts_mission() -> None:

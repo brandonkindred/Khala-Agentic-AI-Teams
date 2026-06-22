@@ -51,6 +51,23 @@ def _validate_pagination(limit: Optional[int], offset: int) -> None:
         raise ValueError("offset must be >= 0")
 
 
+def _apply_brand_patch(cur, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
+    """Shallow-merge *patch* into a brand's JSONB and return the updated Brand.
+
+    The single server-side ``data || patch ... RETURNING data`` write that
+    both ``update_brand`` and ``append_brand_version`` share. Runs on the
+    caller's cursor (so it participates in the caller's transaction); returns
+    None when no row matched (e.g. a concurrent delete).
+    """
+    cur.execute(
+        "UPDATE branding_brands SET data = data || %s "
+        "WHERE id = %s AND client_id = %s RETURNING data",
+        (Json(patch), brand_id, client_id),
+    )
+    row = cur.fetchone()
+    return Brand.model_validate(row["data"]) if row is not None else None
+
+
 class BrandingStore:
     """Postgres-backed store for clients and brands.
 
@@ -286,15 +303,7 @@ class BrandingStore:
         if conversation_id is not None:
             patch["conversation_id"] = conversation_id
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "UPDATE branding_brands SET data = data || %s "
-                "WHERE id = %s AND client_id = %s RETURNING data",
-                (Json(patch), brand_id, client_id),
-            )
-            row = cur.fetchone()
-        if row is None:
-            return None
-        return Brand.model_validate(row["data"])
+            return _apply_brand_patch(cur, brand_id, client_id, patch)
 
     @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(
@@ -344,15 +353,7 @@ class BrandingStore:
                 "history": new_history,
                 "updated_at": now,
             }
-            cur.execute(
-                "UPDATE branding_brands SET data = data || %s "
-                "WHERE id = %s AND client_id = %s RETURNING data",
-                (Json(patch), brand_id, client_id),
-            )
-            updated_row = cur.fetchone()
-        if updated_row is None:
-            return None
-        return Brand.model_validate(updated_row["data"])
+            return _apply_brand_patch(cur, brand_id, client_id, patch)
 
 
 # ---------------------------------------------------------------------------

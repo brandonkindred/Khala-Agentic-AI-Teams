@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
 from branding_team.assistant.store import _default_mission, _StoredMessage
+from branding_team.config import env_int
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -57,11 +58,7 @@ init_otel(service_name="branding-team", team_key="branding")
 
 def _max_concurrent_runs() -> int:
     """Worker cap for the branding-run executor (env-tunable, clamped to >= 1)."""
-    raw = os.environ.get("BRANDING_MAX_CONCURRENT_RUNS", "4")
-    try:
-        return max(1, int(raw))
-    except (TypeError, ValueError):
-        return 4
+    return env_int("BRANDING_MAX_CONCURRENT_RUNS", 4, minimum=1)
 
 
 # Branding runs are submitted to a bounded pool instead of spawning an
