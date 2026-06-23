@@ -74,12 +74,28 @@ export class UserProfileComponent implements OnInit {
     this.load();
   }
 
-  /** Load the profile, its associations, and integration status in one request. */
+  /**
+   * Load the profile, its associations, and integration status in one request.
+   *
+   * Preconditions: none.
+   * Postconditions: on success `form` is patched and `groups`/`totalAssociations`/
+   * `integrations` reflect the response; on an HTTP error, or a 2xx response whose
+   * shape is malformed (missing `profile`/`associations`/`integrations`), `error`
+   * is set and the others are left unchanged. `loading` is false either way.
+   */
   load(): void {
     this.loading = true;
     this.error = null;
     this.api.getOverview().subscribe({
-      next: ({ profile, associations, integrations }) => {
+      next: (overview) => {
+        // A 2xx response with a malformed body slips past the error handler, so
+        // guard the shape before destructuring rather than throw deep in render.
+        if (!overview?.profile || !overview.associations || !overview.integrations) {
+          this.error = 'Received an unexpected response from the server.';
+          this.loading = false;
+          return;
+        }
+        const { profile, associations, integrations } = overview;
         this.form.patchValue({
           display_name: profile.display_name,
           email: profile.email,
@@ -97,7 +113,14 @@ export class UserProfileComponent implements OnInit {
     });
   }
 
-  /** Persist the editable profile fields. */
+  /**
+   * Persist the editable profile fields.
+   *
+   * Preconditions: none enforced — a no-op (marking the form touched) when
+   * `form.invalid` (e.g. a malformed email).
+   * Postconditions: when the form is valid, exactly one of `success` ('Profile
+   * saved.') or `error` is set after the request settles, and `saving` is false.
+   */
   save(): void {
     if (this.form.invalid) {
       this.form.markAllAsTouched();

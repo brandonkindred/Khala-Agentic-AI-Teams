@@ -12,6 +12,8 @@ producers and the UI agree on the strings.
 
 from __future__ import annotations
 
+from enum import Enum
+
 from .models import Association, UserProfile, UserProfileUpdate
 from .postgres import SCHEMA
 from .store import (
@@ -25,8 +27,14 @@ from .store import (
 )
 
 
-class ArtifactType:
-    """Canonical artifact-type strings shared by producers and the UI."""
+class ArtifactType(str, Enum):
+    """Canonical artifact-type strings shared by producers and the UI.
+
+    Subclasses ``str`` so a member is usable anywhere a plain string is (SQL
+    params, JSON, dict keys) AND serves as the single source of truth the API
+    validates filter values against — the route references this enum directly,
+    so a new member can never drift out of sync with a hand-kept ``Literal``.
+    """
 
     BRAND = "brand"
     BLOG_POST = "blog_post"

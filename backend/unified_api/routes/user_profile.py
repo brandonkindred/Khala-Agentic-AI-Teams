@@ -17,13 +17,14 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from typing import Annotated, Literal
+from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 
 from unified_api.integrations_store import get_integrations_list
 from user_profile import (
+    ArtifactType,
     Association,
     UserProfile,
     UserProfileUpdate,
@@ -36,10 +37,6 @@ from user_profile.store import DEFAULT_USER_ID
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/user-profile", tags=["user-profile"])
-
-#: Artifact-type filter values the registry understands. Restricting the query
-#: param to this set makes FastAPI return 422 for anything else.
-ArtifactTypeFilter = Literal["brand", "blog_post", "project", "agentic_team", "integration"]
 
 
 class IntegrationStatus(BaseModel):
@@ -86,7 +83,7 @@ def update_profile(update: UserProfileUpdate) -> UserProfile:
 @router.get("/associations", response_model=list[Association])
 def read_associations(
     artifact_type: Annotated[
-        ArtifactTypeFilter | None,
+        ArtifactType | None,
         Query(description="Optional filter: brand, blog_post, project, agentic_team, integration."),
     ] = None,
 ) -> list[Association]:

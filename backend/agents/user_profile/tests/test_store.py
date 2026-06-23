@@ -30,6 +30,16 @@ def test_get_profile_rejects_empty_user_id(db):
         up_store.get_profile("")
 
 
+def test_upsert_profile_rejects_empty_user_id(db):
+    with pytest.raises(AssertionError):
+        up_store.upsert_profile(UserProfileUpdate(display_name="x"), user_id="")
+
+
+def test_list_associations_rejects_empty_user_id(db):
+    with pytest.raises(AssertionError):
+        up_store.list_associations(user_id="")
+
+
 def test_get_profile_lost_insert_race_rereads_winner(monkeypatch):
     """When a concurrent writer wins the insert, get_profile re-reads its row.
 
@@ -120,8 +130,13 @@ def test_record_association_is_idempotent(db):
 
 
 def test_record_association_validates_inputs(db):
+    # Each of artifact_type, team, artifact_id is a non-empty precondition.
     with pytest.raises(AssertionError):
         up_store.record_association("", "branding", "x")
+    with pytest.raises(AssertionError):
+        up_store.record_association("brand", "", "x")
+    with pytest.raises(AssertionError):
+        up_store.record_association("brand", "branding", "")
 
 
 def test_record_association_requires_user_id(db):

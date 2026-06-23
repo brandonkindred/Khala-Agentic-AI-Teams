@@ -107,6 +107,15 @@ describe('UserProfileComponent', () => {
     expect(component.saving).toBe(false);
   });
 
+  it('should set an error when the overview response is malformed', async () => {
+    // A 2xx response missing `profile` must not throw deep in render.
+    apiSpy.getOverview.mockReturnValue(of({ associations: [], integrations: [] }));
+    await setup();
+    expect(component.error).toBeTruthy();
+    expect(component.loading).toBe(false);
+    expect(component.groups).toEqual([]);
+  });
+
   it('should show no groups when there are no associations', async () => {
     apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, associations: [] }));
     await setup();

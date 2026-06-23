@@ -57,6 +57,11 @@ def test_associations_endpoint_lists_and_filters(client, monkeypatch):
     assert len(items) == 1
     assert items[0]["team"] == "branding"
 
+    # The filter is validated against the ArtifactType enum (single source of
+    # truth), so an unknown type is rejected rather than silently returning [].
+    bad = client.get("/api/user-profile/associations", params={"artifact_type": "nope"})
+    assert bad.status_code == 422
+
 
 def test_overview_aggregates_profile_associations_integrations(client, monkeypatch):
     import unified_api.routes.user_profile as routes_mod

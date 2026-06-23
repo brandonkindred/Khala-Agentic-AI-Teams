@@ -17,12 +17,25 @@ export class UserProfileApiService {
   private readonly http = inject(HttpClient);
   private readonly baseUrl = environment.userProfileApiUrl;
 
-  /** GET /api/user-profile — current (default) profile. */
+  /**
+   * GET /api/user-profile — current (default) profile.
+   *
+   * Preconditions: none (the backend auto-creates the default profile on first read).
+   * Postconditions: the observable emits the current `UserProfile`, or errors with
+   * the `HttpErrorResponse` (e.g. 503 when profile storage is unavailable).
+   */
   getProfile(): Observable<UserProfile> {
     return this.http.get<UserProfile>(this.baseUrl);
   }
 
-  /** PUT /api/user-profile — update profile fields. */
+  /**
+   * PUT /api/user-profile — update profile fields.
+   *
+   * Preconditions: `body` conforms to `UserProfileUpdate` (omitted fields are left
+   * unchanged server-side).
+   * Postconditions: the observable emits the updated `UserProfile`, or errors with
+   * the `HttpErrorResponse`.
+   */
   updateProfile(body: UserProfileUpdate): Observable<UserProfile> {
     return this.http.put<UserProfile>(this.baseUrl, body);
   }
@@ -30,6 +43,11 @@ export class UserProfileApiService {
   /**
    * GET /api/user-profile/overview — profile + associations + integrations in a
    * single response, so the profile page loads in one round-trip.
+   *
+   * Preconditions: none.
+   * Postconditions: the observable emits a `ProfileOverview` whose `profile`,
+   * `associations`, and `integrations` are all present, or errors with the
+   * `HttpErrorResponse`.
    */
   getOverview(): Observable<ProfileOverview> {
     return this.http.get<ProfileOverview>(`${this.baseUrl}/overview`);

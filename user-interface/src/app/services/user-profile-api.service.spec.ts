@@ -49,6 +49,45 @@ describe('UserProfileApiService', () => {
     req.flush({ user_id: 'default', ...body, preferences: {}, created_at: '', updated_at: '' });
   });
 
+  it('should propagate a server error on getProfile', () => {
+    let status = 0;
+    service.getProfile().subscribe({
+      next: () => expect.unreachable('expected an error'),
+      error: (err) => {
+        status = err.status;
+      },
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.flush('boom', { status: 500, statusText: 'Server Error' });
+    expect(status).toBe(500);
+  });
+
+  it('should propagate a 503 on getOverview', () => {
+    let status = 0;
+    service.getOverview().subscribe({
+      next: () => expect.unreachable('expected an error'),
+      error: (err) => {
+        status = err.status;
+      },
+    });
+    const req = httpMock.expectOne(`${baseUrl}/overview`);
+    req.flush('unavailable', { status: 503, statusText: 'Service Unavailable' });
+    expect(status).toBe(503);
+  });
+
+  it('should propagate a network error on updateProfile', () => {
+    let errored = false;
+    service.updateProfile({ display_name: 'x' }).subscribe({
+      next: () => expect.unreachable('expected an error'),
+      error: () => {
+        errored = true;
+      },
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.error(new ProgressEvent('network error'));
+    expect(errored).toBe(true);
+  });
+
   it('should GET the aggregated overview', () => {
     const mock = {
       profile: { user_id: 'default', display_name: '', email: '', bio: '', preferences: {}, created_at: '', updated_at: '' },
