@@ -63,14 +63,22 @@ The pipeline lives in
 
 ## Winner gate
 
+The verdict is deterministic: a *valid* run (it executed and produced a
+trade ledger) is winning iff its annualized return meets or beats the 8%
+S&P-500 amortized benchmark.
+
 ```python
-is_winning = result.annualized_return_pct > 8.0
+is_winning = execution_succeeded and trades and result.annualized_return_pct >= 8.0
 ```
 
-This flag is the single source of truth: `/strategy-lab/paper-trade`
-(standalone endpoint) and the integrated cycle both refuse to paper-trade
-a non-winning strategy. A losing strategy is still persisted as a
-`StrategyLabRecord` with `is_winning=False`, and
+The robustness machinery (walk-forward acceptance gate / deflated Sharpe,
+IS→OOS degradation, regime beats, alignment, conformance, realism, runtime
+look-ahead) still runs and records its findings on `acceptance_reason` and
+the gate timeline — and those findings surface as narrative caveats — but
+they never flip this label. This flag is the single source of truth:
+`/strategy-lab/paper-trade` (standalone endpoint) and the integrated cycle
+both refuse to paper-trade a non-winning strategy. A losing strategy is
+still persisted as a `StrategyLabRecord` with `is_winning=False`, and
 `paper_trading_status="skipped"`, `paper_trading_skipped_reason="not_winning"`.
 
 ## Phase events
@@ -97,7 +105,7 @@ UI clients should treat unknown phase names as opaque and ignore them.
 
 | `paper_trading_skipped_reason` | Meaning |
 |---|---|
-| `not_winning` | Backtest `annualized_return_pct <= 8.0` — paper trading never runs. |
+| `not_winning` | Backtest `annualized_return_pct < 8.0` (or the run produced no valid ledger) — paper trading never runs. |
 | `disabled` | `RunStrategyLabRequest.paper_trading_enabled = false` — explicit opt-out. |
 | `no_market_data` | `MarketDataService` could not fetch live OHLCV data for the strategy's asset class — retry later. |
 | `no_strategy_code` | The orchestrator produced a winning record but no compilable `strategy_code` (e.g. refinement loop exhausted) — nothing to execute in the sandbox. |

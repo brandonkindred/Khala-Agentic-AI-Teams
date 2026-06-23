@@ -576,12 +576,13 @@ def test_is_sharpe_uses_training_segments_not_full_span():
 # ---------------------------------------------------------------------------
 
 
-def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
-    """When walk-forward evaluation raises and we fall back to the legacy
-    threshold path, the orchestrator must re-run anomaly checks with
-    ``dsr_aware=False`` so a downgraded ``Sharpe > 5`` flag becomes
-    critical again — preventing an obvious overfit from being marked
-    winning on annualized return alone."""
+def test_walk_forward_fallback_records_overfit_anomaly_as_caveat(monkeypatch):
+    """When walk-forward evaluation raises and we fall back, the orchestrator
+    re-runs anomaly checks with ``dsr_aware=False`` so a downgraded
+    ``Sharpe > 5`` flag becomes critical again and is recorded on the gate
+    timeline + ``acceptance_reason``. Under the deterministic verdict this
+    overfit-suspect 60% run is still WINNING (60% >= the 8% benchmark) — the
+    anomaly is a caveat that rides into the narrative, not a rejection."""
 
     from investment_team.models import StrategyLabRecord
 
@@ -691,11 +692,12 @@ def test_walk_forward_fallback_rejects_overfit_via_anomaly_recheck(monkeypatch):
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    # The fallback path must reject this on the upgraded Sharpe>5 critical
-    # even though annualized return clears WINNING_THRESHOLD.
-    assert record.is_winning is False
+    # Caveats-only: the 60% return clears the 8% benchmark, so the run is
+    # WINNING; the upgraded Sharpe>5 critical is recorded as a caveat rather
+    # than flipping the verdict.
+    assert record.is_winning is True
     # The persisted gate-result history reflects the upgraded severity so
-    # downstream consumers can audit the rejection reason.
+    # downstream consumers can audit the caveat.
     fallback_gates = [
         g for g in record.quality_gate_results if g.get("gate_name", "").startswith("fallback_")
     ]
@@ -861,12 +863,13 @@ def _wire_run_cycle_stubs(
     )
 
 
-def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch):
-    """#529: even when the walk-forward acceptance gate passes every check,
-    a final alignment report with ``aligned=False`` must veto publication.
-    The audit trail keeps the ``trade_alignment`` gate (passed=False) on
-    ``quality_gate_results`` and surfaces ``alignment_unresolved`` on
-    ``acceptance_reason`` for downstream consumers."""
+def test_failed_alignment_records_caveat_on_acceptance_path(monkeypatch):
+    """A final alignment report with ``aligned=False`` is recorded as a caveat
+    (the ``trade_alignment`` gate stays passed=False on ``quality_gate_results``
+    and ``alignment_unresolved`` is stamped on ``acceptance_reason``), but under
+    the deterministic verdict the 15% (>= 8%) run is still WINNING. The
+    resolved verdict is threaded to AnalysisAgent so the narrative surfaces the
+    misalignment as a caveat rather than calling the strategy a loss."""
 
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -923,7 +926,9 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    assert record.is_winning is False
+    # Caveats-only: 15% >= the 8% benchmark on a valid run → WINNING; the
+    # alignment failure is recorded as a caveat, not a label-flip.
+    assert record.is_winning is True
     alignment_gates = [
         g for g in record.quality_gate_results if g.get("gate_name") == "trade_alignment"
     ]
@@ -942,10 +947,11 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
         "the now-stale 'all four criteria met' summary."
     )
     # The orchestrator must thread the resolved verdict through so the
-    # narrative template + outcome_label match the persisted record.
-    assert captured_analysis_kwargs.get("is_winning") is False, (
-        "orchestrator must pass is_winning=False to AnalysisAgent.run when "
-        "alignment vetoes the publication (PR #573 review follow-up)."
+    # narrative template + outcome_label match the persisted record (now the
+    # deterministic WINNING verdict, with alignment surfaced as a caveat).
+    assert captured_analysis_kwargs.get("is_winning") is True, (
+        "orchestrator must pass the deterministic is_winning=True to "
+        "AnalysisAgent.run; the alignment failure is a caveat, not a veto."
     )
     # PR #573 round-4 regression guard: the alignment-augmentation block
     # used to bind a local ``rationale`` that shadowed the strategy
@@ -960,11 +966,12 @@ def test_failed_alignment_forces_is_winning_false_on_acceptance_path(monkeypatch
     )
 
 
-def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monkeypatch):
-    """#529: the walk-forward fallback branch (entered when
-    ``_evaluate_walk_forward`` raised) must also honour the alignment
-    veto. Even with annualized return > WINNING_THRESHOLD and no critical
-    anomalies, ``is_winning`` is False when alignment fails."""
+def test_failed_alignment_records_caveat_on_walk_forward_fallback(monkeypatch):
+    """The walk-forward fallback branch (entered when ``_evaluate_walk_forward``
+    raised) records an alignment failure as a caveat too: ``alignment_unresolved``
+    replaces the fallback success summary on ``acceptance_reason``. Under the
+    deterministic verdict the 15% (>= 8%) run is still WINNING — alignment is a
+    caveat, not a veto."""
 
     from investment_team.models import StrategyLabRecord
 
@@ -1016,24 +1023,25 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    assert record.is_winning is False
+    # Caveats-only: 15% >= the 8% benchmark on a valid run → WINNING.
+    assert record.is_winning is True
     alignment_gates = [
         g for g in record.quality_gate_results if g.get("gate_name") == "trade_alignment"
     ]
     assert alignment_gates and all(g["passed"] is False for g in alignment_gates)
     reason = record.backtest.result.acceptance_reason or ""
     assert "alignment_unresolved" in reason
-    # Bug 1 symmetry on the fallback path: the anomaly recheck admitted
-    # the run (no criticals + return > threshold), so its
-    # ``"walk_forward_fallback_passed: ..."`` summary is no longer
-    # truthful once alignment vetoes. The augmentation block must
-    # REPLACE it (using ``upstream_admitted``) rather than append.
+    # The anomaly recheck admitted the run (no criticals + return >= threshold),
+    # so its ``"walk_forward_fallback_passed: ..."`` summary is superseded once
+    # alignment is recorded. The augmentation block REPLACES it (using
+    # ``upstream_admitted``) rather than appending.
     assert "walk_forward_fallback_passed" not in reason, (
         "fallback success summary must be replaced (not appended) when "
-        "alignment vetoes a fallback-admitted run."
+        "an alignment caveat is recorded on a fallback-admitted run."
     )
-    assert captured_analysis_kwargs.get("is_winning") is False, (
-        "orchestrator must pass is_winning=False on the walk-forward fallback path too (Gap 6)."
+    assert captured_analysis_kwargs.get("is_winning") is True, (
+        "orchestrator must thread the deterministic is_winning=True on the "
+        "walk-forward fallback path too; alignment is a caveat."
     )
     # PR #573 round-4 regression guard (rationale-shadowing). See the
     # parallel assertion in the acceptance-path test for the full story.
@@ -1044,11 +1052,12 @@ def test_failed_alignment_forces_is_winning_false_on_walk_forward_fallback(monke
 
 
 def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
-    """#529 / PR #573 Bug 1: when the acceptance gate has real failure
-    reasons AND alignment also fails, both must survive on the audit
-    trail joined with ``" | "`` so a downstream parser can disambiguate
-    the alignment boundary from ``summarize_acceptance_reason``'s
-    internal ``"; "`` joiner."""
+    """When the acceptance gate has real failure reasons AND alignment also
+    fails, both caveats must survive on the audit trail joined with ``" | "``
+    so a downstream parser can disambiguate the alignment boundary from
+    ``summarize_acceptance_reason``'s internal ``"; "`` joiner. Under the
+    deterministic verdict the 15% (>= 8%) run is still WINNING — both robustness
+    failures are recorded as caveats, not vetoes."""
 
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult
@@ -1091,7 +1100,9 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    assert record.is_winning is False
+    # Caveats-only: 15% >= the 8% benchmark on a valid run → WINNING, even
+    # though acceptance failed. Both failures are preserved as caveats.
+    assert record.is_winning is True
     reason = record.backtest.result.acceptance_reason or ""
     # Both acceptance failures preserved (joined internally with "; ")
     assert "DSR below threshold" in reason
@@ -1109,15 +1120,12 @@ def test_acceptance_failures_and_alignment_failure_both_recorded(monkeypatch):
     )
 
 
-def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
-    """#529: the legacy ``walk_forward_enabled=False`` publication path
-    was removed. A run that skips walk-forward (still permitted to
-    execute) cannot be marked winning even when alignment passes and
-    annualized return clears the old WINNING_THRESHOLD.
-
-    Gap 4: the audit trail must explain WHY publication was blocked —
-    a record with ``is_winning=False`` and ``acceptance_reason=None``
-    leaves a user guessing."""
+def test_walk_forward_disabled_wins_by_return_records_caveat(monkeypatch):
+    """A run with ``walk_forward_enabled=False`` skips the out-of-sample
+    acceptance check. Under the deterministic verdict it still WINS when its
+    15% return clears the 8% benchmark (a valid run that executed + traded),
+    and the audit trail records that walk-forward was disabled as a caveat so
+    a reviewer knows the win was not out-of-sample validated."""
 
     from investment_team.models import StrategyLabRecord
 
@@ -1133,14 +1141,12 @@ def test_legacy_walk_forward_disabled_cannot_publish(monkeypatch):
     config = _config(walk_forward_enabled=False)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    assert record.is_winning is False
-    # Narrative still generated — the run isn't a failure, it just can't
-    # publish through the removed legacy path.
+    # Caveats-only: 15% >= the 8% benchmark on a valid run → WINNING even with
+    # walk-forward disabled (the skipped OOS check is a caveat, not a veto).
+    assert record.is_winning is True
     assert record.analysis_narrative
-    # Gap 4: the persisted record must explain why publication was
-    # blocked. Permissive substring match so future wording tweaks
-    # (e.g. adding remediation guidance) don't break the test —
-    # the structural prefix is the contract.
+    # The persisted record must record that walk-forward was disabled.
+    # Permissive substring match so future wording tweaks don't break the test.
     reason = record.backtest.result.acceptance_reason or ""
     assert "publication_disabled" in reason and "walk_forward_enabled=False" in reason, (
         f"expected publication_disabled / walk_forward_enabled=False in {reason!r}"
@@ -1152,11 +1158,12 @@ def _raise_walk_forward(*_args, **_kwargs):
 
 
 def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
-    """Gap 7: when the walk-forward fallback rejects via a critical
-    anomaly (e.g. upgraded ``Sharpe > 5.0``), the persisted
-    ``acceptance_reason`` must mirror that rejection — a consumer
-    reading the field alone shouldn't have to know to grep
-    ``quality_gate_results`` for ``fallback_`` entries."""
+    """When the walk-forward fallback flags a critical anomaly (e.g. upgraded
+    ``Sharpe > 5.0``), the persisted ``acceptance_reason`` must mirror that
+    cause — a consumer reading the field alone shouldn't have to grep
+    ``quality_gate_results`` for ``fallback_`` entries. Under the deterministic
+    verdict the 15% (>= 8%) run is still WINNING; the anomaly is the recorded
+    caveat."""
 
     from investment_team.models import StrategyLabRecord
     from investment_team.strategy_lab.quality_gates.models import QualityGateResult as _QGR
@@ -1196,7 +1203,9 @@ def test_walk_forward_fallback_rejected_records_acceptance_reason(monkeypatch):
     config = _config(walk_forward_enabled=True)
     record: StrategyLabRecord = orch.run_cycle(prior_records=[], config=config)
 
-    assert record.is_winning is False
+    # Caveats-only: 15% >= the 8% benchmark on a valid run → WINNING; the
+    # fallback anomaly is recorded on acceptance_reason as the caveat.
+    assert record.is_winning is True
     reason = record.backtest.result.acceptance_reason or ""
     assert reason.startswith("walk_forward_fallback_rejected:"), (
         f"expected walk_forward_fallback_rejected prefix in {reason!r}"
