@@ -64,7 +64,7 @@ from ..executor.predicate_evaluator import (
     relative_miss as _relative_miss_shared,
 )
 from ..executor.predicate_evaluator import (
-    resolve_side_value as _resolve_side_value_shared,
+    resolve_side_value as _resolve_side_value,
 )
 from ..spec_dsl import (
     EntryRule,
@@ -357,17 +357,6 @@ def _evaluate_indicator(ref: IndicatorRef, df: pd.DataFrame) -> pd.Series:
     if name == "vwap":
         return ind.vwap(df["high"], df["low"], df["close"], df["volume"])
     raise ValueError(f"unknown indicator name: {name!r}")
-
-
-def _resolve_side_value(
-    side: Any,
-    df: pd.DataFrame,
-    entry_idx: int,
-    indicator_cache: Dict[str, pd.Series],
-) -> Optional[float]:
-    """Delegate to the shared predicate evaluator via ``PandasHistoryView``."""
-    view = PandasHistoryView(df, indicator_cache)
-    return _resolve_side_value_shared(side, view, entry_idx)
 
 
 def _compare(
@@ -1258,18 +1247,22 @@ class DeterministicAlignmentChecker(GateResultsMixin):
             return
 
         cache = indicator_caches.setdefault(trade.symbol, {})
+        # One view, reused across every rule and the four resolves a cross
+        # predicate needs (lhs/rhs at i and i-1), so its per-column / per-indicator
+        # numpy arrays are built once instead of per resolve.
+        view = PandasHistoryView(df, cache)
 
         # Try each signal-exit rule in spec order — the first one whose
         # predicate fires at the signal bar wins the alignment.
         for rule_idx, rule in enumerate(signal_exit_rules):
             try:
-                lhs_value = _resolve_side_value(rule.when.lhs, df, signal_idx, cache)
-                rhs_value = _resolve_side_value(rule.when.rhs, df, signal_idx, cache)
+                lhs_value = _resolve_side_value(rule.when.lhs, view, signal_idx)
+                rhs_value = _resolve_side_value(rule.when.rhs, view, signal_idx)
                 prev_lhs: Optional[float] = None
                 prev_rhs: Optional[float] = None
                 if rule.when.op in ("cross_above", "cross_below") and signal_idx > 0:
-                    prev_lhs = _resolve_side_value(rule.when.lhs, df, signal_idx - 1, cache)
-                    prev_rhs = _resolve_side_value(rule.when.rhs, df, signal_idx - 1, cache)
+                    prev_lhs = _resolve_side_value(rule.when.lhs, view, signal_idx - 1)
+                    prev_rhs = _resolve_side_value(rule.when.rhs, view, signal_idx - 1)
             except (ValueError, TypeError):
                 continue
 
@@ -1346,19 +1339,22 @@ class DeterministicAlignmentChecker(GateResultsMixin):
         rule_id = f"entry[{rule_idx}]"
         predicate_repr = _format_predicate(rule.when)
         op = rule.when.op
+        # One view, reused across the four resolves a cross predicate needs
+        # (lhs/rhs at i and i-1) so its cached numpy arrays are shared.
+        view = PandasHistoryView(df, cache)
         try:
-            lhs_value = _resolve_side_value(rule.when.lhs, df, entry_idx, cache)
-            rhs_value = _resolve_side_value(rule.when.rhs, df, entry_idx, cache)
+            lhs_value = _resolve_side_value(rule.when.lhs, view, entry_idx)
+            rhs_value = _resolve_side_value(rule.when.rhs, view, entry_idx)
             # Cross ops need previous-bar state to distinguish a real
             # state transition from a sustained inequality. Resolving
             # the previous bar adds one extra series lookup per side;
             # the cache hits on the indicator path so the cost is the
-            # ``iloc[entry_idx - 1]`` access, not a full recompute.
+            # array index access, not a full recompute.
             prev_lhs: Optional[float] = None
             prev_rhs: Optional[float] = None
             if op in ("cross_above", "cross_below") and entry_idx > 0:
-                prev_lhs = _resolve_side_value(rule.when.lhs, df, entry_idx - 1, cache)
-                prev_rhs = _resolve_side_value(rule.when.rhs, df, entry_idx - 1, cache)
+                prev_lhs = _resolve_side_value(rule.when.lhs, view, entry_idx - 1)
+                prev_rhs = _resolve_side_value(rule.when.rhs, view, entry_idx - 1)
         except (ValueError, TypeError) as exc:
             return {
                 "status": "warmup",

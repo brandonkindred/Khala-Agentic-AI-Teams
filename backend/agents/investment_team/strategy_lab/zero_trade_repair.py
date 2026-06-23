@@ -382,9 +382,7 @@ class ZeroTradeRepairer:
             refinement_round=ctx.round_num,
             gate_name_prefix="zero_trade_repair_",
         )
-        critical_safety = [
-            g for g in safety_gates if not g.passed and g.severity == "critical"
-        ]
+        critical_safety = [g for g in safety_gates if not g.passed and g.severity == "critical"]
         if critical_safety:
             return self._reject(
                 ctx,
@@ -462,9 +460,7 @@ class ZeroTradeRepairer:
             # (``risk_limits`` as a list, e.g.). Reject the proposal as we
             # would for unsafe code and let the caller fall through to
             # generic refinement instead of aborting the cycle.
-            logger.warning(
-                "Zero-trade repair proposal had invalid spec updates: %s", exc
-            )
+            logger.warning("Zero-trade repair proposal had invalid spec updates: %s", exc)
             return self._reject(
                 ctx,
                 sub_phase="zero_trade_repair_rejected",
@@ -512,9 +508,7 @@ class ZeroTradeRepairer:
         # when no whitelisted key was present.
         post_repair_spec_gates.extend(dropped_keys_gates)
         spec_criticals = [
-            g
-            for g in post_repair_spec_gates
-            if not g.passed and g.severity == "critical"
+            g for g in post_repair_spec_gates if not g.passed and g.severity == "critical"
         ]
         if spec_criticals:
             return self._reject(
@@ -565,9 +559,7 @@ class ZeroTradeRepairer:
             return self._reject(
                 ctx,
                 sub_phase="zero_trade_repair_rejected",
-                attempt=(
-                    f"reexec_failed ({report.root_cause_category}): {repair_exec.error_type}"
-                ),
+                attempt=(f"reexec_failed ({report.root_cause_category}): {repair_exec.error_type}"),
                 failure_reason=f"re_execution_failed: {repair_exec.error_type}",
                 new_gates=safety_gates + post_repair_spec_gates + [failure_gate],
                 extra_event={
@@ -624,9 +616,7 @@ class ZeroTradeRepairer:
             refinement_round=ctx.round_num,
             gate_name_prefix="zero_trade_repair_",
         )
-        new_critical = [
-            g for g in new_anomaly_gates if not g.passed and g.severity == "critical"
-        ]
+        new_critical = [g for g in new_anomaly_gates if not g.passed and g.severity == "critical"]
         if new_critical:
             return self._reject(
                 ctx,

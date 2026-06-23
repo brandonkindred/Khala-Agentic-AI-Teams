@@ -238,6 +238,7 @@ def _mechanical_repair_enabled() -> bool:
     raw = os.environ.get("STRATEGY_LAB_MECHANICAL_REPAIR_ENABLED", "true")
     return raw.strip().lower() in ("true", "1", "yes")
 
+
 MAX_CODE_REFINEMENT_ROUNDS = 50
 # Maximum number of trade-alignment problem-solving rounds. Each round
 # audits the executed trades against the spec and, if misaligned, asks the
