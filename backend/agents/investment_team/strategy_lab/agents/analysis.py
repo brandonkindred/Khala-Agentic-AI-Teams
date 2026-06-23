@@ -133,12 +133,20 @@ class AnalysisAgent:
         Args:
             on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
             is_winning: Authoritative verdict from the orchestrator. When None,
-                falls back to the deterministic ``annualized_return_pct >=
-                WINNING_THRESHOLD`` rule (the same rule the orchestrator applies),
-                so direct callers and tests get a label consistent with the
-                persisted ``StrategyLabRecord.is_winning``. The label is purely
-                the 8% S&P-500 benchmark verdict — robustness diagnostics never
-                change it; they surface as caveats only (see ``robustness_caveats``).
+                falls back to a simplified return-only check
+                (``annualized_return_pct >= WINNING_THRESHOLD``). This is NOT
+                identical to the orchestrator's rule: the orchestrator also
+                applies the ``execution_succeeded and trades`` validity
+                precondition, which the agent cannot evaluate from a
+                ``BacktestResult`` alone (an invalid run with no trades but a
+                computed return would fall back to WINNING here while the
+                orchestrator labels it LOSING). Callers that know the execution
+                context (the orchestrator) MUST therefore pass the authoritative
+                ``is_winning`` so the narrative template and ``outcome_label``
+                stay consistent with the persisted ``StrategyLabRecord.is_winning``.
+                The label is purely the 8% S&P-500 benchmark verdict — robustness
+                diagnostics never change it; they surface as caveats only (see
+                ``robustness_caveats``).
             robustness_caveats: Pre-rendered ``## Robustness caveats`` block to
                 inject into the draft + self-review prompts. When None, it is
                 derived from ``metrics`` via :func:`format_robustness_caveats`
@@ -449,7 +457,7 @@ def format_robustness_caveats(metrics: BacktestResult) -> str:
     diag: List[str] = []
     if metrics.oos_sharpe is not None:
         diag.append(f"OOS Sharpe {metrics.oos_sharpe:.2f}")
-        if metrics.deflated_sharpe:
+        if metrics.deflated_sharpe is not None:
             diag.append(f"deflated Sharpe {metrics.deflated_sharpe:.2f}")
         if metrics.is_oos_degradation_pct is not None:
             diag.append(f"IS→OOS Sharpe degradation {metrics.is_oos_degradation_pct:.1f}%")

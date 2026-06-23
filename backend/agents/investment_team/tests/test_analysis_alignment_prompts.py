@@ -779,6 +779,20 @@ def test_robustness_caveats_surface_recorded_concern_and_oos_diagnostics() -> No
     assert "beat benchmark in 1 of 4 regime subwindows" in section
 
 
+def test_robustness_caveats_include_zero_deflated_sharpe() -> None:
+    """A deflated Sharpe of exactly 0.0 is a meaningful diagnostic within a
+    walk-forward run (zero risk-adjusted return) and must still be surfaced —
+    regression guard against a truthiness check that skipped 0.0."""
+    section = format_robustness_caveats(
+        _caveat_metrics(
+            acceptance_reason="OOS DSR 0.00 below threshold 1.000",
+            oos_sharpe=0.10,
+            deflated_sharpe=0.0,
+        )
+    )
+    assert "deflated Sharpe 0.00" in section
+
+
 def test_robustness_caveats_omit_oos_block_without_walk_forward() -> None:
     """On a fallback/legacy path (no OOS Sharpe) a recorded concern still
     surfaces the cause, but the out-of-sample diagnostics line is omitted."""
