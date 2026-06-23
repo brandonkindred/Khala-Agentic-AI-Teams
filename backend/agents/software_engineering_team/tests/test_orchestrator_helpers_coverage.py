@@ -13,6 +13,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from software_engineering_team import orchestrator
+
 
 @pytest.fixture(autouse=True)
 def _autouse_patched_job_store(patched_job_store):
@@ -26,7 +28,6 @@ def _autouse_patched_job_store(patched_job_store):
 
 
 def test_iso_now_returns_iso_string():
-    import orchestrator
 
     out = orchestrator._iso_now()
     assert isinstance(out, str)
@@ -37,7 +38,6 @@ def test_iso_now_returns_iso_string():
 
 
 def test_convert_to_structured_questions_assigns_unique_ids_and_options():
-    import orchestrator
 
     qs = orchestrator._convert_to_structured_questions(
         ["What is the goal?", "What is the deadline?"], source="planning"
@@ -53,13 +53,11 @@ def test_convert_to_structured_questions_assigns_unique_ids_and_options():
 
 
 def test_convert_to_structured_questions_empty_list_returns_empty():
-    import orchestrator
 
     assert orchestrator._convert_to_structured_questions([]) == []
 
 
 def test_check_cancellation_raises_when_cancel_requested(monkeypatch):
-    import orchestrator
 
     monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: True)
     with pytest.raises(orchestrator.CancellationError):
@@ -67,7 +65,6 @@ def test_check_cancellation_raises_when_cancel_requested(monkeypatch):
 
 
 def test_check_cancellation_silent_when_not_requested(monkeypatch):
-    import orchestrator
 
     monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: False)
     # Should return None silently
@@ -77,7 +74,6 @@ def test_check_cancellation_silent_when_not_requested(monkeypatch):
 def test_wait_for_user_answers_returns_true_immediately(monkeypatch):
     """When the job is no longer waiting for answers, the helper returns True
     without entering the sleep loop."""
-    import orchestrator
 
     monkeypatch.setattr(orchestrator, "is_waiting_for_answers", lambda _jid: False)
     assert orchestrator._wait_for_user_answers("job-x", timeout_seconds=10.0) is True
@@ -85,7 +81,6 @@ def test_wait_for_user_answers_returns_true_immediately(monkeypatch):
 
 def test_wait_for_user_answers_returns_false_when_job_failed(monkeypatch):
     """If the job transitions to FAILED while waiting, the helper returns False."""
-    import orchestrator
 
     monkeypatch.setattr(orchestrator, "is_waiting_for_answers", lambda _jid: True)
     monkeypatch.setattr(
@@ -99,7 +94,6 @@ def test_wait_for_user_answers_returns_false_when_job_failed(monkeypatch):
 
 
 def test_get_task_stats_returns_zeros_with_empty_snapshot(monkeypatch):
-    import orchestrator
 
     # Patch execution_tracker.snapshot to return no tasks
     monkeypatch.setattr(orchestrator.execution_tracker, "snapshot", lambda: {"tasks": []})
@@ -114,7 +108,6 @@ def test_get_task_stats_returns_zeros_with_empty_snapshot(monkeypatch):
 
 
 def test_get_task_stats_computes_percent_with_completed_tasks(monkeypatch):
-    import orchestrator
 
     monkeypatch.setattr(
         orchestrator.execution_tracker,
@@ -137,7 +130,6 @@ def test_get_task_stats_computes_percent_with_completed_tasks(monkeypatch):
 
 
 def test_parse_traceback_for_crash_extracts_top_frame():
-    import orchestrator
 
     try:
         raise KeyError("missing")
@@ -149,7 +141,6 @@ def test_parse_traceback_for_crash_extracts_top_frame():
 
 
 def test_parse_traceback_for_crash_handles_exception_without_tb():
-    import orchestrator
 
     exc = KeyError("missing")
     # No __traceback__ → returns (None, None, None)
@@ -160,7 +151,6 @@ def test_parse_traceback_for_crash_handles_exception_without_tb():
 
 
 def test_log_agent_crash_banner_smoke():
-    import orchestrator
 
     try:
         raise RuntimeError("boom")
@@ -170,20 +160,17 @@ def test_log_agent_crash_banner_smoke():
 
 
 def test_apply_repair_fixes_empty_list_returns_false(tmp_path: Path):
-    import orchestrator
 
     assert orchestrator._apply_repair_fixes(tmp_path, []) is False
 
 
 def test_apply_repair_fixes_skips_entry_without_file_path(tmp_path: Path):
-    import orchestrator
 
     out = orchestrator._apply_repair_fixes(tmp_path, [{"line_start": 1, "line_end": 1}])
     assert out is False
 
 
 def test_apply_repair_fixes_rejects_path_outside_agent_root(tmp_path: Path):
-    import orchestrator
 
     other = tmp_path / "other"
     other.mkdir()
@@ -202,7 +189,6 @@ def test_apply_repair_fixes_rejects_path_outside_agent_root(tmp_path: Path):
 
 
 def test_apply_repair_fixes_skips_missing_file(tmp_path: Path):
-    import orchestrator
 
     out = orchestrator._apply_repair_fixes(
         tmp_path,
@@ -212,7 +198,6 @@ def test_apply_repair_fixes_skips_missing_file(tmp_path: Path):
 
 
 def test_apply_repair_fixes_rejects_out_of_bounds_line_range(tmp_path: Path):
-    import orchestrator
 
     target = tmp_path / "f.py"
     target.write_text("a\nb\n", encoding="utf-8")
@@ -232,7 +217,6 @@ def test_apply_repair_fixes_rejects_out_of_bounds_line_range(tmp_path: Path):
 
 
 def test_apply_repair_fixes_applies_valid_replacement(tmp_path: Path):
-    import orchestrator
 
     target = tmp_path / "f.py"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
@@ -252,7 +236,6 @@ def test_apply_repair_fixes_applies_valid_replacement(tmp_path: Path):
 
 
 def test_pop_runnable_task_picks_one_when_deps_met():
-    import orchestrator
 
     class _T:
         def __init__(self, id_: str, deps: list[str]):
@@ -271,7 +254,6 @@ def test_pop_runnable_task_picks_one_when_deps_met():
 
 
 def test_pop_runnable_task_returns_none_when_no_deps_satisfied():
-    import orchestrator
 
     class _T:
         def __init__(self, id_: str, deps: list[str]):
@@ -287,7 +269,6 @@ def test_pop_runnable_task_returns_none_when_no_deps_satisfied():
 
 def test_pop_runnable_task_skips_missing_task_objects():
     """If a task id is in the queue but not in all_tasks, it's skipped silently."""
-    import orchestrator
 
     class _T:
         def __init__(self, id_: str, deps: list[str]):
@@ -305,7 +286,6 @@ def test_frontend_code_v2_worker_marks_failed_when_team_missing():
     """When the frontend_code_v2 team isn't registered, all queued tasks
     are marked failed with a clear reason and the worker returns
     without entering the integration loop."""
-    import orchestrator
 
     queue = ["t1", "t2"]
     failed: dict = {}
@@ -328,7 +308,6 @@ def test_frontend_code_v2_worker_marks_failed_when_team_missing():
 
 def test_backend_code_v2_worker_marks_failed_when_team_missing():
     """Mirror coverage for the backend-code-v2 worker's no-team early-exit."""
-    import orchestrator
 
     queue = ["t1"]
     failed: dict = {}
@@ -347,7 +326,6 @@ def test_backend_code_v2_worker_marks_failed_when_team_missing():
 
 
 def test_log_task_breakdown_does_not_raise():
-    import orchestrator
 
     class _T:
         def __init__(self, id_, assignee):
@@ -371,7 +349,6 @@ def test_log_task_breakdown_does_not_raise():
 
 
 def test_log_task_completion_banner_with_passing_task(monkeypatch):
-    import orchestrator
 
     monkeypatch.setattr(
         orchestrator.execution_tracker,
@@ -390,7 +367,6 @@ def test_log_task_completion_banner_with_passing_task(monkeypatch):
 
 
 def test_log_task_completion_banner_truncates_long_strings(monkeypatch):
-    import orchestrator
 
     monkeypatch.setattr(
         orchestrator.execution_tracker,

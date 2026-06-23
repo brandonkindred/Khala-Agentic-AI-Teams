@@ -78,6 +78,19 @@ class BrandingTeamOrchestrator:
         The pipeline is built as a Strands SDK ``Graph`` whose nodes are
         per-phase sub-graphs and swarms.  Brand-compliance checks run outside
         the graph because their inputs come from the API request.
+
+        Preconditions:
+            - ``mission`` is a valid ``BrandingMission`` and ``human_review`` a
+              ``HumanReview``; a brand identity is resolvable either from
+              ``mission`` or from ``store`` + ``client_id``/``brand_id`` (see
+              :meth:`_resolve_brand_mission`).
+            - ``target_phase`` is a ``BrandPhase`` or ``None`` (``None`` ⇒ run
+              every phase in ``PHASE_ORDER``).
+        Postconditions:
+            - Returns a ``TeamOutput`` carrying the phases up to ``target_phase``
+              (see :meth:`_extract_phases`), the derived ``current_phase`` (see
+              :meth:`_determine_current_phase`), and any brand-compliance results;
+              the individual helper contracts hold.
         """
         # Resolve mission/owner from the store, then run and interpret the graph.
         # Each step below is a small, separately-testable helper so this method

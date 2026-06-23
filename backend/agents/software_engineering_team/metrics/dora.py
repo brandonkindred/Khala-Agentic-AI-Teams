@@ -139,7 +139,10 @@ def compute_from_events(
             metrics.deployment_count += 1
         elif etype == se_events.GATE_REENTRY:
             # A change either failed a gate or not — count distinct (job, task) once,
-            # so a resumed job re-emitting the event can't inflate the rate.
+            # so a resumed job re-emitting the event can't inflate the rate. A
+            # GATE_REENTRY is always emitted per task; an empty task_id is therefore
+            # anomalous and has no key to dedup on, so it is counted individually —
+            # mirroring how TASK_MERGED treats an empty task_id above.
             if not task_id or key not in reentry_keys:
                 if task_id:
                     reentry_keys.add(key)

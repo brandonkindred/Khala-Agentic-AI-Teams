@@ -156,13 +156,16 @@ def retrieve_learnings(
         return []
     if not is_postgres_enabled():
         return []
-    params: list = [tsquery]
+    # ``tsquery`` is bound twice — once for the WHERE ``@@`` match and once for the
+    # ORDER BY ``ts_rank`` — because each positional ``%s`` placeholder consumes its
+    # own argument; the appends below are ordered to match the placeholders in the SQL.
+    params: list = [tsquery]  # 1) WHERE search_tsv @@ to_tsquery(...)
     where = "search_tsv @@ to_tsquery('english', %s)"
     if category:
         where += " AND category = %s"
-        params.append(category)
-    params.append(tsquery)  # for the ts_rank in ORDER BY
-    params.append(top_n)
+        params.append(category)  # 2) optional category filter
+    params.append(tsquery)  # 3) ts_rank(...) in ORDER BY
+    params.append(top_n)  # 4) LIMIT
     try:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(

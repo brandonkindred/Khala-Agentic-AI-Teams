@@ -110,6 +110,10 @@ def llm_attribution(
     Postconditions: inside the block, :func:`current_attribution` reflects the
         merged value; on exit (including via exception) the exact attribution
         that was active on entry is restored.
+
+    Yields:
+        The merged :class:`LLMAttribution` active for the block, so callers may
+        inspect the effective attribution (``with llm_attribution(...) as attr``).
     """
     base = _attribution.get()
     merged = replace(

@@ -42,24 +42,30 @@ def is_rejected(result: Any) -> Optional[bool]:
 def _first_issue(result: Any) -> Optional[Any]:
     for attr in _ISSUE_LIST_ATTRS:
         items = getattr(result, attr, None)
-        if items:
-            try:
-                # ``per_criterion`` items expose ``satisfied`` — return the first
-                # failing one, and None when every criterion passed (do NOT fall
-                # through to items[0], which would mislabel a passing criterion as
-                # the rejection). Plain issue lists (code review / QA / security)
-                # have no ``satisfied`` attribute, so items[0] is the right pick.
-                # Single pass: track whether any item carries ``satisfied`` while
-                # looking for the first failing one.
-                has_satisfied = False
-                for item in items:
-                    if hasattr(item, "satisfied"):
-                        has_satisfied = True
-                        if item.satisfied is False:
-                            return item
-                return None if has_satisfied else items[0]
-            except TypeError:
-                return None
+        if not items:
+            continue
+        try:
+            # A list may hold per_criterion items (which expose ``satisfied``),
+            # plain issues (code review / QA / security — no ``satisfied``), or a
+            # mix. Prefer the first *failing* criterion; otherwise the first plain
+            # issue (so a real finding listed alongside passing criteria isn't
+            # dropped); otherwise None — never label a passing criterion as the
+            # rejection.
+            failing_criteria = []
+            plain_issues = []
+            for item in items:
+                if hasattr(item, "satisfied"):
+                    if item.satisfied is False:
+                        failing_criteria.append(item)
+                else:
+                    plain_issues.append(item)
+            if failing_criteria:
+                return failing_criteria[0]
+            if plain_issues:
+                return plain_issues[0]
+            return None
+        except TypeError:
+            return None
     return None
 
 

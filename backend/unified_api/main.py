@@ -973,10 +973,15 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
     if not base:
         raise HTTPException(status_code=503, detail="software engineering service URL not configured")
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        # Operability knob; defensively parsed so a bad value falls back to 15s.
+        timeout = float(os.environ.get("SE_METRICS_ALIAS_TIMEOUT", "") or 15.0)
+    except ValueError:
+        timeout = 15.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})
             resp.raise_for_status()
-            return resp.json()
+            data = resp.json()
     except httpx.HTTPStatusError as exc:
         # Forward the upstream failure as a gateway error rather than a 500 with a
         # leaked traceback.
@@ -985,9 +990,13 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
             detail=f"software engineering service returned {exc.response.status_code}",
         ) from exc
     except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=503, detail="software engineering service unreachable"
-        ) from exc
+        raise HTTPException(status_code=503, detail="software engineering service unreachable") from exc
+    except ValueError as exc:
+        # A 200 with a non-JSON body (e.g. an HTML error page) makes ``resp.json()``
+        # raise ``json.JSONDecodeError`` (a ``ValueError`` subclass); surface a 502
+        # rather than an unhandled 500 with a leaked traceback.
+        raise HTTPException(status_code=502, detail="invalid JSON from software engineering service") from exc
+    return data
 
 
 @app.delete("/api/jobs/{team}/{job_id}", tags=["jobs"])

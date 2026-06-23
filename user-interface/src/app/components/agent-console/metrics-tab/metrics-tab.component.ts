@@ -96,7 +96,13 @@ export class MetricsTabComponent implements OnInit, OnDestroy {
         this.loading.set(false);
       },
       error: (err) => {
-        this.error.set(err?.error?.detail ?? err?.message ?? 'Failed to load metrics.');
+        // ``err.error`` may be a parsed body ({ detail }) or a raw string; fall
+        // back to the transport message, then a generic label.
+        const detail =
+          typeof err?.error === 'string'
+            ? err.error
+            : (err?.error?.detail ?? err?.message ?? 'Failed to load metrics.');
+        this.error.set(detail);
         this.loading.set(false);
       },
     });
@@ -121,5 +127,12 @@ export class MetricsTabComponent implements OnInit, OnDestroy {
   formatUsd(amount: number | null | undefined): string {
     if (amount === null || amount === undefined) return '$0.0000';
     return `$${amount.toFixed(4)}`;
+  }
+
+  /** Render an ISO-8601 timestamp as a localized date/time; the raw value if unparseable. */
+  formatTimestamp(iso: string | null | undefined): string {
+    if (!iso) return '—';
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
   }
 }

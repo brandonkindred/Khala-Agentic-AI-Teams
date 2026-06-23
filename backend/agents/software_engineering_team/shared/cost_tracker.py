@@ -120,15 +120,23 @@ _registered = False
 _register_lock = threading.Lock()
 
 
+# The SE team family whose LLM cost this observer accumulates. An exact-match
+# set (not a ``startswith`` prefix) so an unrelated team that merely shares the
+# prefix — e.g. a hypothetical "software_engineering_tools" — is never captured.
+# Both ids occur in practice: attribution sets ``software_engineering`` while the
+# job store's ``JobServiceClient`` is constructed with ``software_engineering_team``.
+_SE_TEAMS = frozenset({"software_engineering", "software_engineering_team"})
+
+
 def _cost_observer(record: object) -> None:
     """Accumulate cost for SE-attributed LLM call records.
 
-    Only records with a ``job_id`` whose ``team`` is the Software Engineering
-    team contribute, so this stays a no-op for other teams sharing the process.
+    Only records with a ``job_id`` whose ``team`` is in :data:`_SE_TEAMS`
+    contribute, so this stays a no-op for other teams sharing the process.
     """
     job_id = getattr(record, "job_id", None)
     team = getattr(record, "team", "") or ""
-    if not job_id or not team.startswith("software_engineering"):
+    if not job_id or team not in _SE_TEAMS:
         return
     cost = getattr(record, "cost_usd", 0.0) or 0.0
     if cost <= 0:
