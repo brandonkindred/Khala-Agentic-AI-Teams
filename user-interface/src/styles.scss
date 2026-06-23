@@ -31,9 +31,15 @@
   border: 0;
 }
 
-// Global focus indicator — visible amber ring on all interactive elements
+// Global focus indicator — visible amber ring on all interactive elements.
+// The outline is the single, clean indicator (with a 2px offset gap). We
+// deliberately do NOT add a global box-shadow ring here: it would paint a
+// second concentric ring on every element that doesn't override focus, and it
+// gets clipped inside `overflow: hidden` ancestors. Components that drop the
+// outline must supply their own `box-shadow` accent ring instead — that
+// invariant is enforced by src/styles/scss-contrast-guard.spec.ts.
 :focus-visible {
-  outline: 2px solid var(--kh-accent);
+  outline: 2px solid var(--kh-focus-ring);
   outline-offset: 2px;
 }
 

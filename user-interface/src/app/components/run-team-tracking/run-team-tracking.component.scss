@@ -2,7 +2,7 @@
   margin-top: 16px;
 
   &.waiting-for-answers {
-    border: 2px solid var(--mat-sys-tertiary, #ff9800);
+    border: 2px solid var(--kh-warning);
   }
 }
 
@@ -54,33 +54,33 @@
 }
 
 .status-running {
-  background-color: var(--mat-sys-primary-container, rgba(33, 150, 243, 0.15));
-  color: var(--mat-sys-on-primary-container, #1976d2);
+  background-color: var(--kh-info-subtle);
+  color: var(--kh-info);
 }
 
 .status-completed {
-  background-color: var(--mat-sys-tertiary-container, rgba(76, 175, 80, 0.15));
-  color: var(--mat-sys-on-tertiary-container, #2e7d32);
+  background-color: var(--kh-success-subtle);
+  color: var(--kh-success);
 }
 
 .status-failed {
-  background-color: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
-  color: var(--mat-sys-on-error-container, #c62828);
+  background-color: var(--kh-error-subtle);
+  color: var(--kh-error);
 }
 
 .status-pending {
-  background-color: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.6));
+  background-color: var(--kh-surface-3);
+  color: var(--kh-text-tertiary);
 }
 
 .status-waiting {
-  background-color: var(--mat-sys-tertiary, #ff9800);
-  color: var(--mat-sys-on-tertiary, #fff);
+  background-color: var(--kh-warning-subtle);
+  color: var(--kh-warning);
 }
 
 .repo-path {
   margin-left: 12px;
-  color: var(--mat-sys-on-surface-variant, #757575);
+  color: var(--kh-text-tertiary);
   font-size: 0.85rem;
 }
 
@@ -91,7 +91,7 @@
   gap: 0;
   padding: 24px 16px;
   margin: 0 0 16px 0;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   border-radius: 12px;
 }
 
@@ -111,12 +111,12 @@
     left: calc(50% + 24px);
     width: calc(100% - 48px);
     height: 2px;
-    background: #e0e0e0;
+    background: var(--kh-border);
     z-index: 0;
   }
 
   &.has-connector.next-completed::after {
-    background: #4caf50;
+    background: var(--kh-success);
   }
 }
 
@@ -127,8 +127,8 @@
   width: 48px;
   height: 48px;
   border-radius: 50%;
-  border: 2px solid #e0e0e0;
-  background: white;
+  border: 2px solid var(--kh-border);
+  background: var(--kh-surface-3);
   transition: all 0.2s ease;
   z-index: 1;
 
@@ -136,62 +136,62 @@
     font-size: 24px;
     width: 24px;
     height: 24px;
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
 .phase-label {
   font-size: 12px;
   font-weight: 500;
-  color: #9e9e9e;
+  color: var(--kh-text-tertiary);
   text-align: center;
   max-width: 80px;
 }
 
 .phase-step.completed {
   .phase-node {
-    border-color: #4caf50;
-    background: #4caf50;
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: white;
+      color: var(--kh-success);
     }
   }
 
   .phase-label {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 }
 
 .phase-step.current {
   .phase-node {
-    border-color: #2196f3;
-    background: #e3f2fd;
-    box-shadow: 0 0 0 4px rgba(33, 150, 243, 0.2);
+    border-color: var(--kh-info);
+    background: var(--kh-info-subtle);
+    box-shadow: 0 0 0 4px var(--kh-info-subtle);
 
     mat-icon {
-      color: #2196f3;
+      color: var(--kh-info);
     }
   }
 
   .phase-label {
-    color: #2196f3;
+    color: var(--kh-info);
     font-weight: 600;
   }
 }
 
 .phase-step.pending {
   .phase-node {
-    border-color: #e0e0e0;
-    background: white;
+    border-color: var(--kh-border);
+    background: var(--kh-surface-3);
 
     mat-icon {
-      color: #bdbdbd;
+      color: var(--kh-text-muted);
     }
   }
 
   .phase-label {
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -202,22 +202,22 @@
   gap: 8px;
   padding: 12px 16px;
   margin-bottom: 16px;
-  background-color: var(--mat-sys-tertiary-container, rgba(255, 152, 0, 0.15));
-  color: var(--mat-sys-on-tertiary-container, #e65100);
+  background-color: var(--kh-warning-subtle);
+  color: var(--kh-warning);
   border-radius: 8px;
-  border: 1px solid var(--mat-sys-tertiary, rgba(255, 152, 0, 0.3));
+  border: 1px solid var(--kh-warning-subtle);
 
   mat-icon {
-    color: var(--mat-sys-tertiary, #ff9800);
+    color: var(--kh-warning);
     flex-shrink: 0;
   }
 }
 
 // Error message
 .error-message {
-  color: var(--mat-sys-on-error-container, #f44336);
+  color: var(--kh-error);
   padding: 12px 16px;
-  background: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
+  background: var(--kh-error-subtle);
   border-radius: 8px;
   margin-bottom: 16px;
 }
@@ -226,7 +226,7 @@
 .current-task {
   margin: 16px 0;
   padding: 12px 16px;
-  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  background: var(--kh-surface-3);
   border-radius: 8px;
   font-size: 14px;
 }
@@ -247,18 +247,18 @@
   gap: 12px;
   padding: 12px 16px;
   margin: 8px 0 16px 0;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   border-radius: 8px;
-  border-left: 3px solid var(--mat-sys-primary, #2196f3);
+  border-left: 3px solid var(--kh-info);
   font-size: 14px;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  color: var(--kh-text-secondary);
 
   mat-icon.spinning {
     animation: spin 1.5s linear infinite;
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: var(--mat-sys-primary, #2196f3);
+    color: var(--kh-info);
     flex-shrink: 0;
   }
 
@@ -278,14 +278,14 @@ mat-progress-bar {
   font-weight: 500;
   min-width: 48px;
   text-align: right;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  color: var(--kh-text-secondary);
 }
 
 // Sub-agent activity (e.g. code review sub-steps) inside the coding team card
 .current-activity-section {
   margin-top: 8px;
   padding: 8px 12px;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   border-radius: 8px;
 
   .current-activity-detail {
@@ -293,14 +293,14 @@ mat-progress-bar {
     align-items: center;
     gap: 8px;
     font-size: 13px;
-    color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+    color: var(--kh-text-secondary);
     margin-bottom: 6px;
 
     mat-icon {
       font-size: 16px;
       width: 16px;
       height: 16px;
-      color: var(--mat-sys-primary, #2196f3);
+      color: var(--kh-info);
       flex-shrink: 0;
     }
   }
@@ -315,7 +315,7 @@ mat-progress-bar {
       font-weight: 500;
       min-width: 36px;
       text-align: right;
-      color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+      color: var(--kh-text-secondary);
     }
   }
 }
@@ -325,14 +325,14 @@ mat-progress-bar {
   margin: 16px 0;
 
   .failed-icon {
-    color: var(--mat-sys-error, #c62828);
+    color: var(--kh-error);
     margin-right: 8px;
   }
 
   .failed-task-item {
     margin: 8px 0;
     padding: 12px;
-    background: var(--mat-sys-error-container, rgba(244, 67, 54, 0.15));
+    background: var(--kh-error-subtle);
     border-radius: 8px;
     font-size: 13px;
   }
@@ -343,7 +343,7 @@ mat-progress-bar {
   font-size: 14px;
   font-weight: 600;
   margin: 24px 0 16px 0;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  color: var(--kh-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -364,7 +364,7 @@ mat-progress-bar {
   align-items: center;
   gap: 8px;
   padding: 8px 16px;
-  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  background: var(--kh-surface-3);
   border-radius: 8px;
   font-size: 13px;
 }
@@ -374,11 +374,11 @@ mat-progress-bar {
 }
 
 .team-phase {
-  color: var(--mat-sys-primary, #2196f3);
+  color: var(--kh-info);
 }
 
 .team-pct {
-  color: var(--mat-sys-on-surface-variant, #616161);
+  color: var(--kh-text-tertiary);
 }
 
 // Graph section
@@ -388,17 +388,17 @@ mat-progress-bar {
 
 .swim-lane {
   margin-bottom: 16px;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--kh-border-subtle);
   border-radius: 12px;
   overflow: hidden;
 }
 
 .lane-header {
   padding: 12px 16px;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   font-weight: 600;
   font-size: 13px;
-  border-bottom: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
+  border-bottom: 1px solid var(--kh-border-subtle);
 }
 
 .lane-tasks {
@@ -437,34 +437,34 @@ mat-progress-bar {
   font-size: 16px;
   width: 16px;
   height: 16px;
-  color: var(--mat-sys-error, var(--mat-warn-500, #f44336));
+  color: var(--kh-error);
   flex-shrink: 0;
 }
 
 .task-pending {
-  background: var(--mat-sys-surface-container-high, #f5f5f5);
-  color: var(--mat-sys-on-surface-variant, #9e9e9e);
+  background: var(--kh-surface-3);
+  color: var(--kh-text-tertiary);
 }
 
 .task-active {
-  background: var(--mat-sys-surface-container-high, #e3f2fd);
-  color: var(--mat-sys-primary, #1976d2);
-  border-color: var(--mat-sys-primary, #2196f3);
+  background: var(--kh-info-subtle);
+  color: var(--kh-info);
+  border-color: var(--kh-info);
 }
 
 .task-current {
-  border-color: var(--mat-sys-primary, #2196f3);
-  box-shadow: 0 0 0 2px var(--mat-sys-surface-container-high, rgba(33, 150, 243, 0.3));
+  border-color: var(--kh-info);
+  box-shadow: 0 0 0 2px var(--kh-info-subtle);
 }
 
 .task-done {
-  background: var(--mat-sys-surface-container, #e8f5e9);
-  color: var(--mat-sys-tertiary, #2e7d32);
+  background: var(--kh-success-subtle);
+  color: var(--kh-success);
 }
 
 .task-failed {
-  background: var(--mat-sys-surface-container-high, #ffebee);
-  color: var(--mat-sys-error, #c62828);
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
 }
 
 // ---------------------------------------------------------------------------
@@ -474,21 +474,21 @@ mat-progress-bar {
 .subprocess-section {
   margin: 0 16px 16px 32px;
   padding: 16px;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   border-radius: 12px;
-  border-left: 4px solid var(--mat-sys-primary, #2196f3);
+  border-left: 4px solid var(--kh-info);
 }
 
 .subprocess-product-analysis {
-  border-left-color: var(--mat-sys-primary, #2196f3);
+  border-left-color: var(--kh-info);
 }
 
 .subprocess-planning {
-  border-left-color: var(--mat-sys-secondary, #9c27b0);
+  border-left-color: var(--kh-accent-text);
 }
 
 .subprocess-execution {
-  border-left-color: var(--mat-sys-tertiary, #4caf50);
+  border-left-color: var(--kh-success);
 }
 
 // Subprocess stepper (smaller version of main stepper)
@@ -517,12 +517,12 @@ mat-progress-bar {
     left: calc(50% + 18px);
     width: calc(100% - 36px);
     height: 2px;
-    background: #e0e0e0;
+    background: var(--kh-border);
     z-index: 0;
   }
 
   &.has-connector.next-completed::after {
-    background: #4caf50;
+    background: var(--kh-success);
   }
 }
 
@@ -533,8 +533,8 @@ mat-progress-bar {
   width: 36px;
   height: 36px;
   border-radius: 50%;
-  border: 2px solid #e0e0e0;
-  background: white;
+  border: 2px solid var(--kh-border);
+  background: var(--kh-surface-3);
   transition: all 0.2s ease;
   z-index: 1;
 
@@ -542,7 +542,7 @@ mat-progress-bar {
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -560,55 +560,55 @@ mat-progress-bar {
 .subprocess-label {
   font-size: 11px;
   font-weight: 500;
-  color: #9e9e9e;
+  color: var(--kh-text-tertiary);
   text-align: center;
   max-width: 72px;
 }
 
 .subprocess-step.completed {
   .subprocess-node {
-    border-color: #4caf50;
-    background: #4caf50;
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: white;
+      color: var(--kh-success);
     }
   }
 
   .subprocess-label {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 }
 
 .subprocess-step.current {
   .subprocess-node {
-    border-color: #2196f3;
-    background: #e3f2fd;
-    box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.2);
+    border-color: var(--kh-info);
+    background: var(--kh-info-subtle);
+    box-shadow: 0 0 0 3px var(--kh-info-subtle);
 
     mat-icon {
-      color: #2196f3;
+      color: var(--kh-info);
     }
   }
 
   .subprocess-label {
-    color: #2196f3;
+    color: var(--kh-info);
     font-weight: 600;
   }
 }
 
 .subprocess-step.pending {
   .subprocess-node {
-    border-color: #e0e0e0;
-    background: white;
+    border-color: var(--kh-border);
+    background: var(--kh-surface-3);
 
     mat-icon {
-      color: #bdbdbd;
+      color: var(--kh-text-muted);
     }
   }
 
   .subprocess-label {
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -640,9 +640,9 @@ mat-progress-bar {
 
 .team-subprocess-card {
   padding: 16px;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.05));
+  background: var(--kh-surface-2);
   border-radius: 12px;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
+  border: 1px solid var(--kh-border-subtle);
 }
 
 .team-subprocess-header {
@@ -655,14 +655,14 @@ mat-progress-bar {
 .team-subprocess-name {
   font-weight: 600;
   font-size: 14px;
-  color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
+  color: var(--kh-text-primary);
 }
 
 .team-subprocess-pct {
   font-size: 12px;
   font-weight: 500;
-  color: var(--mat-sys-on-primary-container, #2196f3);
-  background: var(--mat-sys-primary-container, rgba(33, 150, 243, 0.15));
+  color: var(--kh-info);
+  background: var(--kh-info-subtle);
   padding: 4px 12px;
   border-radius: 16px;
 }
@@ -673,16 +673,16 @@ mat-progress-bar {
   gap: 8px;
   padding: 8px 12px;
   margin-bottom: 12px;
-  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
+  background: var(--kh-surface-3);
   border-radius: 8px;
   font-size: 12px;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  color: var(--kh-text-secondary);
 
   mat-icon {
     font-size: 16px;
     width: 16px;
     height: 16px;
-    color: var(--mat-sys-primary, #2196f3);
+    color: var(--kh-info);
     flex-shrink: 0;
   }
 
@@ -696,7 +696,7 @@ mat-progress-bar {
 .microtask-count {
   flex-shrink: 0;
   font-weight: 500;
-  color: var(--mat-sys-primary, #1976d2);
+  color: var(--kh-info);
 }
 
 // Current task display
@@ -706,27 +706,27 @@ mat-progress-bar {
   gap: 8px;
   padding: 12px 16px;
   margin-bottom: 12px;
-  background: var(--mat-sys-tertiary-container, rgba(76, 175, 80, 0.15));
+  background: var(--kh-success-subtle);
   border-radius: 8px;
-  border-left: 4px solid var(--mat-sys-tertiary, #4caf50);
+  border-left: 4px solid var(--kh-success);
   font-size: 13px;
 
   mat-icon {
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: var(--mat-sys-tertiary, #4caf50);
+    color: var(--kh-success);
     flex-shrink: 0;
   }
 
   .task-title-label {
     font-weight: 600;
-    color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
+    color: var(--kh-text-primary);
     flex-shrink: 0;
   }
 
   .task-title-text {
-    color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+    color: var(--kh-text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -735,7 +735,7 @@ mat-progress-bar {
 
 .microtask-label {
   font-weight: 600;
-  color: var(--mat-sys-on-surface, rgba(255, 255, 255, 0.87));
+  color: var(--kh-text-primary);
   flex-shrink: 0;
 }
 
@@ -743,16 +743,16 @@ mat-progress-bar {
 .microtask-phase-section {
   margin: 8px 0 16px 0;
   padding: 12px 16px;
-  background: var(--mat-sys-surface-container-low, rgba(255, 255, 255, 0.03));
+  background: var(--kh-surface-1);
   border-radius: 8px;
-  border: 1px dashed var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.12));
+  border: 1px dashed var(--kh-border-subtle);
 }
 
 .microtask-phase-label {
   display: block;
   font-size: 10px;
   font-weight: 500;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.6));
+  color: var(--kh-text-tertiary);
   margin-bottom: 12px;
   text-transform: uppercase;
   letter-spacing: 0.5px;
@@ -782,12 +782,12 @@ mat-progress-bar {
     left: calc(50% + 14px);
     width: calc(100% - 28px);
     height: 2px;
-    background: #e0e0e0;
+    background: var(--kh-border);
     z-index: 0;
   }
 
   &.has-connector.next-completed::after {
-    background: #4caf50;
+    background: var(--kh-success);
   }
 }
 
@@ -798,8 +798,8 @@ mat-progress-bar {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  border: 2px solid #e0e0e0;
-  background: white;
+  border: 2px solid var(--kh-border);
+  background: var(--kh-surface-3);
   transition: all 0.2s ease;
   z-index: 1;
 
@@ -807,62 +807,62 @@ mat-progress-bar {
     font-size: 14px;
     width: 14px;
     height: 14px;
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
 .microtask-phase-name {
   font-size: 10px;
   font-weight: 500;
-  color: #9e9e9e;
+  color: var(--kh-text-tertiary);
   text-align: center;
   max-width: 70px;
 }
 
 .microtask-phase-step.completed {
   .microtask-phase-node {
-    border-color: #4caf50;
-    background: #4caf50;
+    border-color: var(--kh-success);
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: white;
+      color: var(--kh-success);
     }
   }
 
   .microtask-phase-name {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 }
 
 .microtask-phase-step.current {
   .microtask-phase-node {
-    border-color: #ff9800;
-    background: #fff3e0;
-    box-shadow: 0 0 0 3px rgba(255, 152, 0, 0.2);
+    border-color: var(--kh-warning);
+    background: var(--kh-warning-subtle);
+    box-shadow: 0 0 0 3px var(--kh-warning-subtle);
 
     mat-icon {
-      color: #ff9800;
+      color: var(--kh-warning);
     }
   }
 
   .microtask-phase-name {
-    color: #ff9800;
+    color: var(--kh-warning);
     font-weight: 600;
   }
 }
 
 .microtask-phase-step.pending {
   .microtask-phase-node {
-    border-color: #e0e0e0;
-    background: white;
+    border-color: var(--kh-border);
+    background: var(--kh-surface-3);
 
     mat-icon {
-      color: #bdbdbd;
+      color: var(--kh-text-muted);
     }
   }
 
   .microtask-phase-name {
-    color: #9e9e9e;
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -872,17 +872,17 @@ mat-progress-bar {
   gap: 8px;
   padding: 8px 12px;
   margin-top: 8px;
-  background: var(--mat-sys-surface-container, #f5f5f5);
+  background: var(--kh-surface-2);
   border-radius: 4px;
   font-size: 12px;
-  color: var(--mat-sys-on-surface-variant, #666);
+  color: var(--kh-text-tertiary);
 
   mat-icon.spinning {
     animation: spin 1.5s linear infinite;
     font-size: 16px;
     width: 16px;
     height: 16px;
-    color: var(--mat-sys-primary, #1976d2);
+    color: var(--kh-info);
   }
 }
 
@@ -900,25 +900,23 @@ mat-progress-bar {
   margin-top: 16px;
   border-radius: 12px;
   overflow: hidden;
-  background: linear-gradient(180deg, 
-    rgba(25, 25, 30, 0.98) 0%, 
-    rgba(18, 18, 22, 0.99) 100%);
-  box-shadow: 
+  background: var(--kh-surface-2);
+  box-shadow:
     0 2px 12px rgba(0, 0, 0, 0.2),
     inset 0 1px 0 rgba(255, 255, 255, 0.03);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-header {
     padding: 12px 16px;
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-    background: rgba(255, 255, 255, 0.02);
+    border-bottom: 1px solid var(--kh-border-subtle);
+    background: var(--kh-glass);
 
     mat-card-title {
       font-size: 13px;
       font-weight: 600;
       letter-spacing: 0.5px;
       text-transform: uppercase;
-      color: rgba(255, 255, 255, 0.8);
+      color: var(--kh-text-secondary);
     }
   }
 
@@ -946,7 +944,7 @@ mat-progress-bar {
   top: 0;
   bottom: 0;
   width: 1px;
-  background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.2));
+  background: var(--kh-border);
 
   &.tree-guide-empty {
     background: transparent;
@@ -968,7 +966,7 @@ mat-progress-bar {
     top: 0;
     bottom: 50%;
     width: 1px;
-    background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.2));
+    background: var(--kh-border);
   }
 
   &::after {
@@ -978,7 +976,7 @@ mat-progress-bar {
     top: 50%;
     width: 16px;
     height: 1px;
-    background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.2));
+    background: var(--kh-border);
   }
 
   &:not(.tree-branch-last)::before {
@@ -1025,63 +1023,63 @@ mat-progress-bar {
   font-weight: 500;
   padding: 2px 8px;
   border-radius: 10px;
-  background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  background: var(--kh-surface-3);
+  color: var(--kh-text-secondary);
 }
 
 // Tree node status styles
 .tree-node-completed {
   .tree-node-icon {
-    background: #4caf50;
+    background: var(--kh-success-subtle);
 
     mat-icon {
-      color: white;
+      color: var(--kh-success);
     }
   }
 
   .tree-node-label {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 
   .tree-node-detail {
-    background: rgba(76, 175, 80, 0.15);
-    color: #4caf50;
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
   }
 }
 
 .tree-node-current {
   .tree-node-icon {
-    background: #2196f3;
-    box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.2);
+    background: var(--kh-info-subtle);
+    box-shadow: 0 0 0 3px var(--kh-info-subtle);
 
     mat-icon {
-      color: white;
+      color: var(--kh-info);
     }
   }
 
   .tree-node-label {
-    color: #2196f3;
+    color: var(--kh-info);
     font-weight: 600;
   }
 
   .tree-node-detail {
-    background: rgba(33, 150, 243, 0.15);
-    color: #2196f3;
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
   }
 }
 
 .tree-node-pending {
   .tree-node-icon {
-    background: var(--mat-sys-surface-container-high, rgba(255, 255, 255, 0.08));
-    border: 1px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.2));
+    background: var(--kh-surface-3);
+    border: 1px solid var(--kh-border);
 
     mat-icon {
-      color: var(--mat-sys-on-surface-variant, #9e9e9e);
+      color: var(--kh-text-tertiary);
     }
   }
 
   .tree-node-label {
-    color: var(--mat-sys-on-surface-variant, #9e9e9e);
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -1124,13 +1122,13 @@ mat-progress-bar {
     left: calc(50% + 20px);
     width: calc(100% - 40px + 4px);
     height: 2px;
-    background: rgba(255, 255, 255, 0.25);
+    background: var(--kh-border-strong);
     border-radius: 1px;
     z-index: 0;
   }
 
   &.has-connector.next-completed::after {
-    background: #81c784;
+    background: var(--kh-success);
   }
 }
 
@@ -1323,8 +1321,8 @@ mat-progress-bar {
   width: 40px;
   height: 40px;
   border-radius: 50%;
-  border: 2px solid var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.3));
-  background: var(--mat-sys-surface-container, rgba(40, 40, 40, 0.9));
+  border: 2px solid var(--kh-border);
+  background: var(--kh-surface-3);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1337,7 +1335,7 @@ mat-progress-bar {
     font-size: 20px;
     width: 20px;
     height: 20px;
-    color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+    color: var(--kh-text-secondary);
   }
 
   &:hover {
@@ -1401,44 +1399,44 @@ mat-progress-bar {
 
 // DAG Node Status Styles - Clean and professional
 .dag-node-completed {
-  background: linear-gradient(135deg, #4caf50 0%, #388e3c 100%);
-  border-color: #388e3c;
-  box-shadow: 0 2px 6px rgba(76, 175, 80, 0.35);
+  background: var(--kh-success-subtle);
+  border-color: var(--kh-success);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.35);
 
   mat-icon {
-    color: white;
+    color: var(--kh-success);
   }
 
   &:hover {
-    box-shadow: 0 3px 10px rgba(76, 175, 80, 0.5);
+    box-shadow: 0 3px 10px rgba(0, 0, 0, 0.5);
   }
 }
 
 .dag-node-current {
-  background: linear-gradient(135deg, #42a5f5 0%, #1e88e5 100%);
-  border-color: #1976d2;
-  box-shadow: 0 0 0 3px rgba(33, 150, 243, 0.3);
+  background: var(--kh-info-subtle);
+  border-color: var(--kh-info);
+  box-shadow: 0 0 0 3px var(--kh-info-subtle);
 
   mat-icon {
-    color: white;
+    color: var(--kh-info);
   }
 
   &:hover {
-    box-shadow: 0 0 0 4px rgba(33, 150, 243, 0.4);
+    box-shadow: 0 0 0 4px var(--kh-info-subtle);
   }
 }
 
 .dag-node-pending {
-  background: rgba(60, 60, 60, 0.6);
-  border-color: rgba(255, 255, 255, 0.15);
+  background: var(--kh-surface-3);
+  border-color: var(--kh-border);
 
   mat-icon {
-    color: rgba(255, 255, 255, 0.4);
+    color: var(--kh-text-muted);
   }
 
   &:hover {
-    background: rgba(70, 70, 70, 0.7);
-    border-color: rgba(255, 255, 255, 0.25);
+    background: var(--kh-surface-4);
+    border-color: var(--kh-border-strong);
   }
 }
 
@@ -1492,13 +1490,13 @@ mat-progress-bar {
 
 // Current labels are emphasized
 .dag-node-wrapper-current .dag-node-label {
-  color: #64b5f6;
+  color: var(--kh-info);
   font-weight: 600;
 }
 
 // Completed labels
 .dag-node-wrapper-completed .dag-node-label {
-  color: #81c784;
+  color: var(--kh-success);
 }
 
 .dag-node-detail {
@@ -1506,9 +1504,8 @@ mat-progress-bar {
   font-weight: 600;
   padding: 2px 6px;
   border-radius: 8px;
-  background: rgba(33, 150, 243, 0.25);
-  color: #64b5f6;
-  margin-top: 2px;
+  background: var(--kh-info-subtle);
+  color: var(--kh-info);
   margin-top: 4px;
   transition: background 0.2s ease;
 }
@@ -1523,8 +1520,8 @@ mat-progress-bar {
     bottom: calc(100% + 8px);
     left: 50%;
     transform: translateX(-50%);
-    background: rgba(30, 30, 30, 0.95);
-    color: white;
+    background: var(--kh-surface-4);
+    color: var(--kh-text-primary);
     padding: 6px 12px;
     border-radius: 6px;
     font-size: 12px;
@@ -1565,7 +1562,7 @@ mat-progress-bar {
 }
 
 .dag-edge {
-  stroke: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.25));
+  stroke: var(--kh-border);
   stroke-width: 2;
   stroke-linecap: round;
 }
@@ -1658,7 +1655,7 @@ mat-progress-bar {
 .dag-subgroup-header {
   font-size: 11px;
   font-weight: 600;
-  color: var(--mat-sys-on-surface-variant, rgba(255, 255, 255, 0.7));
+  color: var(--kh-text-secondary);
   text-transform: uppercase;
   letter-spacing: 0.8px;
   padding: 4px 12px;
@@ -1693,22 +1690,22 @@ mat-progress-bar {
 .dag-connector-stem {
   width: 2px;
   height: 14px;
-  background: linear-gradient(180deg, 
-    rgba(76, 175, 80, 0.6) 0%, 
-    var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.35)) 100%);
+  background: linear-gradient(180deg,
+    var(--kh-success) 0%,
+    var(--kh-border) 100%);
   border-radius: 1px;
 }
 
 .dag-connector-stem-short {
   width: 2px;
   height: 14px;
-  background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.35));
+  background: var(--kh-border);
   border-radius: 1px;
 }
 
 .dag-connector-horizontal {
   height: 2px;
-  background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.35));
+  background: var(--kh-border);
   width: calc(100% - 80px);
   max-width: 420px;
   border-radius: 1px;
@@ -1724,7 +1721,7 @@ mat-progress-bar {
 .dag-connector-branch {
   width: 2px;
   height: 10px;
-  background: var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.35));
+  background: var(--kh-border);
   border-radius: 1px;
 }
 
@@ -1763,8 +1760,8 @@ mat-progress-bar {
     width: 20px;
     height: 2px;
     background: linear-gradient(90deg,
-      var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.4)) 0%,
-      var(--mat-sys-outline-variant, rgba(255, 255, 255, 0.25)) 100%);
+      var(--kh-border-strong) 0%,
+      var(--kh-border) 100%);
     border-radius: 1px;
   }
 }
@@ -1791,8 +1788,8 @@ mat-progress-bar {
 .dag-subgroup-detail {
   font-size: 10px;
   font-weight: 500;
-  color: #64b5f6;
-  background: rgba(33, 150, 243, 0.15);
+  color: var(--kh-info);
+  background: var(--kh-info-subtle);
   padding: 2px 8px;
   border-radius: 10px;
   margin-left: 4px;
@@ -1822,10 +1819,10 @@ mat-progress-bar {
     height: 16px;
   }
 
-  .completed { color: #2e7d32; }
-  .in-progress { color: #1976d2; }
-  .pending { color: #9e9e9e; }
-  .failed { color: #c62828; }
+  .completed { color: var(--kh-success); }
+  .in-progress { color: var(--kh-info); }
+  .pending { color: var(--kh-text-tertiary); }
+  .failed { color: var(--kh-error); }
 }
 
 .work-tree-list {
@@ -1844,7 +1841,7 @@ mat-progress-bar {
   gap: 8px;
   border-radius: 8px;
   padding: 6px 10px;
-  background: var(--mat-sys-surface-container, rgba(255, 255, 255, 0.04));
+  background: var(--kh-surface-2);
   border: 1px solid transparent;
 }
 
@@ -1866,25 +1863,25 @@ mat-progress-bar {
 }
 
 .work-status-completed {
-  border-color: rgba(76, 175, 80, 0.35);
-  .work-tree-status-icon { color: #2e7d32; }
+  border-color: var(--kh-success-subtle);
+  .work-tree-status-icon { color: var(--kh-success); }
 }
 
 .work-status-in_progress {
-  border-color: rgba(33, 150, 243, 0.35);
+  border-color: var(--kh-info-subtle);
   .work-tree-status-icon {
-    color: #1976d2;
+    color: var(--kh-info);
     animation: spin 1.5s linear infinite;
   }
 }
 
 .work-status-pending {
-  border-color: rgba(158, 158, 158, 0.25);
-  .work-tree-status-icon { color: #9e9e9e; }
+  border-color: var(--kh-border-subtle);
+  .work-tree-status-icon { color: var(--kh-text-tertiary); }
 }
 
 .work-status-failed {
-  border-color: rgba(244, 67, 54, 0.35);
-  background: rgba(244, 67, 54, 0.08);
-  .work-tree-status-icon { color: #c62828; }
+  border-color: var(--kh-error-subtle);
+  background: var(--kh-error-subtle);
+  .work-tree-status-icon { color: var(--kh-error); }
 }

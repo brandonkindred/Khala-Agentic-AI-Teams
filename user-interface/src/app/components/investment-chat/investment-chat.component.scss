@@ -13,8 +13,8 @@
   flex-wrap: wrap;
   gap: 8px;
   padding: 8px 16px;
-  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
   border-radius: 8px;
   margin-bottom: 8px;
 
@@ -27,18 +27,18 @@
       font-size: 18px;
       width: 18px;
       height: 18px;
-      color: var(--mat-sys-primary, #1976d2);
+      color: var(--kh-accent-text);
     }
 
     .session-label {
       font-size: 0.8125rem;
       font-weight: 500;
-      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+      color: var(--kh-text-secondary);
     }
 
     .session-topic {
       font-size: 0.8125rem;
-      color: var(--mat-sys-primary, #1976d2);
+      color: var(--kh-accent-text);
       font-weight: 600;
     }
   }
@@ -51,15 +51,15 @@
 
     .missing-label {
       font-size: 0.75rem;
-      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.54));
+      color: var(--kh-text-tertiary);
     }
 
     .missing-chip {
       font-size: 0.7rem;
       padding: 2px 8px;
       border-radius: 12px;
-      background: var(--mat-sys-surface-variant, rgba(0, 0, 0, 0.06));
-      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+      background: var(--kh-surface-3);
+      color: var(--kh-text-secondary);
     }
   }
 }
@@ -68,7 +68,7 @@
   flex: 1;
   overflow-y: auto;
   padding: 1rem;
-  background: var(--mat-sys-surface, #0d1117);
+  background: var(--kh-surface-1);
   border-radius: 8px;
   margin-bottom: 12px;
   display: flex;
@@ -103,8 +103,8 @@
     flex-direction: row-reverse;
 
     .message-bubble {
-      background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-      color: #fff;
+      background: var(--kh-accent-gradient);
+      color: var(--kh-text-on-accent);
       border-bottom-right-radius: 4px;
     }
 
@@ -118,9 +118,9 @@
     align-self: flex-start;
 
     .message-bubble {
-      background: #21262d;
-      color: #f0f6fc;
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: var(--kh-surface-3);
+      color: var(--kh-text-primary);
+      border: 1px solid var(--kh-border-subtle);
       border-bottom-left-radius: 4px;
     }
   }
@@ -130,7 +130,7 @@
     width: 32px;
     height: 32px;
     font-size: 32px;
-    color: #58a6ff;
+    color: var(--kh-info);
     margin-top: 4px;
   }
 }
@@ -148,7 +148,7 @@
 
 .message-time {
   font-size: 0.75rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   margin-top: 6px;
 }
 
@@ -160,7 +160,7 @@
   span {
     width: 8px;
     height: 8px;
-    background: #8b949e;
+    background: var(--kh-text-tertiary);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
 
@@ -180,20 +180,20 @@
   align-items: center;
   gap: 12px;
   padding: 12px 16px;
-  background: #e8f5e9;
-  border: 1px solid #a5d6a7;
+  background: var(--kh-success-subtle);
+  border: 1px solid var(--kh-success);
   border-radius: 8px;
   margin-bottom: 12px;
 
   mat-icon {
-    color: #2e7d32;
+    color: var(--kh-success);
     flex-shrink: 0;
   }
 
   span {
     flex: 1;
     font-size: 0.875rem;
-    color: #1b5e20;
+    color: var(--kh-success);
   }
 
   button {
@@ -223,13 +223,13 @@
 
   button {
     font-size: 0.8125rem;
-    border-color: rgba(255, 255, 255, 0.15);
-    color: #c9d1d9;
+    border-color: var(--kh-border);
+    color: var(--kh-text-secondary);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: #58a6ff;
-      color: #58a6ff;
+      background: var(--kh-glass);
+      border-color: var(--kh-accent);
+      color: var(--kh-accent);
     }
   }
 }

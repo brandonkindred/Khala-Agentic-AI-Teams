@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #7b1fa2;
+  color: var(--kh-accent-text);
 }
 
 .compliance-section {
@@ -38,7 +38,7 @@
 
   .score-label {
     font-size: 14px;
-    color: rgba(0, 0, 0, 0.54);
+    color: var(--kh-text-tertiary);
     margin-top: 4px;
   }
 }
@@ -52,7 +52,7 @@
 
   p {
     margin: 0;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-secondary);
     font-size: 16px;
   }
 }
@@ -70,7 +70,7 @@ mat-divider {
     margin: 0 0 16px 0;
     font-size: 16px;
     font-weight: 600;
-    color: rgba(0, 0, 0, 0.87);
+    color: var(--kh-text-primary);
   }
 }
 
@@ -99,16 +99,16 @@ mat-divider {
       height: 18px;
 
       &.critical {
-        color: #c62828;
+        color: var(--kh-error);
       }
       &.high {
-        color: #e65100;
+        color: var(--kh-warning);
       }
       &.medium {
-        color: #f57f17;
+        color: var(--kh-warning);
       }
       &.low {
-        color: #1565c0;
+        color: var(--kh-info);
       }
     }
   }
@@ -116,7 +116,7 @@ mat-divider {
   .bar-track {
     flex: 1;
     height: 12px;
-    background: #e0e0e0;
+    background: var(--kh-surface-3);
     border-radius: 6px;
     overflow: hidden;
   }
@@ -127,16 +127,16 @@ mat-divider {
     transition: width 0.5s ease;
 
     &.critical {
-      background: linear-gradient(90deg, #ef5350, #c62828);
+      background: var(--kh-error);
     }
     &.high {
-      background: linear-gradient(90deg, #ff9800, #e65100);
+      background: var(--kh-warning);
     }
     &.medium {
-      background: linear-gradient(90deg, #ffca28, #f57f17);
+      background: var(--kh-warning);
     }
     &.low {
-      background: linear-gradient(90deg, #42a5f5, #1565c0);
+      background: var(--kh-info);
     }
   }
 
@@ -150,10 +150,10 @@ mat-divider {
 
 .executive-summary {
   line-height: 1.7;
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--kh-text-primary);
   font-size: 15px;
   padding: 16px;
-  background: #f5f5f5;
+  background: var(--kh-surface-3);
   border-radius: 8px;
   margin: 0;
 }
@@ -165,13 +165,13 @@ mat-divider {
 
   mat-list-item {
     mat-icon {
-      color: #e65100;
+      color: var(--kh-warning);
     }
   }
 }
 
 .patterns-description {
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-secondary);
   font-size: 14px;
   margin-bottom: 16px;
 }
@@ -184,9 +184,9 @@ mat-divider {
 
 .pattern-card {
   padding: 16px;
-  background: #fafafa;
+  background: var(--kh-surface-2);
   border-radius: 8px;
-  border-left: 4px solid #7b1fa2;
+  border-left: 4px solid var(--kh-accent-text);
 
   .pattern-header {
     display: flex;
@@ -198,13 +198,13 @@ mat-divider {
     margin: 0 0 8px 0;
     font-size: 15px;
     font-weight: 600;
-    color: rgba(0, 0, 0, 0.87);
+    color: var(--kh-text-primary);
   }
 
   .pattern-description {
     margin: 0 0 12px 0;
     font-size: 13px;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-secondary);
     line-height: 1.5;
   }
 
@@ -220,7 +220,7 @@ mat-divider {
     align-items: center;
     gap: 4px;
     font-size: 12px;
-    color: rgba(0, 0, 0, 0.54);
+    color: var(--kh-text-tertiary);
 
     mat-icon {
       font-size: 16px;
@@ -239,8 +239,8 @@ mat-divider {
     font-size: 10px;
     min-height: 20px;
     padding: 2px 8px;
-    background-color: #e8f5e9 !important;
-    color: #2e7d32 !important;
+    background-color: var(--kh-success-subtle) !important;
+    color: var(--kh-success) !important;
   }
 }
 
@@ -249,44 +249,44 @@ mat-divider {
   font-weight: 600;
 
   &.critical {
-    background-color: #ffcdd2 !important;
-    color: #c62828 !important;
+    background-color: var(--kh-error-subtle) !important;
+    color: var(--kh-error) !important;
   }
 
   &.high {
-    background-color: #ffe0b2 !important;
-    color: #e65100 !important;
+    background-color: var(--kh-warning-subtle) !important;
+    color: var(--kh-warning) !important;
   }
 
   &.medium {
-    background-color: #fff9c4 !important;
-    color: #f57f17 !important;
+    background-color: var(--kh-warning-subtle) !important;
+    color: var(--kh-warning) !important;
   }
 
   &.low {
-    background-color: #e3f2fd !important;
-    color: #1565c0 !important;
+    background-color: var(--kh-info-subtle) !important;
+    color: var(--kh-info) !important;
   }
 }
 
 .priority-p0 {
-  background-color: #ffcdd2 !important;
-  color: #c62828 !important;
+  background-color: var(--kh-error-subtle) !important;
+  color: var(--kh-error) !important;
 }
 
 .priority-p1 {
-  background-color: #ffe0b2 !important;
-  color: #e65100 !important;
+  background-color: var(--kh-warning-subtle) !important;
+  color: var(--kh-warning) !important;
 }
 
 .priority-p2 {
-  background-color: #fff9c4 !important;
-  color: #f57f17 !important;
+  background-color: var(--kh-warning-subtle) !important;
+  color: var(--kh-warning) !important;
 }
 
 .priority-p3 {
-  background-color: #e0e0e0 !important;
-  color: rgba(0, 0, 0, 0.6) !important;
+  background-color: var(--kh-surface-3) !important;
+  color: var(--kh-text-secondary) !important;
 }
 
 .loading-state {
@@ -296,7 +296,7 @@ mat-divider {
   justify-content: center;
   gap: 16px;
   padding: 48px;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
 }
 
 .error-message {
@@ -304,8 +304,8 @@ mat-divider {
   align-items: center;
   gap: 8px;
   padding: 16px;
-  background: #ffebee;
-  color: #c62828;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   border-radius: 8px;
 }
 
