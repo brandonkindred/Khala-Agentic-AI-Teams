@@ -26,12 +26,15 @@ from ..coverage_probe import format_coverage_report
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import StrategySpecParseError, extract_json_object, validate_structured_rules
-from ._response_schemas import ZERO_TRADE_REPAIR_SCHEMA
 from .model_factory import get_strands_model
 
 logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
+
+# Loaded once at import — the system prompt is static, so re-reading it from disk
+# on every zero-trade repair is wasted I/O.
+_SYSTEM_PROMPT = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
 
 # Spec keys the orchestrator will honour from a ZeroTradeRepairReport's
 # ``proposed_spec_updates``. Anything else is silently dropped — the
@@ -166,7 +169,7 @@ class ZeroTradeRepairAgent:
                 ),
             )
 
-        system_prompt = (_PROMPT_DIR / "zero_trade_repair_system.md").read_text(encoding="utf-8")
+        system_prompt = _SYSTEM_PROMPT
 
         prior_text = (
             "None yet."
@@ -195,7 +198,7 @@ class ZeroTradeRepairAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_ideation", response_schema=ZERO_TRADE_REPAIR_SCHEMA),
+            model=get_strands_model("strategy_ideation"),
             system_prompt=system_prompt,
             tools=[],
         )
