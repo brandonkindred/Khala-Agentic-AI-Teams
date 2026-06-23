@@ -12,6 +12,15 @@ Endpoints:
   booleans (keys are never returned), and the curated option lists for the UI.
 - ``PUT  /api/llm-config`` -> validate and persist; empty fields leave the
   existing stored value untouched. Requires Postgres.
+
+Security: these endpoints have no app-level authentication dependency, and the
+``SecurityGatewayMiddleware`` (which only content-scans the team route prefixes)
+does NOT cover ``/api/llm-config``. They are intended as **operator-only**
+configuration endpoints, expected to be reachable only behind the deployment's
+external/network access controls (the same trust boundary as the rest of the
+admin surface). API key *values* are never returned by GET (only ``*_configured``
+booleans), so a read cannot exfiltrate stored secrets. If this app is ever exposed
+to untrusted clients, gate these routes with a real auth dependency.
 """
 
 from __future__ import annotations
