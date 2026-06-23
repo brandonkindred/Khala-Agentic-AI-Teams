@@ -30,7 +30,7 @@ from ..attribution import (
 from ..attribution import (
     caller_team as _caller_team,
 )
-from ..backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
+from ..backoff import parse_rate_limit_retry_config, rate_limit_backoff_sleep
 from ..interface import (
     LLMClient,
     LLMJsonParseError,
@@ -102,7 +102,9 @@ def _attribution_log_fields() -> str:
         rendered as ``-`` so the key is always present for log-grep predicates.
     """
     attr = current_attribution()
-    return f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
+    return (
+        f"agent={attr.agent_key or '-'} team={attr.team or '-'} objective={attr.objective or '-'}"
+    )
 
 
 # Default cap for max_tokens
@@ -308,23 +310,24 @@ def _rate_limit_backoff_sleep(
 ) -> None:
     """Sleep the slow 429 backoff for the given attempt index, logging one warning.
 
+    Thin wrapper over the shared :func:`llm_service.backoff.rate_limit_backoff_sleep`
+    so the Claude and Ollama clients share one 429 wait/log/sleep implementation;
+    this only supplies the Ollama request-id and attribution context for the log.
+
     Preconditions: ``0 <= rate_limit_attempt < rate_limit_max_retries``; the caller
         has already exited the concurrency semaphore and HTTP stream contexts —
         this sleep can be minutes long and must not hold a shared resource.
     Postconditions: sleeps ``rate_limit_retry_delay(...)`` seconds; never raises.
     """
-    wait = rate_limit_retry_delay(
-        rate_limit_attempt, rate_limit_initial, rate_limit_cap, retry_after_seconds
+    rate_limit_backoff_sleep(
+        rate_limit_attempt,
+        rate_limit_max_retries,
+        rate_limit_initial,
+        rate_limit_cap,
+        retry_after_seconds,
+        request_id=current_request_id() or "-",
+        context=_attribution_log_fields(),
     )
-    logger.warning(
-        "LLM 429 (rid=%s, %s, rate-limit attempt %d/%d). Retrying in %.1fs",
-        current_request_id() or "-",
-        _attribution_log_fields(),
-        rate_limit_attempt + 1,
-        rate_limit_max_retries + 1,
-        wait,
-    )
-    time.sleep(wait)
 
 
 _ollama_semaphore: Optional[threading.BoundedSemaphore] = None
@@ -423,11 +426,14 @@ class OllamaLLMClient(LLMClient):
             logger.debug("Failed to record LLM telemetry", exc_info=True)
 
     def _ollama_auth_headers(self) -> dict[str, str]:
-        """Return Authorization Bearer header for Ollama Cloud. Uses OLLAMA_API_KEY (or LLM_* overrides)."""
-        key = (
-            (os.environ.get("OLLAMA_API_KEY") or "")
-            or (os.environ.get(llm_config.ENV_LLM_OLLAMA_API_KEY) or "")
-        ).strip()
+        """Return Authorization Bearer header for Ollama Cloud.
+
+        Resolves the key via :func:`llm_config.resolve_ollama_api_key` so a key set
+        through the settings UI (runtime config) takes effect, falling back to the
+        ``OLLAMA_API_KEY`` / ``LLM_OLLAMA_API_KEY`` env vars. Empty -> no header
+        (local Ollama needs none).
+        """
+        key = llm_config.resolve_ollama_api_key()
         if not key:
             return {}
         return {"Authorization": f"Bearer {key}"}
@@ -502,6 +508,43 @@ class OllamaLLMClient(LLMClient):
                 _fallback_num_ctx_ttl_s(),
             )
         return self._record_fallback_num_ctx()
+
+    def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
+        """Resolve the output-token cap for a request.
+
+        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_TOKENS`` (via the
+        centralized ``llm_config.resolve_max_tokens``), else the model's context
+        window — always capped at ``DEFAULT_MAX_OUTPUT_TOKENS``.
+
+        Preconditions: none.
+        Postconditions: returns an ``int`` ``<= DEFAULT_MAX_OUTPUT_TOKENS``; a
+            malformed or non-positive ``LLM_MAX_TOKENS`` falls back to the model
+            context. Never raises.
+        """
+        max_tokens = explicit
+        if max_tokens is None:
+            # Centralized resolver returns 0 when LLM_MAX_TOKENS is unset, malformed,
+            # or non-positive — in which case fall back to the model's context window.
+            env_max = llm_config.resolve_max_tokens()
+            if env_max > 0:
+                max_tokens = min(env_max, DEFAULT_MAX_OUTPUT_TOKENS)
+            else:
+                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+        return min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+
+    def _begin_call_state(self) -> "tuple[str, Any]":
+        """Tag the caller and reset per-call response contextvars.
+
+        Preconditions: none.
+        Postconditions: returns ``(caller, attribution)`` and clears the usage /
+            latency contextvars up front so a failed call never reports a previous
+            call's token counts or latency. Never raises.
+        """
+        caller = _caller_tag()
+        _caller_var.set(caller)
+        _usage_var.set(None)
+        _latency_var.set(0)
+        return caller, current_attribution()
 
     def _record_fallback_num_ctx(self) -> int:
         """Record the provisional num_ctx fallback with the current time and return it.
@@ -1471,13 +1514,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request: rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
             current_request_id() or "-",
@@ -1493,17 +1530,7 @@ class OllamaLLMClient(LLMClient):
             "no explanatory text, no Markdown, no code fences. "
             "If you use a code block, put only the JSON object inside it with no surrounding text."
         )
-        max_tokens = kwargs.pop("max_tokens", None)
-        if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(kwargs.pop("max_tokens", None))
         tools = kwargs.pop("tools", None)
         payload: dict = {
             "model": self.model,
@@ -1731,13 +1758,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (text): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s",
             current_request_id() or "-",
@@ -1748,16 +1769,7 @@ class OllamaLLMClient(LLMClient):
             self.model,
             think,
         )
-        env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-        if max_tokens is None:
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(max_tokens)
         payload: dict = {
             "model": self.model,
             "temperature": temperature,
@@ -1933,13 +1945,7 @@ class OllamaLLMClient(LLMClient):
         max_retries, backoff_base, backoff_max = _parse_retry_config()
         rl_max_retries, rl_initial, rl_cap = parse_rate_limit_retry_config()
         sem = _get_ollama_semaphore()
-        caller = _caller_tag()
-        # Reset per-call response state up front so a failed call never records a
-        # previous call's token counts / latency.
-        _caller_var.set(caller)
-        _usage_var.set(None)
-        _latency_var.set(0)
-        _attr = current_attribution()
+        caller, _attr = self._begin_call_state()
         logger.info(
             "LLM request (chat): rid=%s agent=%s team=%s objective=%s caller=%s provider=ollama model=%s think=%s rf=%s",
             current_request_id() or "-",
@@ -1951,16 +1957,7 @@ class OllamaLLMClient(LLMClient):
             think,
             response_format,
         )
-        if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-            else:
-                max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
-        max_tokens = min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)
+        max_tokens = self._resolve_max_tokens(max_tokens)
         payload: dict = {
             "model": self.model,
             "temperature": temperature,

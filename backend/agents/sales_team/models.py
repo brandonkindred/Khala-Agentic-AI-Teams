@@ -99,6 +99,13 @@ class SalesPipelineConfig(BaseModel):
         le=16,
         description="ThreadPoolExecutor workers for dossier building in deep research.",
     )
+    pipeline_stage_workers: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="ThreadPoolExecutor workers for the per-prospect pipeline stages "
+        "(outreach, qualification, nurture, discovery, proposal, negotiation).",
+    )
     critic_max_refinements: int = Field(
         default=1,
         ge=0,

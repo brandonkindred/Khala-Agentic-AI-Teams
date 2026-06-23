@@ -58,4 +58,23 @@ describe('BloggingDashboardComponent', () => {
   it('should fetch all jobs via getJobs(false) on init', () => {
     expect(apiSpy.getJobs).toHaveBeenCalledWith(false);
   });
+
+  it('getStoryAgentMessages reflects in-place status updates (no stale cache)', () => {
+    // The SSE 'update' handler mutates selectedJobStatus in place (Object.assign),
+    // so this must recompute — not cache on the object reference — or newly arrived
+    // agent messages would never render.
+    const status = {
+      current_gap_round: 0,
+      story_chat_history: [{ gap_round: 0, role: 'assistant', content: 'first' }],
+    } as unknown as NonNullable<typeof component.selectedJobStatus>;
+    component.selectedJobStatus = status;
+    expect(component.getStoryAgentMessages().length).toBe(1);
+
+    // Simulate Object.assign-style in-place mutation from an SSE update.
+    status.story_chat_history = [
+      { gap_round: 0, role: 'assistant', content: 'first' },
+      { gap_round: 0, role: 'assistant', content: 'second' },
+    ] as typeof status.story_chat_history;
+    expect(component.getStoryAgentMessages().length).toBe(2); // reflects the update
+  });
 });

@@ -226,6 +226,40 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
   });
 });
 
+describe('RunTeamTrackingComponent derived-value memoization', () => {
+  const createComponent = (): RunTeamTrackingComponent => {
+    const apiSpy = { getJobStatus: vi.fn() };
+    TestBed.configureTestingModule({
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }, changeDetectorRefStub],
+    });
+    return TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
+  };
+
+  const statusWithTasks = (): JobStatusResponse => ({
+    job_id: 'job-1',
+    status: 'running',
+    task_results: [],
+    failed_tasks: [],
+    task_ids: ['t1'],
+    task_states: { t1: { status: 'in_progress', assignee: 'backend', title: 'T1' } },
+  });
+
+  it('caches getTeamsWithTasks/buildDAGTree per status and rebuilds on a new status', () => {
+    const component = createComponent();
+    component.status = statusWithTasks();
+
+    const teams1 = component.getTeamsWithTasks();
+    expect(component.getTeamsWithTasks()).toBe(teams1); // same reference: rebuilt only once per status
+    const dag1 = component.buildDAGTree();
+    expect(component.buildDAGTree()).toBe(dag1);
+
+    // A poll delivers a new status object — the cache must invalidate and rebuild.
+    component.status = statusWithTasks();
+    expect(component.getTeamsWithTasks()).not.toBe(teams1);
+    expect(component.buildDAGTree()).not.toBe(dag1);
+  });
+});
+
 describe('RunTeamTrackingComponent polling stop conditions', () => {
   it('stops polling on already_complete (a coding-team terminal success)', () => {
     // A Subject (not of()) emits AFTER ngOnInit assigns pollSub, so the stop path nulls the real

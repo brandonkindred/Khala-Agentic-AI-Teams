@@ -24,7 +24,7 @@ def _isolated_factory_cache(monkeypatch):
     from llm_service.strands_provider import _clear_strands_model_cache_for_testing
 
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    factory._clear_client_cache_for_testing()
+    factory.clear_client_cache()
     _clear_strands_model_cache_for_testing()
     yield
     _clear_strands_model_cache_for_testing()
