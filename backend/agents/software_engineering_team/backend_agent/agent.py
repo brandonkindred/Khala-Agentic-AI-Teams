@@ -421,8 +421,14 @@ def _is_pytest_assertion_failure(build_errors: str) -> bool:
 # from a genuine ``None`` (no failing test). Lets the build-failure loop resolve
 # the context once per iteration and pass it to both the BuildFixSpecialist and
 # the escalation helper, while those helpers still resolve it themselves when
-# called directly (e.g. in unit tests).
-_UNSET: Any = object()
+# called directly (e.g. in unit tests). A named sentinel type (rather than a bare
+# ``object()`` typed ``Any``) lets the params below annotate as
+# ``str | None | _Unset`` — preserving real type info instead of erasing to Any.
+class _Unset:
+    """Sentinel: a parameter was not supplied (distinct from an explicit ``None``)."""
+
+
+_UNSET = _Unset()
 
 
 def _resolve_failing_test_context(
@@ -3103,8 +3109,8 @@ class BackendExpertAgent:
         current_task: Task,
         task_id: str,
         iteration: int,
-        failing_test_file: Any = _UNSET,
-        failing_test_content: Any = _UNSET,
+        failing_test_file: str | None | _Unset = _UNSET,
+        failing_test_content: str | None | _Unset = _UNSET,
     ) -> bool:
         """Attempt a minimal, targeted build fix via the BuildFixSpecialist.
 
@@ -3197,8 +3203,8 @@ class BackendExpertAgent:
         build_errors: str,
         consecutive_failures: int,
         repo_path: Path,
-        failing_test_file: Any = _UNSET,
-        failing_test_content: Any = _UNSET,
+        failing_test_file: str | None | _Unset = _UNSET,
+        failing_test_content: str | None | _Unset = _UNSET,
     ) -> None:
         """Prepend escalation guidance to *qa_issues* when a build error repeats.
 
