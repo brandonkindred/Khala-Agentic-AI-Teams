@@ -57,8 +57,9 @@ the next (the agent you just tested is the one offered for the roster; the team 
 persona target). This glue is the only genuinely new interaction concept.
 
 **Stepper navigation is forward‑only.** Clicking a previous stage indicator does *not* navigate backward — the
-indicators show progress, not links. Iteration happens only via the explicit Stage‑4 buttons **"fix an agent"**
-(→ Stage 2) and **"iterate roster"** (→ Stage 3). This keeps the journey guided while still allowing controlled
+indicators show progress, not links. Iteration happens **primarily** via the explicit Stage‑4 buttons **"fix an agent"**
+(→ Stage 2) and **"iterate roster"** (→ Stage 3), and **additionally** via the per‑agent **`Test ▸`** action on
+Stage‑3 roster entries (registry agents only — see below). This keeps the journey guided while still allowing controlled
 back‑loops.
 
 **Forward‑only must not trap the user on one agent.** Because the stepper never jumps back to Stage 1, picking a
@@ -79,6 +80,10 @@ back‑loops.
   **`Test ▸`** action that opens **that agent in Stage 2** (setting `registryAgentId` to it) — the same back‑loop
   semantics as Stage 4's "fix an agent", available directly from Stage 3. This is still not a *stepper* back‑click;
   it's an explicit per‑agent action, and Stage‑1 remains reachable only via the `Browse agents` overlay.
+  **Registry‑only:** `Test ▸` is available **only on `source: registry` entries** (they have a `registryAgentId` /
+  manifest the Stage‑2 sandbox can run). On **`generated`** entries it is **hidden** (shown disabled with a tooltip
+  *"Generated agents can't be individually sandbox‑tested — test the full team in Stage 4"*), since they have no
+  registry manifest to open in Stage 2.
 
 The stepper stays forward‑only (no Stage‑1 stepper click, no confirmation dialog needed); the catalog and the
 "test this agent" jump are simply reachable as in‑context actions from the later stages.
@@ -332,17 +337,9 @@ durable server‑side under its own `run_id`** — a resumed draft reattaches to
 than replaying chat state into the draft blob. So drafts deliberately stop at the Stage‑3 roster; Stage‑4 run context
 is owned by the run, not the draft.
 
-**Identifier naming.** `registryAgentId` (handoff state) and `manifestId` (this draft interface) are the
-**camelCase frontend** forms of the agent's registry **manifest id**; the **backend** field on `AgenticTeamAgent`
-is the snake_case **`manifest_id`** (§5 item 3). They denote the *same* identifier across the boundary — the
-frontend↔backend mapping is purely camelCase↔snake_case. (When a registry agent is added to a roster, that entry's
-`manifest_id` equals the `registryAgentId` it was added from.)
-
-The two names are kept **deliberately** rather than unified: `registryAgentId` is the **handoff slot** ("the agent
-currently in focus"), whereas a roster entry's `manifestId` is that **entry's own** source‑manifest link and is named
-to mirror its backend column `manifest_id` (§5 item 3). Collapsing them to one name would either lose the handoff‑vs‑
-roster‑entry distinction or break the deliberate frontend/backend column parity — so the spec names the *roles*
-distinctly while this note fixes them to the same id space.
+**Identifier naming.** `registryAgentId` (handoff slot) and a roster entry's `manifestId` refer to the **same**
+underlying registry manifest id (backend column `manifest_id`, §5 item 3); they are named differently to reflect
+their distinct roles — "the agent in focus" vs. "this entry's own source link" — and to mirror the backend column.
 
 This makes draft persistence a **must‑have backend touchpoint** (see §5, item 4 — Studio drafts). The frontend `AgentStudioStateService`
 is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
@@ -393,7 +390,7 @@ equivalents** (or the component is refactored to inject them directly). The cont
 |---|---|---|
 | `agent-catalog` | `AgentCatalogApiService`; plus the catalog filter/selection state it reads from the console shell today — specifically the **selected‑team filter**, **tag filter(s)**, **search query**, and **selected‑agent id**. These move into `AgentStudioStateService` (the selected‑agent id *is* the handoff `registryAgentId`). | Studio shell |
 | `agent-runner` (+ schema‑form, run‑history, diff, save‑input dialogs) | `AgentRunnerApiService` (invoke/runs/saved‑inputs/diff) | Studio shell |
-| `agent-provisioning-dashboard` | its existing provisioning service(s), unchanged | Studio shell / wrapper (§Stage 1) |
+| `agent-provisioning-dashboard` | its existing provisioning service(s), unchanged | Studio shell (provided directly, or via the thin slide‑out wrapper component described in the Stage 1 adaptation caveat) |
 | `process-designer-chat`, extracted `agentic-team-dashboard` children | `AgenticTeamApiService` | Studio shell |
 | Stage‑4 test panels & persona dialogs | `agentic-team-test` + persona/audit services | Studio shell |
 | all stages | **new** `AgentStudioStateService` (handoff/draft, §2.4/§3.5) | Studio shell |
@@ -437,7 +434,7 @@ sequenceDiagram
 
 **Must‑have:**
 1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`.
-2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams via the cross‑service call **`GET /api/agentic-team-provisioning/teams`** (the unified‑API mount path), keeping only teams with ≥1 `complete` process (filter client‑side, or pass the provisioning service's process‑status query param if/when it exposes one). Without this the persona dropdown is empty.
+2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams via the cross‑service call **`GET /api/agentic-team-provisioning/teams`** (the unified‑API mount path). **The `list_testable_teams` aggregator applies the "≥1 `complete` process" filter server‑side** (it already composes the response the dropdown consumes), so the frontend receives a ready‑to‑use list and does no filtering. (If the provisioning `teams` endpoint later grows a `process_status` query param, `list_testable_teams` should pass it to avoid over‑fetching, but the filter contract stays server‑side either way.) Without this the persona dropdown is empty.
 3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`. **Authorization:** both endpoints mutate a team's roster, so they **must** enforce the same authz as the existing team‑mutation routes — restricted to the team's **Owner/Admin** (reuse the provisioning service's existing team‑permission dependency/middleware; do not ship these unguarded).
 4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. **Authorization:** drafts are **per‑user** — every read/write is scoped to the authenticated user id, and one user can never list or load another's drafts. Required because the header `Save draft` / `Load draft` UX is non‑functional without it.
 
@@ -500,7 +497,7 @@ point at which it must be decided.
 4. Compose stage: process designer + new roster panel (registry/generated, add/delete).
 5. Persona stage: manual + persona sub‑modes, pre‑seeded launcher, live audit.
 6. Integrate Provisioning into Stage 1; relocate Product Delivery and Cognition to new routes; **delete** old routes, nav items, and shells.
-7. Verify the happy path (§ below) and the 90% coverage floor on new/changed code.
+7. Verify the happy path (§10) and the 90% coverage floor on new/changed code.
 
 ## 10. Verification (of the eventual build)
 
