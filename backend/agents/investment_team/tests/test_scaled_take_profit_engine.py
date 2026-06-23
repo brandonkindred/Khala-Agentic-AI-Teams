@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import dataclasses
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Literal, get_type_hints
 
 import pytest
 
@@ -152,6 +152,9 @@ def test_cursor_mapping_is_read_only_but_live() -> None:
     advance() (a live proxy, not a snapshot copy)."""
     cursor = _ScaledLadderCursor()
     view = cursor.mapping
+    # The ``type: ignore`` is intentional: this line asserts the RUNTIME ``TypeError``
+    # a read-only ``MappingProxyType`` raises on item assignment — it is the behavior
+    # under test, not a static type violation to be fixed.
     with pytest.raises(TypeError):
         view[0] = 99  # type: ignore[index]
     cursor.advance(0, 0)
@@ -192,13 +195,32 @@ def test_snapshot_reuse_refreshes_entry_price_after_scale_in() -> None:
 
 def test_position_state_view_matches_position_state_fields() -> None:
     """_PositionStateView is a mutable structural twin of PositionState consumed by
-    the evaluator across a duck-typed boundary. If a field is added/renamed on one
-    and not the other, the reused hot-path view silently feeds the evaluator a
-    missing/stale field with no type error. Lock the two shapes together so drift
-    fails loudly here instead."""
+    the evaluator across a duck-typed boundary. If a field is added/renamed/retyped
+    on one and not the other, the reused hot-path view silently feeds the evaluator a
+    missing/stale/wrong-typed field with no type error. Lock the two shapes together
+    so drift fails loudly here instead.
+
+    Both field NAMES (and order) and their resolved TYPES must match — so a
+    ``float``↔``str`` swap is caught, not just an add/rename — with ONE deliberate
+    exception: the view widens ``side`` from ``Literal["long", "short"]`` to plain
+    ``str``. The dispatcher has already validated the side before building the view,
+    so the read-only view need not re-narrow it; that single widening is asserted
+    explicitly rather than waved through."""
     view_fields = [f.name for f in dataclasses.fields(_PositionStateView)]
     canonical_fields = [f.name for f in dataclasses.fields(PositionState)]
-    assert view_fields == canonical_fields
+    assert view_fields == canonical_fields  # same names, same order
+    # Resolve string annotations (``from __future__ import annotations``) to real
+    # types so the comparison is robust to annotation formatting.
+    view_types = get_type_hints(_PositionStateView)
+    canonical_types = get_type_hints(PositionState)
+    # The one intentional divergence: ``side`` is widened Literal -> str in the view.
+    assert view_types["side"] is str
+    assert canonical_types["side"] == Literal["long", "short"]
+    # Every OTHER field must match by type, so a str/float swap can't slip through.
+    for name in view_fields:
+        if name == "side":
+            continue
+        assert view_types[name] == canonical_types[name], name
 
 
 # ---------------------------------------------------------------------------

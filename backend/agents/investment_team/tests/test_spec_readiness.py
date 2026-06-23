@@ -365,7 +365,12 @@ def test_rule4_partial_ladder_with_full_closing_ladder_covers_residual_is_ok() -
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert not any("close only a fraction" in c for c in _critical(results))
-    # And the corrected helper classifies the full-close ladder as covering directly.
+    # The public validate() path above short-circuits via ``ladder_closes_full_position``
+    # (the full ladder makes ``any(...)`` true) and so never reaches
+    # ``_full_exit_covers_all_entry_sides`` for a full-close ladder. The direct call
+    # below is therefore the only way to pin the corrected helper contract (a
+    # full-close ladder is classified as covering); it is an intentional white-box
+    # supplement to the public-path assertion, not a replacement for it.
     assert SpecReadinessGate._full_exit_covers_all_entry_sides(spec) is True
 
 
