@@ -116,6 +116,13 @@ def compute_from_events(
 
     ordered = sorted((e for e in events if _event_ts(e)), key=lambda e: e["ts"])
 
+    # Enforce the documented tz-aware precondition: subtracting a naive datetime
+    # from an aware one raises mid-computation, so reject naive timestamps up front
+    # with a clear message rather than a confusing TypeError deep in the loop.
+    for _e in ordered:
+        if _e["ts"].tzinfo is None:
+            raise ValueError("compute_from_events requires timezone-aware event timestamps")
+
     # All per-task state is keyed by (job_id, task_id), not task_id alone: coding-team
     # task ids are LLM-generated and job-local (e.g. "task-1"), so two jobs in the
     # same window routinely reuse an id — keying by task_id alone would collide them.

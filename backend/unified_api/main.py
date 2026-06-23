@@ -972,13 +972,13 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
     base = (os.environ.get(env_var, "").strip() if env_var else "") or ""
     if not base:
         raise HTTPException(status_code=503, detail="software engineering service URL not configured")
-    try:
-        # Operability knob; defensively parsed so a bad value falls back to 15s.
-        timeout = float(os.environ.get("SE_METRICS_ALIAS_TIMEOUT", "") or 15.0)
-    except ValueError:
-        timeout = 15.0
+    # Operability knob parsed via the shared typed reader (missing/garbage → 15s);
+    # a non-positive value is then reset to the default, since a <=0 timeout would
+    # make httpx fail instantly.
+    from shared_env_config import env_float
+
+    timeout = env_float("SE_METRICS_ALIAS_TIMEOUT", 15.0)
     if timeout <= 0:
-        # A non-positive timeout makes httpx fail instantly; fall back to the default.
         timeout = 15.0
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -988,16 +988,19 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
     except httpx.HTTPStatusError as exc:
         # Forward the upstream failure as a gateway error rather than a 500 with a
         # leaked traceback.
+        logger.warning("SE metrics alias: upstream returned %s", exc.response.status_code)
         raise HTTPException(
             status_code=502,
             detail=f"software engineering service returned {exc.response.status_code}",
         ) from exc
     except httpx.RequestError as exc:
+        logger.warning("SE metrics alias: upstream unreachable: %s", exc)
         raise HTTPException(status_code=503, detail="software engineering service unreachable") from exc
     except ValueError as exc:
         # A 200 with a non-JSON body (e.g. an HTML error page) makes ``resp.json()``
         # raise ``json.JSONDecodeError`` (a ``ValueError`` subclass); surface a 502
         # rather than an unhandled 500 with a leaked traceback.
+        logger.warning("SE metrics alias: non-JSON body from upstream: %s", exc)
         raise HTTPException(status_code=502, detail="invalid JSON from software engineering service") from exc
     return data
 

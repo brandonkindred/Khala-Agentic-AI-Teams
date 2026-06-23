@@ -310,6 +310,14 @@ def _ensure_otel_instruments() -> None:
             _otel_llm_cost = None
 
 
+# Call statuses that must NOT mark the span as a tracing error: a successful call,
+# plus soft/transient outcomes (provider rate-limiting, an output truncated at the
+# token cap) that retry or degrade rather than genuinely fail. Flagging these ERROR
+# would create false error signals in distributed tracing and alerting. Any other
+# status (e.g. ``error``) — including an unknown future one — is treated as a failure.
+_NON_ERROR_LLM_STATUSES = frozenset({"success", "rate_limited", "truncated"})
+
+
 def _emit_otel_llm_span(record: LLMCallRecord) -> None:
     """Emit an OpenTelemetry span + metrics for a single LLM call record."""
     _ensure_otel_instruments()
@@ -353,7 +361,7 @@ def _emit_otel_llm_span(record: LLMCallRecord) -> None:
 
         span_name = f"llm.call {record.agent_key or 'agent'}"
         span = _otel_tracer.start_span(span_name, attributes=attributes)
-        if record.status != "success":
+        if record.status not in _NON_ERROR_LLM_STATUSES:
             try:
                 from opentelemetry.trace import Status, StatusCode
 

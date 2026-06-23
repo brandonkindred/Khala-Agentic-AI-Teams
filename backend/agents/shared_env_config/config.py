@@ -2,7 +2,7 @@
 
 Every reader returns a value of the documented type, applies optional
 floor/ceiling clamping, and falls back to ``default`` for a missing or
-unparseable value — it never raises into the caller. This centralizes the
+unparseable value — it never raises for a bad environment *value*. This centralizes the
 ``os.environ.get`` + ``try/except`` + ``max/min`` idiom that teams would
 otherwise each re-implement (it grew up inside the SE team and is now shared).
 
@@ -41,9 +41,7 @@ def _clamp(value: float, floor: float | None, ceiling: float | None) -> float:
     return value
 
 
-def _require_default_in_bounds(
-    default: float, floor: float | None, ceiling: float | None
-) -> None:
+def _require_default_in_bounds(default: float, floor: float | None, ceiling: float | None) -> None:
     """Enforce the precondition that ``default`` lies within ``[floor, ceiling]``.
 
     Raises (not ``assert``) so the contract holds under ``python -O``, where a
@@ -80,7 +78,10 @@ def env_int(name: str, default: int, floor: int | None = None, ceiling: int | No
         - ``default`` respects ``floor``/``ceiling`` when those are supplied.
     Postconditions:
         - Returns ``default`` (clamped) when the var is unset or unparseable;
-          otherwise the parsed value clamped to the supplied bounds. Never raises.
+          otherwise the parsed value clamped to the supplied bounds.
+        - Never raises for an environment *value* (garbage → ``default``); raises
+          ``ValueError`` only on a caller contract violation — a ``default``
+          outside ``[floor, ceiling]``, or ``floor > ceiling``.
     """
     _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)
@@ -105,7 +106,10 @@ def env_float(
     Postconditions:
         - Returns a finite float: ``default`` (clamped) when the var is unset,
           unparseable, or non-finite (``inf``/``nan``); otherwise the parsed value
-          clamped to the supplied bounds. Never raises.
+          clamped to the supplied bounds.
+        - Never raises for an environment *value*; raises ``ValueError`` only on a
+          caller contract violation — a ``default`` outside ``[floor, ceiling]``,
+          or ``floor > ceiling``.
     """
     _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)

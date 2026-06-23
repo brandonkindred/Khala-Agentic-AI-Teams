@@ -2596,6 +2596,11 @@ def _emit_coding_team_metrics(job_id: str) -> None:
         snapshot is unavailable or Postgres is disabled. Idempotent per job (a
         resumed/re-run job does not re-emit and double-count). Always flushes job cost.
     """
+    if not job_id:
+        # Empty job_id is a caller contract violation; surfaced as a no-op rather
+        # than raised, matching this helper's best-effort/never-raises contract
+        # (querying with a blank key would otherwise read the wrong job or None).
+        return
     try:
         # Idempotency: this helper emits a job's whole lifecycle batch at once.
         # task_created is emitted first, for every task, and ONLY by this helper —

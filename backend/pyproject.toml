@@ -40,7 +40,10 @@ max-statements = 130
 
 [tool.ruff.lint.per-file-ignores]
 "agents/**/tests/**" = ["N", "B", "E402"]
-"agents/**/agent_implementations/**" = ["E", "F"]
+# Example/scaffold agent code: exempt from style (E), but keep pyflakes (F) — incl.
+# F821/F822 undefined-name — enforced. (Effective enforcement for agents/ lives in
+# agents/.ruff.toml, which only exempts complexity here; this entry is kept in sync.)
+"agents/**/agent_implementations/**" = ["E"]
 "agents/**/api/main.py" = ["E402"]
 "agents/**/api/*.py" = ["E402"]
 "agents/blogging/blog_research_agent/agent.py" = ["E402"]

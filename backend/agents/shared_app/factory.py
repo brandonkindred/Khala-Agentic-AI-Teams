@@ -53,6 +53,7 @@ def create_team_app(
     postgres_schema: Optional[Any] = None,
     on_startup: Optional[LifecycleHook] = None,
     on_shutdown: Optional[LifecycleHook] = None,
+    excluded_urls: Optional[str] = None,
     **fastapi_kwargs: Any,
 ) -> FastAPI:
     """Build a fully-wired team :class:`FastAPI` app.
@@ -65,7 +66,10 @@ def create_team_app(
           even if ``on_startup`` raises, so a startup failure never leaks the pool.
     Postconditions:
         - :func:`init_otel` has been called and the returned app is OTel-
-          instrumented. Its lifespan registers ``postgres_schema`` on startup and
+          instrumented; ``excluded_urls`` (when given) is forwarded to the
+          instrumentor to override its default span-exclusion list — e.g. so a
+          business route whose path contains ``metrics`` stays traced. Its
+          lifespan registers ``postgres_schema`` on startup and
           closes the Postgres pool on shutdown (both no-ops/guarded when Postgres
           is unconfigured), wrapping the optional hooks. ``fastapi_kwargs`` pass
           through to the ``FastAPI`` constructor.
@@ -111,5 +115,5 @@ def create_team_app(
                     logger.warning("%s shared_postgres close_pool failed", team_key, exc_info=True)
 
     app = FastAPI(title=title, version=version, lifespan=_lifespan, **fastapi_kwargs)
-    instrument_fastapi_app(app, team_key=team_key)
+    instrument_fastapi_app(app, team_key=team_key, excluded_urls=excluded_urls)
     return app

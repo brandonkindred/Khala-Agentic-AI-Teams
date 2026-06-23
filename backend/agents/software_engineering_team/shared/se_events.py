@@ -63,7 +63,12 @@ def record_event(
           event); when omitted the current time is used.
     Postconditions:
         - Returns ``True`` when a row was written, ``False`` when Postgres is
-          disabled or the write failed (failure is logged at DEBUG, never raised).
+          disabled or the write failed (an operational failure is logged at DEBUG,
+          never raised).
+    Raises:
+        - ``ValueError`` if ``event_type`` is empty — a caller contract violation
+          (programming error), distinct from the operational failures above which
+          are swallowed.
     """
     if not event_type:
         raise ValueError("event_type must be a non-empty string")

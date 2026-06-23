@@ -2587,13 +2587,21 @@ def _delete_jobs_concurrently(
           value. The count equals the number of jobs successfully deleted and is
           independent of completion order (each task contributes its own 0/1 and
           the results are summed — no shared mutable counter).
+        - A per-item ``delete_job`` exception is logged and counted as not-deleted,
+          so a single failure never aborts the batch.
         - When ``job_ids`` is empty, returns 0 without spawning any threads.
     """
     if not job_ids:
         return 0
 
     def _delete_one(jid: str) -> int:
-        return 1 if client.delete_job(jid) else 0
+        # Isolate per-item failures: one job's delete raising (e.g. a transient
+        # network error) must not abort the remaining concurrent deletions.
+        try:
+            return 1 if client.delete_job(jid) else 0
+        except Exception:
+            logger.warning("delete_job failed for %s; counted as not deleted", jid, exc_info=True)
+            return 0
 
     workers = min(max_workers, len(job_ids))
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
