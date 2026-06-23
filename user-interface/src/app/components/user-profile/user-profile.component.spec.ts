@@ -56,11 +56,17 @@ describe('UserProfileComponent', () => {
     };
   });
 
+  afterEach(() => {
+    fixture?.destroy();
+  });
+
   it('should create and load the profile in a single request', async () => {
     await setup();
     expect(component).toBeTruthy();
     expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);
     expect(component.form.value.display_name).toBe('Brandon');
+    // The spinner must clear once the single request resolves.
+    expect(component.loading).toBe(false);
   });
 
   it('should group associations by type and count them', async () => {
@@ -68,11 +74,47 @@ describe('UserProfileComponent', () => {
     expect(component.groups.length).toBe(2);
     expect(component.totalAssociations).toBe(2);
     expect(component.groups[0].type).toBe('brand');
+    // Each group must carry the icon + label the template renders.
+    expect(component.groups[0].icon).toBeTruthy();
+    expect(component.groups[0].label).toBeTruthy();
   });
 
   it('should load integration status', async () => {
     await setup();
     expect(component.integrations).toEqual(INTEGRATIONS);
+  });
+
+  it('should render the empty integrations message when none are reported', async () => {
+    apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, integrations: [] }));
+    await setup();
+    expect(component.integrations).toEqual([]);
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('No integrations reported.');
+  });
+
+  it('should fall back to artifact_id when an association has no label', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({
+        ...OVERVIEW,
+        associations: [{ ...ASSOCIATIONS[0], label: '', artifact_id: 'brand_xyz' }],
+      }),
+    );
+    await setup();
+    const labels = (fixture.nativeElement as HTMLElement).querySelectorAll('.up-item-label');
+    const text = Array.from(labels)
+      .map((el) => el.textContent?.trim())
+      .join(' ');
+    expect(text).toContain('brand_xyz');
+  });
+
+  it('should omit the channel meta when an integration has no channel', async () => {
+    apiSpy.getOverview.mockReturnValue(
+      of({ ...OVERVIEW, integrations: [{ id: 'github', type: 'github', enabled: true, channel: null }] }),
+    );
+    await setup();
+    const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
+    expect(text).toContain('github');
+    expect(text).not.toContain('#eng');
   });
 
   it('should set an error when loading fails', async () => {

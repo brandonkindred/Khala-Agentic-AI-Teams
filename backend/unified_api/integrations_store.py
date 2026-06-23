@@ -62,6 +62,9 @@ from user_profile import ArtifactType, record_association_safe
 
 logger = logging.getLogger(__name__)
 
+#: Team slug recorded on profile associations for integration configs.
+_INTEGRATIONS_TEAM = "integrations"
+
 
 def _link_integration_to_profile(service: str) -> None:
     """Best-effort: link an integration config to the default user profile.
@@ -70,7 +73,7 @@ def _link_integration_to_profile(service: str) -> None:
     ``medium``); re-saving the config is idempotent. ``record_association_safe``
     never raises, so a profile-link failure can't break saving integration config.
     """
-    record_association_safe(ArtifactType.INTEGRATION, "integrations", service, label=service)
+    record_association_safe(ArtifactType.INTEGRATION, _INTEGRATIONS_TEAM, service, label=service)
 
 
 _DEFAULT_CACHE_DIR = ".agent_cache"

@@ -20,7 +20,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from unified_api.integrations_store import get_integrations_list
 from user_profile import (
@@ -41,6 +41,10 @@ router = APIRouter(prefix="/api/user-profile", tags=["user-profile"])
 
 class IntegrationStatus(BaseModel):
     """One row of GET /api/user-profile/integrations (mirrors the integrations list)."""
+
+    # Tolerate extra keys from get_integrations_list() so a future field added
+    # there can't turn the whole list into a swallowed ValidationError → empty list.
+    model_config = ConfigDict(extra="ignore")
 
     id: str
     type: str
@@ -117,10 +121,9 @@ def read_overview() -> ProfileOverview:
     try:
         profile = get_profile(DEFAULT_USER_ID)
         associations = list_associations(DEFAULT_USER_ID)
+        # _integrations_list never raises today, but keeping it inside the try
+        # means any future change can't bypass the 503 mapping with a raw 500.
+        integrations = _integrations_list()
     except Exception as exc:  # noqa: BLE001
         raise _unavailable(exc) from exc
-    return ProfileOverview(
-        profile=profile,
-        associations=associations,
-        integrations=_integrations_list(),
-    )
+    return ProfileOverview(profile=profile, associations=associations, integrations=integrations)

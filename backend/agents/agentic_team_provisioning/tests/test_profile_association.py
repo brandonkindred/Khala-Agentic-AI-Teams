@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+import agentic_team_provisioning.assistant.store as store_mod
 from agentic_team_provisioning.assistant.store import AgenticTeamStore
 from agentic_team_provisioning.tests._fake_postgres import install_fake_postgres
 from user_profile import ArtifactType
@@ -17,8 +18,6 @@ def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
 def test_create_team_records_profile_association(
     fake_pg: dict, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import agentic_team_provisioning.assistant.store as store_mod
-
     calls: list = []
     monkeypatch.setattr(store_mod, "record_association_safe", lambda *a, **k: calls.append((a, k)))
 

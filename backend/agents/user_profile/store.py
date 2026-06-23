@@ -238,7 +238,12 @@ def record_association(
     """
     assert user_id, "user_id must be non-empty"
     assert artifact_type and team and artifact_id, "artifact_type, team, artifact_id required"
-    assoc_id = f"assoc_{uuid4().hex[:12]}"
+    # Full 128-bit uuid hex (not a truncated slice): the row's PRIMARY KEY is `id`,
+    # but the upsert's ON CONFLICT arbiter is the (user_id, artifact_type, artifact_id)
+    # triple. A truncated id raises a non-negligible chance of a *cross-triple* PK
+    # collision that the triple arbiter would not absorb (the INSERT would error
+    # instead of upserting). Full entropy makes that practically impossible.
+    assoc_id = f"assoc_{uuid4().hex}"
     now = _now_iso()
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
         cur.execute(
