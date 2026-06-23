@@ -133,6 +133,17 @@ class CodebaseIndex:
             paths.append(self.EXISTING_CODEBASE_PATH)
         return paths
 
+    def _suffix_matches(self, key: str) -> List[str]:
+        """File keys ``key`` selects by its final ``/``-segment (a bare name).
+
+        The model often cites a bare ``main.py`` for ``app/services/main.py``;
+        this returns every stored path whose last segment equals ``key`` (a
+        leading ``./`` is ignored). Shared by :meth:`resolve_path` (a single hit
+        resolves) and :meth:`read_file` (multiple hits report ambiguity).
+        """
+        normalized = key.lstrip("./")
+        return [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+
     def resolve_path(self, path: str) -> Optional[str]:
         """Resolve a cited path to a canonical readable key, or None.
 
@@ -156,8 +167,7 @@ class CodebaseIndex:
             return self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None
         if key in self.files:
             return key
-        normalized = key.lstrip("./")
-        suffix_hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+        suffix_hits = self._suffix_matches(key)
         return suffix_hits[0] if len(suffix_hits) == 1 else None
 
     def read_file(self, path: str) -> str:
@@ -185,8 +195,7 @@ class CodebaseIndex:
         # ambiguous citation from an absent one (and a missing excerpt).
         if key == self.EXISTING_CODEBASE_PATH:
             return "Error: no existing-codebase excerpt available."
-        normalized = key.lstrip("./")
-        suffix_hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+        suffix_hits = self._suffix_matches(key)
         if len(suffix_hits) > 1:
             return (
                 f"Error: path '{path}' is ambiguous; it matches "
@@ -384,6 +393,27 @@ def _code_fence_for(content: str) -> str:
     return "`" * max(3, longest + 1)
 
 
+def _render_finding_block(i: int, issue: CodeReviewIssue) -> List[str]:
+    """Render one indexed finding block (anchor line + metadata) for the prompt.
+
+    Postconditions:
+        - Returns the lines for finding ``i``: an ``--- Finding index i ---``
+          anchor the verdict contract refers back to, a severity/category/
+          location line, the description, and the suggestion when present.
+    """
+    location = issue.file_path or "(file unknown)"
+    if issue.line is not None:
+        location = f"{location}:{issue.line}"
+    block = [
+        f"--- Finding index {i} ---",
+        f"severity: {issue.severity} | category: {issue.category} | location: {location}",
+        f"description: {issue.description}",
+    ]
+    if issue.suggestion:
+        block.append(f"suggestion: {issue.suggestion}")
+    return block
+
+
 def _build_group_prompt(
     index: CodebaseIndex,
     file_path: str,
@@ -447,16 +477,7 @@ def _build_group_prompt(
         "or a false positive:"
     )
     for i, issue in enumerate(issues):
-        location = issue.file_path or "(file unknown)"
-        if issue.line is not None:
-            location = f"{location}:{issue.line}"
-        parts.append(f"--- Finding index {i} ---")
-        parts.append(
-            f"severity: {issue.severity} | category: {issue.category} | location: {location}"
-        )
-        parts.append(f"description: {issue.description}")
-        if issue.suggestion:
-            parts.append(f"suggestion: {issue.suggestion}")
+        parts.extend(_render_finding_block(i, issue))
     parts.append("")
     parts.append(
         'Return a JSON object with a "verdicts" array containing exactly one verdict per finding '
@@ -617,13 +638,14 @@ def _verify_and_filter(
             continue
         for idx, verdict in verdicts.items():
             if verdict.is_false_positive:
-                removed.add(id(group[idx]))
+                issue = group[idx]
+                removed.add(id(issue))
                 logger.info(
                     "FalsePositiveFilter: dropping false positive [%s] %s:%s — %s (%s)",
-                    group[idx].severity,
-                    group[idx].file_path,
-                    group[idx].line if group[idx].line is not None else "-",
-                    group[idx].description[:120],
+                    issue.severity,
+                    issue.file_path,
+                    issue.line if issue.line is not None else "-",
+                    issue.description[:120],
                     verdict.reasoning[:160] or "no reasoning given",
                 )
 
