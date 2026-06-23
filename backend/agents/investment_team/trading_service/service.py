@@ -259,6 +259,10 @@ class _ScaledLadderCursor:
 
     Invariant: a rung fires only when it equals its ladder's current cursor, and
     firing advances the cursor by exactly one.
+
+    Invariant: ``_next_rung`` is only ever mutated IN PLACE (``advance`` does
+    ``self._next_rung[...] = ...``) and never reassigned — the memoized ``mapping``
+    proxy wraps this exact dict, so reassigning it would leave the proxy stale.
     """
 
     _next_rung: Dict[int, int] = field(default_factory=dict)
@@ -510,6 +514,12 @@ class _EngineExitDispatcher:
         """Top-level entry point — call once per bar after strategy orders
         have been queued into ``pending_for_prev``.
 
+        ``pending_for_prev`` is the engine's standing name for the list of order
+        requests being accumulated for the NEXT bar's submission (orders queued on
+        the current bar submit on the following one, for look-ahead safety) — engine
+        closes built here are appended to it. The name is shared across the bar
+        loop; it is the queue this emission contributes to, not a prior bar's state.
+
         Dedup model: the engine always emits at the position's full open
         qty and lets the fill simulator + the position-identity binding
         handle the rest. Specifically:
@@ -700,14 +710,21 @@ class _EngineExitDispatcher:
         """Bind/cancel everything that must not keep working against a position
         this close fully empties.
 
-        Shared by :meth:`_emit_full_close` and by an EMPTYING scaled rung (a
-        ``qty_fraction == 1.0`` rung or the final rung of a ladder summing to 1.0),
-        so the same dangling-order protection applies however the position leaves.
+        Shared by :meth:`_emit_full_close` and by an EMPTYING scaled rung, so the
+        same dangling-order protection applies however the position leaves. A rung
+        "empties" the position only when its close qty actually covers the whole
+        remaining qty — a ladder summing to 1.0 is NOT sufficient on its own: if a
+        scale-in grew the position past the original entry qty, a rung sized off
+        ``original_qty`` leaves the scale-in portion open and must NOT trigger these
+        cleanups.
 
-        Preconditions: the close just appended to ``ctx.pending_for_prev`` empties
-        the position; ``intent.style != "limit"`` whenever
-        ``ctx.resting_limit_stop_id`` is set (guaranteed: a resting limit stop is
-        excluded from evaluation, so the chosen intent is a different rule).
+        Preconditions: the caller has verified this close empties the position —
+        the close qty just appended to ``ctx.pending_for_prev`` is ``>=`` the
+        current ``pos.qty`` (``_emit_partial_scale_out`` guards on
+        ``req.qty >= pos.qty``; ``_emit_full_close`` always closes the full qty).
+        ``intent.style != "limit"`` whenever ``ctx.resting_limit_stop_id`` is set
+        (guaranteed: a resting limit stop is excluded from evaluation, so the
+        chosen intent is a different rule).
         Postconditions: binds competing opposite-side resting exits and same-bar
         queued exits to the position; for a market close cancels the position's
         entry continuations; and cancels a replaced resting stop-limit.
