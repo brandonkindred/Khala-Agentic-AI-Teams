@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from job_service_client import JobServiceClient
+from job_service_client import JobServiceClient, get_job_service_client
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     # cache_dir is accepted for API compatibility with callers that were written when this module
     # was file-backed. JobServiceClient uses HTTP (configured via JOB_SERVICE_URL) and does not
     # use a local filesystem cache, so cache_dir is intentionally not forwarded.
-    return JobServiceClient(team="coding_team")
+    return get_job_service_client("coding_team")
 
 
 def create_job(

@@ -17,6 +17,7 @@ from job_service_client import (
     JOB_STATUS_PENDING,
     JOB_STATUS_RUNNING,
     JobServiceClient,
+    get_job_service_client,
 )
 
 logger = logging.getLogger(__name__)
@@ -25,7 +26,14 @@ DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
 
 def _client(cache_dir: Path | str = DEFAULT_CACHE_DIR) -> JobServiceClient:
-    return JobServiceClient(team="ai_systems_team")
+    """Return the cached JobServiceClient for the ai_systems_team.
+
+    cache_dir is accepted for API compatibility with callers written when this
+    module was file-backed. JobServiceClient uses HTTP (configured via
+    JOB_SERVICE_URL) and does not use a local filesystem cache, so cache_dir is
+    intentionally not forwarded.
+    """
+    return get_job_service_client("ai_systems_team")
 
 
 def create_job(
