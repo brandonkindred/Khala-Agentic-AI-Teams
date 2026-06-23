@@ -1168,7 +1168,11 @@ def send_branding_conversation_message(
         history_pairs, state.mission, payload.message
     )
     conversation_store.update_mission(conversation_id, updated_mission)
-    conversation_store.append_message(conversation_id, "assistant", reply)
+    # The reply is already computed and returned to the caller; if this write
+    # doesn't land (conversation vanished mid-turn) log it rather than fail the
+    # response, so the inconsistency is at least visible in the logs.
+    if not conversation_store.append_message(conversation_id, "assistant", reply):
+        logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
     # Reuse the prior output when the mission is unchanged this turn; the
     # short-circuit returns the same object, so identity tells us whether a
     # fresh run happened and thus whether a write is needed.

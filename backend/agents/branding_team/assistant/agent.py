@@ -267,7 +267,11 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
             continue
         val = update[key]
         if isinstance(val, list):
-            data[key] = [str(x) for x in val if x]
+            # The extractor emits the complete list each turn, so we replace
+            # (not extend) — that already bounds growth. Dedupe while keeping
+            # first-seen order so a model that repeats an item doesn't put
+            # duplicates in the mission brief.
+            data[key] = list(dict.fromkeys(str(x) for x in val if x))
 
     if "color_palettes" in update:
         raw_palettes = update["color_palettes"]

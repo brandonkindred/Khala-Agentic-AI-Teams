@@ -189,6 +189,10 @@ class BrandingStore:
         Single query — replaces the O(clients) scan callers used when they
         hold a brand id but not its owning client.
 
+        Invariants:
+            ``branding_brands.id`` is the table's ``PRIMARY KEY`` (globally
+            unique across clients), so ``WHERE id = %s`` matches at most one row
+            — no ``LIMIT 1`` needed and the resolved client is unambiguous.
         Postconditions:
             Returns None when no such brand exists, else the owning client id
             paired with the validated Brand.
