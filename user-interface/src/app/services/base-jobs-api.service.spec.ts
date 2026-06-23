@@ -55,6 +55,15 @@ describe('BaseJobsApiService', () => {
     http.expectOne('http://api.test/api/demo/jobs/a%2Fb%20c').flush({ job_id: 'a/b c', status: 'x' });
   });
 
+  it('propagates HTTP errors to the caller (e.g. 404)', () => {
+    let status: number | undefined;
+    svc.getJob('missing').subscribe({ error: (err) => (status = err.status) });
+    http
+      .expectOne('http://api.test/api/demo/jobs/missing')
+      .flush('Not Found', { status: 404, statusText: 'Not Found' });
+    expect(status).toBe(404);
+  });
+
   it('pollJob polls getJob until the status is terminal', () => {
     vi.useFakeTimers();
     try {

@@ -79,6 +79,37 @@ describe('pollWhile', () => {
     sub.unsubscribe();
   });
 
+  it('keeps polling through multiple consecutive errors (default onError:continue)', () => {
+    const results = [
+      throwError(() => new Error('boom1')),
+      throwError(() => new Error('boom2')),
+      throwError(() => new Error('boom3')),
+      of('completed'),
+    ];
+    let i = 0;
+    const emitted: string[] = [];
+    let completed = false;
+    let errored = false;
+
+    pollWhile(() => results[Math.min(i++, results.length - 1)], (s) => s === 'completed', {
+      intervalMs: 100,
+    }).subscribe({
+      next: (v) => emitted.push(v),
+      complete: () => (completed = true),
+      error: () => (errored = true),
+    });
+
+    vi.advanceTimersByTime(0); // error 1 — swallowed
+    vi.advanceTimersByTime(100); // error 2 — swallowed
+    vi.advanceTimersByTime(100); // error 3 — swallowed
+    expect(emitted).toEqual([]);
+    expect(errored).toBe(false);
+    vi.advanceTimersByTime(100); // success
+    expect(emitted).toEqual(['completed']);
+    expect(completed).toBe(true);
+    expect(errored).toBe(false);
+  });
+
   it('onError:stop propagates the error and terminates the stream', () => {
     let errored = false;
     let completed = false;

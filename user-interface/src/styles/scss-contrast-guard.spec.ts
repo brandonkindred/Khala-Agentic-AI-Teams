@@ -42,10 +42,14 @@ import { dirname, resolve } from 'node:path';
 //   - Light grays (#888–#ccc): readable on dark, but still bypass the
 //     `--kh-text-*` tokens, so they're banned for design-system consistency —
 //     NOT labelled "low contrast", which would be factually wrong here.
+// Repeated-digit grays only (#111…#777), so a real color like #137 isn't
+// mis-flagged. #fff is deliberately NOT in NON_TOKEN_GRAY_HEX yet: a few files
+// still use `color: #fff` directly, and adding it here would fail the guard
+// before they migrate — it joins the set in the Phase-2 token sweep.
 const LOW_CONTRAST_HEX =
-  '#(?:5{3}|6{3}|7{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#(?:484f58|6e7681|71717a)(?:[0-9a-f]{2})?';
+  '#(?:1{3}|2{3}|3{3}|4{3}|5{3}|6{3}|7{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#(?:484f58|6e7681|71717a)(?:[0-9a-f]{2})?';
 const NON_TOKEN_GRAY_HEX =
-  '#(?:8{3}|9{3}|a{3}|b{3}|c{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#8b949e(?:[0-9a-f]{2})?';
+  '#(?:8{3}|9{3}|a{3}|b{3}|c{3}|d{3}|e{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#8b949e(?:[0-9a-f]{2})?';
 const LOW_CONTRAST_TEXT = new RegExp(
   String.raw`(?<![-\w])color:\s*(?:${LOW_CONTRAST_HEX}|rgba?\(\s*0\s*,\s*0\s*,\s*0)`,
   'i',
@@ -77,17 +81,19 @@ const BURNDOWN = new Set<string>([]);
  *
  * Preconditions: `source` is SCSS/CSS text.
  * Postconditions: returns a string of identical length with every comment
- *   character (and every SCSS `#{…}` interpolation) replaced by a space and all
- *   newlines preserved, so line numbers and brace/selector offsets are
- *   unchanged. A `//` preceded by `:` (e.g. `https://`) or `(` / `/` (e.g. a
- *   protocol-relative `url(//cdn/x.png)`) is left intact so it does not eat the
- *   rest of a value line. Interpolation braces are blanked so the focus-block
- *   brace scanner can't mistake `#{…}` for a ruleset.
+ *   character, quoted string literal, and SCSS `#{…}` interpolation replaced by
+ *   a space and all newlines preserved, so line numbers and brace/selector
+ *   offsets are unchanged. Strings are blanked before line comments so a quoted
+ *   `url("//cdn/x.png")` (and any `{`/`//` inside `content: "…"`) can't be
+ *   mistaken for a comment or a ruleset; an unquoted `//` after `:`/`(`/`/`
+ *   (e.g. `https://`, `url(//cdn)`) is left intact. Interpolation braces are
+ *   blanked so the focus-block brace scanner can't mistake `#{…}` for a block.
  */
 function stripComments(source: string): string {
   const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
   return source
     .replace(/\/\*[\s\S]*?\*\//g, blank)
+    .replace(/"[^"\n]*"|'[^'\n]*'/g, blank)
     .replace(/(?<![:/(])\/\/[^\n]*/g, blank)
     .replace(/#\{[^}]*\}/g, blank);
 }
@@ -280,5 +286,30 @@ describe('findOffenses detector', () => {
     ).toHaveLength(1);
     // Interpolation in a value is blanked, not mistaken for a hardcoded color.
     expect(findOffenses('.x { color: #{$muted}; }')).toHaveLength(0);
+  });
+
+  it('flags darker repeated-digit grays (#111–#444), not arbitrary colors', () => {
+    expect(findOffenses('.x { color: #333; }')[0]).toMatch(/low-contrast/);
+    expect(findOffenses('.x { color: #222222; }')[0]).toMatch(/low-contrast/);
+    // A real (non-gray) color must not be flagged.
+    expect(findOffenses('.x { color: #137; }')).toHaveLength(0);
+  });
+
+  it('flags lighter non-token grays (#ddd/#eee) but not #fff (still migrating)', () => {
+    expect(findOffenses('.x { color: #ddd; }')[0]).toMatch(/bypasses the --kh-text-\* tokens/);
+    expect(findOffenses('.x { color: #eee; }')[0]).toMatch(/bypasses the --kh-text-\* tokens/);
+    expect(findOffenses('.x { color: #fff; }')).toHaveLength(0);
+  });
+
+  it('does not let a quoted protocol-relative url("//…") hide a later offense', () => {
+    expect(findOffenses('.x { background: url("//cdn/x.png"); color: #555; }')[0]).toMatch(
+      /low-contrast/,
+    );
+  });
+
+  it('does not mistake a `{` inside a quoted value for a focus block', () => {
+    // The `{` lives in a string, so the brace scanner must not open a block.
+    expect(findOffenses('.x:focus-visible { content: "{"; outline: none; }')).toHaveLength(1);
+    expect(findOffenses('.x { content: "{"; color: var(--kh-text-primary); }')).toHaveLength(0);
   });
 });
