@@ -194,13 +194,23 @@ def get_strands_model(
     a schema embedded verbatim in its prompt). This replaces the strands-native
     decoder-level ``format`` constraint that the native ``OllamaModel`` path used.
 
-    Preconditions: ``agent_key`` is a non-empty model key; ``response_format`` is
-    ``"json"`` or ``"text"``. ``timeout``, if passed explicitly, must be a
-    positive, finite *number* of seconds — a non-numeric value raises
-    ``TypeError`` and a non-positive or non-finite value raises ``ValueError``.
+    Preconditions: ``agent_key`` is a non-empty model key (an empty value raises
+    ``ValueError``); ``response_format`` is ``"json"`` or ``"text"``. ``timeout``,
+    if passed explicitly, must be a positive, finite *number* of seconds — a
+    non-numeric value raises ``TypeError`` and a non-positive or non-finite value
+    raises ``ValueError``. The resolved ``LLM_PROVIDER`` must be a supported
+    Strands provider (``ollama`` or ``bedrock``); any other value raises
+    ``ValueError`` rather than silently falling through to Ollama.
     Postconditions: returns a constructed strands ``Model``. The chosen provider
     / model never depends on ``response_format``.
     """
+    # Boundary enforcement of the documented ``agent_key`` precondition: an empty
+    # key is a caller bug that would otherwise surface obscurely downstream (e.g.
+    # ``resolve_model`` silently returning a default). Raise (not ``assert``) so
+    # the guard survives ``python -O``.
+    if not agent_key or not agent_key.strip():
+        raise ValueError("agent_key must be a non-empty string")
+
     provider = resolve_provider()
     model_id = resolve_model(agent_key)
     base_url = resolve_base_url()
@@ -234,6 +244,14 @@ def get_strands_model(
         raise ValueError(
             "LLM_PROVIDER=dummy is not supported for Strands agents. "
             "Set LLM_PROVIDER=ollama or LLM_PROVIDER=bedrock."
+        )
+
+    # Fail fast on a misconfigured provider rather than silently treating any
+    # unknown value (e.g. ``LLM_PROVIDER=openai``) as Ollama. Only the supported
+    # Strands providers reach the routing below.
+    if provider != "ollama":
+        raise ValueError(
+            f"Unsupported LLM_PROVIDER: {provider!r}. Supported values: ollama, bedrock."
         )
 
     # Provider is "ollama" (the default). Fail fast on the one misconfiguration

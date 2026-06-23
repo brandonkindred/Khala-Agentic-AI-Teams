@@ -674,6 +674,30 @@ def test_get_strands_model_dummy_provider_raises(monkeypatch: pytest.MonkeyPatch
     assert "dummy" in str(exc.value).lower()
 
 
+@pytest.mark.parametrize("bad_key", ["", "   ", None])
+def test_get_strands_model_rejects_empty_agent_key(
+    monkeypatch: pytest.MonkeyPatch, bad_key
+) -> None:
+    """The documented ``agent_key`` precondition is enforced: an empty/blank key
+    raises ``ValueError`` rather than failing obscurely downstream."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setattr(model_factory, "resolve_provider", lambda: "ollama")
+    with pytest.raises(ValueError, match="agent_key must be a non-empty string"):
+        model_factory.get_strands_model(bad_key)
+
+
+def test_get_strands_model_unsupported_provider_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unknown ``LLM_PROVIDER`` fails fast instead of silently routing to Ollama."""
+    from investment_team.strategy_lab.agents import model_factory
+
+    monkeypatch.setattr(model_factory, "resolve_provider", lambda: "openai")
+    monkeypatch.setattr(model_factory, "resolve_model", lambda key: "gpt-4")
+    monkeypatch.setattr(model_factory, "resolve_base_url", lambda: "http://example.com")
+    with pytest.raises(ValueError, match="Unsupported LLM_PROVIDER"):
+        model_factory.get_strands_model("strategy_ideation")
+
+
 def test_get_strands_model_bedrock_branch(monkeypatch: pytest.MonkeyPatch) -> None:
     from investment_team.strategy_lab.agents import model_factory
 
