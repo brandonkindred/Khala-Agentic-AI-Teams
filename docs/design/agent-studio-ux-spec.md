@@ -177,7 +177,7 @@ Each stage below gives: purpose · wireframe · reused vs new components · the 
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
-│  ① Build ─── ② Test ─── ③ Compose ─── ④ Personas       agent: blogging.planner  │
+│  ① Build ─ ② Test ─ ③ Compose ─ ④ Personas  agent: blogging.planner  [ Browse ▾ ] │
 ├──────────────────────────────────┬─────────────────────────────────────────────┤
 │  Input                            │  Run history                                 │
 │  ┌─ schema form / JSON ─────────┐ │  ● 14:02  run_8f2…   ✓ 3.1s                  │
@@ -203,7 +203,8 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 
 ```
 ┌────────────────────────────────────────────────────────────────────────────────┐
-│  ① Build ─── ② Test ─── ③ Compose ─── ④ Personas        team: [ Growth Pod ▾ ]  │
+│  ① Build ─ ② Test ─ ③ Compose ─ ④ Personas             [ Browse agents ▾ ]       │
+│  team: [ Growth Pod ▾ ]   ·   process: [ Content pipeline ▾ ]                     │
 ├──────────────────────────────────┬─────────────────────────────────────────────┤
 │  Process designer (chat)          │  Roster                          [ + Add ▾ ] │
 │  ┌──────────────────────────────┐ │  ┌─────────────────────────────────────────┐ │
