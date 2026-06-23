@@ -20,6 +20,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && playwright install chromium
 
 # ── Shared code ──────────────────────────────────────────────────────────────
+# Shared env-var parser (leaf, stdlib-only). Imported by llm_service.config,
+# shared_postgres.client, shared_observability.process_health, and
+# blogging.shared.job_event_bus — copy it first so those imports resolve.
+COPY agents/shared_env /app/shared_env
+
 # LLM service (used by all blogging agents)
 COPY agents/llm_service /app/llm_service
 
