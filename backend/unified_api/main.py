@@ -552,7 +552,11 @@ app.include_router(sandboxes_router)
 app.include_router(agent_console_saved_inputs_router)
 app.include_router(agent_console_diff_router)
 app.include_router(cognition_router)
-app.include_router(user_profile_router)
+# Honor the user_profile team's `enabled` flag (it has a TEAM_CONFIGS entry),
+# matching the product_delivery gate below: disabling the team must make
+# /api/user-profile/* stop answering, not just disappear from /teams.
+if TEAM_CONFIGS["user_profile"].enabled:
+    app.include_router(user_profile_router)
 # Honor the in-process team's `enabled` flag: an operator that disables
 # the team via TEAM_CONFIGS expects /api/product-delivery/* to stop
 # answering, not just disappear from /teams. Gate the *import* too —
