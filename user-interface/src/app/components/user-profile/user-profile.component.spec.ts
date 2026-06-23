@@ -84,6 +84,21 @@ describe('UserProfileComponent', () => {
     expect(component.integrations).toEqual(INTEGRATIONS);
   });
 
+  it('should clear stale data and set an error when a re-load returns a malformed response', async () => {
+    await setup();
+    // First load populated groups/integrations.
+    expect(component.groups.length).toBe(2);
+    expect(component.integrations.length).toBe(1);
+    // A subsequent malformed 2xx response must clear the stale data, not show it.
+    apiSpy.getOverview.mockReturnValue(of({ associations: [], integrations: [] }));
+    component.load();
+    expect(component.error).toBeTruthy();
+    expect(component.groups).toEqual([]);
+    expect(component.integrations).toEqual([]);
+    expect(component.totalAssociations).toBe(0);
+    expect(component.loading).toBe(false);
+  });
+
   it('should render the empty integrations message when none are reported', async () => {
     apiSpy.getOverview.mockReturnValue(of({ ...OVERVIEW, integrations: [] }));
     await setup();

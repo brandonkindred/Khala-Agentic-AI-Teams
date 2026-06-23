@@ -83,6 +83,23 @@ describe('UserProfileApiService', () => {
     expect(status).toBe(503);
   });
 
+  it('should propagate a server error on updateProfile', () => {
+    let nextCalled = false;
+    let status = 0;
+    service.updateProfile({ display_name: 'x' }).subscribe({
+      next: () => {
+        nextCalled = true;
+      },
+      error: (err) => {
+        status = err.status;
+      },
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.flush('boom', { status: 500, statusText: 'Server Error' });
+    expect(nextCalled).toBe(false);
+    expect(status).toBe(500);
+  });
+
   it('should propagate a network error on updateProfile', () => {
     let nextCalled = false;
     let errored = false;

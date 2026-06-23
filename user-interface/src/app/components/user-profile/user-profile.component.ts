@@ -91,6 +91,11 @@ export class UserProfileComponent implements OnInit {
         // A 2xx response with a malformed body slips past the error handler, so
         // guard the shape before destructuring rather than throw deep in render.
         if (!overview?.profile || !overview.associations || !overview.integrations) {
+          // Clear any previously loaded data so stale artifacts/integrations
+          // aren't shown alongside the error after a re-load.
+          this.groups = [];
+          this.integrations = [];
+          this.totalAssociations = 0;
           this.error = 'Received an unexpected response from the server.';
           this.loading = false;
           return;
