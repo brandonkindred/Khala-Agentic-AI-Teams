@@ -378,12 +378,14 @@ class ExitRuleConformanceGate(GateResultsMixin):
         partial close fills next bar, and co-existing exits (a stop) can close the
         position before later rungs reach their target. So this is informational —
         it reports how many times each rung scaled out — and only WARNs the lonely
-        case (the ladder is the sole exit, trades exist, yet no rung ever fired).
+        case (every exit rule is a scaled ladder, trades exist, yet this ladder's
+        rungs never fired).
 
         Preconditions: ``rule`` is a ``ScaledTakeProfitRule`` at ``rule_index`` in
         ``all_rules``; ``level_firings`` is keyed ``"<rule_index>:<level_index>"``.
         Postconditions: returns an info result with per-rung counts, or a warning
-        when the ladder is the only exit rule and recorded zero rung firings across
+        when the strategy has no non-ladder exit (every rule in ``all_rules`` is a
+        ``ScaledTakeProfitRule``) and this ladder recorded zero rung firings across
         a non-empty trade ledger.
         """
         per_rung = {
@@ -396,16 +398,21 @@ class ExitRuleConformanceGate(GateResultsMixin):
             f"{rule.levels[level_idx].qty_fraction})={count}"
             for level_idx, count in sorted(per_rung.items())
         )
-        only_rule = len(all_rules) == 1
-        if total_firings >= 1 or not trades or not only_rule:
-            coexist = "" if only_rule else " (co-exists with other exit rules)"
+        # WARN only when EVERY exit rule is a scaled ladder, so the position relies
+        # entirely on rungs reaching their targets — a single ladder is just the
+        # degenerate case. With any non-ladder exit (stop / take-profit / signal)
+        # present, zero rung firings is acceptable (that exit may close trades
+        # first), so this stays informational.
+        only_scaled = all(isinstance(r, ScaledTakeProfitRule) for r in all_rules)
+        if total_firings >= 1 or not trades or not only_scaled:
+            coexist = "" if only_scaled else " (co-exists with other exit rules)"
             return self._info(
                 f"ScaledTakeProfitRule[{rule_index}] — {total_firings} rung "
                 f"firing(s) across {len(trades)} trade(s){coexist}; "
                 f"per-rung: {rung_details}."
             )
         return self._warning(
-            f"ScaledTakeProfitRule[{rule_index}] is the only exit rule but the "
-            f"engine recorded zero rung firings across {len(trades)} trade(s) — "
-            "the rung targets may be unreachable on the strategy's universe."
+            f"ScaledTakeProfitRule[{rule_index}] recorded zero rung firings across "
+            f"{len(trades)} trade(s); the strategy's only exits are scaled ladders, "
+            "so its rung targets may be unreachable on the strategy's universe."
         )

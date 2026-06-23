@@ -37,12 +37,11 @@ from investment_team.strategy_lab.spec_dsl import (
 )
 
 
-def _ladder(**kw) -> ScaledTakeProfitRule:
-    levels = kw.pop(
-        "levels",
-        [{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}],
-    )
-    return ScaledTakeProfitRule(levels=levels, **kw)
+def _ladder(levels: list[dict] | None = None) -> ScaledTakeProfitRule:
+    """A scaled-take-profit ladder; defaults to two rungs (50% at +5%, 30% at +10%)."""
+    if levels is None:
+        levels = [{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}]
+    return ScaledTakeProfitRule(levels=levels)
 
 
 def _long(entry_price: float = 100.0) -> PositionState:

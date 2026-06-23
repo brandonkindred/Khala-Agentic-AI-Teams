@@ -605,9 +605,9 @@ def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
 
 
 def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
-    # An unbound, opposite-side (SHORT) strategy exit resting on the book for AAA —
-    # the kind of order the full-close cleanups must bind so it can't survive the
-    # close and later fire as a reverse entry.
+    """An unbound, opposite-side (SHORT) strategy LIMIT exit resting on the book for
+    AAA — the kind of order the full-close cleanups must bind so it can't survive the
+    close and later fire as a reverse entry."""
     return order_book.submit(
         OrderRequest(
             client_order_id="strat-tp",
@@ -736,6 +736,12 @@ def test_cursor_resets_when_position_is_swapped() -> None:
         original_qty=100.0,
         entry_order_type="market",
     )
+    # Intentional white-box call: tracker reconciliation is a TradingService
+    # responsibility the per-bar loop runs BEFORE the dispatcher — maybe_emit does
+    # NOT reconcile the tracker itself — so driving the real swap-reset path means
+    # calling _update_position_tracker directly (as a @staticmethod) rather than
+    # through maybe_emit. This pins the documented "cursor never leaks across trades"
+    # invariant against the actual reset code, not a test-local re-implementation.
     TradingService._update_position_tracker(tracker=tracker, cur_bar=bar, portfolio=portfolio)
     assert tracker["AAA"].entry_order_id == "o2"
     assert tracker["AAA"].scaled_cursor.mapping == {}  # cursor reset for the new position
@@ -1003,7 +1009,11 @@ def test_partial_market_close_reduces_qty_and_keeps_position_open(model) -> None
     # Second tranche: close the remaining 50 → fully closed, one trade recorded.
     _submit_partial_close(order_book, "tp-1", 50.0)
     outcome = sim.process_bar(_full_bar("2024-01-04", open_price=110.0, high=111.0, low=109.0))
-    assert "AAA" not in portfolio.positions or portfolio.positions["AAA"].qty == pytest.approx(0.0)
+    # Fully closed: the engine either drops the position from the book or leaves it
+    # flat. Assert it is genuinely closed (not merely absent) — if still present it
+    # must be is_closed with zero qty; the recorded trade below confirms the close.
+    remaining = portfolio.positions.get("AAA")
+    assert remaining is None or (remaining.is_closed and remaining.qty == pytest.approx(0.0))
     assert len(outcome.closed_trades) == 1
     assert outcome.closed_trades[0].exit_reason == f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
 

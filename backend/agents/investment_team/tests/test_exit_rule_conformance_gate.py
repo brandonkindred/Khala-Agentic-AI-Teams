@@ -234,13 +234,15 @@ def test_take_profit_with_other_rules_is_informational() -> None:
 
 
 def _ladder() -> ScaledTakeProfitRule:
+    """A two-rung ladder: 50% at +5%, 30% at +10%."""
     return ScaledTakeProfitRule(
         levels=[{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}]
     )
 
 
 def test_scaled_take_profit_alone_is_informational_with_firings() -> None:
-    # Rungs fired → informational per-rung telemetry, never a failure.
+    """Rungs fired → informational per-rung telemetry naming each fired rung key,
+    never a failure."""
     gate = ExitRuleConformanceGate()
     diag = BacktestExecutionDiagnostics(
         exit_rule_firings={"scaled_take_profit": 2},
@@ -251,12 +253,18 @@ def test_scaled_take_profit_alone_is_informational_with_firings() -> None:
         exit_rules=[_ladder()], trades=[_trade()], diagnostics=diag, config=_config()
     )
     assert [r for r in results if not r.passed] == []
-    assert any("ScaledTakeProfitRule" in r.details and "per-rung" in r.details for r in results)
+    # The per-rung telemetry names BOTH rungs and their fired counts, so the format
+    # (not just the presence of the word "per-rung") is pinned.
+    info = next(
+        r for r in results if "ScaledTakeProfitRule" in r.details and "per-rung" in r.details
+    )
+    assert "L0(@0.05, 0.5)=1" in info.details
+    assert "L1(@0.1, 0.3)=1" in info.details
 
 
 def test_scaled_take_profit_alone_warns_when_no_rung_fired() -> None:
-    # The ladder is the only exit and trades exist, yet no rung ever fired → warning
-    # (the rung targets may be unreachable on the strategy's universe).
+    """The ladder is the only exit and trades exist, yet no rung ever fired → warning
+    (the rung targets may be unreachable on the strategy's universe)."""
     gate = ExitRuleConformanceGate()
     results = gate.check(
         exit_rules=[_ladder()],
@@ -269,9 +277,34 @@ def test_scaled_take_profit_alone_warns_when_no_rung_fired() -> None:
     assert fails[0].severity == "warning"
 
 
+def test_scaled_take_profit_warns_when_all_exits_are_ladders_and_one_never_fires() -> None:
+    """Multiple ladders with NO other exit kind: a ladder that records zero rung
+    firings still warns — the position relies entirely on rungs reaching targets, so
+    the gap is not excused by the presence of a second ladder (the warning keys off
+    "every exit is a scaled ladder", not "exactly one exit rule")."""
+    gate = ExitRuleConformanceGate()
+    # Two ladders (rule_index 0 and 1); only rule 0's first rung fired, rule 1 none.
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"scaled_take_profit": 1},
+        exit_rule_firings_by_symbol={"AAA": {"scaled_take_profit": 1}},
+        scaled_take_profit_level_firings={"0:0": 1},
+    )
+    results = gate.check(
+        exit_rules=[_ladder(), _ladder()],
+        trades=[_trade(return_pct=1.0)],
+        diagnostics=diag,
+        config=_config(),
+    )
+    warnings = [r for r in results if not r.passed and r.severity == "warning"]
+    # Rule 1 (zero firings) warns; rule 0 (a rung fired) stays informational.
+    assert len(warnings) == 1
+    assert "ScaledTakeProfitRule[1]" in warnings[0].details
+
+
 def test_scaled_take_profit_with_other_rules_is_informational() -> None:
-    # A co-existing stop can close trades before any rung reaches its target, so
-    # zero rung firings alongside another rule is acceptable (informational only).
+    """A co-existing stop can close trades before any rung reaches its target, so
+    zero rung firings alongside another (non-ladder) exit is acceptable
+    (informational only, flagged as co-existing)."""
     gate = ExitRuleConformanceGate()
     results = gate.check(
         exit_rules=[StopLossRule(pct=0.05), _ladder()],
