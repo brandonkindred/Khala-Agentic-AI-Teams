@@ -492,25 +492,36 @@ def ladder_closes_full_position(rule: "ScaledTakeProfitRule") -> bool:
 
 
 def is_partial_exit(rule: Any) -> bool:
-    """Whether ``rule`` closes only PART of the position (a scaled scale-out).
+    """Whether ``rule`` only PARTIALLY closes the position.
 
-    Canonical single-rule classifier — the rule-level mirror of
-    ``ExitIntent.is_partial``. Preconditions: ``rule`` is an ``ExitRule`` member.
-    Postconditions: ``True`` iff ``rule`` is a ``ScaledTakeProfitRule``.
+    A scaled ladder is a partial exit ONLY when its rung fractions sum to < 1.0,
+    leaving a residual for another exit to close; a ladder that sums to 1.0 closes
+    the full position over its rungs and is a full-position exit (see
+    :func:`is_full_position_exit`). Canonical single-rule classifier.
+    Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is a ``ScaledTakeProfitRule`` whose rungs
+    sum to < 1.0.
     """
-    return isinstance(rule, ScaledTakeProfitRule)
+    return isinstance(rule, ScaledTakeProfitRule) and not ladder_closes_full_position(rule)
 
 
 def is_full_position_exit(rule: Any) -> bool:
-    """Whether ``rule`` closes the WHOLE position when it fires.
+    """Whether ``rule`` fully closes the position.
 
-    A stop-loss / take-profit / signal-exit each close the full position; a
-    laddered take-profit only scales out a fraction (see :func:`is_partial_exit`).
-    Canonical single source of the full-position membership so a new exit kind is
-    classified in one place. Preconditions: ``rule`` is an ``ExitRule`` member.
-    Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, or signal exit.
+    A stop-loss / take-profit / signal-exit each close the full position in a
+    single firing; a scaled ladder closes it across its rungs when (and only when)
+    those rungs sum to 1.0 (``ladder_closes_full_position``). A ladder summing to
+    < 1.0 is partial (see :func:`is_partial_exit`). Canonical single source of the
+    full-position membership so a new exit kind is classified in one place.
+    Preconditions: ``rule`` is an ``ExitRule`` member.
+    Postconditions: ``True`` iff ``rule`` is a stop-loss, take-profit, signal exit,
+    or a ``ScaledTakeProfitRule`` whose rungs sum to 1.0.
     """
-    return isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule))
+    if isinstance(rule, (StopLossRule, TakeProfitRule, SignalExitRule)):
+        return True
+    if isinstance(rule, ScaledTakeProfitRule):
+        return ladder_closes_full_position(rule)
+    return False
 
 
 def is_engine_handled_exit(rule: Any) -> bool:

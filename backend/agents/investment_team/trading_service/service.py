@@ -83,6 +83,12 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORDER_EVENTS = 20
 
+# A scaled rung "empties" the position when its (original-qty-sized) close covers
+# the whole remaining qty. The relative tolerance only absorbs float noise in the
+# fraction arithmetic (e.g. 0.3 + 0.3 + 0.4 not summing to exactly 1.0); it never
+# treats a genuine residual as a full close.
+_FULL_CLOSE_QTY_REL_TOL = 1e-9
+
 # ``ENGINE_EXIT_REASON_PREFIX`` is the reserved order ``reason`` prefix the
 # engine stamps on every close it owns (rule-triggered emissions and reconciled
 # strategy closes). The conformance quality gate reads it off
@@ -550,16 +556,17 @@ class _EngineExitDispatcher:
         # fill first at its stale limit price on a recovery bar and pre-empt the
         # intended close.
         # While the position's own entry is still filling, defer scale-outs (a rung
-        # sized off the not-yet-settled ``original_qty`` would under-close) by
-        # excluding partial intents — but keep evaluating so a lower-priority
-        # full-position exit (e.g. a stop after the ladder) can still fire this bar.
+        # sized off the not-yet-settled ``original_qty`` would under-close — this
+        # holds even for a ``qty_fraction == 1.0`` rung) by excluding scaled rungs —
+        # but keep evaluating so a lower-priority full-position exit (e.g. a stop
+        # after the ladder) can still fire this bar.
         intent = self._evaluate(
             sym,
             gate.tracked,
             gate.pos,
             cur_bar,
             exclude_resting_limit_stop=exclude_resting_limit_stop,
-            exclude_partial=gate.entry_continuation_in_flight,
+            exclude_scaled=gate.entry_continuation_in_flight,
         )
         if intent is None:
             return
@@ -575,32 +582,36 @@ class _EngineExitDispatcher:
             resting_limit_stop_id=gate.resting_limit_stop_id,
             pending=gate.pending,
         )
-        # A partial scale-out (a scaled-take-profit rung) and a full-position close
-        # have disjoint emission flows — the partial path deliberately skips every
-        # whole-position cleanup — so dispatch to the matching handler.
-        if intent.is_partial:
+        # A scaled-ladder rung and a full-position close have distinct emission
+        # flows (the scale-out path sizes off the original qty and skips the
+        # whole-position cleanups *unless* the rung empties the position) — so
+        # dispatch on the intent's origin, not on how much it closes.
+        if intent.is_scaled_rung:
             self._emit_partial_scale_out(intent, ctx)
         else:
             self._emit_full_close(intent, ctx)
 
     def _emit_partial_scale_out(self, intent: ExitIntent, ctx: "_EmitContext") -> None:
-        """Emit a scaled-take-profit rung's PARTIAL close and advance the cursor.
+        """Emit a scaled-take-profit rung's scale-out close and advance the cursor.
 
-        A scale-out closes only one rung's fraction and leaves the rest of the
-        position open, so — unlike :meth:`_emit_full_close` — it must NOT oversize
-        for scale-ins, retire competing resting exits, cancel entry continuations,
-        or cancel a resting stop-limit (all assume the whole position is leaving).
+        A scale-out is sized off the ORIGINAL entry qty and ordinarily leaves the
+        rest of the position open, so — unlike :meth:`_emit_full_close` — it does
+        NOT oversize for scale-ins. It runs the whole-position cleanups (retire
+        competing resting exits, cancel entry continuations / a replaced resting
+        stop-limit) ONLY when this rung actually EMPTIES the position (a
+        ``qty_fraction == 1.0`` rung, or the final rung of a ladder summing to 1.0),
+        since for a true partial the remainder must keep its protective exits.
 
         Deferral while the entry is still filling is handled UPSTREAM: ``maybe_emit``
-        excludes partial intents (``exclude_partial``) when an entry continuation is
-        in flight, so a deferred rung is simply never produced here — and a
-        lower-priority full-position exit can still fire that bar. This handler
-        therefore only ever runs for a rung that is ready to scale out now.
+        excludes scaled rungs (``exclude_scaled``) when an entry continuation is in
+        flight, so a deferred rung is simply never produced here — and a
+        lower-priority full-position exit can still fire that bar.
 
-        Preconditions: ``intent.is_partial`` (``intent.level_index`` is set) and the
-        position's entry has settled (no continuation in flight).
-        Postconditions: appends one partial close to ``ctx.pending_for_prev``, binds
-        it to the position, advances the ladder cursor past the fired rung, and
+        Preconditions: ``intent.is_scaled_rung`` (``intent.level_index`` is set) and
+        the position's entry has settled (no continuation in flight).
+        Postconditions: appends one scale-out close to ``ctx.pending_for_prev``,
+        binds it to the position, advances the ladder cursor past the fired rung,
+        runs the whole-position cleanups iff the close empties the position, and
         records the emission.
         """
         req = self._build_close_order(intent, ctx.tracked, ctx.pos)
@@ -611,29 +622,36 @@ class _EngineExitDispatcher:
         # if a full exit (e.g. a stop) closes the position first.
         self._register_binding(req, ctx.pos)
         level_index = intent.level_index
-        if level_index is None:  # pragma: no cover - is_partial guarantees a level_index
-            raise ValueError("partial scale-out intent requires a level_index")
+        if level_index is None:  # pragma: no cover - is_scaled_rung guarantees a level_index
+            raise ValueError("scaled-rung intent requires a level_index")
         ctx.tracked.scaled_cursor.advance(intent.rule_index, level_index)
+        # If this rung closes the entire remaining position, it is effectively a
+        # full exit — run the same cleanups so nothing keeps working against the
+        # now-closed position. ``req.qty`` is sized off the ORIGINAL qty, so when a
+        # scale-in grew the position above it this is correctly False (a residual
+        # remains and must keep its exits). The relative tolerance only absorbs
+        # float noise in the fraction arithmetic.
+        if req.qty >= ctx.pos.qty * (1.0 - _FULL_CLOSE_QTY_REL_TOL):
+            self._retire_orders_against_closed_position(intent, ctx)
         self._record_emission(req, intent, ctx.cur_bar, ctx.result)
 
     def _emit_full_close(self, intent: ExitIntent, ctx: "_EmitContext") -> None:
         """Emit a full-position close and run the whole-position cleanups.
 
-        Preconditions: ``intent`` closes the full position (stop-loss / take-profit
-        / signal-exit; ``not intent.is_partial``).
+        Preconditions: ``intent`` closes the full position in one firing (stop-loss
+        / take-profit / signal-exit; ``not intent.is_scaled_rung``).
         Postconditions: appends one close to ``ctx.pending_for_prev``, binds it,
         retires competing resting exits, cancels entry continuations (market style)
         and the replaced resting stop-limit (when one rested), and records the
         emission.
         """
-        # Contract guard: only full closes reach here (the dispatch routes partials
-        # to ``_emit_partial_scale_out``). This is what keeps the resting-stop-limit
-        # cancel below unreachable for a partial scale-out, so a scale-out never
-        # strips the protective stop off the position's remainder. Enforced with a
-        # raise (not an assert) so it holds even under ``python -O``.
-        if intent.is_partial:  # pragma: no cover - dispatch routes partials elsewhere
-            raise ValueError("_emit_full_close must not receive a partial scale-out")
-        sym, tracked, pos, order_book = ctx.sym, ctx.tracked, ctx.pos, ctx.order_book
+        # Contract guard: only non-scaled closes reach here (the dispatch routes
+        # scaled rungs to ``_emit_partial_scale_out``, which runs the same cleanups
+        # itself only when a rung empties the position). Enforced with a raise (not
+        # an assert) so it holds even under ``python -O``.
+        if intent.is_scaled_rung:  # pragma: no cover - dispatch routes scaled rungs elsewhere
+            raise ValueError("_emit_full_close must not receive a scaled rung")
+        sym, tracked, pos = ctx.sym, ctx.tracked, ctx.pos
         # ``pending`` is the symbol's pending-order snapshot already scanned by
         # ``_should_evaluate`` this bar — reused here so the close path does not
         # rebuild it per helper. When it is empty (the common close: nothing else
@@ -673,6 +691,34 @@ class _EngineExitDispatcher:
 
         ctx.pending_for_prev.append(req)
         self._register_binding(req, pos)
+        self._retire_orders_against_closed_position(intent, ctx)
+        self._record_emission(req, intent, ctx.cur_bar, ctx.result)
+
+    def _retire_orders_against_closed_position(
+        self, intent: ExitIntent, ctx: "_EmitContext"
+    ) -> None:
+        """Bind/cancel everything that must not keep working against a position
+        this close fully empties.
+
+        Shared by :meth:`_emit_full_close` and by an EMPTYING scaled rung (a
+        ``qty_fraction == 1.0`` rung or the final rung of a ladder summing to 1.0),
+        so the same dangling-order protection applies however the position leaves.
+
+        Preconditions: the close just appended to ``ctx.pending_for_prev`` empties
+        the position; ``intent.style != "limit"`` whenever
+        ``ctx.resting_limit_stop_id`` is set (guaranteed: a resting limit stop is
+        excluded from evaluation, so the chosen intent is a different rule).
+        Postconditions: binds competing opposite-side resting exits and same-bar
+        queued exits to the position; for a market close cancels the position's
+        entry continuations; and cancels a replaced resting stop-limit.
+        """
+        sym, tracked, pos, order_book, pending = (
+            ctx.sym,
+            ctx.tracked,
+            ctx.pos,
+            ctx.order_book,
+            ctx.pending,
+        )
         if pending:
             # Bind competing opposite-side exits to the position. This is safe for
             # BOTH styles: binding only *retires* an order via the fill simulator's
@@ -696,17 +742,16 @@ class _EngineExitDispatcher:
             self._cancel_pending_entry_continuations(pos, order_book, pending)
         # A resting limit-style STOP_LIMIT is excluded from evaluation, so when one
         # rests the chosen intent is always a *different*, market-style rule
-        # (take-profit / signal-exit) — a guaranteed close next bar. Cancel the now
-        # redundant resting stop-limit: left on the book it sits ahead of this
-        # close in submission order, so on a recovery bar that makes its latched
-        # limit marketable it would fill first at the stale limit price and the
-        # intended close would be dropped by the stale-continuation guard. Binding
-        # alone cannot prevent this — it only retires the stop *after* the position
-        # is gone, which is too late once the stop itself is what closed it.
+        # (take-profit / signal-exit / scaled rung) — a guaranteed close next bar.
+        # Cancel the now redundant resting stop-limit: left on the book it sits
+        # ahead of this close in submission order, so on a recovery bar that makes
+        # its latched limit marketable it would fill first at the stale limit price
+        # and the intended close would be dropped by the stale-continuation guard.
+        # Binding alone cannot prevent this — it only retires the stop *after* the
+        # position is gone, which is too late once the stop itself is what closed it.
         if ctx.resting_limit_stop_id is not None:
             assert intent.style != "limit"  # excluded by _evaluate; never re-emit
             order_book.cancel(ctx.resting_limit_stop_id)
-        self._record_emission(req, intent, ctx.cur_bar, ctx.result)
 
     # ------------------------------------------------------------------
     # Sub-steps. Kept as private methods so subclasses or sibling unit
@@ -819,7 +864,7 @@ class _EngineExitDispatcher:
         cur_bar,
         *,
         exclude_resting_limit_stop: bool = False,
-        exclude_partial: bool = False,
+        exclude_scaled: bool = False,
     ) -> Optional[ExitIntent]:
         """Run the pure rule evaluator and pick the intent to act on.
 
@@ -841,11 +886,12 @@ class _EngineExitDispatcher:
         offers the next un-fired rung, so each rule already contributes at most one
         intent and the default single-trigger path applies.
 
-        ``exclude_partial`` is set by ``maybe_emit`` while the position's entry is
+        ``exclude_scaled`` is set by ``maybe_emit`` while the position's entry is
         still filling: a rung sized off the not-yet-settled ``original_qty`` would
-        under-close, so scale-outs are deferred — but a lower-priority full-position
-        exit (e.g. a stop listed after the ladder) must still be free to fire this
-        bar, so the rung is skipped rather than standing the whole bar down.
+        under-close (true even for a ``qty_fraction == 1.0`` rung), so scale-outs
+        are deferred — but a lower-priority full-position exit (e.g. a stop listed
+        after the ladder) must still be free to fire this bar, so the rung is
+        skipped rather than standing the whole bar down.
 
         Preconditions: ``tracked``/``pos`` describe the same open position
         (``pos.qty > 0``); ``cur_bar`` exposes ``high``/``low``/``close``.
@@ -874,7 +920,7 @@ class _EngineExitDispatcher:
             first_only=True,
             cursor_map=cursor_map,
             exclude_limit_style=exclude_resting_limit_stop,
-            exclude_partial=exclude_partial,
+            exclude_scaled=exclude_scaled,
         )
         return intents[0] if intents else None
 
@@ -1016,10 +1062,11 @@ class _EngineExitDispatcher:
             if intent.rule_kind == "signal_exit"
             else f"{ENGINE_EXIT_REASON_PREFIX}{intent.rule_kind}"
         )
-        if intent.is_partial:
-            # Partial scale-out: close this rung's fraction of the full opened
-            # position (``scale_in_qty`` is irrelevant — we deliberately leave the
-            # rest open). ``original_qty`` is the cumulative entry-filled qty; the
+        if intent.is_scaled_rung:
+            # Scaled rung: close this rung's fraction of the full opened position
+            # (``scale_in_qty`` is irrelevant — a true partial deliberately leaves
+            # the rest open; an emptying rung's fraction already covers it).
+            # ``original_qty`` is the cumulative entry-filled qty; the
             # caller defers the rung until the entry has fully settled, so it now
             # equals the full opened size. The ``> 0`` fallback to the live qty
             # never mis-sizes in practice: the engine's fill path always pins
@@ -1053,7 +1100,9 @@ class _EngineExitDispatcher:
                 # the run's default policy. Leave every other exit's policy unset
                 # (``None``) so the service-level ``default_unfilled_policy`` still
                 # applies to it exactly as before.
-                unfilled_policy=(UnfilledPolicy.REQUEUE_NEXT_BAR if intent.is_partial else None),
+                unfilled_policy=(
+                    UnfilledPolicy.REQUEUE_NEXT_BAR if intent.is_scaled_rung else None
+                ),
             )
         try:
             req.validate_prices()
@@ -1219,7 +1268,7 @@ class _EngineExitDispatcher:
         # Per-rung counts for scaled take-profits, additive and keyed by
         # ``"{rule_index}:{level_index}"`` so each ladder rung is attributable
         # without perturbing the byte-stable ``rule_kind`` / close ``reason``.
-        if intent.is_partial:
+        if intent.is_scaled_rung:
             level_key = scaled_level_key(intent.rule_index, intent.level_index)
             diag.scaled_take_profit_level_firings[level_key] = (
                 diag.scaled_take_profit_level_firings.get(level_key, 0) + 1

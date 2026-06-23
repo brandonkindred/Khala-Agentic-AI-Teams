@@ -501,6 +501,74 @@ def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
     assert tracker["AAA"].scaled_cursor.mapping == {}
 
 
+def _submit_competing_short(order_book: OrderBook) -> "object":
+    # An unbound, opposite-side (SHORT) strategy exit resting on the book for AAA —
+    # the kind of order the full-close cleanups must bind so it can't survive the
+    # close and later fire as a reverse entry.
+    return order_book.submit(
+        OrderRequest(
+            client_order_id="strat-tp",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=100.0,
+            order_type=OrderType.LIMIT,
+            limit_price=120.0,
+            tif=TimeInForce.GTC,
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+
+
+def test_full_close_rung_retires_competing_resting_orders() -> None:
+    # A qty_fraction == 1.0 rung empties the position, so it must run the same
+    # whole-position cleanups as a full close — here, binding a competing resting
+    # exit to the position so it retires when the close fills.
+    disp = _dispatcher(
+        exit_rules=[ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 1.0}])]
+    )
+    order_book = OrderBook()
+    competing = _submit_competing_short(order_book)
+    assert competing.working_against_entry_order_id is None
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),  # +5% target reached
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=TradingServiceResult(),
+    )
+    assert [r.qty for r in pending] == [100.0]  # 1.0 * original_qty
+    # The emptying rung bound the competing exit to this position.
+    assert competing.working_against_entry_order_id == portfolio.positions["AAA"].entry_order_id
+
+
+def test_partial_rung_does_not_retire_competing_resting_orders() -> None:
+    # Contrast: a true partial (0.5) leaves the position open, so competing exits
+    # must keep working — the cleanups must NOT run.
+    disp = _dispatcher(
+        exit_rules=[ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}])]
+    )
+    order_book = OrderBook()
+    competing = _submit_competing_short(order_book)
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=TradingServiceResult(),
+    )
+    assert [r.qty for r in pending] == [50.0]  # 0.5 * original_qty, position stays open
+    assert competing.working_against_entry_order_id is None  # left working
+
+
 # ---------------------------------------------------------------------------
 # Fill simulator: a partial MARKET close reduces qty and keeps the position open.
 # ---------------------------------------------------------------------------

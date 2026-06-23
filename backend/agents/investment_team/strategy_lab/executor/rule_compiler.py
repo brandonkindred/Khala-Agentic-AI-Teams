@@ -111,13 +111,17 @@ class ExitIntent:
     level_index: Optional[int] = None
 
     @property
-    def is_partial(self) -> bool:
-        """Whether this intent closes only PART of the position (a scaled-take-profit
-        rung scale-out) and leaves the remainder open, vs. a full-position close.
+    def is_scaled_rung(self) -> bool:
+        """Whether this intent is a scaled-take-profit LADDER RUNG.
 
-        Lets the dispatcher branch on the *semantics* of the close rather than the
-        producing rule kind, so the partial-exit path is not coupled to the literal
-        ``"scaled_take_profit"``.
+        This reflects the intent's ORIGIN, not whether it closes 100%: a rung with
+        ``qty_fraction == 1.0`` (or the final rung of a ladder summing to 1.0) is
+        still a scaled rung, so the dispatcher routes it through the scale-out
+        handler and sizes it off the ORIGINAL entry qty (and defers it while the
+        entry is still filling). The engine then decides full-vs-partial cleanups
+        from the resulting close qty vs the remaining position, not from this flag —
+        so an emptying rung still retires competing resting orders. This keeps the
+        scale-out path decoupled from the literal ``"scaled_take_profit"`` kind.
 
         Preconditions: none (reads only ``level_index``). Postconditions: ``True``
         iff ``level_index`` is set (only laddered rungs carry one).
@@ -217,7 +221,7 @@ def evaluate_exit_rules_for_position(
     first_only: bool = True,
     cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
     exclude_limit_style: bool = False,
-    exclude_partial: bool = False,
+    exclude_scaled: bool = False,
 ) -> list[ExitIntent]:
     """Triggered ``ExitIntent``\\ s for ONE open position, in spec priority order.
 
@@ -227,9 +231,10 @@ def evaluate_exit_rules_for_position(
 
     ``exclude_limit_style`` drops any limit-style stop intent — used when that stop
     already rests as a STOP_LIMIT — so the first *non-resting* rule wins in a single
-    pass, with no "collect every trigger then filter" second walk. ``exclude_partial``
-    drops any partial scale-out (scaled-take-profit rung) — used when the position's
-    entry is still filling, so a deferred rung does not pre-empt a lower-priority
+    pass, with no "collect every trigger then filter" second walk. ``exclude_scaled``
+    drops any scaled-take-profit rung (regardless of ``qty_fraction``) — used when
+    the position's entry is still filling, so a deferred rung (which must be sized
+    off the not-yet-settled original qty) does not pre-empt a lower-priority
     full-position exit (e.g. a stop) that should still fire this bar.
 
     Preconditions: ``position.qty > 0``; ``bar`` exposes ``high``/``low``/``close``
@@ -238,8 +243,8 @@ def evaluate_exit_rules_for_position(
     un-fired rung.
     Postconditions: returns the triggered intents in spec order — at most one when
     ``first_only`` — each ``ScaledTakeProfitRule`` contributing at most its cursor
-    rung; limit-style intents omitted when ``exclude_limit_style`` and partial
-    scale-outs omitted when ``exclude_partial``.
+    rung; limit-style intents omitted when ``exclude_limit_style`` and scaled rungs
+    omitted when ``exclude_scaled``.
     """
     intents: list[ExitIntent] = []
     for idx, rule in enumerate(rules):
@@ -248,7 +253,7 @@ def evaluate_exit_rules_for_position(
             continue
         if exclude_limit_style and intent.style == "limit":
             continue
-        if exclude_partial and intent.is_partial:
+        if exclude_scaled and intent.is_scaled_rung:
             continue
         intents.append(intent)
         if first_only:

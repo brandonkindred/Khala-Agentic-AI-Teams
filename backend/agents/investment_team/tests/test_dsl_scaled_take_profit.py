@@ -24,12 +24,15 @@ from investment_team.strategy_lab.executor.rule_compiler import (
     BarSnapshot,
     PositionState,
     evaluate_exit_rules,
+    evaluate_exit_rules_for_position,
 )
 from investment_team.strategy_lab.spec_dsl import (
     ExitRuleAdapter,
     ScaledTakeProfitRule,
     StopLossRule,
     format_rules_for_prompt,
+    is_full_position_exit,
+    is_partial_exit,
 )
 
 
@@ -167,6 +170,50 @@ def test_ladder_offers_only_cursor_rung() -> None:
     assert [(i.rule_kind, i.level_index, i.qty_fraction) for i in intents] == [
         ("scaled_take_profit", 0, 0.5),
     ]
+
+
+def test_full_close_ladder_is_classified_as_full_position_exit() -> None:
+    # A ladder whose rungs sum to 1.0 fully closes the position over its rungs, so
+    # the rule-level classifiers treat it as a full-position exit, not partial —
+    # whether it is a single 1.0 rung or several rungs summing to 1.0.
+    single = _ladder(levels=[{"pct": 0.05, "qty_fraction": 1.0}])
+    multi = _ladder(levels=[{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.5}])
+    for full in (single, multi):
+        assert is_full_position_exit(full) is True
+        assert is_partial_exit(full) is False
+    # A ladder summing to < 1.0 leaves a residual → partial, not full.
+    partial = _ladder(levels=[{"pct": 0.05, "qty_fraction": 0.5}])
+    assert is_full_position_exit(partial) is False
+    assert is_partial_exit(partial) is True
+
+
+def test_full_close_rung_intent_is_still_a_scaled_rung() -> None:
+    # A qty_fraction == 1.0 rung is still a SCALED rung at the intent level (it flows
+    # through the scale-out path and is sized off the original qty); the engine, not
+    # this flag, decides full-vs-partial cleanups from the resulting close qty.
+    rule = _ladder(levels=[{"pct": 0.05, "qty_fraction": 1.0}])
+    bar = BarSnapshot(high=106.0, low=100.0, close=105.0)  # +5% reached
+    [intent] = evaluate_exit_rules([rule], {"AAA": _long()}, {"AAA": bar})
+    assert intent.is_scaled_rung is True
+    assert intent.qty_fraction == 1.0
+
+
+def test_exclude_scaled_drops_scaled_rungs_but_keeps_full_exits() -> None:
+    # exclude_scaled defers ALL scaled rungs (incl. a 1.0 rung — it must be sized off
+    # the settled original qty), but never drops a non-scaled full-position exit.
+    bar = BarSnapshot(high=106.0, low=96.0, close=98.0)  # +5% rung AND -3% stop
+    pos = _long()
+    for ladder in (
+        _ladder(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),  # partial
+        _ladder(levels=[{"pct": 0.05, "qty_fraction": 1.0}]),  # full-close rung
+    ):
+        rules = [ladder, StopLossRule(pct=0.03)]
+        # Without exclusion the higher-priority rung (rule 0) wins.
+        kept = evaluate_exit_rules_for_position(rules, "AAA", pos, bar)
+        assert kept[0].is_scaled_rung is True
+        # With exclude_scaled the rung is skipped and the stop (rule 1) fires.
+        deferred = evaluate_exit_rules_for_position(rules, "AAA", pos, bar, exclude_scaled=True)
+        assert [i.rule_kind for i in deferred] == ["stop_loss"]
 
 
 def test_cursor_selects_the_next_unfired_rung() -> None:
