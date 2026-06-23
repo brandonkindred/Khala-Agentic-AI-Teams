@@ -357,6 +357,33 @@ def _parse_verdicts(data: object, count: int) -> Dict[int, _Verdict]:
     return verdicts
 
 
+def _code_fence_for(content: str) -> str:
+    """Return a backtick fence that ``content`` cannot close prematurely.
+
+    A run of backticks inside the inlined file body (common in markdown, docs,
+    or docstrings that themselves contain ``` fences) would otherwise close the
+    surrounding code block early and garble the prompt's structure. CommonMark
+    closes a fenced block only on a fence of at least as many backticks as the
+    opener, so a fence one backtick longer than the longest run in ``content``
+    is immune.
+
+    Postconditions:
+        - Returns a string of at least three backticks (the usual fence).
+        - Its length strictly exceeds the longest run of consecutive backticks
+          in ``content``, so wrapping ``content`` in this fence cannot be
+          terminated from inside.
+    """
+    longest = 0
+    run = 0
+    for ch in content:
+        if ch == "`":
+            run += 1
+            longest = max(longest, run)
+        else:
+            run = 0
+    return "`" * max(3, longest + 1)
+
+
 def _build_group_prompt(
     index: CodebaseIndex,
     file_path: str,
@@ -401,10 +428,11 @@ def _build_group_prompt(
     body = index.read_file(file_path)
     inlined = body[:max_inline_chars]
     truncated = len(body) > max_inline_chars
+    fence = _code_fence_for(inlined)
     parts.append(f"**Full content of `{file_path}` (the file the findings below are about):**")
-    parts.append("```")
+    parts.append(fence)
     parts.append(inlined)
-    parts.append("```")
+    parts.append(fence)
     if truncated:
         parts.append(
             f"(Only the first {max_inline_chars} characters of `{file_path}` are shown above; "

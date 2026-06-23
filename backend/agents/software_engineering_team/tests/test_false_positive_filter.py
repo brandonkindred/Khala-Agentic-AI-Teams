@@ -24,6 +24,7 @@ from code_review_agent.false_positive_filter import (
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
+    _code_fence_for,
     _coerce_verdict,
     _parse_verdicts,
     filter_false_positives,
@@ -307,6 +308,27 @@ def test_group_prompt_truncates_large_manifest() -> None:
     idx = CodebaseIndex(files=files)
     prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
     assert "and 5 more (call list_files())" in prompt
+
+
+def test_code_fence_for_grows_past_backtick_runs() -> None:
+    """``_code_fence_for`` returns a fence longer than the longest backtick run in the content."""
+    assert _code_fence_for("plain code, no backticks") == "```"
+    assert _code_fence_for("a ``` fence inside") == "````"  # 3 → 4
+    assert _code_fence_for("nested ````` run") == "``````"  # 5 → 6
+    # A bare run with no other content is still escaped.
+    assert _code_fence_for("```") == "````"
+
+
+def test_group_prompt_uses_safe_fence_for_backtick_content() -> None:
+    """A file body containing a ``` fence is wrapped in a longer fence so it cannot close early."""
+    idx = CodebaseIndex(files={"app/doc.md": "before\n```python\nx = 1\n```\nafter\n"})
+    prompt = _build_group_prompt(
+        idx, "app/doc.md", [_issue(file_path="app/doc.md")], _input(), 1000
+    )
+    # The wrapping fence is four backticks (one longer than the body's run); the
+    # body's own ``` survives intact between them.
+    assert "````" in prompt
+    assert "```python" in prompt
 
 
 # --------------------------------------------------------------------------- filter behavior
