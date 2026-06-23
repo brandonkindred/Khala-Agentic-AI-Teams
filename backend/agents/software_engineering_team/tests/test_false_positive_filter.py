@@ -42,6 +42,7 @@ def _issue(
     category: str = "logic",
     suggestion: str = "define foo",
 ) -> CodeReviewIssue:
+    """Build a ``CodeReviewIssue`` with test defaults; override any field by kwarg."""
     return CodeReviewIssue(
         severity=severity,
         category=category,
@@ -53,6 +54,7 @@ def _issue(
 
 
 def _input(files: Optional[Dict[str, str]] = None, **overrides: Any) -> CodeReviewInput:
+    """Build a ``CodeReviewInput`` with a default one-file submission and overrides."""
     base: Dict[str, Any] = {
         "files": files if files is not None else {"app/main.py": "def bar():\n    return foo()\n"},
         "task_description": "wire up foo",
@@ -227,6 +229,10 @@ def test_coerce_verdict_variants() -> None:
     # explicit false + high confidence → false positive (drop)
     idx, v = _coerce_verdict({"index": 2, "is_real_issue": False, "confidence": "high"})
     assert idx == 2 and v.is_false_positive is True
+    # explicit false + medium confidence → false positive (the prompt accepts
+    # "medium" as a confident drop, so a regression to "high"-only must fail here)
+    _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": "medium"})
+    assert v.is_false_positive is True
     # false but low confidence → keep
     _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": "low"})
     assert v.is_false_positive is False
@@ -306,6 +312,57 @@ def test_filter_skips_when_no_readable_files() -> None:
     issues = [_issue()]
     out = filter_false_positives(_RaisingStub(), inp, issues)
     assert out == issues
+
+
+def test_filter_keeps_unresolved_path_without_llm_call() -> None:
+    """A finding whose cited file is absent from the submission is kept WITHOUT a
+    verification call — the verifier would have no primary file to read."""
+
+    class CountingStub(DummyLLMClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self.verify_calls = 0
+
+        def complete_json(self, prompt: str, **kwargs: Any) -> Dict[str, Any]:  # type: ignore[override]
+            if "verdicts" in prompt.lower():
+                self.verify_calls += 1
+                return {"verdicts": [{"index": 0, "is_real_issue": False, "confidence": "high"}]}
+            return super().complete_json(prompt, **kwargs)
+
+    stub = CountingStub()
+    # Submission has app/main.py; the finding cites a file that isn't there.
+    ghost = _issue(file_path="ghost.py")
+    out = filter_false_positives(stub, _input(files={"app/main.py": "x = 1\n"}), [ghost])
+    assert out == [ghost]
+    assert stub.verify_calls == 0  # no wasted LLM round on an unreadable file
+
+
+def test_filter_verifies_suffix_matched_path() -> None:
+    """A finding citing a bare name that uniquely resolves by suffix is still
+    verified (and droppable) — the unresolved-path skip must not over-skip."""
+    inp = _input(files={"app/services/main.py": "x = 1\n"})
+    issue = _issue(file_path="main.py")  # resolves to app/services/main.py
+    stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}])
+    out = filter_false_positives(stub, inp, [issue])
+    assert out == []  # verified and dropped, not skipped
+
+
+def test_resolve_path_exact_suffix_and_misses() -> None:
+    idx = CodebaseIndex(files={"app/services/main.py": "x", "a/x.py": "y", "b/x.py": "z"})
+    assert idx.resolve_path("app/services/main.py") == "app/services/main.py"  # exact
+    assert idx.resolve_path("main.py") == "app/services/main.py"  # unique suffix
+    assert idx.resolve_path("x.py") is None  # ambiguous → None
+    assert idx.resolve_path("nope.py") is None  # absent → None
+    assert idx.resolve_path("  ") is None  # blank → None
+    # existing-codebase pseudo-path resolves only when an excerpt exists
+    assert (
+        CodebaseIndex(files={"a": "x"}).resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH) is None
+    )
+    with_excerpt = CodebaseIndex(files={"a": "x"}, existing_codebase="old")
+    assert (
+        with_excerpt.resolve_path(CodebaseIndex.EXISTING_CODEBASE_PATH)
+        == CodebaseIndex.EXISTING_CODEBASE_PATH
+    )
 
 
 def test_filter_removes_confirmed_false_positive() -> None:

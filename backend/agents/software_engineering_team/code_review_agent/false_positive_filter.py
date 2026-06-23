@@ -127,6 +127,33 @@ class CodebaseIndex:
             paths.append(self.EXISTING_CODEBASE_PATH)
         return paths
 
+    def resolve_path(self, path: str) -> Optional[str]:
+        """Resolve a cited path to a canonical readable key, or None.
+
+        Shared by ``read_file`` (to locate a hit) and the filter (to decide
+        whether a finding's file is even readable before spending a
+        verification call on it).
+
+        Postconditions:
+            - Returns the ``<existing codebase>`` pseudo-path when the cited path
+              names it and a non-blank excerpt exists.
+            - Returns an exact file key, or the sole suffix match (``main.py`` →
+              ``app/main.py``).
+            - Returns None for a blank, absent, or ambiguous path — the verifier
+              would have no single primary file to read, so the caller keeps the
+              finding rather than verify it.
+        """
+        key = (path or "").strip()
+        if not key:
+            return None
+        if key == self.EXISTING_CODEBASE_PATH:
+            return self.EXISTING_CODEBASE_PATH if self.existing_codebase.strip() else None
+        if key in self.files:
+            return key
+        normalized = key.lstrip("./")
+        suffix_hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
+        return suffix_hits[0] if len(suffix_hits) == 1 else None
+
     def read_file(self, path: str) -> str:
         """Return the full content of ``path``, resolving near-misses.
 
@@ -143,15 +170,17 @@ class CodebaseIndex:
         key = (path or "").strip()
         if not key:
             return "Error: no path provided."
+        resolved = self.resolve_path(key)
+        if resolved == self.EXISTING_CODEBASE_PATH:
+            return self.existing_codebase
+        if resolved is not None:
+            return self.files[resolved]
+        # Resolution failed — give the tool a message that distinguishes an
+        # ambiguous citation from an absent one (and a missing excerpt).
         if key == self.EXISTING_CODEBASE_PATH:
-            return self.existing_codebase or "Error: no existing-codebase excerpt available."
-        if key in self.files:
-            return self.files[key]
-        # Suffix match: a unique file whose path ends with the cited fragment.
+            return "Error: no existing-codebase excerpt available."
         normalized = key.lstrip("./")
         suffix_hits = [p for p in self.files if p == normalized or p.endswith("/" + normalized)]
-        if len(suffix_hits) == 1:
-            return self.files[suffix_hits[0]]
         if len(suffix_hits) > 1:
             return (
                 f"Error: path '{path}' is ambiguous; it matches "
@@ -487,11 +516,22 @@ def filter_false_positives(
     model = _resolve_model(llm)
     max_inline_chars = compute_code_review_map_chunk_chars(llm)
 
-    # Group findings by their cited file so each verification call shares one
-    # file's context (and can still read any other file via the tools).
+    # Group findings by the resolved canonical path of their cited file so each
+    # verification call shares one real file's context (and can still read any
+    # other file via the tools). A finding whose cited file is absent from the
+    # submission (or is ambiguous) is kept without a verification call: the
+    # verifier would have no primary file to read, so the call would inline an
+    # error string, waste an LLM round, and still keep the finding (fail-safe).
     groups: "OrderedDict[str, List[CodeReviewIssue]]" = OrderedDict()
     for issue in verifiable:
-        groups.setdefault(issue.file_path, []).append(issue)
+        resolved = index.resolve_path(issue.file_path)
+        if resolved is None:
+            logger.debug(
+                "FalsePositiveFilter: keeping finding for unresolved path %r (not in submission)",
+                issue.file_path,
+            )
+            continue
+        groups.setdefault(resolved, []).append(issue)
 
     removed: set[int] = set()
     for file_path, group in groups.items():
