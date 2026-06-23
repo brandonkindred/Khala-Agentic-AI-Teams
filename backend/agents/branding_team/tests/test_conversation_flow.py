@@ -1,7 +1,16 @@
 """Unit tests for the conversation-flow helpers in ``branding_team.api.main``.
 
-Covers the mission-fingerprint short-circuit in ``_run_orchestrator_if_ready``
-without needing a live LLM (the orchestrator is monkeypatched).
+Covers the mission short-circuit in ``_run_orchestrator_if_ready`` without
+needing a live LLM (the orchestrator is monkeypatched).
+
+These deliberately exercise the private ``_run_orchestrator_if_ready`` directly:
+the short-circuit is a self-contained, deterministic decision (run vs. reuse the
+prior output) whose only observable effect through the chat endpoints is "was
+the orchestrator invoked". Driving it through the endpoint would require a live
+(or heavily mocked) LLM assistant and the full request stack to assert that one
+internal call count, which tests far more than this unit and is covered
+separately by the integration tests. The function's contract (inputs/return) is
+stable, so testing it directly is the cheaper, more precise check.
 """
 
 from __future__ import annotations

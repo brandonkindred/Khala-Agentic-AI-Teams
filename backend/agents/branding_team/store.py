@@ -213,7 +213,9 @@ class BrandingStore:
                 (unique_ids,),
             )
             rows = cur.fetchall()
-        return {r["id"]: Brand.model_validate(r["data"]).name for r in rows}
+        # Read the name straight out of the JSONB document — no need to build
+        # and validate a full Brand model just to pull one field.
+        return {r["id"]: r["data"].get("name") for r in rows}
 
     @timed_query(store=_STORE, op="list_brands_for_client")
     def list_brands_for_client(

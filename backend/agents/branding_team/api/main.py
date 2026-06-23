@@ -671,18 +671,24 @@ def _submit_brand_run(
         brand_id=brand_id,
         current_phase=target_phase.value if target_phase else None,
     )
-    _run_executor.submit(
-        _run_branding_background,
-        job_id,
-        brand.mission,
-        human_review,
-        payload.brand_checks,
-        client_id,
-        brand_id,
-        payload.include_market_research,
-        payload.include_design_assets,
-        target_phase,
-    )
+    try:
+        _run_executor.submit(
+            _run_branding_background,
+            job_id,
+            brand.mission,
+            human_review,
+            payload.brand_checks,
+            client_id,
+            brand_id,
+            payload.include_market_research,
+            payload.include_design_assets,
+            target_phase,
+        )
+    except RuntimeError:
+        # Executor was shut down (e.g. app teardown) — fail the job row and
+        # return 503 rather than letting the RuntimeError surface as a 500.
+        update_job(job_id, status=JOB_STATUS_FAILED, error="run executor unavailable")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
@@ -1066,6 +1072,14 @@ def _auto_create_brand_from_conversation(
         On success the conversation is attached to the new brand, the brand
         records the conversation id, and any ``output`` is appended as the
         first version. Returns the new brand id, or None if creation failed.
+
+    Note:
+        The steps run as independent statements (each store call takes its own
+        ``shared_postgres`` connection), so this sequence is NOT atomic: if a
+        later step raises, the brand may already exist while the conversation
+        link or first version is missing. Acceptable for the single-user
+        assistant flow today; making it transactional requires cross-store
+        connection sharing and is tracked as a follow-up.
     """
     client_id = _ensure_default_client()
     brand = branding_store.create_brand(

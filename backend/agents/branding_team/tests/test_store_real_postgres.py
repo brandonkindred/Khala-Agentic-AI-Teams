@@ -31,12 +31,19 @@ pytestmark = [pytest.mark.integration, pytest.mark.real_postgres]
 
 
 @pytest.fixture(scope="module", autouse=True)
-def _branding_schema() -> None:
+def _branding_schema():
     if not os.environ.get("POSTGRES_HOST"):
         pytest.skip("real_postgres tests require POSTGRES_HOST")
-    from shared_postgres import register_team_schemas
+    from shared_postgres import get_conn, register_team_schemas
 
     register_team_schemas(BRANDING_SCHEMA)
+    yield
+    # Don't leave test artifacts behind in a shared/CI database.
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            "TRUNCATE branding_conv_messages, branding_conversations, "
+            "branding_brands, branding_clients, branding_sessions"
+        )
 
 
 def _mission(name: str) -> BrandingMission:

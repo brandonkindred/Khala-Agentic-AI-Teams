@@ -220,15 +220,13 @@ def test_list_clients_pagination(fake_pg: dict) -> None:
 
 
 def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
+    """Both list methods reject non-positive limits and negative offsets."""
     store = BrandingStore()
-    with pytest.raises(ValueError):
-        store.list_clients(limit=0)
-    with pytest.raises(ValueError):
-        store.list_clients(limit=-1)
-    with pytest.raises(ValueError):
-        store.list_clients(offset=-1)
-    with pytest.raises(ValueError):
-        store.list_brands_for_client("client_x", limit=0)
+    for bad in (dict(limit=0), dict(limit=-1), dict(offset=-1)):
+        with pytest.raises(ValueError):
+            store.list_clients(**bad)
+        with pytest.raises(ValueError):
+            store.list_brands_for_client("client_x", **bad)
 
 
 def test_list_brands_for_client_pagination(fake_pg: dict) -> None:

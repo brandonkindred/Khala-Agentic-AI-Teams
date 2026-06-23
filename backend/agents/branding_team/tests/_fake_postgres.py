@@ -1,4 +1,18 @@
-"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by branding tests."""
+"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by branding tests.
+
+Matching contract (read before changing store SQL):
+    ``_FakeCursor.execute`` normalizes each statement with
+    ``" ".join(sql.split()).lower()`` and dispatches by ``startswith`` / substring.
+    This is deliberately simple and therefore *coupled to the exact SQL the
+    stores emit* — a wording, column-order, or clause change in a store query
+    must be mirrored here or the cursor raises ``AssertionError("unexpected
+    SQL")``. The matcher is intentionally NOT a SQL parser; that fragility is
+    accepted because the authoritative correctness check is
+    ``tests/test_store_real_postgres.py`` (the ``real_postgres`` marker), which
+    runs the real queries against a live Postgres in the integration job. Keep
+    the two in sync: when you add/alter store SQL, update a handler here and add
+    real-Postgres coverage there.
+"""
 
 from __future__ import annotations
 
