@@ -87,7 +87,7 @@ def _patch_synthesis(
     )
     monkeypatch.setattr(
         "investment_team.strategy_lab.agents.code_synthesis.get_strands_model",
-        lambda role: object(),
+        lambda role, **_kwargs: object(),
     )
     return agent
 

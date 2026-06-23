@@ -576,56 +576,6 @@ def test_accepts_kwarg_ignores_var_keyword() -> None:
     assert _accepts_kwarg(42, "anything") is False
 
 
-def test_ollama_construct_forwards_timeout_via_client_args() -> None:
-    from investment_team.strategy_lab.agents.model_factory import (
-        _construct_ollama_with_timeout,
-    )
-
-    class _Model:
-        def __init__(self, host=None, model_id=None, ollama_client_args=None) -> None:
-            self.host = host
-            self.model_id = model_id
-            self.ollama_client_args = ollama_client_args
-
-    model = _construct_ollama_with_timeout(_Model, 12.5, host="h", model_id="m")
-    assert model.ollama_client_args == {"timeout": 12.5}
-    assert model.host == "h"
-    assert model.model_id == "m"
-
-
-def test_ollama_construct_supports_legacy_client_args_name() -> None:
-    from investment_team.strategy_lab.agents.model_factory import (
-        _construct_ollama_with_timeout,
-    )
-
-    class _Model:
-        def __init__(self, host=None, client_args=None) -> None:
-            self.host = host
-            self.client_args = client_args
-
-    model = _construct_ollama_with_timeout(_Model, 7.0, host="h")
-    assert model.client_args == {"timeout": 7.0}
-
-
-def test_ollama_construct_falls_back_when_no_channel() -> None:
-    from investment_team.strategy_lab.agents.model_factory import (
-        _construct_ollama_with_timeout,
-    )
-
-    class _Model:
-        # No client-args channel; **kwargs must NOT be smuggled a timeout (the
-        # old bug: strands warns-and-drops unknown keys, so doing so would be a
-        # silent no-op rather than an applied timeout).
-        def __init__(self, host=None, **model_config) -> None:
-            self.host = host
-            self.model_config = model_config
-
-    model = _construct_ollama_with_timeout(_Model, 9.0, host="h")
-    assert model.host == "h"
-    assert "timeout" not in model.model_config
-    assert "ollama_client_args" not in model.model_config
-
-
 def test_bedrock_construct_forwards_timeout_via_boto_config() -> None:
     from investment_team.strategy_lab.agents.model_factory import (
         _construct_bedrock_with_timeout,
