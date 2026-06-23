@@ -1,4 +1,5 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -53,6 +54,7 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
 export class UserProfileComponent implements OnInit {
   private readonly api = inject(UserProfileApiService);
   private readonly fb = inject(FormBuilder);
+  private readonly destroyRef = inject(DestroyRef);
 
   loading = false;
   saving = false;
@@ -79,14 +81,20 @@ export class UserProfileComponent implements OnInit {
    *
    * Preconditions: none.
    * Postconditions: on success `form` is patched and `groups`/`totalAssociations`/
-   * `integrations` reflect the response; on an HTTP error, or a 2xx response whose
-   * shape is malformed (missing `profile`/`associations`/`integrations`), `error`
-   * is set and the others are left unchanged. `loading` is false either way.
+   * `integrations` reflect the response. On a 2xx response whose shape is
+   * malformed (missing `profile`/`associations`/`integrations`), `error` is set
+   * and `groups`/`integrations`/`totalAssociations` are cleared so a broken
+   * contract can't leave stale artifacts on screen. On an HTTP error, `error` is
+   * set and any previously loaded data is left as-is (a transient blip keeps the
+   * last-known-good view). `loading` is false either way.
    */
   load(): void {
     this.loading = true;
     this.error = null;
-    this.api.getOverview().subscribe({
+    this.api
+      .getOverview()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (overview) => {
         // A 2xx response with a malformed body slips past the error handler, so
         // guard the shape before destructuring rather than throw deep in render.
@@ -141,6 +149,7 @@ export class UserProfileComponent implements OnInit {
         email: value.email ?? '',
         bio: value.bio ?? '',
       })
+      .pipe(takeUntilDestroyed(this.destroyRef))
       .subscribe({
         next: () => {
           this.saving = false;

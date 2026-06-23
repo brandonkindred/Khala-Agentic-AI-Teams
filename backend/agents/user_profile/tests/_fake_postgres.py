@@ -2,6 +2,13 @@
 
 Handles exactly the SQL emitted by ``user_profile.store`` so the unit tests
 run without a real Postgres (matching the default, non-integration suite).
+
+Coupling note: ``_FakeCursor.execute`` dispatches by normalizing and matching
+the store's SQL text, so it is deliberately tied to those exact statements. If
+you change a query's column list, clause order, or wording in ``store.py``,
+update the matching branch here in lockstep — a mismatch surfaces as a test
+failure here, not a store bug. This trade buys a fast, dependency-free default
+suite; the Postgres-backed integration tests exercise the real SQL.
 """
 
 from __future__ import annotations
