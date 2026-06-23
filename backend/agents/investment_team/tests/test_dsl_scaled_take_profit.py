@@ -72,6 +72,8 @@ def _short(entry_price: float = 100.0) -> PositionState:
 
 
 def test_valid_ladder_round_trips_through_adapter() -> None:
+    """A valid ScaledTakeProfitRule survives a JSON round-trip through the
+    discriminated-union ExitRuleAdapter, preserving kind and every rung."""
     rule = _ladder()
     restored = ExitRuleAdapter.validate_json(rule.model_dump_json())
     assert isinstance(restored, ScaledTakeProfitRule)
@@ -83,6 +85,8 @@ def test_valid_ladder_round_trips_through_adapter() -> None:
 
 
 def test_fractions_summing_to_exactly_one_are_accepted() -> None:
+    """The Σ qty_fraction ≤ 1.0 validation accepts the boundary: rungs summing to
+    exactly 1.0 (a full-close ladder) are valid."""
     rule = _ladder(
         levels=[
             {"pct": 0.05, "qty_fraction": 0.5},
@@ -94,6 +98,7 @@ def test_fractions_summing_to_exactly_one_are_accepted() -> None:
 
 
 def test_fractions_summing_above_one_are_rejected() -> None:
+    """Rungs whose qty_fraction values sum to > 1.0 (would over-close) are rejected."""
     with pytest.raises(ValidationError, match="sum to <= 1.0"):
         _ladder(
             levels=[
@@ -104,6 +109,7 @@ def test_fractions_summing_above_one_are_rejected() -> None:
 
 
 def test_non_increasing_pct_is_rejected() -> None:
+    """Rungs must be a well-ordered ladder: a descending pct sequence is rejected."""
     with pytest.raises(ValidationError, match="strictly increasing pct"):
         _ladder(
             levels=[
@@ -114,6 +120,7 @@ def test_non_increasing_pct_is_rejected() -> None:
 
 
 def test_equal_pct_rungs_are_rejected() -> None:
+    """Strictly increasing means equal adjacent pct values are rejected too."""
     with pytest.raises(ValidationError, match="strictly increasing pct"):
         _ladder(
             levels=[
@@ -124,6 +131,7 @@ def test_equal_pct_rungs_are_rejected() -> None:
 
 
 def test_empty_levels_rejected() -> None:
+    """A ladder needs at least one rung: an empty levels list is rejected (min_length=1)."""
     with pytest.raises(ValidationError):
         ScaledTakeProfitRule(levels=[])
 
@@ -137,11 +145,13 @@ def test_empty_levels_rejected() -> None:
     ],
 )
 def test_per_field_bounds_rejected(level: dict) -> None:
+    """Per-rung field bounds are enforced: pct > 0 and 0 < qty_fraction <= 1.0."""
     with pytest.raises(ValidationError):
         ScaledTakeProfitRule(levels=[level])
 
 
 def test_non_finite_pct_rejected() -> None:
+    """The _SpecNode non-finite-float guard rejects an infinite rung pct."""
     with pytest.raises(ValidationError):
         ScaledTakeProfitRule(levels=[{"pct": math.inf, "qty_fraction": 0.5}])
 
@@ -152,6 +162,7 @@ def test_non_finite_pct_rejected() -> None:
 
 
 def test_format_rule_renders_each_rung() -> None:
+    """_format_rule renders a ladder as prose naming each rung's fraction and target."""
     assert format_rules_for_prompt([_ladder()]) == "scaled take profit (50% at 5%, 30% at 10%)"
 
 

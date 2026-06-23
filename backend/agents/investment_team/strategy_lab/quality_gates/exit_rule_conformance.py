@@ -123,9 +123,7 @@ class ExitRuleConformanceGate(GateResultsMixin):
             ]
             for idx, rule in scaled_take_profits:
                 results.append(
-                    self._check_scaled_take_profit(
-                        idx, rule, trades, exit_rules, firings, level_firings
-                    )
+                    self._check_scaled_take_profit(idx, rule, trades, exit_rules, level_firings)
                 )
 
             # ---- SignalExitRule — engine-enforced via _EngineExitDispatcher ----
@@ -368,7 +366,6 @@ class ExitRuleConformanceGate(GateResultsMixin):
         rule: ScaledTakeProfitRule,
         trades: Sequence[TradeRecord],
         all_rules: Sequence[ExitRule],
-        firings: Mapping[str, int],
         level_firings: Mapping[str, int],
     ) -> QualityGateResult:
         """Sanity + per-rung telemetry for a laddered take-profit.

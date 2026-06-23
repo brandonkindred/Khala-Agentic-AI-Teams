@@ -401,14 +401,16 @@ class _TrackedPosition:
         own symbol (it lives in a ``{symbol: tracker}`` map and is only ever looked
         up by that key, then ``snapshot``-ed with the same key — see ``_evaluate``),
         so the match is a caller guarantee enforced by that single lookup site.
+        ``symbol`` is (re)written onto the view on EVERY call — including the reuse
+        path — so the returned view can never carry a stale symbol from a prior bar
+        even if this precondition were ever violated.
         Postconditions: returns a :class:`_PositionStateView` (structurally a
-        ``PositionState``) whose mutable fields (``qty``, watermarks, and
-        ``entry_price``) reflect this bar — the SAME instance across bars, so the
-        hot path allocates nothing after the first call. ``symbol``/``side`` are
-        fixed for the tracker's life; ``entry_price`` is NOT (``Portfolio.extend``
-        refreshes it to the weighted-average on a scale-in / partial-fill
-        continuation, mirrored onto the tracker by ``_update_position_tracker``),
-        so it is re-read here every bar.
+        ``PositionState``) whose fields (``symbol``, ``qty``, watermarks, and
+        ``entry_price``) reflect this call — the SAME instance across bars, so the
+        hot path allocates nothing after the first call. ``side`` is fixed for the
+        tracker's life; ``entry_price`` is NOT (``Portfolio.extend`` refreshes it to
+        the weighted-average on a scale-in / partial-fill continuation, mirrored onto
+        the tracker by ``_update_position_tracker``), so it is re-read here every bar.
         """
         snap = self._snap
         if snap is None:
@@ -421,6 +423,7 @@ class _TrackedPosition:
                 low_since_entry=self.low_since_entry,
             )
             return self._snap
+        snap.symbol = symbol
         snap.qty = qty
         snap.entry_price = self.entry_price
         snap.high_since_entry = self.high_since_entry
@@ -502,6 +505,12 @@ class _EngineExitDispatcher:
       ``c`` prefix.
 
     Empty ``exit_rules`` makes :meth:`maybe_emit` a no-op.
+
+    ``@dataclass`` is used only for its generated ``__init__`` — it injects the
+    run-scoped fields below (``exit_rules`` / ``engine_exit_bindings`` / ``views``)
+    in one place rather than a hand-written constructor. This is a behavioural
+    service class, not a pure data container; the decorator is a constructor
+    convenience, nothing more.
     """
 
     exit_rules: Sequence[ExitRule]
@@ -658,6 +667,10 @@ class _EngineExitDispatcher:
         # pending, so by the time a later rung fires every earlier rung has already
         # filled and reduced ``pos.qty``. (A live venue with delayed fills could see
         # an earlier rung still unfilled here; that is out of scope for the backtest.)
+        #
+        # Both ``req.qty`` and ``ctx.pos.qty`` are ABSOLUTE quantities (the position's
+        # side is tracked separately via ``tracked.side`` / ``close_side``), so this
+        # "rung empties the position" comparison holds identically for longs and shorts.
         if req.qty >= ctx.pos.qty * (1.0 - _FULL_CLOSE_QTY_REL_TOL):
             self._retire_orders_against_closed_position(intent, ctx)
         self._record_emission(req, intent, ctx.cur_bar, ctx.result)
@@ -900,7 +913,7 @@ class _EngineExitDispatcher:
         sym: str,
         tracked: _TrackedPosition,
         pos: Position,
-        cur_bar,
+        cur_bar: Any,  # structurally a bar exposing high/low/close — see evaluate_exit_rules_for_position
         *,
         exclude_resting_limit_stop: bool = False,
         exclude_scaled: bool = False,
@@ -1118,6 +1131,17 @@ class _EngineExitDispatcher:
             qty = intent.qty_fraction * base
         else:
             qty = pos.qty + scale_in_qty
+        # A scaled rung is always a market scale-out (``_intent_for_rule`` pins
+        # style="market"), so it must never take the resting STOP_LIMIT path below:
+        # that path has no REQUEUE_NEXT_BAR and would strand a participation-capped
+        # rung remainder (a rung fires at most once and cannot re-emit). Fail fast if
+        # a future limit-style scaled rule kind ever breaks this invariant.
+        if (
+            intent.is_scaled_rung and intent.style == "limit"
+        ):  # pragma: no cover - scaled rungs are market
+            raise ValueError(
+                "scaled rungs must be market orders; the limit path has no rung requeue"
+            )
         if intent.style == "limit":
             req = self._build_stop_limit_close(intent, close_side, qty, reason)
         else:
@@ -1205,6 +1229,14 @@ class _EngineExitDispatcher:
         """Bind any unbound opposite-side resting orders to the position
         so they retire when the engine close removes the position.
 
+        Precondition (caller's responsibility): the emission that triggered this
+        is a WHOLE-position close — a full exit or an emptying scaled rung. It must
+        NOT be called for a true partial scale-out (which leaves the position, and
+        its competing orders, working). The sole caller,
+        :meth:`_retire_orders_against_closed_position`, enforces this; the dispatch
+        in :meth:`_emit_partial_scale_out` only invokes that cleanup once a rung's
+        close covers the whole remaining qty.
+
         Without this, an unbound GTC/limit strategy exit
         (``cumulative_filled_qty==0`` AND
         ``working_against_entry_order_id is None``) would survive the
@@ -1272,6 +1304,11 @@ class _EngineExitDispatcher:
         bar's ``pending`` snapshot (``po.order_id == pos.entry_order_id`` — the
         strategy can't reuse an engine-issued order_id, and same-side new strategy
         entries have different order_ids); each match is cancelled on ``order_book``.
+
+        Precondition (caller's responsibility): invoked only for a WHOLE-position
+        close (full exit or emptying rung), never for a true partial scale-out —
+        a partial must leave its entry continuation working. Enforced by the sole
+        caller, :meth:`_retire_orders_against_closed_position`.
         """
         for po in self._entry_continuations(pos, pending):
             order_book.cancel(po.order_id)

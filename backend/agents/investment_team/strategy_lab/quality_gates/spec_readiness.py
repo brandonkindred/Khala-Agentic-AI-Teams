@@ -660,7 +660,8 @@ class SpecReadinessGate(GateResultsMixin):
 
         Preconditions: ``ctx.spec`` is a :class:`StrategySpec` (its ``exit_rules``
         is the authored exit list).
-        Postconditions: returns a tuple of :class:`QualityGateResult` — a single
+        Postconditions: returns an iterable (concretely a tuple) of
+        :class:`QualityGateResult` — a single
         critical when there are no exit rules, when none is of an engine-closable
         kind (``signal_exit`` / ``stop_loss`` / ``take_profit`` /
         ``scaled_take_profit``), or when the only exits are scaled ladders summing
