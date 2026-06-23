@@ -6,6 +6,14 @@ is registered from the team's FastAPI lifespan.
 
 Every public method is wrapped in ``@timed_query`` so slow reads and
 writes surface as structured log lines.
+
+Note for maintainers:
+    The unit tests run against an in-memory fake (``tests/_fake_postgres.py``)
+    that matches the SQL emitted here by prefix. When you change or add SQL in
+    this module, update that fake's handlers and the ``real_postgres``-marked
+    tests in ``tests/test_store_real_postgres.py`` (which run the same SQL
+    against a live Postgres in CI) so the fake can't drift into emulating
+    queries the real database would reject.
 """
 
 from __future__ import annotations

@@ -73,8 +73,12 @@ def test_answering_all_questions_regenerates_and_marks_ready() -> None:
     session_id = session["session_id"]
 
     latest = session
-    # Keep answering whichever question is still open until none remain.
-    while latest["open_questions"]:
+    # Keep answering whichever question is still open until none remain. The
+    # bound is a safety net: if the API ever stops clearing open_questions this
+    # fails loudly instead of hanging.
+    for _ in range(100):
+        if not latest["open_questions"]:
+            break
         qid = latest["open_questions"][0]["id"]
         resp = client.post(
             f"/sessions/{session_id}/questions/{qid}/answer",
@@ -82,12 +86,15 @@ def test_answering_all_questions_regenerates_and_marks_ready() -> None:
         )
         assert resp.status_code == 200
         latest = resp.json()
+    else:
+        pytest.fail("open_questions never cleared within 100 iterations")
 
     assert latest["status"] == "ready_for_rollout"
     assert latest["latest_output"]["strategic_core"] is not None
 
 
 def test_unknown_session_404() -> None:
+    """GET on a non-existent session id returns 404."""
     resp = client.get("/sessions/not-found")
     assert resp.status_code == 404
 
@@ -453,12 +460,14 @@ def test_attach_conversation_to_brand_succeeds() -> None:
 
 
 def test_attach_conversation_unknown_brand_404() -> None:
+    """Attaching a conversation to a non-existent brand returns 404."""
     conv_id = client.post("/conversations", json={}).json()["conversation_id"]
     resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": "brand_missing"})
     assert resp.status_code == 404
 
 
 def test_attach_conversation_unknown_conversation_404() -> None:
+    """Attaching a non-existent conversation to a real brand returns 404."""
     workspace = branding_store.create_client("Attach 404 Client")
     brand = branding_store.create_brand(
         workspace.id,
