@@ -17,7 +17,7 @@
 
     p {
       margin: 0.25rem 0 0;
-      color: rgba(0, 0, 0, 0.6);
+      color: var(--kh-text-secondary);
     }
   }
 
@@ -37,7 +37,7 @@
     display: flex;
     align-items: center;
     gap: 0.5rem;
-    color: #b00020;
+    color: var(--kh-error);
   }
 
   &__grid {
@@ -67,13 +67,13 @@
   }
 
   &__empty {
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-tertiary);
     margin: 0;
   }
 
   &__computed {
     font-size: 0.75rem;
-    color: rgba(0, 0, 0, 0.5);
+    color: var(--kh-text-muted);
     margin: 0;
   }
 }
@@ -83,7 +83,7 @@
     font-size: 0.8rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-tertiary);
   }
 
   &__value {
@@ -96,13 +96,13 @@
   &__unit {
     font-size: 1rem;
     font-weight: 400;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-tertiary);
     margin-left: 0.15rem;
   }
 
   &__sub {
     font-size: 0.8rem;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-tertiary);
     margin-top: 0.25rem;
   }
 }
