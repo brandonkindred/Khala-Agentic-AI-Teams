@@ -149,7 +149,7 @@ def publish(
     now = time.monotonic()
     with state.lock:
         subs = state.subscribers.get(job_id)
-        if not subs:
+        if subs is None:
             return
         for sub in subs:
             sub.events.append(payload)

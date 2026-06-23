@@ -57,17 +57,23 @@ def env_bool(name: str, default: bool = False) -> bool:
     """Read a boolean env var.
 
     Preconditions:
-        - ``name`` is a non-empty environment variable name.
+        - ``name`` is a non-empty environment variable name (enforced).
     Postconditions:
         - Returns ``True`` for ``true/1/yes/on`` and ``False`` for
           ``false/0/no/off`` (case-insensitive, whitespace-tolerant); ``default``
-          for an unset or unrecognized value. Never raises.
+          for an unset or unrecognized value (a set-but-unrecognized value is
+          logged at WARNING). Raises ``ValueError`` only on an empty ``name``.
     """
+    if not name:
+        raise ValueError("name must be a non-empty environment variable name")
     raw = (os.environ.get(name) or "").strip().lower()
     if raw in _TRUE:
         return True
     if raw in _FALSE:
         return False
+    if raw:
+        # Set but unrecognized — surface the likely typo (mirrors env_int/env_float).
+        logger.warning("Unrecognized bool for %s=%r; using default %s", name, raw, default)
     return default
 
 
@@ -83,6 +89,8 @@ def env_int(name: str, default: int, floor: int | None = None, ceiling: int | No
           ``ValueError`` only on a caller contract violation — a ``default``
           outside ``[floor, ceiling]``, or ``floor > ceiling``.
     """
+    if not name:
+        raise ValueError("name must be a non-empty environment variable name")
     _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)
     if raw is None:
@@ -111,6 +119,8 @@ def env_float(
           caller contract violation — a ``default`` outside ``[floor, ceiling]``,
           or ``floor > ceiling``.
     """
+    if not name:
+        raise ValueError("name must be a non-empty environment variable name")
     _require_default_in_bounds(default, floor, ceiling)
     raw = os.environ.get(name)
     if raw is None:

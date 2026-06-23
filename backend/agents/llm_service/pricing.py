@@ -97,9 +97,12 @@ def _price_for_model(model: str) -> ModelPrice | None:
           else ``None``. A malformed override is ignored (logged at WARNING) and
           resolution falls back to the table.
     """
-    env_key = _ENV_PREFIX + _normalize_model_for_env(model)
-    raw = os.environ.get(env_key)
+    suffix = _normalize_model_for_env(model)
+    # An empty suffix (model="" or all-separators) would form the bare
+    # "LLM_PRICE_" key and could match an unrelated env var — skip the override.
+    raw = os.environ.get(_ENV_PREFIX + suffix) if suffix else None
     if raw:
+        env_key = _ENV_PREFIX + suffix
         try:
             in_str, out_str = raw.split("/", 1)
             in_val, out_val = float(in_str), float(out_str)
@@ -107,7 +110,12 @@ def _price_for_model(model: str) -> ModelPrice | None:
             # that poisons spans, the cost counter, and the per-job total.
             if not (math.isfinite(in_val) and math.isfinite(out_val)):
                 raise ValueError("non-finite price")
-            return ModelPrice(max(0.0, in_val), max(0.0, out_val))
+            if in_val < 0 or out_val < 0:
+                # A negative price is a misconfiguration; ignore it (log + fall back
+                # to the table) rather than silently clamping to $0 and hiding it.
+                logger.warning("Ignoring negative %s=%r (prices must be >= 0)", env_key, raw)
+            else:
+                return ModelPrice(in_val, out_val)
         except (ValueError, TypeError):
             logger.warning(
                 "Ignoring invalid %s=%r (expected finite '<in_per_1k>/<out_per_1k>')",

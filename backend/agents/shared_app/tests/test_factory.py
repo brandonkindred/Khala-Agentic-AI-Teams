@@ -28,7 +28,23 @@ def test_create_team_app_wires_otel_and_returns_app() -> None:
     assert isinstance(app, FastAPI)
     assert app.title == "T" and app.version == "9.9"
     assert factory._test_calls["init"] == [{"service_name": "svc", "team_key": "tk"}]
-    assert factory._test_calls["instrument"] == [{"team_key": "tk"}]
+    # excluded_urls is always forwarded to the instrumentor (None when unset).
+    assert factory._test_calls["instrument"] == [{"team_key": "tk", "excluded_urls": None}]
+
+
+def test_excluded_urls_forwarded_to_instrument() -> None:
+    create_team_app(service_name="svc", team_key="tk", title="T", excluded_urls="metrics,healthz")
+    assert factory._test_calls["instrument"] == [
+        {"team_key": "tk", "excluded_urls": "metrics,healthz"}
+    ]
+
+
+def test_fastapi_kwargs_passthrough() -> None:
+    app = create_team_app(
+        service_name="svc", team_key="tk", title="T", description="d", docs_url="/d"
+    )
+    assert app.description == "d"
+    assert app.docs_url == "/d"
 
 
 @pytest.mark.parametrize(

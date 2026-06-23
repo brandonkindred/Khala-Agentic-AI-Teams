@@ -124,9 +124,9 @@ export class MetricsTabComponent implements OnInit, OnDestroy {
     return `${(rate * 100).toFixed(1)}%`;
   }
 
-  /** Format a USD amount. */
+  /** Format a USD amount; `—` when absent (null/undefined), matching the other formatters. */
   formatUsd(amount: number | null | undefined): string {
-    if (amount === null || amount === undefined) return '$0.0000';
+    if (amount === null || amount === undefined) return '—';
     return `$${amount.toFixed(4)}`;
   }
 

@@ -137,7 +137,7 @@ def test_blogging_app_lifespan_runs_in_event_loop(monkeypatch) -> None:
         async with app.router.lifespan_context(app):
             pass
 
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_drive())
+    asyncio.run(_drive())
     assert registered, "expected the blogging Postgres schema to be registered on startup"
     assert shutdown_ran["value"] is True, "expected the blogging shutdown hook to run on teardown"
 
@@ -166,4 +166,4 @@ def test_blogging_app_lifespan_swallows_schema_errors(monkeypatch) -> None:
         async with app.router.lifespan_context(app):
             pass
 
-    asyncio.get_event_loop_policy().new_event_loop().run_until_complete(_drive())
+    asyncio.run(_drive())

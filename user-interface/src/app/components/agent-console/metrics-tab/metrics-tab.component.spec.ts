@@ -117,7 +117,9 @@ describe('MetricsTabComponent', () => {
     expect(c.formatPercent(0.25)).toBe('25.0%');
     expect(c.formatPercent(null)).toBe('—');
     expect(c.formatUsd(1.2345)).toBe('$1.2345');
-    expect(c.formatUsd(undefined)).toBe('$0.0000');
+    expect(c.formatUsd(0)).toBe('$0.0000');
+    expect(c.formatUsd(null)).toBe('—');
+    expect(c.formatUsd(undefined)).toBe('—');
   });
 
   it('extracts a string error body', () => {
