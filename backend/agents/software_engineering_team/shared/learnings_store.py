@@ -131,8 +131,9 @@ def retrieve_learnings(
     """Return up to ``top_n`` learnings most relevant to ``query_text``.
 
     Ranking: Postgres full-text ``ts_rank`` of ``search_tsv`` against
-    ``plainto_tsquery(query_text)``, tie-broken by ``occurrences`` then
-    ``last_seen`` (both descending).
+    ``to_tsquery('english', tsquery)``, where ``tsquery`` is an OR of the
+    sanitized terms from ``query_text`` (built by :func:`_or_tsquery_terms`),
+    tie-broken by ``occurrences`` then ``last_seen`` (both descending).
 
     Preconditions:
         - ``top_n >= 1``.

@@ -67,6 +67,6 @@ def test_crash_to_post_mortem_to_learning_to_prompt(_se_schema, tmp_path) -> Non
         architecture=SimpleNamespace(overview="Postgres-backed service"),
         spec_content="seed the database connection timeout handling",
     )
-    block = TechLeadAgent._relevant_learnings_block(object(), fake_input)
+    block = TechLeadAgent._relevant_learnings_block(fake_input)
     assert any("RELEVANT LEARNINGS FROM PAST SPRINTS" in line for line in block)
     assert any("backend_dev" in line for line in block)

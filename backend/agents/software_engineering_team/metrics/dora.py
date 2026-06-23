@@ -191,6 +191,9 @@ def compute_dora(window_days: float) -> DoraMetrics:
     Preconditions: ``window_days > 0``.
     Postconditions: returns a :class:`DoraMetrics`; an all-zero result (no
         ``None`` medians become numbers) when Postgres is disabled or empty.
+    Raises: ``ImportError`` only if the sibling ``trace_store`` module is
+        missing — a packaging error, not an expected runtime condition (the
+        ``GET /metrics/dora`` endpoint wraps this call and degrades to zeros).
     """
     if window_days <= 0:
         raise ValueError("window_days must be > 0")

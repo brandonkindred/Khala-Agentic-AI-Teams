@@ -66,6 +66,7 @@ class TechLeadAgent:
 
     def __init__(self, llm_client=None) -> None:
         from strands.models.model import Model as _StrandsModel
+
         if llm_client is not None and isinstance(llm_client, _StrandsModel):
             self._model = llm_client
         else:
@@ -489,7 +490,8 @@ class TechLeadAgent:
 
         return "\n".join(context_parts)
 
-    def _relevant_learnings_block(self, input_data: "TechLeadInput") -> List[str]:
+    @staticmethod
+    def _relevant_learnings_block(input_data: "TechLeadInput") -> List[str]:
         """Return a prompt block of the top-N learnings relevant to this initiative.
 
         Retrieves from the ``se_learnings`` store by full-text relevance to the
@@ -497,6 +499,10 @@ class TechLeadAgent:
         returns an empty list when Postgres is disabled or nothing matches, so
         the prompt is byte-identical to before when there are no learnings.
 
+        Stateless (does not touch instance state), hence ``@staticmethod``.
+
+        Preconditions: ``input_data`` carries the requirements/spec/architecture
+            text used to build the retrieval query.
         Postconditions: returns ``[]`` or a non-empty list whose first element is
             the section header; never raises (retrieval failures degrade to ``[]``).
         """
@@ -507,9 +513,7 @@ class TechLeadAgent:
             from software_engineering_team.shared.learnings_store import retrieve_learnings
 
             reqs = input_data.requirements
-            arch_overview = (
-                input_data.architecture.overview if input_data.architecture else ""
-            )
+            arch_overview = input_data.architecture.overview if input_data.architecture else ""
             query = "\n".join(
                 part
                 for part in (

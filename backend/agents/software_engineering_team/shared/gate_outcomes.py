@@ -49,10 +49,14 @@ def _first_issue(result: Any) -> Optional[Any]:
                 # through to items[0], which would mislabel a passing criterion as
                 # the rejection). Plain issue lists (code review / QA / security)
                 # have no ``satisfied`` attribute, so items[0] is the right pick.
-                has_satisfied = any(hasattr(item, "satisfied") for item in items)
+                # Single pass: track whether any item carries ``satisfied`` while
+                # looking for the first failing one.
+                has_satisfied = False
                 for item in items:
-                    if getattr(item, "satisfied", True) is False:
-                        return item
+                    if hasattr(item, "satisfied"):
+                        has_satisfied = True
+                        if item.satisfied is False:
+                            return item
                 return None if has_satisfied else items[0]
             except TypeError:
                 return None

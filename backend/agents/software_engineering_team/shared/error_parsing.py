@@ -133,7 +133,9 @@ def _parse_import_error(text: str) -> Optional[ParsedFailure]:
 
 def _parse_sql_no_such_table(text: str) -> Optional[ParsedFailure]:
     """no such table: api_tokens (from sqlite3.OperationalError or similar)."""
-    m = re.search(r"no such table:\s*([a-zA-Z_]+)", text, re.IGNORECASE)
+    # Table names can contain digits (e.g. ``table_2024``), so allow them after
+    # the leading identifier char.
+    m = re.search(r"no such table:\s*([a-zA-Z_][a-zA-Z0-9_]*)", text, re.IGNORECASE)
     if not m:
         return None
     table = m.group(1)
@@ -190,7 +192,11 @@ def _assertion_playbook_hint(
         return hint + " " + PLAYBOOK_403_FORBIDDEN
     if got_status == 404:
         return hint + " " + PLAYBOOK_404_NOT_FOUND
-    if assertion_line and "401" in assertion_line and ("status_code" in assertion_line or expected_got):
+    if (
+        assertion_line
+        and "401" in assertion_line
+        and ("status_code" in assertion_line or expected_got)
+    ):
         return hint + " " + PLAYBOOK_401_UNAUTHORIZED
     if assertion_line and "403" in assertion_line:
         return hint + " " + PLAYBOOK_403_FORBIDDEN
@@ -259,7 +265,9 @@ def _parse_pytest_assertion(text: str) -> Optional[ParsedFailure]:
     raw_excerpt = text[-2500:] if len(text) > 2500 else text
     assertion_line: Optional[str] = None
     expected_got: Optional[str] = None
-    got_status: Optional[int] = None  # detected response code (e.g. 401) for a status_code assertion
+    got_status: Optional[int] = (
+        None  # detected response code (e.g. 401) for a status_code assertion
+    )
 
     failing_list = _collect_failing_tests(text)
     failing_tests_display = [f"{f}::{t}" if t else f for (f, t) in failing_list]

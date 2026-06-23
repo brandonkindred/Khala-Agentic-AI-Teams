@@ -102,7 +102,7 @@ def fetch_cost_since(cutoff: datetime) -> dict[str, Any]:
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT job_id, SUM(cost_usd) AS cost FROM se_agent_traces "
-                "WHERE ts >= %s GROUP BY job_id",
+                "WHERE ts >= %s AND job_id <> '' GROUP BY job_id",
                 (cutoff,),
             )
             by_job = {r["job_id"]: float(r["cost"] or 0.0) for r in cur.fetchall()}

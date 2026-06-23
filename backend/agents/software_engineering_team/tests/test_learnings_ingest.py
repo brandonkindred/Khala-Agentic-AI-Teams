@@ -173,7 +173,7 @@ def _fake_input() -> SimpleNamespace:
 
 def test_relevant_learnings_block_empty(monkeypatch) -> None:
     monkeypatch.setattr(learnings_store, "retrieve_learnings", lambda *a, **k: [])
-    block = TechLeadAgent._relevant_learnings_block(object(), _fake_input())
+    block = TechLeadAgent._relevant_learnings_block(_fake_input())
     assert block == []
 
 
@@ -192,12 +192,12 @@ def test_relevant_learnings_block_formats(monkeypatch) -> None:
             )
         ],
     )
-    block = TechLeadAgent._relevant_learnings_block(object(), _fake_input())
+    block = TechLeadAgent._relevant_learnings_block(_fake_input())
     assert any("RELEVANT LEARNINGS FROM PAST SPRINTS" in line for line in block)
     assert any("security rejection" in line and "use env var" in line for line in block)
 
 
 def test_relevant_learnings_block_disabled(monkeypatch) -> None:
     monkeypatch.setenv("SE_LEARNINGS_TOPN", "0")
-    block = TechLeadAgent._relevant_learnings_block(object(), _fake_input())
+    block = TechLeadAgent._relevant_learnings_block(_fake_input())
     assert block == []
