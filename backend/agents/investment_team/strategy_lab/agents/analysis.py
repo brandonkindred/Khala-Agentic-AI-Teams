@@ -402,15 +402,26 @@ def _format_alignment_status_section(report: Optional[TradeAlignmentReport]) -> 
     return "\n".join(lines)
 
 
-# ``acceptance_reason`` values that signal a clean robustness pass — these carry
-# no caveat to surface. Every other non-empty ``acceptance_reason`` was written
-# by the verification phase to record a concern (a failing acceptance
-# sub-criterion, a fallback rejection, a conformance / realism / alignment /
-# look-ahead veto, or a publication-disabled reason), so it becomes a caveat.
+# ``acceptance_reason`` values that carry no robustness caveat to surface.
+# Two kinds qualify:
+#   1. A clean robustness pass ("all four criteria met", a clean walk-forward
+#      fallback via ``_CLEAN_ACCEPTANCE_PREFIXES``, or no gates evaluated).
+#   2. The ``publication_disabled:`` *validity-precondition* reasons that mean
+#      no genuine run happened at all (execution failed, or it produced no
+#      trades). These are precondition failures, not out-of-sample/robustness
+#      diagnostics, so the "## Robustness caveats" block — whose header promises
+#      OOS / robustness findings — must not render them or it mislabels the cause.
+# Every *other* non-empty ``acceptance_reason`` was written by the verification
+# phase to record a real concern (a failing acceptance sub-criterion, a fallback
+# rejection, a conformance / realism / alignment / look-ahead veto, or
+# ``publication_disabled: walk_forward_enabled=False`` — a genuine "ran but was
+# not out-of-sample validated" caveat), so it still becomes a caveat.
 _CLEAN_ACCEPTANCE_REASONS = frozenset(
     {
         "all four criteria met",
         "no acceptance gates evaluated",
+        "publication_disabled: no trades produced",
+        "publication_disabled: execution_failed",
     }
 )
 _CLEAN_ACCEPTANCE_PREFIXES = ("walk_forward_fallback_passed",)
@@ -428,8 +439,10 @@ def format_robustness_caveats(metrics: BacktestResult) -> str:
     winner rather than as grounds to reframe it as a loss.
 
     Returns ``""`` when there are no robustness concerns to surface (a clean
-    acceptance pass, a clean fallback, or a run with no recorded reason), so
-    clean-run prompts render byte-identical to before. Otherwise returns a
+    acceptance pass, a clean fallback, a run with no recorded reason, or a
+    ``publication_disabled:`` validity-precondition reason such as execution
+    failure / no trades — those are not robustness diagnostics), so clean-run
+    prompts render byte-identical to before. Otherwise returns a
     compact block beginning with ``"## Robustness caveats"`` and ending with a
     single trailing newline (so the caller can splice it directly before the
     next section).

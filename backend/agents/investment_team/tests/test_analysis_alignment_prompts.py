@@ -746,6 +746,22 @@ def test_robustness_caveats_empty_on_clean_pass(reason: object) -> None:
     assert format_robustness_caveats(_caveat_metrics(acceptance_reason=reason)) == ""
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "publication_disabled: no trades produced",
+        "publication_disabled: execution_failed",
+    ],
+)
+def test_robustness_caveats_empty_on_validity_precondition_reason(reason: str) -> None:
+    """``publication_disabled:`` validity-precondition reasons (no genuine run:
+    execution failed, or no trades produced) are NOT robustness diagnostics.
+    The "## Robustness caveats" block (whose header promises OOS / robustness
+    findings) must render empty for them so the cause isn't mislabeled — only
+    genuine robustness concerns belong in the block."""
+    assert format_robustness_caveats(_caveat_metrics(acceptance_reason=reason)) == ""
+
+
 def test_robustness_caveats_surface_recorded_concern_and_oos_diagnostics() -> None:
     """A recorded robustness concern produces a caveat block carrying the
     acceptance_reason and the out-of-sample diagnostics, explicitly framed as

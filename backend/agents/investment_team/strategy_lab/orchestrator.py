@@ -2795,13 +2795,20 @@ class StrategyLabOrchestrator:
             # entry path so the persisted record carries a reason rather than
             # an empty ``acceptance_reason``. The label itself is resolved by
             # the deterministic rule below (these runs produced no qualifying
-            # return). The no-trades case is checked first because it's the
-            # more proximate cause when both conditions hold.
-            if execution_succeeded and not trades:
+            # return). Ordered most-proximate-cause first: a failed execution
+            # is the root cause and subsumes the (necessarily empty) ledger, so
+            # it is recorded ahead of the no-trades case. A downstream veto
+            # (conformance / realism / alignment / look-ahead) may append its
+            # specific cause to whichever reason is stamped here.
+            if not execution_succeeded:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: execution_failed"}
+                )
+            elif not trades:
                 metrics = metrics.model_copy(
                     update={"acceptance_reason": "publication_disabled: no trades produced"}
                 )
-            elif execution_succeeded and trades and not config.walk_forward_enabled:
+            elif not config.walk_forward_enabled:
                 metrics = metrics.model_copy(
                     update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
                 )

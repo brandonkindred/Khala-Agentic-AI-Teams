@@ -134,6 +134,36 @@ def test_runtime_lookahead_violation_forces_is_winning_false():
     assert "lookahead_violation_at_runtime: subprocess_attribute_error" in reason
 
 
+def test_execution_failure_records_acceptance_reason():
+    """A run that never produced a valid ledger reaches verification with
+    ``execution_succeeded=False``. The else-branch must stamp an explicit
+    ``publication_disabled: execution_failed`` cause so the audit trail isn't
+    empty on the failed-execution path — previously this fell through the
+    ``execution_succeeded and ...`` guards and left ``acceptance_reason``
+    unset. The deterministic verdict already forces ``is_winning=False`` via
+    the validity precondition."""
+    orch = _orch()
+
+    outcome = orch._run_verification_phase(
+        spec=_spec(),
+        trades=[],
+        metrics=_metrics(),
+        market_data=None,
+        config=_config(),
+        execution_succeeded=False,
+        trades_aligned=True,
+        alignment_reports=[],
+        all_gate_results=[],
+        emit=lambda *_a, **_k: None,
+    )
+
+    assert outcome.is_winning is False
+    assert outcome.metrics.acceptance_reason == "publication_disabled: execution_failed", (
+        f"expected publication_disabled: execution_failed, got "
+        f"{outcome.metrics.acceptance_reason!r}"
+    )
+
+
 def test_runtime_lookahead_violation_replaces_generic_publication_disabled_reason(
     monkeypatch,
 ):
