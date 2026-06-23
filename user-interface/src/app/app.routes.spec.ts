@@ -3,6 +3,7 @@ import { routes } from './app.routes';
 import { JobsDashboardComponent } from './components/jobs-dashboard/jobs-dashboard.component';
 import { SoftwareEngineeringDashboardComponent } from './components/software-engineering-dashboard/software-engineering-dashboard.component';
 import { IntegrationsDashboardComponent } from './components/integrations-dashboard/integrations-dashboard.component';
+import { LlmConfigDashboardComponent } from './components/llm-config-dashboard/llm-config-dashboard.component';
 
 /** Resolve a child route's lazily-loaded component to its class. */
 async function loadedComponent(path: string): Promise<unknown> {
@@ -25,6 +26,10 @@ describe('App routes', () => {
 
   it('lazily loads IntegrationsDashboardComponent for integrations', async () => {
     expect(await loadedComponent('integrations')).toBe(IntegrationsDashboardComponent);
+  });
+
+  it('lazily loads LlmConfigDashboardComponent for llm-config', async () => {
+    expect(await loadedComponent('llm-config')).toBe(LlmConfigDashboardComponent);
   });
 
   it('redirects empty path to /dashboard', () => {

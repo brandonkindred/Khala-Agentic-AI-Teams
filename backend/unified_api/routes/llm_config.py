@@ -34,14 +34,11 @@ router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
 # Curated options surfaced to the settings UI. The model fields also accept free
 # text, so these are suggestions, not a closed set.
 _PROVIDER_OPTIONS = ["ollama", "claude"]
-# Claude suggestions come from llm_config.CLAUDE_MODEL_OPTIONS (derived from the
-# context-window table) so this list can't drift from the model the client uses.
-_OLLAMA_MODEL_SUGGESTIONS = [
-    "deepseek-v4-pro:cloud",
-    "qwen3-coder:480b-cloud",
-    "llama3.1",
-    "llama3.2",
-]
+# Both suggestion lists are sourced from llm_service.config so the UI options
+# can't drift from the model config the clients use: Claude suggestions come from
+# CLAUDE_MODEL_OPTIONS (derived from the context-window table) and Ollama
+# suggestions from OLLAMA_MODEL_SUGGESTIONS. Updating models is a one-place edit.
+_OLLAMA_MODEL_SUGGESTIONS = list(llm_config.OLLAMA_MODEL_SUGGESTIONS)
 
 
 class LlmConfigUpdate(BaseModel):

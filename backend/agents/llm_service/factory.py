@@ -137,7 +137,10 @@ def get_client(
     Return an LLM client for the given agent key or default.
 
     Model resolution: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
-    When LLM_PROVIDER=dummy, returns DummyLLMClient. Otherwise returns OllamaLLMClient (cached by model, base_url, timeout).
+    Provider selection (LLM_PROVIDER, runtime config -> env -> "ollama"):
+    - "dummy" -> DummyLLMClient.
+    - "claude"/"anthropic" -> ClaudeLLMClient (cached by model, api-key fingerprint, timeout).
+    - "ollama" (or unset) -> OllamaLLMClient (cached by model, base_url, timeout).
 
     ``on_reasoning`` is an optional per-caller thinking-token sink. When provided,
     a FRESH (uncached) provider client (Ollama or Claude) is returned so the

@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any, Optional
@@ -52,11 +53,12 @@ def load_or_create_key() -> bytes:
     Preconditions: none.
     Postconditions: returns a valid 32-byte url-safe base64 Fernet key as
         ``bytes``; the same key every call within a process (the file/env are
-        stable). A pre-existing, unreadable key file raises ``RuntimeError``
-        rather than silently generating a NEW key (which would destroy every
-        existing encrypted secret). When no key exists it is created atomically
-        (``O_CREAT|O_EXCL``) so concurrent first-starts converge on one key
-        instead of last-writer-wins clobbering each other's.
+        stable). A pre-existing, unreadable or empty key file raises
+        ``RuntimeError`` rather than silently generating a NEW key (which would
+        destroy every existing encrypted secret). When no key exists it is created
+        atomically (written to a temp file then linked into place) so concurrent
+        first-starts converge on one key instead of last-writer-wins clobbering
+        each other's, and a concurrent reader never observes a partial/empty file.
     """
     env_key = os.getenv("INTEGRATION_ENCRYPTION_KEY", "").strip()
     if env_key:
@@ -69,14 +71,7 @@ def load_or_create_key() -> bytes:
     key_path.parent.mkdir(parents=True, exist_ok=True)
 
     if key_path.exists():
-        try:
-            return key_path.read_bytes().strip()
-        except OSError as e:
-            # An existing-but-unreadable key file must NOT fall through to key
-            # generation: overwriting it with a fresh key would render every row
-            # already encrypted under the old key permanently undecryptable. Fail
-            # loudly so an operator fixes permissions / restores the file instead.
-            raise RuntimeError("Integration key file exists but is unreadable") from e
+        return _read_key_file(key_path)
 
     # No persisted key and no env override: auto-generate for dev convenience, but
     # warn — a generated key lives only on this container's volume, so a multi-
@@ -88,29 +83,100 @@ def load_or_create_key() -> bytes:
         "Set INTEGRATION_ENCRYPTION_KEY in production so every container shares one key.",
         key_path,
     )
-    # Create the file atomically: O_CREAT|O_EXCL means exactly one of several
-    # concurrently-starting processes wins the create; the losers get
-    # FileExistsError and re-read the winner's key, so all converge on one key
-    # instead of overwriting the shared file last-writer-wins.
+    return _persist_new_key(key_path, key)
+
+
+def _read_key_file(key_path: Path) -> bytes:
+    """Read and validate the persisted Fernet key.
+
+    Preconditions: ``key_path`` exists.
+    Postconditions: returns the non-empty, stripped key bytes. Raises
+        ``RuntimeError`` when the file is unreadable or empty rather than silently
+        falling through to generate a NEW key — overwriting an existing key would
+        render every row already encrypted under the old key permanently
+        undecryptable, so an operator must fix permissions / restore the file
+        instead. Our own writer publishes the final path only once fully written
+        (atomic link/replace), so an empty read implies an out-of-band/corrupt file.
+    """
     try:
-        fd = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-    except FileExistsError:
-        # Another process created it between our exists() check and now; read it.
-        try:
-            return key_path.read_bytes().strip()
-        except OSError as e:
-            raise RuntimeError("Integration key file exists but is unreadable") from e
+        data = key_path.read_bytes().strip()
     except OSError as e:
-        # Could not create the file (e.g. read-only volume); use the in-memory key
-        # for this process so the dev case still works, but it will not persist.
-        logger.warning("Failed to persist integration key to %s: %s", key_path, e)
-        return key
+        raise RuntimeError("Integration key file exists but is unreadable") from e
+    if not data:
+        raise RuntimeError(f"Integration key file at {key_path} is empty")
+    return data
+
+
+def _persist_new_key(key_path: Path, key: bytes) -> bytes:
+    """Atomically persist a freshly generated Fernet key, converging on one winner.
+
+    Writes ``key`` to a unique temp file in the same directory (fsynced), then
+    hard-links it into place at ``key_path``. ``os.link`` is atomic and fails with
+    ``FileExistsError`` when the final path already exists, so when several
+    containers first-start against a shared volume exactly one wins the create and
+    the losers adopt the winner's key instead of clobbering it last-writer-wins.
+    Because the final path only ever appears as a fully written file (never the
+    in-progress temp), a concurrent reader can never observe a partial/empty key.
+
+    Preconditions: ``key_path`` did not exist when the caller checked; ``key`` is a
+        valid Fernet key; ``key_path.parent`` exists.
+    Postconditions: returns the key now persisted at ``key_path`` — the one this
+        process wrote, or, on a lost create race, the winner's key read back from
+        disk. On a filesystem that cannot persist it (read-only volume, or no
+        hardlink support and the atomic-replace fallback also fails) the in-memory
+        ``key`` is returned with a warning so the dev case still works (it just
+        won't survive a restart). Never raises for an I/O failure.
+    """
+    tmp_path: Optional[Path] = None
     try:
+        fd, tmp_name = tempfile.mkstemp(
+            dir=str(key_path.parent), prefix=".integration.key.", suffix=".tmp"
+        )
+        tmp_path = Path(tmp_name)
         with os.fdopen(fd, "wb") as f:
             f.write(key)
+            f.flush()
+            os.fsync(f.fileno())
+        os.chmod(tmp_path, 0o600)
     except OSError as e:
-        logger.warning("Failed to write integration key to %s: %s", key_path, e)
-    return key
+        logger.warning("Failed to stage integration key near %s: %s", key_path, e)
+        if tmp_path is not None:
+            _unlink_quietly(tmp_path)
+        return key
+
+    try:
+        os.link(tmp_path, key_path)  # atomic create-if-absent; readers never see a partial file
+        return key
+    except FileExistsError:
+        # Another process won the create between the caller's exists() check and
+        # now; adopt its key so every container converges on a single key.
+        return _read_key_file(key_path)
+    except OSError:
+        # Filesystem without hardlink support: fall back to an atomic rename. This
+        # is last-writer-wins under a true concurrent first-start, but still never
+        # exposes a partial file to a reader.
+        try:
+            os.replace(tmp_path, key_path)
+            tmp_path = None  # replace consumed the temp; nothing to clean up
+            return key
+        except OSError as e:
+            logger.warning("Failed to persist integration key to %s: %s", key_path, e)
+            return key
+    finally:
+        if tmp_path is not None:
+            _unlink_quietly(tmp_path)
+
+
+def _unlink_quietly(path: Path) -> None:
+    """Best-effort removal of a temp file; never raises.
+
+    Postconditions: ``path`` is gone if it existed and was removable; any OSError
+        (already gone, permissions) is swallowed.
+    """
+    try:
+        path.unlink()
+    except OSError:
+        pass
 
 
 # Back-compat private alias: callers that imported the underscore-prefixed name

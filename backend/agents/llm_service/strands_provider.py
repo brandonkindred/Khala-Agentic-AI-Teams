@@ -111,7 +111,14 @@ def get_strands_model(
     # cache key must use the Claude model, not the Ollama-resolved one, or
     # telemetry and the cache identity are tagged with the wrong model name.
     # ``resolve_model_for_provider`` is the shared chokepoint for that decision.
-    base_url = llm_config.resolve_base_url()
+    #
+    # base_url only meaningfully identifies an *Ollama* endpoint; Claude talks to
+    # the Anthropic API and dummy talks to nothing, so resolving it for those
+    # providers would just fold the irrelevant default Ollama URL into the cache
+    # key (and the telemetry log below). Use a constant placeholder off the Ollama
+    # path so the key stays precise and the log stays honest. The provider is
+    # already part of the cache key, so this never aliases across providers.
+    base_url = llm_config.resolve_base_url() if provider == "ollama" else "n/a"
 
     # Caller-supplied client bypasses the cache — they own the lifecycle and
     # may be passing distinct clients (different models, different timeouts,

@@ -8,7 +8,6 @@ import { MatInputModule } from '@angular/material/input';
 import { MatButtonModule } from '@angular/material/button';
 import { MatRadioModule } from '@angular/material/radio';
 import { MatIconModule } from '@angular/material/icon';
-import { MatSelectModule } from '@angular/material/select';
 import { MatAutocompleteModule } from '@angular/material/autocomplete';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { LlmConfigApiService } from '../../services/llm-config-api.service';
@@ -41,7 +40,6 @@ const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
     MatButtonModule,
     MatRadioModule,
     MatIconModule,
-    MatSelectModule,
     MatAutocompleteModule,
     MatProgressSpinnerModule,
   ],

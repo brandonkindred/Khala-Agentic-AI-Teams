@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import threading
 import time
 from typing import Any, Callable, Dict, Optional
@@ -218,6 +217,10 @@ class ClaudeLLMClient(LLMClient):
         self.max_retries = max(0, int(max_retries))
         self.on_reasoning = on_reasoning
         self._client: Any = None
+        # Cached reference to the imported ``anthropic`` module, populated alongside
+        # ``_client`` so the hot ``_invoke`` path reads the SDK's exception classes
+        # without re-importing on every call.
+        self._anthropic_mod: Any = None
         # Guards lazy creation of the underlying Anthropic client: the factory
         # caches one ClaudeLLMClient per (model, key), so concurrent first-use
         # across threads must not each build a separate SDK client.
@@ -244,6 +247,7 @@ class ClaudeLLMClient(LLMClient):
         with self._client_lock:
             if self._client is None:
                 anthropic = _import_anthropic()
+                self._anthropic_mod = anthropic
                 self._client = anthropic.Anthropic(
                     api_key=self.api_key, timeout=self.timeout, max_retries=self.max_retries
                 )
@@ -272,16 +276,11 @@ class ClaudeLLMClient(LLMClient):
                 explicit_int = 0
             if explicit_int > 0:
                 return min(explicit_int, CLAUDE_MAX_OUTPUT_TOKENS)
-        env = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-        if env:
-            try:
-                env_int = int(env)
-            except ValueError:
-                env_int = 0
-            # A non-positive env value is treated as "unset" (mirrors the explicit
-            # path above), never coerced to a 1-token cap that truncates every call.
-            if env_int > 0:
-                return min(env_int, CLAUDE_MAX_OUTPUT_TOKENS)
+        # Centralized resolver returns 0 for unset/invalid/non-positive (mirrors the
+        # explicit path above), never a 1-token cap that truncates every call.
+        env_int = llm_config.resolve_max_tokens()
+        if env_int > 0:
+            return min(env_int, CLAUDE_MAX_OUTPUT_TOKENS)
         return DEFAULT_CLAUDE_MAX_OUTPUT_TOKENS
 
     def _thinking_kwargs(self, think: "bool | str | None") -> dict:
@@ -349,8 +348,12 @@ class ClaudeLLMClient(LLMClient):
             any non-Anthropic exception raised client-side) otherwise — no raw
             exception escapes the unified hierarchy.
         """
-        anthropic = _import_anthropic()
         client = self._get_client()
+        # Normal path: _get_client populated _anthropic_mod alongside _client, so
+        # reuse the cached reference rather than re-importing on every invocation.
+        # Fall back to the (module-level cached) import only when _client was
+        # injected directly without going through _get_client (e.g. in tests).
+        anthropic = self._anthropic_mod or _import_anthropic()
         kwargs: dict[str, Any] = {
             "model": self.model,
             "max_tokens": max_tokens,

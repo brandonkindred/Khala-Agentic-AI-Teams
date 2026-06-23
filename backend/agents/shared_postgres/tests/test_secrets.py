@@ -228,10 +228,82 @@ def test_load_or_create_key_generates_and_reuses_file(tmp_path, monkeypatch):
     monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
     secrets_mod._reset_fernet_for_testing()
     key1 = secrets_mod._load_or_create_key()
-    assert (tmp_path / "integration.key").exists()
+    key_file = tmp_path / "integration.key"
+    assert key_file.exists()
+    # The persisted file is fully written (no leftover temp), and 0600 perms.
+    assert key_file.read_bytes().strip() == key1
+    assert not list(tmp_path.glob(".integration.key.*.tmp"))
     # Second load reads the persisted file (same key).
     key2 = secrets_mod._load_or_create_key()
     assert key1 == key2
+
+
+def test_load_or_create_key_raises_on_empty_file(tmp_path, monkeypatch):
+    """An empty (e.g. truncated/out-of-band) key file must fail loudly, not
+    silently regenerate a new key that would orphan every existing secret."""
+    monkeypatch.delenv("INTEGRATION_ENCRYPTION_KEY", raising=False)
+    monkeypatch.setenv("AGENT_CACHE", str(tmp_path))
+    (tmp_path / "integration.key").write_bytes(b"")
+    secrets_mod._reset_fernet_for_testing()
+    with pytest.raises(RuntimeError, match="is empty"):
+        secrets_mod._load_or_create_key()
+
+
+def test_read_key_file_raises_when_unreadable(tmp_path, monkeypatch):
+    """An unreadable existing key file raises rather than regenerating."""
+    key_path = tmp_path / "integration.key"
+    key_path.write_bytes(Fernet.generate_key())
+
+    def _boom(*_a, **_k):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(secrets_mod.Path, "read_bytes", _boom)
+    with pytest.raises(RuntimeError, match="unreadable"):
+        secrets_mod._read_key_file(key_path)
+
+
+def test_persist_new_key_adopts_winner_on_create_race(tmp_path):
+    """When the final key file already exists (another process won the create),
+    _persist_new_key adopts the winner's key instead of clobbering it."""
+    key_path = tmp_path / "integration.key"
+    winner = Fernet.generate_key()
+    key_path.write_bytes(winner)  # simulate the race winner having published its key
+    loser = Fernet.generate_key()
+    result = secrets_mod._persist_new_key(key_path, loser)
+    assert result == winner  # adopted the winner, not the loser's key
+    assert key_path.read_bytes().strip() == winner  # file untouched
+    assert not list(tmp_path.glob(".integration.key.*.tmp"))  # temp cleaned up
+
+
+def test_persist_new_key_falls_back_to_replace_without_hardlinks(tmp_path, monkeypatch):
+    """On a filesystem without hardlink support, the key is still persisted
+    atomically via os.replace, and no partial temp file is left behind."""
+    key_path = tmp_path / "integration.key"
+    key = Fernet.generate_key()
+
+    def _no_link(*_a, **_k):
+        raise OSError("hardlinks unsupported")
+
+    monkeypatch.setattr(secrets_mod.os, "link", _no_link)
+    result = secrets_mod._persist_new_key(key_path, key)
+    assert result == key
+    assert key_path.read_bytes().strip() == key
+    assert not list(tmp_path.glob(".integration.key.*.tmp"))
+
+
+def test_persist_new_key_returns_in_memory_key_when_staging_fails(tmp_path, monkeypatch):
+    """If the temp file can't be staged (e.g. read-only volume), fall back to the
+    in-memory key so dev still works — it just won't persist."""
+    key_path = tmp_path / "integration.key"
+    key = Fernet.generate_key()
+
+    def _no_mkstemp(*_a, **_k):
+        raise OSError("read-only filesystem")
+
+    monkeypatch.setattr(secrets_mod.tempfile, "mkstemp", _no_mkstemp)
+    result = secrets_mod._persist_new_key(key_path, key)
+    assert result == key
+    assert not key_path.exists()
 
 
 def test_ensure_table_runs_once_on_first_use(store):

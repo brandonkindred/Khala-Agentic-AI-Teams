@@ -69,6 +69,15 @@ _STAGE_ORDER = [
     PipelineStage.NEGOTIATION,
 ]
 
+# Default length of a generated nurture sequence, in days. A 90-day (one quarter)
+# cadence is the standard B2B nurture window; named here so it isn't an inline
+# magic number at the call site and can be tuned in one place.
+_DEFAULT_NURTURE_DURATION_DAYS = 90
+# Default annual contract value used for proposal economics when a deal-specific
+# figure isn't supplied. Placeholder pricing for the generated proposal; named
+# here rather than buried as a literal so it's easy to find and override.
+_DEFAULT_ANNUAL_COST = 25000.0
+
 
 def _noop_update(_stage: str, _pct: int) -> None:
     """Default progress callback — does nothing."""
@@ -599,7 +608,7 @@ class SalesPodOrchestrator:
                     p.model_dump_json(indent=2),
                     ctx.product,
                     ctx.vp,
-                    90,
+                    _DEFAULT_NURTURE_DURATION_DAYS,
                     ctx.insights_ctx,
                 )
                 return NurtureSequence(prospect=p, **body.model_dump())
@@ -660,7 +669,7 @@ class SalesPodOrchestrator:
             ctx.job_id,
             len(qualified_prospects),
         )
-        annual_cost = 25000.0
+        annual_cost = _DEFAULT_ANNUAL_COST
         qual_by_prospect_id = {q.prospect.id: q for q in qualified if q.prospect.id}
         if not dossier_map:
             dossier_map = self.load_dossiers_for_prospects(qualified_prospects)

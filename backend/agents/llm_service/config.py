@@ -260,6 +260,18 @@ AGENT_DEFAULT_MODELS: dict[str, str] = {
 
 DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
 
+# Curated Ollama model ids surfaced as suggestions by the settings UI. Centralized
+# here (rather than inline in the unified_api route) so the UI suggestion list and
+# the rest of the model config share one home and can't silently drift, mirroring
+# CLAUDE_MODEL_OPTIONS above. The model field also accepts free text, so this is a
+# suggestion list, not a closed set.
+OLLAMA_MODEL_SUGGESTIONS: list[str] = [
+    "deepseek-v4-pro:cloud",
+    "qwen3-coder:480b-cloud",
+    "llama3.1",
+    "llama3.2",
+]
+
 # ---------------------------------------------------------------------------
 # Resolvers (env + agent defaults)
 # ---------------------------------------------------------------------------
@@ -276,7 +288,11 @@ def _runtime(key: str) -> str:
         from . import runtime_config
 
         return runtime_config.get_runtime(key)
-    except Exception:  # noqa: BLE001 - runtime config is best-effort
+    except Exception as e:  # noqa: BLE001 - runtime config is best-effort
+        # Best-effort fallback to env resolution, but leave a breadcrumb: a silent
+        # empty return would otherwise hide a real runtime_config bug (import
+        # failure, Postgres misconfig) behind "config just isn't set".
+        logger.debug("runtime config read failed for key %s: %s", key, e)
         return ""
 
 
@@ -297,6 +313,27 @@ def resolve_provider() -> str:
     if raw in ("anthropic", "claude"):
         return "claude"
     return raw
+
+
+def resolve_max_tokens() -> int:
+    """Return the configured output-token cap from ``LLM_MAX_TOKENS``, or 0 if unset.
+
+    Centralizes the ``LLM_MAX_TOKENS`` env lookup so provider clients don't read
+    ``os.environ`` directly (mirrors the other resolvers here). A missing,
+    non-integer, or non-positive value yields ``0`` — the caller's "unset"
+    sentinel — so a client falls through to its own provider default rather than a
+    1-token cap that would truncate every call.
+
+    Postconditions: returns an int ``>= 0``. Never raises.
+    """
+    raw = os.environ.get(ENV_LLM_MAX_TOKENS)
+    if not raw:
+        return 0
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return val if val > 0 else 0
 
 
 def _looks_like_claude_model(model: str) -> bool:
