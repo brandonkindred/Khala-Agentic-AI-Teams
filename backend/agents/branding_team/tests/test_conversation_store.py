@@ -1,0 +1,146 @@
+"""Unit tests for the branding conversation store (dict-backed fake Postgres).
+
+Focuses on the single-query ``get_state`` / ``get_by_brand_id`` loaders and the
+backward-compatible ``get`` view.
+"""
+
+from __future__ import annotations
+
+import pytest
+
+from branding_team.assistant.store import BrandingConversationStore
+from branding_team.models import BrandingMission, BrandPhase, TeamOutput, WorkflowStatus
+from branding_team.tests._fake_postgres import install_fake_postgres
+
+
+@pytest.fixture
+def fake_pg(monkeypatch: pytest.MonkeyPatch) -> dict:
+    return install_fake_postgres(monkeypatch)
+
+
+def _mission() -> BrandingMission:
+    return BrandingMission(
+        company_name="Acme",
+        company_description="A great company",
+        target_audience="developers",
+    )
+
+
+def _output(summary: str = "done") -> TeamOutput:
+    return TeamOutput(
+        status=WorkflowStatus.READY_FOR_ROLLOUT,
+        mission_summary=summary,
+        current_phase=BrandPhase.COMPLETE,
+    )
+
+
+def test_get_state_returns_none_for_unknown(fake_pg: dict) -> None:
+    """get_state / get return None for a conversation id that does not exist."""
+    store = BrandingConversationStore()
+    assert store.get_state("missing") is None
+    assert store.get("missing") is None
+
+
+def test_get_state_empty_conversation(fake_pg: dict) -> None:
+    """A freshly created conversation loads with no messages and no output."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_mission())
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.messages == []
+    assert state.brand_id is None
+    assert state.latest_output is None
+    assert state.mission.company_name == "Acme"
+
+
+def test_get_state_includes_messages_and_brand_id(fake_pg: dict) -> None:
+    """get_state returns messages in order and the attached brand id; the legacy
+    3-tuple view stays in sync."""
+    store = BrandingConversationStore()
+    cid = store.create(brand_id="brand_xyz", mission=_mission())
+    assert store.append_message(cid, "user", "hello")
+    assert store.append_message(cid, "assistant", "hi there")
+
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.brand_id == "brand_xyz"
+    assert [(m.role, m.content) for m in state.messages] == [
+        ("user", "hello"),
+        ("assistant", "hi there"),
+    ]
+
+    # Backward-compatible 3-tuple view stays in sync.
+    legacy = store.get(cid)
+    assert legacy is not None
+    messages, mission, latest_output = legacy
+    assert len(messages) == 2
+    assert mission.company_name == "Acme"
+    assert latest_output is None
+
+
+def test_get_state_loads_non_none_latest_output(fake_pg: dict) -> None:
+    """get_state (and the legacy view) load a persisted latest_output in the
+    single query — not just the None case."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_mission())
+    assert store.update_output(cid, _output("rollout ready")) is True
+
+    state = store.get_state(cid)
+    assert state is not None
+    assert state.latest_output is not None
+    assert state.latest_output.mission_summary == "rollout ready"
+    assert state.latest_output.current_phase == BrandPhase.COMPLETE
+
+    _, _, legacy_output = store.get(cid)
+    assert legacy_output is not None
+    assert legacy_output.mission_summary == "rollout ready"
+
+
+def test_append_message_rejects_unknown_conversation_and_role(fake_pg: dict) -> None:
+    """append_message returns False for an unknown conversation or invalid role,
+    and True (persisting) for a valid one."""
+    store = BrandingConversationStore()
+    cid = store.create(mission=_mission())
+    # Unknown conversation -> False, nothing inserted.
+    assert store.append_message("missing", "user", "hi") is False
+    # Invalid role -> False.
+    assert store.append_message(cid, "system", "nope") is False
+    # Valid -> True.
+    assert store.append_message(cid, "user", "hello") is True
+    state = store.get_state(cid)
+    assert state is not None
+    assert [(m.role, m.content) for m in state.messages] == [("user", "hello")]
+
+
+def test_get_by_brand_id_single_join(fake_pg: dict) -> None:
+    """get_by_brand_id loads the brand's conversation, messages, and mission in
+    one query; returns None for an unknown brand."""
+    store = BrandingConversationStore()
+    cid = store.create(brand_id="brand_join", mission=_mission())
+    store.append_message(cid, "user", "one")
+    store.append_message(cid, "assistant", "two")
+
+    result = store.get_by_brand_id("brand_join")
+    assert result is not None
+    rcid, messages, mission, latest_output = result
+    assert rcid == cid
+    assert [m.content for m in messages] == ["one", "two"]
+    assert mission.company_name == "Acme"
+    assert latest_output is None
+
+    assert store.get_by_brand_id("brand_absent") is None
+
+
+def test_get_by_brand_id_loads_non_none_latest_output(fake_pg: dict) -> None:
+    """get_by_brand_id surfaces a persisted latest_output, covering the
+    non-None branch of the single-query load."""
+    store = BrandingConversationStore()
+    cid = store.create(brand_id="brand_out", mission=_mission())
+    assert store.update_output(cid, _output("live")) is True
+
+    result = store.get_by_brand_id("brand_out")
+    assert result is not None
+    rcid, _, _, latest_output = result
+    assert rcid == cid
+    assert latest_output is not None
+    assert latest_output.mission_summary == "live"

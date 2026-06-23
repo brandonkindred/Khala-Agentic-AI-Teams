@@ -2,21 +2,24 @@
 
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import logging
-import threading
-from dataclasses import dataclass
+import os
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Body, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
 
 from branding_team.assistant import get_conversation_store
 from branding_team.assistant.agent import BrandingAssistantAgent
-from branding_team.assistant.store import _default_mission
+from branding_team.assistant.store import _default_mission, _StoredMessage
+from branding_team.config import env_int
 from branding_team.models import (
     Brand,
     BrandCheckRequest,
@@ -45,20 +48,55 @@ from branding_team.shared.job_store import (
     update_job,
 )
 from branding_team.store import get_default_store
-from shared_app import create_team_app
+from shared_observability import init_otel, instrument_fastapi_app
 from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
 logger = logging.getLogger(__name__)
 
-# Standard team wiring: init_otel + Postgres-schema lifespan + OTel instrument.
-app = create_team_app(
-    service_name="branding-team",
-    team_key="branding",
-    title="Branding Team API",
-    version="2.0.0",
-    postgres_schema=BRANDING_POSTGRES_SCHEMA,
+init_otel(service_name="branding-team", team_key="branding")
+
+
+def _max_concurrent_runs() -> int:
+    """Worker cap for the branding-run executor (env-tunable, clamped to >= 1)."""
+    return env_int("BRANDING_MAX_CONCURRENT_RUNS", 4, minimum=1)
+
+
+# Branding runs are submitted to a bounded pool instead of spawning an
+# unbounded daemon thread per request. The fixed worker count gives the
+# pipeline backpressure (extra submissions queue rather than fan out into
+# thousands of concurrent LLM pipelines) while the job row stays PENDING
+# until a worker picks it up.
+_run_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=_max_concurrent_runs(),
+    thread_name_prefix="branding-run",
 )
+
+
+@asynccontextmanager
+async def _lifespan(application: FastAPI):
+    # Register Postgres schema (no-op when POSTGRES_HOST is unset).
+    try:
+        from shared_postgres import register_team_schemas
+
+        register_team_schemas(BRANDING_POSTGRES_SCHEMA)
+    except Exception:
+        logger.exception("branding postgres schema registration failed")
+    yield
+    # Stop accepting new runs and cancel any still queued so worker threads
+    # don't outlive the app. Don't block teardown on an in-flight pipeline
+    # (a full run can take minutes); those threads finish on their own.
+    _run_executor.shutdown(wait=False, cancel_futures=True)
+    try:
+        from shared_postgres import close_pool
+
+        close_pool()
+    except Exception:
+        logger.warning("branding shared_postgres close_pool failed", exc_info=True)
+
+
+app = FastAPI(title="Branding Team API", version="2.0.0", lifespan=_lifespan)
+instrument_fastapi_app(app, team_key="branding")
 
 branding_store = get_default_store()
 orchestrator = BrandingTeamOrchestrator()
@@ -213,27 +251,16 @@ class AttachConversationBrandRequest(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class BrandingSession:
+class BrandingSession(BaseModel):
+    """Interactive-review session state.
+
+    A Pydantic model so persistence is just ``model_dump(mode="json")`` /
+    ``model_validate`` — no hand-rolled field-by-field (de)serialisation.
+    """
+
     mission: BrandingMission
     questions: List[BrandingQuestion]
     latest_output: TeamOutput
-
-
-def _session_to_dict(session: BrandingSession) -> dict:
-    return {
-        "mission": session.mission.model_dump(mode="json"),
-        "questions": [q.model_dump(mode="json") for q in session.questions],
-        "latest_output": session.latest_output.model_dump(mode="json"),
-    }
-
-
-def _session_from_dict(d: dict) -> BrandingSession:
-    return BrandingSession(
-        mission=BrandingMission.model_validate(d["mission"]),
-        questions=[BrandingQuestion.model_validate(q) for q in d["questions"]],
-        latest_output=TeamOutput.model_validate(d["latest_output"]),
-    )
 
 
 class BrandingSessionStore:
@@ -251,7 +278,7 @@ class BrandingSessionStore:
             cur.execute(
                 "INSERT INTO branding_sessions (session_id, session_json, updated_at) "
                 "VALUES (%s, %s, %s)",
-                (session_id, Json(_session_to_dict(session)), now),
+                (session_id, Json(session.model_dump(mode="json")), now),
             )
         return session_id, session
 
@@ -265,7 +292,7 @@ class BrandingSessionStore:
             row = cur.fetchone()
         if row is None:
             return None
-        return _session_from_dict(row["session_json"])
+        return BrandingSession.model_validate(row["session_json"])
 
     @timed_query(store="branding_sessions", op="save")
     def save(self, session_id: str, session: BrandingSession) -> None:
@@ -275,7 +302,7 @@ class BrandingSessionStore:
             cur.execute(
                 "UPDATE branding_sessions SET session_json = %s, updated_at = %s "
                 "WHERE session_id = %s",
-                (Json(_session_to_dict(session)), now, session_id),
+                (Json(session.model_dump(mode="json")), now, session_id),
             )
 
 
@@ -312,10 +339,29 @@ def _mission_has_minimal_required_fields(mission: BrandingMission) -> bool:
     return name_ok and desc_ok and audience_ok
 
 
-def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]:
-    """If mission has minimal required fields, run orchestrator and return TeamOutput; else return None."""
+def _run_orchestrator_if_ready(
+    mission: BrandingMission,
+    previous_mission: Optional[BrandingMission] = None,
+    previous_output: Optional[TeamOutput] = None,
+) -> Optional[TeamOutput]:
+    """Run the pipeline for *mission*, or reuse a cached result.
+
+    Returns None when the mission lacks the minimal required fields. The
+    pipeline output is a pure function of the mission, so when the mission is
+    unchanged since the previous run we return ``previous_output`` instead of
+    re-running ~40 agents — the common case on the chat path, where most turns
+    don't change the mission. Equality is a structural Pydantic compare; no
+    serialization needed.
+    """
     if not _mission_has_minimal_required_fields(mission):
         return None
+    # NOTE: the short-circuit relies on BrandingMission being treated as
+    # immutable — missions are replaced (model_copy/new instance), never mutated
+    # in place. If that ever changes, this structural equality could match a
+    # mutated-but-same-identity mission and serve stale output; compare a version
+    # or content hash instead.
+    if previous_output is not None and previous_mission == mission:
+        return previous_output
     return orchestrator.run(
         mission=mission,
         human_review=HumanReview(approved=False, feedback="Building brand from conversation."),
@@ -323,10 +369,7 @@ def _run_orchestrator_if_ready(mission: BrandingMission) -> Optional[TeamOutput]
 
 
 def _brand_exists(brand_id: str) -> bool:
-    for client in branding_store.list_clients():
-        if branding_store.get_brand(client.id, brand_id):
-            return True
-    return False
+    return branding_store.brand_exists(brand_id)
 
 
 def _build_open_questions(mission: BrandingMission) -> List[BrandingQuestion]:
@@ -407,8 +450,17 @@ def create_client(payload: CreateClientRequest) -> Client:
 
 
 @app.get("/clients", response_model=List[Client])
-def list_clients() -> List[Client]:
-    return branding_store.list_clients()
+def list_clients(
+    limit: Optional[int] = Query(None, gt=0),
+    offset: int = Query(0, ge=0),
+) -> List[Client]:
+    """List clients, optionally paginated.
+
+    ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``), so
+    out-of-range input yields a 422 rather than reaching the store's
+    ``_validate_pagination`` guard and surfacing as a 500.
+    """
+    return branding_store.list_clients(limit=limit, offset=offset)
 
 
 @app.get("/clients/{client_id}", response_model=Client)
@@ -425,10 +477,19 @@ def get_client(client_id: str) -> Client:
 
 
 @app.get("/clients/{client_id}/brands", response_model=List[Brand])
-def list_brands(client_id: str) -> List[Brand]:
+def list_brands(
+    client_id: str,
+    limit: Optional[int] = Query(None, gt=0),
+    offset: int = Query(0, ge=0),
+) -> List[Brand]:
+    """List a client's brands, optionally paginated (404 if the client is unknown).
+
+    ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``) so bad
+    input is a 422, not a 500 from the store's pagination guard.
+    """
     if not branding_store.get_client(client_id):
         raise HTTPException(status_code=404, detail="Client not found")
-    return branding_store.list_brands_for_client(client_id)
+    return branding_store.list_brands_for_client(client_id, limit=limit, offset=offset)
 
 
 @app.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
@@ -633,9 +694,9 @@ def _submit_brand_run(
         brand_id=brand_id,
         current_phase=target_phase.value if target_phase else None,
     )
-    thread = threading.Thread(
-        target=_run_branding_background,
-        args=(
+    try:
+        _run_executor.submit(
+            _run_branding_background,
             job_id,
             brand.mission,
             human_review,
@@ -645,10 +706,12 @@ def _submit_brand_run(
             payload.include_market_research,
             payload.include_design_assets,
             target_phase,
-        ),
-        daemon=True,
-    )
-    thread.start()
+        )
+    except RuntimeError:
+        # Executor was shut down (e.g. app teardown) — fail the job row and
+        # return 503 rather than letting the RuntimeError surface as a 500.
+        update_job(job_id, status=JOB_STATUS_FAILED, error="run executor unavailable")
+        raise HTTPException(status_code=503, detail="Service temporarily unavailable")
     return RunBrandJobResponse(job_id=job_id, status=JOB_STATUS_PENDING)
 
 
@@ -743,15 +806,25 @@ def delete_branding_job(job_id: str) -> Dict[str, Any]:
     "/clients/{client_id}/brands/{brand_id}/request-market-research",
     response_model=CompetitiveSnapshot,
 )
-def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
-    brand = branding_store.get_brand(client_id, brand_id)
+async def request_market_research_for_brand(client_id: str, brand_id: str) -> CompetitiveSnapshot:
+    """Fetch a competitive snapshot for a brand from the Market Research team.
+
+    Async so the (potentially multi-minute) status polling yields to the event
+    loop instead of holding a worker thread. 404 if the brand is unknown; 503
+    if the market-research service is unconfigured or fails.
+    """
+    # get_brand is a synchronous (blocking) DB call — run it off the event loop.
+    brand = await asyncio.to_thread(branding_store.get_brand, client_id, brand_id)
     if not brand:
         raise HTTPException(status_code=404, detail="Brand not found")
     try:
-        from branding_team.adapters.market_research import request_market_research
+        from branding_team.adapters.market_research import request_market_research_async
 
-        snapshot = request_market_research(brand.mission)
+        snapshot = await request_market_research_async(brand.mission)
     except Exception:
+        # Surface the real cause (transport error, bad response, timeout) in the
+        # logs; the client still only sees an opaque 503.
+        logger.exception("Market research request failed for brand %s", brand_id)
         raise HTTPException(status_code=503, detail="Market research service unavailable")
     if not snapshot:
         raise HTTPException(status_code=503, detail="Market research service unavailable")
@@ -877,11 +950,17 @@ def answer_branding_question(
     session.mission = _apply_answer(session.mission, question, payload.answer)
 
     open_questions = [q for q in session.questions if q.status == "open"]
-    human_review = HumanReview(
-        approved=not open_questions,
-        feedback="Answers applied and branding artifacts refreshed.",
-    )
-    session.latest_output = orchestrator.run(mission=session.mission, human_review=human_review)
+    # Debounce regeneration. Answers only refine Phase 1 inputs (values,
+    # differentiators, voice), and any artifacts rebuilt now would be rebuilt
+    # again on the next answer. So while questions remain we keep the existing
+    # artifacts untouched and regenerate the full ~40-agent pipeline exactly
+    # once — when the final question is answered.
+    if not open_questions:
+        human_review = HumanReview(
+            approved=True,
+            feedback="Answers applied and branding artifacts refreshed.",
+        )
+        session.latest_output = orchestrator.run(mission=session.mission, human_review=human_review)
     session_store.save(session_id, session)
     return _session_response(session_id, session)
 
@@ -889,6 +968,25 @@ def answer_branding_question(
 # ---------------------------------------------------------------------------
 # Conversation (chat) endpoints
 # ---------------------------------------------------------------------------
+
+
+def _local_message(role: str, content: str) -> _StoredMessage:
+    """Build an in-memory message mirroring what ``append_message`` just wrote,
+    so a turn's response can be assembled without re-reading the row.
+
+    Preconditions:
+        ``role`` is ``"user"`` or ``"assistant"``; ``content`` is the message
+        text that was just persisted for this conversation.
+    Postconditions:
+        Returns a ``_StoredMessage`` with the given role/content and an
+        ISO-8601 UTC timestamp captured now (within sub-millisecond of the
+        persisted row's timestamp, which is also app-clock generated).
+    """
+    return _StoredMessage(
+        role=role,
+        content=content,
+        timestamp=datetime.now(tz=timezone.utc).isoformat(),
+    )
 
 
 def _conversation_to_response(
@@ -927,66 +1025,44 @@ def create_branding_conversation(
     conversation_id = conversation_store.create(brand_id=brand_id)
     initial_message = (req.initial_message or "").strip()
     suggested_questions: List[str] = []
+    # Track the response messages in memory (a fresh conversation has none yet)
+    # so we don't re-read the row we just wrote.
+    messages: List[_StoredMessage] = []
+    mission: BrandingMission = _default_mission()
+    latest_output: Optional[TeamOutput] = None
 
     if initial_message:
+        # Freshly created conversation: no prior history, mission is the default.
         conversation_store.append_message(conversation_id, "user", initial_message)
-        messages, mission, _ = conversation_store.get(conversation_id) or (
-            [],
-            _default_mission(),
-            None,
-        )
-        msg_pairs = [(m.role, m.content) for m in messages]
+        messages.append(_local_message("user", initial_message))
         reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
-            msg_pairs[:-1], mission, initial_message
+            [], _default_mission(), initial_message
         )
         conversation_store.update_mission(conversation_id, updated_mission)
         conversation_store.append_message(conversation_id, "assistant", reply)
+        messages.append(_local_message("assistant", reply))
         output = _run_orchestrator_if_ready(updated_mission)
         if output is not None:
             conversation_store.update_output(conversation_id, output)
+        mission, latest_output = updated_mission, output
 
         # Auto-create a brand when the user provided enough info in the initial message.
-        skip_save = req.skip_save
-        if not brand_id and not skip_save and _mission_has_brand_name(updated_mission):
-            client_id = _ensure_default_client()
-            brand = branding_store.create_brand(
-                client_id=client_id,
-                mission=updated_mission,
-                name=updated_mission.company_name,
+        if not brand_id and not req.skip_save and _mission_has_brand_name(updated_mission):
+            brand_id = _auto_create_brand_from_conversation(
+                conversation_id, updated_mission, output
             )
-            if brand:
-                conversation_store.set_brand(conversation_id, brand.id)
-                branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-                if output:
-                    branding_store.append_brand_version(client_id, brand.id, output)
-                brand_id = brand.id
-                logger.info(
-                    "Auto-created brand %s from initial message in conversation %s",
-                    brand.id,
-                    conversation_id,
-                )
-
-        messages, mission, latest_output = conversation_store.get(conversation_id) or (
-            [],
-            updated_mission,
-            output,
-        )
     else:
         reply = (
             "Hi! I'm your branding lead. I'll guide you through our 5-phase brand development framework — "
             "starting with your Strategic Core. Let's begin: what's your company or product name?"
         )
         conversation_store.append_message(conversation_id, "assistant", reply)
+        messages.append(_local_message("assistant", reply))
         suggested_questions = [
             "What's your company name?",
             "Who is your target audience?",
             "What does your company do?",
         ]
-        messages, mission, latest_output = conversation_store.get(conversation_id) or (
-            [],
-            _default_mission(),
-            None,
-        )
 
     return _conversation_to_response(
         conversation_id, brand_id, messages, mission, latest_output, suggested_questions
@@ -994,70 +1070,145 @@ def create_branding_conversation(
 
 
 def _ensure_default_client() -> str:
-    """Find or create a default workspace client; return client_id."""
-    clients = branding_store.list_clients()
+    """Find or create a default workspace client; return client_id.
+
+    The default client name is configurable via ``BRANDING_DEFAULT_CLIENT_NAME``
+    (default ``"My brands"``) for multi-tenant deployments.
+
+    Note:
+        Find-or-create is not atomic: two concurrent first-time requests could
+        each create a default client. This is benign for the single-user
+        assistant flow (subsequent calls return ``list_clients(limit=1)[0]``)
+        and client names are intentionally non-unique (a workspace can have
+        several clients), so a unique constraint isn't the right fix. A
+        dedicated default-workspace flag or app-level lock is a follow-up.
+    """
+    clients = branding_store.list_clients(limit=1)
     if clients:
         return clients[0].id
-    client = branding_store.create_client(name="My brands")
+    name = os.environ.get("BRANDING_DEFAULT_CLIENT_NAME", "My brands")
+    client = branding_store.create_client(name=name)
     return client.id
+
+
+def _auto_create_brand_from_conversation(
+    conversation_id: str,
+    mission: BrandingMission,
+    output: Optional[TeamOutput],
+) -> Optional[str]:
+    """Create a brand from an unattached conversation and link the two.
+
+    Preconditions:
+        ``conversation_id`` refers to an existing conversation that is not yet
+        attached to a brand, and ``mission`` carries a real (non-placeholder)
+        company name.
+    Postconditions:
+        On success the conversation is attached to the new brand, the brand
+        records the conversation id, and any ``output`` is appended as the
+        first version. Returns the new brand id, or None if creation failed.
+
+    Note:
+        The steps run as independent statements (each store call takes its own
+        ``shared_postgres`` connection), so this sequence is NOT atomic: if a
+        later step raises, the brand may already exist while the conversation
+        link or first version is missing. Acceptable for the single-user
+        assistant flow today; making it transactional requires cross-store
+        connection sharing and is tracked as a follow-up.
+    """
+    client_id = _ensure_default_client()
+    brand = branding_store.create_brand(
+        client_id=client_id,
+        mission=mission,
+        name=mission.company_name,
+    )
+    if not brand:
+        return None
+    # The brand now exists. If any linkage step below fails, the brand is
+    # orphaned (created but not attached). Log a warning that names the brand so
+    # the inconsistency is recoverable, then re-raise — the steps are not atomic
+    # (see the Note above), so we surface the failure rather than hide it.
+    try:
+        conversation_store.set_brand(conversation_id, brand.id)
+        branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
+        if output:
+            branding_store.append_brand_version(client_id, brand.id, output)
+    except Exception:
+        logger.warning(
+            "Brand %s was created but linking it to conversation %s failed; "
+            "the brand may be orphaned",
+            brand.id,
+            conversation_id,
+            exc_info=True,
+        )
+        raise
+    logger.info("Auto-created brand %s from conversation %s", brand.id, conversation_id)
+    return brand.id
 
 
 @app.post("/conversations/{conversation_id}/messages", response_model=ConversationStateResponse)
 def send_branding_conversation_message(
     conversation_id: str, payload: SendMessageRequest
 ) -> ConversationStateResponse:
-    state = conversation_store.get(conversation_id)
-    if not state:
+    """Append a user message, get the assistant's reply, and return updated state.
+
+    Runs the assistant on the latest turn, persists the mission/output it
+    derives, auto-creates and links a brand once enough info is present (unless
+    ``skip_save``), and returns the refreshed conversation (404 if unknown).
+    """
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    messages, mission, _ = state
-    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
-    conversation_store.append_message(conversation_id, "user", payload.message)
-    msg_pairs = [(m.role, m.content) for m in messages]
-    msg_pairs.append(("user", payload.message))
+    brand_id = state.brand_id
+    # If the write does not land (conversation no longer exists), don't go on to
+    # build an in-memory response that claims the message was persisted.
+    if not conversation_store.append_message(conversation_id, "user", payload.message):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    history_pairs = [(m.role, m.content) for m in state.messages]
     reply, updated_mission, suggested_questions = _get_assistant_agent().respond(
-        msg_pairs[:-1], mission, payload.message
+        history_pairs, state.mission, payload.message
     )
     conversation_store.update_mission(conversation_id, updated_mission)
-    conversation_store.append_message(conversation_id, "assistant", reply)
-    output = _run_orchestrator_if_ready(updated_mission)
-    if output is not None:
+    # The reply is already computed and returned to the caller; if this write
+    # doesn't land (conversation vanished mid-turn) log it rather than fail the
+    # response, so the inconsistency is at least visible in the logs.
+    if not conversation_store.append_message(conversation_id, "assistant", reply):
+        logger.warning("Assistant reply not persisted for conversation %s", conversation_id)
+    # Reuse the prior output when the mission is unchanged this turn; the
+    # short-circuit returns the same object, so identity tells us whether a
+    # fresh run happened and thus whether a write is needed.
+    output = _run_orchestrator_if_ready(updated_mission, state.mission, state.latest_output)
+    if output is not None and output is not state.latest_output:
         conversation_store.update_output(conversation_id, output)
 
     # Auto-create a brand when the user has provided at least a company name and conversation is unattached.
     if not brand_id and not payload.skip_save and _mission_has_brand_name(updated_mission):
-        client_id = _ensure_default_client()
-        brand = branding_store.create_brand(
-            client_id=client_id,
-            mission=updated_mission,
-            name=updated_mission.company_name,
-        )
-        if brand:
-            conversation_store.set_brand(conversation_id, brand.id)
-            branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-            if output:
-                branding_store.append_brand_version(client_id, brand.id, output)
-            brand_id = brand.id
-            logger.info("Auto-created brand %s from conversation %s", brand.id, conversation_id)
+        brand_id = _auto_create_brand_from_conversation(conversation_id, updated_mission, output)
 
-    messages, mission, latest_output = conversation_store.get(conversation_id) or (
-        [],
-        updated_mission,
-        output,
-    )
+    # Assemble the response from known state instead of re-reading the row.
+    messages = list(state.messages) + [
+        _local_message("user", payload.message),
+        _local_message("assistant", reply),
+    ]
+    latest_output = output if output is not None else state.latest_output
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, suggested_questions
+        conversation_id, brand_id, messages, updated_mission, latest_output, suggested_questions
     )
 
 
 @app.get("/conversations/{conversation_id}", response_model=ConversationStateResponse)
 def get_branding_conversation(conversation_id: str) -> ConversationStateResponse:
-    state = conversation_store.get(conversation_id)
-    if not state:
+    """Return the full stored state (messages, mission, output, brand) for a
+    conversation in a single query; 404 if it does not exist."""
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    messages, mission, latest_output = state
-    brand_id = conversation_store.get_conversation_brand_id(conversation_id)
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, []
+        conversation_id,
+        state.brand_id,
+        state.messages,
+        state.mission,
+        state.latest_output,
+        [],
     )
 
 
@@ -1065,11 +1216,12 @@ def get_branding_conversation(conversation_id: str) -> ConversationStateResponse
 def list_branding_conversations(
     brand_id: Optional[str] = None,
 ) -> List[ConversationSummaryResponse]:
+    """List conversation summaries (optionally filtered by ``brand_id``),
+    resolving each attached brand's name in a single batched lookup."""
     summaries = conversation_store.list_conversations(brand_id=brand_id)
-    brand_names: Dict[str, str] = {}
-    for client in branding_store.list_clients():
-        for brand in branding_store.list_brands_for_client(client.id):
-            brand_names[brand.id] = brand.name
+    # Resolve only the brand names referenced by these conversations instead
+    # of loading every brand of every client into memory.
+    brand_names = branding_store.get_brand_names([s.brand_id for s in summaries if s.brand_id])
     return [
         ConversationSummaryResponse(
             conversation_id=s.conversation_id,
@@ -1087,16 +1239,17 @@ def list_branding_conversations(
 def attach_conversation_to_brand(
     conversation_id: str, payload: AttachConversationBrandRequest
 ) -> ConversationStateResponse:
+    """Attach an existing conversation to an existing brand and return the
+    updated state. 404 if either the brand or the conversation is unknown."""
     brand_id = payload.brand_id.strip()
     if not _brand_exists(brand_id):
         raise HTTPException(status_code=404, detail="Brand not found")
-    state = conversation_store.get(conversation_id)
-    if not state:
+    state = conversation_store.get_state(conversation_id)
+    if state is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     conversation_store.set_brand(conversation_id, brand_id)
-    messages, mission, latest_output = state
     return _conversation_to_response(
-        conversation_id, brand_id, messages, mission, latest_output, []
+        conversation_id, brand_id, state.messages, state.mission, state.latest_output, []
     )
 
 

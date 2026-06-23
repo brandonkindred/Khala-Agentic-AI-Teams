@@ -6,25 +6,35 @@ is registered from the team's FastAPI lifespan.
 
 Every public method is wrapped in ``@timed_query`` so slow reads and
 writes surface as structured log lines.
+
+Note for maintainers:
+    The unit tests run against an in-memory fake (``tests/_fake_postgres.py``)
+    that matches the SQL emitted here by prefix. When you change or add SQL in
+    this module, update that fake's handlers and the ``real_postgres``-marked
+    tests in ``tests/test_store_real_postgres.py`` (which run the same SQL
+    against a live Postgres in CI) so the fake can't drift into emulating
+    queries the real database would reject.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from psycopg import Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
-from shared_postgres import get_conn, merge_jsonb_via_cursor
+from shared_postgres import get_conn
 from shared_postgres.metrics import timed_query
 
 from .models import (
     Brand,
     BrandingMission,
     BrandStatus,
+    BrandVersionSummary,
     Client,
     TeamOutput,
 )
@@ -36,6 +46,38 @@ _STORE = "branding"
 
 def _now_iso() -> str:
     return datetime.now(tz=timezone.utc).isoformat()
+
+
+def _validate_pagination(limit: Optional[int], offset: int) -> None:
+    """Enforce pagination preconditions with real raises (survives ``python -O``).
+
+    Preconditions:
+        ``limit`` is None or a positive int; ``offset`` is >= 0.
+    """
+    if limit is not None and limit <= 0:
+        raise ValueError("limit must be None or a positive int")
+    if offset < 0:
+        raise ValueError("offset must be >= 0")
+
+
+def _apply_brand_patch(cur: Cursor, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
+    """Shallow-merge *patch* into a brand's JSONB and return the updated Brand.
+
+    The single server-side ``data || patch ... RETURNING data`` write that
+    both ``update_brand`` and ``append_brand_version`` share. Runs on the
+    caller's cursor (so it participates in the caller's transaction); returns
+    None when no row matched (e.g. a concurrent delete).
+    """
+    # ``%s::jsonb`` cast is required: psycopg adapts ``Json`` as the ``json``
+    # type, and Postgres has no ``jsonb || json`` operator (both operands of
+    # ``||`` must be jsonb).
+    cur.execute(
+        "UPDATE branding_brands SET data = data || %s::jsonb "
+        "WHERE id = %s AND client_id = %s RETURNING data",
+        (Json(patch), brand_id, client_id),
+    )
+    row = cur.fetchone()
+    return Brand.model_validate(row["data"]) if row is not None else None
 
 
 class BrandingStore:
@@ -64,9 +106,26 @@ class BrandingStore:
         return Client.model_validate(row["data"])
 
     @timed_query(store=_STORE, op="list_clients")
-    def list_clients(self) -> List[Client]:
+    def list_clients(self, limit: Optional[int] = None, offset: int = 0) -> List[Client]:
+        """Return clients, optionally paginated.
+
+        Preconditions:
+            ``limit`` is None or a positive int; ``offset`` is >= 0.
+        Postconditions:
+            Rows are ordered by ``(created_at, id)`` — the ``id`` tie-breaker
+            keeps pagination stable when rows share a ``created_at``. When
+            ``limit`` is None the full set is returned; otherwise at most
+            ``limit`` rows starting at ``offset``.
+        """
+        _validate_pagination(limit, offset)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT data FROM branding_clients")
+            if limit is None:
+                cur.execute("SELECT data FROM branding_clients ORDER BY created_at, id")
+            else:
+                cur.execute(
+                    "SELECT data FROM branding_clients ORDER BY created_at, id LIMIT %s OFFSET %s",
+                    (limit, offset),
+                )
             rows = cur.fetchall()
         return [Client.model_validate(r["data"]) for r in rows]
 
@@ -110,34 +169,96 @@ class BrandingStore:
             return None
         return Brand.model_validate(row["data"])
 
-    @timed_query(store=_STORE, op="get_brand_by_id")
-    def get_brand_by_id(self, brand_id: str) -> Optional[Brand]:
-        """Return the brand with this globally-unique id, regardless of owner.
+    @timed_query(store=_STORE, op="brand_exists")
+    def brand_exists(self, brand_id: str) -> bool:
+        """True if a brand with *brand_id* exists for any client.
 
-        Brand ids are globally unique (``brand_`` + a uuid4 slug), so at most
-        one row matches. Lets callers resolve a brand from its id alone instead
-        of scanning every client (the old ``list_clients`` → ``get_brand`` N+1).
+        Single indexed lookup — replaces scanning every client's brand list.
 
-        Preconditions:
-            - ``brand_id`` is a brand identifier string.
         Postconditions:
-            - Returns the single matching :class:`Brand`, or ``None`` when no
-              row has that id. Issues exactly one query.
+            Returns a bool; performs exactly one query and loads no JSONB.
+        """
+        with get_conn() as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1 FROM branding_brands WHERE id = %s LIMIT 1", (brand_id,))
+            return cur.fetchone() is not None
+
+    @timed_query(store=_STORE, op="get_brand_by_id")
+    def get_brand_by_id(self, brand_id: str) -> Optional[Tuple[str, Brand]]:
+        """Return ``(client_id, Brand)`` for *brand_id* regardless of client.
+
+        Single query — replaces the O(clients) scan callers used when they
+        hold a brand id but not its owning client.
+
+        Invariants:
+            ``branding_brands.id`` is the table's ``PRIMARY KEY`` (globally
+            unique across clients), so ``WHERE id = %s`` matches at most one row
+            — no ``LIMIT 1`` needed and the resolved client is unambiguous.
+        Postconditions:
+            Returns None when no such brand exists, else the owning client id
+            paired with the validated Brand.
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute("SELECT data FROM branding_brands WHERE id = %s", (brand_id,))
+            cur.execute(
+                "SELECT client_id, data FROM branding_brands WHERE id = %s",
+                (brand_id,),
+            )
             row = cur.fetchone()
         if row is None:
             return None
-        return Brand.model_validate(row["data"])
+        return row["client_id"], Brand.model_validate(row["data"])
 
-    @timed_query(store=_STORE, op="list_brands_for_client")
-    def list_brands_for_client(self, client_id: str) -> List[Brand]:
+    @timed_query(store=_STORE, op="get_brand_names")
+    def get_brand_names(self, brand_ids: List[str]) -> Dict[str, Optional[str]]:
+        """Return a ``{brand_id: name}`` map for the requested ids only.
+
+        Preconditions:
+            ``brand_ids`` is a list of brand id strings.
+        Postconditions:
+            The result contains an entry for every requested id that exists;
+            unknown ids are simply absent. A value may be ``None`` when the
+            stored JSONB document has no ``name`` key. Empty input yields an
+            empty map with no query issued.
+        """
+        unique_ids = list({bid for bid in brand_ids if bid})
+        if not unique_ids:
+            return {}
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT data FROM branding_brands WHERE client_id = %s",
-                (client_id,),
+                "SELECT id, data FROM branding_brands WHERE id = ANY(%s)",
+                (unique_ids,),
             )
+            rows = cur.fetchall()
+        # Read the name straight out of the JSONB document — no need to build
+        # and validate a full Brand model just to pull one field.
+        return {r["id"]: r["data"].get("name") for r in rows}
+
+    @timed_query(store=_STORE, op="list_brands_for_client")
+    def list_brands_for_client(
+        self, client_id: str, limit: Optional[int] = None, offset: int = 0
+    ) -> List[Brand]:
+        """Return a client's brands, optionally paginated.
+
+        Preconditions:
+            ``limit`` is None or a positive int; ``offset`` is >= 0.
+        Postconditions:
+            Rows are ordered by ``(created_at, id)`` — the ``id`` tie-breaker
+            keeps pagination stable when rows share a ``created_at``. When
+            ``limit`` is None all of the client's brands are returned;
+            otherwise at most ``limit`` rows starting at ``offset``.
+        """
+        _validate_pagination(limit, offset)
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            if limit is None:
+                cur.execute(
+                    "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at, id",
+                    (client_id,),
+                )
+            else:
+                cur.execute(
+                    "SELECT data FROM branding_brands WHERE client_id = %s "
+                    "ORDER BY created_at, id LIMIT %s OFFSET %s",
+                    (client_id, limit, offset),
+                )
             rows = cur.fetchall()
         return [Brand.model_validate(r["data"]) for r in rows]
 
@@ -182,21 +303,16 @@ class BrandingStore:
         name: Optional[str] = None,
         conversation_id: Optional[str] = None,
     ) -> Optional[Brand]:
-        """Patch a brand's top-level fields atomically and return the new state.
+        """Patch a brand's mutable fields in a single round trip.
 
-        Replaces the former read-modify-write cycle (SELECT → ``model_validate``
-        the whole doc → mutate → rewrite the whole blob) with a single
-        server-side shallow merge (``data || patch``). One round-trip, no
-        reserialize of unchanged fields, and concurrency-safe: two callers
-        patching disjoint fields no longer clobber each other.
+        Uses a server-side ``jsonb`` shallow merge (``data || patch``) so only
+        the changed keys travel to Postgres — the full brand document (mission
+        + every phase output + history) is never read back and re-serialised
+        just to flip ``status`` or attach a ``conversation_id``.
 
-        Preconditions:
-            - ``client_id``/``brand_id`` identify a brand (else ``None`` is
-              returned).
         Postconditions:
-            - Only the supplied fields (plus ``updated_at``) are changed; all
-              other stored fields are preserved.
-            - Returns the merged :class:`Brand`, or ``None`` when no row matched.
+            Returns the updated Brand, or None when no such brand exists for
+            the given client.
         """
         patch: dict = {"updated_at": _now_iso()}
         if mission is not None:
@@ -208,34 +324,7 @@ class BrandingStore:
         if conversation_id is not None:
             patch["conversation_id"] = conversation_id
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            return merge_jsonb_via_cursor(
-                cur,
-                "branding_brands",
-                key={"id": brand_id, "client_id": client_id},
-                patch=patch,
-                model=Brand,
-            )
-
-    # Atomic version bump + history append + field merge, all server-side.
-    # The version counter and the history entry's version are both derived from
-    # the row's current ``version`` in the same statement, so concurrent appends
-    # can never collide on a version number or lose a history entry (the former
-    # read-modify-write rewrote the whole — ever-growing — ``history`` array in
-    # Python and raced on ``version``).
-    _APPEND_VERSION_SQL = (
-        "UPDATE branding_brands SET data = jsonb_set("
-        "jsonb_set("
-        "data || %s::jsonb, "
-        "'{version}', to_jsonb(COALESCE((data->>'version')::int, 0) + 1)"
-        "), "
-        "'{history}', COALESCE(data->'history', '[]'::jsonb) || jsonb_build_array("
-        "jsonb_build_object("
-        "'version', COALESCE((data->>'version')::int, 0) + 1, "
-        "'created_at', %s::text, "
-        "'status', %s::text"
-        "))"
-        ") WHERE id = %s AND client_id = %s RETURNING data"
-    )
+            return _apply_brand_patch(cur, brand_id, client_id, patch)
 
     @timed_query(store=_STORE, op="append_brand_version")
     def append_brand_version(
@@ -244,38 +333,48 @@ class BrandingStore:
         brand_id: str,
         output: TeamOutput,
     ) -> Optional[Brand]:
-        """Append a new version to a brand atomically and return the new state.
+        """Append a new version, writing only the changed keys.
 
-        Performs the whole update in a single server-side statement: bumps
-        ``version``, appends one :class:`BrandVersionSummary` to ``history``,
-        and merges ``latest_output``/``current_phase``/``updated_at``. The
-        history array is concatenated in Postgres, so the (unbounded, growing)
-        prior history is never pulled into Python and rewritten.
+        The new version number and history list are derived from the current
+        record, but the write is a ``jsonb`` shallow merge so untouched
+        top-level keys (e.g. ``mission``) are not re-serialised and re-sent.
 
-        Preconditions:
-            - ``client_id``/``brand_id`` identify a brand (else ``None``).
         Postconditions:
-            - ``version`` increases by exactly 1; exactly one history entry is
-              appended carrying the new version, ``output.status`` and the
-              write timestamp.
-            - Returns the updated :class:`Brand`, or ``None`` when no row matched.
+            On success the brand's ``version`` increments by one, the output
+            is recorded as ``latest_output``, and a history entry is appended.
+            Returns None if the brand no longer exists at write time (e.g. a
+            concurrent delete between the read and the write).
         """
-        now = _now_iso()
-        current_phase = output.current_phase.value if output.current_phase is not None else None
-        field_patch = {
-            "latest_output": output.model_dump(mode="json"),
-            "current_phase": current_phase,
-            "updated_at": now,
-        }
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            # Read only the two fields we need to compute the next version,
+            # not the whole brand document (which embeds the previous
+            # latest_output — every phase's output). FOR UPDATE locks the row
+            # for the transaction (get_conn commits at block exit) so
+            # concurrent appends serialise and no increment is lost.
             cur.execute(
-                self._APPEND_VERSION_SQL,
-                (Json(field_patch), now, output.status.value, brand_id, client_id),
+                "SELECT data->>'version' AS version, data->'history' AS history "
+                "FROM branding_brands WHERE id = %s AND client_id = %s FOR UPDATE",
+                (brand_id, client_id),
             )
             row = cur.fetchone()
-        if row is None:
-            return None
-        return Brand.model_validate(row["data"])
+            if row is None:
+                return None
+            now = _now_iso()
+            new_version = int(row["version"] or 0) + 1
+            history_entry = BrandVersionSummary(
+                version=new_version,
+                created_at=now,
+                status=output.status.value,
+            )
+            new_history = list(row["history"] or []) + [history_entry.model_dump(mode="json")]
+            patch = {
+                "latest_output": output.model_dump(mode="json"),
+                "current_phase": output.current_phase.value,
+                "version": new_version,
+                "history": new_history,
+                "updated_at": now,
+            }
+            return _apply_brand_patch(cur, brand_id, client_id, patch)
 
 
 # ---------------------------------------------------------------------------

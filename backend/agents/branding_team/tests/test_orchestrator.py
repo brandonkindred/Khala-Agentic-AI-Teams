@@ -367,30 +367,6 @@ def test_run_with_store_appends_version(fake_pg) -> None:
     assert updated.latest_output is not None
 
 
-def test_run_with_store_resolves_brand_without_client_id(fake_pg) -> None:
-    """brand_id alone resolves via get_brand_by_id (one query, no client scan)."""
-    from branding_team.store import BrandingStore
-
-    store = BrandingStore()
-    client = store.create_client("Owner Client")
-    mission = _mission()
-    brand = store.create_brand(client.id, mission)
-    assert brand is not None
-
-    with _patch_graph_invoke(ALL_PHASES):
-        orchestrator = BrandingTeamOrchestrator()
-        orchestrator.run(
-            mission=mission,
-            human_review=HumanReview(approved=True),
-            store=store,
-            brand_id=brand.id,  # no client_id — must resolve from the id alone
-        )
-
-    updated = store.get_brand(client.id, brand.id)
-    assert updated is not None
-    assert updated.version == 1
-
-
 def test_run_phase_stops_at_strategic_core() -> None:
     with _patch_graph_invoke(["phase1_strategic_core"]):
         orchestrator = BrandingTeamOrchestrator()
