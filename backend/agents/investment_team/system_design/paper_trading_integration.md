@@ -9,10 +9,12 @@ the backtest quality bar.
 ## Winner gate
 
 Paper trading only runs when the backtest flags the strategy as
-winning:
+winning. The verdict is deterministic — a valid run is winning iff its
+annualized return meets or beats the 8% S&P-500 benchmark; robustness gates
+record caveats but never change it:
 
 ```python
-is_winning = result.annualized_return_pct > 8.0
+is_winning = execution_succeeded and trades and result.annualized_return_pct >= 8.0
 ```
 
 If `is_winning` is False, the cycle records:

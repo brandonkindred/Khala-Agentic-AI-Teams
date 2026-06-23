@@ -29,6 +29,7 @@ from investment_team.market_lab_data import (
 )
 from investment_team.models import (
     IPS,
+    WINNING_THRESHOLD,
     AdvisorSession,
     AdvisorSessionStatus,
     BacktestConfig,
@@ -2956,7 +2957,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         raise HTTPException(
             status_code=400,
             detail=f"Strategy '{request.lab_record_id}' is not a winning strategy. "
-            "Only winning strategies (>8% annualized return) can be paper traded.",
+            f"Only winning strategies (annualized return >= {WINNING_THRESHOLD:g}%, the "
+            "S&P-500 benchmark) can be paper traded.",
         )
 
     strategy = lab_record.strategy

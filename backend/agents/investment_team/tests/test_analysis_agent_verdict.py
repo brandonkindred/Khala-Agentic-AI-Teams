@@ -1,13 +1,14 @@
-"""Regression guard for issue #529 follow-up review (PR #573).
+"""Verdict-selection contract for ``AnalysisAgent.run``.
 
-``AnalysisAgent.run`` used to derive its own verdict from
-``metrics.annualized_return_pct > 8.0`` to choose between ``analysis_win.md``
-and ``analysis_lose.md`` and set ``outcome_label="WINNING"|"LOSING"``. After
-#529, the orchestrator can mark a high-return run as ``is_winning=False`` —
-the alignment loop, the walk-forward acceptance gate, or the removal of the
-legacy ``walk_forward_enabled=False`` publication path can all veto. The
-caller now threads the resolved verdict in, and this test pins that the agent
-honours it instead of looking at the metric.
+The WINNING/LOSING label is deterministic: a strategy wins when its annualized
+return meets or beats the 8% S&P-500 benchmark (``>= WINNING_THRESHOLD``).
+``AnalysisAgent.run`` applies that rule to pick between ``analysis_win.md`` and
+``analysis_lose.md`` and to set ``outcome_label="WINNING"|"LOSING"`` when the
+caller does not pass an explicit ``is_winning``. When the caller (the
+orchestrator) does pass one — it always passes the deterministic value — the
+agent must honour it verbatim rather than re-deriving from the metric. These
+tests pin both halves of that contract; the explicit-override cases also guard
+against a direct caller's value being silently ignored.
 
 Robustness notes:
 - Template selection is verified by recording which key the agent looks up in
@@ -61,8 +62,8 @@ def _spec() -> StrategySpec:
 
 
 def _high_return_metrics() -> BacktestResult:
-    # Above the legacy WINNING_THRESHOLD (8.0) — under the old code path
-    # this would force ``is_winning=True`` inside AnalysisAgent.
+    # 15% annualized — at or above the 8% benchmark, so the deterministic
+    # rule classifies this WINNING when no explicit verdict is passed.
     return BacktestResult(
         total_return_pct=18.0,
         annualized_return_pct=15.0,
@@ -134,10 +135,10 @@ def _install_recorder(monkeypatch) -> _Recorder:
 
 
 def test_analysis_agent_honours_explicit_is_winning_false_on_high_return(monkeypatch):
-    """Even with metrics.annualized_return_pct=15% (legacy ``is_winning=True``),
-    an explicit ``is_winning=False`` from the orchestrator must select the
-    LOSING template + ``outcome_label="LOSING"`` so the narrative cannot tell
-    users the strategy won."""
+    """Even with metrics.annualized_return_pct=15% (the deterministic rule
+    would say WINNING), an explicit ``is_winning=False`` from the caller must
+    select the LOSING template + ``outcome_label="LOSING"``. Guards the agent
+    contract: a passed verdict is never silently overridden by the metric."""
 
     rec = _install_recorder(monkeypatch)
 
@@ -193,15 +194,14 @@ def test_analysis_agent_honours_explicit_is_winning_true_on_low_return(monkeypat
 
 
 def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
-    """Back-compat: when no ``is_winning`` is passed the legacy
-    metric-based derivation is preserved (no behaviour change for callers
-    that haven't migrated)."""
+    """When no ``is_winning`` is passed the agent applies the deterministic
+    rule: 15% annualized is at or above the 8% benchmark → WINNING."""
 
     rec = _install_recorder(monkeypatch)
 
     AnalysisAgent().run(
         _spec(),
-        _high_return_metrics(),  # 15% annualized → legacy heuristic says winning
+        _high_return_metrics(),  # 15% annualized ≥ 8% benchmark → winning
         trades=[],
         rationale="rationale",
     )
@@ -210,6 +210,90 @@ def test_analysis_agent_falls_back_to_metric_heuristic_when_unset(monkeypatch):
     assert "analysis_lose.md" not in rec.read_files
     prompts = "\n\n".join(rec.prompts)
     assert "Outcome label: WINNING" in prompts
+
+
+@pytest.mark.parametrize(
+    "annualized,expected_win",
+    [
+        pytest.param(8.0, True, id="exactly_8pct_is_winning"),
+        pytest.param(7.99, False, id="just_below_8pct_is_losing"),
+        pytest.param(44.6, True, id="high_return_is_winning"),
+    ],
+)
+def test_analysis_agent_metric_fallback_is_deterministic_at_boundary(
+    monkeypatch, annualized, expected_win
+):
+    """The unset-``is_winning`` fallback is the deterministic >= 8% rule:
+    exactly 8.00% wins (it meets the S&P-500 benchmark), 7.99% loses. Pins the
+    boundary so the rule cannot silently drift back to a strict ``> 8.0``."""
+
+    rec = _install_recorder(monkeypatch)
+
+    metrics = _high_return_metrics().model_copy(update={"annualized_return_pct": annualized})
+    AnalysisAgent().run(_spec(), metrics, trades=[], rationale="rationale")
+
+    expected_file = "analysis_win.md" if expected_win else "analysis_lose.md"
+    forbidden_file = "analysis_lose.md" if expected_win else "analysis_win.md"
+    assert expected_file in rec.read_files
+    assert forbidden_file not in rec.read_files
+    label = "WINNING" if expected_win else "LOSING"
+    assert f"Outcome label: {label}" in "\n\n".join(rec.prompts)
+
+
+def test_analysis_agent_threads_robustness_caveats_from_metrics(monkeypatch):
+    """A run carrying a recorded robustness concern (acceptance_reason) must
+    inject the ``## Robustness caveats`` block into BOTH the draft and the
+    self-review prompts so a winner's narrative can cite the risk without
+    reclassifying the verdict — the reported high-return-but-fragile case."""
+
+    rec = _install_recorder(monkeypatch)
+
+    metrics = _high_return_metrics().model_copy(
+        update={
+            "annualized_return_pct": 44.6,
+            "acceptance_reason": "OOS DSR 0.30 below threshold 1.000",
+            "oos_sharpe": 0.40,
+        }
+    )
+    AnalysisAgent().run(_spec(), metrics, trades=[], rationale="rationale", is_winning=True)
+
+    assert "analysis_win.md" in rec.read_files
+    for prompt in rec.prompts:
+        assert "## Robustness caveats" in prompt
+        assert "OOS DSR 0.30 below threshold" in prompt
+
+
+def test_analysis_agent_omits_caveats_on_clean_metrics(monkeypatch):
+    """A clean run (no recorded robustness concern) injects no caveat block,
+    keeping the prompt byte-identical to the pre-caveats behaviour."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(), _high_return_metrics(), trades=[], rationale="rationale", is_winning=True
+    )
+
+    for prompt in rec.prompts:
+        assert "## Robustness caveats" not in prompt
+
+
+def test_analysis_agent_honours_explicit_robustness_caveats_override(monkeypatch):
+    """An explicit ``robustness_caveats`` argument overrides the metric-derived
+    block, so callers (and tests) can inject a pre-rendered section."""
+
+    rec = _install_recorder(monkeypatch)
+
+    AnalysisAgent().run(
+        _spec(),
+        _high_return_metrics(),
+        trades=[],
+        rationale="rationale",
+        is_winning=True,
+        robustness_caveats="## Robustness caveats\n- injected marker\n",
+    )
+
+    for prompt in rec.prompts:
+        assert "injected marker" in prompt
 
 
 def test_misaligned_alignment_report_threads_disclaimer_into_draft_and_review(

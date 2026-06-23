@@ -1,4 +1,4 @@
-Draft a rigorous analysis of this LOSING swing-trading strategy (annualized return below 8% threshold).
+Draft a rigorous analysis of this LOSING swing-trading strategy — its annualized return is below the 8% S&P-500 benchmark (< 8.0%), so it underperformed simply holding the index. That benchmark comparison IS the verdict; strong risk-adjusted stats do not make a sub-benchmark return a winner.
 
 ## Strategy (definition under test)
 Asset class: equity
@@ -29,6 +29,7 @@ Trade 2: BUY BBB on 2024-02-01 @ 50.00, SELL on 2024-02-11 @ 49.00 (-2.0%)
 The executed trades faithfully implement the specification (alignment audit clean).
 
 ## Instructions
+This strategy is classified LOSING because its annualized return is below the 8% S&P-500 benchmark — state that plainly. If a "Robustness caveats" section appears above, treat its findings as corroborating evidence for the weak result, not as a reason to relabel it a winner.
 Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what failure modes explain weak performance — signal timing, risk/reward asymmetry, cost drag, or rules misaligned with the market regime implied by the results?
 Do NOT derive a stop-multiplied "effective risk" figure (deployed-fraction × stop) and blame weak or negative returns on it being low — that conflation is the specific error to avoid. The deployed size itself is the capital at risk; if it is genuinely small, stating that limited deployment constrained returns is a legitimate, accurate explanation — weigh it alongside signal quality, exit geometry, costs, and regime fit.
