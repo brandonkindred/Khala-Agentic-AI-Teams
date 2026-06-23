@@ -129,9 +129,14 @@ def test_run_issue_returns_400_when_integration_disabled(mock_cfg):
     assert "not enabled" in resp.json()["detail"]
 
 
+@patch(f"{_M}.is_postgres_enabled", return_value=False)
 @patch(f"{_M}.get_credential")
 @patch(f"{_M}.get_github_config")
-def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_cred):
+def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_cred, mock_pg):
+    # Postgres unconfigured (is_postgres_enabled False) means an empty token is a
+    # genuine "not configured" → 400, deterministically (the store-unreachable 503
+    # branch needs Postgres configured). Pinning is_postgres_enabled keeps this
+    # assertion independent of whether the CI box happens to export POSTGRES_HOST.
     mock_cfg.return_value = dict(_GH_CFG)
     mock_cred.return_value = ""
     resp = client.post(_RUN_ISSUE, json={"issue_number": 7})

@@ -51,6 +51,7 @@ def _default_database() -> str:
 def _connect_timeout() -> int:
     """Return the libpq ``connect_timeout`` (seconds) for new connections.
 
+    Preconditions: none.
     Postconditions: returns a positive int from ``POSTGRES_CONNECT_TIMEOUT_S``
         (default 3, floored to 1). Bounds how long a TCP connect to a down or
         unreachable host can hang before psycopg gives up — without it, opening a

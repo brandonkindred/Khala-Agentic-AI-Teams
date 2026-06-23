@@ -95,6 +95,20 @@ describe('IntegrationsDashboardComponent', () => {
     expect(component.githubStoreUnreachable).toBe(false);
   });
 
+  it('clears a stale GitHub store-unreachable flag when a reload fails', () => {
+    apiSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: false, owner: 'acme', repo: 'widget', default_label: '', credential_store_unreachable: true }),
+    );
+    component.loadGitHubConfig();
+    expect(component.githubStoreUnreachable).toBe(true);
+    // A later reload errors out: current state is unknown, so the stale banner flag
+    // must be cleared rather than left visible alongside the error.
+    apiSpy.getGitHubConfig.mockReturnValue(throwError(() => ({ error: { detail: 'blip' } })));
+    component.loadGitHubConfig();
+    expect(component.githubStoreUnreachable).toBe(false);
+    expect(component.githubError).toBe('blip');
+  });
+
   it('webhookUrlInvalid returns true for short or invalid URL', () => {
     component.webhookUrl = 'https://hooks.slack.com/x';
     expect(component.webhookUrlInvalid()).toBe(true);

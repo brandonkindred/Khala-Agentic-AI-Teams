@@ -1044,6 +1044,7 @@ def _build_github_config_response(
 async def _github_config_response() -> GitHubConfigResponse:
     """Read the GitHub config and probe the credential store, off the event loop.
 
+    Preconditions: none.
     Postconditions: returns the current config with ``credential_store_unreachable``
         set per :func:`_credential_store_unreachable`. The config read (a DB read)
         and the connectivity probe both run in a worker thread so the bounded probe

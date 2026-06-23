@@ -594,6 +594,9 @@ export class IntegrationsDashboardComponent implements OnInit {
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.githubError = err?.error?.detail || err?.message || 'Failed to load GitHub config.';
         this.githubLoading = false;
+        // Current store state is unknown after a failed reload — clear the stale
+        // unreachable flag so a banner from a prior load doesn't linger.
+        this.githubStoreUnreachable = false;
       },
     });
   }

@@ -91,6 +91,17 @@ def test_dsn_url_encodes_special_chars_in_password(monkeypatch: pytest.MonkeyPat
     assert "p%40ss" in dsn  # @ -> %40
 
 
+def test_dsn_bounds_connect_timeout(monkeypatch: pytest.MonkeyPatch):
+    """The credential-store DSN carries connect_timeout so a PAT read can't hang on a
+    down host before any reachability probe runs (default 3, env-overridable)."""
+    monkeypatch.setenv("POSTGRES_HOST", "host")
+    monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
+    mod = _reload(monkeypatch, postgres_host="host")
+    assert "connect_timeout=3" in mod._dsn()
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "9")
+    assert "connect_timeout=9" in mod._dsn()
+
+
 # ---------------------------------------------------------------------------
 # _get_psycopg lazy import
 # ---------------------------------------------------------------------------

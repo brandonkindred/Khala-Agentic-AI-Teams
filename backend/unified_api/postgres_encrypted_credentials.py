@@ -18,6 +18,7 @@ import os
 import threading
 import urllib.parse
 
+from shared_env import parse_int
 from shared_postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
 
@@ -63,7 +64,12 @@ def _dsn() -> str:
     db = os.getenv("POSTGRES_DB", "postgres").strip()
     port = os.getenv("POSTGRES_PORT", "5432").strip()
     pwd = urllib.parse.quote_plus(password)
-    return f"postgresql://{user}:{pwd}@{host}:{port}/{db}"
+    # Bound the TCP connect with the same POSTGRES_CONNECT_TIMEOUT_S as the shared
+    # pool: this credential-store connection is the one the GitHub/Slack/Medium reads
+    # actually use, so without it pg_get_credential would hang on a down host for the
+    # libpq default (no timeout) — long before any bounded reachability probe runs.
+    timeout = parse_int("POSTGRES_CONNECT_TIMEOUT_S", 3, minimum=1)
+    return f"postgresql://{user}:{pwd}@{host}:{port}/{db}?connect_timeout={timeout}"
 
 
 @timed_query(store=_STORE, op="pg_get_credential")
