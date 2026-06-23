@@ -5,7 +5,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from branding_team.api.main import app
+from branding_team.api.main import app, branding_store
 from branding_team.models import BrandingMission
 
 # Hits the team API which calls the real job service.  Marked integration
@@ -65,7 +65,36 @@ def test_answer_question_updates_session_and_output() -> None:
     assert answered["latest_output"]["strategic_core"] is not None
 
 
+def test_answering_all_questions_regenerates_and_marks_ready() -> None:
+    """Debounce: intermediate answers skip regeneration; answering the last
+    open question triggers the full run and flips the session to ready."""
+    create = client.post("/sessions", json=_payload())
+    session = create.json()
+    session_id = session["session_id"]
+
+    latest = session
+    # Keep answering whichever question is still open until none remain. The
+    # bound is a safety net: if the API ever stops clearing open_questions this
+    # fails loudly instead of hanging.
+    for _ in range(100):
+        if not latest["open_questions"]:
+            break
+        qid = latest["open_questions"][0]["id"]
+        resp = client.post(
+            f"/sessions/{session_id}/questions/{qid}/answer",
+            json={"answer": "clarity, trust, craft"},
+        )
+        assert resp.status_code == 200
+        latest = resp.json()
+    else:
+        pytest.fail("open_questions never cleared within 100 iterations")
+
+    assert latest["status"] == "ready_for_rollout"
+    assert latest["latest_output"]["strategic_core"] is not None
+
+
 def test_unknown_session_404() -> None:
+    """GET on a non-existent session id returns 404."""
     resp = client.get("/sessions/not-found")
     assert resp.status_code == 404
 
@@ -367,3 +396,127 @@ def test_brand_creation_auto_creates_conversation() -> None:
     conv_resp = client.get(f"/clients/{client_id}/brands/{brand['id']}/conversation")
     assert conv_resp.status_code == 200
     assert conv_resp.json()["conversation_id"] == brand["conversation_id"]
+
+
+def test_list_conversations_resolves_brand_names() -> None:
+    """GET /conversations exercises get_brand_names: attached conversations
+    carry their brand's name, unattached ones report None."""
+    create_c = client.post("/clients", json={"name": "ListConv Client"})
+    client_id = create_c.json()["id"]
+    create_b = client.post(
+        f"/clients/{client_id}/brands",
+        json={
+            "company_name": "ListBrandCo",
+            "company_description": "Company for list conversations test",
+            "target_audience": "teams",
+        },
+    )
+    brand = create_b.json()
+    attached_conv_id = brand["conversation_id"]
+
+    # An unattached conversation (no brand).
+    unattached_id = client.post("/conversations", json={}).json()["conversation_id"]
+
+    resp = client.get("/conversations")
+    assert resp.status_code == 200
+    summaries = {s["conversation_id"]: s for s in resp.json()}
+    assert summaries[attached_conv_id]["brand_id"] == brand["id"]
+    assert summaries[attached_conv_id]["brand_name"] == brand["name"]
+    assert summaries[unattached_id]["brand_id"] is None
+    assert summaries[unattached_id]["brand_name"] is None
+
+    # Filtering by brand_id returns only that brand's conversation.
+    filtered = client.get("/conversations", params={"brand_id": brand["id"]})
+    assert filtered.status_code == 200
+    assert [s["conversation_id"] for s in filtered.json()] == [attached_conv_id]
+
+
+def test_attach_conversation_to_brand_succeeds() -> None:
+    """POST /conversations/{id}/brand attaches an unattached conversation and
+    the new state (single-query load) reports the brand."""
+    # Brand created directly via the store has no conversation yet, so the
+    # one-conversation-per-brand invariant allows attaching one here.
+    workspace = branding_store.create_client("Attach Client")
+    brand = branding_store.create_brand(
+        workspace.id,
+        BrandingMission(
+            company_name="AttachCo",
+            company_description="Company for attach test",
+            target_audience="users",
+        ),
+    )
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+
+    resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": brand.id})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["conversation_id"] == conv_id
+    assert data["brand_id"] == brand.id
+
+    # Reloading the conversation reflects the attachment.
+    reload = client.get(f"/conversations/{conv_id}")
+    assert reload.status_code == 200
+    assert reload.json()["brand_id"] == brand.id
+
+
+def test_attach_conversation_unknown_brand_404() -> None:
+    """Attaching a conversation to a non-existent brand returns 404."""
+    conv_id = client.post("/conversations", json={}).json()["conversation_id"]
+    resp = client.post(f"/conversations/{conv_id}/brand", json={"brand_id": "brand_missing"})
+    assert resp.status_code == 404
+
+
+def test_attach_conversation_unknown_conversation_404() -> None:
+    """Attaching a non-existent conversation to a real brand returns 404."""
+    workspace = branding_store.create_client("Attach 404 Client")
+    brand = branding_store.create_brand(
+        workspace.id,
+        BrandingMission(
+            company_name="Attach404Co",
+            company_description="Company for attach 404 test",
+            target_audience="users",
+        ),
+    )
+    resp = client.post("/conversations/unknown-conv-id/brand", json={"brand_id": brand.id})
+    assert resp.status_code == 404
+
+
+def test_list_clients_pagination_query_params() -> None:
+    """GET /clients honors limit/offset and returns non-overlapping pages."""
+    created = {client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)}
+    first = client.get("/clients", params={"limit": 2, "offset": 0})
+    second = client.get("/clients", params={"limit": 2, "offset": 2})
+    assert first.status_code == 200 and second.status_code == 200
+    first_ids = {c["id"] for c in first.json()}
+    second_ids = {c["id"] for c in second.json()}
+    assert len(first.json()) == 2
+    assert first_ids.isdisjoint(second_ids)
+    # The full (unpaginated) listing still includes everything we created.
+    all_ids = {c["id"] for c in client.get("/clients").json()}
+    assert created <= all_ids
+
+
+def test_list_clients_rejects_invalid_pagination() -> None:
+    """Out-of-range limit/offset are a 422 (FastAPI validation), never a 500."""
+    assert client.get("/clients", params={"limit": 0}).status_code == 422
+    assert client.get("/clients", params={"limit": -1}).status_code == 422
+    assert client.get("/clients", params={"offset": -1}).status_code == 422
+
+
+def test_list_brands_pagination_query_params() -> None:
+    """GET /clients/{id}/brands honors limit/offset and validates them."""
+    client_id = client.post("/clients", json={"name": "Brand Page Client"}).json()["id"]
+    for i in range(3):
+        resp = client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": f"PageBrand {i}",
+                "company_description": "Company for brand pagination test",
+                "target_audience": "testers",
+            },
+        )
+        assert resp.status_code == 201
+    page = client.get(f"/clients/{client_id}/brands", params={"limit": 1, "offset": 1})
+    assert page.status_code == 200
+    assert len(page.json()) == 1
+    assert client.get(f"/clients/{client_id}/brands", params={"limit": 0}).status_code == 422
