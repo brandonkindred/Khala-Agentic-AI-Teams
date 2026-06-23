@@ -36,6 +36,17 @@ _SIZING_LINE_READING = (
     (_PROMPT_DIR / "_sizing_line_reading.md").read_text(encoding="utf-8").rstrip("\n")
 )
 
+# Draft templates + system prompt loaded once at import — static content that was
+# previously re-read from disk on every analysis call. The win/lose draft
+# templates are keyed by filename so the per-call branch is a dict lookup.
+_DRAFT_TEMPLATES = {
+    name: (_PROMPT_DIR / name).read_text(encoding="utf-8")
+    for name in ("analysis_win.md", "analysis_lose.md")
+}
+_ANALYSIS_SYSTEM_PROMPT = (
+    (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8") + "\n\n" + _STOP_ORDER_SEMANTICS
+)
+
 # The self-review risk-model check (instruction "1a"). Kept as its own
 # implicitly-concatenated constant — rather than one ~1k-char line inside the
 # template — for source readability; interpolated into the template below.
@@ -141,12 +152,8 @@ class AnalysisAgent:
 
         # Phase 1: Draft
         template_file = "analysis_win.md" if is_winning else "analysis_lose.md"
-        draft_template = (_PROMPT_DIR / template_file).read_text(encoding="utf-8")
-        system_prompt = (
-            (_PROMPT_DIR / "analysis_system.md").read_text(encoding="utf-8")
-            + "\n\n"
-            + _STOP_ORDER_SEMANTICS
-        )
+        draft_template = _DRAFT_TEMPLATES[template_file]
+        system_prompt = _ANALYSIS_SYSTEM_PROMPT
 
         draft_prompt = draft_template.format(
             asset_class=spec.asset_class,

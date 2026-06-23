@@ -46,15 +46,26 @@ result.
 
 ### STRATEGY_LAB_LLM_TIMEOUT
 Per-call wall-clock timeout (seconds) for every Strategy Lab LLM call routed through the shared
-fault-tolerance envelope (`strategy_lab/agents/_llm_envelope.py`). Also forwarded as the
-transport-level read timeout to the underlying strands model in `get_strands_model` (the only
-mechanism that actually cancels a hung HTTP call; the envelope adds a secondary daemon-thread guard
-on top). Falls back to `LLM_TIMEOUT` / the platform default (900).
+fault-tolerance envelope (`strategy_lab/agents/_llm_envelope.py`), enforced via a daemon-thread guard.
+On the **Bedrock** path it is also forwarded as the transport-level read timeout in
+`get_strands_model`. On the **Ollama** path (routed through `llm_service`) the transport read timeout
+is owned by the `llm_service` client (`resolve_timeout` / `LLM_TIMEOUT`); this var still bounds the
+call via the envelope's wall-clock guard on top. Falls back to `LLM_TIMEOUT` / the platform default
+(900).
 
 ### STRATEGY_LAB_LLM_MAX_RETRIES
 Retries (attempts = retries + 1) the envelope makes on a *retriable* (transient transport / 5xx /
 connection / timeout / throttle) failure before raising `StrategyLabLLMError`. Fatal failures (4xx /
 auth / malformed, or a weekly rate cap) are never retried. Falls back to `LLM_MAX_RETRIES`, else `2`.
+
+> **Layered retries on the Ollama path.** Because the Ollama provider now routes through the
+> `llm_service` client (which has its *own* transient-fault, rate-limit, and thinking-downgrade retry
+> loops), the envelope's macro-retries sit *on top of* the client's. Wall-clock is still bounded —
+> `STRATEGY_LAB_LLM_TOTAL_BUDGET` and the per-call guard cap elapsed time, and a true
+> `LLMSemanticExhaustionError` is fatal (not macro-retried) — but the worst-case *attempt count*
+> against a persistently-slow endpoint is the product of the two layers. Set `STRATEGY_LAB_LLM_MAX_RETRIES=0`
+> to disable the envelope's macro-retries and rely on the client's loops alone when running against
+> Ollama. (The **Bedrock** native path has no client-level retry, so it relies on the envelope's.)
 
 ### STRATEGY_LAB_LLM_BACKOFF_BASE / STRATEGY_LAB_LLM_BACKOFF_MAX
 Jittered exponential backoff between envelope retries for **transient** (5xx / connection / timeout)
@@ -194,18 +205,29 @@ Each enabled round adds two charged LLM calls to the design-phase budget — the
 re-audit (more if the self-revision hits parse-retries) — so size `STRATEGY_LAB_DESIGN_MAX_LLM_CALLS`
 accordingly.
 
-### STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED
-Master toggle for schema-constrained (structured-output) LLM decoding in the Strategy Lab
-spec-authoring agents — `DesignAgent` (spec generation/revision + self-review), `DesignReviewAgent`,
-`RefinementAgent`, `ZeroTradeRepairAgent`, and the alignment fix-proposer
-(`TradeAlignmentAgent.propose_code_fix`) (default `true`; accepted truthy values `true`/`1`/`yes`,
-case-insensitive; anything else disables). When enabled and the provider is Ollama, each agent passes
-a JSON Schema derived from the structured DSL / its response model to the model's `format` field so
-the decoder can only emit conforming JSON — near-eliminating the malformed-JSON and schema-drift
-failure classes that otherwise burn LLM re-prompt rounds. Pydantic validation still runs downstream
-as defense-in-depth. **Ollama-only:** the Bedrock path is unaffected (keeps prompt-only JSON).
-Disable to restore the prior prompt-only behaviour (e.g. against a model/endpoint that does not
-honour `format`-as-schema).
+### Ollama LLM transport (routed through `llm_service`)
+For the default **Ollama** provider, `get_strands_model` (`strategy_lab/agents/model_factory.py`)
+routes every Strategy Lab LLM call through the platform's hardened `llm_service` client (via
+`llm_service.strands_adapter.get_strands_model`) instead of constructing strands' native
+`OllamaModel`. This closes the failure class where a thinking-enabled model returns an empty /
+thinking-only / prose-only turn on a long code-emitting generation: the strands-native path returned
+that as a "successful" empty string, which the parser then rejected with
+`No JSON object found in LLM response`, wasting the whole round. The `llm_service` client instead
+**detects** an empty response, **retries once with reduced thinking** ("proof-of-change"), and raises
+`LLMSemanticExhaustionError` only when the payload truly yields nothing — and it resolves the model's
+`num_ctx` from `/api/show` (so a large refinement prompt is not silently truncated), caps
+`max_tokens`, and adds rate-limit / JSON-repair handling. Agents that recover their result with
+`extract_json_object` (design, design-review, refinement, zero-trade-repair, alignment, analysis) use
+`response_format="json"` (forces a JSON object on the wire); `CodeSynthesisAgent`, which emits a raw
+Python file, uses `response_format="text"`. The **Bedrock** path is unchanged (native `BedrockModel`).
+
+The JSON *shape* contract on the Ollama path is enforced by `json_object` wire mode plus pydantic
+validation downstream (and, for `RefinementAgent`, a schema embedded verbatim in its prompt). This
+replaced the strands-native decoder-level `format=<schema>` constraint — which, paired with thinking
+on long generations, was itself a contributor to the empty-response failure this routing fixes. The
+former `STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED` toggle and the per-call `response_schema=` argument
+have been retired. The canonical wire-shape definitions still live in `agents/_response_schemas.py`
+(validated for well-formedness by the test suite).
 
 ### STRATEGY_LAB_DESIGN_MAX_LLM_CALLS
 Per-cycle hard cap on the total number of LLM calls the design phase may make within a single

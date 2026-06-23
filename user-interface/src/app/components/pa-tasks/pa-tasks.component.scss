@@ -7,8 +7,8 @@
 .add-tasks-card,
 .loading-card,
 .empty-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-header {
     margin-bottom: 1rem;
@@ -20,7 +20,7 @@
       font-size: 1rem;
 
       mat-icon {
-        color: #58a6ff;
+        color: var(--kh-info);
       }
     }
   }
@@ -51,16 +51,16 @@
     font-size: 48px;
     width: 48px;
     height: 48px;
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
     margin-bottom: 1rem;
   }
 
   p {
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     margin: 0.25rem 0;
 
     &.hint {
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
       font-size: 0.875rem;
     }
   }
@@ -68,8 +68,8 @@
 
 mat-accordion {
   ::ng-deep .mat-expansion-panel {
-    background: #161b22;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--kh-surface-2);
+    border: 1px solid var(--kh-border-subtle);
     margin-bottom: 0.5rem;
 
     .mat-expansion-panel-header {
@@ -82,10 +82,10 @@ mat-accordion {
       display: flex;
       align-items: center;
       gap: 8px;
-      color: #f0f6fc;
+      color: var(--kh-text-primary);
 
       mat-icon {
-        color: #58a6ff;
+        color: var(--kh-info);
         font-size: 20px;
         width: 20px;
         height: 20px;
@@ -93,7 +93,7 @@ mat-accordion {
     }
 
     .mat-panel-description {
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
     }
   }
 }
@@ -104,7 +104,7 @@ mat-accordion {
   &.completed {
     .task-description {
       text-decoration: line-through;
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
     }
   }
 
@@ -114,15 +114,15 @@ mat-accordion {
 }
 
 .task-description {
-  color: #f0f6fc;
+  color: var(--kh-text-primary);
 }
 
 .task-quantity {
-  background: #21262d;
+  background: var(--kh-surface-3);
   padding: 2px 8px;
   border-radius: 12px;
   font-size: 0.75rem;
-  color: #c9d1d9;
+  color: var(--kh-text-secondary);
   margin-left: 8px;
 }
 
@@ -135,6 +135,6 @@ mat-accordion {
 
 .task-due {
   font-size: 0.75rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   margin-left: 8px;
 }

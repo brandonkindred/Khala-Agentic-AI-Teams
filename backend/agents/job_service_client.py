@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_http import get_pooled_client
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,48 @@ _MISSING_URL_MSG = (
 
 def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
+
+
+# ---------------------------------------------------------------------------
+# Cached per-team client factory
+#
+# Every team's job store independently re-implemented "get a JobServiceClient
+# for my team" — some constructing a fresh client on every call, others
+# hand-rolling a module-level lazy singleton.  This single factory replaces all
+# of those: it returns one shared client per team for the life of the process.
+# The client resolves JOB_SERVICE_URL per request (see ``_base_url``), so a
+# cached instance still honors a URL set after construction.
+# ---------------------------------------------------------------------------
+
+_client_cache: dict[str, "JobServiceClient"] = {}
+_client_cache_lock = threading.Lock()
+
+
+def get_job_service_client(team: str) -> "JobServiceClient":
+    """Return a process-wide cached :class:`JobServiceClient` for ``team``.
+
+    Preconditions:
+        - ``team`` is a non-empty string.
+    Postconditions:
+        - Returns the same instance for the same ``team`` across calls
+          (one client per team), constructed lazily on first request.
+    """
+    assert team, "team must be a non-empty string"
+    client = _client_cache.get(team)
+    if client is not None:
+        return client
+    with _client_cache_lock:
+        client = _client_cache.get(team)
+        if client is None:
+            client = JobServiceClient(team=team)
+            _client_cache[team] = client
+        return client
+
+
+def _clear_job_client_cache_for_testing() -> None:
+    """Drop all cached per-team clients.  Test-only seam for isolation."""
+    with _client_cache_lock:
+        _client_cache.clear()
 
 
 class JobServiceClient:
@@ -86,16 +129,27 @@ class JobServiceClient:
         max_retries: int = 3,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Execute an HTTP request with retry on transient errors."""
+        """Execute an HTTP request with retry on transient errors.
+
+        Preconditions:
+            - ``timeout`` is a positive, finite number of seconds (passed
+              through to :func:`get_pooled_client`, which asserts this).
+            - ``max_retries`` is non-negative.
+        Postconditions:
+            - Returns a successful ``httpx.Response`` (2xx) or raises the last
+              transient error / HTTP status error after exhausting retries.
+        """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
         total_attempts = max_retries + 1
         for attempt in range(total_attempts):
             try:
-                with httpx.Client(timeout=timeout) as client:
-                    resp = client.request(method, url, **kwargs)
-                    resp.raise_for_status()
-                    return resp
+                # Reuse a process-wide pooled client (keep-alive connections)
+                # instead of opening/closing one per request.
+                client = get_pooled_client(timeout)
+                resp = client.request(method, url, **kwargs)
+                resp.raise_for_status()
+                return resp
             except (
                 httpx.ConnectError,
                 httpx.ReadTimeout,
@@ -137,6 +191,19 @@ class JobServiceClient:
     def delete_job(self, job_id: str) -> bool:
         resp = self._request("DELETE", self._url(f"/jobs/{self.team}/{job_id}"))
         return resp.json().get("deleted", False)
+
+    def cancel_active_job(self, job_id: str) -> bool:
+        """Atomically cancel a job server-side only if it is still pending/running.
+
+        Preconditions: ``job_id`` is non-empty (the caller validates).
+        Postconditions: returns True only when the server set the status to
+            ``cancelled`` because the job was pending/running at write time. The
+            status guard is evaluated in the same conditional UPDATE that performs
+            the write, so a job that has already reached a terminal status is never
+            overwritten (no read-then-write race).
+        """
+        resp = self._request("POST", self._url(f"/jobs/{self.team}/{job_id}/cancel"))
+        return resp.json().get("cancelled", False)
 
     def list_jobs(self, *, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         params = {}
@@ -401,10 +468,19 @@ class BaseJobStore:
             def submit_title_selection(self, job_id, title): ...
     """
 
-    team: str = ""  # Override in subclass
+    team: str = ""  # Subclasses MUST override with a non-empty team name.
 
     def _client(self) -> JobServiceClient:
-        return JobServiceClient(team=self.team)
+        """Return the cached client for this store's team.
+
+        Preconditions:
+            - The subclass has set a non-empty ``team``.
+        """
+        if not self.team:
+            raise NotImplementedError(
+                f"{type(self).__name__} must set a non-empty 'team' class attribute"
+            )
+        return get_job_service_client(self.team)
 
     def create_job(self, job_id: str, *, status: str = JOB_STATUS_PENDING, **fields: Any) -> None:
         self._client().create_job(job_id, status=status, **fields)
@@ -418,9 +494,45 @@ class BaseJobStore:
     def delete_job(self, job_id: str) -> bool:
         return self._client().delete_job(job_id)
 
-    def list_jobs(self, *, running_only: bool = False) -> List[Dict[str, Any]]:
-        statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING] if running_only else None
+    def list_jobs(
+        self, *, running_only: bool = False, statuses: Optional[List[str]] = None
+    ) -> List[Dict[str, Any]]:
+        """List jobs, optionally filtered by status.
+
+        Preconditions: at most one of ``running_only`` / ``statuses`` need be set;
+            an explicit ``statuses`` takes precedence over ``running_only``.
+        Postconditions: returns the matching jobs (empty list when none); never None.
+        """
+        if statuses is None and running_only:
+            statuses = [JOB_STATUS_PENDING, JOB_STATUS_RUNNING]
         return self._client().list_jobs(statuses=statuses) or []
+
+    def cancel_job(self, job_id: str) -> bool:
+        """Cooperatively cancel a job: mark it cancelled if it is still active.
+
+        Preconditions: ``job_id`` is non-empty.
+        Postconditions: returns True and sets status to ``cancelled`` when the job
+            exists and is pending/running; returns False (no write) otherwise. The
+            status check and the write happen in one conditional server-side UPDATE
+            (``JobServiceClient.cancel_active_job``), so a job that races to a
+            terminal status between the decision and the write is never clobbered —
+            there is no get-then-update window here.
+        """
+        if not job_id:
+            raise ValueError("cancel_job requires a non-empty job_id")
+        return self._client().cancel_active_job(job_id)
+
+    def is_job_cancelled(self, job_id: str) -> bool:
+        """Return True if the job exists and has been marked cancelled.
+
+        Preconditions: ``job_id`` is non-empty.
+        Postconditions: pure read; returns a bool. Used as the cooperative-cancel
+            poll inside orchestrators.
+        """
+        if not job_id:
+            raise ValueError("is_job_cancelled requires a non-empty job_id")
+        job = self._client().get_job(job_id)
+        return job is not None and job.get("status") == JOB_STATUS_CANCELLED
 
     def mark_job_running(self, job_id: str) -> None:
         self.update_job(job_id, status=JOB_STATUS_RUNNING, started_at=_now_iso())
@@ -434,7 +546,20 @@ class BaseJobStore:
         self.update_job(job_id, status=JOB_STATUS_FAILED, error=error)
 
     def mark_all_running_jobs_failed(self, reason: str) -> List[str]:
-        return self._client().mark_all_active_jobs_failed(reason)
+        """Best-effort: mark all active jobs failed (e.g. on shutdown).
+
+        Preconditions: ``reason`` is a human-readable explanation (any string).
+        Postconditions: returns the failed job ids; a client error is logged with
+            its traceback and swallowed (returns ``[]``) so a shutdown hook never
+            raises. Teams that want ``interrupted`` instead override this.
+        """
+        try:
+            return self._client().mark_all_active_jobs_failed(reason)
+        except Exception as e:  # noqa: BLE001 - shutdown hook must not raise
+            # exc_info so a real defect (not just an operational error) is
+            # diagnosable rather than hidden behind a one-line message.
+            logger.warning("mark_all_running_jobs_failed (%s): %s", self.team, e, exc_info=True)
+            return []
 
     def reset_job(self, job_id: str) -> None:
         """Reset a job to initial state for restart (preserves input params)."""

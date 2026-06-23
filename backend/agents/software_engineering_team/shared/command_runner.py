@@ -8,6 +8,7 @@ output for feedback to coding agents.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -17,9 +18,68 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
+
+
+def patch_json_file(path: Path, transform: Callable[[dict], bool], *, indent: int = 2) -> bool:
+    """Read JSON from *path*, apply *transform*, and rewrite only if it changed.
+
+    Absorbs the read → mutate → write-if-changed idiom the Angular-repair helpers
+    duplicated. ``transform(data)`` mutates ``data`` in place and returns True iff
+    it changed something.
+
+    Preconditions: *transform* mutates its dict argument and returns a bool.
+    Postconditions: returns True iff the file was rewritten. Best-effort — a
+        missing file, or any read/parse/transform/write error, is logged and
+        returns False. Never raises.
+    """
+    if not path.exists():
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        changed = transform(data)
+    except Exception as e:  # noqa: BLE001 - repair is best-effort
+        logger.warning("Could not read/transform JSON %s: %s", path, e)
+        return False
+    if not changed:
+        return False
+    try:
+        path.write_text(json.dumps(data, indent=indent), encoding="utf-8")
+        return True
+    except Exception as e:  # noqa: BLE001 - repair is best-effort
+        logger.warning("Could not write JSON %s: %s", path, e)
+        return False
+
+
+def patch_text_file(path: Path, transform: Callable[[str], str]) -> bool:
+    """Read text from *path*, apply *transform*, and rewrite only if it changed.
+
+    Text counterpart of :func:`patch_json_file` for the regex/string-edit repairs.
+
+    Preconditions: *transform* maps the file's text to the desired text.
+    Postconditions: returns True iff ``transform(text) != text`` and the file was
+        rewritten. Best-effort — a missing file or any read/transform/write error
+        is logged and returns False. Never raises.
+    """
+    if not path.exists():
+        return False
+    try:
+        text = path.read_text(encoding="utf-8")
+        new_text = transform(text)
+    except Exception as e:  # noqa: BLE001 - repair is best-effort
+        logger.warning("Could not read/transform %s: %s", path, e)
+        return False
+    if new_text == text:
+        return False
+    try:
+        path.write_text(new_text, encoding="utf-8")
+        return True
+    except Exception as e:  # noqa: BLE001 - repair is best-effort
+        logger.warning("Could not write %s: %s", path, e)
+        return False
+
 
 # Default timeouts (seconds)
 BUILD_TIMEOUT = 120  # frontend build, python -m pytest
@@ -540,39 +600,34 @@ def run_ng_build_with_nvm_fallback(project_path: str | Path) -> CommandResult:  
     return CommandResult(success=False, exit_code=-1, stdout="", stderr=msg)
 
 
-def _ensure_angular_common_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
+def _ensure_angular_common_in_package_json(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/common (provides @angular/common/http).
     Repairs projects where package.json was overwritten or is missing this dep.
     """
-    import json
 
-    pkg_path = cwd / "package.json"
-    if not pkg_path.exists():
-        return
-    try:
-        data = json.loads(pkg_path.read_text(encoding="utf-8"))
+    def _transform(data: dict) -> bool:
         deps = data.setdefault("dependencies", {})
-        if "@angular/common" not in deps:
-            deps["@angular/common"] = _ANGULAR_VERSION
-            pkg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            logger.info("Repaired package.json: added @angular/common for HttpClient support")
-    except Exception as e:
-        logger.warning("Could not repair package.json for @angular/common: %s", e)
+        if "@angular/common" in deps:
+            return False
+        deps["@angular/common"] = _ANGULAR_VERSION
+        return True
+
+    if patch_json_file(cwd / "package.json", _transform):
+        logger.info("Repaired package.json: added @angular/common for HttpClient support")
 
 
-def _ensure_angular_material_in_package_json(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
+def _ensure_angular_material_in_package_json(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular package.json
     """
     Ensure package.json has @angular/material and @angular/cdk.
     Repairs projects where package.json was overwritten or is missing these deps.
     """
-    import json
 
-    pkg_path = cwd / "package.json"
-    if not pkg_path.exists():
-        return
-    try:
-        data = json.loads(pkg_path.read_text(encoding="utf-8"))
+    def _transform(data: dict) -> bool:
         deps = data.setdefault("dependencies", {})
         changed = False
         if "@angular/material" not in deps:
@@ -581,75 +636,72 @@ def _ensure_angular_material_in_package_json(cwd: Path) -> None:  # pragma: no c
         if "@angular/cdk" not in deps:
             deps["@angular/cdk"] = _ANGULAR_VERSION
             changed = True
-        if changed:
-            pkg_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            logger.info("Repaired package.json: added @angular/material and @angular/cdk")
-    except Exception as e:
-        logger.warning("Could not repair package.json for @angular/material: %s", e)
+        return changed
+
+    if patch_json_file(cwd / "package.json", _transform):
+        logger.info("Repaired package.json: added @angular/material and @angular/cdk")
 
 
-def _ensure_tsconfig_module_resolution(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real tsconfig on disk
+def _ensure_tsconfig_module_resolution(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real tsconfig on disk
     """
     Ensure tsconfig.json uses moduleResolution 'bundler' for Angular 17+.
     Fixes 'Cannot find module @angular/common/http' when resolution was 'node'.
     """
-    import json
 
-    ts_path = cwd / "tsconfig.json"
-    if not ts_path.exists():
-        return
-    try:
-        data = json.loads(ts_path.read_text(encoding="utf-8"))
+    def _transform(data: dict) -> bool:
         opts = data.get("compilerOptions") or {}
-        if opts.get("moduleResolution") == "node":
-            opts["moduleResolution"] = "bundler"
-            data["compilerOptions"] = opts
-            ts_path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-            logger.info(
-                "Repaired tsconfig.json: moduleResolution node -> bundler for Angular compatibility"
-            )
-    except Exception as e:
-        logger.warning("Could not repair tsconfig.json: %s", e)
+        if opts.get("moduleResolution") != "node":
+            return False
+        opts["moduleResolution"] = "bundler"
+        data["compilerOptions"] = opts
+        return True
+
+    if patch_json_file(cwd / "tsconfig.json", _transform):
+        logger.info(
+            "Repaired tsconfig.json: moduleResolution node -> bundler for Angular compatibility"
+        )
 
 
-def _ensure_material_theme_in_styles(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular styles on disk
+def _ensure_material_theme_in_styles(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular styles on disk
     """
     Ensure styles.scss (or styles.css) has a Material prebuilt theme import.
     Appends it at the top if missing. Required for Angular Material components.
     """
+
+    def _transform(content: str) -> str:
+        if "material" in content.lower() and (
+            "prebuilt-themes" in content or "indigo-pink" in content
+        ):
+            return content
+        theme_line = "@use '@angular/material/prebuilt-themes/indigo-pink.css';\n"
+        return theme_line + content if content.strip() else theme_line
+
     for name in ("styles.scss", "styles.css"):
         styles_path = cwd / "src" / name
         if not styles_path.exists():
             continue
-        try:
-            content = styles_path.read_text(encoding="utf-8")
-            if "material" in content.lower() and (
-                "prebuilt-themes" in content or "indigo-pink" in content
-            ):
-                return
-            theme_line = "@use '@angular/material/prebuilt-themes/indigo-pink.css';\n"
-            new_content = theme_line + content if content.strip() else theme_line
-            styles_path.write_text(new_content, encoding="utf-8")
+        if patch_text_file(styles_path, _transform):
             logger.info("Repaired %s: added Material prebuilt theme import", name)
-        except Exception as e:
-            logger.warning("Could not repair %s for Material theme: %s", name, e)
         return
 
 
-def _ensure_provide_animations_in_config(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
+def _ensure_provide_animations_in_config(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts has provideAnimations in providers.
     Adds import and provider if missing. Required for Angular Material components.
     """
-    config_path = cwd / "src" / "app" / "app.config.ts"
-    if not config_path.exists():
-        return
-    try:
-        content = config_path.read_text(encoding="utf-8")
+
+    def _transform(content: str) -> str:
         if "provideAnimations" in content:
-            return
+            return content
         if "providers:" not in content:  # pragma: no cover
-            return
+            return content
         import_line = "import { provideAnimations } from '@angular/platform-browser/animations';\n"
         lines = content.split("\n")
         insert_idx = 0
@@ -659,23 +711,25 @@ def _ensure_provide_animations_in_config(cwd: Path) -> None:  # pragma: no cover
             elif insert_idx > 0 and not line.strip().startswith("import "):
                 break
         lines.insert(insert_idx, import_line.rstrip())
-        content = "\n".join(lines)
-        if "provideAnimations()" not in content:
-            if "provideHttpClient()," in content:
-                content = content.replace(
+        new_content = "\n".join(lines)
+        if "provideAnimations()" not in new_content:
+            if "provideHttpClient()," in new_content:
+                new_content = new_content.replace(
                     "provideHttpClient(),",
                     "provideHttpClient(),\n    provideAnimations(),",
                 )
-            elif "provideRouter(routes)," in content:
-                content = content.replace(
+            elif "provideRouter(routes)," in new_content:
+                new_content = new_content.replace(
                     "provideRouter(routes),",
                     "provideRouter(routes),\n    provideAnimations(),",
                 )
-        if "provideAnimations()" in content:
-            config_path.write_text(content, encoding="utf-8")
-            logger.info("Repaired app.config.ts: added provideAnimations")
-    except Exception as e:  # pragma: no cover
-        logger.warning("Could not repair app.config.ts for provideAnimations: %s", e)
+        # Only write when the provider was actually added; an orphan import with
+        # no anchor to attach the provider to is left out (original behavior).
+        return new_content if "provideAnimations()" in new_content else content
+
+    config_path = cwd / "src" / "app" / "app.config.ts"
+    if patch_text_file(config_path, _transform):
+        logger.info("Repaired app.config.ts: added provideAnimations")
 
 
 # Well-known Angular DI tokens that must be imported when used in app.config.ts
@@ -684,7 +738,9 @@ _APP_CONFIG_TOKEN_IMPORTS: dict[str, str] = {
 }
 
 
-def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
+def _ensure_app_config_di_token_imports(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: rewrites real Angular app.config.ts
     """
     Ensure app.config.ts imports any DI tokens it uses in providers.
     E.g. HTTP_INTERCEPTORS must be imported from @angular/common/http when
@@ -692,12 +748,7 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover 
     """
     import re
 
-    config_path = cwd / "src" / "app" / "app.config.ts"
-    if not config_path.exists():
-        return
-    try:
-        content = config_path.read_text(encoding="utf-8")
-        changed = False
+    def _transform(content: str) -> str:
         for token, module in _APP_CONFIG_TOKEN_IMPORTS.items():
             if token not in content:
                 continue
@@ -725,7 +776,6 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover 
                 new_line = f"import {{ {new_imports} }} from '{module}';"
                 old_line = match.group(0)
                 content = content.replace(old_line, new_line, 1)
-                changed = True
             else:
                 lines = content.split("\n")
                 insert_idx = 0
@@ -737,15 +787,16 @@ def _ensure_app_config_di_token_imports(cwd: Path) -> None:  # pragma: no cover 
                 import_line = f"import {{ {token} }} from '{module}';\n"
                 lines.insert(insert_idx, import_line.rstrip())
                 content = "\n".join(lines)
-                changed = True
-        if changed:
-            config_path.write_text(content, encoding="utf-8")
-            logger.info("Repaired app.config.ts: ensured HTTP_INTERCEPTORS import")
-    except Exception as e:  # pragma: no cover
-        logger.warning("Could not repair app.config.ts for DI token imports: %s", e)
+        return content
+
+    config_path = cwd / "src" / "app" / "app.config.ts"
+    if patch_text_file(config_path, _transform):
+        logger.info("Repaired app.config.ts: ensured HTTP_INTERCEPTORS import")
 
 
-def _normalize_double_at_angular(cwd: Path) -> None:  # pragma: no cover  # integration-only: scans real Angular tree
+def _normalize_double_at_angular(
+    cwd: Path,
+) -> None:  # pragma: no cover  # integration-only: scans real Angular tree
     """
     Fix @@angular typo (double @) in frontend .ts and .html files.
     Replaces '@@angular with '@angular and \"@@angular with \"@angular.
@@ -778,7 +829,9 @@ def _ensure_reactive_forms_module_in_components(cwd: Path) -> None:
     src = cwd / "src"
     if not src.exists():
         return
-    for html_path in src.rglob("*.component.html"):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
+    for html_path in src.rglob(
+        "*.component.html"
+    ):  # pragma: no cover  # integration-only: rewrites real Angular component .ts files
         try:
             html_content = html_path.read_text(encoding="utf-8")
             if (
@@ -880,7 +933,11 @@ def run_frontend_serve_smoke_test(  # pragma: no cover  # integration-only: star
         return run_npm_start_smoke_test(cwd, port)
 
 
-def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> CommandResult:  # pragma: no cover  # integration-only: starts `npm start` subprocess with timeout/kill
+def run_npm_start_smoke_test(
+    project_path: str | Path, port: int = 3000
+) -> (
+    CommandResult
+):  # pragma: no cover  # integration-only: starts `npm start` subprocess with timeout/kill
     """
     Start `npm start` or `npm run dev` briefly to confirm the app starts.
     For React/Vue projects using Vite, CRA, or similar.
@@ -964,7 +1021,11 @@ def run_npm_start_smoke_test(project_path: str | Path, port: int = 3000) -> Comm
         )
 
 
-def run_ng_serve_smoke_test(project_path: str | Path, port: int = 4299) -> CommandResult:  # pragma: no cover  # integration-only: starts `ng serve` subprocess with timeout/kill
+def run_ng_serve_smoke_test(
+    project_path: str | Path, port: int = 4299
+) -> (
+    CommandResult
+):  # pragma: no cover  # integration-only: starts `ng serve` subprocess with timeout/kill
     """
     Start `ng serve` briefly to confirm the app compiles and starts.
     Runs for SERVE_TIMEOUT seconds, then kills the process.
@@ -1747,7 +1808,9 @@ def ensure_frontend_project_initialized(  # pragma: no cover  # integration-only
         return _scaffold_react_project(cwd)
 
 
-def _scaffold_angular_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `ng new` scaffolding
+def _scaffold_angular_project(
+    cwd: Path,
+) -> CommandResult:  # pragma: no cover  # integration-only: runs real `ng new` scaffolding
     """Write Angular-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "angular.json", _MINIMAL_ANGULAR_JSON)
@@ -1830,7 +1893,9 @@ body { margin: 0; font-family: Roboto, "Helvetica Neue", sans-serif; }
     )
 
 
-def _scaffold_react_project(cwd: Path) -> CommandResult:  # pragma: no cover  # integration-only: runs real `npm create vite` scaffolding
+def _scaffold_react_project(
+    cwd: Path,
+) -> CommandResult:  # pragma: no cover  # integration-only: runs real `npm create vite` scaffolding
     """Write React-specific config and scaffold files."""
     # Write config files (only if they don't already exist)
     _write_if_missing(cwd / "vite.config.ts", _MINIMAL_REACT_VITE_CONFIG)

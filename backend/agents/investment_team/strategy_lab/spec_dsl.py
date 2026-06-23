@@ -392,9 +392,7 @@ class StopLossRule(_SpecNode):
                     "stop level, and a trailing basis re-prices the stop each bar"
                 )
         elif self.limit_offset_pct is not None:
-            raise ValueError(
-                "StopLossRule.limit_offset_pct is only valid when style='limit'"
-            )
+            raise ValueError("StopLossRule.limit_offset_pct is only valid when style='limit'")
         return self
 
 

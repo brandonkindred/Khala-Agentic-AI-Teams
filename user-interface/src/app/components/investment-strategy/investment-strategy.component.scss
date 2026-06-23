@@ -51,7 +51,7 @@
 
   .toggle-hint {
     font-size: 0.8rem;
-    color: rgba(0, 0, 0, 0.54);
+    color: var(--kh-text-tertiary);
   }
 }
 
@@ -60,13 +60,13 @@
   align-items: center;
   gap: 8px;
   padding: 12px 16px;
-  background: var(--mat-sys-error-container, #ffebee);
-  color: var(--mat-sys-on-error-container, #c62828);
+  background: var(--mat-sys-error-container, var(--kh-error-subtle));
+  color: var(--mat-sys-on-error-container, var(--kh-error));
   border-radius: 4px;
   margin-bottom: 16px;
 
   mat-icon {
-    color: var(--mat-sys-error, #f44336);
+    color: var(--mat-sys-error, var(--kh-error));
   }
 }
 
@@ -76,8 +76,8 @@
   gap: 16px;
   align-items: center;
   padding: 16px;
-  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.08));
+  background: var(--mat-sys-surface-container, var(--kh-surface-2));
+  border: 1px solid var(--mat-sys-outline-variant, var(--kh-border));
   border-radius: 8px;
 
   .summary-item {
@@ -87,7 +87,7 @@
 
     .label {
       font-weight: 500;
-      color: rgba(0, 0, 0, 0.6);
+      color: var(--kh-text-secondary);
     }
 
     .value {
@@ -111,9 +111,9 @@
   display: block;
   padding: 12px;
   margin-bottom: 12px;
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  border: 1px solid var(--mat-sys-outline-variant, var(--kh-border));
   border-radius: 8px;
-  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
+  background: var(--mat-sys-surface-container, var(--kh-surface-2));
 
   .rule-header {
     display: flex;
@@ -123,7 +123,7 @@
 
     .rule-index {
       font-weight: 600;
-      color: rgba(0, 0, 0, 0.6);
+      color: var(--kh-text-secondary);
       min-width: 32px;
     }
 
@@ -167,15 +167,15 @@
   margin-top: 16px;
 
   .check-pass {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 
   .check-warn {
-    color: #ff9800;
+    color: var(--kh-warning);
   }
 
   .check-fail {
-    color: #f44336;
+    color: var(--kh-error);
   }
 }
 
@@ -198,12 +198,12 @@
   align-items: flex-start;
   gap: 8px;
   padding: 8px 12px;
-  background: var(--mat-sys-error-container, #ffebee);
+  background: var(--mat-sys-error-container, var(--kh-error-subtle));
   border-radius: 4px;
-  color: var(--mat-sys-on-error-container, #c62828);
+  color: var(--mat-sys-on-error-container, var(--kh-error));
 
   mat-icon {
-    color: var(--mat-sys-error, #f44336);
+    color: var(--mat-sys-error, var(--kh-error));
     font-size: 20px;
     width: 20px;
     height: 20px;
@@ -215,9 +215,9 @@
   gap: 24px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  border-top: 1px solid var(--kh-border);
   font-size: 0.9rem;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-secondary);
 }
 
 mat-divider {
