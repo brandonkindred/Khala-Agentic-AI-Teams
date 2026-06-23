@@ -1,13 +1,13 @@
-"""Tests for schema-constrained (structured-output) decoding wiring.
+"""Tests for the Strategy Lab agents' JSON-Schema wire definitions.
 
 Covers:
   * the cached wire schemas are well-formed JSON-Schema dicts;
-  * each spec-authoring agent forwards its matching schema to
-    ``get_strands_model`` at construction;
-  * the DesignAgent malformed-JSON path now retries (instead of aborting
-    the cycle) and is gated by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES``.
+  * the DesignAgent malformed-JSON path retries (instead of aborting the
+    cycle) and is gated by ``STRATEGY_LAB_DESIGN_PARSE_RETRIES``.
 
-The model-factory toggle / format-application behaviour lives in
+The Ollama transport now routes through the ``llm_service`` adapter in
+``json_object`` wire mode (the schemas are no longer forwarded to a decoder
+``format`` constraint), so the routing behaviour is covered in
 ``test_misc_helpers.py`` alongside the other ``get_strands_model`` tests.
 """
 
@@ -55,116 +55,6 @@ def test_design_schema_excludes_orchestrator_owned_fields() -> None:
     """The designer never authors strategy_id/audit/strategy_code."""
     props = set(schemas.DESIGN_SPEC_SCHEMA["properties"])
     assert not ({"strategy_id", "audit", "strategy_code"} & props)
-
-
-# ---------------------------------------------------------------------------
-# Per-agent forwarding
-# ---------------------------------------------------------------------------
-
-
-class _SchemaRecorder:
-    """Stand-in for ``get_strands_model`` that records the response_schema."""
-
-    def __init__(self) -> None:
-        self.schemas: List[Any] = []
-
-    def __call__(self, _agent_key: str, *, timeout: Any = None, response_schema: Any = None):
-        self.schemas.append(response_schema)
-        return object()
-
-
-class _StaticAgent:
-    """Strands ``Agent`` replacement returning a fixed payload."""
-
-    def __init__(self, payload: str) -> None:
-        self._payload = payload
-
-    def __call__(self, _prompt: str) -> str:
-        return self._payload
-
-
-def test_design_review_agent_forwards_critique_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.models import RiskLimits, StrategySpec
-    from investment_team.strategy_lab.agents import design_review as mod
-
-    recorder = _SchemaRecorder()
-    monkeypatch.setattr(mod, "get_strands_model", recorder)
-    monkeypatch.setattr(
-        mod, "Agent", lambda **_k: _StaticAgent(json.dumps({"ready": True, "rationale": "ok"}))
-    )
-
-    spec = StrategySpec(
-        strategy_id="s1",
-        authored_by="t",
-        asset_class="stocks",
-        hypothesis="h",
-        signal_definition="s",
-        timeframe="1d",
-        risk_limits=RiskLimits(),
-    )
-    mod.DesignReviewAgent().run(spec)
-
-    assert recorder.schemas == [schemas.CRITIQUE_SCHEMA]
-
-
-def test_refinement_agent_forwards_refinement_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    from investment_team.models import RiskLimits, StrategySpec
-    from investment_team.strategy_lab.agents import refinement as mod
-
-    recorder = _SchemaRecorder()
-    monkeypatch.setattr(mod, "get_strands_model", recorder)
-    monkeypatch.setattr(
-        mod,
-        "Agent",
-        lambda **_k: _StaticAgent(json.dumps({"strategy_code": "# fixed", "changes_made": "x"})),
-    )
-
-    spec = StrategySpec(
-        strategy_id="s1",
-        authored_by="t",
-        asset_class="stocks",
-        hypothesis="h",
-        signal_definition="s",
-        timeframe="1d",
-        risk_limits=RiskLimits(),
-    )
-    mod.RefinementAgent().run(
-        spec=spec, code="# old", failure_phase="execution", failure_details="boom"
-    )
-
-    assert recorder.schemas == [schemas.REFINEMENT_SCHEMA]
-
-
-def test_design_agent_forwards_spec_then_critique_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Design generation uses the spec schema; the self-review pass uses the
-    critique schema — proving the per-call schema threading."""
-    from investment_team.strategy_lab.agents import design as mod
-
-    recorder = _SchemaRecorder()
-    monkeypatch.setattr(mod, "get_strands_model", recorder)
-
-    spec_payload = json.dumps(
-        {
-            "asset_class": "stocks",
-            "hypothesis": "h",
-            "signal_definition": "s",
-            "timeframe": "1d",
-            "entry_rules": [],
-            "exit_rules": [],
-            "sizing": {"kind": "fixed_fraction", "fraction": 0.02},
-            "target_symbols": [],
-            "risk_limits": {"max_position_pct": 5},
-            "rationale": "r",
-        }
-    )
-    critique_payload = json.dumps({"ready": True, "rationale": "ok"})
-    payloads = iter([spec_payload, critique_payload])
-    monkeypatch.setattr(mod, "Agent", lambda **_k: _StaticAgent(next(payloads)))
-    monkeypatch.setenv("STRATEGY_LAB_DESIGN_SELF_REVIEW_ENABLED", "true")
-
-    mod.DesignAgent().run(prior_records=[])
-
-    assert recorder.schemas == [schemas.DESIGN_SPEC_SCHEMA, schemas.CRITIQUE_SCHEMA]
 
 
 # ---------------------------------------------------------------------------
