@@ -465,6 +465,58 @@ def test_check_connection_false_when_pool_errors(monkeypatch):
     assert client_mod.check_connection() is False
 
 
+# ---------------------------------------------------------------------------
+# connect_timeout (public), _kv quoting, resolve_storage_status
+# ---------------------------------------------------------------------------
+
+
+def test_connect_timeout_public_matches_private(monkeypatch):
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "11")
+    assert client_mod.connect_timeout() == 11 == client_mod._connect_timeout()
+
+
+def test_kv_leaves_plain_values_unquoted():
+    assert client_mod._kv("plainvalue") == "plainvalue"
+
+
+def test_kv_quotes_and_escapes_special_values():
+    assert client_mod._kv("my pass") == "'my pass'"
+    assert client_mod._kv("") == "''"  # empty must be quoted, not bare
+    assert client_mod._kv("a'b\\c") == "'a\\'b\\\\c'"
+
+
+def test_dsn_quotes_space_password_but_not_plain(monkeypatch):
+    # A space in the password must be single-quoted so it can't terminate the keyword
+    # value early (and swallow the appended connect_timeout); a plain password stays
+    # unquoted so existing DSNs are unchanged.
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
+    dsn = client_mod._dsn()
+    assert "password='my pass'" in dsn
+    assert "connect_timeout=" in dsn
+    monkeypatch.setenv("POSTGRES_PASSWORD", "plain")
+    assert "password=plain " in client_mod._dsn()
+
+
+def test_resolve_storage_status_unconfigured(monkeypatch):
+    monkeypatch.setattr(client_mod, "is_postgres_enabled", lambda: False)
+    # Must not probe when unconfigured.
+    monkeypatch.setattr(
+        client_mod,
+        "check_connection",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no probe")),
+    )
+    assert client_mod.resolve_storage_status() == "unconfigured"
+
+
+def test_resolve_storage_status_available_and_unreachable(monkeypatch):
+    monkeypatch.setattr(client_mod, "is_postgres_enabled", lambda: True)
+    monkeypatch.setattr(client_mod, "check_connection", lambda *a, **k: True)
+    assert client_mod.resolve_storage_status() == "available"
+    monkeypatch.setattr(client_mod, "check_connection", lambda *a, **k: False)
+    assert client_mod.resolve_storage_status() == "unreachable"
+
+
 class _FakePool:
     def __init__(self):
         self.closed = False

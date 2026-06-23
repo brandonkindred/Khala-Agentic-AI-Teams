@@ -20,7 +20,15 @@ Typical usage in a team's ``api/main.py`` lifespan::
         close_pool()
 """
 
-from shared_postgres.client import check_connection, close_pool, get_conn, is_postgres_enabled
+from shared_postgres.client import (
+    StorageStatus,
+    check_connection,
+    close_pool,
+    connect_timeout,
+    get_conn,
+    is_postgres_enabled,
+    resolve_storage_status,
+)
 from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared_postgres.runner import ensure_team_schema, register_team_schemas
@@ -67,9 +75,11 @@ def __getattr__(name: str):
 __all__ = [
     "TEAM_POSTGRES_MODULES",
     "Json",
+    "StorageStatus",
     "TeamSchema",
     "check_connection",
     "close_pool",
+    "connect_timeout",
     "delete_secret",
     "dict_row",
     "ensure_team_schema",
@@ -81,6 +91,7 @@ __all__ = [
     "load_or_create_key",
     "register_all_team_schemas",
     "register_team_schemas",
+    "resolve_storage_status",
     "set_secret",
     "set_secrets",
     "timed_query",

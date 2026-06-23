@@ -35,25 +35,35 @@ from pydantic import BaseModel, Field, field_validator
 
 from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
-from shared_postgres import check_connection, is_postgres_enabled, set_secrets
+from shared_postgres import (
+    StorageStatus,
+    connect_timeout,
+    is_postgres_enabled,
+    resolve_storage_status,
+    set_secrets,
+)
 
-# Storage-status values surfaced to the settings UI so it can tell the operator
-# *why* config can't be saved, rather than collapsing every case to "not configured".
-StorageStatus = Literal["available", "unconfigured", "unreachable"]
 
-
-def _resolve_storage_status() -> StorageStatus:
-    """Classify the runtime store into one of three states for the UI.
+async def _probe_storage_status() -> StorageStatus:
+    """Resolve the runtime-store status off the event loop, bounded.
 
     Preconditions: none.
-    Postconditions: returns ``"unconfigured"`` when ``POSTGRES_HOST`` is unset,
-        ``"unreachable"`` when it is set but a bounded ``SELECT 1`` probe fails, and
-        ``"available"`` when the store answers. Never raises (the probe swallows
-        every error). Runs blocking I/O, so async callers must offload it.
+    Postconditions: returns the shared :func:`resolve_storage_status` classification
+        (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs
+        in a worker thread wrapped in ``asyncio.wait_for`` so a Postgres that accepts
+        the connection then stalls on the probe query can't hang the request —
+        ``connect_timeout`` only bounds the TCP connect. On timeout or any error the
+        store is reported ``unreachable`` (Save stays disabled). The abandoned worker
+        thread is the same residual the unified-API health probe accepts. Never raises.
     """
     if not is_postgres_enabled():
         return "unconfigured"
-    return "available" if check_connection() else "unreachable"
+    try:
+        # +1s past the connect timeout leaves room for the TCP connect itself to time
+        # out before this outer guard fires.
+        return await asyncio.wait_for(asyncio.to_thread(resolve_storage_status), timeout=connect_timeout() + 1.0)
+    except Exception:  # noqa: BLE001 - any failure/timeout → treat the store as unreachable
+        return "unreachable"
 
 
 logger = logging.getLogger(__name__)
@@ -213,9 +223,9 @@ async def get_llm_config() -> LlmConfigResponse:
             "expires.",
             exc_info=True,
         )
-    # Probe connectivity off the event loop: the bounded SELECT 1 is blocking I/O,
-    # so running it inline would stall the loop for up to the probe timeout.
-    storage_status = await asyncio.to_thread(_resolve_storage_status)
+    # Probe connectivity off the event loop (and bounded), so a stalled DB can't
+    # hang the settings read.
+    storage_status = await _probe_storage_status()
     return _build_response(storage_status)
 
 
@@ -325,5 +335,7 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     except Exception:  # noqa: BLE001 - never 500 after a successful persist
         logger.exception("Failed to clear caches after persisting LLM provider config")
     logger.info("LLM provider config updated: provider=%s", body.provider)
-    # The write above committed, so the store is configured and reachable.
-    return _build_response("available")
+    # Report the real, freshly-probed status rather than assuming "available": the
+    # store could drop between the commit above and this response, and the next GET
+    # would then disagree with what this PUT claimed.
+    return _build_response(await _probe_storage_status())

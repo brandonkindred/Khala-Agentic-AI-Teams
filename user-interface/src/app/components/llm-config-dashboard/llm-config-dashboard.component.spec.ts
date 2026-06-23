@@ -148,8 +148,11 @@ describe('LlmConfigDashboardComponent', () => {
   });
 
   it('blocks save and reports when storage is unavailable', () => {
-    apiSpy.getConfig.mockReturnValue(of({ ...BASE_CONFIG, storage_available: false }));
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, storage_available: false, storage_status: 'unconfigured' }),
+    );
     component.loadConfig();
+    expect(component.storageAvailable).toBe(false);
     component.save();
     expect(apiSpy.updateConfig).not.toHaveBeenCalled();
     expect(component.error).toContain('storage');

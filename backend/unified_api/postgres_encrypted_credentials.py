@@ -18,7 +18,7 @@ import os
 import threading
 import urllib.parse
 
-from shared_env import parse_int
+from shared_postgres import connect_timeout
 from shared_postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
 
@@ -26,6 +26,14 @@ logger = logging.getLogger(__name__)
 
 _STORE = "unified_api_credentials"
 
+# This module opens a fresh psycopg connection per call (no pool). ``_LOCK``
+# serializes those connects so at most one connection to the credential store is
+# open at a time, bounding connection count under load. The trade-off: during a
+# Postgres outage, concurrent reads queue and each waits up to the connect timeout
+# (``POSTGRES_CONNECT_TIMEOUT_S``), so the Nth caller can block ~N×timeout. That is
+# accepted here because credential reads are infrequent (config pages, run/review
+# triggers) and the lock's connection-count guarantee matters more than peak
+# concurrency on this path.
 _LOCK = threading.Lock()
 _psycopg_module = None
 _psycopg_import_failed: bool = False
@@ -63,20 +71,41 @@ def _dsn() -> str:
     password = os.getenv("POSTGRES_PASSWORD", "")
     db = os.getenv("POSTGRES_DB", "postgres").strip()
     port = os.getenv("POSTGRES_PORT", "5432").strip()
-    pwd = urllib.parse.quote_plus(password)
-    # Bound the TCP connect with the same POSTGRES_CONNECT_TIMEOUT_S as the shared
-    # pool: this credential-store connection is the one the GitHub/Slack/Medium reads
-    # actually use, so without it pg_get_credential would hang on a down host for the
-    # libpq default (no timeout) — long before any bounded reachability probe runs.
-    timeout = parse_int("POSTGRES_CONNECT_TIMEOUT_S", 3, minimum=1)
-    return f"postgresql://{user}:{pwd}@{host}:{port}/{db}?connect_timeout={timeout}"
+    # quote(safe="") — NOT quote_plus: this is a URI userinfo component, where a '+'
+    # is a literal plus (libpq does not decode it to a space). quote_plus would turn a
+    # password containing a space into "...+..." and authenticate with the wrong value.
+    pwd = urllib.parse.quote(password, safe="")
+    # Bound the TCP connect with the SAME POSTGRES_CONNECT_TIMEOUT_S as the shared pool
+    # (via the shared helper, so the two paths can't drift): this credential-store
+    # connection is the one the GitHub/Slack/Medium reads actually use, so without it
+    # pg_get_credential would hang on a down host for the libpq default (no timeout) —
+    # long before any bounded reachability probe runs.
+    return f"postgresql://{user}:{pwd}@{host}:{port}/{db}?connect_timeout={connect_timeout()}"
 
 
 @timed_query(store=_STORE, op="pg_get_credential")
-def pg_get_credential(service: str, key: str) -> str:
-    """Return decrypted plaintext, or empty string when missing/disabled."""
+def pg_get_credential_status(service: str, key: str) -> tuple[str, bool]:
+    """Return ``(decrypted_value, store_reachable)``.
+
+    The core read. ``store_reachable`` is ``False`` ONLY when the read failed because
+    the store/connection itself errored, so a caller can tell a genuinely-absent
+    credential ("", reachable) from a down store ("", not reachable) from a SINGLE
+    read — no separate connectivity probe, and therefore no TOCTOU window between the
+    read and the probe.
+
+    Preconditions: none.
+    Postconditions:
+        - Disabled store (``POSTGRES_HOST`` unset) → ``("", True)``: that is a
+          configuration state ("absent"), not an outage; callers gate "configured"
+          via :func:`postgres_credentials_enabled` separately.
+        - Connection/query error → ``("", False)``.
+        - Row missing, or present-but-undecryptable → ``("", True)`` (store answered;
+          the credential is effectively absent/unusable).
+        - Row present and decryptable → ``(plaintext, True)``.
+        Never raises.
+    """
     if not postgres_credentials_enabled():
-        return ""
+        return "", True
     row: tuple | None = None
     with _LOCK:
         import psycopg
@@ -91,15 +120,24 @@ def pg_get_credential(service: str, key: str) -> str:
                 row = cur.fetchone()
         except Exception as e:
             logger.warning("Postgres credential read failed (%s/%s): %s", service, key, e)
-            return ""
+            return "", False
 
     if not row:
-        return ""
+        return "", True
     try:
-        return get_integration_fernet().decrypt(row[0].encode()).decode()
+        return get_integration_fernet().decrypt(row[0].encode()).decode(), True
     except Exception as e:
         logger.error("Failed to decrypt Postgres credential %s/%s: %s", service, key, e)
-        return ""
+        return "", True
+
+
+def pg_get_credential(service: str, key: str) -> str:
+    """Return decrypted plaintext, or empty string when missing/disabled/unreachable.
+
+    Thin wrapper over :func:`pg_get_credential_status` (one implementation, one DB
+    round-trip) for callers that don't need the reachability signal.
+    """
+    return pg_get_credential_status(service, key)[0]
 
 
 @timed_query(store=_STORE, op="pg_set_credential")

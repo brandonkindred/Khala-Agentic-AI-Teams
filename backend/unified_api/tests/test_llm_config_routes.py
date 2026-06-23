@@ -29,9 +29,10 @@ def app_client(monkeypatch):
     """A TestClient over a minimal app, with the secret store + caches stubbed."""
     calls: dict = {"set": [], "cache_clears": 0, "runtime_clears": 0}
     monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
-    # Default to a reachable store so the GET happy path reports "available";
-    # individual tests override this to exercise the unreachable branch.
-    monkeypatch.setattr(route, "check_connection", lambda *a, **k: True)
+    # Default to a reachable store so the GET/PUT happy paths report "available";
+    # individual tests override resolve_storage_status to exercise other branches.
+    # (_probe_storage_status offloads this via asyncio.to_thread + wait_for.)
+    monkeypatch.setattr(route, "resolve_storage_status", lambda *a, **k: "available")
     # The PUT handler writes every changed key in one set_secrets() transaction.
     # Flatten the batch into (svc, key, val) tuples so existing per-key assertions
     # keep working while still proving the atomic call path is exercised.
@@ -428,11 +429,12 @@ def test_get_storage_status_available(app_client):
 
 
 def test_get_storage_status_unconfigured(app_client, monkeypatch):
-    # POSTGRES_HOST unset → "unconfigured"; Save disabled; the probe is never consulted.
+    # POSTGRES_HOST unset → "unconfigured"; Save disabled; the probe is never consulted
+    # (_probe_storage_status short-circuits on is_postgres_enabled before offloading).
     client, _calls, _mp = app_client
     monkeypatch.setattr(route, "is_postgres_enabled", lambda: False)
     monkeypatch.setattr(
-        route, "check_connection", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe"))
+        route, "resolve_storage_status", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe"))
     )
     body = client.get("/api/llm-config").json()
     assert body["storage_status"] == "unconfigured"
@@ -440,11 +442,29 @@ def test_get_storage_status_unconfigured(app_client, monkeypatch):
 
 
 def test_get_storage_status_unreachable(app_client, monkeypatch):
-    # Configured but the probe fails → "unreachable"; Save disabled. This is the case
-    # the old env-only check could not express (it would say "available" and let a
-    # save attempt 503 — or report "not configured" and mislead the operator).
+    # Configured but the probe reports unreachable → "unreachable"; Save disabled. This
+    # is the case the old env-only check could not express (it would say "available"
+    # and let a save attempt 503 — or report "not configured" and mislead the operator).
     client, _calls, _mp = app_client
-    monkeypatch.setattr(route, "check_connection", lambda *a, **k: False)
+    monkeypatch.setattr(route, "resolve_storage_status", lambda *a, **k: "unreachable")
+    body = client.get("/api/llm-config").json()
+    assert body["storage_status"] == "unreachable"
+    assert body["storage_available"] is False
+
+
+def test_get_storage_status_unreachable_on_probe_timeout(app_client, monkeypatch):
+    # A probe that hangs past the bounded window (post-connect stall) must not hang the
+    # request: _probe_storage_status's wait_for fires and the store is reported unreachable.
+    import time
+
+    client, _calls, _mp = app_client
+    monkeypatch.setattr(route, "connect_timeout", lambda: 1)
+
+    def _hang(*_a, **_k):
+        time.sleep(5)
+        return "available"
+
+    monkeypatch.setattr(route, "resolve_storage_status", _hang)
     body = client.get("/api/llm-config").json()
     assert body["storage_status"] == "unreachable"
     assert body["storage_available"] is False

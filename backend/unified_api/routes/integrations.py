@@ -41,7 +41,7 @@ from coding_team.clone_workspace import (
     clone_lock_path,
 )
 from coding_team.github_source.client import _pr_detail_from_payload
-from shared_postgres import check_connection, is_postgres_enabled
+from shared_postgres import connect_timeout, resolve_storage_status
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -49,7 +49,7 @@ from unified_api.google_browser_login_credentials import (
     google_browser_login_storage_available,
     set_google_browser_login_credentials,
 )
-from unified_api.integration_credentials import get_credential
+from unified_api.integration_credentials import get_credential_status
 from unified_api.integrations_store import (
     clear_github_config,
     clear_medium_google_oauth_identity,
@@ -1046,9 +1046,12 @@ async def _github_config_response() -> GitHubConfigResponse:
 
     Preconditions: none.
     Postconditions: returns the current config with ``credential_store_unreachable``
-        set per :func:`_credential_store_unreachable`. The config read (a DB read)
-        and the connectivity probe both run in a worker thread so the bounded probe
-        can't stall the event loop. Never raises.
+        set per :func:`_credential_store_unreachable`. The config read (a DB read) and
+        the connectivity probe run in a worker thread wrapped in ``asyncio.wait_for``
+        so a Postgres that accepts the connection then stalls can't hang the request
+        (``connect_timeout`` bounds only the TCP connect). On timeout, returns a
+        degraded response flagged ``credential_store_unreachable=True`` rather than
+        hanging — the abandoned worker thread is the accepted residual. Never raises.
     """
 
     def _build() -> GitHubConfigResponse:
@@ -1057,7 +1060,20 @@ async def _github_config_response() -> GitHubConfigResponse:
             credential_store_unreachable=_credential_store_unreachable(),
         )
 
-    return await asyncio.to_thread(_build)
+    # Budget covers the two bounded sub-operations _build performs (a credential read
+    # and the probe, each ~connect_timeout) plus slack; a true post-connect stall
+    # overruns it and is reported as unreachable.
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=2 * connect_timeout() + 3.0)
+    except Exception:  # noqa: BLE001 - timeout/any failure → degraded "store unreachable" response
+        return GitHubConfigResponse(
+            enabled=False,
+            token_configured=False,
+            owner="",
+            repo="",
+            default_label="",
+            credential_store_unreachable=True,
+        )
 
 
 @router.get("/github", response_model=GitHubConfigResponse)
@@ -1224,13 +1240,14 @@ def _credential_store_unreachable() -> bool:
     """True when Postgres (the GitHub PAT store) is configured but not answering.
 
     Preconditions: none.
-    Postconditions: True only when ``POSTGRES_HOST`` is set yet a bounded probe
-        fails — i.e. the integration looks unconfigured purely because the store is
-        down, not because nothing was saved. False when Postgres is unset (an empty
-        token then genuinely means "not configured") or when the store answers.
-        Runs blocking I/O (the probe); async callers offload it.
+    Postconditions: True only when the shared classifier reports ``"unreachable"``
+        (``POSTGRES_HOST`` set yet a bounded probe fails) — i.e. the integration looks
+        unconfigured purely because the store is down, not because nothing was saved.
+        False when Postgres is unset or the store answers. Uses the single shared
+        :func:`resolve_storage_status` so the GitHub panel and the LLM page can't
+        drift on what "unreachable" means. Runs blocking I/O; async callers offload it.
     """
-    return is_postgres_enabled() and not check_connection()
+    return resolve_storage_status() == "unreachable"
 
 
 def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
@@ -1244,19 +1261,21 @@ def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
           prerequisite raises ``HTTPException(400)``; an empty token while the
           Postgres credential store is unreachable raises ``HTTPException(503)``
           instead, so a transient DB outage is never reported as "PAT not
-          configured". Shared by every GitHub route so their validation cannot drift.
+          configured". The 400-vs-503 decision comes from a SINGLE credential read
+          (:func:`get_credential_status` reports value + reachability together), so
+          there is no second probe and no TOCTOU window between the read and the
+          probe. Blocking I/O — async callers offload via ``asyncio.to_thread``.
+          Shared by every GitHub route so their validation cannot drift.
     """
     cfg = get_github_config()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
+    token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
     if not token:
-        # An empty token can mean two very different things. When Postgres is
-        # configured but unreachable, the PAT read silently returns "" — surfacing
-        # that as "not configured" (a 400) sends the operator down the wrong path.
-        # Distinguish a down credential store (503, transient) from a genuinely
-        # missing PAT (400, operator action required).
-        if _credential_store_unreachable():
+        # An empty token can mean two very different things, and the same read tells
+        # us which: a down credential store (503, transient) vs a genuinely missing
+        # PAT (400, operator action required). No separate probe → no race.
+        if not store_reachable:
             raise HTTPException(
                 status_code=503,
                 detail=(
@@ -1338,7 +1357,7 @@ async def list_github_issues(label: str | None = Query(default=None)) -> list[Gi
           issue and never fails the list. This adds roughly one extra request wave per
           ``GITHUB_DEPENDENCY_CONCURRENCY`` issues to the response latency.
     """
-    cfg, token, owner, repo = _resolve_github_target()
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     use_label = label or cfg["default_label"]
@@ -1413,7 +1432,7 @@ async def list_github_pulls() -> list[GitHubPullRequestItem]:
           ``_GITHUB_MAX_PR_PAGES`` pages of 100 items. Hitting that bound logs a
           warning and returns the PRs gathered so far rather than failing.
     """
-    _cfg, token, owner, repo = _resolve_github_target()
+    _cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     params: dict[str, Any] = {"state": "open", "per_page": _GITHUB_ISSUES_PER_PAGE}
     headers = _github_api_headers(token)
@@ -1714,7 +1733,7 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
     """
     # Centralized validation (enabled + PAT + owner/repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
-    cfg, token, owner, repo = _resolve_github_target()
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     # Validate the downstream is configured before the (slow) clone, so a
     # misconfiguration fails fast instead of after a multi-second checkout.
@@ -1814,7 +1833,7 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
     """
     # Centralized validation (enabled + PAT + owner/repo), which also maps an
     # unreachable credential store to a 503 rather than a misleading "not configured".
-    cfg, token, owner, repo = _resolve_github_target()
+    cfg, token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:
@@ -1891,7 +1910,7 @@ async def list_github_reviews(
           ``pr_number``), newest-first. Every failure path raises
           ``HTTPException``; no ``httpx`` error escapes unhandled.
     """
-    _cfg, _token, owner, repo = _resolve_github_target()
+    _cfg, _token, owner, repo = await asyncio.to_thread(_resolve_github_target)
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:

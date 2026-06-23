@@ -91,6 +91,22 @@ def get_credential(service: str, key: str) -> str:
     return pg_get_credential(service, key)
 
 
+def get_credential_status(service: str, key: str) -> tuple[str, bool]:
+    """Return ``(value, store_reachable)`` for callers that must tell a missing
+    credential apart from an unreachable store in a SINGLE read (e.g. mapping a
+    GitHub PAT lookup to 400 "not configured" vs 503 "store down" without a separate
+    connectivity probe). ``store_reachable`` is ``False`` only on a connection/query
+    error; a disabled store returns ``("", True)`` ("absent", not an outage)."""
+    from unified_api.postgres_encrypted_credentials import (
+        pg_get_credential_status,
+        postgres_credentials_enabled,
+    )
+
+    if not postgres_credentials_enabled():
+        return "", True
+    return pg_get_credential_status(service, key)
+
+
 def set_credential(service: str, key: str, value: str) -> None:
     """Encrypt and upsert a credential. Deletes the row if ``value`` is empty."""
     from unified_api.postgres_encrypted_credentials import (

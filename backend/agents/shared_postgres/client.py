@@ -27,11 +27,15 @@ import os
 import threading
 from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Optional
+from typing import Literal, Optional
 
 from shared_env import parse_int
 
 logger = logging.getLogger(__name__)
+
+# Storage-reachability classification shared by the settings surfaces (LLM Provider
+# page, GitHub integration panel) so the three-state contract is single-sourced.
+StorageStatus = Literal["available", "unconfigured", "unreachable"]
 
 # Per-database connection pools. Created lazily on first ``get_conn`` call
 # for that database name.
@@ -62,6 +66,34 @@ def _connect_timeout() -> int:
     return parse_int("POSTGRES_CONNECT_TIMEOUT_S", 3, minimum=1)
 
 
+def connect_timeout() -> int:
+    """Public accessor for the libpq ``connect_timeout`` (``POSTGRES_CONNECT_TIMEOUT_S``).
+
+    Preconditions: none.
+    Postconditions: returns the shared connect-timeout seconds so other modules that
+        build their own DSN (e.g. the unified-API credential store) bound the connect
+        with the *same* value as the pool, instead of re-deriving the default and
+        drifting. Never raises.
+    """
+    return _connect_timeout()
+
+
+def _kv(value: str) -> str:
+    """Quote a libpq keyword/value string when it needs it.
+
+    Preconditions: ``value`` is a string.
+    Postconditions: returns ``value`` unchanged when it is a non-empty run of
+        ordinary characters; otherwise returns it single-quoted with ``\\`` and ``'``
+        backslash-escaped, per libpq keyword/value rules. Without this, a value
+        containing a space (e.g. a ``POSTGRES_PASSWORD`` with whitespace) would
+        terminate early and corrupt every following keyword — including the
+        ``connect_timeout`` this DSN appends. Never raises.
+    """
+    if value and not any(c in value for c in " '\\"):
+        return value
+    return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
 def _dsn(database: Optional[str] = None) -> str:
     """Build a libpq DSN for ``database`` (defaults to ``POSTGRES_DB``)."""
     host = os.environ.get("POSTGRES_HOST", "localhost")
@@ -70,8 +102,8 @@ def _dsn(database: Optional[str] = None) -> str:
     password = os.environ.get("POSTGRES_PASSWORD", "")
     dbname = database or _default_database()
     return (
-        f"host={host} port={port} dbname={dbname} user={user} password={password} "
-        f"connect_timeout={_connect_timeout()}"
+        f"host={_kv(host)} port={_kv(port)} dbname={_kv(dbname)} "
+        f"user={_kv(user)} password={_kv(password)} connect_timeout={_connect_timeout()}"
     )
 
 
@@ -193,6 +225,25 @@ def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) 
             return row is not None and row[0] == 1
     except Exception:  # noqa: BLE001 - a probe must never raise; any failure is "unreachable"
         return False
+
+
+def resolve_storage_status(*, timeout_s: float = 1.5) -> StorageStatus:
+    """Classify the runtime store into one of three states for operator surfaces.
+
+    The single source of truth for the LLM Provider page and the GitHub integration
+    panel, so their three-state contract cannot drift.
+
+    Preconditions: none.
+    Postconditions: returns ``"unconfigured"`` when ``POSTGRES_HOST`` is unset,
+        ``"unreachable"`` when it is set but :func:`check_connection` (a bounded
+        ``SELECT 1``) fails, and ``"available"`` when the store answers. Never raises.
+        Runs blocking I/O (the probe), so async callers must offload it (and bound the
+        offload, since a connection that stalls *after* connect is not covered by
+        ``connect_timeout``).
+    """
+    if not is_postgres_enabled():
+        return "unconfigured"
+    return "available" if check_connection(timeout_s=timeout_s) else "unreachable"
 
 
 def close_pool(database: Optional[str] = None) -> None:

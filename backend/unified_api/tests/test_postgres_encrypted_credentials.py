@@ -92,14 +92,26 @@ def test_dsn_url_encodes_special_chars_in_password(monkeypatch: pytest.MonkeyPat
 
 
 def test_dsn_bounds_connect_timeout(monkeypatch: pytest.MonkeyPatch):
-    """The credential-store DSN carries connect_timeout so a PAT read can't hang on a
-    down host before any reachability probe runs (default 3, env-overridable)."""
+    """The credential-store DSN carries connect_timeout (from the shared helper) so a
+    PAT read can't hang on a down host before any reachability probe runs."""
     monkeypatch.setenv("POSTGRES_HOST", "host")
     monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
     mod = _reload(monkeypatch, postgres_host="host")
     assert "connect_timeout=3" in mod._dsn()
     monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "9")
     assert "connect_timeout=9" in mod._dsn()
+
+
+def test_dsn_encodes_space_password_as_percent20(monkeypatch: pytest.MonkeyPatch):
+    """A space in the password must percent-encode to %20, NOT '+' (quote, not
+    quote_plus): in a URI userinfo libpq treats '+' as a literal plus, so quote_plus
+    would authenticate with the wrong password."""
+    monkeypatch.setenv("POSTGRES_HOST", "host")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
+    mod = _reload(monkeypatch, postgres_host="host")
+    dsn = mod._dsn()
+    assert "my%20pass" in dsn
+    assert "my+pass" not in dsn
 
 
 # ---------------------------------------------------------------------------
@@ -174,6 +186,76 @@ def test_pg_set_credential_raises_runtime_error_when_psycopg_missing(
     mod._psycopg_import_failed = True  # simulate missing psycopg
     with pytest.raises(RuntimeError, match="psycopg is not installed"):
         mod.pg_set_credential("svc", "key", "value")
+
+
+# ---------------------------------------------------------------------------
+# pg_get_credential_status: (value, store_reachable) from a single read
+# ---------------------------------------------------------------------------
+
+
+def _fake_conn(row):
+    """A psycopg.connect(...) stand-in usable as ``with ... as conn, conn.cursor() as cur``."""
+    cur = MagicMock()
+    cur.fetchone.return_value = row
+    cur.__enter__ = lambda s=cur: cur
+    cur.__exit__ = lambda *a: False
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    conn.__enter__ = lambda s=conn: conn
+    conn.__exit__ = lambda *a: False
+    return conn
+
+
+def test_status_disabled_is_absent_but_reachable(monkeypatch: pytest.MonkeyPatch):
+    # Disabled store is a configuration state ("absent"), not an outage.
+    mod = _reload(monkeypatch, postgres_host="")
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
+
+
+def test_status_connection_error_is_unreachable(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("connection refused")
+
+    monkeypatch.setattr(psycopg, "connect", _boom)
+    assert mod.pg_get_credential_status("svc", "key") == ("", False)
+
+
+def test_status_missing_row_is_absent_reachable(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(None))
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
+
+
+def test_status_present_row_returns_decrypted_value(monkeypatch: pytest.MonkeyPatch):
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("ciphertext",)))
+    fernet = MagicMock()
+    fernet.decrypt.return_value = b"plain-secret"
+    monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
+    assert mod.pg_get_credential_status("svc", "key") == ("plain-secret", True)
+    # pg_get_credential is a thin wrapper over the same single read.
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("ciphertext",)))
+    assert mod.pg_get_credential("svc", "key") == "plain-secret"
+
+
+def test_status_undecryptable_row_is_absent_reachable(monkeypatch: pytest.MonkeyPatch):
+    # A row that won't decrypt (e.g. rotated key) is store-reachable but unusable →
+    # treated as absent (a 400 path for callers), not an outage.
+    mod = _reload(monkeypatch, postgres_host="host")
+    import psycopg
+
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("bad",)))
+    fernet = MagicMock()
+    fernet.decrypt.side_effect = ValueError("invalid token")
+    monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
+    assert mod.pg_get_credential_status("svc", "key") == ("", True)
 
 
 def test_pg_delete_credential_noop_when_disabled(monkeypatch: pytest.MonkeyPatch):

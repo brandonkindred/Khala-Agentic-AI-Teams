@@ -274,10 +274,15 @@ stores via `shared_postgres`; no SQLite fallback. Setting `POSTGRES_HOST` only m
 from "not configured").
 
 ### POSTGRES_CONNECT_TIMEOUT_S
-libpq `connect_timeout` (seconds) applied to every `shared_postgres` connection (default `3`,
-floor `1`). Bounds how long a TCP connect to a down or unreachable Postgres host can hang —
-without it, opening the pool (`open=True`) against an unreachable host can block far longer than
-a caller's own timeout, which would defeat the `check_connection()` probe.
+libpq `connect_timeout` (seconds) applied to **every** Postgres connection the platform opens —
+both the `shared_postgres` pool (used by `check_connection()` and the migrated-team stores) **and**
+the unified-API encrypted credential store (`postgres_encrypted_credentials`, the live read path for
+the GitHub / Slack / Medium PAT/secret lookups, which is a per-call connection outside the pool).
+Default `3`, floor `1`. Bounds how long a TCP connect to a down or unreachable host can hang —
+without it, opening the pool (`open=True`) or a credential read against an unreachable host blocks
+for the libpq default, defeating the bounded reachability probe. Note: it bounds only the TCP
+*connect* phase; a host that accepts the connection then stalls is bounded at the request layer by
+the route's `asyncio.wait_for` guard, not by this value.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice
