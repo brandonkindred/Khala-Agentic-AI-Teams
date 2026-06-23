@@ -239,6 +239,18 @@ Max bisect-and-retry recursion depth for a failing review chunk before the run
 fails with `CodeReviewUnavailableError`. Default `3`, floor `0` (`0` disables
 bisection; a chunk then gets only the single same-input retry).
 
+### CODE_REVIEW_FALSE_POSITIVE_FILTER
+Default-on toggle for the false-positive verification pass. After the map-reduce
+review merges its findings, each genuine finding is re-checked against the
+*whole* submission — the verifier has read access to every file under review
+(`read_file`/`list_files`/`search_codebase` tools), so it can confirm a finding
+the bounded chunk reviewer flagged in isolation (e.g. "symbol never defined")
+against the real cross-file code and drop it when it is a false positive.
+Fail-safe: a finding is removed only on an explicit, confident false-positive
+verdict; any ambiguity or verifier error keeps the finding, and the not-reviewed
+coverage findings are never removed. Set to `false`/`0`/`no` to disable the pass
+(any other value, or unset, leaves it enabled).
+
 ---
 
 ## Shared Infrastructure and Storage

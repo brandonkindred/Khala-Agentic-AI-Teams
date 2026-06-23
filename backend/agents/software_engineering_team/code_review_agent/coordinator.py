@@ -2,7 +2,10 @@
 
 Pipeline: input → (path, content) blocks → bounded ``FileSegment``s →
 ``ReviewChunk``s → per-chunk LLM review (parallel, with retry/bisect recovery)
-→ line re-anchoring → deterministic merge (dedupe, severity gate, safety
+→ line re-anchoring → false-positive verification (each genuine finding is
+re-checked against the *whole* submission, since a chunk reviewer saw only a
+slice, and confirmed false positives are dropped — see ``false_positive_filter``)
+→ deterministic merge (dedupe, severity gate, safety
 nets). Every LLM call carries at most ``compute_code_review_map_chunk_chars``
 of code regardless of input size, and no input file is ever silently dropped:
 empty files are named by info findings, and a chunk that cannot be reviewed
@@ -47,6 +50,7 @@ from software_engineering_team.shared.context_sizing import (
 
 from .chunk_reviewer import ChunkReviewAgent
 from .code_boundaries import preferred_break_lines
+from .false_positive_filter import filter_false_positives
 from .models import (
     ChunkReviewInput,
     CodeReviewInput,
@@ -542,9 +546,14 @@ class _ChunkOutcome:
           recovery) contributes a degraded outcome — a blocking ``high`` "not
           reviewed" finding and no ``approved_flags`` entry — rather than
           aborting the run, so unreviewed code is rejected, not silently scored.
+        - ``issues`` holds only genuine reviewer findings; the degraded "not
+          reviewed" coverage findings live in ``not_reviewed_issues``. Keeping
+          them apart lets the false-positive filter re-check the genuine
+          findings without ever being able to drop a coverage/safety finding.
     """
 
     issues: List[CodeReviewIssue] = field(default_factory=list)
+    not_reviewed_issues: List[CodeReviewIssue] = field(default_factory=list)
     summaries: List[str] = field(default_factory=list)
     spec_notes: List[str] = field(default_factory=list)
     commit_messages: List[str] = field(default_factory=list)
@@ -553,6 +562,7 @@ class _ChunkOutcome:
     def absorb(self, other: "_ChunkOutcome") -> None:
         """Append ``other``'s entries in order. Postcondition: no entry is lost."""
         self.issues.extend(other.issues)
+        self.not_reviewed_issues.extend(other.not_reviewed_issues)
         self.summaries.extend(other.summaries)
         self.spec_notes.extend(other.spec_notes)
         self.commit_messages.extend(other.commit_messages)
@@ -705,12 +715,14 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
           could be neither bisected further nor recovered by retry.
 
     Postconditions:
-        - Returns one ``high``/``general`` finding per segment, spanning the
-          segment's original-file range via the model's multi-line convention
-          (``start_line`` = first line, ``line`` = last line — there is no
-          ``end_line`` field) and naming the range in its description, so no
-          covered line is silently dropped and downstream tools can highlight
-          the full extent.
+        - Returns one ``high``/``general`` finding per segment in the outcome's
+          ``not_reviewed_issues`` (never ``issues``), so the false-positive
+          filter — which only re-checks genuine ``issues`` — can never drop a
+          coverage finding. Each finding spans the segment's original-file range
+          via the model's multi-line convention (``start_line`` = first line,
+          ``line`` = last line — there is no ``end_line`` field) and names the
+          range in its description, so no covered line is silently dropped and
+          downstream tools can highlight the full extent.
         - The findings are ``high`` severity, so ``_reconcile_approval`` rejects
           the merged review: unreviewed code can never pass the code-review gate
           as approved (the backend only feeds issues back on rejection). The
@@ -745,7 +757,7 @@ def _degraded_outcome(chunk: ReviewChunk, exc: BaseException) -> _ChunkOutcome:
             )
         )
     return _ChunkOutcome(
-        issues=issues,
+        not_reviewed_issues=issues,
         summaries=[f"Not reviewed: {', '.join(_chunk_ranges(chunk))} ({reason})."],
     )
 
@@ -1070,6 +1082,12 @@ def run_coordinator(
           degraded finding rejects the merged review, so unreviewed code never
           passes the gate as approved; no covered line is silently dropped.
         - ``approved is False`` implies at least one critical/high issue.
+        - Every genuine reviewer finding is re-checked against the whole
+          submission and dropped only when the verifier confirms it is a false
+          positive; when that removes the last critical/high finding the gate
+          approves (a chunk-local false positive never blocks the merge). The
+          check is fail-safe — any verifier failure keeps the findings — and
+          never touches the not-reviewed coverage findings.
         - The code under review is never compacted or truncated; only the
           spec/architecture/existing-codebase excerpts are.
         - When ``progress_callback`` is provided, it is invoked with
@@ -1155,17 +1173,34 @@ def run_coordinator(
     # not-reviewed finding, but a run in which *no* chunk produced a verdict
     # has reviewed nothing — rendering approved/rejected here would be a
     # verdict on code we never saw. Fail loudly instead, naming what went
-    # unreviewed (the degraded info findings already record the ranges).
+    # unreviewed (the degraded not-reviewed findings already record the ranges).
     if not outcome.approved_flags:
         raise CodeReviewUnavailableError(
             "No chunk could be reviewed after recovery; no verdict was produced for this submission.",
-            unreviewed=[i.description for i in outcome.issues],
+            unreviewed=[i.description for i in (outcome.not_reviewed_issues + outcome.issues)],
         )
+
+    # False-positive verification: re-check each genuine reviewer finding against
+    # the *whole* submission. Each chunk review saw only a bounded slice, so a
+    # finding can be wrong because the resolving code lived in a part of the file
+    # (or another file) it never saw. The filter reads the real code and drops
+    # only the findings it confirms are false positives. Coverage/safety findings
+    # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
+    # gate's anti-loop nets stay intact; on any verifier failure the findings are
+    # kept (fail-safe).
+    genuine = _dedupe_issues(outcome.issues)
+    notify_review_progress(
+        progress_callback,
+        "verifying",
+        f"verifying {len(genuine)} findings against the full codebase",
+        0.92,
+    )
+    verified = filter_false_positives(llm, input_data, genuine)
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
     )
-    deduped = _dedupe_issues([*outcome.issues, *skipped_issues])
+    deduped = _dedupe_issues([*verified, *outcome.not_reviewed_issues, *skipped_issues])
     all_llm_approved = bool(outcome.approved_flags) and all(outcome.approved_flags)
     approved, deduped = _reconcile_approval(all_llm_approved, deduped)
 
