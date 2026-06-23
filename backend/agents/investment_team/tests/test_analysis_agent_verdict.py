@@ -10,10 +10,10 @@ caller now threads the resolved verdict in, and this test pins that the agent
 honours it instead of looking at the metric.
 
 Robustness notes:
-- Template selection is verified by spying on ``Path.read_text`` to record
-  which prompt file was opened — this survives wording edits to
-  ``analysis_win.md`` / ``analysis_lose.md`` (the goldens in
-  ``test_analysis_alignment_prompts.py`` pin the actual content).
+- Template selection is verified by recording which key the agent looks up in
+  ``analysis._DRAFT_TEMPLATES`` (the templates are loaded once at import) — this
+  survives wording edits to ``analysis_win.md`` / ``analysis_lose.md`` (the
+  goldens in ``test_analysis_alignment_prompts.py`` pin the actual content).
 - ``Outcome label: <LABEL>`` is asserted against the rendered self-review
   prompt; that placeholder lives in ``analysis.py`` itself (the
   ``_SELF_REVIEW_PROMPT`` constant), not in a drifting template.
@@ -22,7 +22,6 @@ Robustness notes:
 from __future__ import annotations
 
 import json
-from pathlib import Path
 from typing import Any, List
 
 import pytest
@@ -100,9 +99,14 @@ class _Recorder:
 
 
 def _install_recorder(monkeypatch) -> _Recorder:
-    """Patch ``strands.Agent``, the strands model factory, and
-    ``Path.read_text`` so the test can capture prompt text + template
-    selection without hitting the LLM. Returns the live recorder."""
+    """Patch ``strands.Agent``, the strands model factory, and the draft-template
+    map so the test can capture prompt text + template selection without hitting
+    the LLM. Returns the live recorder.
+
+    Draft templates are loaded once at import into ``analysis._DRAFT_TEMPLATES``;
+    selection is therefore observed by recording which key the agent looks up
+    (still robust to wording edits in either template, like the prior
+    ``Path.read_text`` spy)."""
 
     rec = _Recorder()
 
@@ -114,16 +118,18 @@ def _install_recorder(monkeypatch) -> _Recorder:
             rec.prompts.append(prompt)
             return rec.render_response()
 
+    class _RecordingTemplates(dict):
+        def __getitem__(self, key):
+            rec.read_files.append(key)
+            return super().__getitem__(key)
+
     monkeypatch.setattr(analysis_module, "Agent", _StubAgent)
     monkeypatch.setattr(analysis_module, "get_strands_model", lambda _name: None)
-
-    original_read_text = Path.read_text
-
-    def _spy_read_text(self, *args, **kwargs):  # type: ignore[no-untyped-def]
-        rec.read_files.append(self.name)
-        return original_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", _spy_read_text)
+    monkeypatch.setattr(
+        analysis_module,
+        "_DRAFT_TEMPLATES",
+        _RecordingTemplates(analysis_module._DRAFT_TEMPLATES),
+    )
     return rec
 
 

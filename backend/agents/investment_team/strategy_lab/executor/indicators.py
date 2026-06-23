@@ -61,7 +61,9 @@ def _coerce_series(series, field: str = "close") -> pd.Series:
     # Accept any non-string sequence/iterable (list, tuple, collections.deque,
     # np.ndarray, …) by materialising it once; reject strings and scalars.
     if isinstance(series, (str, bytes, bytearray)) or not hasattr(series, "__iter__"):
-        raise TypeError(f"indicator input must be pd.Series or a sequence, got {type(series).__name__}")
+        raise TypeError(
+            f"indicator input must be pd.Series or a sequence, got {type(series).__name__}"
+        )
     if not isinstance(series, (list, tuple)):
         series = list(series)
     if not series:
@@ -130,9 +132,7 @@ def rsi(series: pd.Series, period: int = 14) -> pd.Series:
     # When avg_loss is zero (sustained uptrend) RS is infinite → RSI = 100.
     # pandas 3.x requires a Series here (rejects raw ndarray), so wrap the
     # np.where result with the same index as ``result``.
-    fill_values = pd.Series(
-        np.where(avg_loss == 0, 100.0, np.nan), index=result.index
-    )
+    fill_values = pd.Series(np.where(avg_loss == 0, 100.0, np.nan), index=result.index)
     result = result.fillna(fill_values)
     return result
 
