@@ -32,6 +32,7 @@ if str(_agents_dir) not in sys.path:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from shared_env_config import env_float
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
@@ -975,8 +976,6 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
     # Operability knob parsed via the shared typed reader (missing/garbage → 15s);
     # a non-positive value is then reset to the default, since a <=0 timeout would
     # make httpx fail instantly.
-    from shared_env_config import env_float
-
     timeout = env_float("SE_METRICS_ALIAS_TIMEOUT", 15.0)
     if timeout <= 0:
         timeout = 15.0

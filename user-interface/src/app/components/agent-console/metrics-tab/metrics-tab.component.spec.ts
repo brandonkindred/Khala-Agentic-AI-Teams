@@ -1,3 +1,4 @@
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { TestBed } from '@angular/core/testing';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { Subject, of, throwError } from 'rxjs';
@@ -117,5 +118,39 @@ describe('MetricsTabComponent', () => {
     expect(c.formatPercent(null)).toBe('—');
     expect(c.formatUsd(1.2345)).toBe('$1.2345');
     expect(c.formatUsd(undefined)).toBe('$0.0000');
+  });
+
+  it('extracts a string error body', () => {
+    api.getMetrics = vi.fn().mockReturnValue(throwError(() => ({ error: 'string error' })));
+    const fixture = build();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.error()).toBe('string error');
+  });
+
+  it('extracts error.detail from an object error body', () => {
+    api.getMetrics = vi
+      .fn()
+      .mockReturnValue(throwError(() => ({ error: { detail: 'detail error' } })));
+    const fixture = build();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.error()).toBe('detail error');
+  });
+
+  it('falls back to a generic message when the error has no recognizable shape', () => {
+    api.getMetrics = vi.fn().mockReturnValue(throwError(() => ({})));
+    const fixture = build();
+    fixture.detectChanges();
+    expect(fixture.componentInstance.error()).toBe('Failed to load metrics.');
+  });
+
+  it('formats timestamps (valid, invalid, null)', () => {
+    const fixture = build();
+    const c = fixture.componentInstance;
+    expect(c.formatTimestamp(null)).toBe('—');
+    expect(c.formatTimestamp(undefined)).toBe('—');
+    expect(c.formatTimestamp('not-a-date')).toBe('not-a-date');
+    const formatted = c.formatTimestamp('2026-06-20T00:00:00+00:00');
+    expect(typeof formatted).toBe('string');
+    expect(formatted).not.toBe('—');
   });
 });

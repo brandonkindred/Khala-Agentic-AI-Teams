@@ -190,6 +190,10 @@ def reap_once(
           insertion order of ``job_created_at``) are dropped. Every evicted
           subscriber is woken. Returns ``(evicted_jobs, evicted_subs)``.
     """
+    if ttl_seconds < 0:
+        raise ValueError("ttl_seconds must be >= 0")
+    if max_jobs < 0:
+        raise ValueError("max_jobs must be >= 0")
     now = time.monotonic()
     evicted_jobs = 0
     evicted_subs = 0

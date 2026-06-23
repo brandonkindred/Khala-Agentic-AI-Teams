@@ -18,11 +18,14 @@ from __future__ import annotations
 import inspect
 import logging
 from contextlib import asynccontextmanager
-from typing import Any, Awaitable, Callable, Optional, Union
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Optional, Union
 
 from fastapi import FastAPI
 
 from shared_observability import init_otel, instrument_fastapi_app
+
+if TYPE_CHECKING:
+    from shared_postgres import TeamSchema
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,7 @@ def create_team_app(
     team_key: str,
     title: str,
     version: str = "1.0.0",
-    postgres_schema: Optional[Any] = None,
+    postgres_schema: "Optional[TeamSchema]" = None,
     on_startup: Optional[LifecycleHook] = None,
     on_shutdown: Optional[LifecycleHook] = None,
     excluded_urls: Optional[str] = None,
@@ -61,6 +64,8 @@ def create_team_app(
     Preconditions:
         - ``service_name``/``team_key``/``title`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
+        - ``fastapi_kwargs`` must not contain ``title``/``version``/``lifespan``
+          (set explicitly here); duplicating them raises ``TypeError``.
         - ``on_startup`` runs after schema registration; ``on_shutdown`` runs
           before the pool is closed. Teardown (``on_shutdown`` + pool close) runs
           even if ``on_startup`` raises, so a startup failure never leaks the pool.

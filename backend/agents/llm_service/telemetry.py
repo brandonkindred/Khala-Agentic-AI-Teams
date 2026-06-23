@@ -21,6 +21,11 @@ Usage::
     )
 
     summary = get_usage_summary(team="blogging", window_hours=24)
+
+Observers registered via ``register_call_observer`` are invoked **synchronously**
+inside ``record_llm_call``, so they must be cheap and non-blocking — avoid
+synchronous DB/network I/O on the call path or it adds latency to every LLM call
+(persisters should enqueue/offload rather than write inline).
 """
 
 from __future__ import annotations

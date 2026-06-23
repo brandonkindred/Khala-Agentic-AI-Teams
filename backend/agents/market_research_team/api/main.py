@@ -35,6 +35,7 @@ app = create_team_app(
     team_key="market_research",
     title="Market Research Team API",
     version="1.0.0",
+    description="Market research team API for competitive analysis and market insights.",
 )
 
 
