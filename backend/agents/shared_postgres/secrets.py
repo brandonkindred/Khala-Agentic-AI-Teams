@@ -41,18 +41,22 @@ _LOCK = threading.Lock()
 _fernet = None  # cached cryptography.fernet.Fernet
 
 
-def _load_or_create_key() -> bytes:
+def load_or_create_key() -> bytes:
     """Return the Fernet key, matching ``unified_api`` precedence exactly.
 
     Priority:
       1. ``INTEGRATION_ENCRYPTION_KEY`` env var (base64-url-safe 32-byte key)
       2. Persisted key file at ``{AGENT_CACHE}/integration.key``
-      3. Generate a new key, persist it, return it
+      3. Generate a new key, persist it atomically, return it
 
     Preconditions: none.
     Postconditions: returns a valid 32-byte url-safe base64 Fernet key as
         ``bytes``; the same key every call within a process (the file/env are
-        stable). Never raises for a missing file — it is created.
+        stable). A pre-existing, unreadable key file raises ``RuntimeError``
+        rather than silently generating a NEW key (which would destroy every
+        existing encrypted secret). When no key exists it is created atomically
+        (``O_CREAT|O_EXCL``) so concurrent first-starts converge on one key
+        instead of last-writer-wins clobbering each other's.
     """
     env_key = os.getenv("INTEGRATION_ENCRYPTION_KEY", "").strip()
     if env_key:
@@ -68,15 +72,51 @@ def _load_or_create_key() -> bytes:
         try:
             return key_path.read_bytes().strip()
         except OSError as e:
-            logger.warning("Failed to read integration key file %s: %s", key_path, e)
+            # An existing-but-unreadable key file must NOT fall through to key
+            # generation: overwriting it with a fresh key would render every row
+            # already encrypted under the old key permanently undecryptable. Fail
+            # loudly so an operator fixes permissions / restores the file instead.
+            raise RuntimeError("Integration key file exists but is unreadable") from e
 
+    # No persisted key and no env override: auto-generate for dev convenience, but
+    # warn — a generated key lives only on this container's volume, so a multi-
+    # container production deployment must set INTEGRATION_ENCRYPTION_KEY or each
+    # container would derive its own key and be unable to read the others' secrets.
     key = Fernet.generate_key()
+    logger.warning(
+        "No INTEGRATION_ENCRYPTION_KEY set and no key file at %s; generating one. "
+        "Set INTEGRATION_ENCRYPTION_KEY in production so every container shares one key.",
+        key_path,
+    )
+    # Create the file atomically: O_CREAT|O_EXCL means exactly one of several
+    # concurrently-starting processes wins the create; the losers get
+    # FileExistsError and re-read the winner's key, so all converge on one key
+    # instead of overwriting the shared file last-writer-wins.
     try:
-        key_path.write_bytes(key)
-        key_path.chmod(0o600)
+        fd = os.open(key_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except FileExistsError:
+        # Another process created it between our exists() check and now; read it.
+        try:
+            return key_path.read_bytes().strip()
+        except OSError as e:
+            raise RuntimeError("Integration key file exists but is unreadable") from e
     except OSError as e:
+        # Could not create the file (e.g. read-only volume); use the in-memory key
+        # for this process so the dev case still works, but it will not persist.
         logger.warning("Failed to persist integration key to %s: %s", key_path, e)
+        return key
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(key)
+    except OSError as e:
+        logger.warning("Failed to write integration key to %s: %s", key_path, e)
     return key
+
+
+# Back-compat private alias: callers that imported the underscore-prefixed name
+# still work, but new code (and ``unified_api``) should import the public
+# ``load_or_create_key``.
+_load_or_create_key = load_or_create_key
 
 
 def _get_fernet():
@@ -84,7 +124,7 @@ def _get_fernet():
 
     Preconditions: none.
     Postconditions: returns the single ``cryptography.fernet.Fernet`` for this
-        process (built once from :func:`_load_or_create_key`) — the same instance
+        process (built once from :func:`load_or_create_key`) — the same instance
         every call. Never raises for a missing key file; it is created.
     """
     global _fernet
@@ -94,7 +134,7 @@ def _get_fernet():
         if _fernet is None:
             from cryptography.fernet import Fernet
 
-            _fernet = Fernet(_load_or_create_key())
+            _fernet = Fernet(load_or_create_key())
     return _fernet
 
 
@@ -158,7 +198,8 @@ def get_secret(service: str, key: str) -> str:
         missing, Postgres is disabled, or decryption fails (logged). Never raises
         for an absent value.
     """
-    assert service and key, "service and key must be non-empty"
+    if not service or not key:
+        raise ValueError("service and key must be non-empty")
     if not is_postgres_enabled():
         return ""
     _ensure_table()
@@ -197,7 +238,8 @@ def get_secrets(service: str, keys: "list[str] | tuple[str, ...]") -> dict[str, 
         decrypt (logged) are omitted. Returns ``{}`` when Postgres is disabled or
         the read fails. Never raises for absent values.
     """
-    assert service, "service must be non-empty"
+    if not service:
+        raise ValueError("service must be non-empty")
     wanted = {k for k in keys if k}
     if not wanted or not is_postgres_enabled():
         return {}
@@ -273,7 +315,8 @@ def set_secret(service: str, key: str, value: str) -> None:
     Postconditions: a non-empty ``value`` is stored encrypted (insert or update);
         an empty ``value`` removes the row.
     """
-    assert service and key, "service and key must be non-empty"
+    if not service or not key:
+        raise ValueError("service and key must be non-empty")
     if not is_postgres_enabled():
         raise RuntimeError("POSTGRES_HOST is not set; cannot persist shared secrets.")
     _ensure_table()
@@ -306,8 +349,10 @@ def set_secrets(service: str, values: "dict[str, str]") -> None:
         transaction is rolled back — no key is changed — and the exception
         propagates. The batch is all-or-nothing.
     """
-    assert service, "service must be non-empty"
-    assert all(key for key in values), "every secret key must be non-empty"
+    if not service:
+        raise ValueError("service must be non-empty")
+    if not all(key for key in values):
+        raise ValueError("every secret key must be non-empty")
     if not values:
         return
     if not is_postgres_enabled():
@@ -329,7 +374,8 @@ def delete_secret(service: str, key: str) -> None:
     Postconditions: the row is removed if present; a no-op when Postgres is
         disabled. Never raises for an absent row.
     """
-    assert service and key, "service and key must be non-empty"
+    if not service or not key:
+        raise ValueError("service and key must be non-empty")
     if not is_postgres_enabled():
         return
     _ensure_table()

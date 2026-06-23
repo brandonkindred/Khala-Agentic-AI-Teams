@@ -150,9 +150,10 @@ def test_set_secrets_when_disabled_raises(monkeypatch):
 
 
 def test_set_secrets_blank_args_assert(store):
-    with pytest.raises(AssertionError):
+    # Preconditions are enforced with explicit ValueError (survives python -O).
+    with pytest.raises(ValueError):
         secrets_mod.set_secrets("", {"k": "v"})
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         secrets_mod.set_secrets("svc", {"": "v"})
 
 
@@ -198,9 +199,10 @@ def test_delete_when_disabled_noop(monkeypatch):
 
 
 def test_blank_args_assert(store):
-    with pytest.raises(AssertionError):
+    # Preconditions are enforced with explicit ValueError (survives python -O).
+    with pytest.raises(ValueError):
         secrets_mod.get_secret("", "k")
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         secrets_mod.set_secret("svc", "", "v")
 
 

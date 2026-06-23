@@ -46,9 +46,9 @@ def _load_or_create_key() -> bytes:
     secret written here be decrypted in a team container. Keeping two copies in
     sync by hand was the drift risk this removes.
     """
-    from shared_postgres.secrets import _load_or_create_key as _shared_load_or_create_key
+    from shared_postgres.secrets import load_or_create_key
 
-    return _shared_load_or_create_key()
+    return load_or_create_key()
 
 
 def _get_fernet() -> Fernet:
