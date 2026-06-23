@@ -56,6 +56,11 @@ class Subscription:
     ``created_at`` is fixed at construction; ``last_activity`` is the liveness
     signal the reaper reads. Consumers that rely on reaping should call
     :meth:`touch` each loop iteration while their stream is alive.
+
+    ``events`` is a bounded ``deque(maxlen=500)``: a consumer that falls behind
+    by more than 500 undrained events silently loses the **oldest** ones (the
+    deque evicts from the left on overflow). SSE consumers should drain promptly
+    — a slow reader drops old progress events, never the newest.
     """
 
     notify: threading.Event = field(default_factory=threading.Event)

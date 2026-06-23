@@ -26,6 +26,14 @@ Keeping the state team-local means each team's module can expose its own
 module-level config/aliases (e.g. `_subscribers` for tests) and opt into the
 reaper independently.
 
+## Event buffer (bounded)
+
+Each `Subscription` buffers its undrained events in a `deque(maxlen=500)`. If an
+SSE consumer falls behind by more than 500 events, the **oldest** events are
+silently dropped (the deque evicts from the left on overflow) — a slow reader
+loses old progress, never the newest. The cap is a fixed module constant today;
+tune it in `bus.py` if a team needs deeper buffering.
+
 ## Optional reaper
 
 `reap_once(state, *, ttl_seconds, max_jobs, logger=None, label=...)` is a single

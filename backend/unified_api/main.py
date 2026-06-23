@@ -977,6 +977,9 @@ async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
         timeout = float(os.environ.get("SE_METRICS_ALIAS_TIMEOUT", "") or 15.0)
     except ValueError:
         timeout = 15.0
+    if timeout <= 0:
+        # A non-positive timeout makes httpx fail instantly; fall back to the default.
+        timeout = 15.0
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})

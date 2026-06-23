@@ -70,6 +70,32 @@ def test_count_and_prune_noop() -> None:
     assert learnings_store.prune_learnings(0) == 0
 
 
+def test_or_tsquery_terms_builds_or_query() -> None:
+    f = learnings_store._or_tsquery_terms
+    # Empty / whitespace / all-too-short → empty string.
+    assert f("") == ""
+    assert f("   ") == ""
+    assert f("a b cd") == ""  # every term < 3 chars
+    # Lowercased, special chars stripped, de-duplicated (order preserved), OR-joined.
+    assert f("Foo foo BAR!") == "foo | bar"
+    assert f("special!char @# test") == "special | char | test"
+    # Words shorter than 3 chars are dropped; digits are kept.
+    assert f("the api v2 gateway") == "the | api | gateway"
+    # The term limit caps how many are emitted.
+    assert f("aaa bbb ccc ddd", limit=2) == "aaa | bbb"
+
+
+def test_learnings_retention_days_env(monkeypatch) -> None:
+    monkeypatch.delenv("SE_LEARNINGS_RETENTION_DAYS", raising=False)
+    assert learnings_store._retention_days() == 365.0
+    monkeypatch.setenv("SE_LEARNINGS_RETENTION_DAYS", "10")
+    assert learnings_store._retention_days() == 10.0
+    monkeypatch.setenv("SE_LEARNINGS_RETENTION_DAYS", "garbage")
+    assert learnings_store._retention_days() == 365.0  # bad value → default
+    monkeypatch.setenv("SE_LEARNINGS_RETENTION_DAYS", "-5")
+    assert learnings_store._retention_days() == 0.0  # clamped to floor
+
+
 # --- trace_store -----------------------------------------------------------
 
 
@@ -106,3 +132,12 @@ def test_trace_observer_ignores_non_se(monkeypatch) -> None:
 
     trace_store._trace_observer(_Rec())
     assert calls == []  # other team → not written
+
+
+def test_trace_retention_days_env(monkeypatch) -> None:
+    monkeypatch.delenv("SE_TRACE_RETENTION_DAYS", raising=False)
+    assert trace_store._retention_days() == 30.0
+    monkeypatch.setenv("SE_TRACE_RETENTION_DAYS", "7")
+    assert trace_store._retention_days() == 7.0
+    monkeypatch.setenv("SE_TRACE_RETENTION_DAYS", "garbage")
+    assert trace_store._retention_days() == 30.0  # bad value → default
