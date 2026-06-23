@@ -24,12 +24,16 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
 
+# Loaded once at import — the system prompt is static, so re-reading it from disk
+# on every refinement round is wasted I/O.
+_SYSTEM_PROMPT = (_PROMPT_DIR / "refinement_system.md").read_text(encoding="utf-8")
+
 # The JSON Schema the LLM response must conform to, rendered once for
-# injection into the prompt. This is the SAME schema passed to the model's
-# ``format`` field via ``get_strands_model(response_schema=REFINEMENT_SCHEMA)``,
-# so the prompt-level contract and the decoder-level constraint can never
-# drift. Provider-agnostic: it constrains the model even when structured
-# output is disabled or the provider is Bedrock (which ignores ``format``).
+# injection into the prompt. The Ollama transport routes through the
+# ``llm_service`` client in ``json_object`` wire mode (see ``get_strands_model``),
+# which forces a JSON object on the wire but not a specific shape; this
+# prompt-embedded schema — together with the pydantic narrowing below — is what
+# pins the response to the expected ``strategy_code`` / ``changes_made`` shape.
 _REFINEMENT_SCHEMA_JSON = json.dumps(REFINEMENT_SCHEMA, indent=2)
 
 # Spliced into the shared JSON-correction re-prompt so a malformed-output retry
@@ -127,7 +131,7 @@ class RefinementAgent:
         tighten-only semantics). Any other top-level keys in the LLM
         response are logged and discarded.
         """
-        system_prompt = (_PROMPT_DIR / "refinement_system.md").read_text(encoding="utf-8")
+        system_prompt = _SYSTEM_PROMPT
 
         metrics_section = ""
         if metrics:
@@ -220,7 +224,7 @@ class RefinementAgent:
         prompt = user_prompt
         for attempt in range(retries + 1):
             agent = Agent(
-                model=get_strands_model("strategy_ideation", response_schema=REFINEMENT_SCHEMA),
+                model=get_strands_model("strategy_ideation"),
                 system_prompt=system_prompt,
                 tools=[],
             )

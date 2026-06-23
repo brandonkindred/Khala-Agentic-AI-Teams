@@ -16,7 +16,7 @@ import inspect
 import logging
 import math
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Optional
 
 from llm_service.config import resolve_base_url, resolve_model, resolve_provider, resolve_timeout
 
@@ -26,22 +26,6 @@ logger = logging.getLogger(__name__)
 # non-positive / non-finite value. Mirrors the platform default so the resolver's
 # "positive, finite float" postcondition holds unconditionally.
 _DEFAULT_TRANSPORT_TIMEOUT = 900.0
-
-
-def structured_output_enabled() -> bool:
-    """Resolve the master toggle for schema-constrained LLM decoding.
-
-    Reads ``STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED`` (default ``true``;
-    accepted truthy values are ``"true"`` / ``"1"`` / ``"yes"``, case-
-    insensitive; anything else disables). When disabled, ``get_strands_model``
-    ignores any ``response_schema`` and the agents fall back to their prior
-    prompt-only JSON behaviour (still validated by pydantic downstream).
-
-    Preconditions: none.
-    Postconditions: returns a ``bool``; never raises.
-    """
-    raw = os.environ.get("STRATEGY_LAB_STRUCTURED_OUTPUT_ENABLED", "true")
-    return raw.strip().lower() in {"true", "1", "yes"}
 
 
 def _resolve_strands_timeout(agent_key: str) -> float:
@@ -128,38 +112,6 @@ def _accepts_kwarg(target: Any, name: str) -> bool:
     )
 
 
-def _construct_ollama_with_timeout(model_cls, timeout: float, **kwargs):
-    """Construct a strands ``OllamaModel``, forwarding ``timeout`` as the
-    transport (httpx) read/connect timeout.
-
-    strands' ``OllamaModel`` passes ``ollama_client_args`` straight to
-    ``ollama.AsyncClient(host, **client_args)``, which forwards them to httpx —
-    where ``timeout`` is the read/connect timeout, the only mechanism that
-    actually cancels a hung HTTP call. A bare ``timeout=`` (or ``client_args=``)
-    kwarg is swallowed by the constructor's ``**model_config``, which only
-    *warns* and then drops it, so it must never be used. The current strands
-    range (>=1.35,<2.0) declares ``ollama_client_args``; ``client_args`` (the
-    client-args name strands' *other* model providers use) is probed only as a
-    defensive fallback should a release within the pinned range unify on it. The
-    timeout is forwarded through whichever the installed signature explicitly
-    declares, degrading to "no transport timeout" (envelope wall-clock guard
-    only) if neither exists.
-
-    Preconditions: ``model_cls`` is the strands ``OllamaModel`` class (or a
-    stand-in); ``timeout > 0``.
-    Postconditions: returns a constructed model. The returned model carries the
-    transport timeout iff ``model_cls`` exposes a client-args channel.
-    """
-    for param in ("ollama_client_args", "client_args"):
-        if _accepts_kwarg(model_cls, param):
-            return model_cls(**kwargs, **{param: {"timeout": timeout}})
-    logger.warning(
-        "Strands OllamaModel exposes no client-args channel for a transport "
-        "timeout; relying on the envelope wall-clock guard only."
-    )
-    return model_cls(**kwargs)
-
-
 def _construct_bedrock_with_timeout(model_cls, timeout: float, **kwargs):
     """Construct a strands ``BedrockModel``, forwarding ``timeout`` as the
     botocore read/connect timeout via ``boto_client_config``.
@@ -196,60 +148,97 @@ def get_strands_model(
     agent_key: str = "strategy_ideation",
     *,
     timeout: Optional[float] = None,
-    response_schema: Optional[Dict[str, Any]] = None,
+    response_format: str = "json",
 ):
     """Return a Strands ``Model`` instance for the given agent key.
 
-    The Strands SDK defaults to BedrockModel when ``model`` is a string.
-    This factory explicitly constructs the correct provider so that Bedrock
-    is only used when ``LLM_PROVIDER=bedrock`` is set.
+    For the default **Ollama** provider this routes through the platform's
+    hardened ``llm_service`` client (via :func:`llm_service.strands_adapter.
+    get_strands_model`) rather than constructing strands' native ``OllamaModel``
+    directly. The llm_service client converts an empty / thinking-only / prose-
+    only model turn into a real signal — it detects it, retries once with a
+    reduced-thinking ("proof-of-change") pass, and raises
+    ``LLMSemanticExhaustionError`` when the payload truly yields no content —
+    instead of returning a "successful" empty string that the strategy-lab
+    parser then rejects with ``"No JSON object found in LLM response"``. The
+    client also resolves the model's ``num_ctx`` from ``/api/show`` (so a large
+    refinement prompt is not silently truncated), caps ``max_tokens``, and adds
+    rate-limit / JSON-repair handling. Telemetry and per-agent model routing
+    (``LLM_MODEL_<agent_key>``) come along for free.
 
-    ``timeout`` (seconds) is the transport-level read timeout forwarded to the
-    underlying client — the only mechanism that actually cancels a hung HTTP
-    call. Defaults to ``STRATEGY_LAB_LLM_TIMEOUT`` / ``resolve_timeout``. The
-    Strategy Lab LLM envelope adds a secondary wall-clock guard on top.
+    ``response_format`` selects the wire mode for the Ollama path: ``"json"``
+    (default) forces a JSON object on the wire and parses it — correct for every
+    agent that recovers its result with ``extract_json_object`` (design, design-
+    review, refinement, zero-trade-repair, alignment, analysis); ``"text"``
+    returns raw content and must be used by agents that consume free-form output
+    (e.g. code synthesis returns a raw Python file). Bedrock ignores it.
 
-    ``response_schema`` is an optional JSON Schema (``dict``) for
-    schema-constrained decoding. When supplied *and* structured output is
-    enabled (:func:`structured_output_enabled`) *and* the provider is Ollama,
-    it is passed to the model via the ``format`` request field so the decoder
-    can only emit conforming JSON. It is a no-op for Bedrock (which keeps
-    prompt-only JSON) and when the toggle is off, so callers can pass a schema
-    unconditionally.
+    The Strands SDK defaults to BedrockModel when ``model`` is a string, so the
+    factory still explicitly constructs ``BedrockModel`` when
+    ``LLM_PROVIDER=bedrock`` (that path is unchanged: the llm_service Ollama
+    hardening is provider-specific, and Bedrock has its own empty-response
+    semantics).
 
-    Preconditions: ``agent_key`` is a non-empty model key; ``response_schema``,
-    if given, is a JSON-serializable schema dict. ``timeout``, if passed
-    explicitly, must be a positive, finite *number* of seconds — a non-numeric
-    value raises ``TypeError`` and a non-positive or non-finite value raises
-    ``ValueError`` (a resolved timeout is guaranteed positive and finite by
-    :func:`_resolve_strands_timeout`).
-    Postconditions: returns a constructed strands model. Adding a schema never
-    changes which provider/model is selected — only whether the Ollama request
-    carries a ``format`` constraint.
+    ``timeout`` (seconds), when passed explicitly, is validated as a boundary
+    contract and forwarded as the transport read timeout on **both** paths: on
+    Bedrock via ``boto_client_config``, and on Ollama by constructing a dedicated
+    (uncached) ``OllamaLLMClient`` with that timeout for the adapter. When it is
+    omitted, the transport timeout is owned by the llm_service client
+    (``resolve_timeout`` / ``LLM_TIMEOUT``) on the Ollama path and by
+    ``_resolve_strands_timeout`` on the Bedrock path. The Strategy Lab LLM
+    envelope's wall-clock guard (``STRATEGY_LAB_LLM_TIMEOUT``) bounds every call
+    on top of whichever transport timeout applies.
+
+    The JSON-shape contract on the Ollama path is enforced by the ``json_object``
+    wire mode plus pydantic validation downstream (and, for the refinement agent,
+    a schema embedded verbatim in its prompt). This replaces the strands-native
+    decoder-level ``format`` constraint that the native ``OllamaModel`` path used.
+
+    Preconditions: ``agent_key`` is a non-empty model key (an empty value raises
+    ``ValueError``); ``response_format`` is ``"json"`` or ``"text"``. ``timeout``,
+    if passed explicitly, must be a positive, finite *number* of seconds — a
+    non-numeric value raises ``TypeError`` and a non-positive or non-finite value
+    raises ``ValueError``. The resolved ``LLM_PROVIDER`` must be a supported
+    Strands provider (``ollama`` or ``bedrock``); any other value raises
+    ``ValueError`` rather than silently falling through to Ollama.
+    Postconditions: returns a constructed strands ``Model``. The chosen provider
+    / model never depends on ``response_format``.
     """
+    # Boundary enforcement of the documented ``agent_key`` precondition: an empty
+    # key is a caller bug that would otherwise surface obscurely downstream (e.g.
+    # ``resolve_model`` silently returning a default). Raise (not ``assert``) so
+    # the guard survives ``python -O``.
+    if not agent_key or not agent_key.strip():
+        raise ValueError("agent_key must be a non-empty string")
+
     provider = resolve_provider()
     model_id = resolve_model(agent_key)
     base_url = resolve_base_url()
-    if timeout is None:
-        timeout = _resolve_strands_timeout(agent_key)
-    # Boundary enforcement of the construction helpers' ``timeout > 0``
-    # precondition: a bad transport timeout is a caller bug (an explicit bad
-    # kwarg), never a value we should forward to httpx/botocore. Check the type
-    # first so a non-numeric kwarg raises a clear ``TypeError`` (rather than an
-    # obscure one from ``math.isfinite``); use explicit raises rather than
-    # ``assert`` so the guards survive ``python -O``.
-    if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
-        raise TypeError(f"timeout must be a number of seconds (got {type(timeout).__name__})")
-    if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(f"timeout must be a positive, finite number of seconds (got {timeout!r})")
 
-    use_schema = response_schema is not None and structured_output_enabled()
+    # Boundary enforcement of the transport's ``timeout > 0`` precondition for
+    # an explicitly-supplied value: a bad transport timeout is a caller bug (an
+    # explicit bad kwarg), never a value we should forward. Check the type first
+    # so a non-numeric kwarg raises a clear ``TypeError`` (rather than an obscure
+    # one from ``math.isfinite``); use explicit raises rather than ``assert`` so
+    # the guards survive ``python -O``. A resolved (None) timeout is guaranteed
+    # valid by :func:`_resolve_strands_timeout`, so it is not re-validated.
+    if timeout is not None:
+        if not isinstance(timeout, (int, float)) or isinstance(timeout, bool):
+            raise TypeError(f"timeout must be a number of seconds (got {type(timeout).__name__})")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError(
+                f"timeout must be a positive, finite number of seconds (got {timeout!r})"
+            )
+
+    if response_format not in ("json", "text"):
+        raise ValueError(f"response_format must be 'json' or 'text', got {response_format!r}")
 
     if provider == "bedrock":
         from strands.models import BedrockModel
 
-        logger.info("Strands model: Bedrock model_id=%s timeout=%.0fs", model_id, timeout)
-        return _construct_bedrock_with_timeout(BedrockModel, timeout, model_id=model_id)
+        resolved_timeout = timeout if timeout is not None else _resolve_strands_timeout(agent_key)
+        logger.info("Strands model: Bedrock model_id=%s timeout=%.0fs", model_id, resolved_timeout)
+        return _construct_bedrock_with_timeout(BedrockModel, resolved_timeout, model_id=model_id)
 
     if provider == "dummy":
         raise ValueError(
@@ -257,40 +246,63 @@ def get_strands_model(
             "Set LLM_PROVIDER=ollama or LLM_PROVIDER=bedrock."
         )
 
-    # Provider is "ollama" (the default).
-    # The ``ollama`` Python package auto-reads OLLAMA_API_KEY for Bearer auth
-    # and OLLAMA_HOST for the host URL, but we also honour LLM_BASE_URL and
-    # LLM_OLLAMA_API_KEY from the existing llm_service config.
-    from strands.models import OllamaModel
+    # Fail fast on a misconfigured provider rather than silently treating any
+    # unknown value (e.g. ``LLM_PROVIDER=openai``) as Ollama. Only the supported
+    # Strands providers reach the routing below.
+    if provider != "ollama":
+        raise ValueError(
+            f"Unsupported LLM_PROVIDER: {provider!r}. Supported values: ollama, bedrock."
+        )
 
-    host = os.environ.get("OLLAMA_HOST") or base_url
+    # Provider is "ollama" (the default). Fail fast on the one misconfiguration
+    # the llm_service client would otherwise only surface at request time: an
+    # Ollama Cloud base URL with no API key. Mirror the client's resolution
+    # exactly — the host is ``resolve_base_url()`` (``LLM_BASE_URL``, default the
+    # ollama.com cloud endpoint) and the key is ``OLLAMA_API_KEY`` /
+    # ``LLM_OLLAMA_API_KEY`` (``OllamaLLMClient._ollama_auth_headers``).
+    # ``OLLAMA_HOST`` is deliberately NOT consulted: the llm_service transport
+    # keys off ``resolve_base_url()`` only, so reading ``OLLAMA_HOST`` here would
+    # diverge from the client and mis-fire the guard (it could block a valid
+    # local config, or pass a keyless cloud config straight to a request-time
+    # failure).
+    host = base_url
     api_key = (
         os.environ.get("OLLAMA_API_KEY") or os.environ.get("LLM_OLLAMA_API_KEY") or ""
     ).strip()
-
     if not api_key and "ollama.com" in host:
         raise ValueError(
             "Ollama Cloud requires an API key. Set OLLAMA_API_KEY (or "
-            "LLM_OLLAMA_API_KEY), or point LLM_BASE_URL / OLLAMA_HOST "
-            "to a local Ollama server (e.g. http://localhost:11434)."
+            "LLM_OLLAMA_API_KEY), or point LLM_BASE_URL to a local Ollama "
+            "server (e.g. http://localhost:11434)."
         )
 
+    # Route through the hardened llm_service path. Imported lazily so the module
+    # carries no import-time dependency on strands beyond the provider branches
+    # above, and so tests can monkeypatch the source attribute.
+    from llm_service.strands_adapter import get_strands_model as _llm_service_strands_model
+
     logger.info(
-        "Strands model: Ollama model_id=%s host=%s cloud=%s timeout=%.0fs schema=%s",
+        "Strategy Lab LLM routed through llm_service: agent_key=%s model=%s host=%s "
+        "cloud=%s response_format=%s explicit_timeout=%s",
+        agent_key,
         model_id,
         host,
         bool(api_key),
-        timeout,
-        use_schema,
+        response_format,
+        timeout if timeout is not None else "-",
     )
-    extra: Dict[str, Any] = {}
-    if use_schema:
-        # strands' OllamaModel merges ``additional_args`` straight into the
-        # ``ollama`` client request, and the client accepts a JSON-Schema dict
-        # for ``format`` (the same field strands' own ``structured_output``
-        # uses). Unknown config keys only warn — they never raise — so this is
-        # safe across the supported strands range.
-        extra["additional_args"] = {"format": response_schema}
-    return _construct_ollama_with_timeout(
-        OllamaModel, timeout, host=host, model_id=model_id, **extra
-    )
+
+    # When the caller pins an explicit transport timeout, honour it: build a
+    # dedicated (uncached) client with that read timeout and hand it to the
+    # adapter. Otherwise the adapter's default client owns the timeout
+    # (``resolve_timeout`` / ``LLM_TIMEOUT``). Building the client only on the
+    # explicit-timeout path keeps the common path on the shared client cache.
+    if timeout is not None:
+        from llm_service.clients import OllamaLLMClient
+
+        explicit_client = OllamaLLMClient(model=model_id, base_url=base_url, timeout=float(timeout))
+        return _llm_service_strands_model(
+            agent_key=agent_key, response_format=response_format, client=explicit_client
+        )
+
+    return _llm_service_strands_model(agent_key=agent_key, response_format=response_format)

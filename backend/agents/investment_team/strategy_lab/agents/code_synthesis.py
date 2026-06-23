@@ -102,7 +102,10 @@ class CodeSynthesisAgent:
         )
 
         agent = Agent(
-            model=get_strands_model("strategy_code_synthesis"),
+            # ``response_format="text"``: code synthesis emits a raw Python file
+            # (recovered via ``_strip_code_fence``), not a JSON object, so it
+            # must not be routed through the llm_service ``json_object`` wire mode.
+            model=get_strands_model("strategy_code_synthesis", response_format="text"),
             system_prompt=_SYSTEM_PROMPT,
             tools=[],
         )
