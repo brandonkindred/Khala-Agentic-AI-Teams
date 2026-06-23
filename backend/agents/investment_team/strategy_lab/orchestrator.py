@@ -33,6 +33,7 @@ from ..execution.walk_forward import (
 )
 from ..market_data_service import MarketDataService, OHLCVBar
 from ..models import (
+    WINNING_THRESHOLD,
     BacktestConfig,
     BacktestRecord,
     BacktestResult,
@@ -246,14 +247,12 @@ MAX_CODE_REFINEMENT_ROUNDS = 50
 # through the sandbox for a fresh backtest. The cap prevents runaway loops
 # when the agent cannot converge.
 MAX_ALIGNMENT_ROUNDS = 10
-# Single-window annualized-return floor consulted only when the walk-forward
-# acceptance gate is unavailable (i.e. ``_evaluate_walk_forward`` raised and
-# we drop into the fallback path). Issue #247 replaced this scalar with the
-# composite ``AcceptanceGate`` (OOS DSR + IS→OOS degradation + OOS trade
-# count + regime beats) on the primary publication path, and #529 removed
-# the legacy ``walk_forward_enabled=False`` branch that previously used this
-# threshold as a publication gate.
-WINNING_THRESHOLD = 8.0
+# ``WINNING_THRESHOLD`` (the S&P-500 amortized benchmark, 8.0%) is imported
+# from ``..models`` and is the single deterministic verdict floor: a valid run
+# is WINNING iff ``annualized_return_pct >= WINNING_THRESHOLD``, on every path.
+# The walk-forward ``AcceptanceGate``, alignment, conformance, and realism
+# gates still run and record their findings (now surfaced as narrative
+# caveats), but they no longer decide the label.
 
 # Cap on `last_order_events` included in the refinement-prompt diagnostics
 # block. The model already trims to 20; 10 is enough signal for the LLM to
@@ -2628,11 +2627,16 @@ class StrategyLabOrchestrator:
         Mutates ``all_gate_results`` in place (acceptance + conformance +
         optional fallback gates appended).
 
-        The three is_winning branches mirror the orchestrator's three
-        publication-decision paths:
-          * Walk-forward succeeded → acceptance_gate verdict
+        The WINNING/LOSING label is resolved deterministically: a valid run
+        (it executed and produced a trade ledger) is winning iff its
+        annualized return meets or beats the S&P-500 benchmark
+        (``annualized_return_pct >= WINNING_THRESHOLD``). The three branches
+        below only run the robustness machinery and record its findings on
+        ``acceptance_reason`` / ``all_gate_results`` as narrative caveats —
+        they no longer decide the label:
+          * Walk-forward succeeded → acceptance_gate findings recorded
           * Walk-forward raised → anomaly recheck with ``dsr_aware=False``
-          * Walk-forward disabled / no trades → ``is_winning=False``
+          * Walk-forward disabled / no trades → publication_disabled reason
         """
         acceptance_results: List[QualityGateResult] = []
         acceptance_reason: Optional[str] = None
@@ -2723,22 +2727,16 @@ class StrategyLabOrchestrator:
         realism_critical = [r for r in realism_results if not r.passed and r.severity == "critical"]
         realism_passed = not realism_critical
 
-        # Resolve is_winning across the three publication-decision paths.
-        # ``upstream_admitted`` records whether the upstream gate (walk-
-        # forward or fallback) said admit. It feeds the veto-augmentation
-        # block below: a success-style ``acceptance_reason`` is REPLACED
-        # by the veto cause; a failure-style reason is PRESERVED with the
-        # veto appended.
+        # Run the robustness/audit bookkeeping across the three
+        # publication-decision paths. ``upstream_admitted`` records whether
+        # the upstream gate (walk-forward or fallback) said admit; it feeds
+        # the veto-augmentation block below (replace a success-style
+        # ``acceptance_reason``, preserve a real rejection). The WINNING/
+        # LOSING label is resolved deterministically from annualized return
+        # after this block — these gates only record caveats now.
         upstream_admitted = False
         if acceptance_results:
             acceptance_passed = all(r.passed for r in acceptance_results)
-            is_winning = (
-                execution_succeeded
-                and acceptance_passed
-                and trades_aligned
-                and exit_rule_conformance_passed
-                and realism_passed
-            )
             upstream_admitted = acceptance_passed
         elif walk_forward_failed and execution_succeeded:
             # Walk-forward fallback: anomaly recheck occurs after refinement
@@ -2759,14 +2757,7 @@ class StrategyLabOrchestrator:
             fallback_criticals = [
                 g for g in fallback_anomalies if not g.passed and g.severity == "critical"
             ]
-            return_ok = metrics.annualized_return_pct > WINNING_THRESHOLD
-            is_winning = (
-                return_ok
-                and not fallback_criticals
-                and trades_aligned
-                and exit_rule_conformance_passed
-                and realism_passed
-            )
+            return_ok = metrics.annualized_return_pct >= WINNING_THRESHOLD
             upstream_admitted = return_ok and not fallback_criticals
             if fallback_criticals:
                 # Surface the upgraded severities so the persisted gate-
@@ -2789,7 +2780,7 @@ class StrategyLabOrchestrator:
                     fallback_reasons.append("; ".join(g.details for g in fallback_criticals))
                 if not return_ok:
                     fallback_reasons.append(
-                        f"annualized_return {metrics.annualized_return_pct:.2f}% <= "
+                        f"annualized_return {metrics.annualized_return_pct:.2f}% < "
                         f"{WINNING_THRESHOLD:g}% threshold"
                     )
                 metrics = metrics.model_copy(
@@ -2800,26 +2791,45 @@ class StrategyLabOrchestrator:
                     }
                 )
         else:
-            is_winning = False
             # Self-document why publication was blocked on each else-branch
-            # entry path. Without this, the persisted record shows
-            # ``is_winning=False`` with an empty ``acceptance_reason``. The
-            # no-trades case is checked first because it's the more
-            # proximate cause when both conditions hold.
-            if execution_succeeded and not trades:
+            # entry path so the persisted record carries a reason rather than
+            # an empty ``acceptance_reason``. The label itself is resolved by
+            # the deterministic rule below (these runs produced no qualifying
+            # return). Ordered most-proximate-cause first: a failed execution
+            # is the root cause and subsumes the (necessarily empty) ledger, so
+            # it is recorded ahead of the no-trades case. A downstream veto
+            # (conformance / realism / alignment / look-ahead) may append its
+            # specific cause to whichever reason is stamped here.
+            if not execution_succeeded:
+                metrics = metrics.model_copy(
+                    update={"acceptance_reason": "publication_disabled: execution_failed"}
+                )
+            elif not trades:
                 metrics = metrics.model_copy(
                     update={"acceptance_reason": "publication_disabled: no trades produced"}
                 )
-            elif execution_succeeded and trades and not config.walk_forward_enabled:
+            elif not config.walk_forward_enabled:
                 metrics = metrics.model_copy(
                     update={"acceptance_reason": "publication_disabled: walk_forward_enabled=False"}
                 )
 
+        # Deterministic verdict. A *valid* run (it executed and produced a
+        # trade ledger) is WINNING iff its annualized return meets or beats
+        # the S&P-500 benchmark. The robustness gate outcomes above are
+        # recorded on ``acceptance_reason`` / ``all_gate_results`` and surface
+        # as narrative caveats, but never change this label. The
+        # ``execution_succeeded and trades`` guard is a validity precondition
+        # (not a robustness judgement): a run that never produced a real
+        # ledger has no genuine return and cannot win.
+        is_winning = bool(
+            execution_succeeded and trades and metrics.annualized_return_pct >= WINNING_THRESHOLD
+        )
+
         # Publication vetoes — surface each veto's cause on
-        # ``acceptance_reason`` so the audit trail explains why publication
-        # was blocked even when the upstream acceptance gate passed.
-        # ``_apply_veto_to_acceptance_reason`` codifies the "replace stale
-        # success, append real rejection" rule.
+        # ``acceptance_reason`` so the audit trail explains why a robustness
+        # gate failed even on a winning run. These stamps are caveats only and
+        # never change ``is_winning``. ``_apply_veto_to_acceptance_reason``
+        # codifies the "replace stale success, append real rejection" rule.
         if execution_succeeded and trades and not exit_rule_conformance_passed:
             conformance_criticals = [
                 r
@@ -2874,23 +2884,23 @@ class StrategyLabOrchestrator:
                 metrics, suffix, upstream_admitted=upstream_admitted
             )
 
-        # Runtime look-ahead veto. The harness traps ``AttributeError`` on
-        # forward-field access and surfaces it as
+        # Runtime look-ahead — record the cause as a caveat. The harness traps
+        # ``AttributeError`` on forward-field access and surfaces it as
         # ``TradingServiceResult.lookahead_violation=True`` → propagated
         # through ``StrategyRunResult.error_type="lookahead_violation"`` →
         # ``_SynthesisLoopOutcome.runtime_lookahead_violation``. By the
         # time the synthesis loop hands control to verification, an
         # unresolved lookahead means refinement exhausted its budget
-        # without producing a clean run; ``execution_succeeded`` is
-        # already False and the else-branch above set ``is_winning=False``.
-        # The veto here makes that decision explicit in the audit trail
-        # so reviewers see the cause instead of the generic
-        # ``publication_disabled`` reason. The sentinel field
-        # ``subprocess_attribute_error`` records that the trip point was
-        # the harness's AttributeError interceptor (the violating
+        # without producing a clean run; ``execution_succeeded`` is already
+        # False, so the deterministic verdict above already resolved
+        # ``is_winning=False`` via the validity precondition (an invalid run
+        # has no qualifying return). This stamp makes the cause explicit in
+        # the audit trail instead of the generic ``publication_disabled``
+        # reason — it is a caveat only and does not change the label. The
+        # sentinel field ``subprocess_attribute_error`` records that the trip
+        # point was the harness's AttributeError interceptor (the violating
         # attribute name is not preserved on TradingServiceResult).
         if runtime_lookahead_violation:
-            is_winning = False
             metrics, upstream_admitted = _apply_veto_to_acceptance_reason(
                 metrics,
                 "lookahead_violation_at_runtime: subprocess_attribute_error",

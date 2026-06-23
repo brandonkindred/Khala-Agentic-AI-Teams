@@ -1,4 +1,4 @@
-Draft a rigorous analysis of this WINNING swing-trading strategy (annualized return above 8% threshold).
+Draft a rigorous analysis of this WINNING swing-trading strategy — its annualized return is at or above the 8% S&P-500 benchmark (>= 8.0%), so it beat simply holding the index. That benchmark comparison IS the verdict; robustness diagnostics are risk context, never grounds to reclassify it.
 
 ## Strategy (definition under test)
 Asset class: {asset_class}
@@ -24,7 +24,8 @@ Volatility: {volatility_pct:.1f}%
 {simulated_trades_section}
 
 {alignment_status_section}
-## Instructions
+{robustness_caveats_section}## Instructions
+This strategy is classified WINNING because its annualized return is at or above the 8% S&P-500 benchmark. State that verdict plainly; do NOT reframe it as a loss, a "questionable" result, or a non-winner on the basis of Sharpe, drawdown, win rate, or robustness. If a "Robustness caveats" section appears above, weave its findings in as honest forward-looking risk caveats a winner must still be watched for (single-asset concentration, regime dependence, weak out-of-sample / deflated Sharpe, overfitting risk) — alongside the verdict, never instead of it.
 Entry rules above are prose intent only — describe whether trade behaviour was consistent with the intent rather than asserting that trades "violated" them. Exit rules ARE engine-enforced for `StopLossRule` and `TakeProfitRule`: the parent engine emits closes on the strategy's behalf, so attribute observed exit timing to those rules where evidence supports it (e.g. losing trades clustered near the stop-loss floor point to it firing). `SignalExitRule` entries in the list above are NOT yet engine-enforced — treat any predicate-based exit prose the same way as entry intent.
 Think step by step: what in the strategy design plausibly produced strong risk-adjusted returns?
 Relate the hypothesis and rules to (1) Sharpe/drawdown/volatility, (2) win rate vs profit factor, (3) patterns in the simulated trades (hold periods, win/loss mix, concentration).

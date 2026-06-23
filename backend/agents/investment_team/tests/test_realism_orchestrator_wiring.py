@@ -7,9 +7,12 @@ Exercises two seams:
   circuit; a multi-target spec with a single-symbol ledger emits the
   ``target_symbol_coverage`` breadth warning.
 * :meth:`_run_verification_phase` — when realism produces a ``critical``
-  result, ``is_winning`` flips to ``False`` and ``acceptance_reason`` gains
-  a ``realism_failed: ...`` suffix following the same veto convention as
-  ``exit_rule_conformance_failed`` and ``alignment_failed``.
+  result, ``acceptance_reason`` gains a ``realism_failed: ...`` suffix
+  following the same caveat convention as ``exit_rule_conformance_failed``
+  and ``alignment_failed``. Under the deterministic verdict this is a caveat
+  only: it is recorded on ``acceptance_reason`` (and surfaces in the
+  narrative) but never flips ``is_winning``, which follows the
+  return-vs-benchmark rule.
 
 Lower-level gate behaviour is covered by
 ``test_backtest_anomaly_realism.py`` and the breadth extensions in
@@ -320,12 +323,13 @@ def test_run_realism_gates_cost_stress_critical_when_2x_sharpe_negative():
 # ---------------------------------------------------------------------------
 
 
-def test_verification_phase_vetoes_is_winning_on_realism_critical(monkeypatch):
-    """A synthetic realism critical must flip ``is_winning`` to False and
-    rewrite ``acceptance_reason`` with the ``realism_failed:`` suffix.
+def test_verification_phase_records_realism_critical_as_caveat(monkeypatch):
+    """A synthetic realism critical must rewrite ``acceptance_reason`` with the
+    ``realism_failed:`` suffix so it surfaces as a narrative caveat — but the
+    deterministic verdict keeps ``is_winning=True`` for this 10% (>= 8%) run.
 
     The acceptance gate is stubbed to pass cleanly so realism is the only
-    veto in play; walk-forward evaluation is a no-op pass-through.
+    finding in play; walk-forward evaluation is a no-op pass-through.
     """
     orch = _orch()
 
@@ -384,13 +388,15 @@ def test_verification_phase_vetoes_is_winning_on_realism_critical(monkeypatch):
         emit=lambda *_a, **_k: None,
     )
 
-    assert outcome.is_winning is False
+    # Caveats-only: the 10% return is at/above the 8% benchmark, so the
+    # deterministic verdict is winning; realism does not flip the label.
+    assert outcome.is_winning is True
     reason = outcome.metrics.acceptance_reason or ""
     assert "realism_failed:" in reason
     assert "liquidity_realism" not in reason  # detail string, not gate name
     assert "profit factor" in reason
     # The stale ``walk_forward_passed`` success summary must be REPLACED by
-    # the veto cause (matches the conformance + alignment veto convention).
+    # the caveat cause (matches the conformance + alignment caveat convention).
     assert "all four criteria met" not in reason
 
 
