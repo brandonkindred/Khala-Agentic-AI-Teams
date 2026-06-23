@@ -347,21 +347,38 @@ class PandasHistoryView:
     def __init__(self, df: pd.DataFrame, indicator_cache: Dict[str, pd.Series]) -> None:
         self._df = df
         self._cache = indicator_cache
+        # Private per-view ``ndarray`` views for O(1) scalar reads on the
+        # predicate hot path. pandas ``.iloc[i]`` scalar indexing carries heavy
+        # per-call overhead (label resolution, scalar boxing); indexing a cached
+        # numpy array does not, and the values are bit-identical. The shared
+        # ``indicator_cache`` (``Dict[str, pd.Series]``) contract is unchanged —
+        # these arrays are derived from it lazily and never replace it.
+        self._col_arrays: Dict[str, Any] = {}
+        self._series_arrays: Dict[str, Any] = {}
 
     def length(self) -> int:
         return len(self._df)
 
     def bar_field(self, field_name: str, i: int) -> float:
-        return float(self._df[field_name].iloc[i])
+        arr = self._col_arrays.get(field_name)
+        if arr is None:
+            arr = self._df[field_name].to_numpy()
+            self._col_arrays[field_name] = arr
+        return float(arr[i])
 
     def indicator(self, ref: IndicatorRef, i: int) -> Optional[float]:
         key = ref.sig_id
-        if key not in self._cache:
-            self._cache[key] = compute_indicator_series(ref, self._df)
-        series = self._cache[key]
-        if i >= len(series):
+        arr = self._series_arrays.get(key)
+        if arr is None:
+            series = self._cache.get(key)
+            if series is None:
+                series = compute_indicator_series(ref, self._df)
+                self._cache[key] = series
+            arr = series.to_numpy()
+            self._series_arrays[key] = arr
+        if i >= len(arr):
             return None
-        value = series.iloc[i]
+        value = arr[i]
         if value is None or (isinstance(value, float) and math.isnan(value)):
             return None
         return float(value)
