@@ -61,9 +61,9 @@ class CodeReviewAgent:
               A chunk unreviewable after recovery is named by a blocking ``high``
               "not reviewed" finding, so the merged review is rejected and
               unreviewed code never passes the gate as approved.
-            - Findings the verifier confirms are false positives (judged against
-              the full codebase) are absent from the result; the not-reviewed
-              coverage findings are never removed this way.
+            - Findings that the verifier confirms are false positives (judged
+              against the full codebase) are absent from the result; the
+              not-reviewed coverage findings are never removed this way.
             - When ``progress_callback`` is provided, it is invoked with
               non-decreasing fractions ending at 1.0 (step ``done``) on every
               successful return; the review result is identical whether or not

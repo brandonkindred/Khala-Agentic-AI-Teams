@@ -239,6 +239,10 @@ def test_coerce_verdict_variants() -> None:
     # false but no confidence → keep
     _, v = _coerce_verdict({"index": 0, "is_real_issue": False})
     assert v.is_false_positive is False
+    # explicit JSON null confidence → keep (the `or ""` guard maps None to "",
+    # never the string "none", so a null-confidence verdict can't drop a finding)
+    _, v = _coerce_verdict({"index": 0, "is_real_issue": False, "confidence": None})
+    assert v.is_false_positive is False
     # missing is_real_issue key → kept (a valid verdict, not None: index parsed, but
     # without an explicit "not a real issue" the finding is never dropped)
     _, v = _coerce_verdict({"index": 0, "confidence": "high"})
