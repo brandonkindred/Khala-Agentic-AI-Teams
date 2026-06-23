@@ -443,7 +443,7 @@ def _resolve_model(llm: LLMClient):
 
 
 def _verify_group(
-    model,
+    model: _StrandsModel,
     index: CodebaseIndex,
     file_path: str,
     issues: List[CodeReviewIssue],
@@ -522,7 +522,7 @@ def filter_false_positives(
     # submission (or is ambiguous) is kept without a verification call: the
     # verifier would have no primary file to read, so the call would inline an
     # error string, waste an LLM round, and still keep the finding (fail-safe).
-    groups: "OrderedDict[str, List[CodeReviewIssue]]" = OrderedDict()
+    groups: OrderedDict[str, List[CodeReviewIssue]] = OrderedDict()
     for issue in verifiable:
         resolved = index.resolve_path(issue.file_path)
         if resolved is None:
