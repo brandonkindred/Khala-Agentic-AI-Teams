@@ -3,8 +3,8 @@
   flex-direction: column;
   height: 100%;
   overflow-y: auto;
-  background: #161b22;
-  border-left: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border-left: 1px solid var(--kh-border);
 }
 
 .editor-header {
@@ -13,7 +13,7 @@
   padding: 16px 16px 8px;
   position: sticky;
   top: 0;
-  background: #161b22;
+  background: var(--kh-surface-2);
   z-index: 1;
 
   h3 {
@@ -22,10 +22,10 @@
     gap: 8px;
     margin: 0;
     font-size: 1rem;
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
 
     mat-icon {
-      color: #58a6ff;
+      color: var(--kh-info);
     }
   }
 
@@ -44,7 +44,7 @@
     margin: 0 0 10px;
     font-size: 0.8125rem;
     font-weight: 600;
-    color: #c9d1d9;
+    color: var(--kh-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.04em;
 
@@ -52,14 +52,14 @@
       font-size: 16px;
       width: 16px;
       height: 16px;
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
     }
   }
 }
 
 .count-badge {
-  background: rgba(88, 166, 255, 0.15);
-  color: #58a6ff;
+  background: var(--kh-info-subtle);
+  color: var(--kh-info);
   font-size: 0.6875rem;
   padding: 1px 7px;
   border-radius: 10px;
@@ -77,7 +77,7 @@
 }
 
 .empty-text {
-  color: #484f58;
+  color: var(--kh-text-muted);
   font-size: 0.8125rem;
   font-style: italic;
   margin: 0;
@@ -85,7 +85,7 @@
 }
 
 .loading-text {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.8125rem;
   margin: 8px 0 0;
 }
@@ -102,15 +102,15 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  background: #0d1117;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border-subtle);
   border-radius: 8px;
 
   .agent-icon {
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #d2a8ff;
+    color: var(--kh-accent-text);
   }
 
   .agent-info {
@@ -119,7 +119,7 @@
 
     .agent-name {
       display: block;
-      color: #f0f6fc;
+      color: var(--kh-text-primary);
       font-size: 0.8125rem;
       font-weight: 500;
       white-space: nowrap;
@@ -129,7 +129,7 @@
 
     .agent-role {
       display: block;
-      color: #8b949e;
+      color: var(--kh-text-tertiary);
       font-size: 0.6875rem;
       white-space: nowrap;
       overflow: hidden;
@@ -138,7 +138,7 @@
   }
 
   .remove-btn {
-    color: #484f58;
+    color: var(--kh-text-muted);
     width: 28px;
     height: 28px;
     line-height: 28px;
@@ -150,7 +150,7 @@
     }
 
     &:hover {
-      color: #f85149;
+      color: var(--kh-error);
     }
   }
 }
@@ -171,22 +171,22 @@
 
 .result-card {
   padding: 10px 12px;
-  background: #0d1117;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border-subtle);
   border-radius: 8px;
   transition: border-color 0.2s;
 
   &:hover {
-    border-color: rgba(255, 255, 255, 0.14);
+    border-color: var(--kh-border);
   }
 
   &.already-assigned {
     opacity: 0.6;
-    border-color: rgba(63, 185, 80, 0.2);
+    border-color: var(--kh-success-subtle);
   }
 
   &.recommendation {
-    border-left: 3px solid #d2a8ff;
+    border-left: 3px solid var(--kh-accent-text);
   }
 }
 
@@ -200,12 +200,12 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #58a6ff;
+    color: var(--kh-info);
   }
 
   .result-name {
     flex: 1;
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
     font-size: 0.8125rem;
     font-weight: 500;
     white-space: nowrap;
@@ -219,8 +219,8 @@
   line-height: 24px !important;
   padding: 0 10px !important;
   min-width: 0 !important;
-  border-color: rgba(88, 166, 255, 0.4) !important;
-  color: #58a6ff !important;
+  border-color: var(--kh-info) !important;
+  color: var(--kh-info) !important;
 
   mat-icon {
     font-size: 14px;
@@ -230,14 +230,14 @@
   }
 
   &:hover {
-    background: rgba(88, 166, 255, 0.1) !important;
+    background: var(--kh-info-subtle) !important;
   }
 }
 
 .assigned-chip {
   font-size: 0.6875rem !important;
-  --mdc-chip-label-text-color: #3fb950;
-  --mdc-chip-elevated-container-color: rgba(63, 185, 80, 0.1);
+  --mdc-chip-label-text-color: var(--kh-success);
+  --mdc-chip-elevated-container-color: var(--kh-success-subtle);
 }
 
 .source-badge {
@@ -248,18 +248,18 @@
   text-transform: uppercase;
 
   &.registry {
-    background: rgba(88, 166, 255, 0.1);
-    color: #58a6ff;
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
   }
 
   &.roster {
-    background: rgba(210, 168, 255, 0.1);
-    color: #d2a8ff;
+    background: var(--kh-accent-muted);
+    color: var(--kh-accent-text);
   }
 }
 
 .rec-role {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.75rem;
   margin: 0 0 6px;
   line-height: 1.4;
@@ -280,15 +280,15 @@
   font-weight: 500;
 
   &.skill {
-    background: rgba(88, 166, 255, 0.1);
-    color: #58a6ff;
-    border: 1px solid rgba(88, 166, 255, 0.2);
+    background: var(--kh-info-subtle);
+    color: var(--kh-info);
+    border: 1px solid var(--kh-info-subtle);
   }
 
   &.tool {
-    background: rgba(210, 153, 34, 0.1);
-    color: #d29922;
-    border: 1px solid rgba(210, 153, 34, 0.2);
+    background: var(--kh-warning-subtle);
+    color: var(--kh-warning);
+    border: 1px solid var(--kh-warning-subtle);
   }
 }
 
@@ -297,14 +297,14 @@
   align-items: center;
   gap: 4px;
   margin-top: 6px;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   font-size: 0.6875rem;
 
   mat-icon {
     font-size: 14px;
     width: 14px;
     height: 14px;
-    color: #3fb950;
+    color: var(--kh-success);
   }
 }
 
@@ -320,31 +320,31 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  background: #0d1117;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  background: var(--kh-surface-1);
+  border: 1px solid var(--kh-border-subtle);
   border-radius: 6px;
   cursor: pointer;
   transition: border-color 0.2s;
-  color: #c9d1d9;
+  color: var(--kh-text-secondary);
   font-size: 0.8125rem;
 
   mat-icon {
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: #484f58;
+    color: var(--kh-text-muted);
   }
 
   &:hover {
-    border-color: rgba(255, 255, 255, 0.14);
+    border-color: var(--kh-border);
   }
 
   &.selected {
-    border-color: rgba(88, 166, 255, 0.3);
-    background: rgba(88, 166, 255, 0.05);
+    border-color: var(--kh-info-subtle);
+    background: var(--kh-info-subtle);
 
     mat-icon {
-      color: #58a6ff;
+      color: var(--kh-info);
     }
   }
 }
@@ -355,8 +355,8 @@
   display: flex;
   justify-content: flex-end;
   gap: 8px;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  border-top: 1px solid var(--kh-border-subtle);
   position: sticky;
   bottom: 0;
-  background: #161b22;
+  background: var(--kh-surface-2);
 }

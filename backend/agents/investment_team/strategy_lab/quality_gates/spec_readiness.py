@@ -395,11 +395,20 @@ def _identical_ref_verdict(pred: Predicate) -> Optional[tuple[str, str]]:
         return None
     ref = lhs_id.split(":", 1)[1]
     if pred.op in ("<", ">"):
-        return "false", f"both sides reference {ref} with op {pred.op!r} (a value is never strictly {'below' if pred.op == '<' else 'above'} itself)"
+        return (
+            "false",
+            f"both sides reference {ref} with op {pred.op!r} (a value is never strictly {'below' if pred.op == '<' else 'above'} itself)",
+        )
     if pred.op in ("<=", ">=", "=="):
-        return "true", f"both sides reference {ref} with op {pred.op!r} (a value always equals itself)"
+        return (
+            "true",
+            f"both sides reference {ref} with op {pred.op!r} (a value always equals itself)",
+        )
     if pred.op in ("cross_above", "cross_below"):
-        return "false", f"both sides reference {ref} with op {pred.op!r} (identical series move together and never cross)"
+        return (
+            "false",
+            f"both sides reference {ref} with op {pred.op!r} (identical series move together and never cross)",
+        )
     return None
 
 

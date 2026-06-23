@@ -1,6 +1,6 @@
 .chat-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-header {
     mat-card-title {
@@ -10,7 +10,7 @@
       font-size: 1.125rem;
 
       mat-icon {
-        color: #58a6ff;
+        color: var(--kh-info);
       }
     }
   }
@@ -20,7 +20,7 @@
   height: 400px;
   overflow-y: auto;
   padding: 1rem;
-  background: #0d1117;
+  background: var(--kh-surface-1);
   border-radius: 8px;
   margin-bottom: 1rem;
   display: flex;
@@ -53,8 +53,8 @@
 
   &.user {
     align-self: flex-end;
-    background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%);
-    color: #fff;
+    background: var(--kh-accent-gradient);
+    color: var(--kh-text-on-accent);
     border-bottom-right-radius: 4px;
 
     .message-time {
@@ -64,9 +64,9 @@
 
   &.assistant {
     align-self: flex-start;
-    background: #21262d;
-    color: #f0f6fc;
-    border: 1px solid rgba(255, 255, 255, 0.08);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-primary);
+    border: 1px solid var(--kh-border-subtle);
     border-bottom-left-radius: 4px;
   }
 }
@@ -78,7 +78,7 @@
 
 .message-time {
   font-size: 0.75rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   margin-top: 6px;
 }
 
@@ -90,7 +90,7 @@
   span {
     width: 8px;
     height: 8px;
-    background: #8b949e;
+    background: var(--kh-text-tertiary);
     border-radius: 50%;
     animation: bounce 1.4s infinite ease-in-out;
 
@@ -139,13 +139,13 @@
 
   button {
     font-size: 0.8125rem;
-    border-color: rgba(255, 255, 255, 0.15);
-    color: #c9d1d9;
+    border-color: var(--kh-border);
+    color: var(--kh-text-secondary);
 
     &:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: #58a6ff;
-      color: #58a6ff;
+      background: var(--kh-glass);
+      border-color: var(--kh-accent);
+      color: var(--kh-accent);
     }
   }
 }

@@ -114,9 +114,7 @@ class AcceptanceGate(GateResultsMixin):
                 if total
                 else "No regime subwindows evaluated"
             )
-            results.append(
-                (self._info if passed_regime else self._critical)(regime_detail)
-            )
+            results.append((self._info if passed_regime else self._critical)(regime_detail))
 
             return results
 

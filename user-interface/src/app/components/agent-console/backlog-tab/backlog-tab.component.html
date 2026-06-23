@@ -94,26 +94,26 @@
                 </header>
                 <ul class="epic__stories">
                   @for (s of e.stories; track s.id) {
-                    <li
-                      class="story"
-                      tabindex="0"
-                      role="button"
-                      (click)="openStoryDrawer(s)"
-                      (keydown.enter)="openStoryDrawer(s)"
-                    >
-                      <span class="story__title">{{ s.title }}</span>
-                      <mat-chip-set>
-                        <mat-chip class="is-status">{{ s.status }}</mat-chip>
-                        @if (s.wsjf_score !== null) {
-                          <mat-chip class="is-score-wsjf">WSJF {{ s.wsjf_score }}</mat-chip>
-                        }
-                        @if (s.rice_score !== null) {
-                          <mat-chip class="is-score-rice">RICE {{ s.rice_score }}</mat-chip>
-                        }
-                        @if (s.estimate_points !== null) {
-                          <mat-chip class="is-estimate">{{ s.estimate_points }} pts</mat-chip>
-                        }
-                      </mat-chip-set>
+                    <li class="story">
+                      <button
+                        type="button"
+                        class="story__btn"
+                        (click)="openStoryDrawer(s)"
+                      >
+                        <span class="story__title">{{ s.title }}</span>
+                        <mat-chip-set>
+                          <mat-chip class="is-status">{{ s.status }}</mat-chip>
+                          @if (s.wsjf_score !== null) {
+                            <mat-chip class="is-score-wsjf">WSJF {{ s.wsjf_score }}</mat-chip>
+                          }
+                          @if (s.rice_score !== null) {
+                            <mat-chip class="is-score-rice">RICE {{ s.rice_score }}</mat-chip>
+                          }
+                          @if (s.estimate_points !== null) {
+                            <mat-chip class="is-estimate">{{ s.estimate_points }} pts</mat-chip>
+                          }
+                        </mat-chip-set>
+                      </button>
                     </li>
                   }
                 </ul>

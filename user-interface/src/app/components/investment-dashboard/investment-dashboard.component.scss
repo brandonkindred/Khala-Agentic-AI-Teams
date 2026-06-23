@@ -6,13 +6,13 @@
 .page-subtitle {
   margin-top: 0.25rem;
   margin-bottom: 0.35rem;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+  color: var(--kh-text-secondary);
 }
 
 .sub-teams {
   margin: 0 0 0.5rem;
   font-size: 0.875rem;
-  color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.7));
+  color: var(--kh-text-secondary);
 
   .sub-teams-label {
     margin-right: 0.35rem;
@@ -20,7 +20,7 @@
   }
 
   a {
-    color: var(--mat-sys-primary, #1976d2);
+    color: var(--kh-info);
     text-decoration: none;
 
     &:hover {
@@ -35,7 +35,7 @@
 
   .sep {
     margin: 0 0.35rem;
-    color: var(--mat-sys-outline, rgba(0, 0, 0, 0.38));
+    color: var(--kh-text-muted);
   }
 }
 
@@ -70,8 +70,8 @@
   font-size: 0.875rem;
 
   &.checking {
-    background: var(--mat-sys-surface-variant, rgba(0, 0, 0, 0.06));
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+    background: var(--kh-surface-3);
+    color: var(--kh-text-secondary);
 
     mat-icon {
       animation: pulse 1.5s infinite;
@@ -79,20 +79,20 @@
   }
 
   &.healthy {
-    background: #e8f5e9;
-    color: #2e7d32;
+    background: var(--kh-success-subtle);
+    color: var(--kh-success);
 
     mat-icon {
-      color: #43a047;
+      color: var(--kh-success);
     }
   }
 
   &.unhealthy {
-    background: var(--mat-sys-error-container, #ffebee);
-    color: var(--mat-sys-on-error-container, #c62828);
+    background: var(--kh-error-subtle);
+    color: var(--kh-error);
 
     mat-icon {
-      color: var(--mat-sys-error, #f44336);
+      color: var(--kh-error);
     }
   }
 }
@@ -107,8 +107,8 @@
   justify-content: space-between;
   align-items: center;
   padding: 12px 16px;
-  background: var(--mat-sys-surface-container, rgba(0, 0, 0, 0.02));
-  border: 1px solid var(--mat-sys-outline-variant, rgba(0, 0, 0, 0.12));
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border);
   border-radius: 8px;
   margin-bottom: 1rem;
   flex-wrap: wrap;
@@ -122,7 +122,7 @@
   flex-wrap: wrap;
 
   mat-icon {
-    color: var(--mat-sys-primary, #1976d2);
+    color: var(--kh-info);
     font-size: 28px;
     width: 28px;
     height: 28px;
@@ -136,7 +136,7 @@
       font-size: 0.7rem;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.54));
+      color: var(--kh-text-tertiary);
     }
 
     .profile-id {
@@ -162,7 +162,7 @@
       font-size: 40px;
       width: 40px;
       height: 40px;
-      color: #43a047;
+      color: var(--kh-success);
     }
   }
 }
@@ -183,7 +183,7 @@
     font-size: 0.75rem;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.54));
+    color: var(--kh-text-tertiary);
   }
 
   .value {
@@ -201,7 +201,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.05em;
-    color: var(--mat-sys-on-surface-variant, rgba(0, 0, 0, 0.6));
+    color: var(--kh-text-secondary);
   }
 
   .preference-chips {

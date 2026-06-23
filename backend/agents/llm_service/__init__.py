@@ -45,7 +45,11 @@ from .strands_provider import _clear_strands_model_cache_for_testing, get_strand
 from .structured import complete_validated
 from .telemetry import get_recent_calls, get_usage_summary, record_llm_call
 from .tool_loop import complete_json_with_tool_loop
-from .util import call_llm_with_retries, extract_json_from_response
+from .util import (
+    call_llm_with_retries,
+    call_llm_with_retries_async,
+    extract_json_from_response,
+)
 
 # ``strands_adapter`` depends on the optional ``strands-agents`` package. Many
 # teams in this monorepo ship with a narrower requirements file that does NOT
@@ -90,6 +94,7 @@ __all__ = [
     "complete_json_with_tool_loop",
     "complete_validated",
     "call_llm_with_retries",
+    "call_llm_with_retries_async",
     "compact_text",
     "extract_json_from_response",
     "generate_structured",

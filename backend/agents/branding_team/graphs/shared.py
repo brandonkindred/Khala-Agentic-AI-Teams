@@ -7,18 +7,37 @@ Provides:
 
 from __future__ import annotations
 
-from typing import Any, Literal, Optional
+from functools import lru_cache
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from strands import Agent
 
 from branding_team.models import BrandPhase
 from llm_service import get_strands_model
 
+if TYPE_CHECKING:
+    from llm_service import LLMClientModel
+
 # ---------------------------------------------------------------------------
 # Agent factory
 # ---------------------------------------------------------------------------
 
 OutputMode = Literal["json", "text"]
+
+
+# Every branding agent resolves the *same* model (agent_key="branding"),
+# differing only by response format. Building the graph instantiates ~40
+# agents per run; without memoisation each one constructs a fresh
+# LLMClientModel. The model is a stateless wrapper over the cached LLM
+# client, so one instance per response format is safe to share across all
+# agents and all runs. The Agents themselves are NOT cached — they carry
+# per-invocation conversation state and must stay distinct per graph build.
+#
+# ``maxsize`` bounds the cache: ``OutputMode`` is a fixed two-value set
+# ("json"/"text"), so this never holds more than a couple of entries.
+@lru_cache(maxsize=4)
+def _branding_model(output_mode: OutputMode) -> "LLMClientModel":
+    return get_strands_model("branding", response_format=output_mode)
 
 
 def build_agent(
@@ -68,7 +87,7 @@ def build_agent(
     kwargs: dict[str, Any] = {
         "name": name,
         "system_prompt": system_prompt,
-        "model": get_strands_model("branding", response_format=output_mode),
+        "model": _branding_model(output_mode),
         "callback_handler": None,
     }
     if structured_output is not None:
