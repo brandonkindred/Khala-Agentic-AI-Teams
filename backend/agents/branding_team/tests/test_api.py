@@ -479,3 +479,44 @@ def test_attach_conversation_unknown_conversation_404() -> None:
     )
     resp = client.post("/conversations/unknown-conv-id/brand", json={"brand_id": brand.id})
     assert resp.status_code == 404
+
+
+def test_list_clients_pagination_query_params() -> None:
+    """GET /clients honors limit/offset and returns non-overlapping pages."""
+    created = {client.post("/clients", json={"name": f"Page Client {i}"}).json()["id"] for i in range(4)}
+    first = client.get("/clients", params={"limit": 2, "offset": 0})
+    second = client.get("/clients", params={"limit": 2, "offset": 2})
+    assert first.status_code == 200 and second.status_code == 200
+    first_ids = {c["id"] for c in first.json()}
+    second_ids = {c["id"] for c in second.json()}
+    assert len(first.json()) == 2
+    assert first_ids.isdisjoint(second_ids)
+    # The full (unpaginated) listing still includes everything we created.
+    all_ids = {c["id"] for c in client.get("/clients").json()}
+    assert created <= all_ids
+
+
+def test_list_clients_rejects_invalid_pagination() -> None:
+    """Out-of-range limit/offset are a 422 (FastAPI validation), never a 500."""
+    assert client.get("/clients", params={"limit": 0}).status_code == 422
+    assert client.get("/clients", params={"limit": -1}).status_code == 422
+    assert client.get("/clients", params={"offset": -1}).status_code == 422
+
+
+def test_list_brands_pagination_query_params() -> None:
+    """GET /clients/{id}/brands honors limit/offset and validates them."""
+    client_id = client.post("/clients", json={"name": "Brand Page Client"}).json()["id"]
+    for i in range(3):
+        resp = client.post(
+            f"/clients/{client_id}/brands",
+            json={
+                "company_name": f"PageBrand {i}",
+                "company_description": "Company for brand pagination test",
+                "target_audience": "testers",
+            },
+        )
+        assert resp.status_code == 201
+    page = client.get(f"/clients/{client_id}/brands", params={"limit": 1, "offset": 1})
+    assert page.status_code == 200
+    assert len(page.json()) == 1
+    assert client.get(f"/clients/{client_id}/brands", params={"limit": 0}).status_code == 422

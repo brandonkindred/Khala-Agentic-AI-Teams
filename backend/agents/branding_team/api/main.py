@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import Body, FastAPI, HTTPException
+from fastapi import Body, FastAPI, HTTPException, Query
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 from pydantic import BaseModel, Field
@@ -355,6 +355,11 @@ def _run_orchestrator_if_ready(
     """
     if not _mission_has_minimal_required_fields(mission):
         return None
+    # NOTE: the short-circuit relies on BrandingMission being treated as
+    # immutable — missions are replaced (model_copy/new instance), never mutated
+    # in place. If that ever changes, this structural equality could match a
+    # mutated-but-same-identity mission and serve stale output; compare a version
+    # or content hash instead.
     if previous_output is not None and previous_mission == mission:
         return previous_output
     return orchestrator.run(
@@ -445,8 +450,17 @@ def create_client(payload: CreateClientRequest) -> Client:
 
 
 @app.get("/clients", response_model=List[Client])
-def list_clients() -> List[Client]:
-    return branding_store.list_clients()
+def list_clients(
+    limit: Optional[int] = Query(None, gt=0),
+    offset: int = Query(0, ge=0),
+) -> List[Client]:
+    """List clients, optionally paginated.
+
+    ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``), so
+    out-of-range input yields a 422 rather than reaching the store's
+    ``_validate_pagination`` guard and surfacing as a 500.
+    """
+    return branding_store.list_clients(limit=limit, offset=offset)
 
 
 @app.get("/clients/{client_id}", response_model=Client)
@@ -463,10 +477,19 @@ def get_client(client_id: str) -> Client:
 
 
 @app.get("/clients/{client_id}/brands", response_model=List[Brand])
-def list_brands(client_id: str) -> List[Brand]:
+def list_brands(
+    client_id: str,
+    limit: Optional[int] = Query(None, gt=0),
+    offset: int = Query(0, ge=0),
+) -> List[Brand]:
+    """List a client's brands, optionally paginated (404 if the client is unknown).
+
+    ``limit``/``offset`` are validated by FastAPI (``gt=0`` / ``ge=0``) so bad
+    input is a 422, not a 500 from the store's pagination guard.
+    """
     if not branding_store.get_client(client_id):
         raise HTTPException(status_code=404, detail="Client not found")
-    return branding_store.list_brands_for_client(client_id)
+    return branding_store.list_brands_for_client(client_id, limit=limit, offset=offset)
 
 
 @app.post("/clients/{client_id}/brands", response_model=Brand, status_code=201)
