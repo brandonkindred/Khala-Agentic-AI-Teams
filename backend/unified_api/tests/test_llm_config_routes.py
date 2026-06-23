@@ -216,6 +216,41 @@ def test_put_writes_all_keys_in_one_transaction(app_client, monkeypatch):
     }
 
 
+def test_put_rejects_malformed_ollama_base_url(app_client):
+    # A non-empty ollama_base_url must be a well-formed http(s) URL, else it would
+    # be persisted and break every Ollama request until manually corrected.
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config", json={"provider": "ollama", "ollama_base_url": "not-a-url"}
+    )
+    assert resp.status_code == 422  # field validator rejects it before persistence
+    assert calls["set"] == []  # nothing persisted
+
+
+def test_put_accepts_valid_ollama_base_url(app_client):
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "ollama_base_url": "http://localhost:11434"},
+    )
+    assert resp.status_code == 200
+    stored = {k: v for _s, k, v in calls["set"]}
+    assert stored[route.runtime_config.KEY_OLLAMA_BASE_URL] == "http://localhost:11434"
+
+
+def test_put_storage_error_returns_503(app_client, monkeypatch):
+    # A failure persisting the config surfaces as a clear 503, not an opaque 500.
+    client, _calls, _mp = app_client
+
+    def _boom(_svc, _values):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(route, "set_secrets", _boom)
+    resp = client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.2"})
+    assert resp.status_code == 503
+    assert "storage error" in resp.json()["detail"]
+
+
 def test_put_persists_ollama_base_url_and_api_key(app_client):
     # Non-empty ollama base URL + cloud key are batched into the same atomic write.
     client, calls, _mp = app_client

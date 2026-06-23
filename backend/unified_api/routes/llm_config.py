@@ -18,9 +18,10 @@ from __future__ import annotations
 
 import logging
 from typing import Literal
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
@@ -58,6 +59,24 @@ class LlmConfigUpdate(BaseModel):
     claude_api_key: str = Field("", description="Anthropic API key (never returned by GET).")
     ollama_api_key: str = Field("", description="Ollama Cloud API key (never returned by GET).")
 
+    @field_validator("ollama_base_url")
+    @classmethod
+    def _validate_ollama_base_url(cls, v: str) -> str:
+        """Reject a malformed Ollama base URL before it is persisted.
+
+        Preconditions: none.
+        Postconditions: an empty value passes (means "unchanged"); a non-empty value
+            must be a well-formed http/https URL (scheme + host), else ValueError —
+            a bad URL would otherwise be stored and break every Ollama request until
+            an operator manually corrected it.
+        """
+        if not v or not v.strip():
+            return v
+        parsed = urlparse(v.strip())
+        if parsed.scheme not in ("http", "https") or not parsed.netloc:
+            raise ValueError("ollama_base_url must be an http(s) URL, e.g. http://localhost:11434")
+        return v
+
 
 class LlmConfigResponse(BaseModel):
     """Response for ``GET``/``PUT /api/llm-config`` — never includes API keys."""
@@ -91,6 +110,9 @@ def _build_response() -> LlmConfigResponse:
     return LlmConfigResponse(
         provider=llm_config.resolve_provider(),
         model=llm_config.resolve_model_for_provider(None),
+        # resolve_model is the Ollama-specific resolver (the Claude counterpart is
+        # resolve_claude_model); it returns the Ollama model regardless of which
+        # provider is currently active, so the UI can restore it on a switch.
         ollama_model=llm_config.resolve_model(None),
         claude_model=llm_config.resolve_claude_model(None),
         ollama_base_url=llm_config.resolve_base_url(),
@@ -117,6 +139,10 @@ async def get_llm_config() -> LlmConfigResponse:
         ``resolve_*`` chokepoint — clearing the cache forces a fresh read without
         bypassing the env-fallback/heuristic logic a direct uncached read would skip.
     """
+    # The runtime-config cache holds only the ``llm_config`` service keys (ALL_KEYS),
+    # so clearing it here forces a fresh read for the settings view without touching
+    # any other subsystem's cache — this endpoint is low-traffic, so the extra read
+    # is negligible.
     runtime_config.clear_cache()
     return _build_response()
 
@@ -180,7 +206,14 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
         updates[runtime_config.KEY_CLAUDE_API_KEY] = body.claude_api_key.strip()
     if body.ollama_api_key.strip():
         updates[runtime_config.KEY_OLLAMA_API_KEY] = body.ollama_api_key.strip()
-    set_secrets(runtime_config.SERVICE, updates)
+    try:
+        set_secrets(runtime_config.SERVICE, updates)
+    except Exception as e:  # noqa: BLE001 - surface a clear 503 instead of an opaque 500
+        logger.exception("Failed to persist LLM provider config")
+        raise HTTPException(
+            status_code=503,
+            detail="Failed to persist configuration: storage error. Please try again later.",
+        ) from e
 
     # Refresh local caches immediately; other containers pick up the change within
     # the runtime-config TTL.
