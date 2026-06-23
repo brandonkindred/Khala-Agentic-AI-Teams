@@ -246,7 +246,7 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 ┌────────────────────────────────────────────────────────────────────────────────┐
 │  ① Build ─── ② Test ─── ③ Compose ─── ④ Personas        team: Growth Pod        │
 ├────────────────────────────────────────────────────────────────────────────────┤
-│  [ Manual testing ]   [ Persona-driven ◀ ]                                       │
+│  [ Manual testing ]   [ Persona-driven ◀ ]      [ ◂ iterate roster ] [ ◂ fix agent ]│
 │                                                                                  │
 │  Persona            ┌─ persona library ───────────────┐   [ + New persona ]      │
 │  ┌────────────────┐ │ ◎ Startup Founder   (built-in)  │                          │
@@ -269,6 +269,14 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
   animated **"persona is thinking…"** indicator. When the process DAG length is known, a **step progress bar**
   (`step 2 of 4`) renders alongside the transcript; otherwise it falls back to the indeterminate "thinking…" state.
 - **Back‑loops:** "iterate roster" → Stage 3; "fix an agent" → Stage 2.
+
+**Returning to Stage 4 after a back‑loop.** A back‑loop simply places the user in the earlier stage; because the
+stepper is forward‑only, the user comes back via the **normal forward actions** — "Add to team →" (Stage 2 → 3) and
+"Test this team →" (Stage 3 → 4) — not by clicking a stage indicator. This re‑advance is **seamless** because the
+handoff state (§2.4) retains `teamId`, `processId`, and `personaId` across the jump: Stage 3 re‑opens on the same
+team/process, and Stage 4 re‑seeds the same persona target, so the user only re‑touches what they actually came back
+to change. (A "fix an agent" jump that swaps `registryAgentId` likewise leaves `teamId`/`processId`/`personaId`
+intact — only the agent in focus changes.)
 
 ### 3.5 Drafts & session resume (server‑side)
 
@@ -316,6 +324,13 @@ interface AgentStudioDraft {
 
 All fields except `agentName`/`source` (within a roster entry) are optional — a draft saved at Stage 1 carries only
 `registryAgentId`. The server persists the blob verbatim under the user id; it does not interpret stage payloads.
+
+**No `stage4` field — intentional.** Stage 4 has no *unsaved* partial work worth persisting: the chosen persona is
+already the handoff `personaId`, and the team/process targets are `teamId`/`processId`. Everything else in Stage 4 is
+a **live run** (the manual test‑chat session and the persona‑driven pipeline run), which is **transient and already
+durable server‑side under its own `run_id`** — a resumed draft reattaches to an in‑flight/last run by `run_id` rather
+than replaying chat state into the draft blob. So drafts deliberately stop at the Stage‑3 roster; Stage‑4 run context
+is owned by the run, not the draft.
 
 **Identifier naming.** `registryAgentId` (handoff state) and `manifestId` (this draft interface) are the
 **camelCase frontend** forms of the agent's registry **manifest id**; the **backend** field on `AgenticTeamAgent`
