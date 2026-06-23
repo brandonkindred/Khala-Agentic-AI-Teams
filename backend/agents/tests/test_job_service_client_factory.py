@@ -80,6 +80,17 @@ def test_base_store_uses_cached_client(store: _Store):
     assert store._client() is jsc._client_cache["base_store_test"]
 
 
+def test_base_store_without_team_raises_clear_error():
+    """A subclass that forgets to set ``team`` gets an explicit NotImplementedError
+    naming the class, not the factory's generic AssertionError."""
+
+    class _NoTeam(BaseJobStore):
+        pass
+
+    with pytest.raises(NotImplementedError, match="_NoTeam.*team"):
+        _NoTeam()._client()
+
+
 def test_base_store_create_get_update_delete(store: _Store):
     store.create_job("j1", foo="bar")
     job = store.get_job("j1")

@@ -26,6 +26,13 @@ DEFAULT_CACHE_DIR: Path = Path(os.environ.get("AGENT_CACHE", ".agent_cache"))
 
 
 def _client(cache_dir: Path | str = DEFAULT_CACHE_DIR) -> JobServiceClient:
+    """Return the cached JobServiceClient for the ai_systems_team.
+
+    cache_dir is accepted for API compatibility with callers written when this
+    module was file-backed. JobServiceClient uses HTTP (configured via
+    JOB_SERVICE_URL) and does not use a local filesystem cache, so cache_dir is
+    intentionally not forwarded.
+    """
     return get_job_service_client("ai_systems_team")
 
 

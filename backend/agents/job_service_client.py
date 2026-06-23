@@ -446,9 +446,18 @@ class BaseJobStore:
             def submit_title_selection(self, job_id, title): ...
     """
 
-    team: str = ""  # Override in subclass
+    team: str = ""  # Subclasses MUST override with a non-empty team name.
 
     def _client(self) -> JobServiceClient:
+        """Return the cached client for this store's team.
+
+        Preconditions:
+            - The subclass has set a non-empty ``team``.
+        """
+        if not self.team:
+            raise NotImplementedError(
+                f"{type(self).__name__} must set a non-empty 'team' class attribute"
+            )
         return get_job_service_client(self.team)
 
     def create_job(self, job_id: str, *, status: str = JOB_STATUS_PENDING, **fields: Any) -> None:

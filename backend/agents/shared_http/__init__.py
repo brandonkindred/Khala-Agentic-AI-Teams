@@ -64,9 +64,10 @@ def get_pooled_client(timeout: float = 30.0) -> httpx.Client:
           instance.
     """
     key = _bucket(timeout)
-    client = _clients.get(key)
-    if client is not None and not client.is_closed:
-        return client
+    # The lookup is done under the lock (rather than a lock-free fast path) so a
+    # client cannot be closed by a concurrent close_pool() between the check and
+    # the return. The lock is uncontended in the common case and its cost is
+    # negligible next to the HTTP round-trip the client is about to make.
     with _lock:
         client = _clients.get(key)
         if client is None or client.is_closed:
