@@ -63,7 +63,11 @@ const FOCUS_SELECTOR = /:focus-visible\b|:focus(?![-\w])/i;
 // a unit (`0`, `0px`, `0rem`, `0%`), terminated by `;`, `!important`, `}` or EOL.
 // `0(?![.\d])` avoids matching a real thin outline like `0.5px`.
 const OUTLINE_SUPPRESSED = /outline:\s*(?:none|0(?![.\d])(?:px|r?em|%)?)\s*(?:;|!|\}|$)/i;
-// An accent focus ring that legitimises dropping the outline.
+// An accent focus ring that legitimises dropping the outline. Known limitation:
+// this matches the CSS-custom-property token by name, so a ring routed through a
+// SCSS variable or mixin (`$ring: var(--kh-focus-ring); box-shadow: … $ring;`)
+// is NOT recognised and would false-positive. Reference the `--kh-*` token
+// directly in the `box-shadow` to keep the guard satisfied.
 const RING_SHADOW = /box-shadow:[^;]*var\(\s*--kh-(?:focus-ring|accent)\s*\)/i;
 
 /**
@@ -125,7 +129,18 @@ function focusBlockBodies(source: string): string[] {
     // Selector = text back to the previous block/declaration delimiter.
     let s = i - 1;
     while (s >= 0 && !'{};'.includes(source[s])) s--;
-    if (!FOCUS_SELECTOR.test(source.slice(s + 1, i))) continue;
+    const rawSelector = source.slice(s + 1, i);
+    // Drop `:not(…)` groups before testing: `&:not(:focus)` styles the
+    // UN-focused state and legitimately drops the outline, so a `:focus` inside
+    // `:not()` must not be read as a focus block (would false-positive valid CSS).
+    const selector = rawSelector.replace(/:not\([^)]*\)/gi, '');
+    if (!FOCUS_SELECTOR.test(selector)) continue;
+    // `:focus:not(:focus-visible)` targets MOUSE focus only — keyboard focus
+    // keeps its ring via `:focus-visible`, so dropping the outline here is the
+    // correct idiom, not a violation. Skip when the keyboard case is excluded.
+    if (/:not\(\s*:focus-visible\s*\)/i.test(rawSelector) && !/:focus-visible/i.test(selector)) {
+      continue;
+    }
     // Capture this block's brace-balanced body.
     let depth = 1;
     let j = i + 1;
@@ -227,6 +242,14 @@ describe('findOffenses detector', () => {
     expect(findOffenses('.x:focus-visible { outline: 0; }')).toHaveLength(1);
     expect(findOffenses('.x:focus-visible { outline: 0px; }')).toHaveLength(1);
     expect(findOffenses('.x:focus-visible { outline: 0.5px solid red; }')).toHaveLength(0);
+  });
+
+  it('ignores :focus nested inside :not() — the un-focused state may drop the outline', () => {
+    expect(findOffenses('.x:not(:focus) { outline: none; }')).toHaveLength(0);
+    expect(findOffenses('.x:not(:focus-visible) { outline: none; }')).toHaveLength(0);
+    expect(findOffenses('a:focus:not(:focus-visible) { outline: none; }')).toHaveLength(0);
+    // A real focus block alongside a :not() is still caught.
+    expect(findOffenses('.x:not(.bare):focus-visible { outline: none; }')).toHaveLength(1);
   });
 
   it('ignores :focus-within and an outline:none in a nested child of a focus block', () => {

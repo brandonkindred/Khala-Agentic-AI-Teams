@@ -87,4 +87,30 @@ describe('BaseJobsApiService', () => {
       vi.useRealTimers();
     }
   });
+
+  it('pollJob keeps polling through a transient error (default onError:continue)', () => {
+    vi.useFakeTimers();
+    try {
+      const seen: string[] = [];
+      let done = false;
+      svc
+        .pollJob('j1', (j) => j.status === 'completed', { intervalMs: 100 })
+        .subscribe({ next: (j) => seen.push(j.status), complete: () => (done = true) });
+
+      vi.advanceTimersByTime(0);
+      // First poll fails transiently — pollWhile swallows it and keeps ticking.
+      http
+        .expectOne('http://api.test/api/demo/jobs/j1')
+        .flush('Service Unavailable', { status: 503, statusText: 'Service Unavailable' });
+      expect(seen).toEqual([]);
+      expect(done).toBe(false);
+
+      vi.advanceTimersByTime(100);
+      http.expectOne('http://api.test/api/demo/jobs/j1').flush({ job_id: 'j1', status: 'completed' });
+      expect(seen).toEqual(['completed']);
+      expect(done).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

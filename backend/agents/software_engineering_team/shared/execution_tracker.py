@@ -68,6 +68,18 @@ class ExecutionTracker:
         self._lock = Lock()
 
     def _emit(self, event_type: str, payload: dict) -> None:
+        """Append one event to the ring buffer and bump the monotonic total.
+
+        Preconditions: the caller MUST already hold ``self._lock``. Every caller
+            (``upsert_task``/``start_task``/``update_progress``/``observe_loop``/
+            ``finish_task``) runs inside ``with self._lock:``, so the append and
+            the increment are atomic with respect to readers. This method does
+            NOT take the lock itself — ``self._lock`` is a non-reentrant
+            ``threading.Lock``, so re-acquiring it here would deadlock.
+        Postconditions: ``_events`` gains one entry (oldest evicted past
+            ``_MAX_EVENTS``) and ``_events_total`` increases by exactly one,
+            keeping the absolute-index contract of ``events_since`` intact.
+        """
         self._events.append({"type": event_type, "timestamp": _iso(_utc_now()), "payload": payload})
         self._events_total += 1
 

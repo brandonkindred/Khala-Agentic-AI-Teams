@@ -110,17 +110,26 @@ describe('pollWhile', () => {
     expect(errored).toBe(false);
   });
 
-  it('onError:stop propagates the error and terminates the stream', () => {
+  it('onError:stop propagates the error and stops polling (no further fetches)', () => {
     let errored = false;
     let completed = false;
-    pollWhile(() => throwError(() => new Error('boom')), () => false, {
-      intervalMs: 100,
-      onError: 'stop',
-    }).subscribe({ error: () => (errored = true), complete: () => (completed = true) });
+    let fetches = 0;
+    pollWhile(
+      () => {
+        fetches++;
+        return throwError(() => new Error('boom'));
+      },
+      () => false,
+      { intervalMs: 100, onError: 'stop' },
+    ).subscribe({ error: () => (errored = true), complete: () => (completed = true) });
 
     vi.advanceTimersByTime(0);
     expect(errored).toBe(true);
     expect(completed).toBe(false);
+    expect(fetches).toBe(1);
+    // The stream is terminated: advancing the timer must not trigger more fetches.
+    vi.advanceTimersByTime(500);
+    expect(fetches).toBe(1);
   });
 
   it('completes immediately when the first result is already terminal', () => {

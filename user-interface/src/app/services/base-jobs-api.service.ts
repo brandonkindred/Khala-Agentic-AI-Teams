@@ -34,14 +34,17 @@ export abstract class BaseJobsApiService<TJob = unknown> {
   /** Absolute URL for a single job's status resource (encode the id here). */
   protected abstract jobUrl(jobId: string): string;
 
+  /** Fetch a single job's current status by id. */
   getJob(jobId: string): Observable<TJob> {
     return this.http.get<TJob>(this.jobUrl(jobId));
   }
 
+  /** Request cancellation of the job (`POST {jobUrl}/cancel`). */
   cancelJob(jobId: string): Observable<unknown> {
     return this.http.post(`${this.jobUrl(jobId)}/cancel`, {});
   }
 
+  /** Delete the job resource (`DELETE {jobUrl}`). */
   deleteJob(jobId: string): Observable<unknown> {
     return this.http.delete(this.jobUrl(jobId));
   }
