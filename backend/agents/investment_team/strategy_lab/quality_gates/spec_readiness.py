@@ -46,6 +46,7 @@ from ..spec_dsl import (
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    is_full_position_exit,
     ladder_closes_full_position,
     stop_caps_side,
 )
@@ -717,7 +718,9 @@ class SpecReadinessGate(GateResultsMixin):
         A take-profit / signal-exit closes either side; a stop-loss closes only the
         side(s) its basis can fire for (:func:`stop_caps_side` — ``entry_price``
         both, ``trailing_high`` long only, ``trailing_low`` short only); a
-        ``ScaledTakeProfitRule`` is itself partial and never closes the residual.
+        ``ScaledTakeProfitRule`` covers the residual only when its rungs sum to a
+        full close (:func:`is_full_position_exit`), in which case it closes either
+        side, and otherwise is a partial scale-out that leaves a residual.
 
         Preconditions: ``spec`` is a :class:`StrategySpec`.
         Postconditions: ``True`` iff for every distinct ``entry_rules`` side there is
@@ -726,11 +729,12 @@ class SpecReadinessGate(GateResultsMixin):
         """
 
         def covers(rule: object, side: str) -> bool:
-            if isinstance(rule, (TakeProfitRule, SignalExitRule)):
-                return True
+            # Stop-losses are the only side-conditional full exit; every other
+            # full-position exit (TP / signal-exit / full-close ladder) closes
+            # either side, and a partial ladder closes neither.
             if isinstance(rule, StopLossRule):
                 return stop_caps_side(rule.basis, side)
-            return False  # ScaledTakeProfitRule is a partial scale-out, not a residual close
+            return is_full_position_exit(rule)
 
         entry_sides = {e.side for e in spec.entry_rules}
         return all(any(covers(r, side) for r in spec.exit_rules) for side in entry_sides)

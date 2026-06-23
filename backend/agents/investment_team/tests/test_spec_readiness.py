@@ -346,6 +346,29 @@ def test_rule4_full_closing_ladder_alone_is_ok() -> None:
     assert not any("close only a fraction" in c for c in _critical(results))
 
 
+def test_rule4_partial_ladder_with_full_closing_ladder_covers_residual_is_ok() -> None:
+    """A partial ladder's residual can be closed by a SECOND, full-closing ladder:
+    a full-close ladder (rungs sum to 1.0) is a full-position exit and covers either
+    side's residual. Pins the corrected ``_full_exit_covers_all_entry_sides`` contract
+    — before the fix the helper treated every ScaledTakeProfitRule as never-covering,
+    which would have wrongly flagged this exit-complete spec as critical."""
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),  # partial
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                ]
+            ),  # full close → covers the residual
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+    # And the corrected helper classifies the full-close ladder as covering directly.
+    assert SpecReadinessGate._full_exit_covers_all_entry_sides(spec) is True
+
+
 def _entry(side: str) -> EntryRule:
     """An RSI(14) < 30 entry rule on the given ``side``."""
     return EntryRule(

@@ -353,15 +353,17 @@ def _next_scaled_rung(
     gap bar cleared stays eligible even after a later-bar retrace.
 
     Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (DSL-enforced);
-    ``0 <= cursor`` is the next un-fired rung (asserted); ``position.side`` is
-    ``"long"`` or ``"short"`` (any other value fails fast); ``position.high_since_entry``
-    / ``low_since_entry`` are the running watermarks as of the prior bar — non-None
-    ``float``\\ s on :class:`PositionState` (initialized to ``entry_price`` at open,
-    never ``None``), so the ``max``/``min`` below are total.
+    ``0 <= cursor`` is the next un-fired rung (enforced with an explicit raise so it
+    holds under ``python -O``); ``position.side`` is ``"long"`` or ``"short"`` (any
+    other value fails fast); ``position.high_since_entry`` / ``low_since_entry`` are
+    the running watermarks as of the prior bar — non-None ``float``\\ s on
+    :class:`PositionState` (initialized to ``entry_price`` at open, never ``None``),
+    so the ``max``/``min`` below are total.
     Postconditions: returns ``cursor`` when the cursor rung's target is reached and
     ``cursor`` is in range, else ``None`` (ladder exhausted or target not reached).
     """
-    assert cursor >= 0, "cursor must be non-negative (the next un-fired rung)"
+    if cursor < 0:
+        raise ValueError(f"cursor must be non-negative (the next un-fired rung), got {cursor}")
     if cursor >= len(rule.levels):
         return None
     level = rule.levels[cursor]

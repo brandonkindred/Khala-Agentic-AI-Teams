@@ -36,6 +36,7 @@ from investment_team.trading_service.engine.fill_simulator import (
 from investment_team.trading_service.engine.order_book import OrderBook, PendingOrder
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
+    TradingService,
     TradingServiceResult,
     _EngineExitDispatcher,
     _PositionStateView,
@@ -606,6 +607,239 @@ def test_partial_rung_does_not_retire_competing_resting_orders() -> None:
     )
     assert [r.qty for r in pending] == [50.0]  # 0.5 * original_qty, position stays open
     assert competing.working_against_entry_order_id is None  # left working
+
+
+def test_rung_close_sized_off_original_qty_after_scale_in() -> None:
+    """A rung closes ``qty_fraction * original_qty`` even after a scale-in has grown
+    the live ``qty`` above ``original_qty``. The engine sizes off the ORIGINAL entry
+    quantity (``Portfolio.extend`` never bumps ``original_qty`` for a separate
+    same-side order), so a 0.5 rung on a 100-original / 150-current position closes
+    50, not 75 — otherwise the ladder would over-harvest the scaled-in shares."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    portfolio.positions["AAA"].qty = 150.0  # scaled in +50; original_qty stays 100
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),  # +5% rung reached
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert [r.qty for r in pending] == [50.0]  # 0.5 * original_qty(100), NOT 0.5 * 150
+
+
+def test_cursor_resets_when_position_is_swapped() -> None:
+    """Fired rungs are tracked per position and reset on a swap. After a rung fires
+    (cursor advances), a same-symbol position with a NEW entry_order_id replaces the
+    old one; ``_update_position_tracker`` rebuilds the tracker with a fresh cursor, so
+    the first rung can fire again for the new position instead of being suppressed."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG, entry_order_id="o1")
+    portfolio = _portfolio_with(
+        side=OrderSide.LONG, qty=100.0, entry_price=100.0, entry_order_id="o1"
+    )
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    bar = _bar(high=106.0, low=100.0, close=105.0)  # +5% rung reached
+
+    # Position #1 fires its first rung → cursor advances.
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert [r.qty for r in pending] == [50.0]
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
+
+    # Swap: a brand-new position (different entry_order_id) replaces the old one.
+    portfolio.positions["AAA"] = Position(
+        symbol="AAA",
+        side=OrderSide.LONG,
+        qty=100.0,
+        entry_price=100.0,
+        entry_bid_price=100.0,
+        entry_timestamp="2024-01-11",
+        entry_order_id="o2",
+        entry_client_order_id="c-o2",
+        original_qty=100.0,
+        entry_order_type="market",
+    )
+    TradingService._update_position_tracker(tracker=tracker, cur_bar=bar, portfolio=portfolio)
+    assert tracker["AAA"].entry_order_id == "o2"
+    assert tracker["AAA"].scaled_cursor.mapping == {}  # cursor reset for the new position
+
+    # Position #2's first rung fires again from a fresh cursor.
+    pending = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert [r.qty for r in pending] == [50.0]
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
+
+
+def test_independent_ladders_advance_cursors_independently() -> None:
+    """Two ScaledTakeProfitRule ladders on one position keep separate cursors keyed
+    by rule_index. Each ladder's single rung fires once (in spec/priority order),
+    advancing only its own cursor, and diagnostics record a firing per rule_index —
+    the ladders never share or clobber each other's progress."""
+    ladder_a = ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.3}])  # rule 0
+    ladder_b = ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.3}])  # rule 1
+    disp = _dispatcher(exit_rules=[ladder_a, ladder_b])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    bar = _bar(high=106.0, low=100.0, close=105.0)  # +5% reached for both ladders
+
+    seen = []
+    for _ in range(3):
+        pending: list[OrderRequest] = []
+        disp.maybe_emit(
+            cur_bar=bar,
+            position_tracker=tracker,
+            portfolio=portfolio,
+            pending_for_prev=pending,
+            order_book=order_book,
+            result=result,
+        )
+        seen.append([r.qty for r in pending])
+
+    # Rule 0 fires first (priority), then rule 1, then nothing — one tranche per call.
+    assert seen == [[30.0], [30.0], []]
+    # Each ladder advanced ONLY its own cursor.
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1, 1: 1}
+    assert result.execution_diagnostics.scaled_take_profit_level_firings == {"0:0": 1, "1:0": 1}
+
+
+# ---------------------------------------------------------------------------
+# Short-side symmetry: the long-side dispatcher contracts hold for shorts.
+# ---------------------------------------------------------------------------
+
+
+def test_each_rung_fires_at_most_once_and_in_order_short() -> None:
+    """Short mirror of the multi-rung firing test: a short's rungs fire on bar.low
+    (favorable = price falling), each once in cursor order as partial BUY closes
+    (0.5 then 0.3 of original_qty), then nothing; per-rung diagnostics record both."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.SHORT)
+    portfolio = _portfolio_with(side=OrderSide.SHORT, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    bar = _bar(high=100.0, low=89.0, close=90.0)  # crosses -5% AND -10% (short profit)
+
+    seen = []
+    for _ in range(3):
+        pending: list[OrderRequest] = []
+        disp.maybe_emit(
+            cur_bar=bar,
+            position_tracker=tracker,
+            portfolio=portfolio,
+            pending_for_prev=pending,
+            order_book=order_book,
+            result=result,
+        )
+        seen.append([(r.side, r.qty) for r in pending])
+
+    assert seen == [[(OrderSide.LONG, 50.0)], [(OrderSide.LONG, 30.0)], []]  # buy closes
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 2}  # both rungs fired
+    assert result.execution_diagnostics.scaled_take_profit_level_firings == {"0:0": 1, "0:1": 1}
+
+
+def test_stop_loss_listed_first_takes_full_close_over_ladder_short() -> None:
+    """Short mirror of stop-loss priority: a stop listed ahead of the ladder fires a
+    FULL-position BUY close (not a rung) when the bar both breaches the short's stop
+    (entry*(1+pct) on bar.high) and reaches the first profit rung (on bar.low)."""
+    disp = _dispatcher(exit_rules=[StopLossRule(pct=0.03), _ladder()])
+    tracker = _tracker(OrderSide.SHORT)
+    portfolio = _portfolio_with(side=OrderSide.SHORT, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=104.0, low=94.0, close=100.0),  # trips stop (103) AND -5%
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert len(pending) == 1
+    assert pending[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
+    assert pending[0].side == OrderSide.LONG  # closing a short buys
+    assert pending[0].qty == 100.0  # full close
+    assert tracker["AAA"].scaled_cursor.mapping == {}  # ladder did not fire
+
+
+def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_size_short() -> None:
+    """Short mirror of the deferred scale-out: while a short entry is still filling
+    (50 of 100, continuation resting) the rung defers — sizing off the not-yet-settled
+    original_qty would under-close. Once the entry settles to 100, the rung fires a
+    full-size 0.5*100=50 BUY close."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    order_book = OrderBook()
+    cont = order_book.submit(
+        OrderRequest(
+            client_order_id="entry-AAA",
+            symbol="AAA",
+            side=OrderSide.SHORT,
+            qty=100.0,
+            order_type=OrderType.MARKET,
+            tif=TimeInForce.DAY,
+        ),
+        submitted_at="2024-01-09",
+        submitted_equity=1_000_000.0,
+    )
+    cont.cumulative_filled_qty = 50.0  # 50 filled, 50 still working
+    tracker = _tracker(OrderSide.SHORT, entry_order_id=cont.order_id)
+    portfolio = _portfolio_with(
+        side=OrderSide.SHORT, qty=50.0, entry_price=100.0, entry_order_id=cont.order_id
+    )
+    portfolio.positions["AAA"].original_qty = 50.0  # only the first slice so far
+    result = TradingServiceResult()
+    bar = _bar(high=100.0, low=94.0, close=95.0)  # -5% target reached
+
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    # Deferred: nothing emitted and the cursor is NOT advanced.
+    assert pending == []
+    assert tracker["AAA"].scaled_cursor.mapping == {}
+
+    # Entry settles: continuation leaves the book, original_qty now reflects 100.
+    order_book.remove(cont.order_id, was_filled=True)
+    portfolio.positions["AAA"].original_qty = 100.0
+    portfolio.positions["AAA"].qty = 100.0
+    pending = []
+    disp.maybe_emit(
+        cur_bar=bar,
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert [(r.side, r.qty) for r in pending] == [(OrderSide.LONG, 50.0)]  # 0.5 * 100 buy close
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}
 
 
 # ---------------------------------------------------------------------------
