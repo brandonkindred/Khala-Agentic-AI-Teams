@@ -42,10 +42,12 @@ import { dirname, resolve } from 'node:path';
 //   - Light grays (#888–#ccc): readable on dark, but still bypass the
 //     `--kh-text-*` tokens, so they're banned for design-system consistency —
 //     NOT labelled "low contrast", which would be factually wrong here.
-const LOW_CONTRAST_HEX = '#(?:5{3}|6{3}|7{3})(?:[0-9a-f]{3})?|#(?:484f58|6e7681|71717a)';
-const NON_TOKEN_GRAY_HEX = '#(?:8{3}|9{3}|a{3}|b{3}|c{3})(?:[0-9a-f]{3})?|#8b949e';
+const LOW_CONTRAST_HEX =
+  '#(?:5{3}|6{3}|7{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#(?:484f58|6e7681|71717a)(?:[0-9a-f]{2})?';
+const NON_TOKEN_GRAY_HEX =
+  '#(?:8{3}|9{3}|a{3}|b{3}|c{3})(?:[0-9a-f]{3})?(?:[0-9a-f]{2})?|#8b949e(?:[0-9a-f]{2})?';
 const LOW_CONTRAST_TEXT = new RegExp(
-  String.raw`(?<![-\w])color:\s*(?:${LOW_CONTRAST_HEX}|rgba\(\s*0\s*,\s*0\s*,\s*0)`,
+  String.raw`(?<![-\w])color:\s*(?:${LOW_CONTRAST_HEX}|rgba?\(\s*0\s*,\s*0\s*,\s*0)`,
   'i',
 );
 const NON_TOKEN_GRAY_TEXT = new RegExp(String.raw`(?<![-\w])color:\s*(?:${NON_TOKEN_GRAY_HEX})`, 'i');
@@ -75,15 +77,19 @@ const BURNDOWN = new Set<string>([]);
  *
  * Preconditions: `source` is SCSS/CSS text.
  * Postconditions: returns a string of identical length with every comment
- *   character replaced by a space and all newlines preserved, so line numbers
- *   and brace/selector offsets are unchanged. A `//` immediately after `:` is
- *   left intact so it does not eat `https://`-style protocols in values.
+ *   character (and every SCSS `#{…}` interpolation) replaced by a space and all
+ *   newlines preserved, so line numbers and brace/selector offsets are
+ *   unchanged. A `//` preceded by `:` (e.g. `https://`) or `(` / `/` (e.g. a
+ *   protocol-relative `url(//cdn/x.png)`) is left intact so it does not eat the
+ *   rest of a value line. Interpolation braces are blanked so the focus-block
+ *   brace scanner can't mistake `#{…}` for a ruleset.
  */
 function stripComments(source: string): string {
   const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
   return source
     .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .replace(/(?<!:)\/\/[^\n]*/g, blank);
+    .replace(/(?<![:/(])\/\/[^\n]*/g, blank)
+    .replace(/#\{[^}]*\}/g, blank);
 }
 
 /** 1-based line number of character offset `index` within `source`. */
@@ -250,5 +256,29 @@ describe('findOffenses detector', () => {
   it('reports the correct 1-based line number past a multi-line block comment', () => {
     // The block comment spans 2 lines; the offending color is on line 4.
     expect(findOffenses('.a {\n/* note\n   here */\n  color: #555;\n}')[0]).toMatch(/^L4:/);
+  });
+
+  it('flags 8-digit (alpha) hex grays', () => {
+    expect(findOffenses('.x { color: #555555ff; }')[0]).toMatch(/low-contrast/);
+    expect(findOffenses('.x { color: #ccccccff; }')[0]).toMatch(/bypasses the --kh-text-\* tokens/);
+  });
+
+  it('flags rgb(0,0,0) text, not just rgba(0,0,0,…)', () => {
+    expect(findOffenses('.x { color: rgb(0, 0, 0); }')[0]).toMatch(/low-contrast/);
+  });
+
+  it('does not let a protocol-relative url(//…) hide a later offense on the same line', () => {
+    expect(findOffenses('.x { background: url(//cdn/x.png); color: #555; }')[0]).toMatch(
+      /low-contrast/,
+    );
+  });
+
+  it('does not let SCSS interpolation in a selector or value break focus detection', () => {
+    // `#{…}` must not be read as a ruleset by the brace scanner.
+    expect(
+      findOffenses('.icon-#{$name} { &:focus-visible { outline: none; } }'),
+    ).toHaveLength(1);
+    // Interpolation in a value is blanked, not mistaken for a hardcoded color.
+    expect(findOffenses('.x { color: #{$muted}; }')).toHaveLength(0);
   });
 });

@@ -159,23 +159,34 @@
 }
 
 .story {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-radius: 6px;
-  background: var(--kh-surface-2, #1f1f1f);
-  cursor: pointer;
-  gap: 12px;
+  list-style: none;
 
-  &:hover,
-  &:focus-visible {
-    background: var(--kh-surface-3);
-  }
+  // The clickable surface is a real <button> so the <li> stays a valid list
+  // item (keyboard + focus come for free; no role="button" on the <li>).
+  &__btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: var(--kh-surface-2, #1f1f1f);
+    border: none;
+    cursor: pointer;
+    gap: 12px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
 
-  &:focus-visible {
-    outline: 2px solid var(--kh-focus-ring);
-    outline-offset: 2px;
+    &:hover,
+    &:focus-visible {
+      background: var(--kh-surface-3);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--kh-focus-ring);
+      outline-offset: 2px;
+    }
   }
 
   &__title {
