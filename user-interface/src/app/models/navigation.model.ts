@@ -110,6 +110,7 @@ export const NAV_GROUPS: NavGroup[] = [
     label: 'Settings',
     items: [
       { id: 'integrations', label: 'Integrations', icon: 'integration_instructions', route: '/integrations', group: 'settings' },
+      { id: 'llm-config', label: 'LLM Provider', icon: 'tune', route: '/llm-config', group: 'settings' },
     ],
   },
 ];

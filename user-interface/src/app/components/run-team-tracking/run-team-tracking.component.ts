@@ -267,7 +267,25 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
 
 
   /** Team ID -> list of tasks in execution order for that team. */
+  // Identity-memoized on `status`: the template calls getTeamsWithTasks() twice
+  // and buildDAGTree() once per change-detection cycle, but `status` is replaced
+  // wholesale (new reference) only on a poll update — so cache the derived result
+  // and rebuild it only when the data actually changes, not every CD tick.
+  private _teamsCacheStatus: JobStatusResponse | null = null;
+  private _teamsCache: { teamId: string; label: string; tasks: TaskWithId[] }[] = [];
+  private _dagCacheStatus: JobStatusResponse | null = null;
+  private _dagCache: DAGNode[] = [];
+
   getTeamsWithTasks(): { teamId: string; label: string; tasks: TaskWithId[] }[] {
+    if (this.status === this._teamsCacheStatus) {
+      return this._teamsCache;
+    }
+    this._teamsCacheStatus = this.status;
+    this._teamsCache = this._computeTeamsWithTasks();
+    return this._teamsCache;
+  }
+
+  private _computeTeamsWithTasks(): { teamId: string; label: string; tasks: TaskWithId[] }[] {
     const status = this.status;
     if (!status?.task_states || !status.task_ids?.length) {
       return [];
@@ -778,6 +796,15 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
    * Returns an array of main phases (no root node).
    */
   buildDAGTree(): DAGNode[] {
+    if (this.status === this._dagCacheStatus) {
+      return this._dagCache;
+    }
+    this._dagCacheStatus = this.status;
+    this._dagCache = this._computeDAGTree();
+    return this._dagCache;
+  }
+
+  private _computeDAGTree(): DAGNode[] {
     if (!this.status) return [];
 
     const phases: DAGNode[] = [];

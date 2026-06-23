@@ -25,6 +25,25 @@ import pytest
 from job_service_client import JobServiceClient
 from job_service_client_fake import FakeJobServiceClient
 
+
+@pytest.fixture(autouse=True)
+def _isolate_pooled_client():
+    """Reset the ``shared_http`` connection pool around every test.
+
+    ``JobServiceClient._request`` reuses a process-wide client cached per timeout
+    bucket (``shared_http.get_pooled_client``). The MockTransport tests below patch
+    ``httpx.Client`` to inject a transport, which only takes effect when the pooled
+    client is (re)built — so a client cached by an earlier test would otherwise
+    shadow the patch (and a MockTransport client built here would leak into later
+    tests). Clearing the pool before and after each test keeps them independent.
+    """
+    from shared_http import close_pool
+
+    close_pool()
+    yield
+    close_pool()
+
+
 # ---------------------------------------------------------------------------
 # Lazy URL resolution
 # ---------------------------------------------------------------------------

@@ -34,6 +34,10 @@ class TaskGraphService:
         self._tasks: Dict[str, Task] = {}
         self._agent_to_task: Dict[str, str] = {}  # agent_id -> task_id (only non-merged)
         self._persist = persist_callback
+        # Bumped on every mutation (and restore). Lets a persister detect a no-op
+        # call and skip a redundant snapshot+write — the swarm loop persists several
+        # times per round, often with no change in between.
+        self.revision = 0
 
     def add_task(
         self,
@@ -377,8 +381,12 @@ class TaskGraphService:
             )
             self._tasks[task.id] = task
         self._agent_to_task = dict(snapshot.get("agent_task_map", {}))
+        # A wholesale state replacement — bump so a subsequent persist isn't
+        # mistaken for a no-op and skipped.
+        self.revision += 1
 
     def _maybe_persist(self) -> None:
+        self.revision += 1
         if self._persist:
             try:
                 self._persist()

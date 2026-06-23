@@ -1,6 +1,20 @@
 # Central LLM service
 
-Single backend LLM layer used by all agent teams. Provides a provider-agnostic interface and factory so teams request completions through one place; context/config and provider logic (Ollama, dummy, future OpenAI/Anthropic) live here.
+Single backend LLM layer used by all agent teams. Provides a provider-agnostic interface and factory so teams request completions through one place; context/config and provider logic live here.
+
+## Providers
+
+Selected by `LLM_PROVIDER` (resolved per call): runtime config (UI) → env → default `ollama`.
+
+| Provider | Client | Notes |
+|----------|--------|-------|
+| `ollama` (default) | `OllamaLLMClient` | Local (`LLM_BASE_URL=http://host:11434`) or Ollama Cloud (`https://ollama.com` + `OLLAMA_API_KEY`). |
+| `claude` (alias `anthropic`) | `ClaudeLLMClient` | Uses the **official `anthropic` Python SDK** (streaming + `get_final_message()`). Default model `claude-opus-4-8`; key from `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`. Adaptive thinking + `output_config.effort`; never sends `temperature`/`top_p`. |
+| `dummy` | `DummyLLMClient` | Heuristic stub for tests; also a Strands `Model`. |
+
+### Runtime configuration (settings UI)
+
+`PUT /api/llm-config` (unified API) stores provider/model/keys Fernet-encrypted in the shared `encrypted_integration_credentials` table under the `llm_config` service. Every team container reads them back through `shared_postgres.secrets` → `llm_service.runtime_config` — **no dependency on `unified_api`** — because all containers share the Fernet key (`INTEGRATION_ENCRYPTION_KEY` env, or `$AGENT_CACHE/integration.key` on the shared volume) and the same Postgres. Runtime reads are cached for `LLM_RUNTIME_CONFIG_TTL_S` seconds (default 30), so a UI change reaches every container within the TTL; the PUT endpoint also clears the local client cache immediately. Requires Postgres — env vars remain the fallback when it is unset.
 
 ## Usage
 
@@ -114,10 +128,12 @@ for the design rationale and migration notes.
 
 | Variable | Meaning |
 |----------|---------|
-| `LLM_PROVIDER` | `dummy` or `ollama` |
+| `LLM_PROVIDER` | `dummy`, `ollama` (default), or `claude` (alias `anthropic`) |
 | `LLM_MODEL` | Model name |
 | `LLM_MODEL_<agent_key>` | Per-agent model override |
 | `LLM_BASE_URL` | Ollama base URL (default `https://ollama.com`) |
+| `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY` | **Required for `LLM_PROVIDER=claude`.** Anthropic API key (the first is Khala-namespaced; the second is the SDK convention, used as a fallback). |
+| `LLM_RUNTIME_CONFIG_TTL_S` | TTL (seconds, default 30) for the runtime provider config the LLM Provider settings UI writes (see "Runtime configuration" below) |
 | `LLM_TIMEOUT` | Request timeout in seconds (default 900 / 15 min; all calls use streaming) |
 | `LLM_CONTEXT_SIZE` | Override context size |
 | `LLM_MAX_TOKENS` | Max output tokens |
