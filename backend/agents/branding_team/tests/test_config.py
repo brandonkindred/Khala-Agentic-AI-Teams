@@ -8,6 +8,7 @@ from branding_team.config import env_bool, env_float, env_int
 
 
 def test_env_int(monkeypatch: pytest.MonkeyPatch) -> None:
+    """env_int: default when unset/garbage, parses ints, clamps to minimum."""
     monkeypatch.delenv("X", raising=False)
     assert env_int("X", 4) == 4
     monkeypatch.setenv("X", "7")
@@ -19,6 +20,7 @@ def test_env_int(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_env_float(monkeypatch: pytest.MonkeyPatch) -> None:
+    """env_float: default when unset/garbage, parses floats, and the positive guard."""
     monkeypatch.delenv("Y", raising=False)
     assert env_float("Y", 2.0) == 2.0
     monkeypatch.setenv("Y", "3.5")
@@ -31,6 +33,7 @@ def test_env_float(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_env_bool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """env_bool: truthy tokens → True, default when unset, everything else False."""
     monkeypatch.delenv("Z", raising=False)
     assert env_bool("Z") is False
     assert env_bool("Z", default=True) is True

@@ -120,6 +120,15 @@ class BrandingConversationStore:
             Returns None when the conversation does not exist, else a fully
             populated :class:`ConversationState` with messages ordered
             oldest-first.
+
+        Note:
+            This loads the conversation's *entire* message history in one query
+            — the chat endpoints return the full transcript to the client, and
+            branding conversations are expected to stay short (a guided 5-phase
+            flow). The assistant's ``BRANDING_ASSISTANT_HISTORY_WINDOW`` caps
+            only the LLM prompt context, not this load. If conversations ever
+            grow large, add a message ``limit`` / pagination here and in the
+            response model — tracked as a follow-up.
         """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(

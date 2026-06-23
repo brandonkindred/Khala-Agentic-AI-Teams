@@ -168,6 +168,7 @@ def _mission() -> BrandingMission:
 
 
 def test_brand_exists(fake_pg: dict) -> None:
+    """brand_exists is True for an existing brand and False for an unknown id."""
     store = BrandingStore()
     client = store.create_client("Acme")
     brand = store.create_brand(client.id, _mission())
@@ -177,6 +178,7 @@ def test_brand_exists(fake_pg: dict) -> None:
 
 
 def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
+    """get_brand_by_id returns the owning client id + brand, or None if absent."""
     store = BrandingStore()
     client = store.create_client("Acme")
     brand = store.create_brand(client.id, _mission())
@@ -190,6 +192,7 @@ def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
 
 
 def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
+    """get_brand_names maps only the requested existing ids; empty input is a no-op."""
     store = BrandingStore()
     client = store.create_client("Acme")
     b1 = store.create_brand(client.id, _mission(), name="First")
@@ -206,6 +209,7 @@ def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
 
 
 def test_list_clients_pagination(fake_pg: dict) -> None:
+    """list_clients limit/offset returns non-overlapping pages within the set."""
     store = BrandingStore()
     created = [store.create_client(f"Client {i}") for i in range(5)]
     assert len(store.list_clients()) == 5
@@ -230,6 +234,7 @@ def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
 
 
 def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
+    """list_brands_for_client honors limit/offset for a client's brands."""
     store = BrandingStore()
     client = store.create_client("Acme")
     for _ in range(3):

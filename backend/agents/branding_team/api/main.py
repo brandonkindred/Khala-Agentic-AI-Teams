@@ -1048,6 +1048,14 @@ def _ensure_default_client() -> str:
 
     The default client name is configurable via ``BRANDING_DEFAULT_CLIENT_NAME``
     (default ``"My brands"``) for multi-tenant deployments.
+
+    Note:
+        Find-or-create is not atomic: two concurrent first-time requests could
+        each create a default client. This is benign for the single-user
+        assistant flow (subsequent calls return ``list_clients(limit=1)[0]``)
+        and client names are intentionally non-unique (a workspace can have
+        several clients), so a unique constraint isn't the right fix. A
+        dedicated default-workspace flag or app-level lock is a follow-up.
     """
     clients = branding_store.list_clients(limit=1)
     if clients:

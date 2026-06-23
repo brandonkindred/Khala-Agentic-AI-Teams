@@ -55,6 +55,7 @@ def _mission(name: str) -> BrandingMission:
 
 
 def test_brand_jsonb_roundtrip_real_postgres() -> None:
+    """Brand CRUD + jsonb merge / version append / lookups work against real Postgres."""
     store = BrandingStore()
     client = store.create_client(f"RealPG {uuid.uuid4().hex[:8]}")
     brand = store.create_brand(client.id, _mission("RealCo"))
@@ -93,6 +94,7 @@ def test_brand_jsonb_roundtrip_real_postgres() -> None:
 
 
 def test_conversation_sql_real_postgres() -> None:
+    """Conversation CTE append / LEFT JOIN load / list aggregate work against real Postgres."""
     store = BrandingConversationStore()
     cid = store.create(mission=_mission("ConvCo"))
 

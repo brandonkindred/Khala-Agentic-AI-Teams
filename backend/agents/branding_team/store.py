@@ -103,17 +103,18 @@ class BrandingStore:
         Preconditions:
             ``limit`` is None or a positive int; ``offset`` is >= 0.
         Postconditions:
-            Rows are ordered by ``created_at`` for a stable, repeatable order.
-            When ``limit`` is None the full set is returned; otherwise at most
+            Rows are ordered by ``(created_at, id)`` — the ``id`` tie-breaker
+            keeps pagination stable when rows share a ``created_at``. When
+            ``limit`` is None the full set is returned; otherwise at most
             ``limit`` rows starting at ``offset``.
         """
         _validate_pagination(limit, offset)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
-                cur.execute("SELECT data FROM branding_clients ORDER BY created_at")
+                cur.execute("SELECT data FROM branding_clients ORDER BY created_at, id")
             else:
                 cur.execute(
-                    "SELECT data FROM branding_clients ORDER BY created_at LIMIT %s OFFSET %s",
+                    "SELECT data FROM branding_clients ORDER BY created_at, id LIMIT %s OFFSET %s",
                     (limit, offset),
                 )
             rows = cur.fetchall()
@@ -226,21 +227,22 @@ class BrandingStore:
         Preconditions:
             ``limit`` is None or a positive int; ``offset`` is >= 0.
         Postconditions:
-            Rows are ordered by ``created_at`` for a stable, repeatable order.
-            When ``limit`` is None all of the client's brands are returned;
+            Rows are ordered by ``(created_at, id)`` — the ``id`` tie-breaker
+            keeps pagination stable when rows share a ``created_at``. When
+            ``limit`` is None all of the client's brands are returned;
             otherwise at most ``limit`` rows starting at ``offset``.
         """
         _validate_pagination(limit, offset)
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             if limit is None:
                 cur.execute(
-                    "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at",
+                    "SELECT data FROM branding_brands WHERE client_id = %s ORDER BY created_at, id",
                     (client_id,),
                 )
             else:
                 cur.execute(
                     "SELECT data FROM branding_brands WHERE client_id = %s "
-                    "ORDER BY created_at LIMIT %s OFFSET %s",
+                    "ORDER BY created_at, id LIMIT %s OFFSET %s",
                     (client_id, limit, offset),
                 )
             rows = cur.fetchall()

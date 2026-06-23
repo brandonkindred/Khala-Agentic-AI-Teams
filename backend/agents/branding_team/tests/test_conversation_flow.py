@@ -43,7 +43,10 @@ def _output() -> TeamOutput:
     )
 
 
-def test_run_orchestrator_reuses_output_when_mission_unchanged(monkeypatch) -> None:
+def test_run_orchestrator_reuses_output_when_mission_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unchanged mission reuses the prior output; a changed mission re-runs."""
     calls = {"n": 0}
     sentinel = _output()
 
@@ -68,7 +71,10 @@ def test_run_orchestrator_reuses_output_when_mission_unchanged(monkeypatch) -> N
     assert calls["n"] == 2
 
 
-def test_run_orchestrator_returns_none_when_not_ready(monkeypatch) -> None:
+def test_run_orchestrator_returns_none_when_not_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mission missing required fields short-circuits to None without running."""
     calls = {"n": 0}
 
     def fake_run(**kwargs):
