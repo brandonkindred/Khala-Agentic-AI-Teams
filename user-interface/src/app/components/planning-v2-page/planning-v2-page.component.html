@@ -1,8 +1,11 @@
-<h1>Planning (v2)</h1>
-<p>Run the 6-phase product planning workflow and track progress.</p>
-
-<div class="header-row">
-  <app-health-indicator [healthCheck]="healthCheck" label="Software Engineering API" />
+<div class="kh-page-header">
+  <div class="kh-page-header__titles">
+    <h1>Planning (v2)</h1>
+    <p>Run the 6-phase product planning workflow and track progress.</p>
+  </div>
+  <div class="kh-page-header__status" aria-live="polite">
+    <app-health-indicator [healthCheck]="healthCheck" label="Software Engineering API" />
+  </div>
 </div>
 
 @if (loading) {
