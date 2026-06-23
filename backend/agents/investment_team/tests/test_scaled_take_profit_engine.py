@@ -55,6 +55,17 @@ from investment_team.trading_service.strategy.contract import (
 
 @dataclass
 class _MockBar:
+    """Minimal structural bar exposing exactly the fields the dispatcher reads
+    (``symbol``/``timestamp``/``high``/``low``/``close``).
+
+    The dispatcher is duck-typed over the bar — it never touches ``open`` /
+    ``volume`` / ``timeframe`` — so a stand-in keeps these unit tests focused on
+    rule/cursor behavior without an unrelated price series. The REAL ``Bar``
+    contract (open/volume/timeframe and all) is exercised end-to-end by the
+    ``FillSimulator`` tests below via :func:`_full_bar`, so a future dispatcher
+    dependence on a ``Bar``-only field would surface there.
+    """
+
     symbol: str
     timestamp: str
     high: float
@@ -389,6 +400,36 @@ def test_stop_loss_listed_first_takes_full_close_over_ladder() -> None:
     assert pending[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}stop_loss"
     assert pending[0].qty == 100.0  # full close
     assert tracker["AAA"].scaled_cursor.mapping == {}  # ladder did not fire
+
+
+def test_ladder_listed_first_fires_partial_over_same_bar_stop() -> None:
+    """Reverse priority: with the ladder listed AHEAD of the stop and the entry
+    already settled (rung NOT deferred), a bar that both reaches the first rung and
+    breaches the stop fires the higher-priority rung as a PARTIAL close — the stop is
+    suppressed for this bar (it stays working for the remainder on later bars). The
+    contrast to ``test_deferred_scale_out_still_lets_a_same_bar_stop_fire``, where an
+    in-flight entry continuation defers the rung and lets the same-bar stop win."""
+    disp = _dispatcher(exit_rules=[_ladder(), StopLossRule(pct=0.03)])
+    tracker = _tracker(OrderSide.LONG)  # entry settled — no continuation in flight
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=96.0, close=100.0),  # +5% rung AND -3% stop (97)
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert len(pending) == 1
+    assert pending[0].reason == f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
+    assert pending[0].qty == 50.0  # partial rung, NOT the full-close stop
+    assert pending[0].side == OrderSide.SHORT
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}  # rung fired, cursor advanced
+    # The stop did not fire this bar (only the rung emitted).
+    assert result.execution_diagnostics.exit_rule_firings.get("stop_loss") is None
 
 
 def test_short_first_rung_emits_partial_buy_close() -> None:
