@@ -81,9 +81,7 @@ def macd(data, fast=12, slow=26, signal=9) -> tuple[float, float, float]:
 
 def bollinger_bands(data, period=20, num_std=2.0) -> tuple[float, float, float]:
     """Latest (upper, middle, lower) Bollinger Band values. See module contract."""
-    upper, middle, lower = _impl.bollinger_bands(
-        data, period=int(period), num_std=float(num_std)
-    )
+    upper, middle, lower = _impl.bollinger_bands(data, period=int(period), num_std=float(num_std))
     return _last(upper), _last(middle), _last(lower)
 
 

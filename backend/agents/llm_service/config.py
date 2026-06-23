@@ -12,6 +12,11 @@ import os
 import threading
 from typing import Optional
 
+# shared_env is a dependency-free standard-library-only leaf module, so importing
+# it at module scope cannot create an import cycle (it imports nothing from here).
+from shared_env import env_flag_enabled as _env_flag_enabled
+from shared_env import parse_float as _parse_float
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -119,6 +124,10 @@ KNOWN_MODEL_THINKING_LEVELS: dict[str, tuple[str, ...]] = {
 def env_flag_enabled(env_name: str) -> bool:
     """Shared parser for default-on boolean env toggles.
 
+    Thin re-export of the canonical :func:`shared_env.env_flag_enabled` so there is
+    one implementation; kept here for the many call sites that import it from
+    ``llm_service.config``.
+
     Preconditions:
         - ``env_name`` is a non-empty environment variable name.
     Postconditions:
@@ -126,7 +135,7 @@ def env_flag_enabled(env_name: str) -> bool:
           (case-insensitive, whitespace-tolerant); unset or any other value
           means enabled. Never raises.
     """
-    return (os.environ.get(env_name) or "").strip().lower() not in ("false", "0", "no")
+    return _env_flag_enabled(env_name)
 
 
 def thinking_enabled_by_default() -> bool:
@@ -482,11 +491,10 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
     All LLM calls use streaming, so the timeout covers the full streamed response.
     Override with LLM_TIMEOUT if needed.
     """
-    raw = os.environ.get(ENV_LLM_TIMEOUT) or "900"
-    try:
-        return float(raw)
-    except ValueError:
-        return 900.0
+    # A non-positive timeout would make every streamed call fail instantly;
+    # fall back to the default rather than honor a degenerate override.
+    value = _parse_float(ENV_LLM_TIMEOUT, 900.0)
+    return value if value > 0 else 900.0
 
 
 def resolve_context_size_for_model(model: str) -> Optional[int]:
@@ -494,6 +502,9 @@ def resolve_context_size_for_model(model: str) -> Optional[int]:
     Resolve context size (tokens) for a model: env LLM_CONTEXT_SIZE (global override),
     then KNOWN_MODEL_CONTEXT[model], else None (caller may use /api/show or default).
     """
+    # Not expressible via shared_env.parse_int: an unset *or* invalid override must
+    # fall through to the model-specific KNOWN_MODEL_CONTEXT value (an Optional[int]),
+    # not a fixed default, and a valid override is clamped up to a 2048 floor.
     raw = os.environ.get(ENV_LLM_CONTEXT_SIZE)
     if raw:
         try:

@@ -28,6 +28,7 @@ from job_service_client import (
     get_job_service_client,
 )
 from shared_concurrency import BackgroundHeartbeat
+from shared_env import parse_float
 
 logger = logging.getLogger(__name__)
 
@@ -56,10 +57,14 @@ DEFAULT_CACHE_DIR: Path = Path(os.getenv("AGENT_CACHE", ".agent_cache"))
 # Seconds after which a pending/running job with no recent heartbeat is marked failed.
 # Set via env JOB_STALE_AFTER_SECONDS (default 1800).
 def get_stale_after_seconds() -> float:
-    try:
-        return float(os.getenv("JOB_STALE_AFTER_SECONDS", "1800"))
-    except (TypeError, ValueError):
-        return 1800.0
+    """Return the stale-after threshold (seconds) from ``JOB_STALE_AFTER_SECONDS``.
+
+    Postconditions: returns the env override when it is a positive number,
+    otherwise the 1800s default. A non-positive override (which would mark every
+    freshly-started job stale at once) falls back to the default. Never raises.
+    """
+    value = parse_float("JOB_STALE_AFTER_SECONDS", 1800.0)
+    return value if value > 0 else 1800.0
 
 
 _jobs_path_logged = False
