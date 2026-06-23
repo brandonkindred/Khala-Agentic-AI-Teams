@@ -60,8 +60,12 @@
 
     &:hover,
     &:focus-visible {
-      background: var(--mat-sys-surface-container, #f0f0f0);
-      outline: none;
+      background: var(--kh-surface-2);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--kh-focus-ring);
+      outline-offset: 2px;
     }
 
     &.is-active {

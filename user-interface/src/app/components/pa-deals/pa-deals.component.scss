@@ -16,8 +16,8 @@
 
 .wishlist-card,
 .search-card {
-  background: #161b22;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-2);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-header {
     margin-bottom: 1rem;
@@ -29,7 +29,7 @@
       font-size: 1rem;
 
       mat-icon {
-        color: #58a6ff;
+        color: var(--kh-info);
       }
     }
   }
@@ -64,29 +64,29 @@ mat-divider {
 }
 
 .status-text {
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   text-align: center;
   padding: 1rem;
 }
 
 .wishlist-item {
   mat-icon[matListItemIcon] {
-    color: #58a6ff;
+    color: var(--kh-info);
   }
 
   [matListItemTitle] {
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
   }
 
   [matListItemLine] {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
   }
 
   button[mat-icon-button] {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
 
     &:hover {
-      color: #f85149;
+      color: var(--kh-error);
     }
   }
 }
@@ -99,21 +99,21 @@ mat-divider {
 }
 
 .deal-card {
-  background: #21262d;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--kh-surface-3);
+  border: 1px solid var(--kh-border-subtle);
 
   mat-card-title {
     font-size: 1rem;
-    color: #f0f6fc;
+    color: var(--kh-text-primary);
   }
 
   mat-card-subtitle {
-    color: #8b949e;
+    color: var(--kh-text-tertiary);
   }
 }
 
 .deal-description {
-  color: #c9d1d9;
+  color: var(--kh-text-secondary);
   font-size: 0.875rem;
   margin-bottom: 0.5rem;
 }
@@ -128,18 +128,18 @@ mat-divider {
 .sale-price {
   font-size: 1.25rem;
   font-weight: 600;
-  color: #3fb950;
+  color: var(--kh-success);
 }
 
 .original-price {
   font-size: 0.875rem;
-  color: #8b949e;
+  color: var(--kh-text-tertiary);
   text-decoration: line-through;
 }
 
 .discount {
-  background: rgba(246, 87, 87, 0.15);
-  color: #f85149;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   padding: 2px 8px;
   border-radius: 4px;
   font-size: 0.75rem;
