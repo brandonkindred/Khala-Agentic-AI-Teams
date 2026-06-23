@@ -49,6 +49,7 @@ def test_explicit_base_url_is_sticky(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_construction_raises_when_no_url_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no explicit base_url and no JOB_SERVICE_URL env, construction raises RuntimeError."""
     monkeypatch.delenv("JOB_SERVICE_URL", raising=False)
     with pytest.raises(RuntimeError, match="JOB_SERVICE_URL is not set"):
         JobServiceClient(team="x")
@@ -80,6 +81,7 @@ def _route_through_mock_transport(monkeypatch: pytest.MonkeyPatch, handler) -> N
 
 
 def test_real_client_cancel_active_job_posts_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real client POSTs to /jobs/{team}/{job_id}/cancel and returns the parsed `cancelled`."""
     monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
     captured: dict = {}
 

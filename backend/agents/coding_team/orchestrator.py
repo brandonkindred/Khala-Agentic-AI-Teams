@@ -59,12 +59,13 @@ def _no_change_revisit_cap() -> int:
     Postconditions:
         - Returns an int >= 1.
     """
-    # Reuse the shared defensive int-env parser (garbage/empty → default, value clamped to floor)
-    # rather than re-implementing the parse here; the floor of 1 keeps the guard from ever being
-    # disabled into an unbounded no-progress loop.
-    from software_engineering_team.shared.context_sizing import parse_env_int
+    # Use the canonical dependency-free shared parser directly (garbage/empty →
+    # default, value clamped to the floor) rather than the SE team's thin wrapper —
+    # this keeps the coding team off a cross-team import. The floor of 1 keeps the
+    # guard from ever being disabled into an unbounded no-progress loop.
+    from shared_env import parse_int
 
-    return parse_env_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, floor=1)
+    return parse_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, minimum=1)
 
 
 class _NoopBridge:
