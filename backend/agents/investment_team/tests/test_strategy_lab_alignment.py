@@ -1502,14 +1502,16 @@ def test_loop_cross_check_overrides_inconsistent_aligned_flag() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Alignment veto — critical finding details in acceptance_reason
+# Alignment caveat — critical finding details in acceptance_reason
 # ---------------------------------------------------------------------------
 
 
 def test_alignment_veto_surfaces_critical_finding_details() -> None:
-    """The alignment veto in ``_run_verification_phase`` surfaces the
-    deterministic critical-finding details — not the LLM's vague
-    rationale string — into ``metrics.acceptance_reason``."""
+    """The alignment caveat in ``_run_verification_phase`` surfaces the
+    deterministic critical-finding details — not the LLM's vague rationale
+    string — into ``metrics.acceptance_reason``. Here ``is_winning`` is False
+    because the 4% return is below the 8% benchmark (the deterministic
+    verdict), while the alignment failure rides along as a recorded caveat."""
     orch = StrategyLabOrchestrator()
 
     findings = [
@@ -1562,8 +1564,9 @@ def test_alignment_veto_surfaces_critical_finding_details() -> None:
 
 
 def test_alignment_veto_falls_back_to_rationale_when_no_findings() -> None:
-    """When ``alignment_findings`` is empty (defensive path), the veto
-    falls back to the report's rationale string."""
+    """When ``alignment_findings`` is empty (defensive path), the recorded
+    alignment caveat falls back to the report's rationale string. ``is_winning``
+    is False here from the sub-8% return, not from the alignment caveat."""
     orch = StrategyLabOrchestrator()
 
     report = TradeAlignmentReport(

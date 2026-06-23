@@ -8,7 +8,7 @@ from typing import Any, List, Optional
 
 from strands import Agent
 
-from ...models import BacktestResult, StrategySpec, TradeRecord
+from ...models import WINNING_THRESHOLD, BacktestResult, StrategySpec, TradeRecord
 from ..spec_dsl import format_rules_for_prompt, format_sizing_rule
 from ._llm_envelope import invoke_agent
 from ._parse_helpers import extract_json_object
@@ -92,13 +92,14 @@ Outcome label: {outcome_label}
 {simulated_trades_section}
 
 {alignment_status_section}
-## Draft analysis to verify
+{robustness_caveats_section}## Draft analysis to verify
 {draft_narrative}
 
 ## Instructions
 0. If an "Alignment status" section above marks the run as misaligned, ensure the polished narrative opens with the disclaimer verbatim and contains no causal claims about strategy design ("worked because of X", "failed because of Y"). Treat the listed alignment issues as facts; do not soften them.
 1. Check every substantive claim in the draft against the strategy, metrics, and trade evidence.
 {risk_model_check}
+1b. Verdict consistency: the WINNING/LOSING label ("Outcome label" above) is fixed deterministically — WINNING iff annualized return is at or above the 8% S&P-500 benchmark, LOSING below it. Do NOT let the draft reframe a WINNING strategy as a loss (or a LOSING one as a win) on the basis of Sharpe, drawdown, win rate, or the "Robustness caveats" section. Those are honest risk caveats that sit alongside the verdict, never a substitute for it — strike any sentence that calls a winning strategy a loss or otherwise contradicts the label.
 2. Remove or rewrite anything that is unsupported, vague, or contradicts the numbers.
 3. Produce a single polished narrative (5-10 sentences) that a risk committee could rely on.
 4. In verification_notes (2-4 sentences), state what you verified and any material corrections.
@@ -125,17 +126,34 @@ class AnalysisAgent:
         on_sub_phase: Any = None,
         is_winning: Optional[bool] = None,
         alignment_report: Optional[TradeAlignmentReport] = None,
+        robustness_caveats: Optional[str] = None,
     ) -> str:
         """Produce a polished analysis narrative via draft + self-review.
 
         Args:
             on_sub_phase: Optional callback ``(sub_phase: str) -> None`` for progress.
             is_winning: Authoritative verdict from the orchestrator. When None,
-                falls back to the legacy metric-only heuristic; callers that
-                resolve ``is_winning`` against the alignment loop / acceptance
-                gate / fallback anomalies (#529) must pass it explicitly so the
-                narrative template and ``outcome_label`` match the persisted
-                ``StrategyLabRecord.is_winning``.
+                falls back to a simplified return-only check
+                (``annualized_return_pct >= WINNING_THRESHOLD``). This is NOT
+                identical to the orchestrator's rule: the orchestrator also
+                applies the ``execution_succeeded and trades`` validity
+                precondition, which the agent cannot evaluate from a
+                ``BacktestResult`` alone (an invalid run with no trades but a
+                computed return would fall back to WINNING here while the
+                orchestrator labels it LOSING). Callers that know the execution
+                context (the orchestrator) MUST therefore pass the authoritative
+                ``is_winning`` so the narrative template and ``outcome_label``
+                stay consistent with the persisted ``StrategyLabRecord.is_winning``.
+                The label is purely the 8% S&P-500 benchmark verdict — robustness
+                diagnostics never change it; they surface as caveats only (see
+                ``robustness_caveats``).
+            robustness_caveats: Pre-rendered ``## Robustness caveats`` block to
+                inject into the draft + self-review prompts. When None, it is
+                derived from ``metrics`` via :func:`format_robustness_caveats`
+                (acceptance_reason + out-of-sample diagnostics), so the narrative
+                can cite walk-forward / DSR / regime concerns as honest caveats on
+                a winner without reframing it as a loss. Empty string when there
+                are no concerns, keeping clean-run prompts byte-identical.
             alignment_report: Latest ``TradeAlignmentReport`` from the alignment
                 loop. When ``aligned=False``, both the draft and self-review
                 prompts surface a disclaimer + the concrete alignment issues and
@@ -146,9 +164,14 @@ class AnalysisAgent:
         Returns the final narrative string.
         """
         if is_winning is None:
-            is_winning = metrics.annualized_return_pct > 8.0
+            is_winning = metrics.annualized_return_pct >= WINNING_THRESHOLD
         trades_summary = _format_simulated_trades_summary(trades)
         alignment_section = _format_alignment_status_section(alignment_report)
+        caveats_section = (
+            robustness_caveats
+            if robustness_caveats is not None
+            else format_robustness_caveats(metrics)
+        )
 
         # Phase 1: Draft
         template_file = "analysis_win.md" if is_winning else "analysis_lose.md"
@@ -173,6 +196,7 @@ class AnalysisAgent:
             volatility_pct=metrics.volatility_pct,
             simulated_trades_section=trades_summary,
             alignment_status_section=alignment_section,
+            robustness_caveats_section=caveats_section,
         )
 
         agent = Agent(
@@ -217,6 +241,7 @@ class AnalysisAgent:
             outcome_label="WINNING" if is_winning else "LOSING",
             simulated_trades_section=trades_summary,
             alignment_status_section=alignment_section,
+            robustness_caveats_section=caveats_section,
             draft_narrative=draft_narrative,
         )
 
@@ -375,6 +400,90 @@ def _format_alignment_status_section(report: Optional[TradeAlignmentReport]) -> 
         ]
     )
     return "\n".join(lines)
+
+
+# ``acceptance_reason`` values that carry no robustness caveat to surface.
+# Two kinds qualify:
+#   1. A clean robustness pass ("all four criteria met", a clean walk-forward
+#      fallback via ``_CLEAN_ACCEPTANCE_PREFIXES``, or no gates evaluated).
+#   2. The ``publication_disabled:`` *validity-precondition* reasons that mean
+#      no genuine run happened at all (execution failed, or it produced no
+#      trades). These are precondition failures, not out-of-sample/robustness
+#      diagnostics, so the "## Robustness caveats" block — whose header promises
+#      OOS / robustness findings — must not render them or it mislabels the cause.
+# Every *other* non-empty ``acceptance_reason`` was written by the verification
+# phase to record a real concern (a failing acceptance sub-criterion, a fallback
+# rejection, a conformance / realism / alignment / look-ahead veto, or
+# ``publication_disabled: walk_forward_enabled=False`` — a genuine "ran but was
+# not out-of-sample validated" caveat), so it still becomes a caveat.
+_CLEAN_ACCEPTANCE_REASONS = frozenset(
+    {
+        "all four criteria met",
+        "no acceptance gates evaluated",
+        "publication_disabled: no trades produced",
+        "publication_disabled: execution_failed",
+    }
+)
+_CLEAN_ACCEPTANCE_PREFIXES = ("walk_forward_fallback_passed",)
+
+
+def format_robustness_caveats(metrics: BacktestResult) -> str:
+    """Render the ``## Robustness caveats`` block injected into the analysis prompts.
+
+    The Strategy Lab's WINNING/LOSING label is fixed deterministically by
+    annualized return vs the 8% S&P-500 benchmark; the walk-forward acceptance
+    gate, alignment, conformance, and realism gates no longer decide it. This
+    block carries their recorded findings — ``metrics.acceptance_reason`` (the
+    curated cause string the verification phase stamps) plus the out-of-sample
+    diagnostics — so the narrative can cite them as honest risk caveats on a
+    winner rather than as grounds to reframe it as a loss.
+
+    Returns ``""`` when there are no robustness concerns to surface (a clean
+    acceptance pass, a clean fallback, a run with no recorded reason, or a
+    ``publication_disabled:`` validity-precondition reason such as execution
+    failure / no trades — those are not robustness diagnostics), so clean-run
+    prompts render byte-identical to before. Otherwise returns a
+    compact block beginning with ``"## Robustness caveats"`` and ending with a
+    single trailing newline (so the caller can splice it directly before the
+    next section).
+
+    Preconditions: ``metrics`` is a populated :class:`BacktestResult`.
+    Postconditions: result is ``""`` or a ``str`` starting with
+    ``"## Robustness caveats"`` and ending with ``"\\n"``; the function is pure
+    (no mutation, no I/O).
+    """
+    reason = (metrics.acceptance_reason or "").strip()
+    reason_is_concern = bool(reason) and (
+        reason not in _CLEAN_ACCEPTANCE_REASONS
+        and not any(reason.startswith(prefix) for prefix in _CLEAN_ACCEPTANCE_PREFIXES)
+    )
+    if not reason_is_concern:
+        return ""
+
+    lines: List[str] = [
+        "## Robustness caveats (source of truth — NOT grounds to change the verdict)",
+        "Out-of-sample / robustness diagnostics recorded by the verification gates. The "
+        "WINNING/LOSING label is fixed by annualized return vs the 8% S&P-500 benchmark; cite "
+        "these only as honest risk caveats, never to reframe a winning strategy as a loss.",
+        f"- Recorded verdict-gate finding: {reason}",
+    ]
+    diag: List[str] = []
+    if metrics.oos_sharpe is not None:
+        diag.append(f"OOS Sharpe {metrics.oos_sharpe:.2f}")
+        if metrics.deflated_sharpe is not None:
+            diag.append(f"deflated Sharpe {metrics.deflated_sharpe:.2f}")
+        if metrics.is_oos_degradation_pct is not None:
+            diag.append(f"IS→OOS Sharpe degradation {metrics.is_oos_degradation_pct:.1f}%")
+        if metrics.oos_trade_count is not None:
+            diag.append(f"OOS trades {metrics.oos_trade_count}")
+        regimes = metrics.regime_results or []
+        if regimes:
+            beats = sum(1 for regime in regimes if regime.get("beat_benchmark"))
+            diag.append(f"beat benchmark in {beats} of {len(regimes)} regime subwindows")
+    if diag:
+        lines.append("- Out-of-sample diagnostics: " + "; ".join(diag) + ".")
+
+    return "\n".join(lines) + "\n"
 
 
 def format_misalignment_prefix(report: Optional[TradeAlignmentReport]) -> str:
