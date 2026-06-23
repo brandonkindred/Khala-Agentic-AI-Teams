@@ -58,7 +58,8 @@ def test_zero_ttl_reads_through(monkeypatch):
 
 
 def test_unknown_key_asserts():
-    with pytest.raises(AssertionError):
+    # Precondition enforced with explicit ValueError (survives python -O).
+    with pytest.raises(ValueError):
         rc.get_runtime("not_a_key")
 
 

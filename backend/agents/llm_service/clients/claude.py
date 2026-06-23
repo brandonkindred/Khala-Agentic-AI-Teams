@@ -29,6 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import time
 from typing import Any, Callable, Dict, Optional
 
@@ -217,6 +218,10 @@ class ClaudeLLMClient(LLMClient):
         self.max_retries = max(0, int(max_retries))
         self.on_reasoning = on_reasoning
         self._client: Any = None
+        # Guards lazy creation of the underlying Anthropic client: the factory
+        # caches one ClaudeLLMClient per (model, key), so concurrent first-use
+        # across threads must not each build a separate SDK client.
+        self._client_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Client + helpers
@@ -236,10 +241,12 @@ class ClaudeLLMClient(LLMClient):
                 "No Claude API key configured. Set it in the LLM Provider settings, "
                 "or via LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY."
             )
-        anthropic = _import_anthropic()
-        self._client = anthropic.Anthropic(
-            api_key=self.api_key, timeout=self.timeout, max_retries=self.max_retries
-        )
+        with self._client_lock:
+            if self._client is None:
+                anthropic = _import_anthropic()
+                self._client = anthropic.Anthropic(
+                    api_key=self.api_key, timeout=self.timeout, max_retries=self.max_retries
+                )
         return self._client
 
     def get_max_context_tokens(self) -> int:
@@ -375,6 +382,11 @@ class ClaudeLLMClient(LLMClient):
             ) from e
         except anthropic.APIStatusError as e:
             status = getattr(e, "status_code", None)
+            # Defensive fallback: the real SDK raises RateLimitError (caught above)
+            # for a 429, so this branch only fires for a *base* APIStatusError that
+            # carries status 429 without being the RateLimitError subclass. Keep it
+            # so such a 429 still maps to the rate-limit policy rather than a
+            # permanent error (covered by test_plain_apistatuserror_429_maps_rate_limit).
             if status == 429:
                 raise LLMRateLimitError(
                     f"Claude rate limited (429): {e}",

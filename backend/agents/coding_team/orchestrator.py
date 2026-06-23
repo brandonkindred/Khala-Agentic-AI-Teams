@@ -364,7 +364,10 @@ def _read_repo_context(repo_path: Path) -> str:
                 if f.suffix in extensions and f.is_file():
                     eligible.append(f)
     except Exception:
-        pass
+        # Best-effort repo scan: a walk error (e.g. a permission-denied directory)
+        # must not abort context-building, but log it at debug so it is diagnosable
+        # rather than silently swallowed.
+        logger.debug("os.walk failed while building repo context", exc_info=True)
 
     parts: List[str] = []
     for f in sorted(eligible)[:80]:

@@ -129,7 +129,8 @@ def get_runtime(key: str) -> str:
         disabled, or the store read failed. All keys are loaded together in a
         single batched query at most once per TTL window. Never raises.
     """
-    assert key in ALL_KEYS, f"unknown runtime key: {key!r}"
+    if key not in ALL_KEYS:
+        raise ValueError(f"unknown runtime key: {key!r}")
     ttl = _ttl_seconds()
     with _lock:
         if _cache_ts == 0.0 or (time.monotonic() - _cache_ts) >= ttl:
