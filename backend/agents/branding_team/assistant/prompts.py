@@ -146,19 +146,7 @@ NOT your job. Do not output JSON or structured data of any kind. Write like a hu
 
 USER_TURN_TEMPLATE = """\
 Brand brief so far (for your reference only — do not echo this back as structured data):
-- company_name: {company_name}
-- company_description: {company_description}
-- target_audience: {target_audience}
-- values: {values}
-- differentiators: {differentiators}
-- desired_voice: {desired_voice}
-- existing_brand_material: {existing_brand_material}
-- color_inspiration: {color_inspiration}
-- color_palettes: {color_palettes}
-- selected_palette_index: {selected_palette_index}
-- visual_style: {visual_style}
-- typography_preference: {typography_preference}
-- interface_density: {interface_density}
+{brief_block}
 
 Conversation so far:
 {conversation_history}
@@ -209,19 +197,7 @@ Output the JSON object only. No leading or trailing text."""
 
 EXTRACTION_USER_TEMPLATE = """\
 Current brand brief (state before this turn):
-- company_name: {company_name}
-- company_description: {company_description}
-- target_audience: {target_audience}
-- values: {values}
-- differentiators: {differentiators}
-- desired_voice: {desired_voice}
-- existing_brand_material: {existing_brand_material}
-- color_inspiration: {color_inspiration}
-- color_palettes: {color_palettes}
-- selected_palette_index: {selected_palette_index}
-- visual_style: {visual_style}
-- typography_preference: {typography_preference}
-- interface_density: {interface_density}
+{brief_block}
 
 Conversation so far:
 {conversation_history}
