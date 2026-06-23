@@ -1,4 +1,18 @@
-"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by branding tests."""
+"""Shared dict-backed fake for ``shared_postgres.get_conn`` used by branding tests.
+
+Matching contract (read before changing store SQL):
+    ``_FakeCursor.execute`` normalizes each statement with
+    ``" ".join(sql.split()).lower()`` and dispatches by ``startswith`` / substring.
+    This is deliberately simple and therefore *coupled to the exact SQL the
+    stores emit* — a wording, column-order, or clause change in a store query
+    must be mirrored here or the cursor raises ``AssertionError("unexpected
+    SQL")``. The matcher is intentionally NOT a SQL parser; that fragility is
+    accepted because the authoritative correctness check is
+    ``tests/test_store_real_postgres.py`` (the ``real_postgres`` marker), which
+    runs the real queries against a live Postgres in the integration job. Keep
+    the two in sync: when you add/alter store SQL, update a handler here and add
+    real-Postgres coverage there.
+"""
 
 from __future__ import annotations
 
@@ -58,7 +72,11 @@ class _FakeCursor:
             return
 
         if norm.startswith("select data from branding_clients"):
-            self._last_fetch_all = [{"data": c["data"]} for c in self._db["clients"].values()]
+            rows = [{"data": c["data"]} for c in self._db["clients"].values()]
+            if "limit" in norm:
+                limit, offset = params[0], params[1]
+                rows = rows[offset : offset + limit]
+            self._last_fetch_all = rows
             return
 
         if norm.startswith("select 1 from branding_clients where id"):
@@ -86,24 +104,69 @@ class _FakeCursor:
                 self._last_fetch_one = None
             return
 
+        if norm.startswith("select data->>'version'") and "from branding_brands" in norm:
+            brand_id, client_id = params
+            row = self._db["brands"].get(brand_id)
+            if row and row["client_id"] == client_id:
+                data = row["data"]
+                version = data.get("version", 0)
+                self._last_fetch_one = {
+                    "version": None if version is None else str(version),
+                    "history": data.get("history", []),
+                }
+            else:
+                self._last_fetch_one = None
+            return
+
+        if norm.startswith("select 1 from branding_brands where id"):
+            (brand_id,) = params
+            self._last_fetch_one = (1,) if brand_id in self._db["brands"] else None
+            return
+
+        if norm.startswith("select client_id, data from branding_brands where id"):
+            (brand_id,) = params
+            row = self._db["brands"].get(brand_id)
+            self._last_fetch_one = (
+                {"client_id": row["client_id"], "data": row["data"]} if row else None
+            )
+            return
+
+        if norm.startswith("select id, data from branding_brands where id = any"):
+            (wanted,) = params
+            wanted_set = set(wanted)
+            self._last_fetch_all = [
+                {"id": b["id"], "data": b["data"]}
+                for b in self._db["brands"].values()
+                if b["id"] in wanted_set
+            ]
+            return
+
         if norm.startswith("select data from branding_brands where client_id"):
-            (client_id,) = params
+            client_id = params[0]
             rows = [
                 {"data": b["data"]}
                 for b in self._db["brands"].values()
                 if b["client_id"] == client_id
             ]
+            if "limit" in norm:
+                limit, offset = params[1], params[2]
+                rows = rows[offset : offset + limit]
             self._last_fetch_all = rows
             return
 
-        if norm.startswith("update branding_brands set data"):
-            data, brand_id, client_id = params
+        if norm.startswith("update branding_brands set data = data ||"):
+            patch, brand_id, client_id = params
+            patch = _unwrap_json(patch)
             row = self._db["brands"].get(brand_id)
             if row and row["client_id"] == client_id:
-                row["data"] = _unwrap_json(data)
+                # Emulate Postgres ``jsonb || jsonb`` shallow merge.
+                row["data"] = {**row["data"], **patch}
                 self.rowcount = 1
+                if "returning data" in norm:
+                    self._last_fetch_one = {"data": row["data"]}
             else:
                 self.rowcount = 0
+                self._last_fetch_one = None
             return
 
         # -- conversations ------------------------------------------------
@@ -118,6 +181,72 @@ class _FakeCursor:
                 "updated_at": updated_at,
             }
             self.rowcount = 1
+            return
+
+        if (
+            "from branding_conversations c" in norm
+            and "where c.conversation_id" in norm
+            and "order by m.id" in norm
+        ):
+            (cid,) = params
+            conv = self._db["conversations"].get(cid)
+            if conv is None:
+                self._last_fetch_all = []
+                return
+            msgs = [m for m in self._db["conv_messages"] if m["conversation_id"] == cid]
+            msgs.sort(key=lambda m: m["id"])
+            base = {
+                "brand_id": conv["brand_id"],
+                "mission_json": conv["mission_json"],
+                "latest_output_json": conv["latest_output_json"],
+            }
+            if not msgs:
+                self._last_fetch_all = [{**base, "role": None, "content": None, "timestamp": None}]
+            else:
+                self._last_fetch_all = [
+                    {
+                        **base,
+                        "role": m["role"],
+                        "content": m["content"],
+                        "timestamp": m["timestamp"],
+                    }
+                    for m in msgs
+                ]
+            return
+
+        if (
+            "from branding_conversations c" in norm
+            and "where c.brand_id" in norm
+            and "order by m.id" in norm
+        ):
+            (brand_id,) = params
+            conv = next(
+                (c for c in self._db["conversations"].values() if c["brand_id"] == brand_id),
+                None,
+            )
+            if conv is None:
+                self._last_fetch_all = []
+                return
+            cid = conv["conversation_id"]
+            msgs = [m for m in self._db["conv_messages"] if m["conversation_id"] == cid]
+            msgs.sort(key=lambda m: m["id"])
+            base = {
+                "conversation_id": cid,
+                "mission_json": conv["mission_json"],
+                "latest_output_json": conv["latest_output_json"],
+            }
+            if not msgs:
+                self._last_fetch_all = [{**base, "role": None, "content": None, "timestamp": None}]
+            else:
+                self._last_fetch_all = [
+                    {
+                        **base,
+                        "role": m["role"],
+                        "content": m["content"],
+                        "timestamp": m["timestamp"],
+                    }
+                    for m in msgs
+                ]
             return
 
         if norm.startswith(
@@ -148,6 +277,28 @@ class _FakeCursor:
                 for m in self._db["conv_messages"]
                 if m["conversation_id"] == cid
             ]
+            return
+
+        if norm.startswith("with conv as") and "insert into branding_conv_messages" in norm:
+            ts, cid, role, content, ts2 = params
+            conv = self._db["conversations"].get(cid)
+            if conv is None:
+                self._last_fetch_one = None
+                self.rowcount = 0
+                return
+            conv["updated_at"] = ts
+            new_id = next(self._ids)
+            self._db["conv_messages"].append(
+                {
+                    "id": new_id,
+                    "conversation_id": cid,
+                    "role": role,
+                    "content": content,
+                    "timestamp": ts2,
+                }
+            )
+            self._last_fetch_one = (new_id,)
+            self.rowcount = 1
             return
 
         if norm.startswith("insert into branding_conv_messages"):
