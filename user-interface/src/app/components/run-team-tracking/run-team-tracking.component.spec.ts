@@ -230,7 +230,7 @@ describe('RunTeamTrackingComponent derived-value memoization', () => {
   const createComponent = (): RunTeamTrackingComponent => {
     const apiSpy = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }, changeDetectorRefStub],
     });
     return TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
   };
