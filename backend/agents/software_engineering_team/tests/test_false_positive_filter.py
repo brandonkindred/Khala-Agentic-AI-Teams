@@ -479,8 +479,13 @@ def test_filter_keeps_on_low_confidence_false() -> None:
     assert out == issues
 
 
-def test_filter_groups_by_file_and_removes_across_groups() -> None:
-    """Findings are verified per file group; a confirmed drop in one group leaves another's real finding intact."""
+@pytest.mark.parametrize("parallelism", ["1", "4"])
+def test_filter_groups_by_file_and_removes_across_groups(monkeypatch, parallelism) -> None:
+    """Findings are verified per file group; a confirmed drop in one group leaves
+    another's real finding intact. Run both sequentially (parallelism=1) and
+    fanned out (parallelism=4): the per-group fan-out must not change the merged
+    result, which stays ``[b]`` regardless of group completion order."""
+    monkeypatch.setenv("CODE_REVIEW_MAP_PARALLELISM", parallelism)
     a = _issue(file_path="a.py", description="a-fp")
     b = _issue(file_path="b.py", description="b-real")
 

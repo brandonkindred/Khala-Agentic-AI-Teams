@@ -240,8 +240,11 @@ excerpts repeated in every review map call. Defaults `16000` / `4000` / `8000`,
 floors `1000` / `500` / `500`.
 
 ### CODE_REVIEW_MAP_PARALLELISM
-Max concurrent review map calls per review run. Default `4`, floor `1`
-(`1` reviews chunks sequentially). Results merge in chunk order regardless.
+Max concurrent review LLM calls per review run, shared by both phases: the map
+phase (chunk reviews) and the later false-positive verification phase (one call
+per cited file). The two phases run sequentially, so this is a single budget,
+not two. Default `4`, floor `1` (`1` runs both phases' calls sequentially).
+Results merge in deterministic order regardless of completion order.
 
 ### CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS
 A failing chunk smaller than twice this is retried once as-is instead of being

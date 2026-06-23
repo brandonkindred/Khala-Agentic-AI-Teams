@@ -36,6 +36,7 @@ from __future__ import annotations
 import json
 import logging
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -44,7 +45,10 @@ from strands.models.model import Model as _StrandsModel
 
 from llm_service import LLMClient, get_strands_model
 from shared_env import env_flag_enabled
-from software_engineering_team.shared.context_sizing import compute_code_review_map_chunk_chars
+from software_engineering_team.shared.context_sizing import (
+    compute_code_review_map_chunk_chars,
+    parse_env_int,
+)
 
 from .models import CodeReviewInput, CodeReviewIssue
 from .prompts import FALSE_POSITIVE_VERIFY_PROMPT
@@ -70,6 +74,17 @@ _SEARCH_MATCH_LIMIT = 60
 # bound; this keeps an unbounded task/criteria field from dominating the prompt
 # or overflowing context. Normal task text is far below this.
 _CONTEXT_FIELD_CHARS = 4_000
+
+# How many per-file verification LLM calls may run at once. Verification reuses
+# the map phase's knob: the two phases run one after the other (all chunks
+# reviewed, then findings verified), so they share a single concurrency budget
+# rather than introducing a second one to tune. Floor 1 = fully sequential.
+_DEFAULT_VERIFY_PARALLELISM = 4
+
+
+def _verify_parallelism() -> int:
+    """Concurrency cap for per-group verification calls (floor 1)."""
+    return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", _DEFAULT_VERIFY_PARALLELISM, 1)
 
 
 @dataclass
@@ -624,10 +639,17 @@ def _verify_and_filter(
             continue
         groups.setdefault(resolved, []).append(issue)
 
-    removed: set[int] = set()
-    for file_path, group in groups.items():
+    # Each group is an independent verification LLM call over the same read-only
+    # index, so they fan out: with N cited files the wall-clock is the slowest
+    # single call, not the sum. A per-group failure keeps that group's findings
+    # (best-effort), exactly as the sequential path did, and the merge below
+    # consumes results in submission order so the outcome stays deterministic.
+    group_items = list(groups.items())
+
+    def _verify_one(item: Tuple[str, List[CodeReviewIssue]]) -> Dict[int, _Verdict]:
+        file_path, group = item
         try:
-            verdicts = _verify_group(model, index, file_path, group, input_data, max_inline_chars)
+            return _verify_group(model, index, file_path, group, input_data, max_inline_chars)
         except Exception as exc:  # noqa: BLE001 - best-effort; a failure must keep findings, not drop them
             logger.warning(
                 "FalsePositiveFilter: verification failed for %s (%s: %s); keeping its findings",
@@ -635,7 +657,17 @@ def _verify_and_filter(
                 type(exc).__name__,
                 exc,
             )
-            continue
+            return {}
+
+    workers = min(_verify_parallelism(), len(group_items))
+    if workers <= 1:
+        group_verdicts = [_verify_one(item) for item in group_items]
+    else:
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            group_verdicts = list(executor.map(_verify_one, group_items))
+
+    removed: set[int] = set()
+    for (_file_path, group), verdicts in zip(group_items, group_verdicts):
         for idx, verdict in verdicts.items():
             if verdict.is_false_positive:
                 issue = group[idx]
