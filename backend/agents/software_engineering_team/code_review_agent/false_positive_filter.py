@@ -135,6 +135,19 @@ class CodebaseIndex:
                     files[path] = content
         return cls(files=files, existing_codebase=input_data.existing_codebase or "")
 
+    def _readable_sources(self) -> List[Tuple[str, str]]:
+        """All ``(path, content)`` the verifier can read, existing-codebase last.
+
+        The submission's own files in insertion order, then the existing-codebase
+        excerpt under its ``<existing codebase>`` pseudo-path when a non-blank one
+        was provided. The single source of truth for :meth:`list_files` and
+        :meth:`search`, so both expose exactly the same set of readable sources.
+        """
+        sources = list(self.files.items())
+        if self.existing_codebase.strip():
+            sources.append((self.EXISTING_CODEBASE_PATH, self.existing_codebase))
+        return sources
+
     def list_files(self) -> List[str]:
         """Return every readable path, the existing-codebase pseudo-path last.
 
@@ -143,10 +156,7 @@ class CodebaseIndex:
               ``<existing codebase>`` pseudo-path is appended only when a
               non-blank existing-codebase excerpt was provided.
         """
-        paths = list(self.files.keys())
-        if self.existing_codebase.strip():
-            paths.append(self.EXISTING_CODEBASE_PATH)
-        return paths
+        return [path for path, _ in self._readable_sources()]
 
     def _suffix_matches(self, key: str) -> List[str]:
         """File keys ``key`` selects by its final ``/``-segment (a bare name).
@@ -238,10 +248,7 @@ class CodebaseIndex:
         if not needle:
             return []
         results: List[Tuple[str, int, str]] = []
-        sources = list(self.files.items())
-        if self.existing_codebase.strip():
-            sources.append((self.EXISTING_CODEBASE_PATH, self.existing_codebase))
-        for path, content in sources:
+        for path, content in self._readable_sources():
             for lineno, line in enumerate(content.splitlines(), start=1):
                 if needle in line.lower():
                     results.append((path, lineno, line.rstrip()))
