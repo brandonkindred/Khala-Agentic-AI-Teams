@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple
 from uuid import uuid4
 
+from psycopg import Cursor
 from psycopg.rows import dict_row
 from psycopg.types.json import Json
 
@@ -51,7 +52,7 @@ def _validate_pagination(limit: Optional[int], offset: int) -> None:
         raise ValueError("offset must be >= 0")
 
 
-def _apply_brand_patch(cur, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
+def _apply_brand_patch(cur: Cursor, brand_id: str, client_id: str, patch: dict) -> Optional[Brand]:
     """Shallow-merge *patch* into a brand's JSONB and return the updated Brand.
 
     The single server-side ``data || patch ... RETURNING data`` write that
@@ -195,15 +196,16 @@ class BrandingStore:
         return row["client_id"], Brand.model_validate(row["data"])
 
     @timed_query(store=_STORE, op="get_brand_names")
-    def get_brand_names(self, brand_ids: List[str]) -> Dict[str, str]:
+    def get_brand_names(self, brand_ids: List[str]) -> Dict[str, Optional[str]]:
         """Return a ``{brand_id: name}`` map for the requested ids only.
 
         Preconditions:
             ``brand_ids`` is a list of brand id strings.
         Postconditions:
             The result contains an entry for every requested id that exists;
-            unknown ids are simply absent. Empty input yields an empty map
-            with no query issued.
+            unknown ids are simply absent. A value may be ``None`` when the
+            stored JSONB document has no ``name`` key. Empty input yields an
+            empty map with no query issued.
         """
         unique_ids = list({bid for bid in brand_ids if bid})
         if not unique_ids:

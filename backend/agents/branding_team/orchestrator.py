@@ -17,7 +17,7 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, List, Optional
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from .agents import BrandComplianceAgent
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
@@ -291,12 +291,15 @@ class BrandingTeamOrchestrator:
         return model_class()
 
 
-def _collect_message_text(message) -> str:
+def _collect_message_text(message: dict) -> str:
     """Join all text blocks of a Strands agent ``message`` into one string.
 
     Uses ``"".join`` over collected fragments rather than repeated ``+=`` so
     assembly is linear, not quadratic, in the number/size of content blocks.
 
+    Preconditions:
+        ``message`` is a Strands message mapping (``.get("content")`` yields a
+        list of content blocks). Passing a non-mapping is a caller bug.
     Postconditions:
         Returns the concatenation of every block's text (dict ``text`` key or
         ``.text`` attribute); returns ``""`` when there is no text content.
@@ -310,7 +313,7 @@ def _collect_message_text(message) -> str:
     return "".join(parts)
 
 
-def _parse_model_from_text(text: str, model_class):
+def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
     """Best-effort parse of ``text`` into ``model_class``; None on failure.
 
     Tries the whole string first, then falls back to the outermost

@@ -103,6 +103,12 @@ async def request_market_research_async(
     base = _base_url()
     if not base:
         return None
+    # The doubled ``market-research`` segment below is intentional, not a typo:
+    # the Unified API mounts the Market Research team's app under the prefix
+    # ``/api/market-research`` (unified_api/config.py), and that app's own routes
+    # are ``/market-research/run`` and ``/market-research/status/{job_id}``
+    # (market_research_team/api/main.py). The full live path is therefore
+    # ``/api/market-research/market-research/run``.
     root = f"{base.rstrip('/')}/api/market-research"
     payload = _build_payload(mission)
     request_timeout = _request_timeout_s()

@@ -8,12 +8,15 @@ Provides:
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Any, Literal, Optional
+from typing import TYPE_CHECKING, Any, Literal, Optional
 
 from strands import Agent
 
 from branding_team.models import BrandPhase
 from llm_service import get_strands_model
+
+if TYPE_CHECKING:
+    from llm_service import LLMClientModel
 
 # ---------------------------------------------------------------------------
 # Agent factory
@@ -33,7 +36,7 @@ OutputMode = Literal["json", "text"]
 # ``maxsize`` bounds the cache: ``OutputMode`` is a fixed two-value set
 # ("json"/"text"), so this never holds more than a couple of entries.
 @lru_cache(maxsize=4)
-def _branding_model(output_mode: OutputMode) -> Any:
+def _branding_model(output_mode: OutputMode) -> "LLMClientModel":
     return get_strands_model("branding", response_format=output_mode)
 
 

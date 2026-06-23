@@ -799,6 +799,9 @@ async def request_market_research_for_brand(client_id: str, brand_id: str) -> Co
 
         snapshot = await request_market_research_async(brand.mission)
     except Exception:
+        # Surface the real cause (transport error, bad response, timeout) in the
+        # logs; the client still only sees an opaque 503.
+        logger.exception("Market research request failed for brand %s", brand_id)
         raise HTTPException(status_code=503, detail="Market research service unavailable")
     if not snapshot:
         raise HTTPException(status_code=503, detail="Market research service unavailable")
@@ -1097,10 +1100,24 @@ def _auto_create_brand_from_conversation(
     )
     if not brand:
         return None
-    conversation_store.set_brand(conversation_id, brand.id)
-    branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
-    if output:
-        branding_store.append_brand_version(client_id, brand.id, output)
+    # The brand now exists. If any linkage step below fails, the brand is
+    # orphaned (created but not attached). Log a warning that names the brand so
+    # the inconsistency is recoverable, then re-raise — the steps are not atomic
+    # (see the Note above), so we surface the failure rather than hide it.
+    try:
+        conversation_store.set_brand(conversation_id, brand.id)
+        branding_store.update_brand(client_id, brand.id, conversation_id=conversation_id)
+        if output:
+            branding_store.append_brand_version(client_id, brand.id, output)
+    except Exception:
+        logger.warning(
+            "Brand %s was created but linking it to conversation %s failed; "
+            "the brand may be orphaned",
+            brand.id,
+            conversation_id,
+            exc_info=True,
+        )
+        raise
     logger.info("Auto-created brand %s from conversation %s", brand.id, conversation_id)
     return brand.id
 

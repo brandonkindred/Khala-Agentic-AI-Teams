@@ -50,8 +50,10 @@ def _coerce_mission(value: Any) -> Dict[str, Any]:
 def _loads_lenient(raw: str) -> Optional[Dict[str, Any]]:
     """Parse an LLM JSON object, tolerating markdown fences / surrounding prose.
 
-    Returns the dict, or None when nothing parseable is found. Shared by the
-    two-stage extractor and the single-call parser.
+    Returns the dict, or None when nothing parseable is found. The leading-fence
+    regex only strips a fence at the start of the stripped text; replies that
+    wrap the JSON in prose fall through to the outermost ``{ ... }`` slice below,
+    so both shapes are handled.
     """
     text = (raw or "").strip()
     if not text:
