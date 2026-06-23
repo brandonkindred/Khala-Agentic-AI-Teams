@@ -18,7 +18,7 @@ const buildStatus = (overrides: Partial<JobStatusResponse> = {}): JobStatusRespo
   ...overrides,
 });
 
-describe('RunTeamTrackingComponent (extra coverage)', () => {
+describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', () => {
   let api: ApiStub;
   let fixture: ComponentFixture<RunTeamTrackingComponent>;
   let component: RunTeamTrackingComponent;

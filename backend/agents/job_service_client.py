@@ -129,7 +129,16 @@ class JobServiceClient:
         max_retries: int = 3,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Execute an HTTP request with retry on transient errors."""
+        """Execute an HTTP request with retry on transient errors.
+
+        Preconditions:
+            - ``timeout`` is a positive, finite number of seconds (passed
+              through to :func:`get_pooled_client`, which asserts this).
+            - ``max_retries`` is non-negative.
+        Postconditions:
+            - Returns a successful ``httpx.Response`` (2xx) or raises the last
+              transient error / HTTP status error after exhausting retries.
+        """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
         total_attempts = max_retries + 1

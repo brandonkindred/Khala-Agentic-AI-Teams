@@ -20,6 +20,7 @@ Invariants:
 from __future__ import annotations
 
 import atexit
+import math
 import threading
 
 import httpx
@@ -42,6 +43,7 @@ def _bucket(timeout: float) -> float:
         - Returns a float usable as a dict key; equal inputs map to equal keys.
     """
     assert timeout > 0, f"timeout must be positive, got {timeout!r}"
+    assert math.isfinite(timeout), f"timeout must be finite, got {timeout!r}"
     # Round to the nearest 0.5s so callers passing 30.0 vs 30.0001 share a client
     # while genuinely different timeouts (5s vs 30s) stay isolated.
     return round(float(timeout) * 2) / 2
@@ -56,7 +58,7 @@ def get_pooled_client(timeout: float = 30.0) -> httpx.Client:
     :func:`close_pool` at shutdown.
 
     Preconditions:
-        - ``timeout`` is a positive number of seconds.
+        - ``timeout`` is a positive, finite number of seconds.
     Postconditions:
         - Returns a live (non-closed) ``httpx.Client`` configured with
           ``DEFAULT_LIMITS`` and the requested timeout.

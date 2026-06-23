@@ -82,6 +82,16 @@ def test_invalid_timeout_rejected():
         get_pooled_client(-5)
 
 
+def test_non_finite_timeout_rejected():
+    """A non-finite timeout passes ``> 0`` but violates the documented
+    ``finite`` precondition, so it must be rejected rather than producing an
+    ``inf`` bucket key."""
+    with pytest.raises(AssertionError):
+        get_pooled_client(float("inf"))
+    with pytest.raises(AssertionError):
+        get_pooled_client(float("nan"))
+
+
 def test_close_pool_swallows_client_close_errors(monkeypatch):
     """``close_pool`` is best-effort teardown — a failing ``client.close()``
     must not propagate."""
