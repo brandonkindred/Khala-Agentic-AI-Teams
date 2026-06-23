@@ -66,7 +66,8 @@ back‑loops.
 *different* agent after advancing is an explicit **in‑context** action, not backward navigation:
 
 - **Stage 2** and **Stage 3** each expose a **`[ Browse agents ]`** affordance that opens the Stage‑1 catalog
-  (browse + filter + inspect drawer, the same `agent-catalog` component) in a slide‑out. Selecting another agent
+  (browse + filter + inspect drawer, the same `agent-catalog` component) in a slide‑out. (The `▾` on the wireframe
+  `Browse` buttons denotes this **slide‑out catalog panel**, not a traditional dropdown menu.) Selecting another agent
   there updates `registryAgentId` in the handoff state **without** resetting later‑stage work.
 - **What "without resetting later‑stage work" means.** It refers to the *handoff‑state slots* — the Stage‑3 roster
   composition and Stage‑4 team/persona selection are preserved. It does **not** mean the *current* stage keeps stale
@@ -86,7 +87,10 @@ back‑loops.
   registry manifest to open in Stage 2.
 
 The stepper stays forward‑only (no Stage‑1 stepper click, no confirmation dialog needed); the catalog and the
-"test this agent" jump are simply reachable as in‑context actions from the later stages.
+"test this agent" jump are simply reachable as in‑context actions from the later stages. Mechanically, these explicit
+back‑loop actions (`Test ▸`, "fix an agent", "iterate roster") call a Studio‑shell method — e.g. `navigateToStage(n)`
+— that programmatically switches the active stage; this is **distinct** from clicking a stepper indicator, which
+stays inert for backward moves.
 
 ### 2.2 Navigation changes (`user-interface/src/app/models/navigation.model.ts`, `agentic-ai` group)
 
@@ -283,21 +287,26 @@ team/process, and Stage 4 re‑seeds the same persona target, so the user only r
 to change. (A "fix an agent" jump that swaps `registryAgentId` likewise leaves `teamId`/`processId`/`personaId`
 intact — only the agent in focus changes.)
 
+**"Fix an agent" when no registry agent is in focus.** A team composed entirely of *generated* agents reaches Stage 4
+with `registryAgentId` **null** — there's nothing to open in the sandbox‑based Stage 2. In that case the **"fix an
+agent"** button is **disabled** with a tooltip *"No registry agent in focus — use Browse agents to pick one"*;
+clicking the offered `Browse agents` overlay selects a registry agent (sets `registryAgentId`) and then enters Stage 2.
+It never navigates to a broken Stage 2 with a null agent.
+
 ### 3.5 Drafts & session resume (server‑side)
 
 The Studio header carries two controls — **`[ Save draft ]`** and **`[ Load draft ▾ ]`** — that let a user **save and
 resume** an in‑progress journey across reloads and devices. **Persistence is server‑side** (chosen over client‑only
 so drafts survive device changes and match the persisted nature of teams/personas):
 
-- **Save** — `[ Save draft ]` issues `POST /api/agent-studio/drafts` with the current handoff state
+- **Save** — `[ Save draft ]` opens a small **name popover** (pre‑filled with a timestamp default, editable) and on confirm issues `POST /api/agent-studio/drafts` with the current handoff state
   (`registryAgentId`, `teamId`, `processId`, `personaId`) **plus** any partial work the stages hold (e.g. Stage‑2
-  test inputs, Stage‑3 roster composition not yet committed to a team). Returns a `draft_id` (+ name/updated_at).
-  Re‑saving updates in place.
-- **Load** — `[ Load draft ▾ ]` opens a dropdown listing the current user's drafts via `GET /api/agent-studio/drafts`;
-  selecting one **triggers the conflict check in §2.4** (save‑first / discard prompt if the local cache holds unsaved
-  edits), then hydrates `AgentStudioStateService` and jumps the stepper to the furthest reachable stage. (This is the
-  UI trigger for that conflict flow.)
-- **Scope** — drafts are **scoped to the authenticated user**; one user cannot see another's drafts.
+  test inputs, Stage‑3 roster composition not yet committed to a team). Returns `{ draft_id, name, updated_at }`.
+  Re‑saving the same draft updates it in place.
+- **List** — `GET /api/agent-studio/drafts` returns **lightweight summaries** (`{ draft_id, name, updated_at }`, **not** full payloads) to populate the header dropdown — keeping the list cheap regardless of draft count.
+- **Load** — selecting a draft from `[ Load draft ▾ ]` fetches its full payload via **`GET /api/agent-studio/drafts/{draft_id}`** (the only endpoint that returns the complete `AgentStudioDraft`), then **triggers the conflict check in §2.4** (save‑first / discard prompt if the local cache holds unsaved edits), hydrates `AgentStudioStateService`, and jumps the stepper to the furthest reachable stage.
+- **Name / rename / delete** — the name is set in the Save popover and editable later via a **pencil** affordance beside the loaded draft's name in the header (`PATCH /api/agent-studio/drafts/{draft_id}`); the Load dropdown offers a per‑row **⋯ → Delete** (`DELETE /api/agent-studio/drafts/{draft_id}`). Rename + delete are **in scope** for the initial release (the store supports them trivially).
+- **Scope** — drafts are **scoped to the authenticated user**; one user cannot list or load another's drafts.
 
 **Draft payload schema** (the request/response body for `POST`/`GET …/drafts`, so frontend and backend agree):
 
@@ -342,8 +351,9 @@ underlying registry manifest id (backend column `manifest_id`, §5 item 3); they
 their distinct roles — "the agent in focus" vs. "this entry's own source link" — and to mirror the backend column.
 
 This makes draft persistence a **must‑have backend touchpoint** (see §5, item 4 — Studio drafts). The frontend `AgentStudioStateService`
-is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
-auto‑syncs, but the API is the source of truth.
+is the single client owner of draft load/save. **Saving is manual** — the `[ Save draft ]` button is the only thing
+that writes to the API; there is **no background auto‑save**. The optional in‑session `localStorage` cache exists only
+to guard unsaved edits against an accidental tab close/reload between manual saves; the API remains the source of truth.
 
 ### 3.6 Loading, empty, and error states
 
@@ -433,10 +443,10 @@ sequenceDiagram
 ```
 
 **Must‑have:**
-1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`.
+1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`. **`process_id` note:** the run‑create call sends `{process_id, initial_input}` (sequence diagram above) so the chosen process is run. If `POST …/test-pipeline/runs` does not already accept `process_id`, this is a **parameter addition to that existing endpoint** (still *not* a new endpoint) — confirm against the current handler and extend if missing.
 2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams via the cross‑service call **`GET /api/agentic-team-provisioning/teams`** (the unified‑API mount path). **The `list_testable_teams` aggregator applies the "≥1 `complete` process" filter server‑side** (it already composes the response the dropdown consumes), so the frontend receives a ready‑to‑use list and does no filtering. (If the provisioning `teams` endpoint later grows a `process_status` query param, `list_testable_teams` should pass it to avoid over‑fetching, but the filter contract stays server‑side either way.) Without this the persona dropdown is empty.
-3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`. **Authorization:** both endpoints mutate a team's roster, so they **must** enforce the same authz as the existing team‑mutation routes — restricted to the team's **Owner/Admin** (reuse the provisioning service's existing team‑permission dependency/middleware; do not ship these unguarded).
-4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. **Authorization:** drafts are **per‑user** — every read/write is scoped to the authenticated user id, and one user can never list or load another's drafts. Required because the header `Save draft` / `Load draft` UX is non‑functional without it.
+3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` and `DELETE …/teams/{id}/agents/{agent_name}`. The `from-registry` projection maps the `AgentManifest` into the roster fields with this explicit mapping (so `roster_validation.py` needs no change): **`manifest.tags → skills`**, **`manifest.tools → tools`**, **`manifest.summary → role`**, plus `manifest_id = manifest.id` and `source = "registry"` (`capabilities` left empty unless the manifest carries an equivalent). This mapping must be agreed before implementation; it's the contract `roster_validation.py` reads. **Authorization:** both endpoints mutate a team's roster, so they **must** enforce the same authz as the existing team‑mutation routes — restricted to the team's **Owner/Admin** (reuse the provisioning service's existing team‑permission dependency/middleware; do not ship these unguarded).
+4. **Studio drafts — new route group** (see §3.5): **`POST /api/agent-studio/drafts`** (create/update), **`GET /api/agent-studio/drafts`** (list **summaries** — `{draft_id,name,updated_at}`), **`GET /api/agent-studio/drafts/{draft_id}`** (full `AgentStudioDraft`), **`PATCH …/{draft_id}`** (rename), **`DELETE …/{draft_id}`**. User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices, backed by an `agent_studio_drafts` store keyed by user id; no dependency on the other touchpoints. **Authorization:** drafts are **per‑user** — every read/write is scoped to the authenticated user id, and one user can never list, load, rename, or delete another's drafts. Required because the header `Save draft` / `Load draft` UX is non‑functional without it.
 
 **Recommended (not required for the UX to ship, but should land alongside it):**
 
