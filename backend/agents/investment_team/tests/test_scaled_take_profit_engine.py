@@ -62,18 +62,21 @@ class _MockBar:
 
 
 def _ladder() -> ScaledTakeProfitRule:
+    """A two-rung ladder for tests: 50% at +5%, 30% at +10% (sums to 0.8)."""
     return ScaledTakeProfitRule(
         levels=[{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}]
     )
 
 
 def _dispatcher(*, exit_rules) -> _EngineExitDispatcher:
+    """An ``_EngineExitDispatcher`` over ``exit_rules`` with empty bindings."""
     return _EngineExitDispatcher(exit_rules=exit_rules, engine_exit_bindings={})
 
 
 def _portfolio_with(
     *, side: OrderSide, qty: float, entry_price: float, entry_order_id: str = "o1"
 ) -> Portfolio:
+    """A portfolio holding a single open ``AAA`` position (``original_qty == qty``)."""
     p = Portfolio(initial_capital=1_000_000.0)
     p.positions["AAA"] = Position(
         symbol="AAA",
@@ -93,6 +96,7 @@ def _portfolio_with(
 def _tracker(
     side: OrderSide, entry_price: float = 100.0, entry_order_id: str = "o1"
 ) -> Dict[str, _TrackedPosition]:
+    """A position-tracker map with one settled ``AAA`` tracker (watermarks at entry)."""
     return {
         "AAA": _TrackedPosition(
             side=side,
@@ -106,6 +110,7 @@ def _tracker(
 
 
 def _bar(**kw) -> _MockBar:
+    """A mock bar for ``AAA`` (flat at 100 unless overridden via kwargs)."""
     defaults = {
         "symbol": "AAA",
         "timestamp": "2024-01-10T00:00:00",
@@ -118,7 +123,7 @@ def _bar(**kw) -> _MockBar:
 
 
 def test_cursor_advance_rejects_out_of_order_rung() -> None:
-    # advance() enforces fire-in-cursor-order with an explicit raise (holds under -O).
+    """advance() enforces fire-in-cursor-order with an explicit raise (holds under -O)."""
     cursor = _ScaledLadderCursor()
     cursor.advance(0, 0)  # rung 0 fires → cursor at 1
     assert cursor.mapping == {0: 1}
@@ -131,8 +136,8 @@ def test_cursor_advance_rejects_out_of_order_rung() -> None:
 
 
 def test_cursor_mapping_is_read_only_but_live() -> None:
-    # mapping is a read-only view: mutation raises, but it still reflects a
-    # later advance() (a live proxy, not a snapshot copy).
+    """mapping is a read-only view: mutation raises, but it still reflects a later
+    advance() (a live proxy, not a snapshot copy)."""
     cursor = _ScaledLadderCursor()
     view = cursor.mapping
     with pytest.raises(TypeError):
@@ -142,7 +147,7 @@ def test_cursor_mapping_is_read_only_but_live() -> None:
 
 
 def test_tracked_position_caches_side_conversions() -> None:
-    # side_str (evaluator input) and close_side (engine close) are derived once.
+    """side_str (evaluator input) and close_side (engine close) are derived once."""
     long_t = _tracker(OrderSide.LONG)["AAA"]
     short_t = _tracker(OrderSide.SHORT)["AAA"]
     assert long_t.side_str == "long" and long_t.close_side == OrderSide.SHORT
@@ -150,7 +155,7 @@ def test_tracked_position_caches_side_conversions() -> None:
 
 
 def test_snapshot_reuses_one_view_and_reflects_updates() -> None:
-    # The hot path reuses a single evaluator view, mutated in place each bar.
+    """The hot path reuses a single evaluator view, mutated in place each bar."""
     tracked = _tracker(OrderSide.LONG, entry_price=100.0)["AAA"]
     first = tracked.snapshot("AAA", 50.0)
     assert (first.symbol, first.side, first.qty, first.entry_price) == ("AAA", "long", 50.0, 100.0)
@@ -161,9 +166,9 @@ def test_snapshot_reuses_one_view_and_reflects_updates() -> None:
 
 
 def test_snapshot_reuse_refreshes_entry_price_after_scale_in() -> None:
-    # entry_price is NOT fixed: a scale-in refreshes the tracker's weighted-average
-    # entry in place (see _update_position_tracker). The reused view must reflect it,
-    # else take-profit / stop / scaled-rung targets evaluate against a stale entry.
+    """entry_price is NOT fixed: a scale-in refreshes the tracker's weighted-average
+    entry in place (see _update_position_tracker). The reused view must reflect it,
+    else take-profit / stop / scaled-rung targets evaluate against a stale entry."""
     tracked = _tracker(OrderSide.LONG, entry_price=100.0)["AAA"]
     first = tracked.snapshot("AAA", 100.0)
     assert first.entry_price == 100.0
@@ -174,11 +179,11 @@ def test_snapshot_reuse_refreshes_entry_price_after_scale_in() -> None:
 
 
 def test_position_state_view_matches_position_state_fields() -> None:
-    # _PositionStateView is a mutable structural twin of PositionState consumed by
-    # the evaluator across a duck-typed boundary. If a field is added/renamed on one
-    # and not the other, the reused hot-path view silently feeds the evaluator a
-    # missing/stale field with no type error. Lock the two shapes together so drift
-    # fails loudly here instead.
+    """_PositionStateView is a mutable structural twin of PositionState consumed by
+    the evaluator across a duck-typed boundary. If a field is added/renamed on one
+    and not the other, the reused hot-path view silently feeds the evaluator a
+    missing/stale field with no type error. Lock the two shapes together so drift
+    fails loudly here instead."""
     view_fields = [f.name for f in dataclasses.fields(_PositionStateView)]
     canonical_fields = [f.name for f in dataclasses.fields(PositionState)]
     assert view_fields == canonical_fields
@@ -221,9 +226,11 @@ def test_first_rung_emits_partial_close_sized_to_original_qty() -> None:
 
 
 def test_each_rung_fires_at_most_once_and_in_order() -> None:
-    """Successive evaluations on one bar fire each rung exactly once in cursor
-    order (0.5 then 0.3 of original_qty), then nothing; per-rung diagnostics
-    record both firings and the cursor walks off the end."""
+    """Three successive ``maybe_emit`` calls (standing in for three consecutive
+    bars with identical price data — the engine calls ``maybe_emit`` once per bar)
+    fire each rung exactly once in cursor order (0.5 then 0.3 of original_qty),
+    then nothing; per-rung diagnostics record both firings and the cursor walks
+    off the end."""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -250,9 +257,33 @@ def test_each_rung_fires_at_most_once_and_in_order() -> None:
     assert result.execution_diagnostics.scaled_take_profit_level_firings == {"0:0": 1, "0:1": 1}
 
 
+def test_single_call_on_multi_rung_bar_fires_only_first_rung() -> None:
+    """One ``maybe_emit`` call on a bar that crosses BOTH rungs emits only the
+    lowest un-fired rung (one tranche per bar — the documented limitation), advancing
+    the cursor by one and recording a single rung firing."""
+    disp = _dispatcher(exit_rules=[_ladder()])
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    order_book = OrderBook()
+    result = TradingServiceResult()
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=111.0, low=100.0, close=110.0),  # crosses +5% AND +10%
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert len(pending) == 1
+    assert pending[0].qty == 50.0  # only rung 0 (0.5 * original_qty), not both rungs
+    assert tracker["AAA"].scaled_cursor.mapping == {0: 1}  # advanced by exactly one
+    assert result.execution_diagnostics.scaled_take_profit_level_firings == {"0:0": 1}
+
+
 def test_partial_scale_out_does_not_cancel_competing_resting_order() -> None:
-    # A resting opposite-side protective order must survive a partial scale-out —
-    # the remainder of the position still needs it. (A full close would retire it.)
+    """A resting opposite-side protective order must survive a partial scale-out —
+    the remainder of the position still needs it. (A full close would retire it.)"""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -287,10 +318,10 @@ def test_partial_scale_out_does_not_cancel_competing_resting_order() -> None:
 
 
 def test_partial_scale_out_does_not_cancel_resting_limit_stop() -> None:
-    # A spec with BOTH a limit-style stop and a ladder: when the engine's resting
-    # STOP_LIMIT is on the book and a scale-out rung fires, the partial close must
-    # NOT cancel the stop — the remainder of the position still needs it. (A full
-    # close, by contrast, cancels the now-redundant resting stop-limit.)
+    """A spec with BOTH a limit-style stop and a ladder: when the engine's resting
+    STOP_LIMIT is on the book and a scale-out rung fires, the partial close must NOT
+    cancel the stop — the remainder of the position still needs it. (A full close,
+    by contrast, cancels the now-redundant resting stop-limit.)"""
     disp = _dispatcher(
         exit_rules=[StopLossRule(pct=0.04, style="limit", limit_offset_pct=0.01), _ladder()]
     )
@@ -382,9 +413,9 @@ def test_short_first_rung_emits_partial_buy_close() -> None:
 
 
 def test_scaled_close_requeues_capped_remainder() -> None:
-    # A fire-once rung can't re-emit, so its market close must requeue any
-    # participation-capped remainder (unlike a full-position exit, which re-fires
-    # next bar). Assert the emitted scale-out carries REQUEUE_NEXT_BAR.
+    """A fire-once rung can't re-emit, so its market close must requeue any
+    participation-capped remainder (unlike a full-position exit, which re-fires next
+    bar). Assert the emitted scale-out carries REQUEUE_NEXT_BAR."""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -403,11 +434,11 @@ def test_scaled_close_requeues_capped_remainder() -> None:
 
 
 def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_size() -> None:
-    # A partial entry (50 of 100 filled) with a REQUEUE_NEXT_BAR continuation still
-    # resting: pos.original_qty is only 50 so far and the fill simulator will BUMP
-    # it to 100 once the rest fills. A rung firing now would close 0.5*50=25 and be
-    # marked fired, stranding the catch-up. The dispatcher must DEFER until the
-    # entry settles, then close 0.5*100=50.
+    """A partial entry (50 of 100 filled) with a REQUEUE_NEXT_BAR continuation still
+    resting: pos.original_qty is only 50 so far and the fill simulator will BUMP it
+    to 100 once the rest fills. A rung firing now would close 0.5*50=25 and be marked
+    fired, stranding the catch-up. The dispatcher must DEFER until the entry settles,
+    then close 0.5*100=50."""
     disp = _dispatcher(exit_rules=[_ladder()])
     order_book = OrderBook()
     # Submit the entry order; only 50 of 100 filled, 50 still working as a
@@ -466,9 +497,9 @@ def test_scale_out_deferred_while_entry_continuation_resting_then_fires_full_siz
 
 
 def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
-    # While the entry continuation is in flight the scaled rung is deferred — but a
-    # lower-priority full-position stop (listed AFTER the ladder) must still fire
-    # this bar rather than being suppressed along with the deferred rung.
+    """While the entry continuation is in flight the scaled rung is deferred — but a
+    lower-priority full-position stop (listed AFTER the ladder) must still fire this
+    bar rather than being suppressed along with the deferred rung."""
     disp = _dispatcher(exit_rules=[_ladder(), StopLossRule(pct=0.03)])
     order_book = OrderBook()
     cont = order_book.submit(
@@ -529,9 +560,9 @@ def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
 
 
 def test_full_close_rung_retires_competing_resting_orders() -> None:
-    # A qty_fraction == 1.0 rung empties the position, so it must run the same
-    # whole-position cleanups as a full close — here, binding a competing resting
-    # exit to the position so it retires when the close fills.
+    """A qty_fraction == 1.0 rung empties the position, so it must run the same
+    whole-position cleanups as a full close — here, binding a competing resting exit
+    to the position so it retires when the close fills."""
     disp = _dispatcher(
         exit_rules=[ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 1.0}])]
     )
@@ -555,8 +586,8 @@ def test_full_close_rung_retires_competing_resting_orders() -> None:
 
 
 def test_partial_rung_does_not_retire_competing_resting_orders() -> None:
-    # Contrast: a true partial (0.5) leaves the position open, so competing exits
-    # must keep working — the cleanups must NOT run.
+    """Contrast: a true partial (0.5) leaves the position open, so competing exits
+    must keep working — the cleanups must NOT run."""
     disp = _dispatcher(
         exit_rules=[ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}])]
     )
@@ -591,6 +622,7 @@ def _full_bar(
     close: float | None = None,
     volume: float = 10_000_000.0,
 ) -> Bar:
+    """A full ``contract.Bar`` for ``AAA`` (close defaults to open; high volume)."""
     return Bar(
         symbol="AAA",
         timestamp=ts,
@@ -604,6 +636,8 @@ def _full_bar(
 
 
 def _make_simulator(model) -> tuple[FillSimulator, OrderBook, Portfolio]:
+    """A FillSimulator (+ its OrderBook/Portfolio) with no slippage/cost, for the
+    given execution ``model``."""
     portfolio = Portfolio(initial_capital=100_000_000.0)
     order_book = OrderBook()
     sim = FillSimulator(
@@ -618,6 +652,7 @@ def _make_simulator(model) -> tuple[FillSimulator, OrderBook, Portfolio]:
 
 
 def _open_long(sim: FillSimulator, order_book: OrderBook, qty: float = 100.0) -> None:
+    """Open a fully-filled long ``AAA`` position of ``qty`` via a market entry bar."""
     order_book.submit(
         OrderRequest(
             client_order_id="entry-1",
@@ -634,6 +669,7 @@ def _open_long(sim: FillSimulator, order_book: OrderBook, qty: float = 100.0) ->
 
 
 def _submit_partial_close(order_book: OrderBook, cid: str, qty: float) -> None:
+    """Submit an engine scaled-take-profit market close of ``qty`` (client id ``cid``)."""
     order_book.submit(
         OrderRequest(
             client_order_id=cid,
@@ -676,9 +712,9 @@ def test_partial_market_close_reduces_qty_and_keeps_position_open(model) -> None
 
 
 def test_capped_scaled_close_requeues_until_full_fraction_filled() -> None:
-    # End-to-end: a scale-out close that the participation cap clips fills only
-    # partially on a low-liquidity bar; with REQUEUE_NEXT_BAR the remainder keeps
-    # working and the rung's full fraction is realised once liquidity returns.
+    """End-to-end: a scale-out close that the participation cap clips fills only
+    partially on a low-liquidity bar; with REQUEUE_NEXT_BAR the remainder keeps
+    working and the rung's full fraction is realised once liquidity returns."""
     model = RealisticExecutionModel(participation_cap=0.10)
     sim, order_book, portfolio = _make_simulator(model)
     _open_long(sim, order_book, qty=100.0)  # high-volume entry bar → full fill
@@ -701,7 +737,13 @@ def test_capped_scaled_close_requeues_until_full_fraction_filled() -> None:
     sim.process_bar(_full_bar("2024-01-03", open_price=105.0, high=106.0, low=104.0, volume=300.0))
     pos = portfolio.positions["AAA"]
     assert pos.qty == pytest.approx(70.0)  # 100 - cap(0.10*300=30) filled; remainder requeued
-    assert any(po.request.client_order_id == "tp-0" for po in order_book.pending_for_symbol("AAA"))
+    # The capped order is still pending with exactly the 20-share remainder requeued
+    # (50 requested − 30 cap-filled this bar).
+    tp0 = next(
+        po for po in order_book.pending_for_symbol("AAA") if po.request.client_order_id == "tp-0"
+    )
+    assert tp0.cumulative_filled_qty == pytest.approx(30.0)
+    assert tp0.request.qty - tp0.cumulative_filled_qty == pytest.approx(20.0)
 
     # Liquidity returns: the requeued remainder fills, completing the 50-share rung.
     sim.process_bar(

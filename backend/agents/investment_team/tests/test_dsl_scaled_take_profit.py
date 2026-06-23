@@ -316,4 +316,5 @@ def test_stop_loss_priority_when_listed_before_ladder() -> None:
         [rules[0], rules[1]], {"AAA": _long()}, {"AAA": bar}, first_only=False
     )
     assert intents[0].rule_kind == "stop_loss"
-    assert any(i.rule_kind == "scaled_take_profit" for i in intents)
+    assert intents[0].rule_index == 0  # priority is by spec index — the stop is exit_rules[0]
+    assert any(i.rule_kind == "scaled_take_profit" and i.rule_index == 1 for i in intents)

@@ -302,8 +302,8 @@ def test_rule4_no_exit_rules_is_critical() -> None:
 
 
 def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
-    # A laddered take-profit summing to < 1.0 with no other full-position exit
-    # leaves the residual open forever — must be flagged critical.
+    """A laddered take-profit summing to < 1.0 with no other full-position exit
+    leaves the residual open forever — must be flagged critical."""
     spec = _spec(
         exit_=[
             ScaledTakeProfitRule(
@@ -319,7 +319,7 @@ def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
 
 
 def test_rule4_partial_ladder_with_stop_loss_is_ok() -> None:
-    # The stop closes the residual the ladder leaves open → exit-complete.
+    """The stop closes the residual the ladder leaves open → exit-complete."""
     spec = _spec(
         exit_=[
             ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
@@ -331,7 +331,7 @@ def test_rule4_partial_ladder_with_stop_loss_is_ok() -> None:
 
 
 def test_rule4_full_closing_ladder_alone_is_ok() -> None:
-    # A ladder whose fractions sum to 1.0 fully closes the position on its own.
+    """A ladder whose fractions sum to 1.0 fully closes the position on its own."""
     spec = _spec(
         exit_=[
             ScaledTakeProfitRule(
@@ -347,6 +347,7 @@ def test_rule4_full_closing_ladder_alone_is_ok() -> None:
 
 
 def _entry(side: str) -> EntryRule:
+    """An RSI(14) < 30 entry rule on the given ``side``."""
     return EntryRule(
         side=side,
         when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
@@ -354,9 +355,9 @@ def _entry(side: str) -> EntryRule:
 
 
 def test_rule4_partial_ladder_with_side_mismatched_trailing_stop_is_critical() -> None:
-    # A SHORT-only spec whose only full-position exit is a trailing_high stop (which
-    # caps LONGS only) leaves the short residual uncloseable — the side-restricted
-    # stop does not cover the residual, so this must be critical.
+    """A SHORT-only spec whose only full-position exit is a trailing_high stop (which
+    caps LONGS only) leaves the short residual uncloseable — the side-restricted stop
+    does not cover the residual, so this must be critical."""
     spec = _spec(
         entry=[_entry("short")],
         exit_=[
@@ -369,7 +370,7 @@ def test_rule4_partial_ladder_with_side_mismatched_trailing_stop_is_critical() -
 
 
 def test_rule4_partial_ladder_with_side_matched_trailing_stop_is_ok() -> None:
-    # The same short spec with a trailing_low stop (caps SHORTS) closes the residual.
+    """The same short spec with a trailing_low stop (caps SHORTS) closes the residual."""
     spec = _spec(
         entry=[_entry("short")],
         exit_=[

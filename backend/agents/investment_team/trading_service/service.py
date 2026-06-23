@@ -390,7 +390,11 @@ class _TrackedPosition:
     def snapshot(self, symbol: str, qty: float) -> _PositionStateView:
         """Reusable evaluator view of this position as of the current bar.
 
-        Preconditions: ``qty`` is the live position qty for ``symbol``.
+        Preconditions: ``qty`` is the live position qty for ``symbol``, and
+        ``symbol`` is the symbol this tracker tracks. The tracker doesn't store its
+        own symbol (it lives in a ``{symbol: tracker}`` map and is only ever looked
+        up by that key, then ``snapshot``-ed with the same key — see ``_evaluate``),
+        so the match is a caller guarantee enforced by that single lookup site.
         Postconditions: returns a :class:`_PositionStateView` (structurally a
         ``PositionState``) whose mutable fields (``qty``, watermarks, and
         ``entry_price``) reflect this bar — the SAME instance across bars, so the
@@ -641,6 +645,13 @@ class _EngineExitDispatcher:
         # scale-in grew the position above it this is correctly False (a residual
         # remains and must keep its exits). The relative tolerance only absorbs
         # float noise in the fraction arithmetic.
+        #
+        # ``ctx.pos.qty`` is the live portfolio qty, which is exact for this backtest
+        # engine: one tranche fires per bar and the in-flight-engine-MARKET guard in
+        # ``_should_evaluate`` stands the bar down while a prior rung's close is still
+        # pending, so by the time a later rung fires every earlier rung has already
+        # filled and reduced ``pos.qty``. (A live venue with delayed fills could see
+        # an earlier rung still unfilled here; that is out of scope for the backtest.)
         if req.qty >= ctx.pos.qty * (1.0 - _FULL_CLOSE_QTY_REL_TOL):
             self._retire_orders_against_closed_position(intent, ctx)
         self._record_emission(req, intent, ctx.cur_bar, ctx.result)

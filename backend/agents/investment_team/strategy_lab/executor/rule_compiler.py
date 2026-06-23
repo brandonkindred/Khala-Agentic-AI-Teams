@@ -34,6 +34,7 @@ book.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal, Mapping, Optional, Sequence
 
 from ..spec_dsl import (
@@ -142,10 +143,14 @@ def is_limit_stop_rule(rule: ExitRule) -> bool:
     return isinstance(rule, StopLossRule) and getattr(rule, "style", "market") == "limit"
 
 
-# Shared immutable empty cursor map — never mutated, only ``.get()``-queried — so
-# the common no-ladder / no-cursor path allocates nothing per bar, and serves as
-# the default ``cursor_map`` for non-laddered specs.
-_EMPTY_CURSOR: Mapping[int, int] = {}
+# Shared immutable empty cursor map — only ``.get()``-queried — so the common
+# no-ladder / no-cursor path allocates nothing per bar, and serves as the default
+# ``cursor_map`` for non-laddered specs. Wrapped in ``MappingProxyType`` so an
+# accidental mutation can't corrupt the shared default for all callers.
+_EMPTY_CURSOR: Mapping[int, int] = MappingProxyType({})
+# The outer (``symbol -> cursor map``) empty default — a distinct type from
+# ``_EMPTY_CURSOR`` so the ``scaled_cursors`` fallback stays type-correct.
+_EMPTY_SYMBOL_CURSORS: Mapping[str, Mapping[int, int]] = MappingProxyType({})
 
 
 def evaluate_exit_rules(
@@ -196,7 +201,10 @@ def evaluate_exit_rules(
         if bar is None:
             continue
         sym_view = views.get(symbol) if views is not None else None
-        cursor_map = (scaled_cursors or _EMPTY_CURSOR).get(symbol, _EMPTY_CURSOR)
+        # Explicit ``is not None`` (not ``or``) so an empty ``scaled_cursors`` —
+        # "no cursors for any symbol" — is honoured, mirroring the ``views`` check.
+        outer = scaled_cursors if scaled_cursors is not None else _EMPTY_SYMBOL_CURSORS
+        cursor_map = outer.get(symbol, _EMPTY_CURSOR)
         intents.extend(
             evaluate_exit_rules_for_position(
                 rules,
@@ -236,6 +244,11 @@ def evaluate_exit_rules_for_position(
     the position's entry is still filling, so a deferred rung (which must be sized
     off the not-yet-settled original qty) does not pre-empt a lower-priority
     full-position exit (e.g. a stop) that should still fire this bar.
+
+    ``position`` is read-only here and is NOT retained past this call — the engine
+    may pass a single mutable view it reuses each bar (``_PositionStateView``), so a
+    caller must never store the reference; every value an :class:`ExitIntent` needs
+    is copied out before returning.
 
     Preconditions: ``position.qty > 0``; ``bar`` exposes ``high``/``low``/``close``
     (a :class:`BarSnapshot`, or any structurally-compatible bar such as
@@ -289,6 +302,7 @@ def _intent_for_rule(
             rule_kind="scaled_take_profit",
             rule_index=idx,
             note=level.note or rule.note or "",
+            style="market",  # a scaled rung always emits a market scale-out
             level_index=rung,
             qty_fraction=level.qty_fraction,
         )
@@ -341,7 +355,9 @@ def _next_scaled_rung(
     Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (DSL-enforced);
     ``0 <= cursor`` is the next un-fired rung (asserted); ``position.side`` is
     ``"long"`` or ``"short"`` (any other value fails fast); ``position.high_since_entry``
-    / ``low_since_entry`` are the watermarks as of the prior bar.
+    / ``low_since_entry`` are the running watermarks as of the prior bar — non-None
+    ``float``\\ s on :class:`PositionState` (initialized to ``entry_price`` at open,
+    never ``None``), so the ``max``/``min`` below are total.
     Postconditions: returns ``cursor`` when the cursor rung's target is reached and
     ``cursor`` is in range, else ``None`` (ladder exhausted or target not reached).
     """

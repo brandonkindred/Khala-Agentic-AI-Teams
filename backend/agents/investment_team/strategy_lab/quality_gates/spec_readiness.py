@@ -985,7 +985,10 @@ class SpecReadinessGate(GateResultsMixin):
         if stop_losses and tp_pcts:
             min_tp = min(tp_pcts)
             max_sl = max(r.pct for r in stop_losses)
-            assert min_tp > 0 and max_sl > 0, "exit-rule pcts must be strictly positive"
+            # Pydantic already enforces positivity upstream; re-check with an
+            # explicit raise (not ``assert``) so the gate holds under ``python -O``.
+            if min_tp <= 0 or max_sl <= 0:
+                raise ValueError("exit-rule pcts must be strictly positive")
             # Wider stops than profit targets are a deliberate risk/reward
             # choice for trend-following strategies (let losers run a bit
             # further before bailing, take winners quicker). The two legs

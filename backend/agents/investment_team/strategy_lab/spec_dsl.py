@@ -412,8 +412,10 @@ LADDER_SUM_TOL = 1e-9
 class TakeProfitLevel(_SpecNode):
     """One rung of a laddered (scaled) take-profit.
 
-    ``pct`` is the profit target as a fraction off entry (e.g. ``0.05`` = +5% for
-    a long, −5% for a short). ``qty_fraction`` is the fraction of the position's
+    ``pct`` is the profit-target MAGNITUDE as a positive fraction off entry (the
+    field is ``gt=0``); the direction is implied by the position side — ``0.05``
+    means a 5% favourable move, i.e. +5% for a long and −5% for a short. It is
+    never a negative value. ``qty_fraction`` is the fraction of the position's
     *original entry quantity* to close when this rung's target is reached.
 
     Invariants (enforced by the owning :class:`ScaledTakeProfitRule`): within a
