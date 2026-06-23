@@ -16,8 +16,9 @@ from __future__ import annotations
 import json
 import logging
 import re
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from branding_team.config import env_int
 from branding_team.models import BrandingMission, ColorPalette
 
 from .prompts import (
@@ -46,19 +47,19 @@ def _coerce_mission(value: Any) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
-    """Parse the silent extractor's JSON output → (mission_update, suggested_questions).
+def _loads_lenient(raw: str) -> Optional[Dict[str, Any]]:
+    """Parse an LLM JSON object, tolerating markdown fences / surrounding prose.
 
-    Tolerates markdown fences and stray prose around a JSON object. Returns
-    empty values on any parse failure — the conversation reply is unaffected.
+    Returns the dict, or None when nothing parseable is found. The leading-fence
+    regex only strips a fence at the start of the stripped text; replies that
+    wrap the JSON in prose fall through to the outermost ``{ ... }`` slice below,
+    so both shapes are handled.
     """
     text = (raw or "").strip()
     if not text:
-        return {}, []
-
+        return None
     cleaned = re.sub(r"^```(?:json)?\s*", "", text)
     cleaned = re.sub(r"\s*```$", "", cleaned).strip()
-
     parsed: Any = None
     try:
         parsed = json.loads(cleaned)
@@ -69,8 +70,17 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
                 parsed = json.loads(match.group(0))
             except (json.JSONDecodeError, TypeError):
                 parsed = None
+    return parsed if isinstance(parsed, dict) else None
 
-    if not isinstance(parsed, dict):
+
+def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
+    """Parse the silent extractor's JSON output → (mission_update, suggested_questions).
+
+    Tolerates markdown fences and stray prose around a JSON object. Returns
+    empty values on any parse failure — the conversation reply is unaffected.
+    """
+    parsed = _loads_lenient(raw)
+    if parsed is None:
         logger.warning("Branding extractor produced unparseable output; treating as no-op")
         return {}, []
 
@@ -87,7 +97,33 @@ def _parse_extraction(raw: str) -> Tuple[Dict[str, Any], List[str]]:
     return mission_update, suggested_questions
 
 
-_MISSION_FIELD_NAMES = {
+# Single source of truth for the mission fields the assistant reads/writes,
+# grouped by how they merge. ``_brief_value``, ``_merge_mission_update`` and
+# ``_MISSION_FIELD_NAMES`` all derive from these so a new field is added once.
+_MISSION_STR_FIELDS = (
+    "company_name",
+    "company_description",
+    "target_audience",
+    "desired_voice",
+    "visual_style",
+    "typography_preference",
+    "interface_density",
+)
+_MISSION_LIST_FIELDS = (
+    "values",
+    "differentiators",
+    "existing_brand_material",
+    "color_inspiration",
+)
+# Structured fields with bespoke handling (not plain str/list).
+_MISSION_STRUCTURED_FIELDS = ("color_palettes", "selected_palette_index")
+
+_MISSION_FIELD_NAMES = (
+    set(_MISSION_STR_FIELDS) | set(_MISSION_LIST_FIELDS) | set(_MISSION_STRUCTURED_FIELDS)
+)
+
+# Display order for the brief block rendered into the prompt templates.
+_MISSION_BRIEF_ORDER = (
     "company_name",
     "company_description",
     "target_audience",
@@ -101,7 +137,7 @@ _MISSION_FIELD_NAMES = {
     "visual_style",
     "typography_preference",
     "interface_density",
-}
+)
 
 
 def _contains_mission_field(obj: Any) -> bool:
@@ -219,27 +255,23 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
     """Merge update dict into current mission; only set keys present and non-empty where applicable."""
     data = current.model_dump()
 
-    for key in (
-        "company_name",
-        "company_description",
-        "target_audience",
-        "desired_voice",
-        "visual_style",
-        "typography_preference",
-        "interface_density",
-    ):
+    for key in _MISSION_STR_FIELDS:
         if key not in update:
             continue
         val = update[key]
         if isinstance(val, str) and val.strip():
             data[key] = val.strip()
 
-    for key in ("values", "differentiators", "existing_brand_material", "color_inspiration"):
+    for key in _MISSION_LIST_FIELDS:
         if key not in update:
             continue
         val = update[key]
         if isinstance(val, list):
-            data[key] = [str(x) for x in val if x]
+            # The extractor emits the complete list each turn, so we replace
+            # (not extend) — that already bounds growth. Dedupe while keeping
+            # first-seen order so a model that repeats an item doesn't put
+            # duplicates in the mission brief.
+            data[key] = list(dict.fromkeys(str(x) for x in val if x))
 
     if "color_palettes" in update:
         raw_palettes = update["color_palettes"]
@@ -268,32 +300,66 @@ def _merge_mission_update(current: BrandingMission, update: Dict[str, Any]) -> B
     return BrandingMission(**data)
 
 
-def _format_brief(mission: BrandingMission) -> Dict[str, Any]:
-    return {
-        "company_name": mission.company_name or "",
-        "company_description": mission.company_description or "",
-        "target_audience": mission.target_audience or "",
-        "values": mission.values or [],
-        "differentiators": mission.differentiators or [],
-        "desired_voice": mission.desired_voice or "",
-        "existing_brand_material": mission.existing_brand_material or [],
-        "color_inspiration": mission.color_inspiration or [],
-        "color_palettes": [
-            p.model_dump() if hasattr(p, "model_dump") else p
-            for p in (mission.color_palettes or [])
-        ],
-        "selected_palette_index": mission.selected_palette_index,
-        "visual_style": mission.visual_style or "",
-        "typography_preference": mission.typography_preference or "",
-        "interface_density": mission.interface_density or "",
-    }
+def _brief_value(mission: BrandingMission, field: str) -> Any:
+    """Display value for one mission *field* in the prompt brief.
+
+    Preconditions:
+        ``field`` is a member of ``_MISSION_BRIEF_ORDER``.
+    Postconditions:
+        Returns the field's value normalized for display — ``""`` for empty
+        strings, ``[]`` for empty lists, dumped dicts for color palettes, and
+        the raw value (possibly None) for ``selected_palette_index``.
+    """
+    value = getattr(mission, field)
+    if field == "color_palettes":
+        return [p.model_dump() if hasattr(p, "model_dump") else p for p in (value or [])]
+    if field == "selected_palette_index":
+        return value
+    if field in _MISSION_LIST_FIELDS:
+        return value or []
+    return value or ""
+
+
+def _format_brief_block(mission: BrandingMission) -> str:
+    """Render the mission brief as the ``- field: value`` block the prompt
+    templates interpolate via ``{brief_block}``.
+
+    Preconditions:
+        ``mission`` is a BrandingMission.
+    Postconditions:
+        Returns a newline-joined block with exactly one line per field in
+        ``_MISSION_BRIEF_ORDER`` (the shared order, so it can't drift from
+        ``_merge_mission_update``), without allocating an intermediate dict.
+    """
+    return "\n".join(f"- {field}: {_brief_value(mission, field)}" for field in _MISSION_BRIEF_ORDER)
+
+
+def _history_window() -> int:
+    """Max prior turns fed to the LLM (env-tunable, clamped to >= 1).
+
+    Both LLM stages re-send the conversation history every turn, so an
+    uncapped history makes each call grow without bound in tokens, latency,
+    and memory. Capping to the most recent turns keeps per-turn cost roughly
+    constant while preserving the immediate context the strategist needs.
+    """
+    return env_int("BRANDING_ASSISTANT_HISTORY_WINDOW", 20, minimum=1)
 
 
 def _format_history(messages: List[Tuple[str, str]]) -> str:
+    """Render the most recent conversation turns for the LLM prompt.
+
+    Args:
+        messages: prior turns as ``(role, content)`` tuples, oldest first.
+
+    Returns:
+        A newline-joined ``"Speaker: text"`` transcript of at most the last
+        ``_history_window()`` turns, or ``"(No prior messages)"`` when empty.
+    """
     if not messages:
         return "(No prior messages)"
+    recent = messages[-_history_window() :]
     return "\n".join(
-        f"{'Assistant' if role == 'assistant' else 'User'}: {content}" for role, content in messages
+        f"{'Assistant' if role == 'assistant' else 'User'}: {content}" for role, content in recent
     )
 
 
@@ -352,14 +418,14 @@ class BrandingAssistantAgent:
         current_mission: mission state before this turn.
         user_message: latest user message.
         """
-        brief = _format_brief(current_mission)
+        brief_block = _format_brief_block(current_mission)
         history = _format_history(messages)
 
         # ── Stage 1: conversational strategist reply ───────────────────────
         conversation_prompt = USER_TURN_TEMPLATE.format(
+            brief_block=brief_block,
             conversation_history=history,
             user_message=user_message,
-            **brief,
         )
 
         logger.info(
@@ -389,10 +455,10 @@ class BrandingAssistantAgent:
 
         # ── Stage 2: silent extractor ──────────────────────────────────────
         extraction_prompt = EXTRACTION_USER_TEMPLATE.format(
+            brief_block=brief_block,
             conversation_history=history,
             user_message=user_message,
             assistant_reply=reply_text,
-            **brief,
         )
 
         mission_update: Dict[str, Any] = {}
