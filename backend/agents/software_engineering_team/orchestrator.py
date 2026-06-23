@@ -94,6 +94,35 @@ def _iso_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _partition_tasks_by_completion(
+    all_tasks: Dict[str, Any],
+    completed_ids: set,
+    remaining_ids: set,
+) -> Tuple[List[Any], List[Any]]:
+    """Split ``all_tasks`` into (completed, remaining) task lists in one pass.
+
+    Replaces the duplicated pair of list comprehensions that each independently
+    re-scanned ``all_tasks`` (one for completed ids, one for remaining ids).
+
+    Preconditions:
+        - ``completed_ids`` and ``remaining_ids`` are sets (O(1) membership).
+    Postconditions:
+        - Returns ``(completed_tasks, remaining_tasks)`` preserving ``all_tasks``
+          iteration order. A task id present in *both* sets appears in both
+          lists, exactly as the two separate comprehensions produced.
+    """
+    assert isinstance(completed_ids, set), f"completed_ids must be a set, got {type(completed_ids)}"
+    assert isinstance(remaining_ids, set), f"remaining_ids must be a set, got {type(remaining_ids)}"
+    completed_tasks: List[Any] = []
+    remaining_tasks: List[Any] = []
+    for tid, task in all_tasks.items():
+        if tid in completed_ids:
+            completed_tasks.append(task)
+        if tid in remaining_ids:
+            remaining_tasks.append(task)
+    return completed_tasks, remaining_tasks
+
+
 # The SE job owns the allocation of its progress bar across phases. Sub-agents
 # (PRA, Planning V3, coding team) each report their OWN 0-100 progress; the job
 # updaters rescale those onto the phase's band so the bar is monotone across the
@@ -783,9 +812,10 @@ def _run_tech_lead_review(
     """
     from software_engineering_team.shared.context_sizing import compute_existing_code_chars
 
-    completed_tasks = [t for tid, t in all_tasks.items() if tid in completed]
     remaining_ids = set(execution_queue)
-    remaining_tasks = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+    completed_tasks, remaining_tasks = _partition_tasks_by_completion(
+        all_tasks, completed, remaining_ids
+    )
     max_code_chars = compute_existing_code_chars(
         tech_lead.llm
     )  # pragma: no cover  # integration-only: tech-lead review uses live LLM
@@ -1774,9 +1804,10 @@ def _run_backend_frontend_workers(
                         with state_lock:
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
-                completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
                 remaining_ids = set(_remaining_queue_ids()) - {task_id}
-                remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+                completed_tasks_list, remaining_tasks_list = _partition_tasks_by_completion(
+                    all_tasks, completed, remaining_ids
+                )
 
                 def _append_backend_task(nt) -> None:
                     with state_lock:
@@ -2097,9 +2128,10 @@ def _run_backend_frontend_workers(
                             failed[task_id] = f"Git setup failed: {gs_result.message}"
                         continue
 
-                completed_tasks_list = [t for tid, t in all_tasks.items() if tid in completed]
                 remaining_ids = set(_remaining_queue_ids())
-                remaining_tasks_list = [t for tid, t in all_tasks.items() if tid in remaining_ids]
+                completed_tasks_list, remaining_tasks_list = _partition_tasks_by_completion(
+                    all_tasks, completed, remaining_ids
+                )
                 completed_with_current = completed_tasks_list + [task]
 
                 def _append_backend_task(nt) -> None:

@@ -2,23 +2,20 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import logging
 import random
 import re
 import time
-from typing import Any, Callable, Dict, Optional
-
-import httpx
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .interface import (
-    LLMError,
     LLMJsonParseError,
     LLMPermanentError,
     LLMRateLimitError,
     LLMSemanticExhaustionError,
-    LLMTemporaryError,
     LLMUnreachableAfterRetriesError,
 )
 
@@ -63,6 +60,78 @@ def sha256_fingerprint(text: str, *, length: int = 16) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()[:length]
 
 
+# Errors that must short-circuit the retry loop (re-raised as-is, never retried).
+_NON_RETRYABLE_ERRORS = (
+    LLMPermanentError,
+    LLMRateLimitError,
+    LLMSemanticExhaustionError,
+    LLMUnreachableAfterRetriesError,
+)
+
+
+def _notify_retry(
+    on_retry: Optional[Callable[[int, int, float, Exception], None]],
+    failed_attempt: int,
+    max_attempts: int,
+    wait: float,
+    error: Exception,
+) -> None:
+    """Invoke the retry-progress hook, swallowing any error it raises.
+
+    A retry-progress hook is observability and must never abort the retry loop
+    it reports on.
+    """
+    if on_retry is None:
+        return
+    try:
+        on_retry(failed_attempt, max_attempts, wait, error)
+    except Exception as hook_error:  # noqa: BLE001 — hook must not abort the retry loop
+        logger.warning("on_retry hook failed (ignored): %s", hook_error)
+
+
+def _handle_retryable_failure(
+    error: Exception,
+    attempt: int,
+    max_attempts: int,
+    backoff_base: float,
+    backoff_max: float,
+    on_retry: Optional[Callable[[int, int, float, Exception], None]],
+) -> float:
+    """Shared post-failure step for the sync and async retry loops.
+
+    Logs the failure, notifies ``on_retry``, and returns the number of seconds
+    the caller should sleep before the next attempt.  On the final attempt
+    (``attempt == max_attempts - 1``) logs exhaustion and raises
+    ``LLMUnreachableAfterRetriesError`` instead of returning.
+
+    Postconditions:
+        - Returns a non-negative wait when another attempt remains.
+        - Raises ``LLMUnreachableAfterRetriesError`` (chained from ``error``)
+          when no attempts remain; ``on_retry`` is NOT invoked in that case.
+    """
+    if attempt < max_attempts - 1:
+        wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
+        logger.warning(
+            "LLM call failed (attempt %d/%d): %s. Next step -> Retrying in %.1fs",
+            attempt + 1,
+            max_attempts,
+            error,
+            wait,
+        )
+        _notify_retry(on_retry, attempt + 1, max_attempts, wait, error)
+        return wait
+    logger.error(
+        "LLM call exhausted. Recovery summary: attempted %d calls with exponential backoff, "
+        "all failed. Final error: %s",
+        max_attempts,
+        error,
+    )
+    raise LLMUnreachableAfterRetriesError(
+        f"LLM unreachable after {max_attempts} attempts: {error}",
+        cause=error,
+    ) from error
+
+
 def call_llm_with_retries(
     fn: Callable[[], Any],
     *,
@@ -86,80 +155,62 @@ def call_llm_with_retries(
         - on_retry is invoked exactly once per retried attempt, immediately before the
           backoff sleep; never on success and never after the final attempt.
     """
-
-    def _notify_retry(failed_attempt: int, wait: float, error: Exception) -> None:
-        if on_retry is None:
-            return
-        try:
-            on_retry(failed_attempt, max_attempts, wait, error)
-        except Exception as hook_error:  # noqa: BLE001 — hook must not abort the retry loop
-            logger.warning("on_retry hook failed (ignored): %s", hook_error)
-
     last_error: Exception | None = None
     for attempt in range(max_attempts):
         try:
             return fn()
-        except (
-            LLMPermanentError,
-            LLMRateLimitError,
-            LLMSemanticExhaustionError,
-            LLMUnreachableAfterRetriesError,
-        ):
+        except _NON_RETRYABLE_ERRORS:
             raise
-        except (
-            LLMTemporaryError,
-            httpx.ConnectError,
-            httpx.TimeoutException,
-            httpx.ReadTimeout,
-            LLMError,
-        ) as e:
-            last_error = e
-            if attempt < max_attempts - 1:
-                wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
-                logger.warning(
-                    "LLM call failed (attempt %d/%d): %s. Next step -> Retrying in %.1fs",
-                    attempt + 1,
-                    max_attempts,
-                    e,
-                    wait,
-                )
-                _notify_retry(attempt + 1, wait, e)
-                time.sleep(wait)
-            else:
-                logger.error(
-                    "LLM call exhausted. Recovery summary: attempted %d calls with exponential backoff, "
-                    "all failed. Final error: %s",
-                    max_attempts,
-                    e,
-                )
-                raise LLMUnreachableAfterRetriesError(
-                    f"LLM unreachable after {max_attempts} attempts: {e}",
-                    cause=e,
-                ) from e
         except Exception as e:
             last_error = e
-            if attempt < max_attempts - 1:
-                wait = min(backoff_base**attempt + random.uniform(0, 1), backoff_max)
-                logger.warning(
-                    "LLM call failed (attempt %d/%d): %s. Next step -> Retrying in %.1fs",
-                    attempt + 1,
-                    max_attempts,
-                    e,
-                    wait,
-                )
-                _notify_retry(attempt + 1, wait, e)
-                time.sleep(wait)
-            else:
-                logger.error(
-                    "LLM call exhausted. Recovery summary: attempted %d calls with exponential backoff, "
-                    "all failed. Final error: %s",
-                    max_attempts,
-                    e,
-                )
-                raise LLMUnreachableAfterRetriesError(
-                    f"LLM unreachable after {max_attempts} attempts: {e}",
-                    cause=e,
-                ) from e
+            wait = _handle_retryable_failure(
+                e, attempt, max_attempts, backoff_base, backoff_max, on_retry
+            )
+            time.sleep(wait)
+    if last_error:
+        raise LLMUnreachableAfterRetriesError(
+            f"LLM unreachable after {max_attempts} attempts: {last_error}",
+            cause=last_error,
+        ) from last_error
+    raise LLMUnreachableAfterRetriesError(f"LLM unreachable after {max_attempts} attempts")
+
+
+async def call_llm_with_retries_async(
+    fn: Callable[[], Awaitable[Any]],
+    *,
+    max_attempts: int = 3,
+    backoff_base: float = 2.0,
+    backoff_max: float = 60.0,
+    on_retry: Optional[Callable[[int, int, float, Exception], None]] = None,
+) -> Any:
+    """Async counterpart of :func:`call_llm_with_retries`.
+
+    Awaits ``fn()`` and uses ``await asyncio.sleep`` for backoff, so retries on
+    an async path never block the event loop.  Error classification, backoff
+    schedule, ``on_retry`` semantics, and the final
+    ``LLMUnreachableAfterRetriesError`` are identical to the sync version (the
+    two share :func:`_handle_retryable_failure`).
+
+    Preconditions:
+        - ``fn`` is a zero-arg coroutine function (its result is awaited).
+        - ``on_retry`` follows the same contract as in the sync version.
+
+    Postconditions:
+        - on_retry is invoked exactly once per retried attempt, immediately before
+          the backoff sleep; never on success and never after the final attempt.
+    """
+    last_error: Exception | None = None
+    for attempt in range(max_attempts):
+        try:
+            return await fn()
+        except _NON_RETRYABLE_ERRORS:
+            raise
+        except Exception as e:
+            last_error = e
+            wait = _handle_retryable_failure(
+                e, attempt, max_attempts, backoff_base, backoff_max, on_retry
+            )
+            await asyncio.sleep(wait)
     if last_error:
         raise LLMUnreachableAfterRetriesError(
             f"LLM unreachable after {max_attempts} attempts: {last_error}",

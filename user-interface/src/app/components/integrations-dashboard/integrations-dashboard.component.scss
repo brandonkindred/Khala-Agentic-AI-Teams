@@ -164,28 +164,28 @@
     }
 
     &--google {
-      background: linear-gradient(135deg, rgba(66, 133, 244, 0.25), rgba(66, 133, 244, 0.10));
-      color: #8ab4f8;
-      border: 1px solid rgba(66, 133, 244, 0.30);
+      background: var(--kh-info-subtle);
+      color: var(--kh-info);
+      border: 1px solid var(--kh-border-subtle);
     }
 
     &--slack {
-      background: #fff;
+      background: var(--kh-surface-3);
       border: 1px solid var(--kh-border-subtle);
     }
 
     &--medium {
-      background: #000;
-      color: #fff;
+      background: var(--kh-surface-3);
+      color: var(--kh-text-primary);
       font-weight: 700;
       font-size: 1.25rem;
       border: 1px solid var(--kh-border);
     }
 
     &--github {
-      background: linear-gradient(135deg, rgba(110, 84, 148, 0.25), rgba(110, 84, 148, 0.10));
-      color: #b39ddb;
-      border: 1px solid rgba(110, 84, 148, 0.30);
+      background: var(--kh-accent-muted);
+      color: var(--kh-accent-text);
+      border: 1px solid var(--kh-border-subtle);
     }
   }
 
@@ -259,19 +259,19 @@
   &--success {
     background: var(--kh-success-subtle);
     color: var(--kh-success);
-    border-color: rgba(74, 222, 128, 0.30);
+    border-color: var(--kh-border-subtle);
   }
 
   &--warning {
     background: var(--kh-warning-subtle);
     color: var(--kh-warning);
-    border-color: rgba(251, 191, 36, 0.30);
+    border-color: var(--kh-border-subtle);
   }
 
   &--info {
     background: var(--kh-info-subtle);
     color: var(--kh-info);
-    border-color: rgba(147, 197, 253, 0.30);
+    border-color: var(--kh-border-subtle);
   }
 
   &--neutral {
@@ -303,24 +303,24 @@
 
   &--error {
     background: var(--kh-error-subtle);
-    border-color: rgba(248, 113, 113, 0.32);
-    color: #fecaca;
+    border-color: var(--kh-border-subtle);
+    color: var(--kh-error);
   }
 
   &--success {
     background: var(--kh-success-subtle);
-    border-color: rgba(74, 222, 128, 0.32);
-    color: #bbf7d0;
+    border-color: var(--kh-border-subtle);
+    color: var(--kh-success);
   }
 
   &--info {
     background: var(--kh-info-subtle);
-    border-color: rgba(147, 197, 253, 0.32);
-    color: #dbeafe;
+    border-color: var(--kh-border-subtle);
+    color: var(--kh-info);
   }
 
   code {
-    background: rgba(0, 0, 0, 0.4);
+    background: var(--kh-surface-3);
     padding: 0.05em 0.35em;
     border-radius: 4px;
     font-size: 0.85em;
@@ -334,7 +334,7 @@
   gap: var(--kh-space-3);
   padding: var(--kh-space-3) var(--kh-space-4);
   background: var(--kh-success-subtle);
-  border: 1px solid rgba(74, 222, 128, 0.32);
+  border: 1px solid var(--kh-border-subtle);
   border-radius: var(--kh-radius-md);
 
   &__icon {
@@ -452,7 +452,7 @@
 
   &--ready {
     background: var(--kh-success-subtle);
-    border-color: rgba(74, 222, 128, 0.30);
+    border-color: var(--kh-border-subtle);
 
     .readiness-tile__value {
       color: var(--kh-success);
@@ -487,15 +487,15 @@
   height: 44px;
   border: none;
   border-radius: var(--kh-radius-md);
-  background: #4a154b;
-  color: #fff;
+  background: var(--kh-accent-muted);
+  color: var(--kh-accent-text);
   font-size: var(--kh-text-md);
   font-weight: 600;
   cursor: pointer;
   transition: background var(--kh-transition), transform var(--kh-transition);
 
   &:hover:not(:disabled) {
-    background: #611f69;
+    background: var(--kh-accent-subtle);
     transform: translateY(-1px);
   }
 

@@ -61,7 +61,7 @@
     height: 100%;
     width: min(420px, 90vw);
     background: var(--kh-surface-1, #1a1a1a);
-    border-left: 1px solid var(--kh-surface-3, #2a2a2a);
+    border-left: 1px solid var(--kh-surface-3);
     box-shadow: -8px 0 24px rgba(0, 0, 0, 0.4);
     display: flex;
     flex-direction: column;
@@ -73,7 +73,7 @@
     align-items: center;
     justify-content: space-between;
     padding: 12px 16px;
-    border-bottom: 1px solid var(--kh-surface-3, #2a2a2a);
+    border-bottom: 1px solid var(--kh-surface-3);
   }
 
   &__drawer-title {
@@ -105,12 +105,12 @@
     justify-content: flex-end;
     gap: 8px;
     padding: 12px 16px;
-    border-top: 1px solid var(--kh-surface-3, #2a2a2a);
+    border-top: 1px solid var(--kh-surface-3);
   }
 }
 
 .initiative {
-  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border: 1px solid var(--kh-surface-3);
   border-radius: 8px;
   padding: 12px 16px;
   background: var(--kh-surface-1, #1a1a1a);
@@ -132,7 +132,7 @@
 
 .epic {
   margin-top: 12px;
-  border-left: 2px solid var(--kh-surface-3, #2a2a2a);
+  border-left: 2px solid var(--kh-surface-3);
   padding-left: 12px;
 
   &__header {
@@ -159,19 +159,34 @@
 }
 
 .story {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 6px 12px;
-  border-radius: 6px;
-  background: var(--kh-surface-2, #1f1f1f);
-  cursor: pointer;
-  gap: 12px;
+  list-style: none;
 
-  &:hover,
-  &:focus-visible {
-    background: var(--kh-surface-3, #2a2a2a);
-    outline: none;
+  // The clickable surface is a real <button> so the <li> stays a valid list
+  // item (keyboard + focus come for free; no role="button" on the <li>).
+  &__btn {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    width: 100%;
+    padding: 6px 12px;
+    border-radius: 6px;
+    background: var(--kh-surface-2, #1f1f1f);
+    border: none;
+    cursor: pointer;
+    gap: 12px;
+    color: inherit;
+    font: inherit;
+    text-align: left;
+
+    &:hover,
+    &:focus-visible {
+      background: var(--kh-surface-3);
+    }
+
+    &:focus-visible {
+      outline: 2px solid var(--kh-focus-ring);
+      outline-offset: 2px;
+    }
   }
 
   &__title {
@@ -181,7 +196,7 @@
 }
 
 mat-chip.is-status {
-  background: var(--kh-surface-3, #2a2a2a);
+  background: var(--kh-surface-3);
   color: var(--kh-text-secondary, #d4d4d8);
 }
 

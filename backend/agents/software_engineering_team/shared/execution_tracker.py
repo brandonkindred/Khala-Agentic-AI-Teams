@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from threading import Lock
-from typing import Dict, List
+from typing import Deque, Dict, List
+
+# Cap the in-memory event log. A long-running job can emit thousands of task
+# events; without a bound the list grows for the life of the process. We keep
+# the most recent _MAX_EVENTS and track a monotonic total so the absolute-index
+# polling contract of `events_since` still holds across eviction.
+_MAX_EVENTS = 2000
 
 
 def _utc_now() -> datetime:
@@ -54,11 +61,27 @@ class ExecutionTask:
 class ExecutionTracker:
     def __init__(self) -> None:
         self._tasks: Dict[str, ExecutionTask] = {}
-        self._events: List[dict] = []
+        # Bounded ring buffer of recent events + a monotonic count of every
+        # event ever emitted (so `events_since` indices remain absolute).
+        self._events: Deque[dict] = deque(maxlen=_MAX_EVENTS)
+        self._events_total = 0
         self._lock = Lock()
 
     def _emit(self, event_type: str, payload: dict) -> None:
+        """Append one event to the ring buffer and bump the monotonic total.
+
+        Preconditions: the caller MUST already hold ``self._lock``. Every caller
+            (``upsert_task``/``start_task``/``update_progress``/``observe_loop``/
+            ``finish_task``) runs inside ``with self._lock:``, so the append and
+            the increment are atomic with respect to readers. This method does
+            NOT take the lock itself — ``self._lock`` is a non-reentrant
+            ``threading.Lock``, so re-acquiring it here would deadlock.
+        Postconditions: ``_events`` gains one entry (oldest evicted past
+            ``_MAX_EVENTS``) and ``_events_total`` increases by exactly one,
+            keeping the absolute-index contract of ``events_since`` intact.
+        """
         self._events.append({"type": event_type, "timestamp": _iso(_utc_now()), "payload": payload})
+        self._events_total += 1
 
     def upsert_task(
         self, task_id: str, title: str, assigned_agent: str, dependencies: List[str] | None = None
@@ -130,12 +153,24 @@ class ExecutionTracker:
             return {
                 "plan_progress_percent": percent,
                 "tasks": sorted(tasks, key=lambda t: t["task_id"]),
-                "event_count": len(self._events),
+                "event_count": self._events_total,
             }
 
     def events_since(self, index: int) -> List[dict]:
+        """Return events at absolute positions >= `index`.
+
+        Preconditions: `index` is a non-negative absolute event position
+            (as advanced by the caller via `index += len(events)`).
+        Postconditions: returns the buffered events from `index` onward. Events
+            older than the ring buffer (evicted) cannot be replayed; if `index`
+            points before the oldest retained event, the caller resumes from the
+            oldest retained one instead (no duplicates within the buffer).
+        """
+        assert index >= 0, "events_since index must be a non-negative absolute position"
         with self._lock:
-            return self._events[index:]
+            evicted = self._events_total - len(self._events)  # absolute pos of buffer[0]
+            start = max(0, index - evicted)
+            return list(self._events)[start:]
 
 
 execution_tracker = ExecutionTracker()

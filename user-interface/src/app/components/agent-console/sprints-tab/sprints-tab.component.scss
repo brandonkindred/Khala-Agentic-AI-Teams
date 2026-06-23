@@ -43,7 +43,7 @@
 
   &__plan-result {
     background: var(--kh-surface-1, #1a1a1a);
-    border: 1px solid var(--kh-surface-3, #2a2a2a);
+    border: 1px solid var(--kh-surface-3);
     border-left: 3px solid var(--kh-success, #4ade80);
     border-radius: 6px;
     padding: 12px 16px;
@@ -90,7 +90,7 @@
 }
 
 .sprint-card {
-  border: 1px solid var(--kh-surface-3, #2a2a2a);
+  border: 1px solid var(--kh-surface-3);
   border-radius: 8px;
   padding: 12px 16px;
   background: var(--kh-surface-1, #1a1a1a);
@@ -125,7 +125,7 @@
 }
 
 mat-chip.is-status {
-  background: var(--kh-surface-3, #2a2a2a);
+  background: var(--kh-surface-3);
   color: var(--kh-text-secondary, #d4d4d8);
 }
 
