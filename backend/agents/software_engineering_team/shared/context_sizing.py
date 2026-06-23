@@ -10,9 +10,8 @@ chunk + prompt + response stays within the model context window.
 
 from __future__ import annotations
 
-import os
-
 from llm_service import LLMClient
+from shared_env import parse_int
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
@@ -31,25 +30,23 @@ CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS = 4_000  # CODE_REVIEW_ARCH_OVERVIEW_CHARS, 
 CODE_REVIEW_EXISTING_ABS_CHARS = 8_000  # CODE_REVIEW_EXISTING_CHARS, floor 500
 
 
-def env_int(name: str, default: int, floor: int) -> int:
+def parse_env_int(name: str, default: int, floor: int) -> int:
     """Read an int tuning knob from the environment, defensively.
 
+    Thin wrapper over the canonical :func:`shared_env.parse_int` (floor == minimum),
+    named to match it; kept for the existing call sites in this module.
+
     Preconditions:
-        - ``default`` >= ``floor``.
+        - ``default`` >= ``floor`` (raises ``ValueError`` otherwise — explicit so
+          the check survives ``python -O``).
 
     Postconditions:
         - Returns ``default`` when the var is unset or unparseable; otherwise
-          the parsed value clamped to at least ``floor`` (never raises).
+          the parsed value clamped to at least ``floor`` (never raises on the env value).
     """
-    assert default >= floor, "default must respect the floor"
-    raw = os.environ.get(name)
-    if raw is None:
-        return default
-    try:
-        value = int(raw.strip())
-    except (TypeError, ValueError):
-        return default
-    return max(floor, value)
+    if default < floor:
+        raise ValueError(f"default ({default}) must be >= floor ({floor})")
+    return parse_int(name, default, minimum=floor)
 
 
 def compute_max_chunk_chars(
@@ -115,7 +112,7 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
         reserved_response_tokens=4096,
         min_chars=12000,
     )
-    cap = env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
     return min(derived, cap)
 
 
@@ -159,19 +156,19 @@ def compute_code_review_spec_excerpt_chars(llm: LLMClient) -> int:
     every map call of the review coordinator, so an uncapped 1M-context scale
     (~488K chars) would dominate each chunk prompt.
     """
-    cap = env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
+    cap = parse_env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
     return _scale_with_context(llm, 8_000, max_chars=cap)
 
 
 def compute_code_review_arch_overview_chars(llm: LLMClient) -> int:
     """Max chars for architecture overview in code review (scaled, absolutely capped)."""
-    cap = env_int("CODE_REVIEW_ARCH_OVERVIEW_CHARS", CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS, 500)
+    cap = parse_env_int("CODE_REVIEW_ARCH_OVERVIEW_CHARS", CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS, 500)
     return _scale_with_context(llm, 2_000, max_chars=cap)
 
 
 def compute_code_review_existing_codebase_chars(llm: LLMClient) -> int:
     """Max chars for existing codebase excerpt in code review (scaled, absolutely capped)."""
-    cap = env_int("CODE_REVIEW_EXISTING_CHARS", CODE_REVIEW_EXISTING_ABS_CHARS, 500)
+    cap = parse_env_int("CODE_REVIEW_EXISTING_CHARS", CODE_REVIEW_EXISTING_ABS_CHARS, 500)
     return _scale_with_context(llm, 4_000, max_chars=cap)
 
 

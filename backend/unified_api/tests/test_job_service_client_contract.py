@@ -49,9 +49,82 @@ def test_explicit_base_url_is_sticky(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_construction_raises_when_no_url_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no explicit base_url and no JOB_SERVICE_URL env, construction raises RuntimeError."""
     monkeypatch.delenv("JOB_SERVICE_URL", raising=False)
     with pytest.raises(RuntimeError, match="JOB_SERVICE_URL is not set"):
         JobServiceClient(team="x")
+
+
+# ---------------------------------------------------------------------------
+# Real HTTP client wrappers — exercised against an httpx MockTransport so the
+# new cancel endpoint and the bulk shutdown endpoint are covered without a live
+# job service. These pin the wrapper -> URL contract (and confirm the methods
+# the wrapper relies on actually exist on the HTTP client).
+# ---------------------------------------------------------------------------
+
+
+def _route_through_mock_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    """Make the client's internal ``httpx.Client(...)`` use a MockTransport.
+
+    ``JobServiceClient._request`` constructs ``httpx.Client(timeout=...)`` per
+    call, so patching the module-level ``httpx.Client`` to inject the transport
+    intercepts every request without a live server.
+    """
+    transport = httpx.MockTransport(handler)
+    real_client_cls = httpx.Client
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", factory)
+
+
+def test_real_client_cancel_active_job_posts_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real client POSTs to /jobs/{team}/{job_id}/cancel and returns the parsed `cancelled`."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"cancelled": True})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.cancel_active_job("j1") is True
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://js.example/jobs/t/j1/cancel"
+
+
+def test_real_client_cancel_active_job_false_when_not_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal/missing job yields ``cancelled: false`` server-side -> False."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    _route_through_mock_transport(monkeypatch, lambda _req: httpx.Response(200, json={"cancelled": False}))
+    client = JobServiceClient(team="t")
+    assert client.cancel_active_job("j1") is False
+
+
+def test_real_client_mark_all_active_jobs_failed_hits_bulk_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shutdown hook routes through the atomic server-side bulk endpoint
+    (``/mark-all-running-failed``), not a client-side list+update loop."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"failed_job_ids": ["a", "b"]})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.mark_all_active_jobs_failed("shutdown") == ["a", "b"]
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://js.example/jobs/t/mark-all-running-failed"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +210,39 @@ def test_fake_heartbeat_succeeds_for_existing_job(
     fake_job_client.heartbeat("present")
     after = fake_job_client.get_job("present")["last_heartbeat_at"]
     assert after >= before
+
+
+# ---------------------------------------------------------------------------
+# Atomic cancel — mirrors job_service/db.py cancel_active_job conditional UPDATE
+# ---------------------------------------------------------------------------
+
+
+def test_fake_cancel_active_job_cancels_pending_and_running(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """A pending or running job is cancellable; the fake mirrors the production
+    conditional UPDATE (``status IN ('pending','running')``)."""
+    fake_job_client.create_job("p", status="pending")
+    fake_job_client.create_job("r", status="running")
+    assert fake_job_client.cancel_active_job("p") is True
+    assert fake_job_client.cancel_active_job("r") is True
+    assert fake_job_client.get_job("p")["status"] == "cancelled"
+    assert fake_job_client.get_job("r")["status"] == "cancelled"
+
+
+def test_fake_cancel_active_job_noop_on_terminal(fake_job_client: FakeJobServiceClient) -> None:
+    """A job that has reached a terminal status must NOT be overwritten — the status
+    guard lives in the same UPDATE that writes, closing the check-then-act race."""
+    for terminal in ("completed", "failed", "cancelled", "interrupted"):
+        fake_job_client.create_job(terminal, status=terminal)
+        assert fake_job_client.cancel_active_job(terminal) is False
+        assert fake_job_client.get_job(terminal)["status"] == terminal
+
+
+def test_fake_cancel_active_job_noop_on_missing(fake_job_client: FakeJobServiceClient) -> None:
+    """Cancelling a job that does not exist returns False (no auto-create)."""
+    assert fake_job_client.cancel_active_job("nope") is False
+    assert fake_job_client.get_job("nope") is None
 
 
 # ---------------------------------------------------------------------------

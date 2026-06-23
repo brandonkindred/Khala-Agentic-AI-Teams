@@ -1043,3 +1043,325 @@ def test_build_completion_package_contains_trace_and_gates() -> None:
     assert pkg["task_id"] == "BE-1"
     assert pkg["quality_gates"]["acceptance_trace"] == "pass"
     assert pkg["acceptance_criteria_trace"][0]["criterion"] == "Endpoint returns 201"
+
+
+def _make_bf_result(edits: list, summary: str = "fixed") -> MagicMock:
+    """Build a fake BuildFixSpecialist result with the given edits/summary."""
+    result = MagicMock()
+    result.edits = edits
+    result.summary = summary
+    return result
+
+
+def _bf_task(description: str = "do the thing") -> MagicMock:
+    task = MagicMock()
+    task.description = description
+    return task
+
+
+def test_try_build_fix_specialist_applies_and_writes_returns_true(tmp_path: Path) -> None:
+    """Edits that apply and write cleanly -> True so the caller re-runs the build."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()], summary="patched")
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(True, "", {"app/main.py": "x"}),
+        ),
+        patch(
+            "software_engineering_team.shared.repo_writer.write_agent_output",
+            return_value=(True, ""),
+        ),
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T1",
+            iteration=2,
+        )
+    assert result is True
+    spec.run.assert_called_once()
+
+
+def test_try_build_fix_specialist_no_edits_returns_false(tmp_path: Path) -> None:
+    """No edits -> False so the caller falls back to full regeneration."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])
+    result = agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="ImportError: No module named foo",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="T2",
+        iteration=2,
+    )
+    assert result is False
+
+
+def test_try_build_fix_specialist_apply_failure_returns_false(tmp_path: Path) -> None:
+    """A failed apply returns False and never attempts to write."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()])
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(False, "bad edit", {}),
+        ),
+        patch("software_engineering_team.shared.repo_writer.write_agent_output") as write_mock,
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T3",
+            iteration=3,
+        )
+    assert result is False
+    write_mock.assert_not_called()
+
+
+def test_try_build_fix_specialist_write_failure_returns_false(tmp_path: Path) -> None:
+    """A failed write returns False (the edits did not land)."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([MagicMock()])
+    with (
+        patch("backend_agent.agent.compute_existing_code_chars", return_value=10000),
+        patch(
+            "backend_agent.agent._apply_build_fix_edits",
+            return_value=(True, "", {"app/main.py": "x"}),
+        ),
+        patch(
+            "software_engineering_team.shared.repo_writer.write_agent_output",
+            return_value=(False, "disk full"),
+        ),
+    ):
+        result = agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="ImportError: No module named foo",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="T4",
+            iteration=4,
+        )
+    assert result is False
+
+
+def test_try_build_fix_specialist_swallows_specialist_error(tmp_path: Path) -> None:
+    """A specialist failure is non-blocking: returns False, never raises."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.side_effect = RuntimeError("specialist boom")
+    result = agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="ImportError: No module named foo",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="T5",
+        iteration=5,
+    )
+    assert result is False
+
+
+def test_escalate_qa_issues_prepends_single_issue_at_two_failures(tmp_path: Path) -> None:
+    """At two consecutive failures, one focus-only escalation issue is prepended."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="ImportError: boom",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+    )
+    assert len(issues) == 1
+    assert "occurred 2 times" in issues[0]["description"]
+    assert issues[0]["location"] == ""
+    assert issues[0]["severity"] == "critical"
+
+
+def test_escalate_qa_issues_prepends_test_wrong_issue_first_at_fourth_failure(
+    tmp_path: Path,
+) -> None:
+    """At the 4th failure, the 'test may be wrong' issue is inserted ahead of the focus issue."""
+    issues = [{"severity": "low", "description": "pre-existing"}]
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="ImportError: boom",
+        consecutive_failures=4,
+        repo_path=tmp_path,
+    )
+    assert len(issues) == 3
+    assert "4th same failure" in issues[0]["description"]
+    assert "occurred 4 times" in issues[1]["description"]
+    assert issues[2]["description"] == "pre-existing"
+
+
+def test_escalate_qa_issues_embeds_failing_test_content(tmp_path: Path) -> None:
+    """When the failing test file exists, its contents are embedded in the escalation."""
+    test_file = "tests/test_thing.py"
+    (tmp_path / "tests").mkdir()
+    (tmp_path / test_file).write_text(
+        "def test_x():\n    assert add(1, 2) == 3\n", encoding="utf-8"
+    )
+    issues: list = []
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value=test_file,
+        ),
+    ):
+        BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+            issues,
+            build_errors="E   AssertionError",
+            consecutive_failures=2,
+            repo_path=tmp_path,
+        )
+    assert len(issues) == 1
+    assert "Failing test expectations" in issues[0]["description"]
+    assert "assert add(1, 2) == 3" in issues[0]["description"]
+    assert issues[0]["location"] == test_file
+
+
+def test_escalate_qa_issues_notes_missing_failing_test_file(tmp_path: Path) -> None:
+    """When the failing test file is named but absent, the escalation says so."""
+    issues: list = []
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value="tests/missing.py",
+        ),
+    ):
+        BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+            issues,
+            build_errors="E   AssertionError",
+            consecutive_failures=2,
+            repo_path=tmp_path,
+        )
+    assert len(issues) == 1
+    assert "file not found in repo" in issues[0]["description"]
+    assert issues[0]["location"] == "tests/missing.py"
+
+
+def test_resolve_failing_test_context_reads_existing_file(tmp_path: Path) -> None:
+    """_resolve_failing_test_context returns the file and its full text when present."""
+    from backend_agent.agent import _resolve_failing_test_context
+
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_x.py").write_text("CONTENT", encoding="utf-8")
+    with (
+        patch("backend_agent.agent._is_pytest_assertion_failure", return_value=True),
+        patch(
+            "backend_agent.agent._extract_failing_test_file_from_build_errors",
+            return_value="tests/test_x.py",
+        ),
+    ):
+        file, content = _resolve_failing_test_context("E AssertionError", tmp_path)
+    assert file == "tests/test_x.py"
+    assert content == "CONTENT"
+
+
+def test_resolve_failing_test_context_no_pytest_failure(tmp_path: Path) -> None:
+    """Non-pytest build errors yield (None, None) and no disk access."""
+    from backend_agent.agent import _resolve_failing_test_context
+
+    file, content = _resolve_failing_test_context("ImportError: boom", tmp_path)
+    assert file is None and content is None
+
+
+def test_try_build_fix_specialist_uses_precomputed_test_content(tmp_path: Path) -> None:
+    """A precomputed failing_test_content is sliced into BuildFixInput without re-reading disk."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])  # no edits; we only inspect the call args
+    long_content = "x" * 5000
+    agent._try_build_fix_specialist(
+        repo_path=tmp_path,
+        build_errors="E AssertionError",
+        build_fix_specialist=spec,
+        current_task=_bf_task(),
+        task_id="P1",
+        iteration=2,
+        failing_test_file="tests/test_x.py",
+        failing_test_content=long_content,
+    )
+    sent = spec.run.call_args[0][0]
+    assert sent.failing_test_content == long_content[:3000]
+
+
+def test_try_build_fix_specialist_resolves_context_when_unset(tmp_path: Path) -> None:
+    """When the caller omits failing_test_file/content (default _UNSET sentinel), the
+    method resolves them via _resolve_failing_test_context and threads the result
+    into BuildFixInput."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])  # no edits; we only inspect the call args
+    with patch(
+        "backend_agent.agent._resolve_failing_test_context",
+        return_value=("tests/test_resolved.py", "def test_resolved(): assert False\n"),
+    ) as resolve:
+        agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="E AssertionError",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="U1",
+            iteration=2,
+            # failing_test_file / failing_test_content intentionally omitted -> _UNSET
+        )
+    resolve.assert_called_once_with("E AssertionError", tmp_path)
+    sent = spec.run.call_args[0][0]
+    assert sent.failing_test_content == "def test_resolved(): assert False\n"
+
+
+def test_escalate_uses_precomputed_content_without_disk(tmp_path: Path) -> None:
+    """Precomputed content is embedded even when the file path is not on disk (no re-read)."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/test_x.py",  # intentionally not created on disk
+        failing_test_content="def test_x():\n    assert f() == 1\n",
+    )
+    assert len(issues) == 1
+    assert "assert f() == 1" in issues[0]["description"]
+    assert issues[0]["location"] == "tests/test_x.py"
+
+
+def test_escalate_precomputed_long_content_is_truncated(tmp_path: Path) -> None:
+    """Precomputed content over 3000 chars is marked truncated."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/test_x.py",
+        failing_test_content="y" * 4000,
+    )
+    assert "... [truncated]" in issues[0]["description"]
+
+
+def test_escalate_precomputed_missing_file_adds_note(tmp_path: Path) -> None:
+    """Precomputed (file, None) for an absent file still adds the 'file not found' note."""
+    issues: list = []
+    BackendExpertAgent._escalate_qa_issues_for_repeated_build_failure(
+        issues,
+        build_errors="E AssertionError",
+        consecutive_failures=2,
+        repo_path=tmp_path,
+        failing_test_file="tests/missing.py",
+        failing_test_content=None,
+    )
+    assert len(issues) == 1
+    assert "file not found in repo" in issues[0]["description"]
