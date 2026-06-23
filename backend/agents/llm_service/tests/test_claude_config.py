@@ -9,6 +9,7 @@ from llm_service import config as c
 
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch):
+    """Clear Postgres + LLM_* env so env vars are the sole config source per test."""
     # No Postgres -> runtime config is empty; env vars are the sole source.
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
     for var in (
@@ -26,6 +27,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_provider_claude_and_anthropic_alias(monkeypatch):
+    """LLM_PROVIDER claude/anthropic (any case) all resolve to 'claude'."""
     monkeypatch.setenv("LLM_PROVIDER", "claude")
     assert c.resolve_provider() == "claude"
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
@@ -35,10 +37,12 @@ def test_provider_claude_and_anthropic_alias(monkeypatch):
 
 
 def test_provider_defaults_to_ollama():
+    """resolve_provider defaults to ollama when nothing is configured."""
     assert c.resolve_provider() == "ollama"
 
 
 def test_resolve_claude_model_precedence(monkeypatch):
+    """Claude model precedence: per-agent env > global env > default."""
     # default
     assert c.resolve_claude_model(None) == c.DEFAULT_CLAUDE_MODEL
     # global
@@ -51,11 +55,13 @@ def test_resolve_claude_model_precedence(monkeypatch):
 
 
 def test_resolve_claude_model_ignores_ollama_agent_defaults():
+    """Claude resolution never consults the Ollama AGENT_DEFAULT_MODELS table."""
     # 'backend' has an Ollama default in AGENT_DEFAULT_MODELS; Claude must skip it.
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
 def test_resolve_claude_model_skips_non_claude_env(monkeypatch):
+    """A non-Claude LLM_MODEL env value is skipped (incl. the already-warned lock path)."""
     # A non-Claude value in the SHARED LLM_MODEL env (its default is a non-Claude
     # model) is ignored, not sent to Anthropic; a second call hits the "already
     # warned" branch (lock path). The provider-specific runtime key is empty here.
@@ -67,6 +73,7 @@ def test_resolve_claude_model_skips_non_claude_env(monkeypatch):
 
 
 def test_resolve_claude_model_trusts_runtime_value(monkeypatch):
+    """The provider-specific runtime claude_model is trusted as-is (no heuristic filter)."""
     # The provider-specific runtime claude_model is trusted as-is (no heuristic),
     # so a free-typed custom/gateway Claude model is honored even when it does not
     # match _looks_like_claude_model.
@@ -77,6 +84,7 @@ def test_resolve_claude_model_trusts_runtime_value(monkeypatch):
 
 
 def test_resolve_model_reads_runtime(monkeypatch):
+    """The Ollama path honors the runtime model, ranked above global env but below per-agent."""
     # The Ollama path honors the runtime (UI) model, ranked above LLM_MODEL.
     monkeypatch.setattr(c, "_runtime", lambda key: "llama3.2" if key == "ollama_model" else "")
     assert c.resolve_model(None) == "llama3.2"
@@ -87,6 +95,7 @@ def test_resolve_model_reads_runtime(monkeypatch):
 
 
 def test_resolve_model_falls_back_without_runtime(monkeypatch):
+    """Without runtime, resolve_model uses the default fallback then global env."""
     monkeypatch.setattr(c, "_runtime", lambda key: "")
     assert c.resolve_model(None) == c.DEFAULT_FALLBACK_MODEL
     monkeypatch.setenv("LLM_MODEL", "llama3.1")
@@ -94,6 +103,7 @@ def test_resolve_model_falls_back_without_runtime(monkeypatch):
 
 
 def test_resolve_model_uses_provider_specific_runtime_keys(monkeypatch):
+    """Each provider's runtime model key is isolated: no cross-provider leakage."""
     # Per-provider keys: resolve_model reads ONLY ollama_model and
     # resolve_claude_model reads ONLY claude_model, so a value stored for one
     # provider can never leak into the other (no heuristic filtering needed).
@@ -104,6 +114,7 @@ def test_resolve_model_uses_provider_specific_runtime_keys(monkeypatch):
 
 
 def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
+    """The chokepoint routes the ollama provider to resolve_model (Ollama key)."""
     # The chokepoint routes ollama -> resolve_model, which reads the Ollama key.
     runtime = {"provider": "ollama", "ollama_model": "llama3.2"}
     monkeypatch.setattr(c, "_runtime", lambda key: runtime.get(key, ""))
@@ -111,19 +122,21 @@ def test_resolve_model_for_provider_ollama_uses_runtime(monkeypatch):
 
 
 def test_claude_model_options_track_context_table():
-    # The UI suggestion list is derived from the context table (single source),
-    # and the default model is always present.
-    assert c.CLAUDE_MODEL_OPTIONS == list(c.KNOWN_CLAUDE_CONTEXT.keys())
-    assert c.DEFAULT_CLAUDE_MODEL in c.CLAUDE_MODEL_OPTIONS
+    """The Claude suggestion list is derived from the context table and includes the default."""
+    assert c.CLAUDE_MODEL_SUGGESTIONS == list(c.KNOWN_CLAUDE_CONTEXT.keys())
+    assert c.DEFAULT_CLAUDE_MODEL in c.CLAUDE_MODEL_SUGGESTIONS
 
 
 def test_looks_like_claude_model():
+    """_looks_like_claude_model matches Claude/Anthropic ids and rejects others."""
     for m in (
         "claude-opus-4-8",
         "claude-sonnet-4-6",
         "claude-fable-5",
         "claude-mythos-5",
         "anthropic.claude-opus-4-8",
+        # "anthropic" appearing anywhere also matches (not only as a prefix).
+        "my-gateway-anthropic-opus",
     ):
         assert c._looks_like_claude_model(m) is True
     for m in ("deepseek-v4-pro:cloud", "llama3.1", "qwen3-coder:480b-cloud", "", "gpt-4"):
@@ -131,6 +144,7 @@ def test_looks_like_claude_model():
 
 
 def test_resolve_claude_model_ignores_non_claude_global_env(monkeypatch):
+    """A non-Claude global LLM_MODEL falls back to the Claude default, never sent to Anthropic."""
     # The shipped docker default LLM_MODEL=deepseek-v4-pro:cloud must NOT be sent
     # to the Anthropic API — a non-Claude model falls back to the default.
     monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
@@ -138,16 +152,19 @@ def test_resolve_claude_model_ignores_non_claude_global_env(monkeypatch):
 
 
 def test_resolve_claude_model_ignores_non_claude_per_agent_env(monkeypatch):
+    """A non-Claude per-agent LLM_MODEL_<agent> falls back to the Claude default."""
     monkeypatch.setenv("LLM_MODEL_backend", "llama3.1")
     assert c.resolve_claude_model("backend") == c.DEFAULT_CLAUDE_MODEL
 
 
 def test_resolve_claude_model_accepts_claude_global_env(monkeypatch):
+    """A Claude global LLM_MODEL is honored by resolve_claude_model."""
     monkeypatch.setenv("LLM_MODEL", "claude-haiku-4-5")
     assert c.resolve_claude_model(None) == "claude-haiku-4-5"
 
 
 def test_resolve_claude_model_warns_once_per_candidate(monkeypatch, caplog):
+    """A non-Claude model warns at most once per distinct value, not per call."""
     # A non-Claude LLM_MODEL under the Claude provider must warn at most once per
     # distinct value, not on every call (resolve runs per get_client()).
     monkeypatch.setenv("LLM_MODEL", "deepseek-v4-pro:cloud")
@@ -161,6 +178,7 @@ def test_resolve_claude_model_warns_once_per_candidate(monkeypatch, caplog):
 
 
 def test_resolve_model_for_provider_dispatches(monkeypatch):
+    """resolve_model_for_provider dispatches by active provider (ollama vs claude)."""
     # Ollama provider -> resolve_model; Claude provider -> resolve_claude_model.
     monkeypatch.setenv("LLM_MODEL", "llama3.1")
     assert c.resolve_provider() == "ollama"
@@ -174,6 +192,7 @@ def test_resolve_model_for_provider_dispatches(monkeypatch):
 
 
 def test_resolve_claude_api_key_precedence(monkeypatch):
+    """Claude API key precedence: LLM_CLAUDE_API_KEY > ANTHROPIC_API_KEY > ''."""
     assert c.resolve_claude_api_key() == ""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-anthropic")
     assert c.resolve_claude_api_key() == "sk-anthropic"
@@ -182,6 +201,7 @@ def test_resolve_claude_api_key_precedence(monkeypatch):
 
 
 def test_resolve_claude_context_size(monkeypatch):
+    """Claude context size: known windows, default for unknown, env override wins."""
     assert c.resolve_claude_context_size("claude-opus-4-8") == 1_000_000
     assert c.resolve_claude_context_size("claude-haiku-4-5") == 200_000
     assert c.resolve_claude_context_size("unknown-model") == c.DEFAULT_CLAUDE_CONTEXT
@@ -190,6 +210,7 @@ def test_resolve_claude_context_size(monkeypatch):
 
 
 def test_resolve_ollama_api_key_precedence(monkeypatch):
+    """Ollama API key precedence: OLLAMA_API_KEY > LLM_OLLAMA_API_KEY > ''."""
     assert c.resolve_ollama_api_key() == ""
     monkeypatch.setenv("LLM_OLLAMA_API_KEY", "ll")
     assert c.resolve_ollama_api_key() == "ll"
@@ -198,6 +219,7 @@ def test_resolve_ollama_api_key_precedence(monkeypatch):
 
 
 def test_summary_for_claude(monkeypatch):
+    """The config summary reports provider/model for Claude and never leaks keys."""
     monkeypatch.setenv("LLM_PROVIDER", "claude")
     summary = c.get_llm_config_summary()
     assert "provider=claude" in summary

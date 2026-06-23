@@ -1,6 +1,5 @@
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -32,7 +31,6 @@ const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
   selector: 'app-llm-config-dashboard',
   standalone: true,
   imports: [
-    CommonModule,
     FormsModule,
     MatCardModule,
     MatFormFieldModule,
@@ -102,6 +100,7 @@ export class LlmConfigDashboardComponent implements OnInit {
       });
   }
 
+  /** Populate form fields from the loaded LLM configuration. */
   private applyConfig(cfg: LlmConfigResponse): void {
     this.provider = cfg.provider === 'claude' ? 'claude' : 'ollama';
     this.model = cfg.model || '';
@@ -148,6 +147,9 @@ export class LlmConfigDashboardComponent implements OnInit {
    *
    * Uses the parsed hostname, not a substring, so a custom host that merely
    * contains 'ollama.com' (e.g. http://ollama.company.com) is treated as Local.
+   * Has a scheme-less fallback: a value like 'ollama.com' or 'ollama.com:443'
+   * makes the bare URL() parse throw, so it retries parsing with an 'https://'
+   * prefix to extract the real hostname rather than comparing the raw string.
    */
   private isOllamaCloudUrl(url: string): boolean {
     const u = (url || '').trim();
@@ -219,6 +221,7 @@ export class LlmConfigDashboardComponent implements OnInit {
       });
   }
 
+  /** Extract a human-readable error detail from an API error response, falling back to a default message. */
   private friendlyError(err: unknown, fallback: string): string {
     const detail = (err as { error?: { detail?: string } })?.error?.detail;
     return detail || fallback;

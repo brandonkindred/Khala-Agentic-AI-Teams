@@ -21,9 +21,9 @@ from fastapi.testclient import TestClient
 def _dummy_llm(monkeypatch: pytest.MonkeyPatch) -> None:
     """Force ``LLM_PROVIDER=dummy`` so factories don't need a real Ollama."""
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    from llm_service import _clear_client_cache_for_testing
+    from llm_service import clear_client_cache
 
-    _clear_client_cache_for_testing()
+    clear_client_cache()
 
 
 def _build_app(monkeypatch: pytest.MonkeyPatch, agent_id: str):

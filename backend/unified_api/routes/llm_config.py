@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/llm-config", tags=["llm-config"])
 _PROVIDER_OPTIONS = ["ollama", "claude"]
 # Both suggestion lists are sourced from llm_service.config so the UI options
 # can't drift from the model config the clients use: Claude suggestions come from
-# CLAUDE_MODEL_OPTIONS (derived from the context-window table) and Ollama
+# CLAUDE_MODEL_SUGGESTIONS (derived from the context-window table) and Ollama
 # suggestions from OLLAMA_MODEL_SUGGESTIONS. Updating models is a one-place edit.
 _OLLAMA_MODEL_SUGGESTIONS = list(llm_config.OLLAMA_MODEL_SUGGESTIONS)
 
@@ -117,7 +117,7 @@ def _build_response() -> LlmConfigResponse:
         ollama_api_key_configured=bool(llm_config.resolve_ollama_api_key()),
         storage_available=is_postgres_enabled(),
         provider_options=list(_PROVIDER_OPTIONS),
-        claude_model_options=list(llm_config.CLAUDE_MODEL_OPTIONS),
+        claude_model_options=list(llm_config.CLAUDE_MODEL_SUGGESTIONS),
         ollama_model_suggestions=list(_OLLAMA_MODEL_SUGGESTIONS),
     )
 
@@ -143,7 +143,12 @@ async def get_llm_config() -> LlmConfigResponse:
     try:
         runtime_config.clear_cache()
     except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 a read
-        logger.exception("Failed to clear runtime-config cache for GET /api/llm-config")
+        logger.warning(
+            "Failed to clear runtime-config cache for GET /api/llm-config; the returned "
+            "config may reflect a stale per-worker cache until the runtime-config TTL "
+            "expires.",
+            exc_info=True,
+        )
     return _build_response()
 
 
@@ -176,7 +181,12 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     try:
         runtime_config.clear_cache()
     except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 the guard below
-        logger.exception("Failed to clear runtime-config cache before the LLM provider guard")
+        logger.warning(
+            "Failed to clear runtime-config cache before the LLM provider guard; the "
+            "keyless-Claude guard decision below may reflect a stale per-worker cache "
+            "until the runtime-config TTL expires.",
+            exc_info=True,
+        )
 
     # Refuse to switch the global provider to Claude unless a key will actually be
     # available (in this request, or already stored/in env). Otherwise the factory

@@ -47,9 +47,15 @@ class _FakeCursor:
 class _FakeConn:
     def __init__(self, store):
         self.store = store
+        self.commits = 0
 
     def cursor(self):
         return _FakeCursor(self.store)
+
+    def commit(self):
+        # _ensure_table() now issues an explicit conn.commit() after the DDL; the
+        # real pooled connection always has commit(), so the fake mirrors it.
+        self.commits += 1
 
 
 def _fake_get_conn(store):

@@ -276,6 +276,11 @@ def _ensure_table() -> None:
         try:
             with get_conn() as conn, conn.cursor() as cur:
                 cur.execute(SECRETS_TABLE_DDL)
+                # get_conn() already commits on clean exit, so this is belt-and-braces;
+                # it makes the DDL durable immediately (before the context manager's
+                # own commit) so the table is guaranteed visible to the very next
+                # pooled connection regardless of the wrapper's commit timing.
+                conn.commit()
             _table_ensured = True
         except Exception as e:  # noqa: BLE001 - reads still fall back to ""; retried next call
             logger.warning("shared secrets table ensure failed: %s", e)

@@ -203,14 +203,16 @@ class ClaudeLLMClient(LLMClient):
     ) -> None:
         """Construct a Claude client.
 
-        Preconditions: ``model`` is a non-empty Claude model id; ``timeout`` > 0;
+        Preconditions: ``model`` is a non-empty Claude model id (validated with an
+            explicit ``ValueError`` so it survives ``python -O``); ``timeout`` > 0;
             ``max_retries`` >= 0; ``on_reasoning`` is callable or ``None``.
             ``api_key`` may be empty here — it is validated on first use so the
             client can be constructed in environments that resolve the key lazily.
         Postconditions: a ready client; when ``on_reasoning`` is set, thinking-token
             deltas are streamed to it during each call (mirrors the Ollama client).
         """
-        assert model, "model must be non-empty"
+        if not model or not model.strip():
+            raise ValueError("model must be a non-empty string")
         self.model = model
         self.api_key = api_key or ""
         self.timeout = timeout

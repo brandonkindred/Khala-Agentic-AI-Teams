@@ -1,8 +1,21 @@
-"""
-Factory for obtaining an LLM client by agent key or default.
+"""LLM client factory: provider selection, client caching, and agent attribution.
 
-Resolves provider and model from config (env + per-agent overrides + default table).
-Caches Ollama clients by (model, base_url, timeout). Thread-safe.
+Resolves the active provider and model from :mod:`llm_service.config` (runtime UI ->
+env -> per-agent/default tables) and hands back the matching provider client:
+
+- **Provider selection** — ``dummy`` -> :class:`DummyLLMClient`; ``claude`` ->
+  :class:`ClaudeLLMClient`; ``ollama`` (or unset) -> :class:`OllamaLLMClient`.
+- **Caching** — Ollama clients are cached by ``(model, base_url, timeout-ms)`` and
+  Claude clients by ``(model, api-key-fingerprint, timeout-ms)`` (the timeout is
+  quantized to integer milliseconds so float jitter never fragments the cache), so
+  a model/key/base-url change yields a fresh client and a stale key never lingers.
+- **on_reasoning fresh-client path** — a per-caller thinking-token sink forces a
+  FRESH, uncached client so the callback never leaks into the shared cache.
+- **Agent attribution** — when ``agent_key`` is given, the cached client is wrapped
+  in :class:`_AttributingClient`, which binds that identity onto the attribution
+  context around every generation call (logs/telemetry attribute to the agent).
+
+Thread-safe: all cache reads/writes are guarded by ``_cache_lock``.
 """
 
 from __future__ import annotations
@@ -19,11 +32,27 @@ from .util import sha256_fingerprint
 
 logger = logging.getLogger(__name__)
 
-_client_cache: dict[tuple[str, str, float], OllamaLLMClient] = {}
-# Claude clients cache by (model, api-key fingerprint) so a key or model change
-# yields a fresh client (and a stale key never lingers behind a cached client).
-_claude_cache: dict[tuple[str, str, float], ClaudeLLMClient] = {}
+_client_cache: dict[tuple[str, str, int], OllamaLLMClient] = {}
+# Claude clients cache by (model, api-key fingerprint, timeout-ms) so a key, model,
+# or timeout change yields a fresh client (and a stale key never lingers behind a
+# cached client).
+_claude_cache: dict[tuple[str, str, int], ClaudeLLMClient] = {}
 _cache_lock = threading.Lock()
+
+
+def _timeout_cache_key(timeout: float) -> int:
+    """Quantize a float ``timeout`` (seconds) to integer milliseconds for the cache key.
+
+    A float timeout would let imperceptible jitter (e.g. 900.0 vs 900.0000001)
+    fragment the client cache into near-duplicate entries; rounding to whole
+    milliseconds gives a stable, hashable key while preserving any meaningful
+    per-agent timeout difference.
+
+    Preconditions: ``timeout`` is a number.
+    Postconditions: returns ``round(timeout * 1000)`` as an ``int``. Never raises
+        for a numeric input.
+    """
+    return int(round(timeout * 1000))
 
 
 class _AttributingClient:
@@ -186,16 +215,17 @@ def get_client(
         )
         return _AttributingClient(client, agent_key) if agent_key else client
 
-    cache_key = (model, base_url, timeout)
+    cache_key = (model, base_url, _timeout_cache_key(timeout))
     with _cache_lock:
-        if cache_key not in _client_cache:
-            _client_cache[cache_key] = OllamaLLMClient(
-                model=model, base_url=base_url, timeout=timeout
-            )
-        client = _client_cache[cache_key]
+        client = _client_cache.get(cache_key)
+        if client is None:
+            client = OllamaLLMClient(model=model, base_url=base_url, timeout=timeout)
+            _client_cache[cache_key] = client
+            # Log the effective config once, on a genuine cache miss (a new client
+            # was just built) — independent of agent_key, so it fires whether or not
+            # a keyed wrapper is returned, and never on a cache hit.
+            logger.info("LLM config: %s", llm_config.get_llm_config_summary())
 
-    if agent_key is None:
-        logger.info("LLM config: %s", llm_config.get_llm_config_summary())
     # Falsy agent_key (None or "") binds nothing — return the raw client, matching
     # the on_reasoning branch above. Wrapping with an empty key would bind
     # ``llm_attribution(agent_key="")``, which (since "" overrides rather than
@@ -210,11 +240,12 @@ def _get_claude_client(
 ) -> Union[ClaudeLLMClient, "_AttributingClient"]:
     """Build/cache a :class:`ClaudeLLMClient` for ``agent_key``.
 
-    Cached by ``(model, api_key_fingerprint, timeout)`` so a model, key, or timeout
-    change yields a fresh client (the timeout dimension mirrors the Ollama cache
-    key and avoids a stale-timeout client if ``resolve_timeout`` ever becomes
-    per-agent). Wrapped in :class:`_AttributingClient` when ``agent_key`` is
-    truthy, mirroring the Ollama path.
+    Cached by ``(model, api_key_fingerprint, timeout_ms)`` so a model, key, or
+    timeout change yields a fresh client (the timeout dimension mirrors the Ollama
+    cache key and avoids a stale-timeout client if ``resolve_timeout`` ever becomes
+    per-agent; it is quantized to integer milliseconds so float jitter never
+    fragments the cache). Wrapped in :class:`_AttributingClient` when ``agent_key``
+    is truthy, mirroring the Ollama path.
 
     ``on_reasoning`` (a per-caller thinking-token sink) forces a FRESH, uncached
     client so the callback never leaks into the shared cache — mirroring the Ollama
@@ -234,14 +265,16 @@ def _get_claude_client(
         )
         return _AttributingClient(client, agent_key) if agent_key else client
     fingerprint = sha256_fingerprint(api_key) if api_key else "no-key"
-    cache_key = (model, fingerprint, timeout)
+    cache_key = (model, fingerprint, _timeout_cache_key(timeout))
     with _cache_lock:
         client = _claude_cache.get(cache_key)
         if client is None:
             client = ClaudeLLMClient(model=model, api_key=api_key, timeout=timeout)
             _claude_cache[cache_key] = client
-    if agent_key is None:
-        logger.info("LLM config: %s", llm_config.get_llm_config_summary())
+            # Log the effective config once, on a genuine cache miss (a new client
+            # was just built) — independent of agent_key, so it fires whether or not
+            # a keyed wrapper is returned, and never on a cache hit.
+            logger.info("LLM config: %s", llm_config.get_llm_config_summary())
     return _AttributingClient(client, agent_key) if agent_key else client
 
 
@@ -261,16 +294,14 @@ def clear_client_cache() -> None:
         _client_cache.clear()
         _claude_cache.clear()
     # Lazy import to avoid a circular import (strands_provider imports get_client).
+    # Kept broad (not just ImportError): this guards BOTH the optional-dependency
+    # import AND the clear_model_cache() call, and a cache clear must be best-effort
+    # so a config change still succeeds. Warn (not debug): a swallowed failure here
+    # silently leaves a stale key-pinned Strands adapter after a config change — the
+    # bug this clears — so it must stay visible.
     try:
         from . import strands_provider
 
         strands_provider.clear_model_cache()
-    except Exception:  # noqa: BLE001 - cache clear is best-effort
-        # Warn (not debug): a swallowed failure here silently leaves a stale
-        # key-pinned Strands adapter after a config change — the bug this clears.
+    except Exception:  # noqa: BLE001 - cache clear is best-effort (import or clear)
         logger.warning("Failed to clear Strands model cache", exc_info=True)
-
-
-def _clear_client_cache_for_testing() -> None:
-    """Clear the provider client caches. For use in tests only."""
-    clear_client_cache()

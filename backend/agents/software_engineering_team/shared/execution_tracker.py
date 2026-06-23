@@ -107,6 +107,11 @@ class ExecutionTracker:
         self._lock = Lock()
 
     def _emit(self, event_type: str, payload: dict) -> None:
+        """Append one event to the bounded buffer, tracking front-evictions.
+
+        Preconditions: the caller MUST hold ``self._lock`` (it is non-reentrant, so
+            this method never acquires it itself).
+        """
         # When the bounded deque is full, the append drops one event off the front;
         # count it so events_since()/event_count stay aligned with the consumer's
         # monotonic (total-emitted) index.
@@ -115,6 +120,11 @@ class ExecutionTracker:
         self._events.append({"type": event_type, "timestamp": _iso(_utc_now()), "payload": payload})
 
     def _store_task(self, task_id: str, task: ExecutionTask) -> None:
+        """Insert/replace a task under the FIFO cap.
+
+        Preconditions: the caller MUST hold ``self._lock`` (it is non-reentrant, so
+            this method never acquires it itself).
+        """
         # FIFO eviction: a single job's task set stays well under the cap, so the
         # only entries dropped are leftovers from earlier completed jobs.
         if task_id not in self._tasks and len(self._tasks) >= self._task_cap:

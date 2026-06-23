@@ -22,7 +22,6 @@ from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
 from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import (
-    _clear_client_cache_for_testing,
     attributed_client,
     clear_client_cache,
     client_agent_key,
@@ -84,7 +83,6 @@ def get_llm_config_summary() -> str:
 
 
 __all__ = [
-    "_clear_client_cache_for_testing",
     "_clear_strands_model_cache_for_testing",
     "clear_client_cache",
     "LLMAttribution",

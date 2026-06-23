@@ -1,8 +1,28 @@
-"""
-Single source of configuration for the LLM service.
+"""Centralized LLM configuration resolution for the ``llm_service``.
 
-Environment variables use LLM_* prefix. Known model context and
-per-agent default models live here.
+This module is the single chokepoint for "what provider / model / key / context
+window / thinking level is effective right now". Every setting follows one
+resolution order:
+
+    runtime (UI / Postgres) -> environment variable -> hard-coded default
+
+Runtime values are the operator selections made in the LLM Provider settings UI
+and persisted (Fernet-encrypted) in shared Postgres; they are read back here
+**best-effort** via :mod:`llm_service.runtime_config` (the :func:`_runtime` helper
+swallows any read/import failure and returns ``""``), so env vars are always a
+working fallback and these resolvers never raise on a runtime-config problem.
+
+Key exports:
+    - ``resolve_*`` functions — the effective provider, model (per-provider and
+      via the :func:`resolve_model_for_provider` chokepoint), API keys, base URL,
+      timeout, context size, and ``max_tokens``; plus the thinking-level resolvers
+      (:func:`resolve_think_for_model` / :func:`downgrade_think`).
+    - ``ENV_*`` constants — the canonical ``LLM_*`` environment-variable names.
+    - Model-option/suggestion constants (``CLAUDE_MODEL_SUGGESTIONS``,
+      ``OLLAMA_MODEL_SUGGESTIONS``) and the known context-window / thinking-level
+      tables.
+
+Environment variables use the ``LLM_*`` prefix.
 """
 
 from __future__ import annotations
@@ -42,7 +62,13 @@ ENV_LLM_RATE_LIMIT_BACKOFF_MAX = "LLM_RATE_LIMIT_BACKOFF_MAX"
 ENV_LLM_RATE_LIMIT_HONOR_RETRY_AFTER = "LLM_RATE_LIMIT_HONOR_RETRY_AFTER"
 ENV_LLM_MAX_CONCURRENCY = "LLM_MAX_CONCURRENCY"
 ENV_LLM_ENABLE_THINKING = "LLM_ENABLE_THINKING"
+# No dedicated resolver: read directly by resolve_think_for_model below (it picks
+# this level when the model registers it, else warns and falls back to the model's
+# max level).
 ENV_LLM_THINKING_LEVEL = "LLM_THINKING_LEVEL"
+# No dedicated resolver: read directly by the Ollama client's downgrade-retry gate
+# (clients/ollama.py, via env_flag_enabled) — a falsy value disables reducing the
+# thinking level as the proof-of-change on a semantically-exhausted retry.
 ENV_LLM_THINKING_DOWNGRADE_RETRY = "LLM_THINKING_DOWNGRADE_RETRY"
 ENV_LLM_OLLAMA_API_KEY = "LLM_OLLAMA_API_KEY"
 # Claude / Anthropic API key. ``LLM_CLAUDE_API_KEY`` is the Khala-namespaced name;
@@ -82,10 +108,10 @@ KNOWN_CLAUDE_CONTEXT: dict[str, int] = {
 DEFAULT_CLAUDE_CONTEXT = 200_000
 
 # Curated Claude model ids surfaced as suggestions by the settings UI. Derived
-# from KNOWN_CLAUDE_CONTEXT so the option list and the context-window table are a
-# single source of truth that cannot silently drift apart: every suggested model
+# from KNOWN_CLAUDE_CONTEXT so the suggestion list and the context-window table are
+# a single source of truth that cannot silently drift apart: every suggested model
 # has a known context window. The model field also accepts free text.
-CLAUDE_MODEL_OPTIONS: list[str] = list(KNOWN_CLAUDE_CONTEXT.keys())
+CLAUDE_MODEL_SUGGESTIONS: list[str] = list(KNOWN_CLAUDE_CONTEXT.keys())
 
 # Invariant: the default model must itself have a known context window (and thus
 # appear in the suggestion list), so it never falls back to DEFAULT_CLAUDE_CONTEXT.
@@ -263,8 +289,8 @@ DEFAULT_FALLBACK_MODEL = "deepseek-v4-pro:cloud"
 # Curated Ollama model ids surfaced as suggestions by the settings UI. Centralized
 # here (rather than inline in the unified_api route) so the UI suggestion list and
 # the rest of the model config share one home and can't silently drift, mirroring
-# CLAUDE_MODEL_OPTIONS above. The model field also accepts free text, so this is a
-# suggestion list, not a closed set.
+# CLAUDE_MODEL_SUGGESTIONS above. The model field also accepts free text, so this is
+# a suggestion list, not a closed set.
 OLLAMA_MODEL_SUGGESTIONS: list[str] = [
     "deepseek-v4-pro:cloud",
     "qwen3-coder:480b-cloud",
@@ -296,6 +322,30 @@ def _runtime(key: str) -> str:
         return ""
 
 
+def _runtime_key(attr: str) -> Optional[str]:
+    """Resolve a ``runtime_config.KEY_*`` constant by attribute name, or ``None``.
+
+    Reads the canonical key string from :mod:`llm_service.runtime_config` (rather
+    than duplicating the literal here, which would let the two drift). Guards the
+    lazy import so a resolver honors its "Never raises" postcondition even when
+    runtime_config can't be imported — the caller then skips the runtime lookup and
+    falls through to env/default. Returning ``None`` (not ``""``) keeps a missing
+    key from being passed into :func:`_runtime` (whose ``get_runtime`` rejects an
+    unknown key).
+
+    Preconditions: ``attr`` names a ``KEY_*`` constant on ``runtime_config``.
+    Postconditions: returns the key string, or ``None`` when runtime_config is
+        unavailable. Never raises.
+    """
+    try:
+        from . import runtime_config as _rc
+
+        return getattr(_rc, attr)
+    except Exception as e:  # noqa: BLE001 - runtime config is best-effort
+        logger.debug("runtime config key lookup failed for %s: %s", attr, e)
+        return None
+
+
 def resolve_provider() -> str:
     """Return effective LLM provider: 'dummy', 'claude', or 'ollama' (default).
 
@@ -305,11 +355,9 @@ def resolve_provider() -> str:
     Postconditions: returns a lowercase, stripped provider id; ``"anthropic"``
         maps to ``"claude"``. Never raises.
     """
-    from . import runtime_config as _rc
-
-    raw = (
-        (_runtime(_rc.KEY_PROVIDER) or os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
-    )
+    key = _runtime_key("KEY_PROVIDER")
+    runtime = _runtime(key) if key else ""
+    raw = (runtime or os.environ.get(ENV_LLM_PROVIDER) or "ollama").lower().strip()
     if raw in ("anthropic", "claude"):
         return "claude"
     return raw
@@ -342,8 +390,14 @@ def _looks_like_claude_model(model: str) -> bool:
 
     Heuristic guard so a cross-provider model id (e.g. an Ollama model left in the
     shared ``LLM_MODEL`` env, which defaults to a non-Claude model) is never sent to
-    the Anthropic API. Matches the Claude/Fable/Mythos families and the
-    Bedrock/Vertex-style ``anthropic.``/``claude-`` prefixes.
+    the Anthropic API.
+
+    Matching rules (case-insensitive, applied to the stripped value):
+        - a ``claude``, ``anthropic.``, or ``anthropic/`` prefix (the latter two are
+          the Bedrock/Vertex gateway forms) -> match; or
+        - the token ``anthropic``, ``claude``, ``fable``, or ``mythos`` appears
+          anywhere in the id -> match.
+    Anything else (including the empty string) -> no match.
 
     Postconditions: returns a bool; never raises. ``""`` -> False.
     """
@@ -352,7 +406,7 @@ def _looks_like_claude_model(model: str) -> bool:
         return False
     if m.startswith(("claude", "anthropic.", "anthropic/")):
         return True
-    return any(token in m for token in ("claude", "fable", "mythos"))
+    return any(token in m for token in ("anthropic", "claude", "fable", "mythos"))
 
 
 def resolve_claude_model(agent_key: Optional[str] = None) -> str:
@@ -375,7 +429,8 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
 
     Postconditions: returns a non-empty model id string.
     """
-    from . import runtime_config as _rc
+    key = _runtime_key("KEY_CLAUDE_MODEL")
+    runtime_model = _runtime(key).strip() if key else ""
 
     # (candidate, trusted) in priority order. Env candidates are shared across
     # providers so they are heuristic-validated; the provider-specific runtime
@@ -383,7 +438,7 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
     candidates: list[tuple[str, bool]] = []
     if agent_key:
         candidates.append(((os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip(), False))
-    candidates.append((_runtime(_rc.KEY_CLAUDE_MODEL).strip(), True))
+    candidates.append((runtime_model, True))
     candidates.append(((os.environ.get(ENV_LLM_MODEL) or "").strip(), False))
 
     for candidate, trusted in candidates:
@@ -396,12 +451,22 @@ def resolve_claude_model(agent_key: Optional[str] = None) -> str:
             if should_warn:
                 _warned_non_claude_models.add(candidate)
         if should_warn:
-            logger.warning(
-                "Ignoring non-Claude model %r for the Claude provider; using default %s. "
-                "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
-                candidate,
-                DEFAULT_CLAUDE_MODEL,
-            )
+            if agent_key:
+                logger.warning(
+                    "Ignoring non-Claude model %r for the Claude provider for agent %s; "
+                    "using default %s. Set a Claude model in the LLM Provider settings or "
+                    "LLM_MODEL.",
+                    candidate,
+                    agent_key,
+                    DEFAULT_CLAUDE_MODEL,
+                )
+            else:
+                logger.warning(
+                    "Ignoring non-Claude model %r for the Claude provider; using default %s. "
+                    "Set a Claude model in the LLM Provider settings or LLM_MODEL.",
+                    candidate,
+                    DEFAULT_CLAUDE_MODEL,
+                )
     return DEFAULT_CLAUDE_MODEL
 
 
@@ -412,9 +477,8 @@ def resolve_claude_api_key() -> str:
         ``""`` when none is configured (the client then surfaces a clear auth error
         on first call). Never raises.
     """
-    from . import runtime_config as _rc
-
-    runtime = _runtime(_rc.KEY_CLAUDE_API_KEY).strip()
+    key = _runtime_key("KEY_CLAUDE_API_KEY")
+    runtime = _runtime(key).strip() if key else ""
     if runtime:
         return runtime
     return (
@@ -445,9 +509,8 @@ def resolve_ollama_api_key() -> str:
     Postconditions: returns the first non-empty source stripped, else ``""`` (local
         Ollama needs no key). Never raises.
     """
-    from . import runtime_config as _rc
-
-    runtime = _runtime(_rc.KEY_OLLAMA_API_KEY).strip()
+    key = _runtime_key("KEY_OLLAMA_API_KEY")
+    runtime = _runtime(key).strip() if key else ""
     if runtime:
         return runtime
     return (
@@ -469,13 +532,12 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
 
     Postconditions: returns a non-empty model id string. Never raises.
     """
-    from . import runtime_config as _rc
-
     if agent_key:
         per_agent = (os.environ.get(f"{ENV_LLM_MODEL}_{agent_key}") or "").strip()
         if per_agent:
             return per_agent
-    runtime_model = _runtime(_rc.KEY_OLLAMA_MODEL).strip()
+    key = _runtime_key("KEY_OLLAMA_MODEL")
+    runtime_model = _runtime(key).strip() if key else ""
     if runtime_model:
         return runtime_model
     global_model = (os.environ.get(ENV_LLM_MODEL) or "").strip()
@@ -486,7 +548,9 @@ def resolve_model(agent_key: Optional[str] = None) -> str:
     return DEFAULT_FALLBACK_MODEL
 
 
-def resolve_model_for_provider(agent_key: Optional[str] = None, provider: Optional[str] = None) -> str:
+def resolve_model_for_provider(
+    agent_key: Optional[str] = None, provider: Optional[str] = None
+) -> str:
     """Resolve the model id for the *active* provider.
 
     Single chokepoint for the "which model id under the current provider"
@@ -513,13 +577,9 @@ def resolve_base_url() -> str:
     The runtime value lets the settings UI toggle between local Ollama
     (``http://host:11434``) and Ollama Cloud (``https://ollama.com``).
     """
-    from . import runtime_config as _rc
-
-    raw = (
-        _runtime(_rc.KEY_OLLAMA_BASE_URL)
-        or os.environ.get(ENV_LLM_BASE_URL)
-        or "https://ollama.com"
-    )
+    key = _runtime_key("KEY_OLLAMA_BASE_URL")
+    runtime = _runtime(key) if key else ""
+    raw = runtime or os.environ.get(ENV_LLM_BASE_URL) or "https://ollama.com"
     return raw.strip().rstrip("/")
 
 
@@ -560,9 +620,9 @@ def get_llm_config_summary() -> str:
     provider = resolve_provider()
     if provider == "ollama":
         return (
-            f"provider={provider}, model={resolve_model_for_provider(None)}, "
+            f"provider={provider}, model={resolve_model_for_provider(None, provider)}, "
             f"base_url={resolve_base_url()}"
         )
     if provider == "claude":
-        return f"provider={provider}, model={resolve_model_for_provider(None)}"
+        return f"provider={provider}, model={resolve_model_for_provider(None, provider)}"
     return f"provider={provider}"
