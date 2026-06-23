@@ -27,7 +27,9 @@ import logging
 import math
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +50,20 @@ class ModelPrice:
 # self-hosted hardware and are priced at $0 here (compute cost is not metered
 # per token). Cloud models use rough public list prices; override per
 # deployment with LLM_PRICE_<model> when real rates are known.
-MODEL_PRICING: dict[str, ModelPrice] = {
-    "deepseek-v4-pro:cloud": ModelPrice(0.00027, 0.00110),
-    "qwen3-coder:480b-cloud": ModelPrice(0.00020, 0.00080),
-    "qwen3-coder:480b": ModelPrice(0.00020, 0.00080),
-    "qwen3.5:397b": ModelPrice(0.00020, 0.00080),
-    "qwen3.5:397b-cloud": ModelPrice(0.00020, 0.00080),
-    "qwen3.5:cloud": ModelPrice(0.00020, 0.00080),
-    "llama3.1": ModelPrice(0.0, 0.0),
-    "llama3.2": ModelPrice(0.0, 0.0),
-}
+# Wrapped read-only (MappingProxyType) so accidental mutation can't corrupt cost
+# estimates; override per model via the LLM_PRICE_* env var instead.
+MODEL_PRICING: Mapping[str, ModelPrice] = MappingProxyType(
+    {
+        "deepseek-v4-pro:cloud": ModelPrice(0.00027, 0.00110),
+        "qwen3-coder:480b-cloud": ModelPrice(0.00020, 0.00080),
+        "qwen3-coder:480b": ModelPrice(0.00020, 0.00080),
+        "qwen3.5:397b": ModelPrice(0.00020, 0.00080),
+        "qwen3.5:397b-cloud": ModelPrice(0.00020, 0.00080),
+        "qwen3.5:cloud": ModelPrice(0.00020, 0.00080),
+        "llama3.1": ModelPrice(0.0, 0.0),
+        "llama3.2": ModelPrice(0.0, 0.0),
+    }
+)
 
 _ENV_PREFIX = "LLM_PRICE_"
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")

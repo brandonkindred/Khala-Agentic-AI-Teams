@@ -60,6 +60,13 @@ def test_ingest_missing_file_is_zero() -> None:
     assert post_mortem_ingest.ingest_post_mortems_file("/no/such/file.md") == 0
 
 
+def test_ingest_file_without_failure_entries_is_zero(tmp_path) -> None:
+    """A file that exists but has no '## Failure:' entries ingests nothing (returns 0)."""
+    p = tmp_path / "POST_MORTEMS.md"
+    p.write_text("# Post-mortems\n\nNo failures recorded yet.\n", encoding="utf-8")
+    assert post_mortem_ingest.ingest_post_mortems_file(p) == 0
+
+
 # --- gate_outcomes ---------------------------------------------------------
 
 

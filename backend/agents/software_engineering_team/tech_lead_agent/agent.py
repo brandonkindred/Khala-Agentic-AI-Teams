@@ -517,8 +517,8 @@ class TechLeadAgent:
             query = "\n".join(
                 part
                 for part in (
-                    reqs.title,
-                    reqs.description,
+                    reqs.title if reqs else "",
+                    reqs.description if reqs else "",
                     input_data.spec_content or "",
                     arch_overview,
                 )

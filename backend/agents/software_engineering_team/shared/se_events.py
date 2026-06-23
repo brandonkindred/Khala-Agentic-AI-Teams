@@ -104,7 +104,12 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
     Postconditions:
         - Returns a list of dict rows (keys: ts, job_id, task_id, event_type,
           phase, gate, detail); ``[]`` when Postgres is disabled or on error.
+    Raises:
+        - ``ValueError`` if ``cutoff`` is naive — a naive bound is compared in the
+          session TimeZone and would silently shift the window (caller bug).
     """
+    if cutoff.tzinfo is None:
+        raise ValueError("cutoff must be a timezone-aware datetime")
     try:
         from shared_postgres import dict_row, get_conn, is_postgres_enabled
     except Exception:

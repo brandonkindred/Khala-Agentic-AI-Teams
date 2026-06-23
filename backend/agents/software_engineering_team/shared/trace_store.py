@@ -90,7 +90,12 @@ def fetch_cost_since(cutoff: datetime) -> dict[str, Any]:
     Postconditions:
         - Returns ``{"total_cost_usd": float, "by_job": {job_id: cost}}``;
           zeros / empty when Postgres is disabled or on error.
+    Raises:
+        - ``ValueError`` if ``cutoff`` is naive — a naive bound is compared in the
+          session TimeZone and would silently shift the aggregation window.
     """
+    if cutoff.tzinfo is None:
+        raise ValueError("cutoff must be a timezone-aware datetime")
     empty: dict[str, Any] = {"total_cost_usd": 0.0, "by_job": {}}
     try:
         from shared_postgres import dict_row, get_conn, is_postgres_enabled

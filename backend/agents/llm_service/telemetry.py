@@ -41,6 +41,17 @@ from typing import Any, Callable, Deque, Dict, List, Optional
 
 from .pricing import estimate_cost_usd
 
+__all__ = [
+    "LLMCallRecord",
+    "UsageSummary",
+    "record_llm_call",
+    "register_call_observer",
+    "unregister_call_observer",
+    "get_recent_calls",
+    "get_usage_summary",
+    "clear_call_log",
+]
+
 logger = logging.getLogger(__name__)
 
 # In-memory ring buffer size. For production, this should be replaced with
