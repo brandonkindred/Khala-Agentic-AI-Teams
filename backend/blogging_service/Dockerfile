@@ -34,6 +34,9 @@ COPY agents/job_service_client.py /app/job_service_client.py
 # Shared concurrency primitives (BackgroundHeartbeat) imported by job_service_client
 COPY agents/shared_concurrency /app/shared_concurrency
 
+# Shared HTTP connection pool (get_pooled_client) imported by job_service_client
+COPY agents/shared_http /app/shared_http
+
 # Integration contracts (used by integrations_store)
 COPY agents/integrations /app/integrations
 
