@@ -51,9 +51,10 @@ flowchart LR
     State -.-> S1 & S2 & S3 & S4
 ```
 
-The stepper carries a small **handoff state** `{registryAgentId?, teamId?, processId?, personaId?}` so each stage
-pre‑seeds the next (the agent you just tested is the one offered for the roster; the team you just composed is the
-default persona target). This glue is the only genuinely new interaction concept.
+The Studio maintains a small **handoff state** `{registryAgentId?, teamId?, processId?, personaId?}` via
+`AgentStudioStateService` (§2.4) — which the stepper reflects and each stage reads/writes — so each stage pre‑seeds
+the next (the agent you just tested is the one offered for the roster; the team you just composed is the default
+persona target). This glue is the only genuinely new interaction concept.
 
 **Stepper navigation is forward‑only.** Clicking a previous stage indicator does *not* navigate backward — the
 indicators show progress, not links. Iteration happens only via the explicit Stage‑4 buttons **"fix an agent"**
@@ -66,6 +67,11 @@ back‑loops.
 - **Stage 2** and **Stage 3** each expose a **`[ Browse agents ]`** affordance that opens the Stage‑1 catalog
   (browse + filter + inspect drawer, the same `agent-catalog` component) in a slide‑out. Selecting another agent
   there updates `registryAgentId` in the handoff state **without** resetting later‑stage work.
+- **What "without resetting later‑stage work" means.** It refers to the *handoff‑state slots* — the Stage‑3 roster
+  composition and Stage‑4 team/persona selection are preserved. It does **not** mean the *current* stage keeps stale
+  context: when the agent changes **in Stage 2**, the runner resets to the new agent — it clears and re‑fetches that
+  agent's run history and re‑warms its sandbox (the transient runner UI is per‑agent, so it must follow the new
+  `registryAgentId`).
 - In Stage 3, the **`+ Add → Search registry agents`** path is itself a full catalog browser with inspect, so a
   roster can be staffed with agents that were never the "current" `registryAgentId`.
 
@@ -217,6 +223,7 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 - **New (one small component): Roster panel.** Lists roster entries with a **`source` badge** (`registry` ✦ / `generated` ⚙) and a delete control. **"+ Add"** offers two paths: **search registry agents** (→ new `POST …/teams/{id}/agents/from-registry`) or **suggest via chat** (existing LLM flow). Deleting calls new `DELETE …/teams/{id}/agents/{agent_name}`.
 - **Editing roster entries.** Clicking a roster entry opens a small inline edit form for its **role / skills / tools** (the `AgenticTeamAgent` fields the old team dashboard exposed), persisted via the existing team‑update endpoint — so the capability the deleted `agentic-team-dashboard` shell provided is preserved, not lost in the cutover. **`generated`** entries are fully editable; **`registry`** entries show their manifest‑projected fields read‑only with an "override for this team" toggle, so edits never mutate the source manifest. Re‑running the process designer can also re‑propose roster changes (the chat flow), but inline editing is the direct path.
 - **Roster validation — "fully staffed":** a roster is *fully staffed* when **every step in the process DAG has at least one assigned agent**, and each assigned agent has the **skills the step requires** (per the process design). This is exactly the existing logic in `roster_validation.py` (it reads the roster's `skills/capabilities/tools` list fields) — registry agents pass uniformly because the `from-registry` projection fills those fields (see §5 item 3). The `✓ fully staffed` / warning indicator surfaces that module's result; no new validation rules are introduced.
+- **Process selection.** A team may define more than one process, so a **process dropdown** sits in the Stage‑3 header beside the team selector (`team: [ Growth Pod ▾ ]  ·  process: [ Content pipeline ▾ ]`); choosing one sets `processId` and drives which DAG the panel renders and validates. When the team has exactly one process it is auto‑selected (the dropdown still shows it, disabled). The Stage‑3 → Stage‑4 handoff uses this currently selected `processId`.
 - **Handoff (`Test this team →`):** **enabled only when the roster is fully staffed AND a process is selected.** Clicking it sets `teamId` + `processId` and advances to Stage 4. While disabled, the button shows a **tooltip** listing what's missing (e.g. "step *Review* has no agent" / "select a process").
 
 ### Stage 4 — Test Team with Personas
@@ -294,6 +301,12 @@ interface AgentStudioDraft {
 
 All fields except `agentName`/`source` (within a roster entry) are optional — a draft saved at Stage 1 carries only
 `registryAgentId`. The server persists the blob verbatim under the user id; it does not interpret stage payloads.
+
+**Identifier naming.** `registryAgentId` (handoff state) and `manifestId` (this draft interface) are the
+**camelCase frontend** forms of the agent's registry **manifest id**; the **backend** field on `AgenticTeamAgent`
+is the snake_case **`manifest_id`** (§5 item 3). They denote the *same* identifier across the boundary — the
+frontend↔backend mapping is purely camelCase↔snake_case. (When a registry agent is added to a roster, that entry's
+`manifest_id` equals the `registryAgentId` it was added from.)
 
 This makes draft persistence a **must‑have backend touchpoint** (see §5, item 4 — Studio drafts). The frontend `AgentStudioStateService`
 is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
