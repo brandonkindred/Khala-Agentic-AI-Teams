@@ -370,6 +370,101 @@ def test_get_or_create_pool_raises_when_disabled(monkeypatch):
         client_mod._get_or_create_pool()
 
 
+def test_dsn_includes_connect_timeout(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "h")
+    monkeypatch.delenv("POSTGRES_CONNECT_TIMEOUT_S", raising=False)
+    assert "connect_timeout=3" in client_mod._dsn()
+
+
+def test_connect_timeout_env_override(monkeypatch):
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "7")
+    assert client_mod._connect_timeout() == 7
+    assert "connect_timeout=7" in client_mod._dsn()
+
+
+def test_connect_timeout_floored_to_one(monkeypatch):
+    # A zero/negative override is clamped up so the pool can never be opened with an
+    # unbounded (0 = wait forever) connect timeout against a down host.
+    monkeypatch.setenv("POSTGRES_CONNECT_TIMEOUT_S", "0")
+    assert client_mod._connect_timeout() == 1
+
+
+# ---------------------------------------------------------------------------
+# check_connection: real reachability probe (never raises)
+# ---------------------------------------------------------------------------
+
+
+class _ProbePool:
+    """Fake pool whose ``connection(timeout=...)`` yields a cursor returning ``row``.
+
+    ``raise_on_connection`` simulates a down host / exhausted pool (the acquisition
+    itself fails), which the probe must swallow and report as unreachable.
+    """
+
+    def __init__(self, row=(1,), raise_on_connection=False):
+        self._row = row
+        self._raise = raise_on_connection
+        self.timeout_seen = None
+
+    def connection(self, timeout=None):
+        self.timeout_seen = timeout
+        if self._raise:
+            raise RuntimeError("pool timeout / host down")
+        return _probe_conn_cm(self._row)
+
+
+@contextmanager
+def _probe_conn_cm(row):
+    cur = MagicMock()
+    cur.fetchone.return_value = row
+    cur.__enter__ = lambda self=cur: cur
+    cur.__exit__ = lambda *a: False
+    conn = MagicMock()
+    conn.cursor.return_value = cur
+    yield conn
+
+
+def test_check_connection_false_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_true_on_select_1(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    pool = _ProbePool(row=(1,))
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: pool)
+    assert client_mod.check_connection(timeout_s=0.5) is True
+    # The acquisition is bounded by the caller-supplied timeout.
+    assert pool.timeout_seen == 0.5
+
+
+def test_check_connection_false_on_unexpected_row(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod, "_get_or_create_pool", lambda database=None: _ProbePool(row=(0,))
+    )
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_false_on_none_row(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod, "_get_or_create_pool", lambda database=None: _ProbePool(row=None)
+    )
+    assert client_mod.check_connection() is False
+
+
+def test_check_connection_false_when_pool_errors(monkeypatch):
+    # A down host / exhausted pool surfaces as "unreachable", never as a raised error.
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    monkeypatch.setattr(
+        client_mod,
+        "_get_or_create_pool",
+        lambda database=None: _ProbePool(raise_on_connection=True),
+    )
+    assert client_mod.check_connection() is False
+
+
 class _FakePool:
     def __init__(self):
         self.closed = False

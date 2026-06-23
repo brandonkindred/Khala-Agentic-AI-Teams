@@ -39,6 +39,19 @@ _RUN_ISSUE = "/api/integrations/github/run-issue"
 
 _GH_CFG = {"enabled": True, "owner": "acme", "repo": "widget", "repo_path": ""}
 
+# Full config shape returned by get_github_config() (includes the status booleans the
+# GET response builder reads), used by the /github config-status tests below.
+_GH_STATUS_CFG = {
+    "enabled": True,
+    "owner": "acme",
+    "repo": "widget",
+    "default_label": "ai-ready",
+    "repo_path": "",
+    "token_configured": False,
+}
+
+_GITHUB_CFG_ENDPOINT = "/api/integrations/github"
+
 
 # ---------------------------------------------------------------------------
 # Test doubles for the async httpx client used to reach the coding team service
@@ -126,6 +139,20 @@ def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_cred):
     assert "PAT" in resp.json()["detail"]
 
 
+@patch(f"{_M}.check_connection", return_value=False)
+@patch(f"{_M}.is_postgres_enabled", return_value=True)
+@patch(f"{_M}.get_credential", return_value="")
+@patch(f"{_M}.get_github_config")
+def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_cred, mock_pg, mock_probe):
+    # An empty PAT while Postgres is configured but unreachable is a transient store
+    # outage (503), not a missing-credential operator error (400). This is the case
+    # the silent "" read previously mislabeled as "PAT not configured".
+    mock_cfg.return_value = dict(_GH_CFG)
+    resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
+    assert resp.status_code == 503
+    assert "credential store" in resp.json()["detail"]
+
+
 @patch(f"{_M}.get_credential")
 @patch(f"{_M}.get_github_config")
 def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_cred):
@@ -160,6 +187,45 @@ def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_cred, mock_clone,
     resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
     assert resp.status_code == 502
     assert "git executable not found" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GET /github config status: credential_store_unreachable flag
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{_M}.check_connection", return_value=False)
+@patch(f"{_M}.is_postgres_enabled", return_value=True)
+@patch(f"{_M}.get_github_config")
+def test_get_github_flags_store_unreachable(mock_cfg, mock_pg, mock_probe):
+    # Postgres configured but unreachable → the panel learns the store is down, so it
+    # can warn instead of implying the integration was never set up.
+    mock_cfg.return_value = dict(_GH_STATUS_CFG)
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["credential_store_unreachable"] is True
+
+
+@patch(f"{_M}.check_connection", return_value=True)
+@patch(f"{_M}.is_postgres_enabled", return_value=True)
+@patch(f"{_M}.get_github_config")
+def test_get_github_store_reachable_flag_false(mock_cfg, mock_pg, mock_probe):
+    # Configured and reachable → not flagged.
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "token_configured": True}
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["credential_store_unreachable"] is False
+
+
+@patch(f"{_M}.is_postgres_enabled", return_value=False)
+@patch(f"{_M}.get_github_config")
+def test_get_github_not_flagged_when_postgres_unconfigured(mock_cfg, mock_pg):
+    # Postgres unset → an empty token genuinely means "not configured", not a down
+    # store, so the unreachable flag stays False.
+    mock_cfg.return_value = dict(_GH_STATUS_CFG)
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["credential_store_unreachable"] is False
 
 
 # ---------------------------------------------------------------------------
@@ -564,9 +630,7 @@ def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_
     # Cloning is not skipped for an override — it runs once against the pinned
     # path, and platform_owned=False so it does NOT require a sibling lock (the
     # operator's parent dir may be read-only).
-    mock_clone.assert_called_once_with(
-        "/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False
-    )
+    mock_clone.assert_called_once_with("/srv/checkout", "acme", "widget", "ghp_token", platform_owned=False)
 
 
 # ---------------------------------------------------------------------------

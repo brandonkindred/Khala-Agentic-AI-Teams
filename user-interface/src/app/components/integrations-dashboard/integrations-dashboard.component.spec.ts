@@ -79,6 +79,22 @@ describe('IntegrationsDashboardComponent', () => {
     expect(component.loadingSlack).toBe(false);
   });
 
+  it('flags the GitHub credential store as unreachable from the API', () => {
+    apiSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: true, token_configured: false, owner: 'acme', repo: 'widget', default_label: '', credential_store_unreachable: true }),
+    );
+    component.loadGitHubConfig();
+    expect(component.githubStoreUnreachable).toBe(true);
+  });
+
+  it('defaults the GitHub store-unreachable flag to false when absent', () => {
+    apiSpy.getGitHubConfig.mockReturnValue(
+      of({ enabled: false, token_configured: false, owner: '', repo: '', default_label: '' }),
+    );
+    component.loadGitHubConfig();
+    expect(component.githubStoreUnreachable).toBe(false);
+  });
+
   it('webhookUrlInvalid returns true for short or invalid URL', () => {
     component.webhookUrl = 'https://hooks.slack.com/x';
     expect(component.webhookUrlInvalid()).toBe(true);

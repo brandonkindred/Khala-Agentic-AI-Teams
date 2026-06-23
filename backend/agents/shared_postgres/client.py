@@ -48,6 +48,19 @@ def _default_database() -> str:
     return os.environ.get("POSTGRES_DB", "postgres")
 
 
+def _connect_timeout() -> int:
+    """Return the libpq ``connect_timeout`` (seconds) for new connections.
+
+    Postconditions: returns a positive int from ``POSTGRES_CONNECT_TIMEOUT_S``
+        (default 3, floored to 1). Bounds how long a TCP connect to a down or
+        unreachable host can hang before psycopg gives up — without it, opening a
+        pool (``open=True``) against an unreachable host can block far longer than
+        any caller's own timeout, which is exactly the failure ``check_connection``
+        must surface quickly.
+    """
+    return parse_int("POSTGRES_CONNECT_TIMEOUT_S", 3, minimum=1)
+
+
 def _dsn(database: Optional[str] = None) -> str:
     """Build a libpq DSN for ``database`` (defaults to ``POSTGRES_DB``)."""
     host = os.environ.get("POSTGRES_HOST", "localhost")
@@ -55,7 +68,10 @@ def _dsn(database: Optional[str] = None) -> str:
     user = os.environ.get("POSTGRES_USER", "postgres")
     password = os.environ.get("POSTGRES_PASSWORD", "")
     dbname = database or _default_database()
-    return f"host={host} port={port} dbname={dbname} user={user} password={password}"
+    return (
+        f"host={host} port={port} dbname={dbname} user={user} password={password} "
+        f"connect_timeout={_connect_timeout()}"
+    )
 
 
 def _pool_sizes() -> tuple[int, int]:
@@ -143,6 +159,39 @@ def get_conn(database: Optional[str] = None) -> Generator:
     # connection to the pool.
     with pool.connection() as conn:
         yield conn
+
+
+def check_connection(database: Optional[str] = None, *, timeout_s: float = 1.5) -> bool:
+    """Return True iff Postgres is enabled and answers ``SELECT 1`` quickly.
+
+    A real connectivity probe, distinct from :func:`is_postgres_enabled` (which only
+    checks that ``POSTGRES_HOST`` is set). Callers use the pair to tell three states
+    apart: not-configured (``is_postgres_enabled()`` false), configured-but-unreachable
+    (``is_postgres_enabled()`` true, this false), and healthy (both true).
+
+    Preconditions: none.
+    Postconditions: returns ``False`` immediately when Postgres is disabled; otherwise
+        acquires a pooled connection (waiting at most ``timeout_s`` for a free slot,
+        and bounded on the TCP connect by ``POSTGRES_CONNECT_TIMEOUT_S``), runs
+        ``SELECT 1``, and returns whether the result is ``(1,)``. Swallows every
+        error (disabled, psycopg missing, host down, pool exhausted, timeout) and
+        returns ``False`` — never raises. This is a read-only probe with no side
+        effects beyond opening/reusing the shared pool.
+    """
+    if not is_postgres_enabled():
+        return False
+    try:
+        # Reach through ``_get_or_create_pool`` (rather than ``get_conn``) so the
+        # acquisition can be bounded by ``timeout_s``; the public context manager
+        # exposes no timeout knob. Mirrors the bounded probe in the unified API
+        # health loop, which now delegates here.
+        pool = _get_or_create_pool(database)
+        with pool.connection(timeout=timeout_s) as conn, conn.cursor() as cur:
+            cur.execute("SELECT 1")
+            row = cur.fetchone()
+            return row is not None and row[0] == 1
+    except Exception:  # noqa: BLE001 - a probe must never raise; any failure is "unreachable"
+        return False
 
 
 def close_pool(database: Optional[str] = None) -> None:

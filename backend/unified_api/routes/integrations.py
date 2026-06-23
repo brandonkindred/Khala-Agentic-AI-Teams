@@ -41,6 +41,7 @@ from coding_team.clone_workspace import (
     clone_lock_path,
 )
 from coding_team.github_source.client import _pr_detail_from_payload
+from shared_postgres import check_connection, is_postgres_enabled
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -933,6 +934,15 @@ class GitHubConfigResponse(BaseModel):
     owner: str
     repo: str
     default_label: str
+    credential_store_unreachable: bool = Field(
+        default=False,
+        description=(
+            "True when Postgres (the PAT store) is configured but unreachable, so "
+            "token_configured may read False only because the store is down — not "
+            "because no token was saved. Lets the UI warn instead of showing "
+            "'not connected'."
+        ),
+    )
 
 
 class GitHubConfigUpdate(BaseModel):
@@ -1018,20 +1028,41 @@ class CodeReviewRunItem(BaseModel):
     completed_at: str | None = None
 
 
-def _build_github_config_response(cfg: dict[str, Any]) -> GitHubConfigResponse:
+def _build_github_config_response(
+    cfg: dict[str, Any], *, credential_store_unreachable: bool = False
+) -> GitHubConfigResponse:
     return GitHubConfigResponse(
         enabled=cfg["enabled"],
         token_configured=cfg["token_configured"],
         owner=cfg["owner"],
         repo=cfg["repo"],
         default_label=cfg["default_label"],
+        credential_store_unreachable=credential_store_unreachable,
     )
+
+
+async def _github_config_response() -> GitHubConfigResponse:
+    """Read the GitHub config and probe the credential store, off the event loop.
+
+    Postconditions: returns the current config with ``credential_store_unreachable``
+        set per :func:`_credential_store_unreachable`. The config read (a DB read)
+        and the connectivity probe both run in a worker thread so the bounded probe
+        can't stall the event loop. Never raises.
+    """
+
+    def _build() -> GitHubConfigResponse:
+        return _build_github_config_response(
+            get_github_config(),
+            credential_store_unreachable=_credential_store_unreachable(),
+        )
+
+    return await asyncio.to_thread(_build)
 
 
 @router.get("/github", response_model=GitHubConfigResponse)
 async def get_github() -> GitHubConfigResponse:
     """Return GitHub integration config status."""
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 @router.put("/github", response_model=GitHubConfigResponse)
@@ -1045,14 +1076,14 @@ async def update_github(body: GitHubConfigUpdate) -> GitHubConfigResponse:
         default_label=body.default_label,
         repo_path=body.repo_path,
     )
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 @router.delete("/github", response_model=GitHubConfigResponse)
 async def delete_github() -> GitHubConfigResponse:
     """Disconnect GitHub integration (removes PAT and resets config)."""
     clear_github_config()
-    return _build_github_config_response(get_github_config())
+    return await _github_config_response()
 
 
 async def _iter_github_pages(
@@ -1188,6 +1219,19 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     )
 
 
+def _credential_store_unreachable() -> bool:
+    """True when Postgres (the GitHub PAT store) is configured but not answering.
+
+    Preconditions: none.
+    Postconditions: True only when ``POSTGRES_HOST`` is set yet a bounded probe
+        fails — i.e. the integration looks unconfigured purely because the store is
+        down, not because nothing was saved. False when Postgres is unset (an empty
+        token then genuinely means "not configured") or when the store answers.
+        Runs blocking I/O (the probe); async callers offload it.
+    """
+    return is_postgres_enabled() and not check_connection()
+
+
 def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
     """Validate GitHub integration config and return (cfg, token, owner, repo).
 
@@ -1195,15 +1239,30 @@ def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
         - The GitHub integration is enabled with a stored PAT and a configured
           owner/repo.
     Postconditions:
-        - Returns the config dict plus the resolved token/owner/repo. Each missing
-          prerequisite raises ``HTTPException(400)``. Shared by the issue- and
-          PR-listing routes so their validation cannot drift.
+        - Returns the config dict plus the resolved token/owner/repo. A missing
+          prerequisite raises ``HTTPException(400)``; an empty token while the
+          Postgres credential store is unreachable raises ``HTTPException(503)``
+          instead, so a transient DB outage is never reported as "PAT not
+          configured". Shared by every GitHub route so their validation cannot drift.
     """
     cfg = get_github_config()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
     token = get_credential(_GITHUB_SERVICE, "personal_access_token")
     if not token:
+        # An empty token can mean two very different things. When Postgres is
+        # configured but unreachable, the PAT read silently returns "" — surfacing
+        # that as "not configured" (a 400) sends the operator down the wrong path.
+        # Distinguish a down credential store (503, transient) from a genuinely
+        # missing PAT (400, operator action required).
+        if _credential_store_unreachable():
+            raise HTTPException(
+                status_code=503,
+                detail=(
+                    "Cannot reach the GitHub credential store (Postgres); the integration "
+                    "is temporarily unavailable. Restore the database connection and retry."
+                ),
+            )
         raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
     owner = cfg["owner"]
     repo = cfg["repo"]
@@ -1437,13 +1496,7 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     # value that could traverse out of the workspace (a real GitHub owner/repo
     # never contains these).
     for label, value in (("owner", cfg["owner"]), ("repo", cfg["repo"])):
-        if (
-            "/" in value
-            or "\\" in value
-            or "\x00" in value
-            or value in ("..", ".")
-            or value.strip() != value
-        ):
+        if "/" in value or "\\" in value or "\x00" in value or value in ("..", ".") or value.strip() != value:
             raise HTTPException(status_code=400, detail=f"invalid GitHub {label}: {value!r}")
 
     # Enforce the documented precondition: a non-positive issue_number would yield
@@ -1452,9 +1505,7 @@ def _resolve_repo_path(cfg: dict[str, Any], issue_number: int | None = None) -> 
     if issue_number is not None and issue_number < 1:
         raise HTTPException(status_code=400, detail=f"issue_number must be positive: {issue_number!r}")
 
-    issue_segment = (
-        PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
-    )
+    issue_segment = PER_ISSUE_DIR_TEMPLATE.format(issue_number=issue_number) if issue_number is not None else None
 
     # Auto-derived paths are resolved to absolute so they are stable regardless
     # of the process working directory at clone vs. cleanup time, and so the
@@ -1532,9 +1583,7 @@ def _remote_matches(remote_url: str, owner: str, repo: str) -> bool:
     return got_owner.casefold() == owner.casefold() and got_repo.casefold() == repo.casefold()
 
 
-def _ensure_repo_clone(
-    repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True
-) -> str | None:
+def _ensure_repo_clone(repo_path: str, owner: str, repo: str, token: str, *, platform_owned: bool = True) -> str | None:
     """Clone or fetch the repository.
 
     Auth is passed via ``GIT_CONFIG_*`` environment variables so the token
@@ -1662,16 +1711,9 @@ async def run_github_issue(body: RunGitHubIssueRequest) -> RunGitHubIssueRespons
           header, drops the response, and the UI can only report an opaque
           "0 Unknown Error" — useless for diagnosis.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    # Centralized validation (enabled + PAT + owner/repo), which also maps an
+    # unreachable credential store to a 503 rather than a misleading "not configured".
+    cfg, token, owner, repo = _resolve_github_target()
 
     # Validate the downstream is configured before the (slow) clone, so a
     # misconfiguration fails fast instead of after a multi-second checkout.
@@ -1769,16 +1811,9 @@ async def run_github_review_pr(body: RunPrReviewRequest) -> RunPrReviewResponse:
           job. Every failure path raises ``HTTPException`` with an explanatory detail;
           no ``httpx`` error escapes as an unhandled exception.
     """
-    cfg = get_github_config()
-    if not cfg["enabled"]:
-        raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
-    if not token:
-        raise HTTPException(status_code=400, detail="GitHub PAT not configured.")
-    owner = cfg["owner"]
-    repo = cfg["repo"]
-    if not owner or not repo:
-        raise HTTPException(status_code=400, detail="GitHub owner/repo not configured.")
+    # Centralized validation (enabled + PAT + owner/repo), which also maps an
+    # unreachable credential store to a 503 rather than a misleading "not configured".
+    cfg, token, owner, repo = _resolve_github_target()
 
     coding_team_url = os.environ.get("CODING_TEAM_SERVICE_URL", "").strip()
     if not coding_team_url:

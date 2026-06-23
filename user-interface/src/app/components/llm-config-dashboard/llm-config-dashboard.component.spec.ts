@@ -15,6 +15,7 @@ const BASE_CONFIG: LlmConfigResponse = {
   claude_api_key_configured: false,
   ollama_api_key_configured: false,
   storage_available: true,
+  storage_status: 'available',
   provider_options: ['ollama', 'claude'],
   claude_model_options: ['claude-opus-4-8'],
   ollama_model_suggestions: ['llama3.1'],
@@ -68,8 +69,36 @@ describe('LlmConfigDashboardComponent', () => {
     component.loadConfig();
     expect(component.error).toBe('boom');
     expect(component.loading).toBe(false);
-    // A failed load can't confirm the store is reachable, so Save is disabled.
+    // A failed load can't confirm the store is reachable, so Save is disabled and the
+    // status points at connectivity (the API itself didn't answer).
     expect(component.storageAvailable).toBe(false);
+    expect(component.storageStatus).toBe('unreachable');
+  });
+
+  it('reflects the unreachable storage status from the API', () => {
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, storage_available: false, storage_status: 'unreachable' }),
+    );
+    component.loadConfig();
+    expect(component.storageAvailable).toBe(false);
+    expect(component.storageStatus).toBe('unreachable');
+  });
+
+  it('save guard message differs for unreachable vs unconfigured storage', () => {
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, storage_available: false, storage_status: 'unreachable' }),
+    );
+    component.loadConfig();
+    component.save();
+    expect(apiSpy.updateConfig).not.toHaveBeenCalled();
+    expect(component.error).toContain('unreachable');
+
+    apiSpy.getConfig.mockReturnValue(
+      of({ ...BASE_CONFIG, storage_available: false, storage_status: 'unconfigured' }),
+    );
+    component.loadConfig();
+    component.save();
+    expect(component.error).toContain('not configured');
   });
 
   it('onOllamaModeChange defaults the base URL', () => {

@@ -24,7 +24,11 @@
   @if (!storageAvailable) {
     <div class="banner banner-warn" role="alert">
       <mat-icon>warning_amber</mat-icon>
-      <span>Postgres is not configured — settings can't be saved here. Configure the provider via environment variables.</span>
+      @if (storageStatus === 'unreachable') {
+        <span>Postgres is configured but currently unreachable — settings can't be saved until the database connection is restored.</span>
+      } @else {
+        <span>Postgres is not configured — settings can't be saved here. Configure the provider via environment variables.</span>
+      }
     </div>
   }
 

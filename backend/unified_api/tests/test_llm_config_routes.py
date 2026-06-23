@@ -29,6 +29,9 @@ def app_client(monkeypatch):
     """A TestClient over a minimal app, with the secret store + caches stubbed."""
     calls: dict = {"set": [], "cache_clears": 0, "runtime_clears": 0}
     monkeypatch.setattr(route, "is_postgres_enabled", lambda: True)
+    # Default to a reachable store so the GET happy path reports "available";
+    # individual tests override this to exercise the unreachable branch.
+    monkeypatch.setattr(route, "check_connection", lambda *a, **k: True)
     # The PUT handler writes every changed key in one set_secrets() transaction.
     # Flatten the batch into (svc, key, val) tuples so existing per-key assertions
     # keep working while still proving the atomic call path is exercised.
@@ -413,6 +416,51 @@ def test_put_persists_ollama_base_url_and_api_key(app_client):
     stored = {k: v for _s, k, v in calls["set"]}
     assert stored[route.runtime_config.KEY_OLLAMA_BASE_URL] == "https://ollama.com"
     assert stored[route.runtime_config.KEY_OLLAMA_API_KEY] == "ok-123"
+
+
+def test_get_storage_status_available(app_client):
+    # Configured (is_postgres_enabled True) and reachable (check_connection True) →
+    # the store is writable, so Save is enabled.
+    client, _calls, _mp = app_client
+    body = client.get("/api/llm-config").json()
+    assert body["storage_status"] == "available"
+    assert body["storage_available"] is True
+
+
+def test_get_storage_status_unconfigured(app_client, monkeypatch):
+    # POSTGRES_HOST unset → "unconfigured"; Save disabled; the probe is never consulted.
+    client, _calls, _mp = app_client
+    monkeypatch.setattr(route, "is_postgres_enabled", lambda: False)
+    monkeypatch.setattr(
+        route, "check_connection", lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not probe"))
+    )
+    body = client.get("/api/llm-config").json()
+    assert body["storage_status"] == "unconfigured"
+    assert body["storage_available"] is False
+
+
+def test_get_storage_status_unreachable(app_client, monkeypatch):
+    # Configured but the probe fails → "unreachable"; Save disabled. This is the case
+    # the old env-only check could not express (it would say "available" and let a
+    # save attempt 503 — or report "not configured" and mislead the operator).
+    client, _calls, _mp = app_client
+    monkeypatch.setattr(route, "check_connection", lambda *a, **k: False)
+    body = client.get("/api/llm-config").json()
+    assert body["storage_status"] == "unreachable"
+    assert body["storage_available"] is False
+
+
+def test_put_response_reports_available(app_client):
+    # A successful write proves the store is reachable, so the echoed config says so.
+    client, _calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "model": "llama3.2", "ollama_base_url": "http://localhost:11434"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["storage_status"] == "available"
+    assert body["storage_available"] is True
 
 
 def test_provider_model_keys_cover_all_provider_options():

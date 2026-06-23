@@ -14,6 +14,7 @@ import type {
   LlmConfigResponse,
   LlmConfigUpdate,
   LlmProvider,
+  LlmStorageStatus,
 } from '../../models/llm-config.model';
 
 type OllamaMode = 'local' | 'cloud';
@@ -67,6 +68,9 @@ export class LlmConfigDashboardComponent implements OnInit {
   claudeApiKeyConfigured = false;
   ollamaApiKeyConfigured = false;
   storageAvailable = true;
+  // Why the store is (un)writable, so the banner can say *why* Save is disabled
+  // rather than always blaming "not configured".
+  storageStatus: LlmStorageStatus = 'available';
 
   providerOptions: LlmProvider[] = ['ollama', 'claude'];
   claudeModelOptions: string[] = [];
@@ -94,8 +98,10 @@ export class LlmConfigDashboardComponent implements OnInit {
           this.loading = false;
           // The config load failed, so we can't confirm the store is reachable;
           // mark storage unavailable to disable Save rather than letting the user
-          // attempt a write that would fail.
+          // attempt a write that would fail. Treat it as unreachable (the API
+          // itself didn't answer) so the banner points at connectivity.
           this.storageAvailable = false;
+          this.storageStatus = 'unreachable';
         },
       });
   }
@@ -111,6 +117,7 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.claudeApiKeyConfigured = cfg.claude_api_key_configured;
     this.ollamaApiKeyConfigured = cfg.ollama_api_key_configured;
     this.storageAvailable = cfg.storage_available;
+    this.storageStatus = cfg.storage_status ?? (cfg.storage_available ? 'available' : 'unconfigured');
     this.providerOptions = cfg.provider_options?.length ? cfg.provider_options : ['ollama', 'claude'];
     this.claudeModelOptions = cfg.claude_model_options || [];
     this.ollamaModelSuggestions = cfg.ollama_model_suggestions || [];
@@ -182,7 +189,9 @@ export class LlmConfigDashboardComponent implements OnInit {
 
     if (!this.storageAvailable) {
       this.error =
-        'Configuration storage is unavailable (Postgres is not configured). Set the provider via environment variables instead.';
+        this.storageStatus === 'unreachable'
+          ? 'Configuration storage is unreachable (Postgres is configured but not responding). Restore the database connection and try again.'
+          : 'Configuration storage is unavailable (Postgres is not configured). Set the provider via environment variables instead.';
       return;
     }
 

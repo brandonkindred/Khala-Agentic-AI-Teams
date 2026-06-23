@@ -268,7 +268,16 @@ Bind address/port for the Unified API (default `0.0.0.0:8080`).
 ### POSTGRES_HOST (and POSTGRES_PORT / USER / PASSWORD / DB)
 Required for migrated teams (blogging, branding, team_assistant, startup_advisor,
 user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed
-stores via `shared_postgres`; no SQLite fallback.
+stores via `shared_postgres`; no SQLite fallback. Setting `POSTGRES_HOST` only marks Postgres
+*configured* — use `shared_postgres.check_connection()` for a real `SELECT 1` reachability probe
+(the LLM Provider page and GitHub integration use it to tell "configured but unreachable" apart
+from "not configured").
+
+### POSTGRES_CONNECT_TIMEOUT_S
+libpq `connect_timeout` (seconds) applied to every `shared_postgres` connection (default `3`,
+floor `1`). Bounds how long a TCP connect to a down or unreachable Postgres host can hang —
+without it, opening the pool (`open=True`) against an unreachable host can block far longer than
+a caller's own timeout, which would defeat the `check_connection()` probe.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice
