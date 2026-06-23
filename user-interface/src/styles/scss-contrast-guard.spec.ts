@@ -85,7 +85,8 @@ const BURNDOWN = new Set<string>([]);
  *   a space and all newlines preserved, so line numbers and brace/selector
  *   offsets are unchanged. Strings are blanked before line comments so a quoted
  *   `url("//cdn/x.png")` (and any `{`/`//` inside `content: "…"`) can't be
- *   mistaken for a comment or a ruleset; an unquoted `//` after `:`/`(`/`/`
+ *   mistaken for a comment or a ruleset (backslash-escaped quotes inside a
+ *   string are handled, so `"a\"b"` blanks as one unit); an unquoted `//` after `:`/`(`/`/`
  *   (e.g. `https://`, `url(//cdn)`) is left intact. Interpolation braces are
  *   blanked so the focus-block brace scanner can't mistake `#{…}` for a block.
  */
@@ -93,7 +94,7 @@ function stripComments(source: string): string {
   const blank = (m: string): string => m.replace(/[^\n]/g, ' ');
   return source
     .replace(/\/\*[\s\S]*?\*\//g, blank)
-    .replace(/"[^"\n]*"|'[^'\n]*'/g, blank)
+    .replace(/"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/g, blank)
     .replace(/(?<![:/(])\/\/[^\n]*/g, blank)
     .replace(/#\{[^}]*\}/g, blank);
 }
@@ -305,6 +306,11 @@ describe('findOffenses detector', () => {
     expect(findOffenses('.x { background: url("//cdn/x.png"); color: #555; }')[0]).toMatch(
       /low-contrast/,
     );
+  });
+
+  it('handles escaped quotes inside a string without truncating the blank', () => {
+    // The `\"` must not end the string early and re-expose the trailing `color`.
+    expect(findOffenses('.x { content: "a\\"//b"; color: #555; }')[0]).toMatch(/low-contrast/);
   });
 
   it('does not mistake a `{` inside a quoted value for a focus block', () => {

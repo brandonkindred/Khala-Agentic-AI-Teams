@@ -46,6 +46,11 @@ export function pollWhile<T>(
   options: PollWhileOptions = {},
 ): Observable<T> {
   const { intervalMs = 2000, immediate = true, onError = 'continue' } = options;
+  // Precondition: a non-positive interval would make `timer` fire continuously
+  // (or never), which is a caller bug — fail loudly rather than busy-loop.
+  if (intervalMs <= 0) {
+    throw new Error(`pollWhile: intervalMs must be > 0 (got ${intervalMs})`);
+  }
   return timer(immediate ? 0 : intervalMs, intervalMs).pipe(
     switchMap(() =>
       // On error, EMPTY completes only the inner poll (no emission); the outer

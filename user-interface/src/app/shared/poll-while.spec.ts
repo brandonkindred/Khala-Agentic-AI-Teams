@@ -135,4 +135,10 @@ describe('pollWhile', () => {
     expect(emitted).toEqual(['done']);
     expect(completed).toBe(true);
   });
+
+  it('throws synchronously when intervalMs <= 0 (precondition)', () => {
+    const call = (ms: number) => () => pollWhile(() => of('x'), () => true, { intervalMs: ms });
+    expect(call(0)).toThrow(/intervalMs must be > 0/);
+    expect(call(-100)).toThrow(/intervalMs must be > 0/);
+  });
 });
