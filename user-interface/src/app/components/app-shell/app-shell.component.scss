@@ -45,7 +45,7 @@
   font-size: 20px;
   width: 20px;
   height: 20px;
-  color: #09090b;
+  color: var(--kh-text-on-accent);
 }
 
 .brand-text {
@@ -374,7 +374,7 @@
   top: -50px;
   left: 0;
   background: var(--kh-accent);
-  color: #09090b;
+  color: var(--kh-text-on-accent);
   padding: 10px 20px;
   z-index: 1000;
   text-decoration: none;

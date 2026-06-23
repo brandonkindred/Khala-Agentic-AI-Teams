@@ -9,6 +9,7 @@ outside the graph as a post-processing utility.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import List
 
@@ -577,6 +578,17 @@ def make_brand_rules_codifier() -> Agent:
 # ===================================================================
 
 
+# Fixed copy reused for every off-brand asset — hoisted out of the per-check
+# loop so it is allocated once, not rebuilt on each miss.
+_ON_BRAND_RATIONALE = "Asset aligns with declared audience and brand language."
+_OFF_BRAND_RATIONALE = "Asset is missing core brand signals."
+_REVISION_SUGGESTIONS = (
+    "Add clearer reference to target audience and expected outcome.",
+    "Use approved voice-and-tone language from the writing playbook.",
+    "Map copy to one narrative pillar and include proof.",
+)
+
+
 @dataclass
 class BrandComplianceAgent:
     """Evaluates whether assets are on-brand using keyword matching against mission values."""
@@ -592,28 +604,25 @@ class BrandComplianceAgent:
             mission.company_name,
             mission.target_audience,
         ]
-        lowered_keywords = [k.lower() for k in keywords if k]
+        # Word-boundary patterns, compiled once per call. Substring matching
+        # ("k in text") falsely fires on incidental overlaps — e.g. the value
+        # "tech" matching "fintech" or "logistics" — inflating the on-brand
+        # score. ``\b`` anchors each keyword (and multi-word phrase) to whole
+        # words.
+        patterns = [(k, re.compile(rf"\b{re.escape(k.lower())}\b")) for k in keywords if k]
         results: List[BrandCheckResult] = []
 
         for check in checks:
             text = f"{check.asset_name} {check.asset_description}".lower()
-            matched = [k for k in lowered_keywords if k in text]
+            matched = [k for k, pat in patterns if pat.search(text)]
             is_on_brand = len(matched) >= 2
             confidence = min(0.95, 0.45 + (0.1 * len(matched)))
 
             rationale = [
-                "Asset aligns with declared audience and brand language."
-                if is_on_brand
-                else "Asset is missing core brand signals.",
+                _ON_BRAND_RATIONALE if is_on_brand else _OFF_BRAND_RATIONALE,
                 f"Detected brand cues: {', '.join(matched[:4]) or 'none'}.",
             ]
-            revision_suggestions = []
-            if not is_on_brand:
-                revision_suggestions = [
-                    "Add clearer reference to target audience and expected outcome.",
-                    "Use approved voice-and-tone language from the writing playbook.",
-                    "Map copy to one narrative pillar and include proof.",
-                ]
+            revision_suggestions = [] if is_on_brand else list(_REVISION_SUGGESTIONS)
 
             results.append(
                 BrandCheckResult(

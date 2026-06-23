@@ -47,6 +47,25 @@ body {
   --kh-accent-text:       #fde68a;
   --kh-accent-gradient:   linear-gradient(135deg, #fbbf24 0%, #f59e0b 100%);
 
+  // Focus ring — semantic alias so the keyboard-focus colour can be retuned
+  // independently of the accent (e.g. a future high-contrast mode) without
+  // touching call sites. Defaults to the accent, so there is no visual change.
+  // USE FOR: the keyboard-focus indicator only —
+  //   `outline: 2px solid var(--kh-focus-ring); outline-offset: 2px;` (or a
+  //   `box-shadow` ring when the layout can't take an outline). Reach for
+  //   `--kh-accent` instead for decorative/brand accents (active borders,
+  //   selected states); keep them separate so focus styling stays retunable.
+  --kh-focus-ring:        var(--kh-accent);
+
+  // Foreground for text/icons that sit on a bright fill (accent gradient or a
+  // high-luminance semantic token used as a background). Near-black so it keeps
+  // high contrast on amber/green/blue/red fills.
+  // USE FOR: `color:` on elements whose background is `--kh-accent(-gradient)`
+  //   or a bright `--kh-{success,warning,error,info}` fill (e.g. chips, badges,
+  //   primary buttons, on-accent chat bubbles). Do NOT use it as a text colour
+  //   on the normal dark surfaces — use `--kh-text-{primary,secondary}` there.
+  --kh-text-on-accent:    #09090b;
+
   // ── Surface Layers (wider gaps for clear depth separation) ──────────────
   --kh-surface-0:         #000000;   // app background (pure black)
   --kh-surface-1:         #0a0a0a;   // sidebar, main content bg

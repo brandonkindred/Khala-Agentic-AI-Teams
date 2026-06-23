@@ -9,7 +9,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  color: #00897b;
+  color: var(--kh-success);
 }
 
 .full-width {
@@ -77,7 +77,7 @@ mat-divider {
 }
 
 .section-description {
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-secondary);
   font-size: 14px;
   margin: 0 0 16px 0;
 }
@@ -103,10 +103,10 @@ mat-divider {
 }
 
 .component-icon {
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
 
   .component-panel:has(.contract-badge) & {
-    color: #4caf50;
+    color: var(--kh-success);
   }
 }
 
@@ -115,8 +115,8 @@ mat-divider {
 }
 
 .contract-badge {
-  background-color: #e8f5e9 !important;
-  color: #2e7d32 !important;
+  background-color: var(--kh-success-subtle) !important;
+  color: var(--kh-success) !important;
   font-size: 11px;
 
   mat-icon {
@@ -146,7 +146,7 @@ mat-divider {
   align-items: center;
   gap: 4px;
   font-size: 12px;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
 
   mat-icon {
     font-size: 16px;
@@ -160,14 +160,14 @@ mat-divider {
 .test-harness-section {
   margin-top: 16px;
   padding: 12px;
-  background: #f5f5f5;
+  background: var(--kh-surface-3);
   border-radius: 8px;
 
   h5 {
     margin: 0 0 8px 0;
     font-size: 13px;
     font-weight: 600;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-secondary);
     text-transform: uppercase;
     letter-spacing: 0.5px;
   }
@@ -178,10 +178,10 @@ mat-divider {
   align-items: center;
   gap: 8px;
   font-size: 14px;
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--kh-text-primary);
 
   mat-icon {
-    color: #00897b;
+    color: var(--kh-success);
   }
 }
 
@@ -193,14 +193,14 @@ mat-divider {
 
 .pattern-chip {
   font-size: 12px;
-  background-color: #e8eaf6 !important;
-  color: #3949ab !important;
+  background-color: var(--kh-accent-muted) !important;
+  color: var(--kh-accent-text) !important;
 }
 
 .test-harness-info {
   margin: 0;
   font-size: 14px;
-  color: rgba(0, 0, 0, 0.87);
+  color: var(--kh-text-primary);
 }
 
 .no-contract-message {
@@ -208,12 +208,12 @@ mat-divider {
   align-items: center;
   gap: 8px;
   padding: 16px;
-  background: #fafafa;
+  background: var(--kh-surface-2);
   border-radius: 8px;
-  color: rgba(0, 0, 0, 0.54);
+  color: var(--kh-text-tertiary);
 
   mat-icon {
-    color: #1976d2;
+    color: var(--kh-info);
   }
 }
 
@@ -222,8 +222,8 @@ mat-divider {
   align-items: center;
   gap: 8px;
   padding: 12px;
-  background: #ffebee;
-  color: #c62828;
+  background: var(--kh-error-subtle);
+  color: var(--kh-error);
   border-radius: 8px;
   margin-top: 16px;
 }

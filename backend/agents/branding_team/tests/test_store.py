@@ -179,3 +179,88 @@ def test_create_brand_for_nonexistent_client_returns_none(fake_pg: dict) -> None
     )
     brand = store.create_brand("nonexistent_client_id", mission)
     assert brand is None
+
+
+def _mission() -> BrandingMission:
+    return BrandingMission(
+        company_name="Acme Inc",
+        company_description="A great company",
+        target_audience="everyone",
+    )
+
+
+def test_brand_exists(fake_pg: dict) -> None:
+    """brand_exists is True for an existing brand and False for an unknown id."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, _mission())
+    assert brand is not None
+    assert store.brand_exists(brand.id) is True
+    assert store.brand_exists("brand_does_not_exist") is False
+
+
+def test_get_brand_by_id_resolves_client(fake_pg: dict) -> None:
+    """get_brand_by_id returns the owning client id + brand, or None if absent."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    brand = store.create_brand(client.id, _mission())
+    assert brand is not None
+    found = store.get_brand_by_id(brand.id)
+    assert found is not None
+    resolved_client_id, resolved_brand = found
+    assert resolved_client_id == client.id
+    assert resolved_brand.id == brand.id
+    assert store.get_brand_by_id("brand_missing") is None
+
+
+def test_get_brand_names_returns_only_requested(fake_pg: dict) -> None:
+    """get_brand_names maps only the requested existing ids; empty input is a no-op."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    b1 = store.create_brand(client.id, _mission(), name="First")
+    b2 = store.create_brand(client.id, _mission(), name="Second")
+    assert b1 is not None and b2 is not None
+
+    names = store.get_brand_names([b1.id, "brand_missing"])
+    assert names == {b1.id: "First"}
+    assert b2.id not in names
+
+    # Empty / falsy input issues no query and returns an empty map.
+    assert store.get_brand_names([]) == {}
+    assert store.get_brand_names([""]) == {}
+
+
+def test_list_clients_pagination(fake_pg: dict) -> None:
+    """list_clients limit/offset returns non-overlapping pages within the set."""
+    store = BrandingStore()
+    created = [store.create_client(f"Client {i}") for i in range(5)]
+    assert len(store.list_clients()) == 5
+    first_two = store.list_clients(limit=2, offset=0)
+    assert len(first_two) == 2
+    next_two = store.list_clients(limit=2, offset=2)
+    assert len(next_two) == 2
+    # Pages do not overlap and stay within the created set.
+    ids = {c.id for c in first_two} | {c.id for c in next_two}
+    assert len(ids) == 4
+    assert ids <= {c.id for c in created}
+
+
+def test_pagination_rejects_invalid_args(fake_pg: dict) -> None:
+    """Both list methods reject non-positive limits and negative offsets."""
+    store = BrandingStore()
+    for bad in (dict(limit=0), dict(limit=-1), dict(offset=-1)):
+        with pytest.raises(ValueError):
+            store.list_clients(**bad)
+        with pytest.raises(ValueError):
+            store.list_brands_for_client("client_x", **bad)
+
+
+def test_list_brands_for_client_pagination(fake_pg: dict) -> None:
+    """list_brands_for_client honors limit/offset for a client's brands."""
+    store = BrandingStore()
+    client = store.create_client("Acme")
+    for _ in range(3):
+        assert store.create_brand(client.id, _mission()) is not None
+    assert len(store.list_brands_for_client(client.id)) == 3
+    page = store.list_brands_for_client(client.id, limit=1, offset=1)
+    assert len(page) == 1

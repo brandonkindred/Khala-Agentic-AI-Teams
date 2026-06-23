@@ -14,7 +14,10 @@ Phase gate logic:
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import TYPE_CHECKING, List, Optional
+
+from pydantic import BaseModel, ValidationError
 
 from .agents import BrandComplianceAgent
 from .graphs.shared import PHASE_ORDER, phase_index, serialize_mission
@@ -38,6 +41,8 @@ from .models import (
 
 if TYPE_CHECKING:
     from .store import BrandingStore
+
+logger = logging.getLogger(__name__)
 
 
 def _build_phase_gates(up_to_phase: BrandPhase, approved: bool) -> List[PhaseGate]:
@@ -85,12 +90,12 @@ class BrandingTeamOrchestrator:
             if client_id:
                 brand = store.get_brand(client_id, brand_id)
             else:
-                brand = None
-                for c in store.list_clients():
-                    brand = store.get_brand(c.id, brand_id)
-                    if brand is not None:
-                        resolved_client_id = c.id
-                        break
+                # One indexed lookup instead of scanning every client's brands.
+                found = store.get_brand_by_id(brand_id)
+                if found is not None:
+                    resolved_client_id, brand = found
+                else:
+                    brand = None
             if brand is not None:
                 mission = brand.mission
                 if resolved_client_id is None:
@@ -270,20 +275,66 @@ class BrandingTeamOrchestrator:
                     if agent_results:
                         last = agent_results[-1]
                         if hasattr(last, "message") and last.message:
-                            text = ""
-                            for block in last.message.get("content", []):
-                                if isinstance(block, dict) and block.get("text"):
-                                    text += block["text"]
-                                elif hasattr(block, "text"):
-                                    text += block.text
-                            if text:
-                                start = text.find("{")
-                                end = text.rfind("}") + 1
-                                if start >= 0 and end > start:
-                                    return model_class.model_validate_json(text[start:end])
+                            text = _collect_message_text(last.message)
+                            parsed = _parse_model_from_text(text, model_class)
+                            if parsed is not None:
+                                return parsed
         except Exception:
-            pass
+            # Malformed JSON / schema mismatch already returns None from
+            # _parse_model_from_text; reaching here means an unexpected error
+            # walking the graph result. Log it rather than swallow silently.
+            logger.warning(
+                "Unexpected error extracting phase output for node %s; using default",
+                node_id,
+                exc_info=True,
+            )
         return model_class()
+
+
+def _collect_message_text(message: dict) -> str:
+    """Join all text blocks of a Strands agent ``message`` into one string.
+
+    Uses ``"".join`` over collected fragments rather than repeated ``+=`` so
+    assembly is linear, not quadratic, in the number/size of content blocks.
+
+    Preconditions:
+        ``message`` is a Strands message mapping (``.get("content")`` yields a
+        list of content blocks). Passing a non-mapping is a caller bug.
+    Postconditions:
+        Returns the concatenation of every block's text (dict ``text`` key or
+        ``.text`` attribute); returns ``""`` when there is no text content.
+    """
+    parts: List[str] = []
+    for block in message.get("content", []):
+        if isinstance(block, dict) and block.get("text"):
+            parts.append(block["text"])
+        elif getattr(block, "text", None):
+            parts.append(block.text)
+    return "".join(parts)
+
+
+def _parse_model_from_text(text: str, model_class: type[BaseModel]) -> Optional[BaseModel]:
+    """Best-effort parse of ``text`` into ``model_class``; None on failure.
+
+    Tries the whole string first, then falls back to the outermost
+    ``{ ... }`` slice for replies that wrap JSON in prose.
+    """
+    if not text:
+        return None
+    # ValidationError covers both malformed JSON and schema mismatch from
+    # model_validate_json; anything else is a genuine bug and should surface.
+    try:
+        return model_class.model_validate_json(text)
+    except ValidationError:
+        pass
+    start = text.find("{")
+    end = text.rfind("}") + 1
+    if start >= 0 and end > start:
+        try:
+            return model_class.model_validate_json(text[start:end])
+        except ValidationError:
+            return None
+    return None
 
 
 def _build_brand_book(

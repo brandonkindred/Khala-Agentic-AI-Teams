@@ -18,7 +18,7 @@ const buildStatus = (overrides: Partial<JobStatusResponse> = {}): JobStatusRespo
   ...overrides,
 });
 
-describe('RunTeamTrackingComponent (extra coverage)', () => {
+describe('RunTeamTrackingComponent (polling lifecycle & view-model helpers)', () => {
   let api: ApiStub;
   let fixture: ComponentFixture<RunTeamTrackingComponent>;
   let component: RunTeamTrackingComponent;
@@ -45,6 +45,26 @@ describe('RunTeamTrackingComponent (extra coverage)', () => {
     fixture.detectChanges();
     expect(component.loading).toBe(false);
     expect(api.getJobStatus).not.toHaveBeenCalled();
+  });
+
+  it('precomputes phaseStatuses to match the per-phase helpers after a poll', async () => {
+    vi.useFakeTimers();
+    api.getJobStatus.mockReturnValue(of(buildStatus({ status: 'running', phase: 'planning' })));
+    component.jobId = 'job-1';
+    fixture.detectChanges();
+    await vi.advanceTimersByTimeAsync(1);
+
+    // The precomputed map must agree with the methods it replaces in the template.
+    for (const phase of component.ALL_PHASES) {
+      expect(component.phaseStatuses[phase.id]).toEqual({
+        completed: component.isPhaseCompleted(phase.id),
+        current: component.isCurrentPhase(phase.id),
+        pending: component.isPhasePending(phase.id),
+      });
+    }
+    expect(component.phaseStatuses['planning'].current).toBe(true);
+    expect(component.phaseStatuses['product_analysis'].completed).toBe(true);
+    expect(component.phaseStatuses['execution'].pending).toBe(true);
   });
 
   it('starts polling on init when jobId is set', async () => {

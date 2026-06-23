@@ -14,7 +14,7 @@
     font-weight: 600;
     text-transform: uppercase;
     letter-spacing: 0.04em;
-    color: rgba(0, 0, 0, 0.55);
+    color: var(--kh-text-tertiary);
   }
 
   // --- Objective ---
@@ -24,7 +24,7 @@
     gap: 10px;
 
     mat-icon {
-      color: var(--mat-sys-primary, #1565c0);
+      color: var(--kh-info);
     }
   }
 
@@ -41,7 +41,7 @@
 
   &__objective-tasks {
     font-size: 0.82rem;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-secondary);
   }
 
   // --- Progress + stepper ---
@@ -55,7 +55,7 @@
   &__progress-pct {
     font-size: 0.82rem;
     font-weight: 600;
-    color: rgba(0, 0, 0, 0.7);
+    color: var(--kh-text-secondary);
   }
 
   &__progress-bar {
@@ -88,12 +88,12 @@
     left: 50%;
     width: 100%;
     height: 2px;
-    background: rgba(0, 0, 0, 0.15);
+    background: var(--kh-border);
     z-index: 0;
   }
 
   &.completed.has-connector::after {
-    background: var(--mat-sys-tertiary, #2e7d32);
+    background: var(--kh-success);
   }
 
   &__node {
@@ -103,9 +103,9 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #eceff1;
-    color: rgba(0, 0, 0, 0.45);
-    border: 2px solid rgba(0, 0, 0, 0.15);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-muted);
+    border: 2px solid var(--kh-border);
     z-index: 1;
 
     mat-icon {
@@ -118,34 +118,34 @@
   &__label {
     margin-top: 6px;
     font-size: 0.78rem;
-    color: rgba(0, 0, 0, 0.55);
+    color: var(--kh-text-tertiary);
   }
 
   &.current &__node {
-    background: var(--mat-sys-primary, #1565c0);
-    color: #fff;
-    border-color: var(--mat-sys-primary, #1565c0);
+    background: var(--kh-info);
+    color: var(--kh-text-on-accent);
+    border-color: var(--kh-info);
   }
 
   &.current &__label {
-    color: var(--mat-sys-primary, #1565c0);
+    color: var(--kh-info);
     font-weight: 600;
   }
 
   &.completed &__node {
-    background: var(--mat-sys-tertiary, #2e7d32);
-    color: #fff;
-    border-color: var(--mat-sys-tertiary, #2e7d32);
+    background: var(--kh-success);
+    color: var(--kh-text-on-accent);
+    border-color: var(--kh-success);
   }
 
   &.failed &__node {
-    background: var(--mat-sys-error, #c62828);
-    color: #fff;
-    border-color: var(--mat-sys-error, #c62828);
+    background: var(--kh-error);
+    color: var(--kh-text-on-accent);
+    border-color: var(--kh-error);
   }
 
   &.failed &__label {
-    color: var(--mat-sys-error, #c62828);
+    color: var(--kh-error);
     font-weight: 600;
   }
 }
@@ -156,7 +156,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 10px 12px;
-  background: rgba(21, 101, 192, 0.06);
+  background: var(--kh-info-subtle);
   border-radius: 6px;
 }
 
@@ -170,7 +170,7 @@
     font-size: 18px;
     width: 18px;
     height: 18px;
-    color: var(--mat-sys-primary, #1565c0);
+    color: var(--kh-info);
   }
 }
 
@@ -179,7 +179,7 @@
 }
 
 .ct-monitor__activity-detail {
-  color: rgba(0, 0, 0, 0.7);
+  color: var(--kh-text-secondary);
 }
 
 .ct-monitor__activity-bar {
@@ -196,7 +196,7 @@
 .ct-monitor__activity-pct {
   font-size: 0.75rem;
   font-weight: 600;
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-secondary);
   min-width: 32px;
   text-align: right;
 }
@@ -210,19 +210,19 @@
 }
 
 .ct-agent {
-  border: 1px solid rgba(0, 0, 0, 0.12);
+  border: 1px solid var(--kh-border);
   border-radius: 8px;
   padding: 10px 12px;
-  background: #fafafa;
+  background: var(--kh-surface-2);
   display: flex;
   flex-direction: column;
   gap: 8px;
   transition: border-color 0.2s ease, box-shadow 0.2s ease;
 
   &--active {
-    border-color: var(--mat-sys-primary, #1565c0);
-    box-shadow: 0 1px 4px rgba(21, 101, 192, 0.18);
-    background: #fff;
+    border-color: var(--kh-info);
+    box-shadow: var(--kh-shadow-sm);
+    background: var(--kh-surface-3);
   }
 
   &__head {
@@ -235,7 +235,7 @@
     font-size: 20px;
     width: 20px;
     height: 20px;
-    color: rgba(0, 0, 0, 0.55);
+    color: var(--kh-text-tertiary);
   }
 
   &__name {
@@ -258,26 +258,26 @@
 
     // status palette
     &--idle {
-      background: #eceff1;
-      color: rgba(0, 0, 0, 0.5);
+      background: var(--kh-surface-3);
+      color: var(--kh-text-muted);
     }
     &--working {
-      background: #e3f2fd;
-      color: var(--mat-sys-primary, #1565c0);
+      background: var(--kh-info-subtle);
+      color: var(--kh-info);
     }
     &--in_review,
     &--reviewing {
-      background: #fff3e0;
-      color: #e65100;
+      background: var(--kh-warning-subtle);
+      color: var(--kh-warning);
     }
     &--planning {
-      background: #ede7f6;
-      color: #5e35b1;
+      background: var(--kh-accent-muted);
+      color: var(--kh-accent-text);
     }
     // Fallback for any unrecognized status (agentStatusClass folds unknowns here).
     &--unknown {
-      background: #eceff1;
-      color: rgba(0, 0, 0, 0.5);
+      background: var(--kh-surface-3);
+      color: var(--kh-text-muted);
     }
   }
 
@@ -291,8 +291,8 @@
     font-size: 0.68rem;
     padding: 1px 6px;
     border-radius: 4px;
-    background: rgba(0, 0, 0, 0.06);
-    color: rgba(0, 0, 0, 0.65);
+    background: var(--kh-surface-3);
+    color: var(--kh-text-secondary);
   }
 
   &__task {
@@ -300,13 +300,13 @@
     align-items: center;
     gap: 6px;
     font-size: 0.8rem;
-    color: rgba(0, 0, 0, 0.75);
+    color: var(--kh-text-secondary);
 
     mat-icon {
       font-size: 16px;
       width: 16px;
       height: 16px;
-      color: rgba(0, 0, 0, 0.45);
+      color: var(--kh-text-muted);
       flex: 0 0 auto;
     }
 
@@ -329,7 +329,7 @@
 
   &__activity-step {
     font-size: 0.74rem;
-    color: rgba(0, 0, 0, 0.6);
+    color: var(--kh-text-secondary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
