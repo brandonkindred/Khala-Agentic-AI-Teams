@@ -77,7 +77,10 @@ def _caller_tag() -> str:
 
     Mirrors the Ollama client's tag so telemetry ``caller_tag`` values are
     comparable across providers. Frame-walks with ``sys._getframe`` (no file
-    I/O); degrades to ``"unknown"`` where unavailable. Never raises.
+    I/O); degrades to ``"unknown"`` where unavailable. Never raises. ``sys._getframe``
+    is a CPython-specific implementation detail, so this is best-effort telemetry
+    tagging only — never required for correctness; the ``"unknown"`` fallback is an
+    acceptable result on interpreters that do not expose it.
     """
     import sys
 
@@ -886,7 +889,11 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
         results are flushed here on the next non-tool message, so an intervening
         user turn would split them into a separate user message.
         :func:`llm_service.tool_loop.complete_json_with_tool_loop` guarantees this
-        ordering; this translator does not re-order to enforce it.
+        ordering; this translator does not re-order to enforce it. It assumes the
+        caller has already ordered messages correctly (tool results immediately
+        after their assistant turn) and neither re-orders nor rejects out-of-order
+        tool results — it only flushes pending results on the next non-tool message,
+        so a mis-ordered list is faithfully (and possibly invalidly) translated.
     Postconditions: returns ``(system_text, anthropic_messages)`` where every
         emitted entry has role ``user``/``assistant`` and Anthropic-valid
         (non-empty) content, and every emitted ``tool_result`` has a matching

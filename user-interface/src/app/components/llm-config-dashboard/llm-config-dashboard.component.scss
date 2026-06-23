@@ -50,8 +50,10 @@
 }
 
 .banner-error {
-  background: #fdecea;
-  color: #b71c1c;
+  // Material system theme colors; hex fallbacks keep the banner readable if the
+  // app's theme does not define these CSS variables.
+  background: var(--mat-sys-error-container, #fdecea);
+  color: var(--mat-sys-on-error-container, #b71c1c);
 }
 
 .banner-success {

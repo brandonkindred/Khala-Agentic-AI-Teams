@@ -9,6 +9,7 @@ import anthropic
 import httpx
 import pytest
 
+import llm_service.clients.claude as _claude_mod
 from llm_service.clients.claude import ClaudeLLMClient, _to_anthropic_tools
 from llm_service.interface import (
     LLMPermanentError,
@@ -728,8 +729,6 @@ def test_to_anthropic_tools_translates_both_shapes():
 # Slow rate-limit retry: a 429 that survives the Anthropic SDK's built-in
 # retries is retried on the shared LLM_RATE_LIMIT_* schedule, mirroring Ollama.
 # ---------------------------------------------------------------------------
-
-import llm_service.clients.claude as _claude_mod  # noqa: E402
 
 
 def _invoke_kwargs():

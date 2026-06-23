@@ -41,6 +41,20 @@ _PROVIDER_OPTIONS = ["ollama", "claude"]
 _OLLAMA_MODEL_SUGGESTIONS = list(llm_config.OLLAMA_MODEL_SUGGESTIONS)
 
 
+def _is_ollama_cloud_url(url: str) -> bool:
+    """Return True when ``url`` points at the Ollama Cloud endpoint.
+
+    Preconditions: ``url`` is a string (may be empty or malformed).
+    Postconditions: returns True iff the parsed hostname is exactly ``ollama.com``
+        or a subdomain of it (``*.ollama.com``); returns False for an empty,
+        unparseable, or non-cloud URL. Never raises. Used to gate the
+        Ollama-Cloud-without-key guard so a local Ollama URL (e.g.
+        ``http://localhost:11434``) never trips it.
+    """
+    host = (urlparse(url.strip()).hostname or "").lower() if url and url.strip() else ""
+    return host == "ollama.com" or host.endswith(".ollama.com")
+
+
 class LlmConfigUpdate(BaseModel):
     """Request body for ``PUT /api/llm-config``.
 
@@ -63,15 +77,19 @@ class LlmConfigUpdate(BaseModel):
 
         Preconditions: none.
         Postconditions: an empty value passes (means "unchanged"); a non-empty value
-            must be a well-formed http/https URL (scheme + host), else ValueError —
-            a bad URL would otherwise be stored and break every Ollama request until
-            an operator manually corrected it.
+            must be a well-formed http/https URL (scheme + host) and must NOT embed
+            credentials (``user:pass@host``), else ValueError — a bad URL would
+            otherwise be stored and break every Ollama request until an operator
+            manually corrected it, and a credential-bearing URL would leak secrets
+            into the runtime store and request logs.
         """
         if not v or not v.strip():
             return v
         parsed = urlparse(v.strip())
         if parsed.scheme not in ("http", "https") or not parsed.netloc:
             raise ValueError("ollama_base_url must be an http(s) URL, e.g. http://localhost:11434")
+        if parsed.username or parsed.password:
+            raise ValueError("ollama_base_url must not contain credentials (user:pass@host)")
         return v
 
 
@@ -104,9 +122,10 @@ def _build_response() -> LlmConfigResponse:
         switch), the Ollama base URL, and ``*_configured`` booleans — API keys are
         never included. Never raises.
     """
+    provider = llm_config.resolve_provider()
     return LlmConfigResponse(
-        provider=llm_config.resolve_provider(),
-        model=llm_config.resolve_model_for_provider(None),
+        provider=provider,
+        model=llm_config.resolve_model_for_provider(None, provider),
         # resolve_model is the Ollama-specific resolver (the Claude counterpart is
         # resolve_claude_model); it returns the Ollama model regardless of which
         # provider is currently active, so the UI can restore it on a switch.
@@ -200,6 +219,26 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
                 "claude_api_key, or set LLM_CLAUDE_API_KEY / ANTHROPIC_API_KEY first."
             ),
         )
+
+    # Same guard for Ollama Cloud: the cloud endpoint requires an API key, so refuse
+    # to point the provider at ollama.com unless a key will be available (this
+    # request, runtime store, or env). A local Ollama URL needs no key and is never
+    # gated here. The effective URL is the request value if given, else the resolved
+    # default (which itself may be the cloud endpoint).
+    if body.provider == "ollama":
+        effective_base_url = body.ollama_base_url.strip() or llm_config.resolve_base_url()
+        if (
+            _is_ollama_cloud_url(effective_base_url)
+            and not body.ollama_api_key.strip()
+            and not llm_config.resolve_ollama_api_key()
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cannot use Ollama Cloud without an API key. Provide ollama_api_key, "
+                    "or set OLLAMA_API_KEY / LLM_OLLAMA_API_KEY first."
+                ),
+            )
 
     # Collect every changed key and persist them in ONE transaction (set_secrets),
     # so a transient failure mid-write can never commit a half-switched config —

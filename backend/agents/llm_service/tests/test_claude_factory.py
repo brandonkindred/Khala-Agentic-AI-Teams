@@ -81,10 +81,31 @@ def test_on_reasoning_returns_fresh_uncached_claude_client():
     assert c1.on_reasoning is cb
 
 
-def test_clear_client_cache_also_clears_strands_cache():
-    """clear_client_cache() also empties the Strands model cache."""
-    from llm_service import strands_provider
+def test_clear_client_cache_also_clears_strands_cache(monkeypatch):
+    """clear_client_cache() invalidates the Strands model cache (public behavior).
 
-    strands_provider._model_cache[("m", "u", "json", None)] = object()
-    clear_client_cache()
-    assert strands_provider._model_cache == {}
+    Asserts the public contract — a cached model is served again on a second call,
+    and clear_client_cache() forces the next call to rebuild — instead of inspecting
+    the private ``_model_cache`` dict. get_client/LLMClientModel are stubbed so no
+    real provider client is constructed (mirrors the strands cache suites).
+    """
+    import llm_service.config as cfg
+    import llm_service.strands_provider as sp
+    from llm_service.strands_provider import get_strands_model
+
+    monkeypatch.setattr(cfg, "resolve_provider", lambda: "ollama")
+    monkeypatch.setattr(cfg, "resolve_base_url", lambda: "http://host")
+    monkeypatch.setattr(cfg, "resolve_model_for_provider", lambda ak, provider=None: "model-x")
+    monkeypatch.setattr(cfg, "resolve_ollama_api_key", lambda: "")
+    monkeypatch.setattr(sp, "_active_provider_key_fingerprint", lambda *_a: "no-key")
+    monkeypatch.setattr(sp, "get_client", lambda ak: object())
+    monkeypatch.setattr(sp, "LLMClientModel", lambda *a, **k: object())
+
+    m1 = get_strands_model()  # build + cache
+    m2 = get_strands_model()  # identical key -> cache hit
+    assert m1 is m2
+
+    clear_client_cache()  # must invalidate the strands cache too
+
+    m3 = get_strands_model()  # cache emptied -> rebuild
+    assert m1 is not m3

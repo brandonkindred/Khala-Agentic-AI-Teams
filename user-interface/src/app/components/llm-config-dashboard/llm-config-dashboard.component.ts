@@ -145,6 +145,12 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   /** True iff the URL's host is exactly ollama.com (the Cloud endpoint).
    *
+   * An empty or blank URL returns true: the app treats a missing endpoint as
+   * Cloud because ollama.com is the default endpoint when none is configured, so
+   * the component surfaces the Cloud-key prompt rather than silently assuming
+   * Local. This empty=Cloud default is relied on elsewhere in the component, so
+   * it is intentional, not a bug.
+   *
    * Uses the parsed hostname, not a substring, so a custom host that merely
    * contains 'ollama.com' (e.g. http://ollama.company.com) is treated as Local.
    * Has a scheme-less fallback: a value like 'ollama.com' or 'ollama.com:443'

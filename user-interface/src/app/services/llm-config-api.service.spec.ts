@@ -3,6 +3,7 @@ import {
   HttpClientTestingModule,
   HttpTestingController,
 } from '@angular/common/http/testing';
+import { HttpErrorResponse } from '@angular/common/http';
 import { LlmConfigApiService } from './llm-config-api.service';
 import { environment } from '../../environments/environment';
 
@@ -41,5 +42,30 @@ describe('LlmConfigApiService', () => {
     expect(req.request.method).toBe('PUT');
     expect(req.request.body).toEqual(body);
     req.flush({ provider: 'claude', model: 'claude-opus-4-8' });
+  });
+
+  it('getConfig propagates an HTTP error to the observable', () => {
+    let captured: HttpErrorResponse | undefined;
+    service.getConfig().subscribe({
+      next: () => fail('expected an error, not a value'),
+      error: (err: HttpErrorResponse) => (captured = err),
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.flush('error', { status: 500, statusText: 'Server Error' });
+    expect(captured).toBeInstanceOf(HttpErrorResponse);
+    expect(captured?.status).toBe(500);
+  });
+
+  it('updateConfig propagates an HTTP error to the observable', () => {
+    const body = { provider: 'claude' as const, model: 'claude-opus-4-8', claude_api_key: 'sk' };
+    let captured: HttpErrorResponse | undefined;
+    service.updateConfig(body).subscribe({
+      next: () => fail('expected an error, not a value'),
+      error: (err: HttpErrorResponse) => (captured = err),
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.flush('error', { status: 500, statusText: 'Server Error' });
+    expect(captured).toBeInstanceOf(HttpErrorResponse);
+    expect(captured?.status).toBe(500);
   });
 });

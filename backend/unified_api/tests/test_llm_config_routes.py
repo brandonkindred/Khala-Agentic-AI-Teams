@@ -109,7 +109,11 @@ def test_put_succeeds_even_if_client_cache_clear_raises(app_client):
         raise RuntimeError("client cache backend down")
 
     mp.setattr(route, "clear_client_cache", boom)
-    resp = client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.1"})
+    # Local base URL keeps the Ollama-cloud-without-key guard from firing.
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "model": "llama3.1", "ollama_base_url": "http://localhost:11434"},
+    )
     assert resp.status_code == 200
     # The write still happened despite the cache-clear failure.
     stored = dict((k, v) for _s, k, v in calls["set"])
@@ -124,7 +128,11 @@ def test_put_succeeds_even_if_runtime_cache_clear_raises(app_client):
         raise RuntimeError("runtime cache down")
 
     mp.setattr(route.runtime_config, "clear_cache", boom)
-    resp = client.put("/api/llm-config", json={"provider": "ollama"})
+    # Local base URL keeps the Ollama-cloud-without-key guard from firing.
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "ollama_base_url": "http://localhost:11434"},
+    )
     assert resp.status_code == 200
 
 
@@ -179,6 +187,39 @@ def test_put_claude_allowed_when_key_in_env(app_client):
     assert stored[route.runtime_config.KEY_PROVIDER] == "claude"
 
 
+def test_put_claude_allowed_via_env_key_despite_clear_failure(app_client):
+    # The pre-guard runtime-cache clear failing must not break a valid Claude switch:
+    # the env key still satisfies the guard, so the request succeeds despite the clear
+    # raising (the failure is logged, not propagated).
+    client, calls, mp = app_client
+
+    def boom() -> None:
+        raise RuntimeError("runtime cache down")
+
+    mp.setenv("ANTHROPIC_API_KEY", "sk-existing")
+    mp.setattr(route.runtime_config, "clear_cache", boom)
+    resp = client.put("/api/llm-config", json={"provider": "claude", "model": "claude-opus-4-8"})
+    assert resp.status_code == 200
+    stored = dict((k, v) for _s, k, v in calls["set"])
+    assert stored[route.runtime_config.KEY_PROVIDER] == "claude"
+
+
+def test_put_claude_rejected_without_key_despite_clear_failure(app_client):
+    # The pre-guard runtime-cache clear failing must not bypass the guard: with no key
+    # anywhere the switch is still rejected (the clear failure is logged, then the
+    # guard reads the unchanged — keyless — state and 400s).
+    client, calls, mp = app_client
+
+    def boom() -> None:
+        raise RuntimeError("runtime cache down")
+
+    mp.setattr(route.runtime_config, "clear_cache", boom)
+    resp = client.put("/api/llm-config", json={"provider": "claude", "model": "claude-opus-4-8"})
+    assert resp.status_code == 400
+    assert "without an API key" in resp.json()["detail"]
+    assert calls["set"] == []  # nothing persisted
+
+
 def test_put_rejects_invalid_provider(app_client):
     client, _calls, _mp = app_client
     resp = client.put("/api/llm-config", json={"provider": "openai"})
@@ -221,7 +262,11 @@ def test_put_stores_model_under_provider_specific_key(app_client):
     # The model is persisted under the active provider's key (ollama here), so it
     # never collides with a Claude selection in a shared slot.
     client, calls, _mp = app_client
-    client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.2"})
+    # Local base URL keeps the Ollama-cloud-without-key guard from firing.
+    client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "model": "llama3.2", "ollama_base_url": "http://localhost:11434"},
+    )
     stored = {k: v for _s, k, v in calls["set"]}
     assert stored[route.runtime_config.KEY_OLLAMA_MODEL] == "llama3.2"
     assert route.runtime_config.KEY_CLAUDE_MODEL not in stored
@@ -260,14 +305,71 @@ def test_put_rejects_malformed_ollama_base_url(app_client):
     # A non-empty ollama_base_url must be a well-formed http(s) URL, else it would
     # be persisted and break every Ollama request until manually corrected.
     client, calls, _mp = app_client
+    resp = client.put("/api/llm-config", json={"provider": "ollama", "ollama_base_url": "not-a-url"})
+    assert resp.status_code == 422  # field validator rejects it before persistence
+    assert calls["set"] == []  # nothing persisted
+
+
+def test_put_rejects_ollama_base_url_with_credentials(app_client):
+    # A URL embedding credentials (user:pass@host) must be rejected before persistence
+    # so secrets are never written to the runtime store or leaked into request logs.
+    client, calls, _mp = app_client
     resp = client.put(
-        "/api/llm-config", json={"provider": "ollama", "ollama_base_url": "not-a-url"}
+        "/api/llm-config",
+        json={
+            "provider": "ollama",
+            "ollama_base_url": "https://user:pass@host:11434",
+            "ollama_api_key": "ok-123",
+        },
     )
     assert resp.status_code == 422  # field validator rejects it before persistence
     assert calls["set"] == []  # nothing persisted
 
 
 def test_put_accepts_valid_ollama_base_url(app_client):
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "ollama_base_url": "http://localhost:11434"},
+    )
+    assert resp.status_code == 200
+    stored = {k: v for _s, k, v in calls["set"]}
+    assert stored[route.runtime_config.KEY_OLLAMA_BASE_URL] == "http://localhost:11434"
+
+
+def test_put_ollama_cloud_without_key_rejected(app_client):
+    # Pointing the provider at Ollama Cloud (ollama.com) with no key (request,
+    # runtime, or env) is rejected so the factory never builds a keyless cloud client
+    # that fails every later call.
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "ollama_base_url": "https://ollama.com"},
+    )
+    assert resp.status_code == 400
+    assert "Ollama Cloud without an API key" in resp.json()["detail"]
+    assert calls["set"] == []  # nothing persisted
+
+
+def test_put_ollama_cloud_allowed_with_key_in_body(app_client):
+    # A cloud URL with the key supplied in the request body passes the guard.
+    client, calls, _mp = app_client
+    resp = client.put(
+        "/api/llm-config",
+        json={
+            "provider": "ollama",
+            "ollama_base_url": "https://ollama.com",
+            "ollama_api_key": "ok-123",
+        },
+    )
+    assert resp.status_code == 200
+    stored = {k: v for _s, k, v in calls["set"]}
+    assert stored[route.runtime_config.KEY_OLLAMA_BASE_URL] == "https://ollama.com"
+    assert stored[route.runtime_config.KEY_OLLAMA_API_KEY] == "ok-123"
+
+
+def test_put_ollama_local_without_key_allowed(app_client):
+    # A local Ollama URL needs no key, so the cloud guard must not fire.
     client, calls, _mp = app_client
     resp = client.put(
         "/api/llm-config",
@@ -286,7 +388,12 @@ def test_put_storage_error_returns_503(app_client, monkeypatch):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(route, "set_secrets", _boom)
-    resp = client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.2"})
+    # Use a local base URL so the Ollama-cloud-without-key guard does not short-circuit
+    # the request before set_secrets is reached.
+    resp = client.put(
+        "/api/llm-config",
+        json={"provider": "ollama", "model": "llama3.2", "ollama_base_url": "http://localhost:11434"},
+    )
     assert resp.status_code == 503
     assert "storage error" in resp.json()["detail"]
 
