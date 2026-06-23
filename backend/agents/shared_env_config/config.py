@@ -58,14 +58,19 @@ def env_bool(name: str, default: bool = False) -> bool:
 
     Preconditions:
         - ``name`` is a non-empty environment variable name (enforced).
+        - ``default`` is a ``bool`` (enforced) — so the fallback can never leak a
+          non-bool into a boolean context.
     Postconditions:
         - Returns ``True`` for ``true/1/yes/on`` and ``False`` for
           ``false/0/no/off`` (case-insensitive, whitespace-tolerant); ``default``
           for an unset or unrecognized value (a set-but-unrecognized value is
-          logged at WARNING). Raises ``ValueError`` only on an empty ``name``.
+          logged at WARNING). Raises ``ValueError`` on an empty ``name`` or a
+          non-bool ``default``.
     """
     if not name:
         raise ValueError("name must be a non-empty environment variable name")
+    if not isinstance(default, bool):
+        raise ValueError("default must be a bool")
     raw = (os.environ.get(name) or "").strip().lower()
     if raw in _TRUE:
         return True

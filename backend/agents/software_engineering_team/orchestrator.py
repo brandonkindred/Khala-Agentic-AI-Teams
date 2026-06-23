@@ -1424,6 +1424,13 @@ def _code_v2_worker(
             failed[tid] = f"{label} team not registered"
         return
 
+    # Carry the job's creation time on each TASK_MERGED so DORA lead time survives
+    # a metrics-window boundary even when the original task_created event predates
+    # the query window (mirrors _emit_coding_team_metrics on the coding-team path).
+    _job = get_job(job_id) or {}
+    _created_ts = _parse_iso(_job.get("created_at"))
+    _created_iso = _created_ts.isoformat() if _created_ts else None
+
     while (
         queue
     ):  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
@@ -1482,7 +1489,11 @@ def _code_v2_worker(
                 completed_code_task_ids.append(task_id)
                 update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
                 se_events.record_event(
-                    se_events.TASK_MERGED, job_id=job_id, task_id=task_id, phase="execution"
+                    se_events.TASK_MERGED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"created_ts": _created_iso} if _created_iso else None,
                 )
                 _log_task_completion_banner(
                     task_id=task_id,

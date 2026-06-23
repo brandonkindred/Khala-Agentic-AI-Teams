@@ -62,7 +62,7 @@ def create_team_app(
     """Build a fully-wired team :class:`FastAPI` app.
 
     Preconditions:
-        - ``service_name``/``team_key``/``title`` are non-empty strings.
+        - ``service_name``/``team_key``/``title``/``version`` are non-empty strings.
         - ``postgres_schema`` (when given) is a ``shared_postgres.TeamSchema``.
         - ``fastapi_kwargs`` must not contain ``title``/``version``/``lifespan``
           (set explicitly here); duplicating them raises ``TypeError``.
@@ -88,6 +88,7 @@ def create_team_app(
         ("service_name", service_name),
         ("team_key", team_key),
         ("title", title),
+        ("version", version),
     ):
         if not isinstance(_value, str) or not _value:
             raise ValueError(f"{_name} must be a non-empty string")

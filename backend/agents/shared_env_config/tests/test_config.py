@@ -33,6 +33,32 @@ def test_env_bool_unrecognized_returns_default(monkeypatch) -> None:
     assert env_bool(_KNOB, default=True) is True
 
 
+def test_env_bool_logs_on_set_but_unrecognized(monkeypatch, caplog) -> None:
+    # Mirrors env_int/env_float: a set-but-unrecognized value is surfaced; unset is silent.
+    import logging
+
+    monkeypatch.delenv(_KNOB, raising=False)
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        env_bool(_KNOB)
+    assert not caplog.records  # unset: no warning
+    monkeypatch.setenv(_KNOB, "maybe")
+    with caplog.at_level(logging.WARNING, logger="shared_env_config.config"):
+        assert env_bool(_KNOB) is False
+    assert any("Unrecognized bool" in r.message for r in caplog.records)
+
+
+def test_env_bool_rejects_non_bool_default() -> None:
+    with pytest.raises(ValueError, match="default must be a bool"):
+        env_bool(_KNOB, default="yes")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("reader", [env_bool, env_int, env_float])
+def test_readers_reject_empty_name(reader) -> None:
+    # Empty name is a caller contract violation, enforced (raised, not silently defaulted).
+    with pytest.raises(ValueError, match="non-empty"):
+        reader("", 1) if reader is not env_bool else reader("")
+
+
 def test_env_int_unset_and_garbage_return_default(monkeypatch) -> None:
     monkeypatch.delenv(_KNOB, raising=False)
     assert env_int(_KNOB, 7, 1) == 7

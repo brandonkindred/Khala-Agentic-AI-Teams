@@ -186,7 +186,7 @@ def compute_from_events(
             min(1.0, metrics.gate_reentry_count / metrics.merged_count), 4
         )
 
-    if cost:
+    if cost is not None:
         metrics.total_cost_usd = round(float(cost.get("total_cost_usd", 0.0) or 0.0), 6)
         metrics.cost_by_job = {
             str(k): round(float(v or 0.0), 6) for k, v in (cost.get("by_job") or {}).items()

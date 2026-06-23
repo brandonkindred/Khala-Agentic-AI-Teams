@@ -39,8 +39,6 @@ def test_iso_now_returns_iso_string():
 
 def test_partition_tasks_by_completion_splits_and_preserves_order():
     """Partition tasks by completion splits and preserves order."""
-    import orchestrator
-
     all_tasks = {"a": "ta", "b": "tb", "c": "tc", "d": "td"}
     completed_ids = {"a", "c"}
     remaining_ids = {"b", "d"}
@@ -55,8 +53,6 @@ def test_partition_tasks_by_completion_splits_and_preserves_order():
 
 def test_partition_tasks_by_completion_id_in_both_sets_appears_in_both():
     """Partition tasks by completion id in both sets appears in both."""
-    import orchestrator
-
     all_tasks = {"a": "ta", "b": "tb"}
     # "a" is both completed and still listed as remaining: it must appear in both
     # lists, exactly as the two independent comprehensions produced.
@@ -67,8 +63,6 @@ def test_partition_tasks_by_completion_id_in_both_sets_appears_in_both():
 
 def test_partition_tasks_by_completion_empty_sets_yield_empty_lists():
     """Partition tasks by completion empty sets yield empty lists."""
-    import orchestrator
-
     completed, remaining = orchestrator._partition_tasks_by_completion({"a": "ta"}, set(), set())
     assert completed == []
     assert remaining == []
@@ -77,8 +71,6 @@ def test_partition_tasks_by_completion_empty_sets_yield_empty_lists():
 def test_partition_tasks_by_completion_rejects_non_set_ids():
     """The documented set precondition is enforced — passing a list (which would
     silently degrade membership to O(n)) raises rather than running."""
-    import orchestrator
-
     with pytest.raises(AssertionError, match="completed_ids must be a set"):
         orchestrator._partition_tasks_by_completion({"a": "ta"}, ["a"], set())
     with pytest.raises(AssertionError, match="remaining_ids must be a set"):

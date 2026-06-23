@@ -27,6 +27,9 @@ Invariants:
     - Every mutation of a :class:`BusState` is performed under ``state.lock``.
     - ``state.subscribers`` and ``state.job_created_at`` share the same key set
       after any operation returns (a job is tracked in both or neither).
+    - ``state.job_created_at`` preserves insertion order (a plain ``dict``, ordered
+      since Python 3.7), so its first key is the oldest tracked job —
+      :func:`reap_once` relies on this when evicting the oldest jobs at the cap.
 """
 
 from __future__ import annotations
@@ -131,7 +134,10 @@ def publish(
     """Broadcast *event* to all subscribers of *job_id* (thread-safe).
 
     Preconditions:
-        - ``event`` is a dict; called from pipeline threads.
+        - ``event`` is a dict; called from pipeline threads. Its values should be
+          JSON-serializable — the SSE layer serializes each delivered payload to
+          JSON, so publishers are responsible for passing serializable values
+          (e.g. ISO strings, not raw ``datetime``/custom objects).
     Postconditions:
         - A timestamped payload (``ts`` added; ``type`` set when *event_type* is given)
           is appended to every current subscriber's queue and their ``notify`` is set,

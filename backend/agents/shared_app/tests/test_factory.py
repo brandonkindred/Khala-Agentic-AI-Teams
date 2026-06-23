@@ -53,6 +53,7 @@ def test_fastapi_kwargs_passthrough() -> None:
         {"service_name": "", "team_key": "tk", "title": "T"},
         {"service_name": "svc", "team_key": "", "title": "T"},
         {"service_name": "svc", "team_key": "tk", "title": ""},
+        {"service_name": "svc", "team_key": "tk", "title": "T", "version": ""},
     ],
 )
 def test_create_team_app_rejects_empty_required_strings(kwargs) -> None:

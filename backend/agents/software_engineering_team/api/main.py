@@ -2866,14 +2866,31 @@ def metrics_dora(window_days: float = 30.0) -> dict:
     render a "no data" state.
     """
     window = max(1.0, min(365.0, window_days))
-    from software_engineering_team.metrics.dora import compute_dora
-
     try:
+        # Import inside the try so even a packaging/circular-import failure of the
+        # metrics module degrades to the zeroed "no data" response below rather
+        # than surfacing a 500 — the endpoint's contract is to always return a
+        # valid metrics shape.
+        from software_engineering_team.metrics.dora import compute_dora
+
         return compute_dora(window).to_dict()
     except Exception:
         logger.exception("failed to compute DORA metrics")
-        from software_engineering_team.metrics.dora import DoraMetrics
-
-        return DoraMetrics(
-            window_days=window, computed_at=datetime.now(timezone.utc).isoformat()
-        ).to_dict()
+        # Build the zeroed fallback as a literal (not via DoraMetrics) so it holds
+        # even when the metrics module itself cannot be imported. Mirrors
+        # DoraMetrics' field defaults; keep in sync with that dataclass.
+        return {
+            "window_days": window,
+            "computed_at": datetime.now(timezone.utc).isoformat(),
+            "deployment_count": 0,
+            "deployment_frequency_per_day": 0.0,
+            "lead_time_seconds_median": None,
+            "lead_time_sample_count": 0,
+            "merged_count": 0,
+            "gate_reentry_count": 0,
+            "change_failure_rate": 0.0,
+            "mttr_seconds_median": None,
+            "crash_resolved_count": 0,
+            "total_cost_usd": 0.0,
+            "cost_by_job": {},
+        }
