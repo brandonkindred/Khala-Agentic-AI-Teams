@@ -138,6 +138,19 @@ class JobServiceClient:
         resp = self._request("DELETE", self._url(f"/jobs/{self.team}/{job_id}"))
         return resp.json().get("deleted", False)
 
+    def cancel_active_job(self, job_id: str) -> bool:
+        """Atomically cancel a job server-side only if it is still pending/running.
+
+        Preconditions: ``job_id`` is non-empty (the caller validates).
+        Postconditions: returns True only when the server set the status to
+            ``cancelled`` because the job was pending/running at write time. The
+            status guard is evaluated in the same conditional UPDATE that performs
+            the write, so a job that has already reached a terminal status is never
+            overwritten (no read-then-write race).
+        """
+        resp = self._request("POST", self._url(f"/jobs/{self.team}/{job_id}/cancel"))
+        return resp.json().get("cancelled", False)
+
     def list_jobs(self, *, statuses: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         params = {}
         if statuses:
@@ -436,15 +449,15 @@ class BaseJobStore:
 
         Preconditions: ``job_id`` is non-empty.
         Postconditions: returns True and sets status to ``cancelled`` when the job
-            exists and is pending/running; returns False (no write) otherwise.
+            exists and is pending/running; returns False (no write) otherwise. The
+            status check and the write happen in one conditional server-side UPDATE
+            (``JobServiceClient.cancel_active_job``), so a job that races to a
+            terminal status between the decision and the write is never clobbered —
+            there is no get-then-update window here.
         """
         if not job_id:
             raise ValueError("cancel_job requires a non-empty job_id")
-        job = self._client().get_job(job_id)
-        if job is None or job.get("status") not in {JOB_STATUS_PENDING, JOB_STATUS_RUNNING}:
-            return False
-        self._client().update_job(job_id, status=JOB_STATUS_CANCELLED)
-        return True
+        return self._client().cancel_active_job(job_id)
 
     def is_job_cancelled(self, job_id: str) -> bool:
         """Return True if the job exists and has been marked cancelled.

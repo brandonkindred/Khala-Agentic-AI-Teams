@@ -11,6 +11,11 @@ import logging
 import os
 from typing import Optional
 
+# shared_env is a dependency-free standard-library-only leaf module, so importing
+# it at module scope cannot create an import cycle (it imports nothing from here).
+from shared_env import env_flag_enabled as _env_flag_enabled
+from shared_env import parse_float as _parse_float
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -85,9 +90,7 @@ def env_flag_enabled(env_name: str) -> bool:
           (case-insensitive, whitespace-tolerant); unset or any other value
           means enabled. Never raises.
     """
-    from shared_env import env_flag_enabled as _impl
-
-    return _impl(env_name)
+    return _env_flag_enabled(env_name)
 
 
 def thinking_enabled_by_default() -> bool:
@@ -249,11 +252,9 @@ def resolve_timeout(agent_key: Optional[str] = None) -> float:
     All LLM calls use streaming, so the timeout covers the full streamed response.
     Override with LLM_TIMEOUT if needed.
     """
-    from shared_env import parse_float
-
     # A non-positive timeout would make every streamed call fail instantly;
     # fall back to the default rather than honor a degenerate override.
-    value = parse_float(ENV_LLM_TIMEOUT, 900.0)
+    value = _parse_float(ENV_LLM_TIMEOUT, 900.0)
     return value if value > 0 else 900.0
 
 

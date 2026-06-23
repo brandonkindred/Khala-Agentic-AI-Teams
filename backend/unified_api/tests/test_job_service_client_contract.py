@@ -140,6 +140,39 @@ def test_fake_heartbeat_succeeds_for_existing_job(
 
 
 # ---------------------------------------------------------------------------
+# Atomic cancel — mirrors job_service/db.py cancel_active_job conditional UPDATE
+# ---------------------------------------------------------------------------
+
+
+def test_fake_cancel_active_job_cancels_pending_and_running(
+    fake_job_client: FakeJobServiceClient,
+) -> None:
+    """A pending or running job is cancellable; the fake mirrors the production
+    conditional UPDATE (``status IN ('pending','running')``)."""
+    fake_job_client.create_job("p", status="pending")
+    fake_job_client.create_job("r", status="running")
+    assert fake_job_client.cancel_active_job("p") is True
+    assert fake_job_client.cancel_active_job("r") is True
+    assert fake_job_client.get_job("p")["status"] == "cancelled"
+    assert fake_job_client.get_job("r")["status"] == "cancelled"
+
+
+def test_fake_cancel_active_job_noop_on_terminal(fake_job_client: FakeJobServiceClient) -> None:
+    """A job that has reached a terminal status must NOT be overwritten — the status
+    guard lives in the same UPDATE that writes, closing the check-then-act race."""
+    for terminal in ("completed", "failed", "cancelled", "interrupted"):
+        fake_job_client.create_job(terminal, status=terminal)
+        assert fake_job_client.cancel_active_job(terminal) is False
+        assert fake_job_client.get_job(terminal)["status"] == terminal
+
+
+def test_fake_cancel_active_job_noop_on_missing(fake_job_client: FakeJobServiceClient) -> None:
+    """Cancelling a job that does not exist returns False (no auto-create)."""
+    assert fake_job_client.cancel_active_job("nope") is False
+    assert fake_job_client.get_job("nope") is None
+
+
+# ---------------------------------------------------------------------------
 # Activity stamping — mirrors job_service/db.py central last_activity_at
 # ---------------------------------------------------------------------------
 

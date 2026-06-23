@@ -68,8 +68,9 @@ def parse_int(
         value = default
     else:
         try:
+            # raw is a non-blank str here, so int() can only raise ValueError.
             value = int(raw.strip())
-        except (TypeError, ValueError):
+        except ValueError:
             value = default
     if minimum is not None and value < minimum:
         value = minimum
@@ -99,19 +100,23 @@ def parse_float(
         raise ValueError("env_name must be non-empty")
     if minimum is not None and maximum is not None and minimum > maximum:
         raise ValueError("minimum must be <= maximum")
+    # Normalize the default to float once so every fallback branch can return it
+    # directly (mirrors parse_int's ``value = default``) while still honouring the
+    # ``-> float`` postcondition even when the caller passes an int default.
+    default = float(default)
     raw = os.environ.get(env_name)
     if raw is None or not raw.strip():
-        value = float(default)
+        value = default
     else:
         try:
             value = float(raw.strip())
-        except (TypeError, ValueError):
-            value = float(default)
+        except ValueError:
+            value = default
     # Reject inf/nan from the env: a non-finite value defeats clamp comparisons
     # (always False for nan) and can busy-loop/crash a consumer using it as an
     # interval. Fall back to the (finite) default.
     if not math.isfinite(value):
-        value = float(default)
+        value = default
     if minimum is not None and value < minimum:
         value = float(minimum)
     if maximum is not None and value > maximum:

@@ -62,9 +62,9 @@ def _no_change_revisit_cap() -> int:
     # Reuse the shared defensive int-env parser (garbage/empty → default, value clamped to floor)
     # rather than re-implementing the parse here; the floor of 1 keeps the guard from ever being
     # disabled into an unbounded no-progress loop.
-    from software_engineering_team.shared.context_sizing import env_int
+    from software_engineering_team.shared.context_sizing import parse_env_int
 
-    return env_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, floor=1)
+    return parse_env_int("CODING_TEAM_NO_CHANGE_REVISIT_CAP", NO_CHANGE_REVISIT_CAP, floor=1)
 
 
 class _NoopBridge:
