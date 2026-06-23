@@ -16,6 +16,9 @@ from db import (
     apply_patch as db_apply_patch,
 )
 from db import (
+    cancel_active_job as db_cancel_active_job,
+)
+from db import (
     close_pool as db_close_pool,
 )
 from db import (
@@ -52,6 +55,7 @@ from fastapi import FastAPI, HTTPException, Query
 from models import (
     AppendEventRequest,
     ApplyPatchRequest,
+    CancelResponse,
     CreateJobRequest,
     DeleteResponse,
     HealthResponse,
@@ -135,6 +139,17 @@ def get_job(team: str, job_id: str):
 def delete_job(team: str, job_id: str):
     deleted = db_delete_job(team, job_id)
     return DeleteResponse(deleted=deleted)
+
+
+@app.post("/jobs/{team}/{job_id}/cancel", response_model=CancelResponse)
+def cancel_job(team: str, job_id: str):
+    """Atomically cancel a job only if it is still pending/running.
+
+    The status guard lives in the SQL ``WHERE`` clause, so a job that races to a
+    terminal status is never overwritten (see ``db.cancel_active_job``).
+    """
+    cancelled = db_cancel_active_job(team, job_id)
+    return CancelResponse(cancelled=cancelled)
 
 
 @app.get("/jobs/{team}", response_model=JobListResponse)

@@ -95,17 +95,28 @@ def test_map_chunk_cap_is_env_overridable(monkeypatch) -> None:
     assert compute_code_review_chunk_chars(llm) == 10_000  # clamped to the floor
 
 
-def test_env_int_defensive_parsing(monkeypatch) -> None:
-    from software_engineering_team.shared.context_sizing import env_int
+def test_parse_env_int_defensive_parsing(monkeypatch) -> None:
+    from software_engineering_team.shared.context_sizing import parse_env_int
 
     monkeypatch.delenv("SOME_KNOB", raising=False)
-    assert env_int("SOME_KNOB", 7, 1) == 7
+    assert parse_env_int("SOME_KNOB", 7, 1) == 7
     monkeypatch.setenv("SOME_KNOB", " 42 ")
-    assert env_int("SOME_KNOB", 7, 1) == 42
+    assert parse_env_int("SOME_KNOB", 7, 1) == 42
     monkeypatch.setenv("SOME_KNOB", "nope")
-    assert env_int("SOME_KNOB", 7, 1) == 7
+    assert parse_env_int("SOME_KNOB", 7, 1) == 7
     monkeypatch.setenv("SOME_KNOB", "-3")
-    assert env_int("SOME_KNOB", 7, 1) == 1
+    assert parse_env_int("SOME_KNOB", 7, 1) == 1
+
+
+def test_parse_env_int_rejects_default_below_floor() -> None:
+    """Precondition (default >= floor) is enforced with an explicit ValueError
+    so the check survives ``python -O`` (assert would be stripped)."""
+    import pytest
+
+    from software_engineering_team.shared.context_sizing import parse_env_int
+
+    with pytest.raises(ValueError):
+        parse_env_int("SOME_KNOB", 1, 5)
 
 
 def test_code_review_excerpts_are_absolutely_capped_at_large_context() -> None:

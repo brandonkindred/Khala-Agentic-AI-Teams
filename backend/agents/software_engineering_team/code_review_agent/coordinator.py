@@ -42,7 +42,7 @@ from software_engineering_team.shared.context_sizing import (
     compute_code_review_existing_codebase_chars,
     compute_code_review_map_chunk_chars,
     compute_code_review_spec_excerpt_chars,
-    env_int,
+    parse_env_int,
 )
 
 from .chunk_reviewer import ChunkReviewAgent
@@ -90,15 +90,15 @@ _VALID_SEVERITIES = frozenset({"critical", "high", "medium", "low", "info"})
 
 
 def _min_split_segment_chars() -> int:
-    return env_int("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", MIN_SPLIT_SEGMENT_CHARS, 1_000)
+    return parse_env_int("CODE_REVIEW_MIN_SPLIT_SEGMENT_CHARS", MIN_SPLIT_SEGMENT_CHARS, 1_000)
 
 
 def _max_bisect_depth() -> int:
-    return env_int("CODE_REVIEW_MAX_BISECT_DEPTH", MAX_CHUNK_BISECT_DEPTH, 0)
+    return parse_env_int("CODE_REVIEW_MAX_BISECT_DEPTH", MAX_CHUNK_BISECT_DEPTH, 0)
 
 
 def _map_parallelism() -> int:
-    return env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
+    return parse_env_int("CODE_REVIEW_MAP_PARALLELISM", DEFAULT_MAP_PARALLELISM, 1)
 
 
 def parse_code_into_file_blocks(code: str) -> List[Tuple[str, str]]:
