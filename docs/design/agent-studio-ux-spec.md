@@ -74,9 +74,14 @@ back‑loops.
   `registryAgentId`).
 - In Stage 3, the **`+ Add → Search registry agents`** path is itself a full catalog browser with inspect, so a
   roster can be staffed with agents that were never the "current" `registryAgentId`.
+- **Re‑test an agent without going forward first.** A user in Stage 3 who realizes a roster agent needs more testing
+  should not have to advance to Stage 4 to reach the "fix an agent" back‑loop. Each roster entry therefore exposes a
+  **`Test ▸`** action that opens **that agent in Stage 2** (setting `registryAgentId` to it) — the same back‑loop
+  semantics as Stage 4's "fix an agent", available directly from Stage 3. This is still not a *stepper* back‑click;
+  it's an explicit per‑agent action, and Stage‑1 remains reachable only via the `Browse agents` overlay.
 
-The stepper stays forward‑only (no Stage‑1 stepper click, no confirmation dialog needed); the catalog is simply
-reachable as an overlay from the later stages.
+The stepper stays forward‑only (no Stage‑1 stepper click, no confirmation dialog needed); the catalog and the
+"test this agent" jump are simply reachable as in‑context actions from the later stages.
 
 ### 2.2 Navigation changes (`user-interface/src/app/models/navigation.model.ts`, `agentic-ai` group)
 
@@ -301,7 +306,8 @@ interface AgentStudioDraft {
   stage3RosterDraft?: Array<{
     agentName: string;
     source: 'registry' | 'generated';
-    manifestId?: string;                   // set when source === 'registry'
+    manifestId?: string;                   // set when source === 'registry'; same id space as the
+                                           // handoff registryAgentId — named to mirror backend manifest_id (§5 item 3)
     role?: string;
     skills?: string[];
   }>;
@@ -316,6 +322,12 @@ All fields except `agentName`/`source` (within a roster entry) are optional — 
 is the snake_case **`manifest_id`** (§5 item 3). They denote the *same* identifier across the boundary — the
 frontend↔backend mapping is purely camelCase↔snake_case. (When a registry agent is added to a roster, that entry's
 `manifest_id` equals the `registryAgentId` it was added from.)
+
+The two names are kept **deliberately** rather than unified: `registryAgentId` is the **handoff slot** ("the agent
+currently in focus"), whereas a roster entry's `manifestId` is that **entry's own** source‑manifest link and is named
+to mirror its backend column `manifest_id` (§5 item 3). Collapsing them to one name would either lose the handoff‑vs‑
+roster‑entry distinction or break the deliberate frontend/backend column parity — so the spec names the *roles*
+distinctly while this note fixes them to the same id space.
 
 This makes draft persistence a **must‑have backend touchpoint** (see §5, item 4 — Studio drafts). The frontend `AgentStudioStateService`
 is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
@@ -364,7 +376,7 @@ equivalents** (or the component is refactored to inject them directly). The cont
 
 | Reused component | Services it expects | Provided by |
 |---|---|---|
-| `agent-catalog` | `AgentCatalogApiService` (+ any catalog filter/selection state it reads from the console shell today) | Studio shell |
+| `agent-catalog` | `AgentCatalogApiService`; plus the catalog filter/selection state it reads from the console shell today — specifically the **selected‑team filter**, **tag filter(s)**, **search query**, and **selected‑agent id**. These move into `AgentStudioStateService` (the selected‑agent id *is* the handoff `registryAgentId`). | Studio shell |
 | `agent-runner` (+ schema‑form, run‑history, diff, save‑input dialogs) | `AgentRunnerApiService` (invoke/runs/saved‑inputs/diff) | Studio shell |
 | `agent-provisioning-dashboard` | its existing provisioning service(s), unchanged | Studio shell / wrapper (§Stage 1) |
 | `process-designer-chat`, extracted `agentic-team-dashboard` children | `AgenticTeamApiService` | Studio shell |
@@ -410,7 +422,7 @@ sequenceDiagram
 
 **Must‑have:**
 1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`.
-2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams (cross‑service `GET …/agentic-team-provisioning/teams`, filtered to teams with ≥1 `complete` process). Without this the persona dropdown is empty.
+2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams via the cross‑service call **`GET /api/agentic-team-provisioning/teams`** (the unified‑API mount path), keeping only teams with ≥1 `complete` process (filter client‑side, or pass the provisioning service's process‑status query param if/when it exposes one). Without this the persona dropdown is empty.
 3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`. **Authorization:** both endpoints mutate a team's roster, so they **must** enforce the same authz as the existing team‑mutation routes — restricted to the team's **Owner/Admin** (reuse the provisioning service's existing team‑permission dependency/middleware; do not ship these unguarded).
 4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. **Authorization:** drafts are **per‑user** — every read/write is scoped to the authenticated user id, and one user can never list or load another's drafts. Required because the header `Save draft` / `Load draft` UX is non‑functional without it.
 
