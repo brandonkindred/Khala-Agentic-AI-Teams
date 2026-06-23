@@ -1,21 +1,24 @@
-"""Runtime look-ahead veto in :meth:`StrategyLabOrchestrator._run_verification_phase`.
+"""Runtime look-ahead handling in :meth:`StrategyLabOrchestrator._run_verification_phase`.
 
 The harness's ``AttributeError`` interceptor flips
 ``TradingServiceResult.lookahead_violation=True`` whenever generated code
 reads a forward attribute on ``bar`` / ``ctx``. The compat shim propagates
 that as ``StrategyRunResult.error_type="lookahead_violation"`` and the
 synthesis loop threads the boolean onto
-``_SynthesisLoopOutcome.runtime_lookahead_violation``. The verification
-phase consumes the boolean here and, when True, forces ``is_winning=False``
-plus appends ``lookahead_violation_at_runtime: subprocess_attribute_error``
-to ``acceptance_reason`` — even if execution_succeeded had already steered
-the else-branch to ``is_winning=False`` for a more generic reason.
+``_SynthesisLoopOutcome.runtime_lookahead_violation``. The verification phase
+consumes the boolean here and, when True, appends
+``lookahead_violation_at_runtime: subprocess_attribute_error`` to
+``acceptance_reason`` so the cause is recorded as a narrative caveat.
 
-Defence-in-depth: today an unresolved lookahead exhausts refinement and
-arrives at verification with ``execution_succeeded=False`` (so the else
-branch already vetoes), but this test pins the BOOLEAN-driven veto so a
-future refactor that lets a partial run reach verification still gets
-rejected with the right ``acceptance_reason``.
+Under the deterministic verdict, runtime look-ahead is a *caveat only* — it
+no longer flips ``is_winning``. The label is the return-vs-benchmark rule
+gated by the ``execution_succeeded and trades`` validity precondition. In
+production an unresolved look-ahead exhausts refinement and reaches
+verification with ``execution_succeeded=False``, so the validity precondition
+already yields ``is_winning=False`` (an invalid run has no genuine return).
+The contrived "clean ledger + lookahead=True" case is the documented residual
+surface: the label follows the return and the look-ahead cause rides along as
+a caveat.
 """
 
 from __future__ import annotations
@@ -105,8 +108,9 @@ def _orch() -> StrategyLabOrchestrator:
 
 
 def test_runtime_lookahead_violation_forces_is_winning_false():
-    """When the synthesis loop signals a runtime lookahead, verification
-    forces ``is_winning=False`` even on an otherwise-empty input set."""
+    """A runtime look-ahead arrives with ``execution_succeeded=False`` (the
+    production path), so the validity precondition yields ``is_winning=False``
+    and the look-ahead cause is recorded on ``acceptance_reason`` as a caveat."""
     orch = _orch()
     metrics = _metrics()
     all_gate_results: list = []
@@ -201,13 +205,18 @@ def test_no_veto_when_runtime_lookahead_violation_is_false(monkeypatch):
     assert "lookahead_violation_at_runtime" not in reason
 
 
-def test_runtime_lookahead_violation_overrides_clean_upstream_admission(monkeypatch):
-    """Even if (for some reason) the walk-forward / acceptance gates
-    admitted the run with ``is_winning=True``, a runtime lookahead must
-    force ``is_winning=False`` and overwrite the success reason.
+def test_runtime_lookahead_violation_records_cause_on_clean_ledger(monkeypatch):
+    """The documented residual surface: a clean ledger (execution_succeeded=
+    True, trades present, return at/above the benchmark) that also carries a
+    runtime look-ahead. Under the deterministic verdict the label follows the
+    return rule — so ``is_winning`` is True here (10% >= 8%) — and the
+    look-ahead cause is recorded on ``acceptance_reason`` as a caveat (it
+    replaces the clean acceptance success string), surfacing in the narrative.
 
-    This guards against a future regression where lookahead state could
-    arrive at verification alongside a clean trade ledger.
+    In production this combination does not occur: an unresolved look-ahead
+    reaches verification with ``execution_succeeded=False``, so the validity
+    precondition forces ``is_winning=False`` (see the other tests). This pins
+    the caveat-recording so a future refactor cannot drop the audit trail.
     """
     orch = _orch()
     monkeypatch.setattr(
@@ -249,6 +258,11 @@ def test_runtime_lookahead_violation_overrides_clean_upstream_admission(monkeypa
         runtime_lookahead_violation=True,
     )
 
-    assert outcome.is_winning is False
+    # Deterministic verdict: a valid run (executed + trades) with 10% >= 8%
+    # is winning; the look-ahead is a caveat, not a label-flip.
+    assert outcome.is_winning is True
     reason = outcome.metrics.acceptance_reason or ""
+    # The look-ahead cause is still recorded (it replaces the clean acceptance
+    # success string, since upstream_admitted was True), so it rides into the
+    # narrative as a caveat.
     assert "lookahead_violation_at_runtime: subprocess_attribute_error" in reason

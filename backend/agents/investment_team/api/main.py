@@ -2901,7 +2901,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         raise HTTPException(
             status_code=400,
             detail=f"Strategy '{request.lab_record_id}' is not a winning strategy. "
-            "Only winning strategies (>8% annualized return) can be paper traded.",
+            "Only winning strategies (annualized return >= 8%, the S&P-500 benchmark) "
+            "can be paper traded.",
         )
 
     strategy = lab_record.strategy

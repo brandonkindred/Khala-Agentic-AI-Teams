@@ -30,6 +30,7 @@ from pathlib import Path
 
 import pytest
 
+from investment_team.models import BacktestResult
 from investment_team.strategy_lab.agents.alignment import (
     AlignmentIssue,
     TradeAlignmentReport,
@@ -41,6 +42,7 @@ from investment_team.strategy_lab.agents.analysis import (
     _SIZING_LINE_READING,
     _format_alignment_status_section,
     format_misalignment_prefix,
+    format_robustness_caveats,
 )
 from investment_team.strategy_lab.spec_dsl import (
     EntryRule,
@@ -95,6 +97,10 @@ def _render_inputs() -> dict[str, object]:
         "alignment_status_section": _format_alignment_status_section(
             TradeAlignmentReport(aligned=True)
         ),
+        # Clean run → empty caveats. The placeholder sits immediately before
+        # the next section header, so an empty value renders byte-identical to
+        # the pre-caveats prompt and the goldens are unchanged.
+        "robustness_caveats_section": "",
     }
 
 
@@ -674,6 +680,117 @@ def test_analysis_templates_expose_alignment_placeholder(label: str, template_fi
     assert "{alignment_status_section}" in template, (
         f"{label} template missing {{alignment_status_section}} placeholder (issue #532)."
     )
+
+
+# ---------------------------------------------------------------------------
+# Robustness caveats threaded into the analysis prompts. The WINNING/LOSING
+# label is deterministic (annualized return vs the 8% S&P-500 benchmark);
+# these caveats carry the robustness diagnostics as risk context only and must
+# never reframe the verdict.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "label,template_file",
+    [
+        pytest.param("analysis_win", "analysis_win.md", id="analysis_win"),
+        pytest.param("analysis_lose", "analysis_lose.md", id="analysis_lose"),
+    ],
+)
+def test_analysis_templates_expose_robustness_caveats_placeholder(
+    label: str, template_file: str
+) -> None:
+    """Both analysis templates must expose ``{robustness_caveats_section}``
+    immediately before ``## Instructions`` so an empty value renders
+    byte-identical to the pre-caveats prompt (clean-run goldens unchanged)."""
+    template = (_PROMPT_DIR / template_file).read_text(encoding="utf-8")
+    assert "{robustness_caveats_section}## Instructions" in template, (
+        f"{label} template must place {{robustness_caveats_section}} directly "
+        "before '## Instructions' (byte-neutral when empty)."
+    )
+
+
+def test_self_review_prompt_exposes_caveats_placeholder_and_verdict_check() -> None:
+    """The self-review prompt carries the caveats placeholder and the
+    verdict-consistency instruction that forbids reframing the label."""
+    assert "{robustness_caveats_section}## Draft analysis to verify" in _SELF_REVIEW_PROMPT
+    assert "Verdict consistency" in _SELF_REVIEW_PROMPT
+
+
+def _caveat_metrics(**overrides: object) -> BacktestResult:
+    """Build a BacktestResult for the caveat-formatter tests (the reported
+    44.6% / Sharpe 0.64 winner by default)."""
+    base: dict[str, object] = dict(
+        total_return_pct=50.0,
+        annualized_return_pct=44.6,
+        volatility_pct=51.2,
+        sharpe_ratio=0.64,
+        max_drawdown_pct=17.2,
+        win_rate_pct=32.3,
+        profit_factor=3.79,
+        sortino_ratio=0.0,
+        calmar_ratio=0.0,
+        deflated_sharpe=0.0,
+    )
+    base.update(overrides)
+    return BacktestResult(**base)
+
+
+@pytest.mark.parametrize(
+    "reason",
+    [None, "", "   ", "all four criteria met", "walk_forward_fallback_passed: anomaly recheck clean"],
+)
+def test_robustness_caveats_empty_on_clean_pass(reason: object) -> None:
+    """A clean acceptance pass (or no recorded reason) yields no caveat block,
+    so clean-run prompts stay byte-identical."""
+    assert format_robustness_caveats(_caveat_metrics(acceptance_reason=reason)) == ""
+
+
+def test_robustness_caveats_surface_recorded_concern_and_oos_diagnostics() -> None:
+    """A recorded robustness concern produces a caveat block carrying the
+    acceptance_reason and the out-of-sample diagnostics, explicitly framed as
+    risk context that does NOT change the verdict (the reported failure mode:
+    a high-return winner that the old code reclassified as LOSING)."""
+    metrics = _caveat_metrics(
+        acceptance_reason=(
+            "OOS DSR 0.30 below threshold 1.000; "
+            "Beat benchmark in 1 of 4 regime subwindows (threshold: 2)"
+        ),
+        oos_sharpe=0.40,
+        deflated_sharpe=0.30,
+        is_oos_degradation_pct=62.0,
+        oos_trade_count=18,
+        regime_results=[
+            {"beat_benchmark": True},
+            {"beat_benchmark": False},
+            {"beat_benchmark": False},
+            {"beat_benchmark": False},
+        ],
+    )
+    section = format_robustness_caveats(metrics)
+    assert section.startswith("## Robustness caveats")
+    assert section.endswith("\n")
+    assert "NOT grounds to change the verdict" in section
+    assert "OOS DSR 0.30 below threshold" in section
+    assert "OOS Sharpe 0.40" in section
+    assert "deflated Sharpe 0.30" in section
+    assert "IS→OOS Sharpe degradation 62.0%" in section
+    assert "OOS trades 18" in section
+    assert "beat benchmark in 1 of 4 regime subwindows" in section
+
+
+def test_robustness_caveats_omit_oos_block_without_walk_forward() -> None:
+    """On a fallback/legacy path (no OOS Sharpe) a recorded concern still
+    surfaces the cause, but the out-of-sample diagnostics line is omitted."""
+    section = format_robustness_caveats(
+        _caveat_metrics(
+            acceptance_reason="walk_forward_fallback_rejected: Sharpe 6.10 exceeds 5.0 realism ceiling",
+            oos_sharpe=None,
+        )
+    )
+    assert section.startswith("## Robustness caveats")
+    assert "walk_forward_fallback_rejected" in section
+    assert "Out-of-sample diagnostics:" not in section
 
 
 # ---------------------------------------------------------------------------
