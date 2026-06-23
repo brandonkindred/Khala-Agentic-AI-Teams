@@ -109,12 +109,60 @@ def test_mark_all_running_jobs_failed_returns_ids(store: _Store) -> None:
     assert store.get_job("b")["status"] == "failed"  # the pending job is failed too
 
 
-def test_mark_all_running_jobs_failed_swallows_client_error(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
-    """The shutdown hook must never raise: a client error is logged and swallowed,
-    and the method returns []."""
+def test_mark_all_running_jobs_failed_swallows_client_error(
+    monkeypatch: pytest.MonkeyPatch, store: _Store, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The shutdown hook must never raise: a client error is logged (with the
+    exception detail) and swallowed, and the method returns []."""
 
     def _boom(*_: Any, **__: Any) -> None:
         raise RuntimeError("client down")
 
     monkeypatch.setattr(store._fake, "mark_all_active_jobs_failed", _boom)
-    assert store.mark_all_running_jobs_failed("x") == []
+    with caplog.at_level("WARNING"):
+        assert store.mark_all_running_jobs_failed("x") == []
+    # The logging half of the "logged and swallowed" contract.
+    assert any("client down" in rec.getMessage() for rec in caplog.records)
+
+
+def test_cancel_job_propagates_client_error(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    """cancel_job is not a shutdown hook: a client failure propagates (it must not
+    silently swallow a failed cancel and report success/failure dishonestly)."""
+
+    def _boom(*_: Any, **__: Any) -> None:
+        raise RuntimeError("client down")
+
+    monkeypatch.setattr(store._fake, "cancel_active_job", _boom)
+    with pytest.raises(RuntimeError, match="client down"):
+        store.cancel_job("j1")
+
+
+def test_is_job_cancelled_propagates_client_error(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    """is_job_cancelled is a pure read; a client failure propagates rather than
+    being misreported as 'not cancelled'."""
+
+    def _boom(*_: Any, **__: Any) -> None:
+        raise RuntimeError("client down")
+
+    monkeypatch.setattr(store._fake, "get_job", _boom)
+    with pytest.raises(RuntimeError, match="client down"):
+        store.is_job_cancelled("j1")
+
+
+def test_list_jobs_propagates_client_error(monkeypatch: pytest.MonkeyPatch, store: _Store) -> None:
+    """list_jobs propagates a client failure rather than masking it as 'no jobs'."""
+
+    def _boom(*_: Any, **__: Any) -> None:
+        raise RuntimeError("client down")
+
+    monkeypatch.setattr(store._fake, "list_jobs", _boom)
+    with pytest.raises(RuntimeError, match="client down"):
+        store.list_jobs()
+
+
+def test_list_jobs_empty_statuses_returns_all(store: _Store) -> None:
+    """An empty ``statuses`` list is treated as 'no filter' (falsy), so every job
+    is returned — matching the client/server ``if statuses:`` guard."""
+    store.create_job("r", status=JOB_STATUS_RUNNING)
+    store.create_job("d", status=JOB_STATUS_COMPLETED)
+    assert {j["job_id"] for j in store.list_jobs(statuses=[])} == {"r", "d"}

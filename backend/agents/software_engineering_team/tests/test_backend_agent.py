@@ -1297,6 +1297,31 @@ def test_try_build_fix_specialist_uses_precomputed_test_content(tmp_path: Path) 
     assert sent.failing_test_content == long_content[:3000]
 
 
+def test_try_build_fix_specialist_resolves_context_when_unset(tmp_path: Path) -> None:
+    """When the caller omits failing_test_file/content (default _UNSET sentinel), the
+    method resolves them via _resolve_failing_test_context and threads the result
+    into BuildFixInput."""
+    agent = BackendExpertAgent(llm_client=ConfigurableLLM())
+    spec = MagicMock()
+    spec.run.return_value = _make_bf_result([])  # no edits; we only inspect the call args
+    with patch(
+        "backend_agent.agent._resolve_failing_test_context",
+        return_value=("tests/test_resolved.py", "def test_resolved(): assert False\n"),
+    ) as resolve:
+        agent._try_build_fix_specialist(
+            repo_path=tmp_path,
+            build_errors="E AssertionError",
+            build_fix_specialist=spec,
+            current_task=_bf_task(),
+            task_id="U1",
+            iteration=2,
+            # failing_test_file / failing_test_content intentionally omitted -> _UNSET
+        )
+    resolve.assert_called_once_with("E AssertionError", tmp_path)
+    sent = spec.run.call_args[0][0]
+    assert sent.failing_test_content == "def test_resolved(): assert False\n"
+
+
 def test_escalate_uses_precomputed_content_without_disk(tmp_path: Path) -> None:
     """Precomputed content is embedded even when the file path is not on disk (no re-read)."""
     issues: list = []

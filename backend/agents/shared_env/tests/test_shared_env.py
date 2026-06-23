@@ -64,6 +64,18 @@ def test_int_clamps_to_maximum(monkeypatch):
     assert parse_int("N", 7, maximum=10) == 10
 
 
+def test_int_with_both_bounds_in_range(monkeypatch):
+    """A value within [minimum, maximum] passes through unclamped."""
+    monkeypatch.setenv("N", "7")
+    assert parse_int("N", 1, minimum=5, maximum=10) == 7
+
+
+def test_int_with_max_only_below_max(monkeypatch):
+    """With only maximum set, a value below it is returned unchanged."""
+    monkeypatch.setenv("N", "3")
+    assert parse_int("N", 1, maximum=10) == 3
+
+
 def test_int_default_is_also_clamped(monkeypatch):
     monkeypatch.delenv("N", raising=False)
     assert parse_int("N", 1, minimum=5) == 5  # default below floor -> clamped up

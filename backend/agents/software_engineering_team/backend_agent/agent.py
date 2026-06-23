@@ -3133,14 +3133,17 @@ class BackendExpertAgent:
               error. Best-effort: never raises, so a specialist failure cannot
               abort the workflow.
         """
-        from software_engineering_team.shared.repo_writer import write_agent_output
-
-        if failing_test_file is _UNSET:
-            failing_test_file, failing_test_content = _resolve_failing_test_context(
-                build_errors, repo_path
-            )
-
         try:
+            from software_engineering_team.shared.repo_writer import write_agent_output
+
+            # Resolve the failing-test context here too (inside the try) when the
+            # caller didn't precompute it, so an import or file-read failure honors
+            # the "never raises" postcondition rather than escaping.
+            if failing_test_file is _UNSET:
+                failing_test_file, failing_test_content = _resolve_failing_test_context(
+                    build_errors, repo_path
+                )
+
             from build_fix_specialist.models import BuildFixInput
 
             affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)

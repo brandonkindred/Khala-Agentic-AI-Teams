@@ -64,12 +64,13 @@ def parse_int(
     if minimum is not None and maximum is not None and minimum > maximum:
         raise ValueError("minimum must be <= maximum")
     raw = os.environ.get(env_name)
-    if raw is None or not raw.strip():
+    stripped = raw.strip() if raw is not None else ""
+    if not stripped:
         value = default
     else:
         try:
-            # raw is a non-blank str here, so int() can only raise ValueError.
-            value = int(raw.strip())
+            # stripped is a non-blank str here, so int() can only raise ValueError.
+            value = int(stripped)
         except ValueError:
             value = default
     if minimum is not None and value < minimum:
@@ -105,11 +106,12 @@ def parse_float(
     # ``-> float`` postcondition even when the caller passes an int default.
     default = float(default)
     raw = os.environ.get(env_name)
-    if raw is None or not raw.strip():
+    stripped = raw.strip() if raw is not None else ""
+    if not stripped:
         value = default
     else:
         try:
-            value = float(raw.strip())
+            value = float(stripped)
         except ValueError:
             value = default
     # Reject inf/nan from the env: a non-finite value defeats clamp comparisons
