@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from software_engineering_team.shared.env_config import env_float
+from software_engineering_team.shared.pg import postgres_available
 
 logger = logging.getLogger(__name__)
 
@@ -95,15 +96,13 @@ def upsert_learning(
     """
     if not pattern or not pattern.strip():
         raise ValueError("pattern must be a non-empty string")
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return False
-    if not is_postgres_enabled():
+    if not postgres_available():
         return False
     fp = fingerprint(pattern, trigger, category)
     now = datetime.now(tz=timezone.utc)
     try:
+        from shared_postgres import get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO se_learnings "
@@ -150,11 +149,7 @@ def retrieve_learnings(
     tsquery = _or_tsquery_terms(query_text[:8000])
     if not tsquery:
         return []
-    try:
-        from shared_postgres import dict_row, get_conn, is_postgres_enabled
-    except Exception:
-        return []
-    if not is_postgres_enabled():
+    if not postgres_available():
         return []
     # ``tsquery`` is bound twice — once for the WHERE ``@@`` match and once for the
     # ORDER BY ``ts_rank`` — because each positional ``%s`` placeholder consumes its
@@ -167,6 +162,8 @@ def retrieve_learnings(
     params.append(tsquery)  # 3) ts_rank(...) in ORDER BY
     params.append(top_n)  # 4) LIMIT
     try:
+        from shared_postgres import dict_row, get_conn
+
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT pattern, trigger, counter_measure, source, category, occurrences "
@@ -195,13 +192,11 @@ def retrieve_learnings(
 
 def count_learnings() -> int:
     """Return the number of stored learnings (0 when Postgres disabled)."""
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return 0
-    if not is_postgres_enabled():
+    if not postgres_available():
         return 0
     try:
+        from shared_postgres import get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("SELECT COUNT(*) FROM se_learnings")
             row = cur.fetchone()
@@ -216,14 +211,12 @@ def prune_learnings(retention_days: float | None = None) -> int:
     days = _retention_days() if retention_days is None else retention_days
     if days <= 0:
         return 0
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return 0
-    if not is_postgres_enabled():
+    if not postgres_available():
         return 0
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
     try:
+        from shared_postgres import get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM se_learnings WHERE last_seen < %s", (cutoff,))
             return cur.rowcount or 0

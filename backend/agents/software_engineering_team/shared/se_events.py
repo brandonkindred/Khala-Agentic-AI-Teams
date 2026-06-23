@@ -12,8 +12,10 @@ failure never breaks the pipeline: instrumentation is best-effort.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
+
+from software_engineering_team.shared.pg import postgres_available
 
 logger = logging.getLogger(__name__)
 
@@ -72,11 +74,7 @@ def record_event(
     """
     if not event_type:
         raise ValueError("event_type must be a non-empty string")
-    try:
-        from shared_postgres import Json, get_conn, is_postgres_enabled
-    except Exception:
-        return False
-    if not is_postgres_enabled():
+    if not postgres_available():
         return False
     # Normalize to an aware UTC timestamp: a naive datetime would be read by
     # Postgres in the session TimeZone, silently shifting DORA windows.
@@ -84,6 +82,8 @@ def record_event(
     if when.tzinfo is None:
         when = when.replace(tzinfo=timezone.utc)
     try:
+        from shared_postgres import Json, get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
                 "INSERT INTO se_events (ts, job_id, task_id, event_type, phase, gate, detail) "
@@ -110,13 +110,11 @@ def fetch_events_since(cutoff: datetime) -> list[dict[str, Any]]:
     """
     if cutoff.tzinfo is None:
         raise ValueError("cutoff must be a timezone-aware datetime")
-    try:
-        from shared_postgres import dict_row, get_conn, is_postgres_enabled
-    except Exception:
-        return []
-    if not is_postgres_enabled():
+    if not postgres_available():
         return []
     try:
+        from shared_postgres import dict_row, get_conn
+
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT ts, job_id, task_id, event_type, phase, gate, detail "
@@ -140,13 +138,11 @@ def job_has_events(job_id: str, event_type: str = "") -> bool:
     """
     if not job_id:
         return False
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return False
-    if not is_postgres_enabled():
+    if not postgres_available():
         return False
     try:
+        from shared_postgres import get_conn
+
         sql = "SELECT 1 FROM se_events WHERE job_id = %s"
         params: list[Any] = [job_id]
         if event_type:
@@ -172,13 +168,11 @@ def unresolved_crashed_task_ids(job_id: str) -> set[str]:
     """
     if not job_id:
         return set()
-    try:
-        from shared_postgres import dict_row, get_conn, is_postgres_enabled
-    except Exception:
-        return set()
-    if not is_postgres_enabled():
+    if not postgres_available():
         return set()
     try:
+        from shared_postgres import dict_row, get_conn
+
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT task_id, "
@@ -202,16 +196,12 @@ def prune_events(retention_days: float) -> int:
     """Delete events older than ``retention_days``; returns rows removed (0 if disabled)."""
     if retention_days <= 0:
         return 0
-    try:
-        from datetime import timedelta
-
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return 0
-    if not is_postgres_enabled():
+    if not postgres_available():
         return 0
     cutoff = _utc_now() - timedelta(days=retention_days)
     try:
+        from shared_postgres import get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM se_events WHERE ts < %s", (cutoff,))
             return cur.rowcount or 0

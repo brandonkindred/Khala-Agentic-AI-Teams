@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from software_engineering_team.shared.env_config import env_bool, env_float
+from software_engineering_team.shared.pg import postgres_available
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +42,11 @@ def write_trace(record: Any) -> bool:
     """
     if not _trace_enabled():
         return False
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return False
-    if not is_postgres_enabled():
+    if not postgres_available():
         return False
     try:
+        from shared_postgres import get_conn
+
         # Use the record's own timestamp; fall back to *now* (not the 1970 epoch)
         # for a missing/invalid value so the row stays inside cost-query windows.
         raw_ts = getattr(record, "timestamp", None)
@@ -97,13 +96,11 @@ def fetch_cost_since(cutoff: datetime) -> dict[str, Any]:
     if cutoff.tzinfo is None:
         raise ValueError("cutoff must be a timezone-aware datetime")
     empty: dict[str, Any] = {"total_cost_usd": 0.0, "by_job": {}}
-    try:
-        from shared_postgres import dict_row, get_conn, is_postgres_enabled
-    except Exception:
-        return empty
-    if not is_postgres_enabled():
+    if not postgres_available():
         return empty
     try:
+        from shared_postgres import dict_row, get_conn
+
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
                 "SELECT job_id, SUM(cost_usd) AS cost FROM se_agent_traces "
@@ -122,14 +119,12 @@ def prune_traces(retention_days: float | None = None) -> int:
     days = _retention_days() if retention_days is None else retention_days
     if days <= 0:
         return 0
-    try:
-        from shared_postgres import get_conn, is_postgres_enabled
-    except Exception:
-        return 0
-    if not is_postgres_enabled():
+    if not postgres_available():
         return 0
     cutoff = datetime.now(tz=timezone.utc) - timedelta(days=days)
     try:
+        from shared_postgres import get_conn
+
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute("DELETE FROM se_agent_traces WHERE ts < %s", (cutoff,))
             return cur.rowcount or 0

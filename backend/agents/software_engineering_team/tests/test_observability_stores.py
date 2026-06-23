@@ -160,3 +160,34 @@ def test_trace_retention_days_env(monkeypatch) -> None:
     assert trace_store._retention_days() == 7.0
     monkeypatch.setenv("SE_TRACE_RETENTION_DAYS", "garbage")
     assert trace_store._retention_days() == 30.0  # bad value → default
+
+
+# --- pg.postgres_available (shared guard) ----------------------------------
+
+
+def test_postgres_available_false_without_postgres() -> None:
+    """postgres_available is False in the default test env (POSTGRES_HOST unset)."""
+    from software_engineering_team.shared.pg import postgres_available
+
+    assert postgres_available() is False
+
+
+def test_postgres_available_true_when_enabled(monkeypatch) -> None:
+    """postgres_available mirrors is_postgres_enabled() when shared_postgres imports."""
+    import shared_postgres
+    from software_engineering_team.shared.pg import postgres_available
+
+    monkeypatch.setattr(shared_postgres, "is_postgres_enabled", lambda: True)
+    assert postgres_available() is True
+
+
+def test_postgres_available_false_on_import_failure(monkeypatch) -> None:
+    """postgres_available swallows an unimportable shared_postgres and returns False."""
+    import sys
+
+    from software_engineering_team.shared.pg import postgres_available
+
+    # A stand-in module without ``is_postgres_enabled`` makes the inner
+    # ``from shared_postgres import is_postgres_enabled`` raise ImportError.
+    monkeypatch.setitem(sys.modules, "shared_postgres", object())
+    assert postgres_available() is False
