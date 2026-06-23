@@ -18,7 +18,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 import pytest
+from code_review_agent.coordinator import run_coordinator
 from code_review_agent.false_positive_filter import (
+    _MANIFEST_LIMIT,
     CodebaseIndex,
     _build_group_prompt,
     _build_tools,
@@ -124,11 +126,13 @@ def _enable_filter(monkeypatch):
 
 
 def test_index_from_files_keeps_nonblank() -> None:
+    """``from_input`` keeps only files with non-blank content (blank/empty dropped)."""
     idx = CodebaseIndex.from_input(_input(files={"a.py": "x = 1\n", "b.py": "   ", "c.py": ""}))
     assert set(idx.files) == {"a.py"}
 
 
 def test_index_from_legacy_code_parses_headers() -> None:
+    """Legacy ``code`` with ``### path ###`` headers splits into path-addressable files."""
     code = "### app/main.py ###\ndef foo(): pass\n\n### app/util.py ###\ndef bar(): pass"
     idx = CodebaseIndex.from_input(CodeReviewInput(code=code, task_description="t"))
     assert set(idx.files) == {"app/main.py", "app/util.py"}
@@ -144,12 +148,14 @@ def test_index_legacy_code_without_headers_has_no_readable_files() -> None:
 
 
 def test_read_file_exact_and_existing_codebase() -> None:
+    """``read_file`` returns a body by exact path and the excerpt by its pseudo-path."""
     idx = CodebaseIndex(files={"app/main.py": "BODY"}, existing_codebase="OLD CODE")
     assert idx.read_file("app/main.py") == "BODY"
     assert idx.read_file(CodebaseIndex.EXISTING_CODEBASE_PATH) == "OLD CODE"
 
 
 def test_read_file_blank_and_missing() -> None:
+    """``read_file`` returns an error string for blank, missing, and excerpt-less pseudo-paths."""
     idx = CodebaseIndex(files={"app/main.py": "BODY"})
     assert idx.read_file("  ").startswith("Error")
     assert "not found" in idx.read_file("does/not/exist.py")
@@ -158,12 +164,14 @@ def test_read_file_blank_and_missing() -> None:
 
 
 def test_read_file_unique_suffix_match() -> None:
+    """``read_file`` resolves a bare or ``./``-prefixed name to a uniquely matching suffix path."""
     idx = CodebaseIndex(files={"app/services/main.py": "BODY"})
     assert idx.read_file("main.py") == "BODY"
     assert idx.read_file("./main.py") == "BODY"
 
 
 def test_read_file_ambiguous_suffix() -> None:
+    """``read_file`` reports ambiguity (naming both candidates) when a suffix matches multiple files."""
     idx = CodebaseIndex(files={"a/main.py": "A", "b/main.py": "B"})
     msg = idx.read_file("main.py")
     assert "ambiguous" in msg
@@ -171,12 +179,14 @@ def test_read_file_ambiguous_suffix() -> None:
 
 
 def test_list_files_appends_existing_codebase_only_when_present() -> None:
+    """``list_files`` appends the existing-codebase pseudo-path only when an excerpt is present."""
     assert CodebaseIndex(files={"a.py": "x"}).list_files() == ["a.py"]
     with_existing = CodebaseIndex(files={"a.py": "x"}, existing_codebase="old")
     assert with_existing.list_files() == ["a.py", CodebaseIndex.EXISTING_CODEBASE_PATH]
 
 
 def test_search_matches_and_blank_and_existing() -> None:
+    """``search`` finds case-insensitive matches across files and the excerpt with 1-based lines; a blank query returns nothing."""
     idx = CodebaseIndex(
         files={"a.py": "def foo():\n    pass\n", "b.py": "FOO_CONST = 1\n"},
         existing_codebase="legacy_foo()\n",
@@ -190,11 +200,13 @@ def test_search_matches_and_blank_and_existing() -> None:
 
 
 def test_search_respects_max_matches() -> None:
+    """``search`` caps the number of returned hits at ``max_matches``."""
     idx = CodebaseIndex(files={"a.py": "x\n" * 100})
     assert len(idx.search("x", max_matches=5)) == 5
 
 
 def test_search_rejects_nonpositive_max() -> None:
+    """``search`` asserts on a non-positive ``max_matches`` (precondition guard)."""
     with pytest.raises(AssertionError):
         CodebaseIndex(files={"a.py": "x"}).search("x", max_matches=0)
 
@@ -203,6 +215,7 @@ def test_search_rejects_nonpositive_max() -> None:
 
 
 def test_build_tools_delegate_to_index() -> None:
+    """``_build_tools`` returns read_file/list_files/search_codebase tools that delegate to the index."""
     idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"}, existing_codebase="old")
     read_file, list_files, search_codebase = _build_tools(idx)
     assert {read_file.tool_name, list_files.tool_name, search_codebase.tool_name} == {
@@ -218,6 +231,7 @@ def test_build_tools_delegate_to_index() -> None:
 
 
 def test_list_files_tool_handles_empty_index() -> None:
+    """The list_files tool returns a placeholder string for an empty index."""
     _, list_files, _ = _build_tools(CodebaseIndex(files={}))
     assert list_files() == "(no files available)"
 
@@ -226,6 +240,7 @@ def test_list_files_tool_handles_empty_index() -> None:
 
 
 def test_coerce_verdict_variants() -> None:
+    """``_coerce_verdict`` drops only on an explicit false verdict at high/medium confidence; every other shape keeps the finding or returns None."""
     # explicit false + high confidence → false positive (drop)
     idx, v = _coerce_verdict({"index": 2, "is_real_issue": False, "confidence": "high"})
     assert idx == 2 and v.is_false_positive is True
@@ -257,6 +272,7 @@ def test_coerce_verdict_variants() -> None:
 
 
 def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
+    """``_parse_verdicts`` keeps only in-range, well-shaped verdicts and tolerates bad containers."""
     data = {
         "verdicts": [
             {"index": 0, "is_real_issue": False, "confidence": "high"},
@@ -275,6 +291,7 @@ def test_parse_verdicts_filters_out_of_range_and_bad_shapes() -> None:
 
 
 def test_group_prompt_has_anchor_indices_and_truncation_note() -> None:
+    """``_build_group_prompt`` emits per-finding anchor indices, the task description, and the inline-truncation note."""
     idx = CodebaseIndex(files={"app/main.py": "X" * 50}, existing_codebase="old")
     issues = [_issue(description="d0"), _issue(description="d1", line=None)]
     prompt = _build_group_prompt(idx, "app/main.py", issues, _input(), max_inline_chars=10)
@@ -286,8 +303,6 @@ def test_group_prompt_has_anchor_indices_and_truncation_note() -> None:
 
 def test_group_prompt_truncates_large_manifest() -> None:
     """A submission with more files than the manifest limit defers the rest to list_files()."""
-    from code_review_agent.false_positive_filter import _MANIFEST_LIMIT
-
     files = {f"f{i:04d}.py": "x = 1\n" for i in range(_MANIFEST_LIMIT + 5)}
     idx = CodebaseIndex(files=files)
     prompt = _build_group_prompt(idx, "f0000.py", [_issue(file_path="f0000.py")], _input(), 1000)
@@ -298,6 +313,7 @@ def test_group_prompt_truncates_large_manifest() -> None:
 
 
 def test_filter_disabled_returns_unchanged_without_llm(monkeypatch) -> None:
+    """When the filter env flag is off, findings pass through untouched and the LLM is never called."""
     monkeypatch.setenv("CODE_REVIEW_FALSE_POSITIVE_FILTER", "false")
 
     class Boom(DummyLLMClient):
@@ -310,12 +326,14 @@ def test_filter_disabled_returns_unchanged_without_llm(monkeypatch) -> None:
 
 
 def test_filter_skips_when_no_file_paths() -> None:
+    """Findings with only blank file paths are returned unchanged without an LLM call."""
     issues = [_issue(file_path=""), _issue(file_path="   ")]
     out = filter_false_positives(_RaisingStub(), _input(), issues)
     assert out == issues  # never touched the LLM (all blank paths)
 
 
 def test_filter_skips_when_no_readable_files() -> None:
+    """A submission exposing no readable files keeps all findings without an LLM call."""
     inp = CodeReviewInput(code="loose code with no headers", task_description="t")
     issues = [_issue()]
     out = filter_false_positives(_RaisingStub(), inp, issues)
@@ -356,6 +374,7 @@ def test_filter_verifies_suffix_matched_path() -> None:
 
 
 def test_resolve_path_exact_suffix_and_misses() -> None:
+    """``resolve_path`` matches exact and unique-suffix paths, returns None for ambiguous/absent/blank, and resolves the existing-codebase pseudo-path only when an excerpt exists."""
     idx = CodebaseIndex(files={"app/services/main.py": "x", "a/x.py": "y", "b/x.py": "z"})
     assert idx.resolve_path("app/services/main.py") == "app/services/main.py"  # exact
     assert idx.resolve_path("main.py") == "app/services/main.py"  # unique suffix
@@ -374,6 +393,7 @@ def test_resolve_path_exact_suffix_and_misses() -> None:
 
 
 def test_filter_removes_confirmed_false_positive() -> None:
+    """A finding with an explicit high-confidence false verdict is dropped; a real one is kept."""
     keep = _issue(description="real bug", line=5)
     drop = _issue(description="foo undefined", line=1)
     stub = _VerdictStub(
@@ -401,6 +421,7 @@ def test_filter_keeps_blank_path_issue_even_with_other_removals() -> None:
 
 
 def test_filter_keeps_on_verifier_error() -> None:
+    """A verifier that raises keeps all findings (fail-safe)."""
     issues = [_issue()]
     out = filter_false_positives(_RaisingStub(), _input(), issues)
     assert out == issues
@@ -422,12 +443,14 @@ def test_filter_keeps_on_setup_exception() -> None:
 
 
 def test_filter_keeps_on_unparsable_verdict() -> None:
+    """An unparsable verifier response keeps all findings (fail-safe)."""
     issues = [_issue()]
     out = filter_false_positives(_BadJsonStub(), _input(), issues)
     assert out == issues
 
 
 def test_filter_keeps_on_low_confidence_false() -> None:
+    """A false verdict at low confidence keeps the finding (only confident verdicts drop)."""
     issues = [_issue()]
     stub = _VerdictStub(verdicts=[{"index": 0, "is_real_issue": False, "confidence": "low"}])
     out = filter_false_positives(stub, _input(), issues)
@@ -435,6 +458,7 @@ def test_filter_keeps_on_low_confidence_false() -> None:
 
 
 def test_filter_groups_by_file_and_removes_across_groups() -> None:
+    """Findings are verified per file group; a confirmed drop in one group leaves another's real finding intact."""
     a = _issue(file_path="a.py", description="a-fp")
     b = _issue(file_path="b.py", description="b-real")
 
@@ -457,6 +481,7 @@ def test_filter_groups_by_file_and_removes_across_groups() -> None:
 
 
 def test_filter_empty_issue_list() -> None:
+    """An empty finding list returns empty without invoking the verifier."""
     assert filter_false_positives(_RaisingStub(), _input(), []) == []
 
 
@@ -475,8 +500,6 @@ _CHUNK_ISSUE = {
 def test_run_coordinator_drops_false_positive_and_flips_to_approved() -> None:
     """A chunk's only blocking finding, confirmed a false positive, is removed and
     the deterministic gate then approves — the developer is not handed phantom work."""
-    from code_review_agent.coordinator import run_coordinator
-
     stub = _VerdictStub(
         verdicts=[
             {
@@ -495,8 +518,6 @@ def test_run_coordinator_drops_false_positive_and_flips_to_approved() -> None:
 
 def test_run_coordinator_keeps_confirmed_issue_and_rejects() -> None:
     """A finding the verifier confirms is real survives and the review still rejects."""
-    from code_review_agent.coordinator import run_coordinator
-
     stub = _VerdictStub(
         verdicts=[{"index": 0, "is_real_issue": True, "confidence": "high"}],
         chunk_issues=[_CHUNK_ISSUE],
@@ -508,8 +529,6 @@ def test_run_coordinator_keeps_confirmed_issue_and_rejects() -> None:
 
 def test_run_coordinator_disabled_filter_keeps_issue(monkeypatch) -> None:
     """With the filter disabled, the false-positive finding is NOT removed."""
-    from code_review_agent.coordinator import run_coordinator
-
     monkeypatch.setenv("CODE_REVIEW_FALSE_POSITIVE_FILTER", "0")
     stub = _VerdictStub(
         verdicts=[{"index": 0, "is_real_issue": False, "confidence": "high"}],

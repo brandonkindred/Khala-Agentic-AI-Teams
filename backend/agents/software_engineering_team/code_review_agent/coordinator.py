@@ -1188,14 +1188,14 @@ def run_coordinator(
     # (``not_reviewed_issues``, empty-file notices) are never passed in, so the
     # gate's anti-loop nets stay intact; on any verifier failure the findings are
     # kept (fail-safe).
-    genuine = _dedupe_issues(outcome.issues)
+    genuine_issues = _dedupe_issues(outcome.issues)
     notify_review_progress(
         progress_callback,
         "verifying",
-        f"verifying {len(genuine)} findings against the full codebase",
+        f"verifying {len(genuine_issues)} findings against the full codebase",
         0.92,
     )
-    verified = filter_false_positives(llm, input_data, genuine)
+    verified = filter_false_positives(llm, input_data, genuine_issues)
 
     notify_review_progress(
         progress_callback, "finalizing", "deduplicating findings and applying approval rules", 0.95
