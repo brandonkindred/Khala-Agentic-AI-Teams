@@ -79,7 +79,8 @@ export class UserProfileComponent implements OnInit {
   /**
    * Load the profile, its associations, and integration status in one request.
    *
-   * Preconditions: none.
+   * Preconditions: none — a no-op while a previous load is still in flight, so
+   * overlapping requests can't race to set the view.
    * Postconditions: on success `form` is patched and `groups`/`totalAssociations`/
    * `integrations` reflect the response. On a 2xx response whose shape is
    * malformed (missing `profile`/`associations`/`integrations`), `error` is set
@@ -89,6 +90,7 @@ export class UserProfileComponent implements OnInit {
    * last-known-good view). `loading` is false either way.
    */
   load(): void {
+    if (this.loading) return; // guard against overlapping loads (e.g. a refresh re-trigger)
     this.loading = true;
     this.error = null;
     this.api
@@ -130,7 +132,8 @@ export class UserProfileComponent implements OnInit {
    * Persist the editable profile fields.
    *
    * Preconditions: none enforced — a no-op (marking the form touched) when
-   * `form.invalid` (e.g. a malformed email).
+   * `form.invalid` (e.g. a malformed email), and a no-op while a previous save
+   * is still in flight, so a double-submit can't send duplicate updates.
    * Postconditions: when the form is valid, exactly one of `success` ('Profile
    * saved.') or `error` is set after the request settles, and `saving` is false.
    */
@@ -139,6 +142,7 @@ export class UserProfileComponent implements OnInit {
       this.form.markAllAsTouched();
       return;
     }
+    if (this.saving) return; // guard against a double-submit before the button disables
     this.saving = true;
     this.error = null;
     this.success = null;

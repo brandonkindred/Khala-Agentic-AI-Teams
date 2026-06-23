@@ -156,6 +156,22 @@ describe('UserProfileComponent', () => {
     expect(apiSpy.updateProfile).not.toHaveBeenCalled();
   });
 
+  it('should not start a second save while one is already in flight', async () => {
+    await setup();
+    component.saving = true;
+    component.form.patchValue({ display_name: 'New Name' });
+    component.save();
+    expect(apiSpy.updateProfile).not.toHaveBeenCalled();
+  });
+
+  it('should not start a second load while one is already in flight', async () => {
+    await setup();
+    expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);
+    component.loading = true;
+    component.load();
+    expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);
+  });
+
   it('should surface a save error', async () => {
     apiSpy.updateProfile.mockReturnValue(throwError(() => new Error('boom')));
     await setup();

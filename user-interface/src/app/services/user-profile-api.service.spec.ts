@@ -29,7 +29,7 @@ describe('UserProfileApiService', () => {
   });
 
   it('should GET the profile', () => {
-    const mock = { user_id: 'default', display_name: 'Brandon', email: '', bio: '' };
+    const mock = { user_id: 'default', display_name: 'Brandon', email: '', bio: '', preferences: {}, created_at: '', updated_at: '' };
     service.getProfile().subscribe((res) => {
       expect(res).toEqual(mock);
     });
