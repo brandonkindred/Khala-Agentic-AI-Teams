@@ -136,7 +136,12 @@ def get_client(
     """
     Return an LLM client for the given agent key or default.
 
-    Model resolution: LLM_MODEL_<agent_key>, then LLM_MODEL, then AGENT_DEFAULT_MODELS[agent_key], then fallback.
+    Model resolution is provider-specific:
+    - Ollama/dummy: LLM_MODEL_<agent_key>, then LLM_MODEL, then
+      AGENT_DEFAULT_MODELS[agent_key], then fallback.
+    - Claude: ``resolve_claude_model`` — LLM_MODEL_<agent_key> (per-agent env) ->
+      runtime UI (Claude-specific) -> LLM_MODEL (global env) -> DEFAULT_CLAUDE_MODEL.
+      The env candidates are heuristic-validated as Claude ids and skipped otherwise.
     Provider selection (LLM_PROVIDER, runtime config -> env -> "ollama"):
     - "dummy" -> DummyLLMClient.
     - "claude"/"anthropic" -> ClaudeLLMClient (cached by model, api-key fingerprint, timeout).

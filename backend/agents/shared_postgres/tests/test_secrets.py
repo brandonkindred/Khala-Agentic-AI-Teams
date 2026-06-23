@@ -249,6 +249,15 @@ def test_load_or_create_key_raises_on_empty_file(tmp_path, monkeypatch):
         secrets_mod._load_or_create_key()
 
 
+def test_load_or_create_key_raises_on_invalid_env_key(monkeypatch):
+    """A malformed INTEGRATION_ENCRYPTION_KEY must fail fast with a clear message,
+    not surface a cryptic Fernet error on the first encrypt/decrypt."""
+    monkeypatch.setenv("INTEGRATION_ENCRYPTION_KEY", "not-a-valid-fernet-key")
+    secrets_mod._reset_fernet_for_testing()
+    with pytest.raises(RuntimeError, match="not a valid Fernet key"):
+        secrets_mod._load_or_create_key()
+
+
 def test_read_key_file_raises_when_unreadable(tmp_path, monkeypatch):
     """An unreadable existing key file raises rather than regenerating."""
     key_path = tmp_path / "integration.key"

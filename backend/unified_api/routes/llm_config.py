@@ -140,7 +140,10 @@ async def get_llm_config() -> LlmConfigResponse:
     # so clearing it here forces a fresh read for the settings view without touching
     # any other subsystem's cache — this endpoint is low-traffic, so the extra read
     # is negligible.
-    runtime_config.clear_cache()
+    try:
+        runtime_config.clear_cache()
+    except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 a read
+        logger.exception("Failed to clear runtime-config cache for GET /api/llm-config")
     return _build_response()
 
 
@@ -170,7 +173,10 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
     # key: in a multi-worker deployment this worker may hold a stale cache that
     # predates a key another worker just stored, which would otherwise make the
     # guard falsely reject a valid switch (mirrors the fresh read the GET does).
-    runtime_config.clear_cache()
+    try:
+        runtime_config.clear_cache()
+    except Exception:  # noqa: BLE001 - a cache-clear failure must never 500 the guard below
+        logger.exception("Failed to clear runtime-config cache before the LLM provider guard")
 
     # Refuse to switch the global provider to Claude unless a key will actually be
     # available (in this request, or already stored/in env). Otherwise the factory
@@ -213,8 +219,13 @@ async def update_llm_config(body: LlmConfigUpdate) -> LlmConfigResponse:
         ) from e
 
     # Refresh local caches immediately; other containers pick up the change within
-    # the runtime-config TTL.
-    runtime_config.clear_cache()
-    clear_client_cache()
+    # the runtime-config TTL. The config is already persisted, so a cache-clear bug
+    # must never fail the request — log it and return success; this worker's caches
+    # then expire on their own (and other workers were never refreshed here anyway).
+    try:
+        runtime_config.clear_cache()
+        clear_client_cache()
+    except Exception:  # noqa: BLE001 - never 500 after a successful persist
+        logger.exception("Failed to clear caches after persisting LLM provider config")
     logger.info("LLM provider config updated: provider=%s", body.provider)
     return _build_response()

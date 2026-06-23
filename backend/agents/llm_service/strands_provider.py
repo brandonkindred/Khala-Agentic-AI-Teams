@@ -89,7 +89,7 @@ def get_strands_model(
     fresh client for a different model). When set, the cache is bypassed —
     each call returns a fresh ``LLMClientModel`` over the provided client,
     matching the adapter-side factory's contract. When omitted, results are
-    cached by ``(model_id, base_url, response_format, agent_key, api_key_fingerprint)``.
+    cached by ``(provider, model_id, base_url, response_format, agent_key, api_key_fingerprint)``.
 
     Args:
         agent_key: Optional agent identifier for per-agent model overrides.

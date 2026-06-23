@@ -101,6 +101,46 @@ def test_put_persists_and_clears_caches(app_client):
     assert calls["runtime_clears"] == 2
 
 
+def test_put_succeeds_even_if_client_cache_clear_raises(app_client):
+    """The config is already persisted, so a post-persist cache-clear bug must not 500."""
+    client, calls, mp = app_client
+
+    def boom() -> None:
+        raise RuntimeError("client cache backend down")
+
+    mp.setattr(route, "clear_client_cache", boom)
+    resp = client.put("/api/llm-config", json={"provider": "ollama", "model": "llama3.1"})
+    assert resp.status_code == 200
+    # The write still happened despite the cache-clear failure.
+    stored = dict((k, v) for _s, k, v in calls["set"])
+    assert stored[route.runtime_config.KEY_PROVIDER] == "ollama"
+
+
+def test_put_succeeds_even_if_runtime_cache_clear_raises(app_client):
+    """Both runtime-config clears (pre-guard and post-persist) are guarded."""
+    client, _calls, mp = app_client
+
+    def boom() -> None:
+        raise RuntimeError("runtime cache down")
+
+    mp.setattr(route.runtime_config, "clear_cache", boom)
+    resp = client.put("/api/llm-config", json={"provider": "ollama"})
+    assert resp.status_code == 200
+
+
+def test_get_succeeds_even_if_cache_clear_raises(app_client):
+    """A runtime-cache-clear failure must not 500 the settings read."""
+    client, _calls, mp = app_client
+
+    def boom() -> None:
+        raise RuntimeError("runtime cache down")
+
+    mp.setattr(route.runtime_config, "clear_cache", boom)
+    resp = client.get("/api/llm-config")
+    assert resp.status_code == 200
+    assert resp.json()["provider"] == "ollama"
+
+
 def test_put_skips_empty_fields(app_client):
     client, calls, mp = app_client
     # A Claude key is already configured (env here), so switching to Claude with

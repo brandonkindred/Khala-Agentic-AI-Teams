@@ -53,18 +53,28 @@ def load_or_create_key() -> bytes:
     Preconditions: none.
     Postconditions: returns a valid 32-byte url-safe base64 Fernet key as
         ``bytes``; the same key every call within a process (the file/env are
-        stable). A pre-existing, unreadable or empty key file raises
+        stable). An ``INTEGRATION_ENCRYPTION_KEY`` that is not a valid Fernet key
+        raises ``RuntimeError`` immediately, rather than failing cryptically on the
+        first encrypt/decrypt. A pre-existing, unreadable or empty key file raises
         ``RuntimeError`` rather than silently generating a NEW key (which would
         destroy every existing encrypted secret). When no key exists it is created
         atomically (written to a temp file then linked into place) so concurrent
         first-starts converge on one key instead of last-writer-wins clobbering
         each other's, and a concurrent reader never observes a partial/empty file.
     """
+    from cryptography.fernet import Fernet
+
     env_key = os.getenv("INTEGRATION_ENCRYPTION_KEY", "").strip()
     if env_key:
-        return env_key.encode()
-
-    from cryptography.fernet import Fernet
+        key_bytes = env_key.encode()
+        try:
+            Fernet(key_bytes)  # validate up front; a bad key breaks ALL secret access
+        except (ValueError, TypeError) as e:
+            raise RuntimeError(
+                "INTEGRATION_ENCRYPTION_KEY is not a valid Fernet key (expected a "
+                "32-byte url-safe base64 string, e.g. produced by Fernet.generate_key())."
+            ) from e
+        return key_bytes
 
     cache_dir = os.getenv("AGENT_CACHE", _DEFAULT_CACHE_DIR)
     key_path = Path(cache_dir) / "integration.key"
@@ -124,8 +134,10 @@ def _persist_new_key(key_path: Path, key: bytes) -> bytes:
         process wrote, or, on a lost create race, the winner's key read back from
         disk. On a filesystem that cannot persist it (read-only volume, or no
         hardlink support and the atomic-replace fallback also fails) the in-memory
-        ``key`` is returned with a warning so the dev case still works (it just
-        won't survive a restart). Never raises for an I/O failure.
+        ``key`` is returned with an ERROR log so the dev case still works — but it
+        won't survive a restart, after which every secret encrypted under it becomes
+        unrecoverable, so production must set ``INTEGRATION_ENCRYPTION_KEY`` or a
+        writable volume. Never raises for an I/O failure.
     """
     tmp_path: Optional[Path] = None
     try:
@@ -139,7 +151,14 @@ def _persist_new_key(key_path: Path, key: bytes) -> bytes:
             os.fsync(f.fileno())
         os.chmod(tmp_path, 0o600)
     except OSError as e:
-        logger.warning("Failed to stage integration key near %s: %s", key_path, e)
+        logger.error(
+            "Failed to stage integration key near %s: %s. Falling back to an "
+            "in-memory key for THIS process only — it will not survive a restart, "
+            "after which all secrets encrypted under it become unrecoverable. Set "
+            "INTEGRATION_ENCRYPTION_KEY (or fix the volume) for a durable key.",
+            key_path,
+            e,
+        )
         if tmp_path is not None:
             _unlink_quietly(tmp_path)
         return key
@@ -160,7 +179,14 @@ def _persist_new_key(key_path: Path, key: bytes) -> bytes:
             tmp_path = None  # replace consumed the temp; nothing to clean up
             return key
         except OSError as e:
-            logger.warning("Failed to persist integration key to %s: %s", key_path, e)
+            logger.error(
+                "Failed to persist integration key to %s: %s. Falling back to an "
+                "in-memory key for THIS process only — it will not survive a restart, "
+                "after which all secrets encrypted under it become unrecoverable. Set "
+                "INTEGRATION_ENCRYPTION_KEY (or fix the volume) for a durable key.",
+                key_path,
+                e,
+            )
             return key
     finally:
         if tmp_path is not None:

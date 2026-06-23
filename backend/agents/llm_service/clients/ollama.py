@@ -512,21 +512,22 @@ class OllamaLLMClient(LLMClient):
     def _resolve_max_tokens(self, explicit: Optional[int]) -> int:
         """Resolve the output-token cap for a request.
 
-        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_TOKENS``, else
-        the model's context window — always capped at ``DEFAULT_MAX_OUTPUT_TOKENS``.
+        Precedence: an explicit ``max_tokens`` arg, else ``LLM_MAX_TOKENS`` (via the
+        centralized ``llm_config.resolve_max_tokens``), else the model's context
+        window — always capped at ``DEFAULT_MAX_OUTPUT_TOKENS``.
 
         Preconditions: none.
         Postconditions: returns an ``int`` ``<= DEFAULT_MAX_OUTPUT_TOKENS``; a
-            malformed ``LLM_MAX_TOKENS`` falls back to the model context. Never raises.
+            malformed or non-positive ``LLM_MAX_TOKENS`` falls back to the model
+            context. Never raises.
         """
         max_tokens = explicit
         if max_tokens is None:
-            env_max = os.environ.get(llm_config.ENV_LLM_MAX_TOKENS)
-            if env_max:
-                try:
-                    max_tokens = min(int(env_max), DEFAULT_MAX_OUTPUT_TOKENS)
-                except ValueError:
-                    max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
+            # Centralized resolver returns 0 when LLM_MAX_TOKENS is unset, malformed,
+            # or non-positive — in which case fall back to the model's context window.
+            env_max = llm_config.resolve_max_tokens()
+            if env_max > 0:
+                max_tokens = min(env_max, DEFAULT_MAX_OUTPUT_TOKENS)
             else:
                 max_tokens = min(self._fetch_model_num_ctx(), DEFAULT_MAX_OUTPUT_TOKENS)
         return min(max_tokens, DEFAULT_MAX_OUTPUT_TOKENS)

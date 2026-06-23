@@ -1,7 +1,6 @@
 """Provider-aware model_id in get_strands_model under LLM_PROVIDER=claude.
 
-Lives in its own file (the legacy test_strands_provider.py references a helper
-absent from the committed module and fails at import).
+Lives in its own focused file alongside the other Strands provider suites.
 """
 
 from __future__ import annotations

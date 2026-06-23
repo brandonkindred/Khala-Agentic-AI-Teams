@@ -877,7 +877,14 @@ def _to_anthropic_messages(messages: list) -> tuple[str, list]:
     Preconditions: ``messages`` is a list of ``{role, content, ...}`` dicts that
         includes at least one ``user``/``assistant`` turn with content (a
         system-only conversation cannot be sent to Anthropic — the caller, e.g.
-        :meth:`ClaudeLLMClient.chat`, surfaces a clear error for that case).
+        :meth:`ClaudeLLMClient.chat`, surfaces a clear error for that case). The
+        caller must also keep tool results immediately after the assistant turn
+        that requested them: Anthropic rejects an intervening ``user`` turn between
+        an assistant ``tool_use`` and its ``tool_result`` blocks. Pending tool
+        results are flushed here on the next non-tool message, so an intervening
+        user turn would split them into a separate user message.
+        :func:`llm_service.tool_loop.complete_json_with_tool_loop` guarantees this
+        ordering; this translator does not re-order to enforce it.
     Postconditions: returns ``(system_text, anthropic_messages)`` where every
         emitted entry has role ``user``/``assistant`` and Anthropic-valid
         (non-empty) content, and every emitted ``tool_result`` has a matching

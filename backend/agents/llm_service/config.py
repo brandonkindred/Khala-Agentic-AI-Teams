@@ -319,7 +319,8 @@ def resolve_max_tokens() -> int:
     """Return the configured output-token cap from ``LLM_MAX_TOKENS``, or 0 if unset.
 
     Centralizes the ``LLM_MAX_TOKENS`` env lookup so provider clients don't read
-    ``os.environ`` directly (mirrors the other resolvers here). A missing,
+    ``os.environ`` directly (mirrors the other resolvers here) — used by
+    :meth:`OllamaLLMClient._resolve_max_tokens`. A missing,
     non-integer, or non-positive value yields ``0`` — the caller's "unset"
     sentinel — so a client falls through to its own provider default rather than a
     1-token cap that would truncate every call.

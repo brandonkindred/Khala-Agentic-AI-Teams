@@ -43,6 +43,24 @@ def test_resolve_timeout_default(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.resolve_timeout() == 900.0
 
 
+def test_resolve_max_tokens_unset_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    assert config.resolve_max_tokens() == 0
+
+
+def test_resolve_max_tokens_valid_positive(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    assert config.resolve_max_tokens() == 4096
+
+
+def test_resolve_max_tokens_malformed_or_nonpositive_is_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Garbage, zero, and negative all collapse to the 0 'unset' sentinel so a
+    client falls through to its provider default instead of a tiny/0 cap."""
+    for raw in ("not-an-int", "0", "-5"):
+        monkeypatch.setenv("LLM_MAX_TOKENS", raw)
+        assert config.resolve_max_tokens() == 0
+
+
 def test_resolve_context_size_for_model_known(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("LLM_CONTEXT_SIZE", raising=False)
     assert config.resolve_context_size_for_model("qwen3.5:397b-cloud") == 262144

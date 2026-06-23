@@ -7,9 +7,8 @@ key up only via the runtime-config TTL — they never call ``clear_model_cache``
 rotated key would keep being served by a model wrapping a client built with the
 old key until the process restarts.
 
-These tests live in a dedicated module (not ``test_strands_provider.py``, which is
-a stale suite that predates the current ``LLMClientModel`` implementation) so the
-new coverage is collectable on its own.
+These tests live in a dedicated module so the cache-invalidation coverage is
+collectable on its own.
 """
 
 from __future__ import annotations
