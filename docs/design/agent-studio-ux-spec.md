@@ -147,7 +147,7 @@ Each stage below gives: purpose · wireframe · reused vs new components · the 
 
 ```
 ┌─ Agent Studio ───────────────────────────────────────────────────────────────┐
-│  ① Build ─── ② Test ─── ③ Compose ─── ④ Personas            [ Save draft ▾ ]  │
+│  ① Build ─ ② Test ─ ③ Compose ─ ④ Personas   [ Save draft ]  [ Load draft ▾ ]  │
 ├────────────────────────────────────────────────────────────────────────────────┤
 │  Build an agent                                                                  │
 │  ┌─ filters ───────┐   ┌─ catalog grid ───────────────────────────────────────┐ │
@@ -169,6 +169,10 @@ Each stage below gives: purpose · wireframe · reused vs new components · the 
   `agent-provisioning-dashboard` component in a **slide‑out panel** (modal on narrow viewports), letting the user
   deploy the selected agent to a target environment. The provisioning flow itself is **unchanged** from today's
   Provisioning tab — only its entry point moves here, because provisioning is part of building/deploying an agent.
+  - **Adaptation caveat:** the dashboard is a full‑page/tab surface today, so it may need **minor layout adjustments**
+    to render in a narrow slide‑out (its core logic and API calls are unchanged). If adaptation is non‑trivial, host
+    it via a **thin wrapper component** that mounts the dashboard inside the slide‑out container rather than editing
+    the dashboard itself — keeping the reused component intact.
 - **Handoff:** selecting an agent sets `registryAgentId`; **"Test this agent →"** advances to Stage 2 pre‑seeded.
 
 ### Stage 2 — Test Agent
@@ -220,8 +224,9 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 └──────────────────────────────────┴─────────────────────────────────────────────┘
 ```
 
-- **Reuse as‑is:** `process-designer-chat` (LLM design mode, `@Input() team`); team CRUD, process/DAG editing, and roster‑validation display from `agentic-team-dashboard` (`agentic-team-api.service.ts`).
+- **Reuse as‑is:** `process-designer-chat` (LLM design mode, `@Input() team`). From `agentic-team-dashboard`, reuse the **specific child components** — not the dashboard container/shell, which is deleted (§4): the **team CRUD dialog** (`TeamCreateDialogComponent`), the **process/DAG editor** (`ProcessDagEditorComponent`), and the **roster‑validation panel** (`RosterValidationPanelComponent`), all backed by `agentic-team-api.service.ts`. Where these aren't already standalone components inside the dashboard, they are **extracted from it** during the cutover (the dashboard shell is being deleted regardless).
 - **New (one small component): Roster panel.** Lists roster entries with a **`source` badge** (`registry` ✦ / `generated` ⚙) and a delete control. **"+ Add"** offers two paths: **search registry agents** (→ new `POST …/teams/{id}/agents/from-registry`) or **suggest via chat** (existing LLM flow). Deleting calls new `DELETE …/teams/{id}/agents/{agent_name}`.
+- **Authorization (roster mutation).** The new `from-registry` / delete endpoints **must enforce authorization** — only a user with the **Team Owner / Admin** role for the given team may add or remove roster agents — reusing the same authz the existing team‑mutation endpoints apply. The middleware detail lives in §5 (item 3); flagged here so the UX never exposes roster edit/delete to unauthorized users.
 - **Editing roster entries.** Clicking a roster entry opens a small inline edit form for its **role / skills / tools** (the `AgenticTeamAgent` fields the old team dashboard exposed), persisted via the existing team‑update endpoint — so the capability the deleted `agentic-team-dashboard` shell provided is preserved, not lost in the cutover. **`generated`** entries are fully editable; **`registry`** entries show their manifest‑projected fields read‑only with an "override for this team" toggle, so edits never mutate the source manifest. Re‑running the process designer can also re‑propose roster changes (the chat flow), but inline editing is the direct path.
 - **Roster validation — "fully staffed":** a roster is *fully staffed* when **every step in the process DAG has at least one assigned agent**, and each assigned agent has the **skills the step requires** (per the process design). This is exactly the existing logic in `roster_validation.py` (it reads the roster's `skills/capabilities/tools` list fields) — registry agents pass uniformly because the `from-registry` projection fills those fields (see §5 item 3). The `✓ fully staffed` / warning indicator surfaces that module's result; no new validation rules are introduced.
 - **Process selection.** A team may define more than one process, so a **process dropdown** sits in the Stage‑3 header beside the team selector (`team: [ Growth Pod ▾ ]  ·  process: [ Content pipeline ▾ ]`); choosing one sets `processId` and drives which DAG the panel renders and validates. When the team has exactly one process it is auto‑selected (the dropdown still shows it, disabled). The Stage‑3 → Stage‑4 handoff uses this currently selected `processId`.
@@ -262,15 +267,18 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 
 ### 3.5 Drafts & session resume (server‑side)
 
-The `[ Save draft ▾ ]` control in the Studio header lets a user **save and resume** an in‑progress journey across
-reloads and devices. **Persistence is server‑side** (chosen over client‑only so drafts survive device changes and
-match the persisted nature of teams/personas):
+The Studio header carries two controls — **`[ Save draft ]`** and **`[ Load draft ▾ ]`** — that let a user **save and
+resume** an in‑progress journey across reloads and devices. **Persistence is server‑side** (chosen over client‑only
+so drafts survive device changes and match the persisted nature of teams/personas):
 
-- **Save** — `POST /api/agent-studio/drafts` with the current handoff state (`registryAgentId`, `teamId`,
-  `processId`, `personaId`) **plus** any partial work the stages hold (e.g. Stage‑2 test inputs, Stage‑3 roster
-  composition not yet committed to a team). Returns a `draft_id` (+ name/updated_at). Re‑saving updates in place.
-- **Load** — a header dropdown lists the current user's drafts via `GET /api/agent-studio/drafts`; selecting one
-  hydrates `AgentStudioStateService` (§2.4) and jumps the stepper to the furthest reachable stage.
+- **Save** — `[ Save draft ]` issues `POST /api/agent-studio/drafts` with the current handoff state
+  (`registryAgentId`, `teamId`, `processId`, `personaId`) **plus** any partial work the stages hold (e.g. Stage‑2
+  test inputs, Stage‑3 roster composition not yet committed to a team). Returns a `draft_id` (+ name/updated_at).
+  Re‑saving updates in place.
+- **Load** — `[ Load draft ▾ ]` opens a dropdown listing the current user's drafts via `GET /api/agent-studio/drafts`;
+  selecting one **triggers the conflict check in §2.4** (save‑first / discard prompt if the local cache holds unsaved
+  edits), then hydrates `AgentStudioStateService` and jumps the stepper to the furthest reachable stage. (This is the
+  UI trigger for that conflict flow.)
 - **Scope** — drafts are **scoped to the authenticated user**; one user cannot see another's drafts.
 
 **Draft payload schema** (the request/response body for `POST`/`GET …/drafts`, so frontend and backend agree):
@@ -337,7 +345,7 @@ channel (Stage 2) rather than a new code path.
 | `agent-console/agent-runner` (+ `agent-schema-form`, `agent-run-history`, `agent-diff-dialog`, `save-input-dialog`) | **Move + reuse** → Stage 2 |
 | `agent-provisioning-dashboard` | **Move + reuse** → Stage 1 "Provision" affordance |
 | `process-designer-chat` | **Move + reuse** → Stage 3 |
-| `agentic-team-dashboard` (team CRUD, DAG editor, roster validation) | **Reuse logic** → Stage 3; container shell **deleted** |
+| `agentic-team-dashboard` child components — `TeamCreateDialogComponent` (team CRUD), `ProcessDagEditorComponent` (DAG editor), `RosterValidationPanelComponent` (validation) | **Move/extract the children → Stage 3**; the dashboard container shell is **deleted** |
 | `agentic-team-test-panel`, `agent-test-chat`, `pipeline-test-runner` | **Move + reuse** → Stage 4 manual |
 | `persona-editor-dialog`, `start-test-dialog`, `persona-test-audit-panel` | **Move + reuse** → Stage 4 persona |
 | `AgentConsoleComponent` (7‑tab), `AgenticTeamDashboardComponent`, `PersonaTestingDashboardComponent` | **Delete** |
@@ -347,6 +355,26 @@ channel (Stage 2) rather than a new code path.
 | **Roster panel (registry + generated, source badges, add/delete)** | **New** (small) |
 
 Net‑new frontend is intentionally minimal: a shell, a stepper, and one roster panel. Everything load‑bearing exists.
+
+### 4.1 Service dependencies (what the Studio shell must provide)
+
+"Reuse as‑is" only holds if the moved components find the services they expect. Today some are provided by the old
+container shells (e.g. `AgentConsoleComponent`); when those shells are deleted, the **Studio shell must re‑provide the
+equivalents** (or the component is refactored to inject them directly). The contract:
+
+| Reused component | Services it expects | Provided by |
+|---|---|---|
+| `agent-catalog` | `AgentCatalogApiService` (+ any catalog filter/selection state it reads from the console shell today) | Studio shell |
+| `agent-runner` (+ schema‑form, run‑history, diff, save‑input dialogs) | `AgentRunnerApiService` (invoke/runs/saved‑inputs/diff) | Studio shell |
+| `agent-provisioning-dashboard` | its existing provisioning service(s), unchanged | Studio shell / wrapper (§Stage 1) |
+| `process-designer-chat`, extracted `agentic-team-dashboard` children | `AgenticTeamApiService` | Studio shell |
+| Stage‑4 test panels & persona dialogs | `agentic-team-test` + persona/audit services | Studio shell |
+| all stages | **new** `AgentStudioStateService` (handoff/draft, §2.4/§3.5) | Studio shell |
+
+**Action for implementation:** before moving each component, confirm its actual injected services (constructor +
+template) and ensure the Studio shell's providers cover them; any console‑shell‑scoped state a component relies on
+is either re‑provided at the shell or folded into `AgentStudioStateService`. No reused component should depend on a
+deleted container.
 
 ---
 
@@ -383,8 +411,8 @@ sequenceDiagram
 **Must‑have:**
 1. **Persona → any team — `AgenticTeamAdapter`** (`backend/agents/user_agent_founder/targets/agentic_team.py`, modeled on `targets/software_engineering.py`) implementing the `TargetTeamAdapter` Protocol against the *existing* `POST …/test-pipeline/runs` + `/input` endpoints — **no new provisioning endpoints needed**. A *collapsing adapter*: persona `generate_spec()` → pipeline `initial_input`; each `waiting_for_input` WAIT step → wrapped as a single free‑text question the persona answers via `/input`. Dynamic dispatch in `targets/__init__.py` via `get_adapter("agentic_team:<id>")`.
 2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams (cross‑service `GET …/agentic-team-provisioning/teams`, filtered to teams with ≥1 `complete` process). Without this the persona dropdown is empty.
-3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`.
-4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. Required because the header `Save draft` / load‑draft UX is non‑functional without it.
+3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`. **Authorization:** both endpoints mutate a team's roster, so they **must** enforce the same authz as the existing team‑mutation routes — restricted to the team's **Owner/Admin** (reuse the provisioning service's existing team‑permission dependency/middleware; do not ship these unguarded).
+4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. **Authorization:** drafts are **per‑user** — every read/write is scoped to the authenticated user id, and one user can never list or load another's drafts. Required because the header `Save draft` / `Load draft` UX is non‑functional without it.
 
 **Recommended (not required for the UX to ship, but should land alongside it):**
 
