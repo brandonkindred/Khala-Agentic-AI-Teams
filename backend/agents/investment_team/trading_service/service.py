@@ -81,6 +81,10 @@ from .strategy.streaming_harness import StrategyRuntimeError, StreamingHarness
 
 logger = logging.getLogger(__name__)
 
+# Cap on how many recent order-lifecycle events are retained in
+# ``diagnostics.last_order_events`` — the tail is trimmed to the most recent 20 (see
+# the trim in ``_record_event``) to bound per-run diagnostics memory while
+# keeping enough trailing context to explain the latest fills.
 _MAX_ORDER_EVENTS = 20
 
 # A scaled rung "empties" the position when its (original-qty-sized) close covers
