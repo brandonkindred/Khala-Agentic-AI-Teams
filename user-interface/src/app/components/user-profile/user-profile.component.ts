@@ -21,6 +21,7 @@ interface AssociationGroup {
   items: Association[];
 }
 
+/** Supported artifact types in display order, each with its label and Material icon. */
 const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
   { type: 'brand', label: 'Brands', icon: 'palette' },
   { type: 'blog_post', label: 'Blog Posts', icon: 'article' },
@@ -80,7 +81,8 @@ export class UserProfileComponent implements OnInit {
    * Load the profile, its associations, and integration status in one request.
    *
    * Preconditions: none — a no-op while a previous load is still in flight, so
-   * overlapping requests can't race to set the view.
+   * overlapping requests can't race to set the view. Clears any prior `success`
+   * banner so a stale "Profile saved." message can't linger across a reload.
    * Postconditions: on success `form` is patched and `groups`/`totalAssociations`/
    * `integrations` reflect the response. On a 2xx response whose shape is
    * malformed (missing `profile`/`associations`/`integrations`), `error` is set
@@ -93,6 +95,7 @@ export class UserProfileComponent implements OnInit {
     if (this.loading) return; // guard against overlapping loads (e.g. a refresh re-trigger)
     this.loading = true;
     this.error = null;
+    this.success = null; // drop any stale "Profile saved." banner from a prior save
     this.api
       .getOverview()
       .pipe(takeUntilDestroyed(this.destroyRef))
@@ -112,9 +115,11 @@ export class UserProfileComponent implements OnInit {
         }
         const { profile, associations, integrations } = overview;
         this.form.patchValue({
-          display_name: profile.display_name,
-          email: profile.email,
-          bio: profile.bio,
+          // `?? ''` defends against a null slipping through a technically-valid
+          // body; the backend columns are NOT NULL DEFAULT so this is belt-and-braces.
+          display_name: profile.display_name ?? '',
+          email: profile.email ?? '',
+          bio: profile.bio ?? '',
         });
         this.groups = this.groupAssociations(associations);
         this.totalAssociations = this.groups.reduce((sum, g) => sum + g.items.length, 0);

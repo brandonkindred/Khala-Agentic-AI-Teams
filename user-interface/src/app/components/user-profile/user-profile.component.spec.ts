@@ -92,6 +92,7 @@ describe('UserProfileComponent', () => {
     // A subsequent malformed 2xx response must clear the stale data, not show it.
     apiSpy.getOverview.mockReturnValue(of({ associations: [], integrations: [] }));
     component.load();
+    fixture.detectChanges();
     expect(component.error).toBeTruthy();
     expect(component.groups).toEqual([]);
     expect(component.integrations).toEqual([]);
@@ -137,6 +138,13 @@ describe('UserProfileComponent', () => {
     await setup();
     expect(component.error).toBeTruthy();
     expect(component.loading).toBe(false);
+  });
+
+  it('should clear a stale success banner on reload', async () => {
+    await setup();
+    component.success = 'Profile saved.';
+    component.load();
+    expect(component.success).toBeNull();
   });
 
   it('should save valid profile edits', async () => {
