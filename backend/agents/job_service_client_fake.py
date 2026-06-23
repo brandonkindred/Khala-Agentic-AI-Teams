@@ -80,6 +80,20 @@ class FakeJobServiceClient:
     def delete_job(self, job_id: str) -> bool:
         return self._jobs.pop(job_id, None) is not None
 
+    def cancel_active_job(self, job_id: str) -> bool:
+        # Mirror production (``backend/job_service/db.py`` cancel_active_job): the
+        # status check and the write are one conditional UPDATE — a job that is
+        # not pending/running (terminal or missing) is left untouched and False is
+        # returned. This fake is single-threaded, so the check-then-set below is
+        # atomic from the test's perspective, matching the row-locked SQL.
+        job = self._jobs.get(job_id)
+        if job is None or job.get("status") not in _ACTIVE_STATUSES:
+            return False
+        job["status"] = "cancelled"
+        job["last_activity_at"] = _now_iso()
+        self._stamp(job)
+        return True
+
     def list_jobs(self, *, statuses: list[str] | None = None) -> list[dict[str, Any]]:
         jobs = [dict(j) for j in self._jobs.values()]
         if statuses:

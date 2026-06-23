@@ -1,5 +1,6 @@
 """Unit tests for command_runner repair helpers and scaffold."""
 
+import json as _json
 import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -16,9 +17,55 @@ from software_engineering_team.shared.command_runner import (
     ensure_frontend_dependencies_installed,
     ensure_frontend_project_initialized,
     is_ng_build_environment_failure,
+    patch_json_file,
+    patch_text_file,
     run_command,
     run_ng_serve_smoke_test,
 )
+
+
+def test_patch_json_file_rewrites_only_when_changed(tmp_path) -> None:
+    p = tmp_path / "x.json"
+    p.write_text('{"a": 1}', encoding="utf-8")
+
+    # No-op transform -> no rewrite, returns False.
+    assert patch_json_file(p, lambda d: False) is False
+
+    # Mutating transform -> rewrite, returns True, content updated.
+    def _add_b(d: dict) -> bool:
+        d["b"] = 2
+        return True
+
+    assert patch_json_file(p, _add_b) is True
+    assert _json.loads(p.read_text())["b"] == 2
+
+
+def test_patch_json_file_missing_or_bad_is_best_effort(tmp_path) -> None:
+    assert patch_json_file(tmp_path / "nope.json", lambda d: True) is False  # missing
+    bad = tmp_path / "bad.json"
+    bad.write_text("{not json", encoding="utf-8")
+    assert patch_json_file(bad, lambda d: True) is False  # unparseable, swallowed
+
+
+def test_patch_json_file_swallows_transform_error(tmp_path) -> None:
+    p = tmp_path / "x.json"
+    p.write_text('{"a": 1}', encoding="utf-8")
+
+    def _boom(d: dict) -> bool:
+        raise RuntimeError("bad transform")
+
+    assert patch_json_file(p, _boom) is False
+    assert p.read_text() == '{"a": 1}'  # unchanged
+
+
+def test_patch_text_file_rewrites_only_on_change(tmp_path) -> None:
+    p = tmp_path / "styles.scss"
+    p.write_text("a { color: red; }", encoding="utf-8")
+
+    assert patch_text_file(p, lambda t: t) is False  # identity -> no rewrite
+    assert patch_text_file(p, lambda t: t.replace("red", "blue")) is True
+    assert "blue" in p.read_text()
+    assert patch_text_file(tmp_path / "missing.scss", lambda t: "x") is False
 
 
 def test_command_result_output_property() -> None:

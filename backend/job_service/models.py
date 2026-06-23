@@ -62,6 +62,10 @@ class DeleteResponse(BaseModel):
     deleted: bool
 
 
+class CancelResponse(BaseModel):
+    cancelled: bool
+
+
 class MarkStaleResponse(BaseModel):
     failed_job_ids: list[str]
 
