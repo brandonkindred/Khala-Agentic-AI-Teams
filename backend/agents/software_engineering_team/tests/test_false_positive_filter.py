@@ -402,6 +402,21 @@ def test_filter_keeps_on_verifier_error() -> None:
     assert out == issues
 
 
+def test_filter_keeps_on_setup_exception() -> None:
+    """A failure in the verification *setup* (before the per-group loop) must be
+    caught by the fail-safe guard and keep all findings — not crash the review."""
+
+    class BoomCtxStub(DummyLLMClient):
+        # context sizing (compute_code_review_map_chunk_chars) calls this during
+        # setup, after the index is built — a perfect injection point.
+        def get_max_context_tokens(self) -> int:  # type: ignore[override]
+            raise RuntimeError("context sizing boom")
+
+    issues = [_issue()]
+    out = filter_false_positives(BoomCtxStub(), _input(), issues)
+    assert out == issues  # kept, no exception propagated
+
+
 def test_filter_keeps_on_unparsable_verdict() -> None:
     issues = [_issue()]
     out = filter_false_positives(_BadJsonStub(), _input(), issues)

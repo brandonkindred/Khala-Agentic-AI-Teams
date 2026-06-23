@@ -65,6 +65,12 @@ _MANIFEST_LIMIT = 300
 # cannot flood the tool result.
 _SEARCH_MATCH_LIMIT = 60
 
+# Cap on the task-description and each acceptance-criterion text inlined into the
+# verification prompt. The file body already has its own ``max_inline_chars``
+# bound; this keeps an unbounded task/criteria field from dominating the prompt
+# or overflowing context. Normal task text is far below this.
+_CONTEXT_FIELD_CHARS = 4_000
+
 
 @dataclass
 class CodebaseIndex:
@@ -370,14 +376,17 @@ def _build_group_prompt(
     Postconditions:
         - The returned text contains one indexed block per finding (index 0..n-1
           matching ``issues`` order) and never exceeds the inline budget for the
-          primary file body.
+          primary file body. The task description and each acceptance criterion
+          are capped at ``_CONTEXT_FIELD_CHARS`` so an oversized task field can
+          never dominate the prompt or overflow context.
     """
     parts: List[str] = []
-    if input_data.task_description.strip():
-        parts.append(f"**Task being implemented:** {input_data.task_description.strip()}")
+    task = input_data.task_description.strip()[:_CONTEXT_FIELD_CHARS]
+    if task:
+        parts.append(f"**Task being implemented:** {task}")
     if input_data.acceptance_criteria:
         parts.append("**Acceptance criteria:**")
-        parts.extend(f"- {c}" for c in input_data.acceptance_criteria)
+        parts.extend(f"- {c[:_CONTEXT_FIELD_CHARS]}" for c in input_data.acceptance_criteria)
         parts.append("")
 
     manifest = index.list_files()
@@ -496,8 +505,10 @@ def filter_false_positives(
         - Returns ``issues`` unchanged (no LLM call) when the filter is disabled
           via ``CODE_REVIEW_FALSE_POSITIVE_FILTER``, when no finding has a file
           path, or when the submission exposes no readable files.
-        - Never raises: a per-group verification failure logs a warning and keeps
-          that group's findings, so verification can never break the review.
+        - Never raises: any setup failure (index build, model resolution,
+          context sizing) or per-group verification failure logs a warning and
+          keeps the affected findings, so verification can never break the
+          review.
     """
     if not env_flag_enabled(_FILTER_ENV):
         return list(issues)
@@ -506,6 +517,37 @@ def filter_false_positives(
     if not verifiable:
         return list(issues)
 
+    try:
+        return _verify_and_filter(llm, input_data, issues, verifiable)
+    except Exception as exc:  # noqa: BLE001 - fail-safe: verification must never break the review
+        logger.warning(
+            "FalsePositiveFilter: verification failed during setup (%s: %s); keeping all findings",
+            type(exc).__name__,
+            exc,
+        )
+        return list(issues)
+
+
+def _verify_and_filter(
+    llm: LLMClient,
+    input_data: CodeReviewInput,
+    issues: List[CodeReviewIssue],
+    verifiable: List[CodeReviewIssue],
+) -> List[CodeReviewIssue]:
+    """Core of :func:`filter_false_positives`; may raise on setup errors.
+
+    Split out so its sole caller can wrap it in the fail-safe guard: model
+    resolution and context sizing happen here (outside the per-group loop) and
+    can raise, and the caller turns any such error into "keep all findings".
+
+    Preconditions:
+        - ``verifiable`` is the subset of ``issues`` with a non-blank file path
+          (already computed by the caller).
+
+    Postconditions:
+        - Same removal contract as :func:`filter_false_positives`, minus the
+          env-toggle and blank-path early returns the caller already handled.
+    """
     index = CodebaseIndex.from_input(input_data)
     if not index.files:
         # No readable submission files — the legacy ``code`` blob had no
