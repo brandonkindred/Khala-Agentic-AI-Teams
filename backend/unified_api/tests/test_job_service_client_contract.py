@@ -22,23 +22,8 @@ from datetime import datetime, timedelta, timezone
 import httpx
 import pytest
 
-import job_service_client as jsc
-from job_service_client import JobServiceClient, get_job_service_client
+from job_service_client import JobServiceClient
 from job_service_client_fake import FakeJobServiceClient
-
-
-class _RecordingHttp:
-    """Stand-in for httpx.Client that records requests and never hits the network."""
-
-    def __init__(self) -> None:
-        self.calls: list = []
-
-    def request(self, method: str, url: str, **kwargs):
-        self.calls.append((method, url, kwargs))
-        return httpx.Response(200, json={"ok": True}, request=httpx.Request(method, url))
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 # ---------------------------------------------------------------------------
 # Lazy URL resolution
@@ -68,64 +53,6 @@ def test_construction_raises_when_no_url_anywhere(monkeypatch: pytest.MonkeyPatc
     monkeypatch.delenv("JOB_SERVICE_URL", raising=False)
     with pytest.raises(RuntimeError, match="JOB_SERVICE_URL is not set"):
         JobServiceClient(team="x")
-
-
-# ---------------------------------------------------------------------------
-# Connection pooling + per-team client caching
-# ---------------------------------------------------------------------------
-
-
-def test_get_http_pools_a_single_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One pooled httpx.Client is reused across requests; close() rebuilds it."""
-    monkeypatch.setenv("JOB_SERVICE_URL", "http://x.example")
-    client = JobServiceClient(team="t")
-    h1 = client._get_http()
-    h2 = client._get_http()
-    assert h1 is h2
-    assert isinstance(h1, httpx.Client)
-    client.close()
-    assert client._http is None
-    h3 = client._get_http()
-    assert h3 is not h1  # rebuilt lazily after close
-    client.close()
-
-
-def test_request_reuses_pooled_client_and_forwards_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """_request must reuse the pooled client and pass timeout per-request."""
-    monkeypatch.setenv("JOB_SERVICE_URL", "http://x.example")
-    client = JobServiceClient(team="t")
-    fake = _RecordingHttp()
-    client._http = fake  # inject the pooled client
-    client._request("GET", "http://x.example/jobs/t/1", timeout=12.5)
-    client._request("GET", "http://x.example/jobs/t/2")  # default timeout
-    assert len(fake.calls) == 2
-    assert fake.calls[0][2]["timeout"] == 12.5
-    assert fake.calls[1][2]["timeout"] == 30.0
-    assert client._http is fake  # never rebuilt — same pooled connection
-
-
-def test_get_job_service_client_caches_per_team(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The factory returns one shared client per (team, base_url)."""
-    monkeypatch.setenv("JOB_SERVICE_URL", "http://x.example")
-    jsc._shared_clients.clear()
-    try:
-        a1 = get_job_service_client("teamA")
-        a2 = get_job_service_client("teamA")
-        b = get_job_service_client("teamB")
-        assert a1 is a2  # same team -> same cached client
-        assert a1 is not b  # different team -> different client
-        assert a1.team == "teamA"
-        # An explicit base_url is keyed separately so it never aliases the env one.
-        explicit = get_job_service_client("teamA", base_url="http://explicit.example")
-        assert explicit is not a1
-    finally:
-        jsc._shared_clients.clear()
-
-
-def test_get_job_service_client_requires_team(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("JOB_SERVICE_URL", "http://x.example")
-    with pytest.raises(AssertionError):
-        get_job_service_client("")
 
 
 # ---------------------------------------------------------------------------

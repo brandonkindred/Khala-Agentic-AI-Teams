@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_http import get_pooled_client
 
 logger = logging.getLogger(__name__)
 
@@ -46,34 +47,46 @@ def _default_base_url() -> str:
     return os.environ.get("JOB_SERVICE_URL", "")
 
 
-# Process-wide cache of one JobServiceClient per (team, base_url). Stores create a
-# client on every operation otherwise; caching lets the pooled httpx.Client (and
-# its keep-alive connections) actually be reused across calls. Keyed including
-# base_url so explicit URLs don't collide; base_url=None entries resolve
-# JOB_SERVICE_URL per request (preserving pytest's late URL swap).
-_shared_clients: "Dict[tuple[str, str | None], JobServiceClient]" = {}
-_shared_clients_lock = threading.Lock()
+# ---------------------------------------------------------------------------
+# Cached per-team client factory
+#
+# Every team's job store independently re-implemented "get a JobServiceClient
+# for my team" — some constructing a fresh client on every call, others
+# hand-rolling a module-level lazy singleton.  This single factory replaces all
+# of those: it returns one shared client per team for the life of the process.
+# The client resolves JOB_SERVICE_URL per request (see ``_base_url``), so a
+# cached instance still honors a URL set after construction.
+# ---------------------------------------------------------------------------
+
+_client_cache: dict[str, "JobServiceClient"] = {}
+_client_cache_lock = threading.Lock()
 
 
-def get_job_service_client(team: str, base_url: str | None = None) -> "JobServiceClient":
-    """Return a process-wide cached :class:`JobServiceClient` for ``(team, base_url)``.
+def get_job_service_client(team: str) -> "JobServiceClient":
+    """Return a process-wide cached :class:`JobServiceClient` for ``team``.
 
-    Preconditions: ``team`` is a non-empty string.
-    Postconditions: returns the same client instance for the same ``(team,
-        base_url)`` across calls (constructed lazily on first use), so the pooled
-        HTTP connections are reused. Never returns ``None``.
+    Preconditions:
+        - ``team`` is a non-empty string.
+    Postconditions:
+        - Returns the same instance for the same ``team`` across calls
+          (one client per team), constructed lazily on first request.
     """
-    assert team, "team must be non-empty"
-    key = (team, base_url)
-    client = _shared_clients.get(key)
+    assert team, "team must be a non-empty string"
+    client = _client_cache.get(team)
     if client is not None:
         return client
-    with _shared_clients_lock:
-        client = _shared_clients.get(key)
+    with _client_cache_lock:
+        client = _client_cache.get(team)
         if client is None:
-            client = JobServiceClient(team=team, base_url=base_url)
-            _shared_clients[key] = client
-    return client
+            client = JobServiceClient(team=team)
+            _client_cache[team] = client
+        return client
+
+
+def _clear_job_client_cache_for_testing() -> None:
+    """Drop all cached per-team clients.  Test-only seam for isolation."""
+    with _client_cache_lock:
+        _client_cache.clear()
 
 
 class JobServiceClient:
@@ -90,38 +103,6 @@ class JobServiceClient:
         self._explicit_base_url: str | None = base_url.rstrip("/") if base_url else None
         if not self._explicit_base_url and not _default_base_url():
             raise RuntimeError(_MISSING_URL_MSG)
-        # One pooled httpx.Client reused across all requests from this instance, so
-        # job operations (status updates, heartbeats, task-state merges — the hottest
-        # non-LLM path) reuse keep-alive connections instead of opening a fresh TCP
-        # connection per call. httpx.Client is safe for concurrent use across threads.
-        self._http: httpx.Client | None = None
-        self._http_lock = threading.Lock()
-
-    def _get_http(self) -> httpx.Client:
-        """Return the pooled httpx.Client, creating it on first use (double-checked).
-
-        Postconditions: returns a ready, reusable ``httpx.Client`` with connection
-            pooling; the same instance on every call until :meth:`close`.
-        """
-        if self._http is not None:
-            return self._http
-        with self._http_lock:
-            if self._http is None:
-                self._http = httpx.Client(
-                    limits=httpx.Limits(max_keepalive_connections=20, max_connections=100)
-                )
-        return self._http
-
-    def close(self) -> None:
-        """Close the pooled HTTP client (releases keep-alive sockets).
-
-        Postconditions: the next request lazily rebuilds the client. Safe to call
-            when no client was ever created.
-        """
-        with self._http_lock:
-            if self._http is not None:
-                self._http.close()
-                self._http = None
 
     @property
     def _base_url(self) -> str:
@@ -148,14 +129,25 @@ class JobServiceClient:
         max_retries: int = 3,
         **kwargs: Any,
     ) -> httpx.Response:
-        """Execute an HTTP request with retry on transient errors."""
+        """Execute an HTTP request with retry on transient errors.
+
+        Preconditions:
+            - ``timeout`` is a positive, finite number of seconds (passed
+              through to :func:`get_pooled_client`, which asserts this).
+            - ``max_retries`` is non-negative.
+        Postconditions:
+            - Returns a successful ``httpx.Response`` (2xx) or raises the last
+              transient error / HTTP status error after exhausting retries.
+        """
         delays = [0.5, 1.0, 2.0]
         last_exc: Exception | None = None
         total_attempts = max_retries + 1
-        client = self._get_http()
         for attempt in range(total_attempts):
             try:
-                resp = client.request(method, url, timeout=timeout, **kwargs)
+                # Reuse a process-wide pooled client (keep-alive connections)
+                # instead of opening/closing one per request.
+                client = get_pooled_client(timeout)
+                resp = client.request(method, url, **kwargs)
                 resp.raise_for_status()
                 return resp
             except (
@@ -476,12 +468,19 @@ class BaseJobStore:
             def submit_title_selection(self, job_id, title): ...
     """
 
-    team: str = ""  # Override in subclass
+    team: str = ""  # Subclasses MUST override with a non-empty team name.
 
     def _client(self) -> JobServiceClient:
-        # Reuse one pooled client per team instead of constructing a new client
-        # (and a new TCP connection) on every store operation.
-        return get_job_service_client(team=self.team)
+        """Return the cached client for this store's team.
+
+        Preconditions:
+            - The subclass has set a non-empty ``team``.
+        """
+        if not self.team:
+            raise NotImplementedError(
+                f"{type(self).__name__} must set a non-empty 'team' class attribute"
+            )
+        return get_job_service_client(self.team)
 
     def create_job(self, job_id: str, *, status: str = JOB_STATUS_PENDING, **fields: Any) -> None:
         self._client().create_job(job_id, status=status, **fields)

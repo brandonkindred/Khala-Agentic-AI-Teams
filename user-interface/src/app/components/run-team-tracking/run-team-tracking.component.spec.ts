@@ -1,9 +1,14 @@
+import { ChangeDetectorRef } from '@angular/core';
 import { TestBed } from '@angular/core/testing';
 import { Subject } from 'rxjs';
 import { vi } from 'vitest';
 import { SoftwareEngineeringApiService } from '../../services/software-engineering-api.service';
 import { RunTeamTrackingComponent } from './run-team-tracking.component';
 import type { JobStatusResponse, TaskStateEntry, PlanningHierarchy } from '../../models';
+
+// The component is OnPush and constructed directly (not via a host view), so a
+// real ChangeDetectorRef is unavailable in the injection context — stub it.
+const changeDetectorRefStub = { provide: ChangeDetectorRef, useValue: { markForCheck: () => undefined } };
 
 // Make timer fire once synchronously so the poll callback runs in the test without a real interval.
 vi.mock('rxjs', async (importOriginal) => {
@@ -15,7 +20,7 @@ describe('RunTeamTrackingComponent work tree fallback initiative behavior', () =
   const createComponent = (): RunTeamTrackingComponent => {
     const apiSpy = { getJobStatus: vi.fn() };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }, changeDetectorRefStub],
     });
     return TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
   };
@@ -262,7 +267,7 @@ describe('RunTeamTrackingComponent polling stop conditions', () => {
     const statusSubject = new Subject<JobStatusResponse>();
     const apiSpy = { getJobStatus: vi.fn().mockReturnValue(statusSubject) };
     TestBed.configureTestingModule({
-      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }],
+      providers: [{ provide: SoftwareEngineeringApiService, useValue: apiSpy }, changeDetectorRefStub],
     });
     const component = TestBed.runInInjectionContext(() => new RunTeamTrackingComponent());
     component.jobId = 'job-1';

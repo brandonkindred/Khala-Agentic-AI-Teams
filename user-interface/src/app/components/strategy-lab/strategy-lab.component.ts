@@ -1,4 +1,13 @@
-import { Component, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
+import {
+  Component,
+  DestroyRef,
+  ElementRef,
+  OnDestroy,
+  OnInit,
+  ViewChild,
+  inject,
+} from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule, DecimalPipe, DatePipe, CurrencyPipe, JsonPipe } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -133,6 +142,7 @@ const DEFAULT_STRATEGY_LAB_CATEGORIES: AssetCategoryOption[] = buildCategoryOpti
 })
 export class StrategyLabComponent implements OnInit, OnDestroy {
   private readonly api = inject(InvestmentApiService);
+  private readonly destroyRef = inject(DestroyRef);
 
   running = false;
   loading = false;
@@ -233,6 +243,9 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
 
   @ViewChild('logContainer') logContainer?: ElementRef<HTMLElement>;
 
+  /** Pending auto-scroll timer id, cleared on destroy. */
+  private autoScrollTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
   ngOnInit(): void {
     this.loadConfig();
     this.loadResults();
@@ -241,7 +254,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   private loadConfig(): void {
-    this.api.getStrategyLabConfig().subscribe({
+    this.api
+      .getStrategyLabConfig()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (cfg) => {
         if (cfg.batch_count_max >= this.BATCH_COUNT_MIN) {
           this.BATCH_COUNT_MAX = cfg.batch_count_max;
@@ -292,6 +308,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       sub.unsubscribe();
     }
     this.paperTradingPollSubs = {};
+    if (this.autoScrollTimeoutId !== null) {
+      clearTimeout(this.autoScrollTimeoutId);
+      this.autoScrollTimeoutId = null;
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -499,7 +519,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   loadResults(): void {
     this.loading = true;
     this.error = null;
-    this.api.getStrategyLabResults().subscribe({
+    this.api
+      .getStrategyLabResults()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (res) => {
         this.results = res;
         this.totalCount = res.count;
@@ -682,8 +705,13 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
       message: msg,
     });
 
-    // Auto-scroll the log container
-    setTimeout(() => {
+    // Auto-scroll the log container. Track the timer so a destroy mid-wait
+    // cancels it — the callback would otherwise touch a detached element.
+    if (this.autoScrollTimeoutId !== null) {
+      clearTimeout(this.autoScrollTimeoutId);
+    }
+    this.autoScrollTimeoutId = setTimeout(() => {
+      this.autoScrollTimeoutId = null;
       this.logContainer?.nativeElement?.scrollTo({ top: 999999, behavior: 'smooth' });
     }, 50);
   }
@@ -861,7 +889,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
     this.error = null;
     this.deletingLabRecordId = id;
-    this.api.deleteStrategyLabRecord(id).subscribe({
+    this.api
+      .deleteStrategyLabRecord(id)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: () => {
         this.deletingLabRecordId = null;
         this.loadResults();
@@ -883,7 +914,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     }
     this.error = null;
     this.clearingAll = true;
-    this.api.clearStrategyLabStorage().subscribe({
+    this.api
+      .clearStrategyLabStorage()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: () => {
         this.clearingAll = false;
         this.paperTradingSessions = {};
@@ -901,7 +935,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   // ---------------------------------------------------------------------------
 
   loadPaperTradingResults(): void {
-    this.api.getPaperTradingResults().subscribe({
+    this.api
+      .getPaperTradingResults()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (res) => {
         const sessions: Record<string, PaperTradingSession> = {};
         for (const s of res.items) {
@@ -932,7 +969,10 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   runPaperTrading(record: StrategyLabRecord): void {
     this.error = null;
     this.paperTradingLabRecordId = record.lab_record_id;
-    this.api.runPaperTrading({ lab_record_id: record.lab_record_id }).subscribe({
+    this.api
+      .runPaperTrading({ lab_record_id: record.lab_record_id })
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
       next: (res) => {
         // Backend returns a "running" session immediately; store it so the UI
         // shows in-progress state, then poll until the worker finishes.

@@ -1,4 +1,4 @@
-import { Component, Input, OnChanges, OnDestroy, OnInit, output, SimpleChanges, inject } from '@angular/core';
+import { ChangeDetectionStrategy, ChangeDetectorRef, Component, Input, OnChanges, OnDestroy, OnInit, output, SimpleChanges, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MatCardModule } from '@angular/material/card';
 import { MatProgressBarModule } from '@angular/material/progress-bar';
@@ -76,9 +76,11 @@ interface FlatWorkTreeNode {
   ],
   templateUrl: './run-team-tracking.component.html',
   styleUrl: './run-team-tracking.component.scss',
+  changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
   private readonly api = inject(SoftwareEngineeringApiService);
+  private readonly cdr = inject(ChangeDetectorRef);
 
   @Input() jobId: string | null = null;
 
@@ -98,7 +100,29 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
     { id: 'completed', label: 'Completed', icon: 'check_circle' },
   ];
 
+  /**
+   * Precomputed completed/current/pending flags per phase id, refreshed once per
+   * status change. The template binds to this map instead of calling
+   * isPhaseCompleted/isCurrentPhase/isPhasePending per phase per change-detection
+   * cycle (each of which re-scanned ALL_PHASES).
+   */
+  phaseStatuses: Record<string, { completed: boolean; current: boolean; pending: boolean }> = {};
+
+  /** Recompute the stepper phase flags from the current status. */
+  private updatePhaseStatuses(): void {
+    const next: Record<string, { completed: boolean; current: boolean; pending: boolean }> = {};
+    for (const phase of this.ALL_PHASES) {
+      next[phase.id] = {
+        completed: this.isPhaseCompleted(phase.id),
+        current: this.isCurrentPhase(phase.id),
+        pending: this.isPhasePending(phase.id),
+      };
+    }
+    this.phaseStatuses = next;
+  }
+
   ngOnInit(): void {
+    this.updatePhaseStatuses();
     if (this.jobId) {
       this.startPolling();
     } else {
@@ -111,6 +135,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
       this.status = null;
       this.workTreeRows = [];
       this.loading = true;
+      this.updatePhaseStatuses();
       if (this.jobId) {
         this.startPolling();
       } else {
@@ -149,8 +174,12 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           // last snapshot (see staleness.util.ts).
           this.status = markStatusReceived(res);
           this.workTreeRows = this.buildWorkTreeRows(res);
+          this.updatePhaseStatuses();
           this.statusChange.emit(res);
           this.loading = false;
+          // OnPush: the poll updates state outside any template event, so the
+          // view must be explicitly marked for the next change-detection pass.
+          this.cdr.markForCheck();
           // Stop polling on any coding-team terminal status. Routed through the shared helper
           // (rather than a hard-coded list) so terminal successes like completed_with_failures and
           // already_complete are always recognized here — otherwise the poll runs forever on a job
@@ -166,6 +195,7 @@ export class RunTeamTrackingComponent implements OnInit, OnChanges, OnDestroy {
           this.loading = false;
           this.pollSub?.unsubscribe();
           this.pollSub = null;
+          this.cdr.markForCheck();
         },
       });
   }

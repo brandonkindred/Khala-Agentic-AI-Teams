@@ -195,4 +195,20 @@ describe('StrategyLabComponent — asset categories', () => {
       'commodities',
     ]);
   });
+
+  it('cancels a pending auto-scroll timer on destroy', () => {
+    const clearSpy = vi.spyOn(globalThis, 'clearTimeout');
+    // Simulate a scroll timer left pending when the view is torn down.
+    (component as unknown as { autoScrollTimeoutId: ReturnType<typeof setTimeout> | null })
+      .autoScrollTimeoutId = setTimeout(() => undefined, 10_000);
+
+    component.ngOnDestroy();
+
+    expect(clearSpy).toHaveBeenCalled();
+    expect(
+      (component as unknown as { autoScrollTimeoutId: ReturnType<typeof setTimeout> | null })
+        .autoScrollTimeoutId,
+    ).toBeNull();
+    clearSpy.mockRestore();
+  });
 });
