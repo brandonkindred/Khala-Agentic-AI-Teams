@@ -14,6 +14,7 @@ Two layers:
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from typing import Dict
 
@@ -32,7 +33,7 @@ from investment_team.trading_service.engine.fill_simulator import (
     FillSimulator,
     FillSimulatorConfig,
 )
-from investment_team.trading_service.engine.order_book import OrderBook
+from investment_team.trading_service.engine.order_book import OrderBook, PendingOrder
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
     TradingServiceResult,
@@ -178,8 +179,6 @@ def test_position_state_view_matches_position_state_fields() -> None:
     # and not the other, the reused hot-path view silently feeds the evaluator a
     # missing/stale field with no type error. Lock the two shapes together so drift
     # fails loudly here instead.
-    import dataclasses
-
     view_fields = [f.name for f in dataclasses.fields(_PositionStateView)]
     canonical_fields = [f.name for f in dataclasses.fields(PositionState)]
     assert view_fields == canonical_fields
@@ -191,6 +190,8 @@ def test_position_state_view_matches_position_state_fields() -> None:
 
 
 def test_first_rung_emits_partial_close_sized_to_original_qty() -> None:
+    """The first rung of a scaled ladder emits a PARTIAL market close sized to
+    qty_fraction * original_qty (50 of 100), leaving the position open."""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -220,6 +221,9 @@ def test_first_rung_emits_partial_close_sized_to_original_qty() -> None:
 
 
 def test_each_rung_fires_at_most_once_and_in_order() -> None:
+    """Successive evaluations on one bar fire each rung exactly once in cursor
+    order (0.5 then 0.3 of original_qty), then nothing; per-rung diagnostics
+    record both firings and the cursor walks off the end."""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -333,6 +337,8 @@ def test_partial_scale_out_does_not_cancel_resting_limit_stop() -> None:
 
 
 def test_stop_loss_listed_first_takes_full_close_over_ladder() -> None:
+    """When a stop-loss is listed ahead of the ladder and both trigger, the
+    higher-priority stop wins and emits a FULL-position close, not a rung."""
     disp = _dispatcher(exit_rules=[StopLossRule(pct=0.03), _ladder()])
     tracker = _tracker(OrderSide.LONG)
     portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
@@ -354,6 +360,8 @@ def test_stop_loss_listed_first_takes_full_close_over_ladder() -> None:
 
 
 def test_short_first_rung_emits_partial_buy_close() -> None:
+    """Symmetric for shorts: a rung's target is reached on bar.low, and the
+    scale-out is a partial BUY close sized to qty_fraction * original_qty."""
     disp = _dispatcher(exit_rules=[_ladder()])
     tracker = _tracker(OrderSide.SHORT)
     portfolio = _portfolio_with(side=OrderSide.SHORT, qty=100.0, entry_price=100.0)
@@ -501,7 +509,7 @@ def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
     assert tracker["AAA"].scaled_cursor.mapping == {}
 
 
-def _submit_competing_short(order_book: OrderBook) -> "object":
+def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
     # An unbound, opposite-side (SHORT) strategy exit resting on the book for AAA —
     # the kind of order the full-close cleanups must bind so it can't survive the
     # close and later fire as a reverse entry.
@@ -646,6 +654,8 @@ def _submit_partial_close(order_book: OrderBook, cid: str, qty: float) -> None:
     [RealisticExecutionModel(participation_cap=1.0), OptimisticExecutionModel(warn=False)],
 )
 def test_partial_market_close_reduces_qty_and_keeps_position_open(model) -> None:
+    """A partial MARKET scale-out reduces the position qty and keeps it open (no
+    TradeRecord until the remainder closes), under both execution models."""
     sim, order_book, portfolio = _make_simulator(model)
     _open_long(sim, order_book, qty=100.0)
 
@@ -690,7 +700,7 @@ def test_capped_scaled_close_requeues_until_full_fraction_filled() -> None:
     # Low-volume bar: cap (0.10 * 300 shares = 30) clips the 50-share close.
     sim.process_bar(_full_bar("2024-01-03", open_price=105.0, high=106.0, low=104.0, volume=300.0))
     pos = portfolio.positions["AAA"]
-    assert 50.0 < pos.qty < 100.0  # partially scaled out, remainder requeued
+    assert pos.qty == pytest.approx(70.0)  # 100 - cap(0.10*300=30) filled; remainder requeued
     assert any(po.request.client_order_id == "tp-0" for po in order_book.pending_for_symbol("AAA"))
 
     # Liquidity returns: the requeued remainder fills, completing the 50-share rung.

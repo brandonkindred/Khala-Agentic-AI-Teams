@@ -156,6 +156,8 @@ def test_take_profit_present_no_inline_or_bracket() -> None:
 
 
 def test_scaled_take_profit_present_no_inline_or_bracket() -> None:
+    """A strategy whose only exit is a ScaledTakeProfitRule must not emit inline
+    order-submission or bracket code — the engine owns the ladder."""
     spec = _spec(
         entry_rules=[_rsi_lt_30_entry()],
         exit_rules=[

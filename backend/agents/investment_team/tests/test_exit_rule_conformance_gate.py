@@ -20,6 +20,7 @@ from investment_team.strategy_lab.quality_gates.exit_rule_conformance import (
 from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -225,6 +226,61 @@ def test_take_profit_with_other_rules_is_informational() -> None:
     )
     fails = [r for r in results if not r.passed]
     assert fails == []
+
+
+# ---------------------------------------------------------------------------
+# ScaledTakeProfitRule
+# ---------------------------------------------------------------------------
+
+
+def _ladder() -> ScaledTakeProfitRule:
+    return ScaledTakeProfitRule(
+        levels=[{"pct": 0.05, "qty_fraction": 0.5}, {"pct": 0.10, "qty_fraction": 0.3}]
+    )
+
+
+def test_scaled_take_profit_alone_is_informational_with_firings() -> None:
+    # Rungs fired → informational per-rung telemetry, never a failure.
+    gate = ExitRuleConformanceGate()
+    diag = BacktestExecutionDiagnostics(
+        exit_rule_firings={"scaled_take_profit": 2},
+        exit_rule_firings_by_symbol={"AAA": {"scaled_take_profit": 2}},
+        scaled_take_profit_level_firings={"0:0": 1, "0:1": 1},
+    )
+    results = gate.check(
+        exit_rules=[_ladder()], trades=[_trade()], diagnostics=diag, config=_config()
+    )
+    assert [r for r in results if not r.passed] == []
+    assert any("ScaledTakeProfitRule" in r.details and "per-rung" in r.details for r in results)
+
+
+def test_scaled_take_profit_alone_warns_when_no_rung_fired() -> None:
+    # The ladder is the only exit and trades exist, yet no rung ever fired → warning
+    # (the rung targets may be unreachable on the strategy's universe).
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[_ladder()],
+        trades=[_trade(return_pct=1.0)],
+        diagnostics=_diagnostics(),  # no firings at all
+        config=_config(),
+    )
+    fails = [r for r in results if not r.passed]
+    assert len(fails) == 1
+    assert fails[0].severity == "warning"
+
+
+def test_scaled_take_profit_with_other_rules_is_informational() -> None:
+    # A co-existing stop can close trades before any rung reaches its target, so
+    # zero rung firings alongside another rule is acceptable (informational only).
+    gate = ExitRuleConformanceGate()
+    results = gate.check(
+        exit_rules=[StopLossRule(pct=0.05), _ladder()],
+        trades=[_trade(return_pct=-1.0)],
+        diagnostics=_diagnostics(stop_loss=1),
+        config=_config(),
+    )
+    assert [r for r in results if not r.passed] == []
+    assert any("co-exists with other exit rules" in r.details for r in results)
 
 
 # ---------------------------------------------------------------------------

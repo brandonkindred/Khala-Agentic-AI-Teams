@@ -750,7 +750,12 @@ class _EngineExitDispatcher:
         # Binding alone cannot prevent this — it only retires the stop *after* the
         # position is gone, which is too late once the stop itself is what closed it.
         if ctx.resting_limit_stop_id is not None:
-            assert intent.style != "limit"  # excluded by _evaluate; never re-emit
+            # A limit-style intent never reaches here (a resting limit stop is
+            # excluded from evaluation, so the chosen rule is a different one) —
+            # enforce it with a raise so the stop-cancel can't fire for a re-emitted
+            # limit stop even under ``python -O``.
+            if intent.style == "limit":  # pragma: no cover - excluded by _evaluate
+                raise ValueError("cannot cancel a resting limit stop for a limit-style intent")
             order_book.cancel(ctx.resting_limit_stop_id)
 
     # ------------------------------------------------------------------
