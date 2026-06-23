@@ -69,6 +69,11 @@ back‑loops.
   (browse + filter + inspect drawer, the same `agent-catalog` component) in a slide‑out. (The `▾` on the wireframe
   `Browse` buttons denotes this **slide‑out catalog panel**, not a traditional dropdown menu.) Selecting another agent
   there updates `registryAgentId` in the handoff state **without** resetting later‑stage work.
+  - **Adaptation caveat (same as the Stage‑1 provisioning dashboard).** `agent-catalog` renders full‑width in the
+    console today, so hosting it in a narrow slide‑out may need **minor layout adjustments** (responsive grid / drawer
+    width) — its core logic and API calls stay **unchanged**. If adaptation is non‑trivial, mount it via a **thin
+    wrapper component** inside the slide‑out container rather than editing the catalog itself, keeping the reused
+    component intact. (Stage 1 hosts the same component full‑page and needs no such wrapper.)
 - **What "without resetting later‑stage work" means.** It refers to the *handoff‑state slots* — the Stage‑3 roster
   composition and Stage‑4 team/persona selection are preserved. It does **not** mean the *current* stage keeps stale
   context: when the agent changes **in Stage 2**, the runner resets to the new agent — it clears and re‑fetches that
@@ -140,6 +145,16 @@ level (one instance per Studio session). It holds the current `registryAgentId`,
   pick a process, choose a persona) write to it. The stepper and each next stage **read** it to pre‑seed
   themselves (e.g., Stage 3 offers the Stage‑2 agent as a roster candidate; Stage 4 defaults its target to the
   Stage‑3 team).
+- **Scope — journey state vs transient UI state.** The service holds two *distinct* tiers, and only one is durable:
+  - **Journey‑handoff state (durable):** the four IDs above (`registryAgentId`, `teamId`, `processId`, `personaId`)
+    **plus** the partial stage work §3.5 enumerates (Stage‑2 test inputs, uncommitted Stage‑3 roster composition).
+    This is the only tier written to drafts.
+  - **Transient UI state (session‑only):** ephemeral view state such as the **catalog filters** (`agent-catalog`'s
+    selected‑team filter, tag filter(s), search query — see §4.1). These live on the service so the catalog re‑opens
+    where the user left it within a session, but they are **never** included in the draft payload and are **not**
+    restored on resume — a loaded draft re‑seeds the four IDs and partial work, not the last filter selection. (The
+    selected‑*agent* id is the one exception that bridges the tiers: it *is* the handoff `registryAgentId`, so it is
+    durable.) This keeps the draft schema in §3.5 limited to the four IDs + partial work, with no transient UI fields.
 - **Persistence:** the service hydrates from / syncs to the server-side **draft API** (see §3.5). The draft is the
   durable source of truth; the service may keep an in‑session `localStorage` cache for unsaved edits, but resume
   across reloads/devices comes from the API, not local storage.
@@ -398,7 +413,7 @@ equivalents** (or the component is refactored to inject them directly). The cont
 
 | Reused component | Services it expects | Provided by |
 |---|---|---|
-| `agent-catalog` | `AgentCatalogApiService`; plus the catalog filter/selection state it reads from the console shell today — specifically the **selected‑team filter**, **tag filter(s)**, **search query**, and **selected‑agent id**. These move into `AgentStudioStateService` (the selected‑agent id *is* the handoff `registryAgentId`). | Studio shell |
+| `agent-catalog` | `AgentCatalogApiService`; plus the catalog filter/selection state it reads from the console shell today — specifically the **selected‑team filter**, **tag filter(s)**, **search query**, and **selected‑agent id**. These move into `AgentStudioStateService` as **transient session‑only UI state** (per the two‑tier scope in §2.4) — the filters are *not* persisted in drafts; only the selected‑agent id is durable, because it *is* the handoff `registryAgentId`. | Studio shell |
 | `agent-runner` (+ schema‑form, run‑history, diff, save‑input dialogs) | `AgentRunnerApiService` (invoke/runs/saved‑inputs/diff) | Studio shell |
 | `agent-provisioning-dashboard` | its existing provisioning service(s), unchanged | Studio shell (provided directly, or via the thin slide‑out wrapper component described in the Stage 1 adaptation caveat) |
 | `process-designer-chat`, extracted `agentic-team-dashboard` children | `AgenticTeamApiService` | Studio shell |
