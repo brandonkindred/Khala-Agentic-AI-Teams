@@ -63,13 +63,17 @@ def add_cost(job_id: str, cost_usd: float) -> float:
     if cost_usd < 0:
         raise ValueError(f"cost_usd must be non-negative, got {cost_usd}")
 
+    # Read time and the (env-derived) flush interval *outside* the lock so the
+    # critical section is a few field updates only — this runs on every LLM call
+    # across all SE worker threads, so a shorter hold reduces contention.
     now = time.time()
+    interval = _flush_interval_s()
     flush_total: float | None = None
     with _lock:
         state = _states.setdefault(job_id, _CostState())
         state.cost_usd += cost_usd
         total = state.cost_usd
-        if total > state.flushed_cost and (now - state.last_flushed_at) >= _flush_interval_s():
+        if total > state.flushed_cost and (now - state.last_flushed_at) >= interval:
             state.flushed_cost = total
             state.last_flushed_at = now
             flush_total = total

@@ -42,6 +42,18 @@ def test_window_days_must_be_positive() -> None:
         compute_from_events([], 0)
 
 
+def test_naive_timestamp_is_rejected() -> None:
+    """An event with a naive (tz-unaware) ts raises ValueError, not a sort TypeError."""
+    naive = {
+        "ts": datetime(2026, 1, 1),  # no tzinfo
+        "event_type": se_events.MERGE_TO_MAIN,
+        "job_id": "",
+        "task_id": "",
+    }
+    with pytest.raises(ValueError, match="timezone-aware"):
+        compute_from_events([naive], 30.0)
+
+
 def test_deployment_frequency() -> None:
     """Deployment frequency is merge count divided by the window in days."""
     events = [_ev(se_events.MERGE_TO_MAIN, offset_s=i) for i in range(6)]

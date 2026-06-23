@@ -29,6 +29,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from types import MappingProxyType
 
 logger = logging.getLogger(__name__)
@@ -69,8 +70,16 @@ _ENV_PREFIX = "LLM_PRICE_"
 _NON_ALNUM = re.compile(r"[^A-Z0-9]+")
 
 
+@lru_cache(maxsize=256)
 def _normalize_model_for_env(model: str) -> str:
     """Map a model name to the suffix used in its ``LLM_PRICE_*`` env var.
+
+    Memoized: this runs on every LLM call (via :func:`_price_for_model`) but is a
+    pure function of ``model`` over the small fixed set of model names a
+    deployment uses, so the regex normalization is computed once per name. The
+    cache holds only the derived suffix, never any environment value — the
+    ``LLM_PRICE_*`` lookup in :func:`_price_for_model` stays live, so overrides
+    still take effect without a cache reset.
 
     Preconditions:
         - ``model`` is a string.

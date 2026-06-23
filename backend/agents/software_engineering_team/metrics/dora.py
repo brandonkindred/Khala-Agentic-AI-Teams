@@ -114,14 +114,20 @@ def compute_from_events(
         computed_at=datetime.now(tz=timezone.utc).isoformat(),
     )
 
-    ordered = sorted((e for e in events if _event_ts(e)), key=lambda e: e["ts"])
-
-    # Enforce the documented tz-aware precondition: subtracting a naive datetime
-    # from an aware one raises mid-computation, so reject naive timestamps up front
-    # with a clear message rather than a confusing TypeError deep in the loop.
-    for _e in ordered:
-        if _e["ts"].tzinfo is None:
+    # Single pass to keep events carrying a datetime ``ts`` while enforcing the
+    # documented tz-aware precondition up front (a naive ts would raise mid-
+    # computation when subtracted from an aware one, or break the sort on mixed
+    # inputs). Folding the check into this filter avoids a second full pass over
+    # the events before sorting.
+    validated: list[dict[str, Any]] = []
+    for e in events:
+        ts = _event_ts(e)
+        if ts is None:
+            continue
+        if ts.tzinfo is None:
             raise ValueError("compute_from_events requires timezone-aware event timestamps")
+        validated.append(e)
+    ordered = sorted(validated, key=lambda e: e["ts"])
 
     # All per-task state is keyed by (job_id, task_id), not task_id alone: coding-team
     # task ids are LLM-generated and job-local (e.g. "task-1"), so two jobs in the
