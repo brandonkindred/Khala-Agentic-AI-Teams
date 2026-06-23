@@ -79,7 +79,7 @@
 }
 
 .up-item-meta {
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-secondary);
   font-size: 0.85rem;
 }
 
@@ -101,7 +101,7 @@
 }
 
 .up-empty {
-  color: rgba(0, 0, 0, 0.6);
+  color: var(--kh-text-muted);
 }
 
 .up-link {
