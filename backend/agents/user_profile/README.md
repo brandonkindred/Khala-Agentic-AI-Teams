@@ -50,6 +50,7 @@ integration setters in `unified_api/integrations_store.py`.
 | PUT | `/api/user-profile` | Partial update of profile fields. |
 | GET | `/api/user-profile/associations?artifact_type=` | Linked artifacts, newest first. |
 | GET | `/api/user-profile/integrations` | Integration status (pass-through to the integrations store). |
+| GET | `/api/user-profile/overview` | Aggregated profile + associations + integrations in one response (so the profile page loads in one round-trip). |
 
 ## Tests
 

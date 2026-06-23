@@ -14,6 +14,18 @@ def db(monkeypatch):
     return install_fake_postgres(monkeypatch)
 
 
+def test_now_iso_returns_tz_aware_iso_string():
+    """_now_iso must always yield a timezone-aware ISO-8601 string."""
+    result = up_store._now_iso()
+    assert "T" in result  # date/time separator
+    assert result.endswith("+00:00") or result.endswith("Z")  # explicit UTC offset
+    # Round-trips back to an aware datetime.
+    from datetime import datetime
+
+    parsed = datetime.fromisoformat(result)
+    assert parsed.tzinfo is not None
+
+
 def test_get_profile_autocreates_default(db):
     profile = up_store.get_profile()
     assert profile.user_id == "default"
