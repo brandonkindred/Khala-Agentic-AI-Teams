@@ -331,8 +331,8 @@ def _read_repo_context(repo_path: Path) -> str:
     engineer reasons over this to implement a task, and clipping a file would
     hide code from it (mirroring the team's "inputs are never truncated"
     contract for the plan text, task description, and review diff). The 80-file
-    ceiling on ``sorted(repo_path.rglob("*"))`` is a deliberate cap on how many
-    files the briefing covers, not truncation of any file's content.
+    ceiling on the eligible-file list is a deliberate cap on how many files the
+    briefing covers, not truncation of any file's content.
 
     Preconditions:
         - ``repo_path`` is an existing directory.
@@ -344,21 +344,40 @@ def _read_repo_context(repo_path: Path) -> str:
     """
     extensions, exclude_dirs = _context_file_filters()
 
-    parts: List[str] = []
+    # Walk with os.walk and prune excluded dirs in place so the traversal never
+    # descends into node_modules/.git/etc. The old ``sorted(repo_path.rglob("*"))``
+    # stat-ed the *entire* tree (tens of thousands of files for any frontend repo)
+    # and sorted it before slicing — and worse, those excluded entries consumed the
+    # 80-entry budget, starving real source files. Collecting eligible files first,
+    # then sorting and capping, both fixes the stat storm and guarantees the cap
+    # covers real files.
+    eligible: List[Path] = []
     try:
-        for f in sorted(repo_path.rglob("*"))[:80]:
-            if not f.is_file() or f.suffix not in extensions:
-                continue
-            if any(skip in f.parts for skip in exclude_dirs):
-                continue
-            try:
-                content = f.read_text(encoding="utf-8", errors="replace")
-            except Exception:
-                continue
-            rel = str(f.relative_to(repo_path))
-            parts.append(f"--- {rel} ---\n{content}\n")
+        for dirpath, dirnames, filenames in os.walk(repo_path):
+            dirnames[:] = [d for d in dirnames if d not in exclude_dirs]
+            for name in filenames:
+                f = Path(dirpath) / name
+                # is_file() (not just suffix) guards against special files: a FIFO /
+                # socket / device named e.g. ``pipe.py`` would otherwise pass the
+                # suffix check and block read_text() forever (a hang the try/except
+                # below cannot catch). is_file() is False for those and for broken
+                # symlinks, matching the previous rglob path's filter.
+                if f.suffix in extensions and f.is_file():
+                    eligible.append(f)
     except Exception:
-        pass
+        # Best-effort repo scan: a walk error (e.g. a permission-denied directory)
+        # must not abort context-building, but log it at debug so it is diagnosable
+        # rather than silently swallowed.
+        logger.debug("os.walk failed while building repo context", exc_info=True)
+
+    parts: List[str] = []
+    for f in sorted(eligible)[:80]:
+        try:
+            content = f.read_text(encoding="utf-8", errors="replace")
+        except Exception:
+            continue
+        rel = str(f.relative_to(repo_path))
+        parts.append(f"--- {rel} ---\n{content}\n")
     return "\n".join(parts) if parts else "No files found"
 
 
@@ -660,6 +679,14 @@ def run_coding_team_orchestrator(
         return bool(data and data.get(CANCEL_KEY))
 
     # Create Task Graph with persist
+    # Tracks the last persisted (graph revision, phase, status_text) so a no-op
+    # call skips the snapshot + job-service write entirely. The swarm loop persists
+    # 3x per round and every graph mutation persists too, so on an idle round (or
+    # back-to-back triggers for the same state) most calls are redundant; durability
+    # is preserved because any real mutation bumps graph.revision and any phase /
+    # status change is part of the key, so every actual state change still writes.
+    _persist_state: Dict[str, Any] = {"revision": -1, "phase": None, "status_text": None}
+
     def _persist_graph() -> None:
         # Persist the snapshot through the SAME store used for the resume read and cancel checks
         # (the injected update_job_fn). On the software-engineering path that is the SE job record;
@@ -667,6 +694,12 @@ def run_coding_team_orchestrator(
         # the central job service's UPDATE-WHERE matches no row and the write — hence resume — is
         # silently lost. The standalone coding_team path's default callback writes the same keys to
         # the coding_team record exactly as before.
+        if (
+            graph.revision == _persist_state["revision"]
+            and phase == _persist_state["phase"]
+            and status_text == _persist_state["status_text"]
+        ):
+            return
         snap = graph.snapshot()
         _update(
             task_graph_snapshot=snap["tasks"],
@@ -675,6 +708,9 @@ def run_coding_team_orchestrator(
             status_text=status_text,
             progress=_coding_progress(snap["tasks"], progress_base, progress_span),
         )
+        _persist_state["revision"] = graph.revision
+        _persist_state["phase"] = phase
+        _persist_state["status_text"] = status_text
 
     graph: TaskGraphService = create_task_graph(job_id, persist_callback=_persist_graph)
     phase = "task_graph"

@@ -77,7 +77,9 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
             "Software engineering job store using JobServiceClient (team=software_engineering_team)"
         )
         _jobs_path_logged = True
-    return get_job_service_client("software_engineering_team")
+    # Reuse one pooled client per process instead of constructing a new client
+    # (and a fresh TCP connection) on every job operation.
+    return get_job_service_client(team="software_engineering_team")
 
 
 def create_job(

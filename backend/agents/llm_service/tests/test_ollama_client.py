@@ -10,6 +10,7 @@ import httpx
 import pytest
 
 from llm_service.clients.ollama import (
+    DEFAULT_MAX_OUTPUT_TOKENS,
     OllamaLLMClient,
     _parse_retry_after_seconds,
 )
@@ -33,6 +34,17 @@ def test_ollama_get_max_context_tokens_env_override(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("LLM_CONTEXT_SIZE", "50000")
     client = OllamaLLMClient(model="unknown-model", base_url="http://localhost:9999", timeout=5)
     assert client.get_max_context_tokens() == 50000
+
+
+def test_ollama_resolve_max_tokens_explicit_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An explicit arg wins (capped); otherwise LLM_MAX_TOKENS is read via the
+    centralized ``llm_config.resolve_max_tokens`` (also capped). Neither path
+    touches the model context, so no /api/show call is needed."""
+    client = OllamaLLMClient(model="test", base_url="http://localhost:9999", timeout=5)
+    assert client._resolve_max_tokens(100) == 100
+    assert client._resolve_max_tokens(999_999_999) == DEFAULT_MAX_OUTPUT_TOKENS
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4096")
+    assert client._resolve_max_tokens(None) == 4096
 
 
 def _make_show_response(status_code: int, num_ctx: int | None = None) -> MagicMock:

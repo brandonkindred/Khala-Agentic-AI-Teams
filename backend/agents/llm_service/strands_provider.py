@@ -25,8 +25,40 @@ from .strands_adapter import LLMClientModel
 
 logger = logging.getLogger(__name__)
 
-_model_cache: dict[tuple[str, str, str], LLMClientModel] = {}
+# Key: (provider, model_id, base_url, response_format, agent_key, key_fingerprint).
+_model_cache: dict[tuple[str, str, str, str, Optional[str], str], LLMClientModel] = {}
 _cache_lock = threading.Lock()
+
+
+def _active_provider_key_fingerprint(provider: Optional[str] = None) -> str:
+    """Fingerprint of the active provider's API key, for cache-key invalidation.
+
+    Returns a stable short digest of the Claude or Ollama API key (whichever the
+    resolved provider uses), or ``"no-key"`` when none is configured. Including
+    this in the model cache key makes an in-place API-key rotation rebuild the
+    adapter even in containers that pick the new key up only via the runtime-config
+    TTL — those never call :func:`clear_model_cache` (it fires solely in the PUT
+    handler's process), so without the fingerprint a rotated key would keep being
+    served by a model wrapping a client built with the old key. Mirrors the
+    factory's Claude client cache, which already keys on the fingerprint.
+
+    Preconditions: ``provider`` is the already-resolved active provider id, or
+        ``None`` to resolve it here (callers on the hot path pass it to avoid a
+        redundant ``resolve_provider`` lock acquisition).
+    Postconditions: returns a non-empty string; never raises.
+    """
+    from . import config as llm_config
+    from .util import sha256_fingerprint
+
+    if provider is None:
+        provider = llm_config.resolve_provider()
+    if provider in ("claude", "anthropic"):
+        api_key = llm_config.resolve_claude_api_key()
+    elif provider == "ollama":
+        api_key = llm_config.resolve_ollama_api_key()
+    else:
+        api_key = ""
+    return sha256_fingerprint(api_key) if api_key else "no-key"
 
 
 def get_strands_model(
@@ -57,7 +89,7 @@ def get_strands_model(
     fresh client for a different model). When set, the cache is bypassed —
     each call returns a fresh ``LLMClientModel`` over the provided client,
     matching the adapter-side factory's contract. When omitted, results are
-    cached by ``(model_id, base_url, response_format)``.
+    cached by ``(provider, model_id, base_url, response_format, agent_key, api_key_fingerprint)``.
 
     Args:
         agent_key: Optional agent identifier for per-agent model overrides.
@@ -69,7 +101,24 @@ def get_strands_model(
     """
     from . import config as llm_config
 
-    base_url = llm_config.resolve_base_url()
+    # Resolve the active provider ONCE and thread it through the model-id and
+    # fingerprint helpers below. They would each re-resolve it otherwise, so a
+    # single cached lookup took the runtime-config lock for the provider key three
+    # times; this collapses that to one.
+    provider = llm_config.resolve_provider()
+
+    # Provider-aware model id: under LLM_PROVIDER=claude the Strands model_id /
+    # cache key must use the Claude model, not the Ollama-resolved one, or
+    # telemetry and the cache identity are tagged with the wrong model name.
+    # ``resolve_model_for_provider`` is the shared chokepoint for that decision.
+    #
+    # base_url only meaningfully identifies an *Ollama* endpoint; Claude talks to
+    # the Anthropic API and dummy talks to nothing, so resolving it for those
+    # providers would just fold the irrelevant default Ollama URL into the cache
+    # key (and the telemetry log below). Use a constant placeholder off the Ollama
+    # path so the key stays precise and the log stays honest. The provider is
+    # already part of the cache key, so this never aliases across providers.
+    base_url = llm_config.resolve_base_url() if provider == "ollama" else "n/a"
 
     # Caller-supplied client bypasses the cache — they own the lifecycle and
     # may be passing distinct clients (different models, different timeouts,
@@ -84,17 +133,26 @@ def get_strands_model(
         return LLMClientModel(
             client,
             agent_key=agent_key,
-            model_id=client_model or llm_config.resolve_model(agent_key),
+            model_id=client_model or llm_config.resolve_model_for_provider(agent_key, provider=provider),
             response_format=response_format,
         )
 
-    model_id = llm_config.resolve_model(agent_key)
+    model_id = llm_config.resolve_model_for_provider(agent_key, provider=provider)
 
     # ``agent_key`` is part of the cache key so two agents that resolve to the
     # same model don't share one ``LLMClientModel`` (which would attribute every
     # later call to whichever agent constructed it first). Distinct keys get
     # distinct adapters, each backed by its own attribution-wrapped client.
-    cache_key = (model_id, base_url, response_format, agent_key)
+    # The active provider AND its API-key fingerprint are part of the key so a
+    # provider switch or an in-place key rotation rebuilds the adapter even in
+    # containers that refresh config only via the runtime-config TTL (which never
+    # call clear_model_cache). Without the provider, an ollama<->claude/dummy switch
+    # that happened to resolve the same model_id and key fingerprint (e.g. both
+    # providers keyless with a shared LLM_MODEL) would keep serving a model wrapping
+    # the wrong provider's client; without the fingerprint, a rotated key would keep
+    # being served by a model wrapping a stale client.
+    key_fingerprint = _active_provider_key_fingerprint(provider)
+    cache_key = (provider, model_id, base_url, response_format, agent_key, key_fingerprint)
 
     with _cache_lock:
         if cache_key not in _model_cache:
@@ -116,7 +174,23 @@ def get_strands_model(
         return _model_cache[cache_key]
 
 
-def _clear_strands_model_cache_for_testing() -> None:
-    """Clear the Strands model cache. For use in tests only."""
+def clear_model_cache() -> None:
+    """Drop all cached Strands models so the next call rebuilds against new config.
+
+    Called by ``factory.clear_client_cache`` after a settings change. The cache key
+    already includes the active provider and its API-key fingerprint, so most
+    settings changes are invalidated by the key itself; this explicit clear is the
+    belt-and-suspenders path that runs in the PUT handler's own process, dropping
+    every cached adapter immediately rather than waiting for the next differing key.
+
+    Preconditions: none.
+    Postconditions: the Strands model cache is empty afterward. Safe to call when
+        nothing is cached.
+    """
     with _cache_lock:
         _model_cache.clear()
+
+
+def _clear_strands_model_cache_for_testing() -> None:
+    """Clear the Strands model cache. For use in tests only."""
+    clear_model_cache()
