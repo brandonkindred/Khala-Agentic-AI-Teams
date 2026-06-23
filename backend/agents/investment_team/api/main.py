@@ -28,6 +28,7 @@ from investment_team.market_lab_data import (
 )
 from investment_team.models import (
     IPS,
+    WINNING_THRESHOLD,
     AdvisorSession,
     AdvisorSessionStatus,
     BacktestConfig,
@@ -1393,6 +1394,7 @@ def _run_one_strategy_lab_cycle(
     *,
     precomputed_signal_brief: Optional[SignalIntelligenceBriefV1] = None,
     signal_brief_storage: Optional[Dict[str, Any]] = None,
+    prior_records: Optional[List[StrategyLabRecord]] = None,
     on_phase: Optional[Any] = None,
     exclude_asset_classes: Optional[List[str]] = None,
     paper_trading_enabled: bool = True,
@@ -1412,6 +1414,11 @@ def _run_one_strategy_lab_cycle(
     and the error message.
 
     Args:
+        prior_records: Precomputed prior-record snapshot, supplied by the wave
+            driver so the whole table isn't re-read + re-parsed per concurrent
+            cycle. Precondition: it must reflect pre-wave state (the caller reads
+            it once before launching the wave). When None, this cycle reads and
+            parses the snapshot itself (the path direct/test callers take).
         paper_trading_enabled: Opt-out flag; when False, every winning strategy
             records ``paper_trading_status = "skipped"`` with reason ``"disabled"``.
         paper_trading_lookback_days: Forwarded to ``MarketDataService.fetch_multi_symbol``
@@ -1422,11 +1429,17 @@ def _run_one_strategy_lab_cycle(
         if on_phase:
             on_phase(phase, data or {})
 
-    with _lock:
-        raw_prior = list(_strategy_lab_records.values())
-
-    prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
-    prior_records.sort(key=lambda r: r.created_at)
+    # When the caller (the wave driver) precomputes the prior records once per
+    # wave, reuse that snapshot instead of re-reading + re-parsing the whole
+    # table in every concurrent cycle. Each cycle persists only at its very end,
+    # long after every sibling has already read prior records at its start, so
+    # all cycles in a wave observe the same pre-wave snapshot; reading it once up
+    # front is equivalent (and strictly more deterministic).
+    if prior_records is None:
+        with _lock:
+            raw_prior = list(_strategy_lab_records.values())
+        prior_records = [StrategyLabRecord.parse_persisted(r) for r in raw_prior]
+        prior_records.sort(key=lambda r: r.created_at)
 
     record = orchestrator.run_cycle(
         prior_records=prior_records,
@@ -1617,9 +1630,9 @@ def _strategy_lab_worker(
             # "no constraint" handling (which keys off ``None``) is uniform.
             exclude_asset_classes = excluded_for_allowed(request.allowed_asset_classes) or None
 
-        def _compute_signal_brief() -> tuple[
-            Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]
-        ]:
+        def _compute_signal_brief() -> (
+            tuple[Optional[SignalIntelligenceBriefV1], Optional[Dict[str, Any]]]
+        ):
             """Build the per-batch signal brief over all currently-persisted prior records.
 
             Called at the start of every batch so that batch N+1 sees results from
@@ -1779,6 +1792,16 @@ def _strategy_lab_worker(
                 remaining = remaining[max_parallel:]
 
                 wave_futures: Dict[Any, int] = {}
+                # Read + parse the prior records ONCE per wave and share the
+                # snapshot across all cycles in the wave, rather than having each
+                # concurrent cycle re-read and re-parse the whole table. Each cycle
+                # persists only at its end (after every sibling has already read at
+                # its start), so all cycles in a wave see the same pre-wave snapshot;
+                # reading it once here is equivalent and strictly more deterministic.
+                with _lock:
+                    _raw_prior = list(_strategy_lab_records.values())
+                wave_prior_records = [StrategyLabRecord.parse_persisted(r) for r in _raw_prior]
+                wave_prior_records.sort(key=lambda r: r.created_at)
                 # Issue #269 — retain each cycle's orchestrator so the wave
                 # can merge its post-run ``convergence_tracker`` back into
                 # ``primary_tracker`` below. Keyed by 0-based cycle index
@@ -1812,6 +1835,7 @@ def _strategy_lab_worker(
                             cycle_orchestrator,
                             precomputed_signal_brief=precomputed_brief,
                             signal_brief_storage=signal_brief_storage,
+                            prior_records=wave_prior_records,
                             on_phase=_make_on_phase(cn),
                             exclude_asset_classes=exclude_asset_classes,
                             paper_trading_enabled=request.paper_trading_enabled,
@@ -2901,7 +2925,8 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         raise HTTPException(
             status_code=400,
             detail=f"Strategy '{request.lab_record_id}' is not a winning strategy. "
-            "Only winning strategies (>8% annualized return) can be paper traded.",
+            f"Only winning strategies (annualized return >= {WINNING_THRESHOLD:g}%, the "
+            "S&P-500 benchmark) can be paper traded.",
         )
 
     strategy = lab_record.strategy
@@ -2933,9 +2958,7 @@ def run_paper_trading(request: RunPaperTradingRequest) -> PaperTradingResponse:
         }
         with _lock:
             for existing in _paper_trading_sessions.values():
-                existing_session = (
-                    PaperTradingSession.parse_persisted(existing)
-                )
+                existing_session = PaperTradingSession.parse_persisted(existing)
                 if (
                     existing_session.strategy.strategy_id == strategy.strategy_id
                     and existing_session.status in _active_states

@@ -27,7 +27,9 @@ def _client(cache_dir: str | Path = DEFAULT_CACHE_DIR) -> JobServiceClient:
     # cache_dir is accepted for API compatibility with callers that were written when this module
     # was file-backed. JobServiceClient uses HTTP (configured via JOB_SERVICE_URL) and does not
     # use a local filesystem cache, so cache_dir is intentionally not forwarded.
-    return get_job_service_client("coding_team")
+    # Reuse one pooled client per process instead of a fresh client (and TCP
+    # connection) on every job operation.
+    return get_job_service_client(team="coding_team")
 
 
 def create_job(

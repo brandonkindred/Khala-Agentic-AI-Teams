@@ -16,6 +16,16 @@ from .strategy_lab.spec_dsl import (
     SizingRule,
 )
 
+# S&P 500 amortized average annual return (%). A backtested strategy is
+# classified WINNING when its annualized return meets or beats this benchmark
+# (``annualized_return_pct >= WINNING_THRESHOLD``) on a valid run, and LOSING
+# otherwise — beating the index is what justifies trading a strategy over
+# simply holding it. This is the single deterministic verdict threshold used
+# across the Strategy Lab on every path; robustness diagnostics (walk-forward
+# acceptance, alignment, conformance, realism, runtime look-ahead) are recorded
+# as caveats but never change this label.
+WINNING_THRESHOLD = 8.0
+
 
 def _coerce_legacy_strategy_spec_dict(raw: Dict[str, Any]) -> Dict[str, Any]:
     """Migrate a legacy persisted StrategySpec dict to the current strict schema.
@@ -1118,7 +1128,7 @@ class StrategyLabRecord(BaseModel):
     lab_record_id: str
     strategy: StrategySpec
     backtest: BacktestRecord
-    is_winning: bool  # walk-forward acceptance gate (or fallback) AND alignment veto (#247, #529)
+    is_winning: bool  # deterministic: annualized_return_pct >= WINNING_THRESHOLD (8% S&P benchmark) on a valid run; robustness gates record caveats but never flip this
     strategy_rationale: str  # why the agent chose this strategy
     analysis_narrative: str  # LLM post-backtest analysis
     created_at: str

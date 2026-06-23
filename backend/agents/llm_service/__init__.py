@@ -19,11 +19,11 @@ from .attribution import (
     new_request_id,
 )
 from .backoff import parse_rate_limit_retry_config, rate_limit_retry_delay
-from .clients import DummyLLMClient, OllamaLLMClient
+from .clients import ClaudeLLMClient, DummyLLMClient, OllamaLLMClient
 from .compaction import compact_text
 from .factory import (
-    _clear_client_cache_for_testing,
     attributed_client,
+    clear_client_cache,
     client_agent_key,
     get_client,
     unwrap_client,
@@ -83,8 +83,8 @@ def get_llm_config_summary() -> str:
 
 
 __all__ = [
-    "_clear_client_cache_for_testing",
     "_clear_strands_model_cache_for_testing",
+    "clear_client_cache",
     "LLMAttribution",
     "llm_attribution",
     "current_attribution",
@@ -120,6 +120,7 @@ __all__ = [
     "LLMTruncatedError",
     "OLLAMA_WEEKLY_LIMIT_MESSAGE",
     "OllamaLLMClient",
+    "ClaudeLLMClient",
     "DummyLLMClient",
     "record_llm_call",
     "get_recent_calls",

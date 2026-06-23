@@ -8,19 +8,14 @@ both read/write. Registered from the unified_api's FastAPI lifespan.
 from __future__ import annotations
 
 from shared_postgres import TeamSchema
+from shared_postgres.secrets import SECRETS_TABLE_DDL
 
 SCHEMA = TeamSchema(
     team="unified_api",
     database=None,  # default POSTGRES_DB
-    statements=[
-        """CREATE TABLE IF NOT EXISTS encrypted_integration_credentials (
-            service TEXT NOT NULL,
-            credential_key TEXT NOT NULL,
-            ciphertext TEXT NOT NULL,
-            updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-            PRIMARY KEY (service, credential_key)
-        )""",
-    ],
+    # The CREATE TABLE lives once in shared_postgres.secrets (the shared store that
+    # also self-heals it), so the registered schema and the lazy ensure can't drift.
+    statements=[SECRETS_TABLE_DDL],
     table_names=[
         "encrypted_integration_credentials",
     ],

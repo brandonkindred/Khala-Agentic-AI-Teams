@@ -126,8 +126,17 @@ def scan(
     """
     del method  # method is not scanned; no rule meaningfully matches GET/POST.
     parts = _normalize_parts(path, query_string, headers, body_bytes)
+    # Build the joined haystack once per distinct scope-set (currently just two:
+    # URL-only and all-parts) and reuse it across every rule sharing that set,
+    # instead of re-joining path+query+headers+body for each of the ~30 rules.
+    # This is the dominant cost for large bodies (the body string was previously
+    # concatenated into a fresh haystack ~25 times per request).
+    haystacks: dict[frozenset[str], str] = {}
     for pattern, message, scopes in _RULES:
-        haystack = "\n".join(parts[name] for name in _SCOPE_ORDER if name in scopes)
+        haystack = haystacks.get(scopes)
+        if haystack is None:
+            haystack = "\n".join(parts[name] for name in _SCOPE_ORDER if name in scopes)
+            haystacks[scopes] = haystack
         if pattern.search(haystack):
             return (False, [message])
     return (True, [])
