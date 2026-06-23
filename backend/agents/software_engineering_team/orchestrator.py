@@ -111,6 +111,8 @@ def _partition_tasks_by_completion(
           iteration order. A task id present in *both* sets appears in both
           lists, exactly as the two separate comprehensions produced.
     """
+    assert isinstance(completed_ids, set), f"completed_ids must be a set, got {type(completed_ids)}"
+    assert isinstance(remaining_ids, set), f"remaining_ids must be a set, got {type(remaining_ids)}"
     completed_tasks: List[Any] = []
     remaining_tasks: List[Any] = []
     for tid, task in all_tasks.items():

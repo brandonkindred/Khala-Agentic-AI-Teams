@@ -74,6 +74,17 @@ def test_partition_tasks_by_completion_empty_sets_yield_empty_lists():
     assert remaining == []
 
 
+def test_partition_tasks_by_completion_rejects_non_set_ids():
+    """The documented set precondition is enforced — passing a list (which would
+    silently degrade membership to O(n)) raises rather than running."""
+    import orchestrator
+
+    with pytest.raises(AssertionError, match="completed_ids must be a set"):
+        orchestrator._partition_tasks_by_completion({"a": "ta"}, ["a"], set())
+    with pytest.raises(AssertionError, match="remaining_ids must be a set"):
+        orchestrator._partition_tasks_by_completion({"a": "ta"}, set(), ["a"])
+
+
 def test_convert_to_structured_questions_assigns_unique_ids_and_options():
     import orchestrator
 
