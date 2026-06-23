@@ -50,6 +50,21 @@ class _StoredMessage:
 
 
 @dataclass
+class ConversationState:
+    """Full conversation state loaded in a single query.
+
+    Invariants:
+        ``messages`` is ordered oldest-first; ``mission`` is always present;
+        ``brand_id`` is None for conversations not yet attached to a brand.
+    """
+
+    messages: List[_StoredMessage]
+    mission: BrandingMission
+    latest_output: Optional[TeamOutput]
+    brand_id: Optional[str]
+
+
+@dataclass
 class ConversationSummary:
     conversation_id: str
     brand_id: Optional[str]
@@ -93,62 +108,99 @@ class BrandingConversationStore:
             )
         return cid
 
-    @timed_query(store=_STORE, op="get")
+    @timed_query(store=_STORE, op="get_state")
+    def get_state(self, conversation_id: str) -> Optional[ConversationState]:
+        """Load a conversation's messages, mission, output, and brand id at once.
+
+        Uses a single ``LEFT JOIN`` so a full conversation load costs one round
+        trip instead of the two it previously took (conversation row, then
+        messages) plus a third for ``brand_id``.
+
+        Postconditions:
+            Returns None when the conversation does not exist, else a fully
+            populated :class:`ConversationState` with messages ordered
+            oldest-first.
+
+        Note:
+            This loads the conversation's *entire* message history in one query
+            — the chat endpoints return the full transcript to the client, and
+            branding conversations are expected to stay short (a guided 5-phase
+            flow). The assistant's ``BRANDING_ASSISTANT_HISTORY_WINDOW`` caps
+            only the LLM prompt context, not this load. If conversations ever
+            grow large, add a message ``limit`` / pagination here and in the
+            response model — tracked as a follow-up.
+        """
+        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
+            cur.execute(
+                "SELECT c.brand_id, c.mission_json, c.latest_output_json, "
+                "m.role, m.content, m.timestamp "
+                "FROM branding_conversations c "
+                "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
+                "WHERE c.conversation_id = %s ORDER BY m.id",
+                (conversation_id,),
+            )
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        head = rows[0]
+        mission = BrandingMission.model_validate(head["mission_json"])
+        latest_output = (
+            TeamOutput.model_validate(head["latest_output_json"])
+            if head["latest_output_json"]
+            else None
+        )
+        brand_id = str(head["brand_id"]) if head["brand_id"] else None
+        messages = [
+            _StoredMessage(
+                role=r["role"],
+                content=r["content"],
+                timestamp=_row_ts(r["timestamp"]),
+            )
+            for r in rows
+            if r["role"] is not None
+        ]
+        return ConversationState(
+            messages=messages,
+            mission=mission,
+            latest_output=latest_output,
+            brand_id=brand_id,
+        )
+
     def get(
         self, conversation_id: str
     ) -> Optional[tuple[List[_StoredMessage], BrandingMission, Optional[TeamOutput]]]:
-        with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-            cur.execute(
-                "SELECT mission_json, latest_output_json FROM branding_conversations "
-                "WHERE conversation_id = %s",
-                (conversation_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            mission = BrandingMission.model_validate(row["mission_json"])
-            latest_output = (
-                TeamOutput.model_validate(row["latest_output_json"])
-                if row["latest_output_json"]
-                else None
-            )
-            cur.execute(
-                "SELECT role, content, timestamp FROM branding_conv_messages "
-                "WHERE conversation_id = %s ORDER BY id",
-                (conversation_id,),
-            )
-            messages = [
-                _StoredMessage(
-                    role=r["role"],
-                    content=r["content"],
-                    timestamp=_row_ts(r["timestamp"]),
-                )
-                for r in cur.fetchall()
-            ]
-        return (messages, mission, latest_output)
+        """Backwards-compatible 3-tuple view over :meth:`get_state`."""
+        state = self.get_state(conversation_id)
+        if state is None:
+            return None
+        return (state.messages, state.mission, state.latest_output)
 
     @timed_query(store=_STORE, op="append_message")
     def append_message(self, conversation_id: str, role: str, content: str) -> bool:
+        """Append a message and bump ``updated_at`` in a single statement.
+
+        A data-modifying CTE bumps the parent conversation's ``updated_at``
+        and only inserts the message when that conversation exists — replacing
+        the prior exists-check / insert / touch trio (three round trips, called
+        twice per chat turn) with one.
+
+        Postconditions:
+            Returns True iff the conversation existed and the message was
+            inserted; False for an unknown conversation or invalid role.
+        """
         if role not in ("user", "assistant"):
             return False
         ts = datetime.now(tz=timezone.utc)
         with get_conn() as conn, conn.cursor() as cur:
             cur.execute(
-                "SELECT 1 FROM branding_conversations WHERE conversation_id = %s",
-                (conversation_id,),
+                "WITH conv AS ("
+                "UPDATE branding_conversations SET updated_at = %s "
+                "WHERE conversation_id = %s RETURNING conversation_id) "
+                "INSERT INTO branding_conv_messages (conversation_id, role, content, timestamp) "
+                "SELECT conversation_id, %s, %s, %s FROM conv RETURNING id",
+                (ts, conversation_id, role, content, ts),
             )
-            if cur.fetchone() is None:
-                return False
-            cur.execute(
-                "INSERT INTO branding_conv_messages "
-                "(conversation_id, role, content, timestamp) VALUES (%s, %s, %s, %s)",
-                (conversation_id, role, content, ts),
-            )
-            cur.execute(
-                "UPDATE branding_conversations SET updated_at = %s WHERE conversation_id = %s",
-                (ts, conversation_id),
-            )
-        return True
+            return cur.fetchone() is not None
 
     @timed_query(store=_STORE, op="update_mission")
     def update_mission(self, conversation_id: str, mission: BrandingMission) -> bool:
@@ -192,36 +244,40 @@ class BrandingConversationStore:
     def get_by_brand_id(
         self, brand_id: str
     ) -> Optional[tuple[str, List[_StoredMessage], BrandingMission, Optional[TeamOutput]]]:
-        """Return the single conversation for *brand_id*, or None."""
+        """Return the single conversation for *brand_id*, or None.
+
+        Single ``LEFT JOIN`` load (conversation + messages) — same pattern as
+        :meth:`get_state`, keyed by brand id.
+        """
         with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
             cur.execute(
-                "SELECT conversation_id, mission_json, latest_output_json "
-                "FROM branding_conversations WHERE brand_id = %s",
+                "SELECT c.conversation_id, c.mission_json, c.latest_output_json, "
+                "m.role, m.content, m.timestamp "
+                "FROM branding_conversations c "
+                "LEFT JOIN branding_conv_messages m ON m.conversation_id = c.conversation_id "
+                "WHERE c.brand_id = %s ORDER BY m.id",
                 (brand_id,),
             )
-            row = cur.fetchone()
-            if row is None:
-                return None
-            cid = str(row["conversation_id"])
-            mission = BrandingMission.model_validate(row["mission_json"])
-            latest_output = (
-                TeamOutput.model_validate(row["latest_output_json"])
-                if row["latest_output_json"]
-                else None
+            rows = cur.fetchall()
+        if not rows:
+            return None
+        head = rows[0]
+        cid = str(head["conversation_id"])
+        mission = BrandingMission.model_validate(head["mission_json"])
+        latest_output = (
+            TeamOutput.model_validate(head["latest_output_json"])
+            if head["latest_output_json"]
+            else None
+        )
+        messages = [
+            _StoredMessage(
+                role=r["role"],
+                content=r["content"],
+                timestamp=_row_ts(r["timestamp"]),
             )
-            cur.execute(
-                "SELECT role, content, timestamp FROM branding_conv_messages "
-                "WHERE conversation_id = %s ORDER BY id",
-                (cid,),
-            )
-            messages = [
-                _StoredMessage(
-                    role=r["role"],
-                    content=r["content"],
-                    timestamp=_row_ts(r["timestamp"]),
-                )
-                for r in cur.fetchall()
-            ]
+            for r in rows
+            if r["role"] is not None
+        ]
         return (cid, messages, mission, latest_output)
 
     @timed_query(store=_STORE, op="list_conversations")
