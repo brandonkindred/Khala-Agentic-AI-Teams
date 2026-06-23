@@ -68,6 +68,8 @@ describe('LlmConfigDashboardComponent', () => {
     component.loadConfig();
     expect(component.error).toBe('boom');
     expect(component.loading).toBe(false);
+    // A failed load can't confirm the store is reachable, so Save is disabled.
+    expect(component.storageAvailable).toBe(false);
   });
 
   it('onOllamaModeChange defaults the base URL', () => {

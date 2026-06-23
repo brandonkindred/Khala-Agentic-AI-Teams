@@ -1,4 +1,5 @@
-import { Component, OnInit, inject } from '@angular/core';
+import { Component, DestroyRef, OnInit, inject } from '@angular/core';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
@@ -49,6 +50,7 @@ const OLLAMA_LOCAL_DEFAULT = 'http://localhost:11434';
 })
 export class LlmConfigDashboardComponent implements OnInit {
   private readonly api = inject(LlmConfigApiService);
+  private readonly destroyRef = inject(DestroyRef);
 
   loading = false;
   saving = false;
@@ -83,16 +85,23 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.loading = true;
     this.error = null;
     this.success = null;
-    this.api.getConfig().subscribe({
-      next: (cfg) => {
-        this.applyConfig(cfg);
-        this.loading = false;
-      },
-      error: (err) => {
-        this.error = this.friendlyError(err, 'Failed to load LLM configuration.');
-        this.loading = false;
-      },
-    });
+    this.api
+      .getConfig()
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (cfg) => {
+          this.applyConfig(cfg);
+          this.loading = false;
+        },
+        error: (err) => {
+          this.error = this.friendlyError(err, 'Failed to load LLM configuration.');
+          this.loading = false;
+          // The config load failed, so we can't confirm the store is reachable;
+          // mark storage unavailable to disable Save rather than letting the user
+          // attempt a write that would fail.
+          this.storageAvailable = false;
+        },
+      });
   }
 
   private applyConfig(cfg: LlmConfigResponse): void {
@@ -196,17 +205,20 @@ export class LlmConfigDashboardComponent implements OnInit {
     }
 
     this.saving = true;
-    this.api.updateConfig(body).subscribe({
-      next: (cfg) => {
-        this.applyConfig(cfg);
-        this.saving = false;
-        this.success = 'LLM provider settings saved.';
-      },
-      error: (err) => {
-        this.error = this.friendlyError(err, 'Failed to save LLM configuration.');
-        this.saving = false;
-      },
-    });
+    this.api
+      .updateConfig(body)
+      .pipe(takeUntilDestroyed(this.destroyRef))
+      .subscribe({
+        next: (cfg) => {
+          this.applyConfig(cfg);
+          this.saving = false;
+          this.success = 'LLM provider settings saved.';
+        },
+        error: (err) => {
+          this.error = this.friendlyError(err, 'Failed to save LLM configuration.');
+          this.saving = false;
+        },
+      });
   }
 
   private friendlyError(err: unknown, fallback: string): string {

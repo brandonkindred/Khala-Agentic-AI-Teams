@@ -28,7 +28,7 @@ describe('LlmConfigApiService', () => {
 
   it('getConfig issues GET /api/llm-config', () => {
     const mock = { provider: 'ollama', model: 'm', ollama_base_url: 'https://ollama.com' };
-    service.getConfig().subscribe((res) => expect(res).toEqual(mock as never));
+    service.getConfig().subscribe((res) => expect(res).toEqual(mock));
     const req = httpMock.expectOne(baseUrl);
     expect(req.request.method).toBe('GET');
     req.flush(mock);
