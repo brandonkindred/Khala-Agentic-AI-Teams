@@ -36,7 +36,9 @@ DEFAULT_USER_ID = "default"
 #: Column list for ``user_profiles``, in the order ``_profile_from_row`` reads.
 #: Shared by every SELECT/INSERT/RETURNING so a schema change is edited once.
 #: Trusted literal only — never interpolate untrusted input here (it is f-string
-#: composed into SQL).
+#: composed into SQL). Changing these constants (or any query below) requires
+#: updating ``user_profile/tests/_fake_postgres.py`` in lockstep — it matches the
+#: store's exact SQL text.
 _PROFILE_COLUMNS = "user_id, display_name, email, bio, profile_json, created_at, updated_at"
 
 #: Column list for ``user_profile_associations``, in the order ``_assoc_from_row``

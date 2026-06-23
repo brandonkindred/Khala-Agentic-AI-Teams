@@ -162,6 +162,33 @@ describe('UserProfileComponent', () => {
     component.form.patchValue({ email: 'not-an-email' });
     component.save();
     expect(apiSpy.updateProfile).not.toHaveBeenCalled();
+    // The documented side effect: the form is marked touched so validators show.
+    expect(component.form.touched).toBe(true);
+  });
+
+  it('should keep previously loaded data when a reload fails with an HTTP error', async () => {
+    await setup();
+    // First load populated groups/integrations.
+    expect(component.groups.length).toBe(2);
+    expect(component.integrations.length).toBe(1);
+    // A subsequent HTTP error must set the error but leave the last-good view.
+    apiSpy.getOverview.mockReturnValue(throwError(() => new Error('boom')));
+    component.load();
+    expect(component.error).toBeTruthy();
+    expect(component.loading).toBe(false);
+    expect(component.groups.length).toBe(2);
+    expect(component.integrations.length).toBe(1);
+    expect(component.totalAssociations).toBe(2);
+  });
+
+  it('should treat a non-array associations/integrations field as malformed', async () => {
+    // A 2xx body where associations isn't an array must not throw in grouping.
+    apiSpy.getOverview.mockReturnValue(
+      of({ profile: PROFILE, associations: {}, integrations: [] }),
+    );
+    await setup();
+    expect(component.error).toBeTruthy();
+    expect(component.groups).toEqual([]);
   });
 
   it('should not start a second save while one is already in flight', async () => {

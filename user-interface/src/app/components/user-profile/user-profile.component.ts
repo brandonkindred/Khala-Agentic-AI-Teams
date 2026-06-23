@@ -103,7 +103,13 @@ export class UserProfileComponent implements OnInit {
       next: (overview) => {
         // A 2xx response with a malformed body slips past the error handler, so
         // guard the shape before destructuring rather than throw deep in render.
-        if (!overview?.profile || !overview.associations || !overview.integrations) {
+        // `associations`/`integrations` must be arrays — a non-array (e.g. an
+        // object) would otherwise throw in `groupAssociations`/the template.
+        if (
+          !overview?.profile ||
+          !Array.isArray(overview.associations) ||
+          !Array.isArray(overview.integrations)
+        ) {
           // Clear any previously loaded data so stale artifacts/integrations
           // aren't shown alongside the error after a re-load.
           this.groups = [];

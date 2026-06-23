@@ -99,12 +99,24 @@ def read_associations(
 
 
 def _integrations_list() -> list[IntegrationStatus]:
-    """Shared integration-status fetch (best-effort: empty list on failure)."""
+    """Shared integration-status fetch (best-effort).
+
+    Resilient per item: one malformed integration entry (missing a required
+    field) is skipped and logged rather than discarding every other integration;
+    a failure to fetch the list at all yields an empty list.
+    """
     try:
-        return [IntegrationStatus(**item) for item in get_integrations_list()]
+        raw = get_integrations_list()
     except Exception as exc:  # noqa: BLE001
         logger.warning("user_profile: integrations list unavailable: %s", exc, exc_info=True)
         return []
+    items: list[IntegrationStatus] = []
+    for item in raw:
+        try:
+            items.append(IntegrationStatus(**item))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("user_profile: skipping invalid integration item %r: %s", item, exc, exc_info=True)
+    return items
 
 
 @router.get("/integrations", response_model=list[IntegrationStatus])

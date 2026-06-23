@@ -120,6 +120,38 @@ def test_integrations_passthrough_tolerates_failure(client, monkeypatch):
     assert resp.json() == []
 
 
+def test_integrations_skips_invalid_item(client, monkeypatch):
+    """One malformed integration entry is dropped, not the whole list."""
+    import unified_api.routes.user_profile as routes_mod
+
+    monkeypatch.setattr(
+        routes_mod,
+        "get_integrations_list",
+        lambda: [
+            {"id": "slack", "type": "slack", "enabled": True, "channel": "#eng"},
+            {"id": "broken"},  # missing required 'type'/'enabled' -> skipped
+        ],
+    )
+    resp = client.get("/api/user-profile/integrations")
+    assert resp.status_code == 200
+    items = resp.json()
+    assert [i["id"] for i in items] == ["slack"]
+
+
+def test_overview_list_associations_failure_returns_503(client, monkeypatch):
+    """A failure in list_associations (not just get_profile) maps to 503.
+
+    Uses the fake-postgres ``client`` so get_profile succeeds and the 503 is
+    attributable to list_associations specifically.
+    """
+    import unified_api.routes.user_profile as routes_mod
+
+    monkeypatch.setattr(
+        routes_mod, "list_associations", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("down"))
+    )
+    assert client.get("/api/user-profile/overview").status_code == 503
+
+
 def test_profile_storage_unavailable_returns_503(monkeypatch):
     """When the store raises, the GET surfaces a clean 503."""
     import unified_api.routes.user_profile as routes_mod
