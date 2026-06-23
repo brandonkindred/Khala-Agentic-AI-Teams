@@ -705,7 +705,8 @@ class SpecReadinessGate(GateResultsMixin):
                         "position (rung qty_fraction sums to < 1.0) and no other "
                         "full-position exit (stop_loss / take_profit / signal_exit) "
                         "closes the residual — the remainder would never close. Add "
-                        "a full-position exit or make a ladder's fractions sum to 1.0."
+                        "a full-position exit or make a ladder's fractions sum to 1.0.",
+                        rule_id="exit_completeness:partial_ladder_residual",
                     ),
                 )
         return ()
@@ -1005,7 +1006,8 @@ class SpecReadinessGate(GateResultsMixin):
                     self._warning(
                         f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp}; "
                         "wider stop than profit target is a valid risk/reward "
-                        "choice but unusual — confirm the asymmetry is intentional."
+                        "choice but unusual — confirm the asymmetry is intentional.",
+                        rule_id="risk_reward:stop_geq_tp",
                     )
                 )
 

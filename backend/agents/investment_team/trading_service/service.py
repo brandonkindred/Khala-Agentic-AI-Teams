@@ -313,6 +313,12 @@ class _PositionStateView:
     evaluator treats it as read-only within one call (it never retains the
     reference past the call — :class:`ExitIntent` copies the values it needs), so
     reusing the instance across bars is safe.
+
+    Contract: this view's fields must stay name- and type-compatible with
+    ``PositionState`` (the evaluator reads them interchangeably). That parity is
+    enforced by ``test_position_state_view_matches_position_state_fields`` — if the
+    two shapes drift, that test fails rather than the mismatch surfacing as silent
+    stale data on the hot path.
     """
 
     symbol: str

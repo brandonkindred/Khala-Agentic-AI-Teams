@@ -95,6 +95,13 @@ def _critical(results) -> list[str]:
     return [r.details for r in results if r.severity == "critical" and not r.passed]
 
 
+def _rule_ids(results) -> list[str]:
+    """Structured ``rule_id`` handles of failing/warning results — assert on these
+    instead of human-readable message substrings where the gate populates them, so a
+    reword of the message text can't silently break the test."""
+    return [r.rule_id for r in results if r.rule_id is not None and not r.passed]
+
+
 # ---------------------------------------------------------------------------
 # Rule 1: Universe set
 # ---------------------------------------------------------------------------
@@ -316,6 +323,7 @@ def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("close only a fraction" in c for c in _critical(results))
+    assert "exit_completeness:partial_ladder_residual" in _rule_ids(results)
 
 
 def test_rule4_partial_ladder_with_stop_loss_is_ok() -> None:
@@ -395,6 +403,7 @@ def test_rule4_partial_ladder_with_side_mismatched_trailing_stop_is_critical() -
     )
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("close only a fraction" in c for c in _critical(results))
+    assert "exit_completeness:partial_ladder_residual" in _rule_ids(results)
 
 
 def test_rule4_partial_ladder_with_side_matched_trailing_stop_is_ok() -> None:
@@ -1050,6 +1059,7 @@ def test_rule8_scaled_ladder_first_rung_folds_into_risk_reward_warning() -> None
     assert not any("stop_loss.pct" in c for c in _critical(results))
     warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
     assert any("stop_loss.pct" in w for w in warnings), warnings
+    assert "risk_reward:stop_geq_tp" in _rule_ids(results)
 
 
 def test_rule8_scaled_ladder_healthy_first_rung_no_risk_reward_warning() -> None:

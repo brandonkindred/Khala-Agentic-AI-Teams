@@ -20,6 +20,7 @@ import math
 import pytest
 from pydantic import ValidationError
 
+from investment_team.models import scaled_level_key
 from investment_team.strategy_lab.executor.rule_compiler import (
     BarSnapshot,
     PositionState,
@@ -318,3 +319,36 @@ def test_stop_loss_priority_when_listed_before_ladder() -> None:
     assert intents[0].rule_kind == "stop_loss"
     assert intents[0].rule_index == 0  # priority is by spec index — the stop is exit_rules[0]
     assert any(i.rule_kind == "scaled_take_profit" and i.rule_index == 1 for i in intents)
+
+
+# ---------------------------------------------------------------------------
+# scaled_level_key — the single-source diagnostics key format
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("rule_index", "level_index", "expected"),
+    [
+        (0, 0, "0:0"),
+        (0, 1, "0:1"),
+        (2, 3, "2:3"),
+        (10, 7, "10:7"),  # multi-digit indices are not zero-padded / delimited oddly
+        (123, 456, "123:456"),  # large indices round-trip verbatim
+    ],
+)
+def test_scaled_level_key_format(rule_index: int, level_index: int, expected: str) -> None:
+    """The key is exactly ``"<rule_index>:<level_index>"`` — the contract the emitter
+    (``_record_emission``) and the conformance gate both depend on, so it is pinned
+    directly here rather than only indirectly via the gate."""
+    assert scaled_level_key(rule_index, level_index) == expected
+
+
+@pytest.mark.parametrize(
+    ("rule_index", "level_index"),
+    [(-1, 0), (0, -1), (-1, -1), (-5, 3)],
+)
+def test_scaled_level_key_rejects_negative_indices(rule_index: int, level_index: int) -> None:
+    """Both indices must be non-negative — enforced with an explicit raise (not an
+    ``assert``) so the contract holds under ``python -O``."""
+    with pytest.raises(ValueError, match="non-negative"):
+        scaled_level_key(rule_index, level_index)
