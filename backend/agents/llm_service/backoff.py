@@ -19,12 +19,20 @@ itself stdlib-only), so it cannot create an import cycle with either consumer.
 
 from __future__ import annotations
 
+import logging
 import os
 import random
+import time
 
 from . import config as llm_config
 
-__all__ = ["parse_rate_limit_retry_config", "rate_limit_retry_delay"]
+logger = logging.getLogger(__name__)
+
+__all__ = [
+    "parse_rate_limit_retry_config",
+    "rate_limit_backoff_sleep",
+    "rate_limit_retry_delay",
+]
 
 # Defaults: first 429 retry at 5 minutes, doubling, capped at 1 hour, 5 retries
 # (6 total attempts) => worst-case ~2h15m of waiting before raising.
@@ -121,3 +129,49 @@ def rate_limit_retry_delay(
     if retry_after_seconds is not None and retry_after_seconds > 0:
         computed = max(computed, retry_after_seconds)
     return min(computed, cap_seconds)
+
+
+def rate_limit_backoff_sleep(
+    attempt: int,
+    max_retries: int,
+    initial_seconds: float,
+    cap_seconds: float,
+    retry_after_seconds: float | None = None,
+    *,
+    provider: str = "LLM",
+    request_id: str = "-",
+    context: str = "",
+) -> float:
+    """Compute the 429 backoff for ``attempt``, log one warning, and sleep it.
+
+    Single home for the "wait, warn, sleep" step shared by the Claude and Ollama
+    rate-limit retry loops, so the schedule, the log line, and the sleep have one
+    implementation. The caller passes the already-resolved ``request_id`` and
+    attribution ``context`` as plain strings, so this stays a leaf module (stdlib +
+    ``llm_service.config`` only) with no dependency on the attribution layer.
+
+    Preconditions:
+        * ``0 <= attempt < max_retries`` — the caller enforces the retry-budget
+          check before calling; ``attempt``/``max_retries`` only shape the log line.
+        * The caller has already exited any concurrency semaphore / HTTP stream
+          context — this sleep can be minutes long and must not hold a shared
+          resource.
+        * ``initial_seconds > 0``; ``cap_seconds >= initial_seconds``.
+    Postconditions: sleeps ``rate_limit_retry_delay(attempt, initial_seconds,
+        cap_seconds, retry_after_seconds)`` seconds and returns that value; emits
+        exactly one warning. Only raises ``ValueError`` on a
+        ``rate_limit_retry_delay`` precondition breach.
+    """
+    wait = rate_limit_retry_delay(attempt, initial_seconds, cap_seconds, retry_after_seconds)
+    ctx = f", {context}" if context else ""
+    logger.warning(
+        "%s 429 (rid=%s%s, rate-limit attempt %d/%d). Retrying in %.1fs",
+        provider,
+        request_id,
+        ctx,
+        attempt + 1,
+        max_retries + 1,
+        wait,
+    )
+    time.sleep(wait)
+    return wait

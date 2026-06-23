@@ -539,11 +539,13 @@ from unified_api.routes.agents import router as agents_router
 from unified_api.routes.analytics import router as analytics_router
 from unified_api.routes.cognition import router as cognition_router
 from unified_api.routes.integrations import router as integrations_router
+from unified_api.routes.llm_config import router as llm_config_router
 from unified_api.routes.llm_tools import router as llm_tools_router
 from unified_api.routes.llm_usage import router as llm_usage_router
 from unified_api.routes.sandboxes import router as sandboxes_router
 
 app.include_router(integrations_router)
+app.include_router(llm_config_router)
 app.include_router(llm_tools_router)
 app.include_router(llm_usage_router)
 app.include_router(analytics_router)

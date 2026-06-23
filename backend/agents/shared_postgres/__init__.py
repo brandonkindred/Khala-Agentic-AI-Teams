@@ -30,6 +30,15 @@ from shared_postgres.metrics import timed_query
 from shared_postgres.registry import TEAM_POSTGRES_MODULES, register_all_team_schemas
 from shared_postgres.runner import ensure_team_schema, register_team_schemas
 from shared_postgres.schema import TeamSchema
+from shared_postgres.secrets import (
+    delete_secret,
+    get_fernet,
+    get_secret,
+    get_secrets,
+    load_or_create_key,
+    set_secret,
+    set_secrets,
+)
 
 
 def _import_json_adapter():
@@ -66,13 +75,20 @@ __all__ = [
     "TeamSchema",
     "build_merge_statement",
     "close_pool",
+    "delete_secret",
     "dict_row",
     "ensure_team_schema",
     "get_conn",
+    "get_fernet",
+    "get_secret",
+    "get_secrets",
     "is_postgres_enabled",
+    "load_or_create_key",
     "merge_jsonb_returning",
     "merge_jsonb_via_cursor",
     "register_all_team_schemas",
     "register_team_schemas",
+    "set_secret",
+    "set_secrets",
     "timed_query",
 ]

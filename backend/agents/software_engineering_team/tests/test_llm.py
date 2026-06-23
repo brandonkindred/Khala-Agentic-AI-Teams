@@ -14,7 +14,7 @@ from llm_service import (
     LLMRateLimitError,
     LLMTemporaryError,
     OllamaLLMClient,
-    _clear_client_cache_for_testing,
+    clear_client_cache,
     get_client,
     unwrap_client,
 )
@@ -247,7 +247,7 @@ def test_get_llm_for_agent_dummy_provider_returns_dummy_client() -> None:
 
 def test_get_llm_for_agent_per_agent_env_overrides() -> None:
     """LLM_MODEL_<agent_key> overrides global and default."""
-    _clear_client_cache_for_testing()
+    clear_client_cache()
     with patch.dict(
         os.environ,
         {
@@ -264,7 +264,7 @@ def test_get_llm_for_agent_per_agent_env_overrides() -> None:
 
 def test_get_llm_for_agent_global_fallback() -> None:
     """When no per-agent env, LLM_MODEL is used."""
-    _clear_client_cache_for_testing()
+    clear_client_cache()
     with patch.dict(
         os.environ,
         {"LLM_PROVIDER": "ollama", "LLM_MODEL": "qwen3.5:397b-cloud"},
@@ -277,7 +277,7 @@ def test_get_llm_for_agent_global_fallback() -> None:
 
 def test_get_llm_for_agent_uses_default_when_no_env() -> None:
     """When no env overrides, agent default (e.g. deepseek-v4-pro:cloud for backend) is used."""
-    _clear_client_cache_for_testing()
+    clear_client_cache()
     with patch.dict(
         os.environ,
         {
@@ -294,7 +294,7 @@ def test_get_llm_for_agent_uses_default_when_no_env() -> None:
 
 def test_get_client_cache_returns_same_instance() -> None:
     """Two calls for same agent with same config return the same cached Ollama client instance."""
-    _clear_client_cache_for_testing()
+    clear_client_cache()
     with patch.dict(
         os.environ,
         {"LLM_PROVIDER": "ollama", "LLM_MODEL_backend": "cached-model"},

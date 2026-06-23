@@ -1534,11 +1534,13 @@ def stream_execution_events() -> StreamingResponse:
     def event_generator():  # pragma: no cover  # integration-only: long-lived SSE generator with time.sleep
         index = 0
         for _ in range(300):
-            events = execution_tracker.events_since(index)
+            # Thread back the returned next_index (a total-emitted position): once the
+            # tracker's bounded buffer wraps it diverges from a naive len()-based
+            # counter, which would re-emit already-sent events.
+            events, index = execution_tracker.events_since(index)
             if events:
                 for event in events:
                     yield f"data: {json.dumps(event)}\n\n"
-                index += len(events)
             else:
                 yield ": keepalive\n\n"
             time.sleep(0.5)

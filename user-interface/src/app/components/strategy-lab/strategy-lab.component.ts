@@ -775,10 +775,24 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
     this.tradeLedgerPages[id] = event.pageIndex;
   }
 
+  // Per-record caches keyed by the record object. A status poll replaces records
+  // with new objects, so the WeakMap entries fall away naturally; within a poll
+  // cycle these are called per change-detection tick for every visible card.
+  private readonly _pagedTradesCache = new WeakMap<StrategyLabRecord, { page: number; trades: TradeRecord[] }>();
+  private readonly _winCountCache = new WeakMap<StrategyLabRecord, number>();
+
   pagedTrades(record: StrategyLabRecord): TradeRecord[] {
     const page = this.getPageIndex(record.lab_record_id);
+    const cached = this._pagedTradesCache.get(record);
+    // Returning a stable array reference for the same (record, page) lets the
+    // mat-table dataSource diff instead of re-rendering every row each CD cycle.
+    if (cached && cached.page === page) {
+      return cached.trades;
+    }
     const start = page * this.PAGE_SIZE;
-    return record.backtest.trades.slice(start, start + this.PAGE_SIZE);
+    const trades = record.backtest.trades.slice(start, start + this.PAGE_SIZE);
+    this._pagedTradesCache.set(record, { page, trades });
+    return trades;
   }
 
   tradeCount(record: StrategyLabRecord): number {
@@ -786,7 +800,12 @@ export class StrategyLabComponent implements OnInit, OnDestroy {
   }
 
   winCount(record: StrategyLabRecord): number {
-    return record.backtest.trades.filter((t) => t.outcome === 'win').length;
+    let count = this._winCountCache.get(record);
+    if (count === undefined) {
+      count = record.backtest.trades.filter((t) => t.outcome === 'win').length;
+      this._winCountCache.set(record, count);
+    }
+    return count;
   }
 
   totalNetPnl(record: StrategyLabRecord): number {
