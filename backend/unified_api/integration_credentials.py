@@ -92,11 +92,17 @@ def get_credential(service: str, key: str) -> str:
 
 
 def get_credential_status(service: str, key: str) -> tuple[str, bool]:
-    """Return ``(value, store_reachable)`` for callers that must tell a missing
-    credential apart from an unreachable store in a SINGLE read (e.g. mapping a
-    GitHub PAT lookup to 400 "not configured" vs 503 "store down" without a separate
-    connectivity probe). ``store_reachable`` is ``False`` only on a connection/query
-    error; a disabled store returns ``("", True)`` ("absent", not an outage)."""
+    """Return ``(value, store_reachable)`` so a caller can tell a missing credential
+    apart from an unreachable store in a SINGLE read.
+
+    Preconditions: ``service`` and ``key`` are non-empty strings.
+    Postconditions: returns the decrypted value (or ``""``) paired with
+        ``store_reachable``. ``store_reachable`` is ``False`` ONLY on a
+        connection/query error; a disabled store returns ``("", True)`` — "absent", not
+        an outage, since ``POSTGRES_HOST`` unset is a configuration state callers gate
+        separately. Lets the GitHub path map a PAT lookup to 400 "not configured" vs 503
+        "store down" from one read, with no separate probe and no TOCTOU. Never raises.
+    """
     from unified_api.postgres_encrypted_credentials import (
         pg_get_credential_status,
         postgres_credentials_enabled,

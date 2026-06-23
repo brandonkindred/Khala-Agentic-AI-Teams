@@ -116,14 +116,14 @@ def _pull(number, **overrides):
 # ---------------------------------------------------------------------------
 
 
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_pulls_400_when_disabled(mock_cfg):
     mock_cfg.return_value = {**_GH_CFG, "enabled": False}
     assert client.get(_PULLS).status_code == 400
 
 
 @patch(f"{_M}.get_credential_status", return_value=("", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_400_when_pat_missing(mock_cfg, mock_cred):
     resp = client.get(_PULLS)
     assert resp.status_code == 400
@@ -131,7 +131,7 @@ def test_pulls_400_when_pat_missing(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "owner": "", "repo": ""})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
 def test_pulls_400_when_owner_repo_missing(mock_cfg, mock_cred):
     resp = client.get(_PULLS)
     assert resp.status_code == 400
@@ -144,7 +144,7 @@ def test_pulls_400_when_owner_repo_missing(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_401(mock_cfg, mock_cred):
     fake = _FakePullsClient([_FakePullsResp(401)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -152,7 +152,7 @@ def test_pulls_401(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_404(mock_cfg, mock_cred):
     fake = _FakePullsClient([_FakePullsResp(404)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -160,7 +160,7 @@ def test_pulls_404(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_502(mock_cfg, mock_cred):
     fake = _FakePullsClient([_FakePullsResp(500)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -173,7 +173,7 @@ def test_pulls_502(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_field_mapping(mock_cfg, mock_cred):
     fake = _FakePullsClient([_FakePullsResp(200, [_pull(7, draft=True)])])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -189,7 +189,7 @@ def test_pulls_field_mapping(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_pulls_pagination(mock_cfg, mock_cred):
     fake = _FakePullsClient(
         [
@@ -208,19 +208,19 @@ def test_pulls_pagination(mock_cfg, mock_cred):
 # ---------------------------------------------------------------------------
 
 
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "enabled": False})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "enabled": False})
 def test_review_400_when_disabled(mock_cfg):
     assert client.post(_REVIEW, json={"pr_number": 7}).status_code == 400
 
 
 @patch(f"{_M}.get_credential_status", return_value=("", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_400_when_pat_missing(mock_cfg, mock_cred):
     assert client.post(_REVIEW, json={"pr_number": 7}).status_code == 400
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
     assert client.post(_REVIEW, json={"pr_number": 7}).status_code == 503
@@ -233,7 +233,7 @@ def test_review_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_success_does_not_clone(mock_cfg, mock_cred, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     ok = _FakeResp(
@@ -263,7 +263,7 @@ def test_review_success_does_not_clone(mock_cfg, mock_cred, mock_path, monkeypat
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
     import httpx
 
@@ -275,7 +275,7 @@ def test_review_504_on_timeout(mock_cfg, mock_cred, mock_path, monkeypatch):
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_502_on_unreachable(mock_cfg, mock_cred, mock_path, monkeypatch):
     import httpx
 
@@ -287,7 +287,7 @@ def test_review_502_on_unreachable(mock_cfg, mock_cred, mock_path, monkeypatch):
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_propagates_upstream_error(mock_cfg, mock_cred, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(502, {"detail": "github api error"}))
@@ -299,7 +299,7 @@ def test_review_propagates_upstream_error(mock_cfg, mock_cred, mock_path, monkey
 
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/x")
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_review_502_on_malformed_success_body(mock_cfg, mock_cred, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(200, {"unexpected": "shape"}))
@@ -335,20 +335,20 @@ class _FakeReviewsClient:
         return self._result
 
 
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "enabled": False})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "enabled": False})
 def test_reviews_400_when_disabled(mock_cfg):
     assert client.get(_REVIEWS).status_code == 400
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_503_when_service_url_unset(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
     assert client.get(_REVIEWS).status_code == 503
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     rows = [
@@ -381,7 +381,7 @@ def test_reviews_success_injects_owner_repo(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_omits_pr_number_when_absent(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
@@ -393,7 +393,7 @@ def test_reviews_omits_pr_number_when_absent(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_forwards_limit(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(200, json_data=[]))
@@ -405,7 +405,7 @@ def test_reviews_forwards_limit(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     # Validated by FastAPI before any upstream call.
@@ -414,7 +414,7 @@ def test_reviews_rejects_out_of_range_limit(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
     import httpx
 
@@ -425,7 +425,7 @@ def test_reviews_504_on_timeout(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
     import httpx
 
@@ -436,7 +436,7 @@ def test_reviews_502_on_connect_error(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_propagates_upstream_error(mock_cfg, mock_cred, monkeypatch):
     # Upstream detail is sanitized: the status code is preserved but the client
     # gets a generic message (the real detail is only logged server-side).
@@ -449,7 +449,7 @@ def test_reviews_propagates_upstream_error(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_propagates_upstream_error_with_plain_text_body(mock_cfg, mock_cred, monkeypatch):
     # A non-JSON (plain text) error body is also sanitized to the generic message.
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -461,7 +461,7 @@ def test_reviews_propagates_upstream_error_with_plain_text_body(mock_cfg, mock_c
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_reviews_502_on_malformed_success_body(mock_cfg, mock_cred, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeReviewsClient(result=_FakeResp(200, json_data=None, json_raises=True))

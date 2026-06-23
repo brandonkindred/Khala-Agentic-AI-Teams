@@ -56,6 +56,7 @@ from typing import Any
 from unified_api.integration_credentials import (
     delete_credential,
     get_credential,
+    get_credential_status,
     set_credential,
 )
 
@@ -535,20 +536,39 @@ def get_integrations_list() -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
-def get_github_config() -> dict[str, Any]:
-    """Return GitHub integration config. PAT from encrypted DB; owner/repo from JSON."""
+def get_github_config_meta() -> dict[str, Any]:
+    """Return the JSON-only GitHub settings (enabled/owner/repo/default_label/repo_path).
+
+    No credential-store read — so callers that only need the settings (and will read the
+    PAT themselves) don't pay an extra DB round-trip. Never returns the token.
+    """
     with _LOCK:
         data = _read_raw()
     github = data.get("github") or {}
-    token = get_credential(_GITHUB_SERVICE, "personal_access_token")
     return {
         "enabled": bool(github.get("enabled", False)),
         "owner": str(github.get("owner", "")).strip(),
         "repo": str(github.get("repo", "")).strip(),
         "default_label": str(github.get("default_label", "")).strip(),
         "repo_path": str(github.get("repo_path", "")).strip(),
-        "token_configured": bool(token),
     }
+
+
+def get_github_config() -> dict[str, Any]:
+    """Return GitHub integration config. PAT presence/reachability from encrypted DB;
+    owner/repo from JSON.
+
+    Uses a SINGLE credential read (``get_credential_status``) to derive both
+    ``token_configured`` and ``store_reachable`` so callers (the config panel and the
+    run/review routes) share one source of reachability and can't disagree — and pay
+    one DB round-trip, not a read plus a separate probe. The raw token is deliberately
+    NEVER included (only ``token_configured``); routes that need the token value read it
+    explicitly via ``get_credential_status`` so the secret stays out of this widely
+    passed dict.
+    """
+    meta = get_github_config_meta()
+    token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")
+    return {**meta, "token_configured": bool(token), "store_reachable": store_reachable}
 
 
 def set_github_config(

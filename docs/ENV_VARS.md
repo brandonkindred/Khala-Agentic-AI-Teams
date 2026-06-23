@@ -281,8 +281,16 @@ the GitHub / Slack / Medium PAT/secret lookups, which is a per-call connection o
 Default `3`, floor `1`. Bounds how long a TCP connect to a down or unreachable host can hang —
 without it, opening the pool (`open=True`) or a credential read against an unreachable host blocks
 for the libpq default, defeating the bounded reachability probe. Note: it bounds only the TCP
-*connect* phase; a host that accepts the connection then stalls is bounded at the request layer by
-the route's `asyncio.wait_for` guard, not by this value.
+*connect* phase; a host that accepts the connection then stalls is bounded by `statement_timeout`
+(below) on the credential store, and at the request layer by the route's `asyncio.wait_for` guard.
+
+### POSTGRES_STATEMENT_TIMEOUT_MS
+`statement_timeout` (milliseconds) applied as a libpq `options` to the **unified-API credential
+store's** per-call connections (GitHub / Slack / Medium secret reads/writes). Default `5000`, floor
+`0` (set `0` to disable). Bounds the query phase that `connect_timeout` does not cover, so a Postgres
+that accepts the connection then stalls mid-query can't pin the credential store's `_LOCK` and
+cascade a stall across every credential consumer. Scoped to the credential store only — it is
+deliberately **not** applied to the shared pool, which would cap legitimate long-running team queries.
 
 ### TEAM_MEMORY_WATCHDOG_ENABLED / _LIMIT_MB / _THRESHOLD / _INTERVAL_S
 Per-worker memory watchdog used by every `team_service` microservice

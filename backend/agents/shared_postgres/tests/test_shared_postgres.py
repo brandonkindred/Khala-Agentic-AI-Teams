@@ -485,6 +485,14 @@ def test_kv_quotes_and_escapes_special_values():
     assert client_mod._kv("a'b\\c") == "'a\\'b\\\\c'"
 
 
+def test_kv_quotes_all_whitespace_not_just_space():
+    # libpq terminates a keyword/value token on ANY whitespace, so tab/newline/CR must
+    # be quoted too — not just the ASCII space.
+    assert client_mod._kv("a\tb") == "'a\tb'"
+    assert client_mod._kv("a\nb") == "'a\nb'"
+    assert client_mod._kv("a\rb") == "'a\rb'"
+
+
 def test_dsn_quotes_space_password_but_not_plain(monkeypatch):
     # A space in the password must be single-quoted so it can't terminate the keyword
     # value early (and swallow the appended connect_timeout); a plain password stays

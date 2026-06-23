@@ -50,8 +50,8 @@ def test_postgres_credentials_enabled_true_when_host_set(monkeypatch: pytest.Mon
 # ---------------------------------------------------------------------------
 
 
-def test_dsn_builds_correct_url(monkeypatch: pytest.MonkeyPatch):
-    """_dsn() assembles a postgresql:// URL from environment variables."""
+def test_dsn_delegates_to_shared_keyword_builder(monkeypatch: pytest.MonkeyPatch):
+    """_dsn() reuses the shared keyword-form builder (one DSN builder, no drift)."""
     monkeypatch.setenv("POSTGRES_HOST", "myhost")
     monkeypatch.setenv("POSTGRES_USER", "myuser")
     monkeypatch.setenv("POSTGRES_PASSWORD", "mypassword")
@@ -59,11 +59,12 @@ def test_dsn_builds_correct_url(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("POSTGRES_PORT", "5433")
     mod = _reload(monkeypatch, postgres_host="myhost")
     dsn = mod._dsn()
-    assert "postgresql://" in dsn
-    assert "myhost" in dsn
-    assert "myuser" in dsn
-    assert "mydb" in dsn
-    assert "5433" in dsn
+    # Keyword/value libpq form (NOT a postgresql:// URI), so every field is _kv-escaped.
+    assert "postgresql://" not in dsn
+    assert "host=myhost" in dsn
+    assert "user=myuser" in dsn
+    assert "dbname=mydb" in dsn
+    assert "port=5433" in dsn
 
 
 def test_dsn_uses_defaults_for_optional_vars(monkeypatch: pytest.MonkeyPatch):
@@ -76,19 +77,23 @@ def test_dsn_uses_defaults_for_optional_vars(monkeypatch: pytest.MonkeyPatch):
     mod = _reload(monkeypatch, postgres_host="host")
     dsn = mod._dsn()
     # Defaults: user=postgres, db=postgres, port=5432
-    assert "postgres" in dsn
-    assert "5432" in dsn
+    assert "user=postgres" in dsn
+    assert "port=5432" in dsn
 
 
-def test_dsn_url_encodes_special_chars_in_password(monkeypatch: pytest.MonkeyPatch):
-    """_dsn() percent-encodes special characters in the password."""
+def test_dsn_escapes_special_password_and_user(monkeypatch: pytest.MonkeyPatch):
+    """A password with a space AND a user with '@' (e.g. an Azure-style role) must both
+    be safely escaped — the round-2 URI form left the user raw, which split the userinfo
+    at the '@' and connected to the wrong host."""
     monkeypatch.setenv("POSTGRES_HOST", "host")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "p@ss:word!")
+    monkeypatch.setenv("POSTGRES_USER", "svc@prod")
+    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
     mod = _reload(monkeypatch, postgres_host="host")
     dsn = mod._dsn()
-    # Raw password must not appear; @ must be encoded
-    assert "p@ss:word!" not in dsn
-    assert "p%40ss" in dsn  # @ -> %40
+    # Space-bearing password is single-quoted; the '@'-user is kept intact (keyword form
+    # has no userinfo to mis-split), not truncated.
+    assert "password='my pass'" in dsn
+    assert "user=svc@prod" in dsn
 
 
 def test_dsn_bounds_connect_timeout(monkeypatch: pytest.MonkeyPatch):
@@ -102,16 +107,17 @@ def test_dsn_bounds_connect_timeout(monkeypatch: pytest.MonkeyPatch):
     assert "connect_timeout=9" in mod._dsn()
 
 
-def test_dsn_encodes_space_password_as_percent20(monkeypatch: pytest.MonkeyPatch):
-    """A space in the password must percent-encode to %20, NOT '+' (quote, not
-    quote_plus): in a URI userinfo libpq treats '+' as a literal plus, so quote_plus
-    would authenticate with the wrong password."""
+def test_statement_timeout_options(monkeypatch: pytest.MonkeyPatch):
+    """Credential connects carry a statement_timeout so a post-connect stall can't pin
+    _LOCK; 0 disables it."""
     monkeypatch.setenv("POSTGRES_HOST", "host")
-    monkeypatch.setenv("POSTGRES_PASSWORD", "my pass")
+    monkeypatch.delenv("POSTGRES_STATEMENT_TIMEOUT_MS", raising=False)
     mod = _reload(monkeypatch, postgres_host="host")
-    dsn = mod._dsn()
-    assert "my%20pass" in dsn
-    assert "my+pass" not in dsn
+    assert mod._statement_timeout_options() == "-c statement_timeout=5000"
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "1500")
+    assert mod._statement_timeout_options() == "-c statement_timeout=1500"
+    monkeypatch.setenv("POSTGRES_STATEMENT_TIMEOUT_MS", "0")
+    assert mod._statement_timeout_options() == ""
 
 
 # ---------------------------------------------------------------------------
@@ -235,11 +241,20 @@ def test_status_present_row_returns_decrypted_value(monkeypatch: pytest.MonkeyPa
     mod = _reload(monkeypatch, postgres_host="host")
     import psycopg
 
-    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("ciphertext",)))
+    conn = _fake_conn(("ciphertext",))
+    cur = conn.cursor.return_value
+    monkeypatch.setattr(psycopg, "connect", lambda *a, **k: conn)
     fernet = MagicMock()
     fernet.decrypt.return_value = b"plain-secret"
     monkeypatch.setattr(mod, "get_integration_fernet", lambda: fernet)
     assert mod.pg_get_credential_status("svc", "key") == ("plain-secret", True)
+    # The single read must actually issue the SELECT bound to (service, key), and the
+    # fetched ciphertext must be what gets decrypted (guards against a refactor that
+    # drops the query or reads the wrong column/params).
+    sql, params = cur.execute.call_args.args
+    assert "SELECT ciphertext FROM encrypted_integration_credentials" in sql
+    assert params == ("svc", "key")
+    fernet.decrypt.assert_called_once_with(b"ciphertext")
     # pg_get_credential is a thin wrapper over the same single read.
     monkeypatch.setattr(psycopg, "connect", lambda *a, **k: _fake_conn(("ciphertext",)))
     assert mod.pg_get_credential("svc", "key") == "plain-secret"

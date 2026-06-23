@@ -16,9 +16,9 @@ from __future__ import annotations
 import logging
 import os
 import threading
-import urllib.parse
 
-from shared_postgres import connect_timeout
+from shared_env import parse_int
+from shared_postgres import dsn as _shared_dsn
 from shared_postgres.metrics import timed_query
 from unified_api.integration_credentials import get_integration_fernet
 
@@ -33,7 +33,9 @@ _STORE = "unified_api_credentials"
 # (``POSTGRES_CONNECT_TIMEOUT_S``), so the Nth caller can block ~N×timeout. That is
 # accepted here because credential reads are infrequent (config pages, run/review
 # triggers) and the lock's connection-count guarantee matters more than peak
-# concurrency on this path.
+# concurrency on this path. Each connection also carries a ``statement_timeout``
+# (see ``_statement_timeout_options``) so a query that stalls *after* connect can't
+# pin ``_LOCK`` indefinitely and cascade across every credential consumer.
 _LOCK = threading.Lock()
 _psycopg_module = None
 _psycopg_import_failed: bool = False
@@ -66,21 +68,34 @@ def postgres_credentials_enabled() -> bool:
 
 
 def _dsn() -> str:
-    host = os.environ["POSTGRES_HOST"].strip()
-    user = os.getenv("POSTGRES_USER", "postgres").strip()
-    password = os.getenv("POSTGRES_PASSWORD", "")
-    db = os.getenv("POSTGRES_DB", "postgres").strip()
-    port = os.getenv("POSTGRES_PORT", "5432").strip()
-    # quote(safe="") — NOT quote_plus: this is a URI userinfo component, where a '+'
-    # is a literal plus (libpq does not decode it to a space). quote_plus would turn a
-    # password containing a space into "...+..." and authenticate with the wrong value.
-    pwd = urllib.parse.quote(password, safe="")
-    # Bound the TCP connect with the SAME POSTGRES_CONNECT_TIMEOUT_S as the shared pool
-    # (via the shared helper, so the two paths can't drift): this credential-store
-    # connection is the one the GitHub/Slack/Medium reads actually use, so without it
-    # pg_get_credential would hang on a down host for the libpq default (no timeout) —
-    # long before any bounded reachability probe runs.
-    return f"postgresql://{user}:{pwd}@{host}:{port}/{db}?connect_timeout={connect_timeout()}"
+    """Return the shared libpq keyword DSN for the credential store.
+
+    Preconditions: ``POSTGRES_HOST`` is set (callers gate on
+        :func:`postgres_credentials_enabled`).
+    Postconditions: delegates to ``shared_postgres.dsn()`` so this direct (un-pooled)
+        connection uses the EXACT same builder as the shared pool — every field
+        ``_kv``-escaped (so a ``POSTGRES_USER``/``POSTGRES_PASSWORD`` containing ``@``,
+        ``:`` , spaces, or other special chars is handled identically) and carrying
+        ``connect_timeout``. Having one builder means the reachability probe and this
+        live read can't disagree because of escaping. Never raises.
+    """
+    return _shared_dsn()
+
+
+def _statement_timeout_options() -> str:
+    """libpq ``options`` that bound each credential query with ``statement_timeout``.
+
+    Preconditions: none.
+    Postconditions: returns ``-c statement_timeout={ms}`` from
+        ``POSTGRES_STATEMENT_TIMEOUT_MS`` (default 5000, floor 0); returns ``""`` when
+        set to 0 (disabled). Scoped to the credential store's OWN connections so a
+        query that stalls *after* connect (which ``connect_timeout`` does not cover)
+        errors out and releases ``_LOCK`` instead of pinning it across all credential
+        consumers. The shared pool is intentionally NOT bounded this way (it would cap
+        legitimate long team queries). Never raises.
+    """
+    ms = parse_int("POSTGRES_STATEMENT_TIMEOUT_MS", 5000, minimum=0)
+    return f"-c statement_timeout={ms}" if ms > 0 else ""
 
 
 @timed_query(store=_STORE, op="pg_get_credential")
@@ -111,7 +126,10 @@ def pg_get_credential_status(service: str, key: str) -> tuple[str, bool]:
         import psycopg
 
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+            with (
+                psycopg.connect(_dsn(), autocommit=True, options=_statement_timeout_options()) as conn,
+                conn.cursor() as cur,
+            ):
                 cur.execute(
                     "SELECT ciphertext FROM encrypted_integration_credentials "
                     "WHERE service = %s AND credential_key = %s",
@@ -134,8 +152,12 @@ def pg_get_credential_status(service: str, key: str) -> tuple[str, bool]:
 def pg_get_credential(service: str, key: str) -> str:
     """Return decrypted plaintext, or empty string when missing/disabled/unreachable.
 
-    Thin wrapper over :func:`pg_get_credential_status` (one implementation, one DB
-    round-trip) for callers that don't need the reachability signal.
+    Preconditions: ``service`` and ``key`` are non-empty strings.
+    Postconditions: returns the decrypted value, or ``""`` for every non-value state
+        (disabled / missing / undecryptable / store unreachable) — i.e. it collapses
+        :func:`pg_get_credential_status`'s reachability flag away. Thin wrapper over
+        that single implementation (one DB round-trip) for callers that don't need to
+        distinguish those states. Never raises.
     """
     return pg_get_credential_status(service, key)[0]
 
@@ -155,7 +177,11 @@ def pg_set_credential(service: str, key: str, value: str) -> None:
         return
     encrypted = get_integration_fernet().encrypt(value.encode()).decode()
 
-    with _LOCK, psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+    with (
+        _LOCK,
+        psycopg.connect(_dsn(), autocommit=True, options=_statement_timeout_options()) as conn,
+        conn.cursor() as cur,
+    ):
         cur.execute(
             """
                     INSERT INTO encrypted_integration_credentials (service, credential_key, ciphertext, updated_at)
@@ -177,7 +203,10 @@ def pg_delete_credential(service: str, key: str) -> None:
 
     with _LOCK:
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+            with (
+                psycopg.connect(_dsn(), autocommit=True, options=_statement_timeout_options()) as conn,
+                conn.cursor() as cur,
+            ):
                 cur.execute(
                     "DELETE FROM encrypted_integration_credentials WHERE service = %s AND credential_key = %s",
                     (service, key),
@@ -201,7 +230,10 @@ def pg_delete_service_credentials(service: str) -> None:
 
     with _LOCK:
         try:
-            with psycopg.connect(_dsn(), autocommit=True) as conn, conn.cursor() as cur:
+            with (
+                psycopg.connect(_dsn(), autocommit=True, options=_statement_timeout_options()) as conn,
+                conn.cursor() as cur,
+            ):
                 cur.execute(
                     "DELETE FROM encrypted_integration_credentials WHERE service = %s",
                     (service,),

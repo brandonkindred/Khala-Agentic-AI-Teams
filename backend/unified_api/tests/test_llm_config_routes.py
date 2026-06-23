@@ -455,13 +455,15 @@ def test_get_storage_status_unreachable(app_client, monkeypatch):
 def test_get_storage_status_unreachable_on_probe_timeout(app_client, monkeypatch):
     # A probe that hangs past the bounded window (post-connect stall) must not hang the
     # request: _probe_storage_status's wait_for fires and the store is reported unreachable.
+    # connect_timeout=0 → budget 2*0+1=1s; sleep just over it so the abandoned worker
+    # lingers only briefly (no multi-second thread leaked into the suite).
     import time
 
     client, _calls, _mp = app_client
-    monkeypatch.setattr(route, "connect_timeout", lambda: 1)
+    monkeypatch.setattr(route, "connect_timeout", lambda: 0)
 
     def _hang(*_a, **_k):
-        time.sleep(5)
+        time.sleep(1.3)
         return "available"
 
     monkeypatch.setattr(route, "resolve_storage_status", _hang)

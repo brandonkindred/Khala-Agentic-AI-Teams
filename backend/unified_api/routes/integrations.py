@@ -41,7 +41,7 @@ from coding_team.clone_workspace import (
     clone_lock_path,
 )
 from coding_team.github_source.client import _pr_detail_from_payload
-from shared_postgres import connect_timeout, resolve_storage_status
+from shared_postgres import connect_timeout
 from unified_api.google_browser_login_credentials import (
     clear_google_browser_login_credentials,
     get_google_browser_login_credentials,
@@ -58,6 +58,7 @@ from unified_api.integrations_store import (
     generate_medium_google_oauth_state,
     generate_oauth_state,
     get_github_config,
+    get_github_config_meta,
     get_integrations_list,
     get_medium_config,
     get_slack_config,
@@ -1042,30 +1043,36 @@ def _build_github_config_response(
 
 
 async def _github_config_response() -> GitHubConfigResponse:
-    """Read the GitHub config and probe the credential store, off the event loop.
+    """Read the GitHub config off the event loop and report store reachability.
 
     Preconditions: none.
-    Postconditions: returns the current config with ``credential_store_unreachable``
-        set per :func:`_credential_store_unreachable`. The config read (a DB read) and
-        the connectivity probe run in a worker thread wrapped in ``asyncio.wait_for``
-        so a Postgres that accepts the connection then stalls can't hang the request
-        (``connect_timeout`` bounds only the TCP connect). On timeout, returns a
-        degraded response flagged ``credential_store_unreachable=True`` rather than
-        hanging — the abandoned worker thread is the accepted residual. Never raises.
+    Postconditions: returns the current config. ``credential_store_unreachable`` is
+        derived from the SAME single credential read that backs ``token_configured``
+        (``get_github_config`` -> ``get_credential_status``), so the panel and the
+        run/review routes can never disagree about reachability — no separate probe.
+        The read runs in a worker thread wrapped in ``asyncio.wait_for`` so a Postgres
+        that accepts the connection then stalls can't hang the request
+        (``connect_timeout`` bounds only the TCP connect; the inner query is bounded by
+        ``statement_timeout``). On timeout or any error, returns a degraded response
+        flagged ``credential_store_unreachable=True`` AND logs the cause (so a
+        non-connectivity bug isn't silently masked as "store down"). The abandoned
+        worker thread is the accepted residual. Never raises.
     """
 
     def _build() -> GitHubConfigResponse:
+        cfg = get_github_config()
+        # store_reachable is False only on a connection/query error; disabled Postgres
+        # reports reachable=True ("absent", not an outage), matching the panel intent.
         return _build_github_config_response(
-            get_github_config(),
-            credential_store_unreachable=_credential_store_unreachable(),
+            cfg,
+            credential_store_unreachable=not cfg.get("store_reachable", True),
         )
 
-    # Budget covers the two bounded sub-operations _build performs (a credential read
-    # and the probe, each ~connect_timeout) plus slack; a true post-connect stall
-    # overruns it and is reported as unreachable.
+    ct = connect_timeout()
     try:
-        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=2 * connect_timeout() + 3.0)
-    except Exception:  # noqa: BLE001 - timeout/any failure → degraded "store unreachable" response
+        return await asyncio.wait_for(asyncio.to_thread(_build), timeout=2 * ct + 1.0)
+    except Exception:  # noqa: BLE001 - timeout/any failure → degraded response, but record why
+        logger.exception("GitHub config read failed; reporting credential store unreachable")
         return GitHubConfigResponse(
             enabled=False,
             token_configured=False,
@@ -1236,20 +1243,6 @@ def _build_issue_item(raw: dict[str, Any], raw_deps: list[dict[str, Any]]) -> Gi
     )
 
 
-def _credential_store_unreachable() -> bool:
-    """True when Postgres (the GitHub PAT store) is configured but not answering.
-
-    Preconditions: none.
-    Postconditions: True only when the shared classifier reports ``"unreachable"``
-        (``POSTGRES_HOST`` set yet a bounded probe fails) — i.e. the integration looks
-        unconfigured purely because the store is down, not because nothing was saved.
-        False when Postgres is unset or the store answers. Uses the single shared
-        :func:`resolve_storage_status` so the GitHub panel and the LLM page can't
-        drift on what "unreachable" means. Runs blocking I/O; async callers offload it.
-    """
-    return resolve_storage_status() == "unreachable"
-
-
 def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
     """Validate GitHub integration config and return (cfg, token, owner, repo).
 
@@ -1267,7 +1260,10 @@ def _resolve_github_target() -> tuple[dict[str, Any], str, str, str]:
           probe. Blocking I/O — async callers offload via ``asyncio.to_thread``.
           Shared by every GitHub route so their validation cannot drift.
     """
-    cfg = get_github_config()
+    # JSON-only settings (no credential read), so the only DB round-trip on this path is
+    # the single get_credential_status below — which yields BOTH the token value and the
+    # 503-vs-400 reachability signal.
+    cfg = get_github_config_meta()
     if not cfg["enabled"]:
         raise HTTPException(status_code=400, detail="GitHub integration is not enabled.")
     token, store_reachable = get_credential_status(_GITHUB_SERVICE, "personal_access_token")

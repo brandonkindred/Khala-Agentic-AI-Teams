@@ -121,7 +121,7 @@ def _ok_resp():
 # ---------------------------------------------------------------------------
 
 
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_integration_disabled(mock_cfg):
     mock_cfg.return_value = {**_GH_CFG, "enabled": False}
     resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
@@ -130,7 +130,7 @@ def test_run_issue_returns_400_when_integration_disabled(mock_cfg):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("", True))
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
     # Store reachable, token genuinely absent → 400 "not configured" (a single read
     # reports value + reachability, so no separate probe and no env dependency).
@@ -141,7 +141,7 @@ def test_run_issue_returns_400_when_pat_missing(mock_cfg, mock_status):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("", False))
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_status):
     # An empty PAT while the credential store is unreachable (the SAME read reports it)
     # is a transient outage (503), not a missing-credential operator error (400).
@@ -152,7 +152,7 @@ def test_run_issue_returns_503_when_credential_store_unreachable(mock_cfg, mock_
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
     mock_cfg.return_value = {**_GH_CFG, "owner": "", "repo": ""}
     resp = client.post(_RUN_ISSUE, json={"issue_number": 7})
@@ -161,7 +161,7 @@ def test_run_issue_returns_400_when_owner_repo_missing(mock_cfg, mock_status):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, monkeypatch):
     mock_cfg.return_value = dict(_GH_CFG)
     monkeypatch.delenv("CODING_TEAM_SERVICE_URL", raising=False)
@@ -173,7 +173,7 @@ def test_run_issue_returns_503_when_service_url_unset(mock_cfg, mock_status, mon
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone")
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clone, mock_path, monkeypatch):
     """A clone failure (e.g. missing git binary) must be a clean 502, not a 500."""
     mock_cfg.return_value = dict(_GH_CFG)
@@ -186,36 +186,36 @@ def test_run_issue_returns_502_on_clone_failure(mock_cfg, mock_status, mock_clon
 
 # ---------------------------------------------------------------------------
 # GET /github config status: credential_store_unreachable flag
+#
+# The panel derives reachability from get_github_config()'s store_reachable (the same
+# single read that backs token_configured) — no separate probe — so these patch
+# get_github_config directly.
 # ---------------------------------------------------------------------------
 
 
-@patch(f"{_M}.resolve_storage_status", return_value="unreachable")
 @patch(f"{_M}.get_github_config")
-def test_get_github_flags_store_unreachable(mock_cfg, mock_status):
-    # Store configured but unreachable → the panel learns the store is down, so it can
-    # warn instead of implying the integration was never set up.
-    mock_cfg.return_value = dict(_GH_STATUS_CFG)
+def test_get_github_flags_store_unreachable(mock_cfg):
+    # store_reachable=False → the panel learns the store is down and warns.
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": False}
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     assert resp.status_code == 200
     assert resp.json()["credential_store_unreachable"] is True
 
 
-@patch(f"{_M}.resolve_storage_status", return_value="available")
 @patch(f"{_M}.get_github_config")
-def test_get_github_store_reachable_flag_false(mock_cfg, mock_status):
-    # Configured and reachable → not flagged.
-    mock_cfg.return_value = {**_GH_STATUS_CFG, "token_configured": True}
+def test_get_github_store_reachable_flag_false(mock_cfg):
+    # store_reachable=True → not flagged.
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "token_configured": True, "store_reachable": True}
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     assert resp.status_code == 200
     assert resp.json()["credential_store_unreachable"] is False
 
 
-@patch(f"{_M}.resolve_storage_status", return_value="unconfigured")
 @patch(f"{_M}.get_github_config")
-def test_get_github_not_flagged_when_postgres_unconfigured(mock_cfg, mock_status):
-    # Postgres unset → an empty token genuinely means "not configured", not a down
-    # store, so the unreachable flag stays False.
-    mock_cfg.return_value = dict(_GH_STATUS_CFG)
+def test_get_github_not_flagged_when_postgres_unconfigured(mock_cfg):
+    # Postgres unset → get_credential_status returns reachable=True ("absent", not an
+    # outage), so the unreachable flag stays False.
+    mock_cfg.return_value = {**_GH_STATUS_CFG, "store_reachable": True}
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     assert resp.status_code == 200
     assert resp.json()["credential_store_unreachable"] is False
@@ -223,9 +223,22 @@ def test_get_github_not_flagged_when_postgres_unconfigured(mock_cfg, mock_status
 
 @patch(f"{_M}.get_github_config", side_effect=RuntimeError("store stalled"))
 def test_get_github_degrades_to_unreachable_on_build_failure(mock_cfg):
-    # If building the config response fails/stalls (the wait_for guard fires on a
-    # post-connect stall, or any error), the endpoint returns a degraded response
-    # flagged unreachable rather than 500-ing or hanging.
+    # A synchronous error building the config response is caught and reported as a
+    # degraded unreachable response rather than 500-ing.
+    resp = client.get(_GITHUB_CFG_ENDPOINT)
+    assert resp.status_code == 200
+    assert resp.json()["credential_store_unreachable"] is True
+
+
+@patch(f"{_M}.connect_timeout", return_value=0)
+@patch(f"{_M}.get_github_config")
+def test_get_github_degrades_on_probe_timeout(mock_cfg, mock_ct):
+    # Exercises the wait_for TIMEOUT path (not just the synchronous-error path): _build
+    # blocks past the budget (2*0+1=1s), so the request returns degraded-unreachable
+    # instead of hanging.
+    import time
+
+    mock_cfg.side_effect = lambda: time.sleep(1.3) or dict(_GH_STATUS_CFG)
     resp = client.get(_GITHUB_CFG_ENDPOINT)
     assert resp.status_code == 200
     assert resp.json()["credential_store_unreachable"] is True
@@ -239,7 +252,7 @@ def test_get_github_degrades_to_unreachable_on_build_failure(mock_cfg):
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ConnectError("Connection refused"))
@@ -252,7 +265,7 @@ def test_run_issue_returns_502_when_service_unreachable(mock_cfg, mock_cred, moc
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(exc=httpx.ReadTimeout("timed out"))
@@ -265,7 +278,7 @@ def test_run_issue_returns_504_on_service_timeout(mock_cfg, mock_cred, mock_clon
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(409, {"detail": "issue blocked by sub-issues"}))
@@ -278,7 +291,7 @@ def test_run_issue_propagates_upstream_error_detail(mock_cfg, mock_cred, mock_cl
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_FakeResp(500, text="internal boom", json_raises=True))
@@ -291,7 +304,7 @@ def test_run_issue_upstream_error_with_non_json_body(mock_cfg, mock_cred, mock_c
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     """A 200 from the service that is missing required fields is a 502, not a 500."""
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
@@ -310,7 +323,7 @@ def test_run_issue_502_on_malformed_success_body(mock_cfg, mock_cred, mock_clone
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103/")
     fake = _FakeAsyncClient(result=_ok_resp())
@@ -330,7 +343,7 @@ def test_run_issue_success_returns_job(mock_cfg, mock_cred, mock_clone, mock_pat
 @patch(f"{_M}._resolve_repo_path", return_value="/tmp/acme_widget")
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_base_branch(mock_cfg, mock_cred, mock_clone, mock_path, monkeypatch):
     monkeypatch.setenv("CODING_TEAM_SERVICE_URL", "http://coding:8103")
     fake = _FakeAsyncClient(result=_ok_resp())
@@ -586,7 +599,7 @@ def test_resolve_repo_path_operator_override_returned_verbatim():
 
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_cred, mock_clone, monkeypatch):
     """An auto-derived run clones the per-issue folder and forwards repo_path +
     cleanup_checkout_on_success=True to the coding team."""
@@ -615,7 +628,7 @@ def test_run_issue_forwards_per_issue_checkout_and_cleanup_flag(mock_cfg, mock_c
 @patch(f"{_M}._ensure_repo_clone", return_value=None)
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
 @patch(
-    f"{_M}.get_github_config",
+    f"{_M}.get_github_config_meta",
     return_value={"enabled": True, "owner": "acme", "repo": "widget", "repo_path": "/srv/checkout"},
 )
 def test_run_issue_operator_override_disables_cleanup(mock_cfg, mock_cred, mock_clone, monkeypatch):

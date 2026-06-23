@@ -52,17 +52,28 @@ async def _probe_storage_status() -> StorageStatus:
         (``available`` / ``unconfigured`` / ``unreachable``). The blocking probe runs
         in a worker thread wrapped in ``asyncio.wait_for`` so a Postgres that accepts
         the connection then stalls on the probe query can't hang the request —
-        ``connect_timeout`` only bounds the TCP connect. On timeout or any error the
-        store is reported ``unreachable`` (Save stays disabled). The abandoned worker
-        thread is the same residual the unified-API health probe accepts. Never raises.
+        ``connect_timeout`` only bounds the TCP connect. The inner pool-acquire bound
+        and the outer guard are both derived from ``connect_timeout`` so raising
+        ``POSTGRES_CONNECT_TIMEOUT_S`` actually widens the probe (they used to be
+        unrelated). On timeout or any error the store is reported ``unreachable`` (Save
+        stays disabled) AND the cause is logged, so a non-connectivity bug (e.g. a
+        Fernet/config error) isn't silently masked as "Postgres down". The abandoned
+        worker thread is the same residual the unified-API health probe accepts. Never
+        raises.
     """
     if not is_postgres_enabled():
         return "unconfigured"
+    ct = connect_timeout()
     try:
-        # +1s past the connect timeout leaves room for the TCP connect itself to time
-        # out before this outer guard fires.
-        return await asyncio.wait_for(asyncio.to_thread(resolve_storage_status), timeout=connect_timeout() + 1.0)
-    except Exception:  # noqa: BLE001 - any failure/timeout → treat the store as unreachable
+        # The inner check_connection can wait up to its pool-acquire bound (timeout_s)
+        # plus the TCP connect (ct); size the outer guard above both so it only fires
+        # on a genuine post-connect stall, not on a legitimately slow connect.
+        return await asyncio.wait_for(
+            asyncio.to_thread(resolve_storage_status, timeout_s=ct),
+            timeout=2 * ct + 1.0,
+        )
+    except Exception:  # noqa: BLE001 - any failure/timeout → unreachable, but record why
+        logger.exception("LLM provider storage probe failed; reporting store unreachable")
         return "unreachable"
 
 

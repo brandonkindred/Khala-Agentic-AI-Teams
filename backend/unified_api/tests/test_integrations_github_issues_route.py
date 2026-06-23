@@ -146,7 +146,7 @@ def _pr(number):
 # ---------------------------------------------------------------------------
 
 
-@patch(f"{_M}.get_github_config")
+@patch(f"{_M}.get_github_config_meta")
 def test_issues_returns_400_when_integration_disabled(mock_cfg):
     mock_cfg.return_value = {**_GH_CFG, "enabled": False}
     resp = client.get(_ISSUES)
@@ -155,7 +155,7 @@ def test_issues_returns_400_when_integration_disabled(mock_cfg):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_returns_400_when_pat_missing(mock_cfg, mock_cred):
     # Store reachable, token genuinely absent → 400 (not 503).
     resp = client.get(_ISSUES)
@@ -164,7 +164,7 @@ def test_issues_returns_400_when_pat_missing(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "owner": "", "repo": ""})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "owner": "", "repo": ""})
 def test_issues_returns_400_when_owner_repo_missing(mock_cfg, mock_cred):
     resp = client.get(_ISSUES)
     assert resp.status_code == 400
@@ -177,7 +177,7 @@ def test_issues_returns_400_when_owner_repo_missing(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_returns_401_on_bad_token(mock_cfg, mock_cred):
     fake = _FakeIssuesClient([_FakeIssuesResp(401)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -187,7 +187,7 @@ def test_issues_returns_401_on_bad_token(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_returns_404_on_missing_repo(mock_cfg, mock_cred):
     fake = _FakeIssuesClient([_FakeIssuesResp(404)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -197,7 +197,7 @@ def test_issues_returns_404_on_missing_repo(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_returns_502_on_other_github_error(mock_cfg, mock_cred):
     fake = _FakeIssuesClient([_FakeIssuesResp(500)])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -212,7 +212,7 @@ def test_issues_returns_502_on_other_github_error(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_single_page_returns_all_and_excludes_prs(mock_cfg, mock_cred):
     page = [_issue(1, labels=["bug", "ready"]), _pr(2), _issue(3)]
     fake = _FakeIssuesClient([_FakeIssuesResp(200, page)])
@@ -231,7 +231,7 @@ def test_issues_single_page_returns_all_and_excludes_prs(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_body_preview_truncated_to_200_chars(mock_cfg, mock_cred):
     long_body = "x" * 500
     fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1, body=long_body)])])
@@ -242,7 +242,7 @@ def test_issues_body_preview_truncated_to_200_chars(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_handles_null_body_and_label_objects(mock_cfg, mock_cred):
     raw = {"number": 9, "title": None, "body": None, "labels": [{"no_name": "x"}, {"name": "ok"}], "html_url": None}
     fake = _FakeIssuesClient([_FakeIssuesResp(200, [raw])])
@@ -257,7 +257,7 @@ def test_issues_handles_null_body_and_label_objects(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "default_label": "ready"})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "default_label": "ready"})
 def test_issues_uses_default_label_when_no_query(mock_cfg, mock_cred):
     fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -267,7 +267,7 @@ def test_issues_uses_default_label_when_no_query(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value={**_GH_CFG, "default_label": "ready"})
+@patch(f"{_M}.get_github_config_meta", return_value={**_GH_CFG, "default_label": "ready"})
 def test_issues_query_label_overrides_default(mock_cfg, mock_cred):
     fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
     with patch(f"{_M}.httpx.AsyncClient", return_value=fake):
@@ -282,7 +282,7 @@ def test_issues_query_label_overrides_default(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_follows_link_header_across_pages(mock_cfg, mock_cred):
     page2_url = "https://api.github.com/repositories/1/issues?page=2&per_page=100&state=open"
     responses = [
@@ -304,7 +304,7 @@ def test_issues_follows_link_header_across_pages(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issues_stops_at_page_cap_and_warns(mock_cfg, mock_cred, monkeypatch, caplog):
     # Force a tiny cap and hand back pages that always advertise a "next" link, so
     # only the cap can stop the loop.
@@ -333,7 +333,7 @@ def test_issues_stops_at_page_cap_and_warns(mock_cfg, mock_cred, monkeypatch, ca
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issue_with_open_dependency_is_blocked(mock_cfg, mock_cred):
     fake = _FakeIssuesClient(
         [_FakeIssuesResp(200, [_issue(1)])],
@@ -350,7 +350,7 @@ def test_issue_with_open_dependency_is_blocked(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issue_with_all_closed_dependencies_not_blocked(mock_cfg, mock_cred):
     fake = _FakeIssuesClient(
         [_FakeIssuesResp(200, [_issue(1)])],
@@ -366,7 +366,7 @@ def test_issue_with_all_closed_dependencies_not_blocked(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_issue_with_no_dependencies(mock_cfg, mock_cred):
     # No queued dependency response → the fake returns an empty 200.
     fake = _FakeIssuesClient([_FakeIssuesResp(200, [_issue(1)])])
@@ -380,7 +380,7 @@ def test_issue_with_no_dependencies(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_dependency_endpoint_404_treated_as_no_deps(mock_cfg, mock_cred):
     # 404 = issue dependencies feature not enabled for the repo.
     fake = _FakeIssuesClient(
@@ -396,7 +396,7 @@ def test_dependency_endpoint_404_treated_as_no_deps(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_one_dependency_fetch_failure_does_not_fail_list(mock_cfg, mock_cred):
     # Issue #1's dependency lookup raises; issue #2's succeeds. The whole list must
     # still return 200 with #1 degraded to empty deps and #2 enriched.
@@ -418,7 +418,7 @@ def test_one_dependency_fetch_failure_does_not_fail_list(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_dependency_concurrency_knob_respected(mock_cfg, mock_cred, monkeypatch):
     # A small concurrency bound must not drop any dependency fetch.
     monkeypatch.setattr(integrations, "_GITHUB_DEPENDENCY_CONCURRENCY", 2)
@@ -437,7 +437,7 @@ def test_dependency_concurrency_knob_respected(mock_cfg, mock_cred, monkeypatch)
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_dependency_fetch_follows_link_header_across_pages(mock_cfg, mock_cred):
     # A blocked_by list spanning two pages: the open blocker is on page 2, so dropping
     # page 2 would wrongly mark the issue runnable. Both pages must be fetched.
@@ -464,7 +464,7 @@ def test_dependency_fetch_follows_link_header_across_pages(mock_cfg, mock_cred):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_dependency_fetch_stops_at_page_cap(mock_cfg, mock_cred, monkeypatch):
     # Pages that always advertise a "next" link must be bounded by the page cap.
     monkeypatch.setattr(integrations, "_GITHUB_MAX_DEPENDENCY_PAGES", 2)
@@ -493,7 +493,7 @@ def test_dependency_fetch_stops_at_page_cap(mock_cfg, mock_cred, monkeypatch):
 
 
 @patch(f"{_M}.get_credential_status", return_value=("ghp_token", True))
-@patch(f"{_M}.get_github_config", return_value=dict(_GH_CFG))
+@patch(f"{_M}.get_github_config_meta", return_value=dict(_GH_CFG))
 def test_dependency_partial_pages_kept_on_mid_pagination_error(mock_cfg, mock_cred):
     # A transport error on page 2 keeps page 1's dependencies rather than discarding them.
     nxt = "https://api.github.com/repos/acme/widget/issues/1/dependencies/blocked_by?page=2"

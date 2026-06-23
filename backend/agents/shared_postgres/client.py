@@ -84,12 +84,14 @@ def _kv(value: str) -> str:
     Preconditions: ``value`` is a string.
     Postconditions: returns ``value`` unchanged when it is a non-empty run of
         ordinary characters; otherwise returns it single-quoted with ``\\`` and ``'``
-        backslash-escaped, per libpq keyword/value rules. Without this, a value
-        containing a space (e.g. a ``POSTGRES_PASSWORD`` with whitespace) would
-        terminate early and corrupt every following keyword — including the
-        ``connect_timeout`` this DSN appends. Never raises.
+        backslash-escaped, per libpq keyword/value rules. "Needs quoting" means the
+        value is empty, or contains a single-quote, a backslash, or ANY whitespace —
+        libpq terminates a keyword/value token on any whitespace (space, tab, newline,
+        CR, …), not just an ASCII space, so a ``POSTGRES_PASSWORD`` with a tab would
+        otherwise terminate early and corrupt every following keyword (including the
+        ``connect_timeout`` this DSN appends). Never raises.
     """
-    if value and not any(c in value for c in " '\\"):
+    if value and not (any(c.isspace() for c in value) or "'" in value or "\\" in value):
         return value
     return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
 
@@ -105,6 +107,19 @@ def _dsn(database: Optional[str] = None) -> str:
         f"host={_kv(host)} port={_kv(port)} dbname={_kv(dbname)} "
         f"user={_kv(user)} password={_kv(password)} connect_timeout={_connect_timeout()}"
     )
+
+
+def dsn(database: Optional[str] = None) -> str:
+    """Public accessor for the shared libpq keyword DSN.
+
+    Preconditions: none.
+    Postconditions: returns the exact DSN the connection pool uses — every field
+        ``_kv``-escaped and carrying ``connect_timeout`` — so a module that opens its
+        own ``psycopg`` connection outside the pool (e.g. the unified-API credential
+        store) builds an identically-escaped DSN. One DSN builder, no drift between the
+        reachability probe and the live read. Never raises.
+    """
+    return _dsn(database)
 
 
 def _pool_sizes() -> tuple[int, int]:
