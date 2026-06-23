@@ -13,9 +13,9 @@ from __future__ import annotations
 from llm_service import LLMClient
 
 # Re-exported from the shared typed env-config helper so the int-knob parser
-# has a single implementation; imported here for the existing call sites below
-# (and the ``context_sizing.env_int`` import path that callers/tests rely on).
-from software_engineering_team.shared.env_config import env_int
+# has a single implementation; exposed here under the name ``parse_env_int``,
+# which the code-review coordinator and tests import from this module.
+from software_engineering_team.shared.env_config import env_int as parse_env_int
 
 # Conservative chars per token for code/spec (used for token estimates from char counts)
 CHARS_PER_TOKEN = 3.5
@@ -97,7 +97,7 @@ def compute_code_review_chunk_chars(llm: LLMClient) -> int:
         reserved_response_tokens=4096,
         min_chars=12000,
     )
-    cap = env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
+    cap = parse_env_int("CODE_REVIEW_MAP_CHUNK_CHARS", CODE_REVIEW_ABS_CHUNK_CHARS, 10_000)
     return min(derived, cap)
 
 
@@ -141,19 +141,19 @@ def compute_code_review_spec_excerpt_chars(llm: LLMClient) -> int:
     every map call of the review coordinator, so an uncapped 1M-context scale
     (~488K chars) would dominate each chunk prompt.
     """
-    cap = env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
+    cap = parse_env_int("CODE_REVIEW_SPEC_EXCERPT_CHARS", CODE_REVIEW_SPEC_EXCERPT_ABS_CHARS, 1_000)
     return _scale_with_context(llm, 8_000, max_chars=cap)
 
 
 def compute_code_review_arch_overview_chars(llm: LLMClient) -> int:
     """Max chars for architecture overview in code review (scaled, absolutely capped)."""
-    cap = env_int("CODE_REVIEW_ARCH_OVERVIEW_CHARS", CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS, 500)
+    cap = parse_env_int("CODE_REVIEW_ARCH_OVERVIEW_CHARS", CODE_REVIEW_ARCH_OVERVIEW_ABS_CHARS, 500)
     return _scale_with_context(llm, 2_000, max_chars=cap)
 
 
 def compute_code_review_existing_codebase_chars(llm: LLMClient) -> int:
     """Max chars for existing codebase excerpt in code review (scaled, absolutely capped)."""
-    cap = env_int("CODE_REVIEW_EXISTING_CHARS", CODE_REVIEW_EXISTING_ABS_CHARS, 500)
+    cap = parse_env_int("CODE_REVIEW_EXISTING_CHARS", CODE_REVIEW_EXISTING_ABS_CHARS, 500)
     return _scale_with_context(llm, 4_000, max_chars=cap)
 
 
