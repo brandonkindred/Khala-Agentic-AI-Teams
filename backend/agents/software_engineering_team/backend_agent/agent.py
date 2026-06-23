@@ -417,6 +417,48 @@ def _is_pytest_assertion_failure(build_errors: str) -> bool:
     return "[pytest_assertion]" in build_errors or "failure_class=pytest_assertion" in build_errors
 
 
+# Sentinel distinguishing "caller did not precompute the failing-test context"
+# from a genuine ``None`` (no failing test). Lets the build-failure loop resolve
+# the context once per iteration and pass it to both the BuildFixSpecialist and
+# the escalation helper, while those helpers still resolve it themselves when
+# called directly (e.g. in unit tests). A named sentinel type (rather than a bare
+# ``object()`` typed ``Any``) lets the params below annotate as
+# ``str | None | _Unset`` — preserving real type info instead of erasing to Any.
+class _Unset:
+    """Sentinel: a parameter was not supplied (distinct from an explicit ``None``)."""
+
+
+_UNSET = _Unset()
+
+
+def _resolve_failing_test_context(
+    build_errors: str, repo_path: Path
+) -> Tuple[Optional[str], Optional[str]]:
+    """Parse the failing pytest file from *build_errors* and read its full text.
+
+    Preconditions: none.
+    Postconditions: returns ``(failing_test_file, failing_test_content)`` — the
+        file path named in a pytest assertion failure (or None), and its full
+        text when the file exists and is readable (or None when there is no such
+        file, it is missing, or it can't be read). Never raises; the read is
+        best-effort. Callers slice ``failing_test_content`` as needed.
+    """
+    failing_test_file = (
+        _extract_failing_test_file_from_build_errors(build_errors)
+        if _is_pytest_assertion_failure(build_errors)
+        else None
+    )
+    failing_test_content: Optional[str] = None
+    if failing_test_file:
+        test_path = repo_path / failing_test_file
+        if test_path.exists():
+            try:
+                failing_test_content = test_path.read_text(encoding="utf-8", errors="replace")
+            except Exception:
+                failing_test_content = None
+    return failing_test_file, failing_test_content
+
+
 def _build_error_signature(build_errors: str) -> str:
     """Compute a signature for same-error detection.
     For pytest assertion failures, use the last 1200 chars (where assertion details
@@ -1244,6 +1286,19 @@ def _task_requirements_with_test_expectations(task: Task, repo_path: Path) -> st
     return task_requirements_with_expectations(task, repo_path, "backend")
 
 
+@dataclass
+class _FileWriteOutput:
+    """Minimal ``write_agent_output`` payload (just ``files`` + ``summary``).
+
+    ``write_agent_output`` is duck-typed over any object exposing ``.files``; this
+    names the throwaway shim used when applying BuildFixSpecialist edits instead of
+    constructing an anonymous ``type(...)`` class inline.
+    """
+
+    files: Dict[str, str]
+    summary: str
+
+
 class BackendExpertAgent:
     """
     Backend expert that implements solutions in Python or Java.
@@ -1883,82 +1938,31 @@ class BackendExpertAgent:
                         repeated_build_failure_reason[:800],
                     )
                     break
+                # Resolve the failing-test context once for the specialist and
+                # escalation paths (both gated on >=2 same failures) so the test
+                # file is parsed and read a single time per iteration.
+                failing_test_file: Optional[str] = None
+                failing_test_content: Optional[str] = None
+                if consecutive_same_build_failures >= 2:
+                    failing_test_file, failing_test_content = _resolve_failing_test_context(
+                        build_errors, repo_path
+                    )
                 # When same error repeats 2+ times, try BuildFixSpecialist for minimal targeted fix
-                if consecutive_same_build_failures >= 2 and build_fix_specialist is not None:
-                    try:
-                        from build_fix_specialist.models import BuildFixInput
-
-                        affected_paths = _extract_affected_file_paths_from_build_errors(
-                            build_errors, repo_path
-                        )
-                        affected_code = _read_affected_files_code(repo_path, affected_paths)
-                        failing_test_file = (
-                            _extract_failing_test_file_from_build_errors(build_errors)
-                            if _is_pytest_assertion_failure(build_errors)
-                            else None
-                        )
-                        failing_test_content = None
-                        if failing_test_file:
-                            test_path = repo_path / failing_test_file
-                            if test_path.exists():
-                                try:
-                                    failing_test_content = test_path.read_text(
-                                        encoding="utf-8", errors="replace"
-                                    )[:3000]
-                                except Exception:
-                                    pass
-                        bf_result = build_fix_specialist.run(
-                            BuildFixInput(
-                                build_errors=build_errors[:4000],
-                                failing_test_content=failing_test_content,
-                                affected_files_code=affected_code,
-                                task_description=current_task.description,
-                            )
-                        )
-                        if bf_result.edits:
-                            max_chars = compute_existing_code_chars(self.llm)
-                            ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
-                                repo_path, bf_result.edits, max_chars
-                            )
-                            if ok_apply and files_dict:
-                                ok_write, write_msg = write_agent_output(
-                                    repo_path,
-                                    type(
-                                        "R", (), {"files": files_dict, "summary": bf_result.summary}
-                                    )(),
-                                    subdir="",
-                                )
-                                if ok_write:
-                                    logger.info(
-                                        "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
-                                        task_id,
-                                        iteration,
-                                        len(files_dict),
-                                    )
-                                    continue  # Re-run build verification
-                                else:
-                                    logger.warning(
-                                        "[%s] WORKFLOW   BuildFixSpecialist write failed: %s",
-                                        task_id,
-                                        write_msg,
-                                    )
-                            else:
-                                logger.warning(
-                                    "[%s] WORKFLOW   BuildFixSpecialist apply failed: %s",
-                                    task_id,
-                                    msg_apply,
-                                )
-                        else:
-                            logger.info(
-                                "[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration",
-                                task_id,
-                            )
-                    except Exception as spec_err:
-                        logger.warning(
-                            "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
-                            task_id,
-                            spec_err,
-                        )
+                if (
+                    consecutive_same_build_failures >= 2
+                    and build_fix_specialist is not None
+                    and self._try_build_fix_specialist(
+                        repo_path=repo_path,
+                        build_errors=build_errors,
+                        build_fix_specialist=build_fix_specialist,
+                        current_task=current_task,
+                        task_id=task_id,
+                        iteration=iteration,
+                        failing_test_file=failing_test_file,
+                        failing_test_content=failing_test_content,
+                    )
+                ):
+                    continue  # Re-run build verification
                 # Collaborate with general problem solver before moving to other subtasks.
                 if problem_solver_agent is not None:
                     bug_issue = {
@@ -2019,68 +2023,14 @@ class BackendExpertAgent:
                     ]
                 # Escalate when same error repeats: add failing test content and clearer instructions
                 if consecutive_same_build_failures >= 2:
-                    failing_test_file = (
-                        _extract_failing_test_file_from_build_errors(build_errors)
-                        if _is_pytest_assertion_failure(build_errors)
-                        else None
+                    self._escalate_qa_issues_for_repeated_build_failure(
+                        qa_issues,
+                        build_errors=build_errors,
+                        consecutive_failures=consecutive_same_build_failures,
+                        repo_path=repo_path,
+                        failing_test_file=failing_test_file,
+                        failing_test_content=failing_test_content,
                     )
-                    escalation_desc = (
-                        f"ESCALATION: This build error has occurred {consecutive_same_build_failures} times. "
-                        "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
-                        "Do not add new features or refactor. Follow the Suggestion and Playbook in the error output."
-                    )
-                    escalation_suggestion = (
-                        "Apply the minimal fix indicated by the error message. "
-                        "Re-read the Suggestion and Playbook sections above. "
-                        "Read the failing test's assertions line-by-line and ensure the implementation satisfies each one."
-                    )
-                    if failing_test_file:
-                        test_path = repo_path / failing_test_file
-                        if test_path.exists():
-                            try:
-                                test_content = test_path.read_text(
-                                    encoding="utf-8", errors="replace"
-                                )
-                                escalation_desc += (
-                                    f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
-                                    f"{test_content[:3000]}{'... [truncated]' if len(test_content) > 3000 else ''}\n```"
-                                )
-                                escalation_suggestion = (
-                                    f"The failing test is in {failing_test_file}. "
-                                    "Read its assertions line-by-line and ensure the implementation satisfies each one."
-                                )
-                            except Exception:
-                                pass
-                        else:
-                            escalation_desc += f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
-                    qa_issues.insert(
-                        0,
-                        {
-                            "severity": "critical",
-                            "description": escalation_desc,
-                            "location": failing_test_file or "",
-                            "recommendation": escalation_suggestion,
-                        },
-                    )
-                    if consecutive_same_build_failures == 4:
-                        # Suggest that test expectations might be wrong
-                        qa_issues.insert(
-                            0,
-                            {
-                                "severity": "critical",
-                                "description": (
-                                    "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
-                                    "If the test asserts behavior that conflicts with the spec, you may need to update the test "
-                                    "rather than the implementation. Explain your reasoning. Either fix the implementation to "
-                                    "satisfy the test, or update the test if it incorrectly asserts behavior."
-                                ),
-                                "location": "",
-                                "recommendation": (
-                                    "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
-                                    "If the implementation is wrong, Fix the implementation to satisfy the test."
-                                ),
-                            },
-                        )
                 task_plan_arg = plan_text_for_fix_loop if fix_attempt_count < 3 else None
                 result = self._regenerate_with_issues(
                     repo_path=repo_path,
@@ -3149,6 +3099,193 @@ class BackendExpertAgent:
                 return True, last_result, ""
             last_error = build_errors or last_error
         return False, last_result, last_error
+
+    def _try_build_fix_specialist(
+        self,
+        *,
+        repo_path: Path,
+        build_errors: str,
+        build_fix_specialist: Any,
+        current_task: Task,
+        task_id: str,
+        iteration: int,
+        failing_test_file: str | None | _Unset = _UNSET,
+        failing_test_content: str | None | _Unset = _UNSET,
+    ) -> bool:
+        """Attempt a minimal, targeted build fix via the BuildFixSpecialist.
+
+        Invoked after the same build error repeats, before falling back to full
+        regeneration. Reads the affected files (and any failing pytest file),
+        asks the specialist for edits, then applies and writes them.
+
+        Preconditions:
+            - ``build_fix_specialist`` is a runnable agent (not None); the caller
+              gates on this and on the repeated-failure threshold.
+            - ``repo_path`` is the backend repo root.
+            - ``failing_test_file``/``failing_test_content`` are the precomputed
+              :func:`_resolve_failing_test_context` result, or left ``_UNSET`` to
+              resolve here (the caller threads them so the test file is read once
+              per iteration across this and the escalation helper).
+        Postconditions:
+            - Returns True iff the specialist produced edits that were applied
+              and written to disk — the caller re-runs build verification.
+            - Returns False on no edits / apply failure / write failure / any
+              error. Best-effort: never raises, so a specialist failure cannot
+              abort the workflow.
+        """
+        try:
+            from software_engineering_team.shared.repo_writer import write_agent_output
+
+            # Resolve the failing-test context here too (inside the try) when the
+            # caller didn't precompute it, so an import or file-read failure honors
+            # the "never raises" postcondition rather than escaping.
+            if failing_test_file is _UNSET:
+                failing_test_file, failing_test_content = _resolve_failing_test_context(
+                    build_errors, repo_path
+                )
+
+            from build_fix_specialist.models import BuildFixInput
+
+            affected_paths = _extract_affected_file_paths_from_build_errors(build_errors, repo_path)
+            affected_code = _read_affected_files_code(repo_path, affected_paths)
+            bf_failing_test_content = (
+                failing_test_content[:3000] if failing_test_content is not None else None
+            )
+            bf_result = build_fix_specialist.run(
+                BuildFixInput(
+                    build_errors=build_errors[:4000],
+                    failing_test_content=bf_failing_test_content,
+                    affected_files_code=affected_code,
+                    task_description=current_task.description,
+                )
+            )
+            if not bf_result.edits:
+                logger.info(
+                    "[%s] WORKFLOW   BuildFixSpecialist returned no edits, falling back to full regeneration",
+                    task_id,
+                )
+                return False
+            max_chars = compute_existing_code_chars(self.llm)
+            ok_apply, msg_apply, files_dict = _apply_build_fix_edits(
+                repo_path, bf_result.edits, max_chars
+            )
+            if not (ok_apply and files_dict):
+                logger.warning(
+                    "[%s] WORKFLOW   BuildFixSpecialist apply failed: %s", task_id, msg_apply
+                )
+                return False
+            ok_write, write_msg = write_agent_output(
+                repo_path,
+                _FileWriteOutput(files=files_dict, summary=bf_result.summary),
+                subdir="",
+            )
+            if not ok_write:
+                logger.warning(
+                    "[%s] WORKFLOW   BuildFixSpecialist write failed: %s", task_id, write_msg
+                )
+                return False
+            logger.info(
+                "[%s] WORKFLOW   [%d] BuildFixSpecialist applied %d edit(s), re-running build",
+                task_id,
+                iteration,
+                len(files_dict),
+            )
+            return True
+        except Exception as spec_err:
+            logger.warning(
+                "[%s] WORKFLOW   BuildFixSpecialist failed (non-blocking): %s",
+                task_id,
+                spec_err,
+            )
+            return False
+
+    @staticmethod
+    def _escalate_qa_issues_for_repeated_build_failure(
+        qa_issues: List[Dict[str, Any]],
+        *,
+        build_errors: str,
+        consecutive_failures: int,
+        repo_path: Path,
+        failing_test_file: str | None | _Unset = _UNSET,
+        failing_test_content: str | None | _Unset = _UNSET,
+    ) -> None:
+        """Prepend escalation guidance to *qa_issues* when a build error repeats.
+
+        Mutates *qa_issues* in place: prepends a "focus only on this error"
+        issue (enriched with the failing test's contents when available), and
+        at exactly the 4th identical failure additionally prepends a "the test
+        expectations may be wrong" issue ahead of it.
+
+        Preconditions:
+            - *qa_issues* is the (possibly empty) list of issue dicts for the
+              upcoming regeneration; the caller gates on
+              ``consecutive_failures >= 2``.
+            - ``failing_test_file``/``failing_test_content`` are the precomputed
+              :func:`_resolve_failing_test_context` result, or left ``_UNSET`` to
+              resolve here (the caller threads them to avoid re-reading the test
+              file already read for the BuildFixSpecialist this iteration).
+        Postconditions:
+            - One issue (two at the 4th failure) is inserted at the front of
+              *qa_issues*; no existing element is modified. Reading the failing
+              test is best-effort and never raises.
+        """
+        if failing_test_file is _UNSET:
+            failing_test_file, failing_test_content = _resolve_failing_test_context(
+                build_errors, repo_path
+            )
+        escalation_desc = (
+            f"ESCALATION: This build error has occurred {consecutive_failures} times. "
+            "Focus ONLY on fixing this specific error. Make minimal, targeted changes. "
+            "Do not add new features or refactor. Follow the Suggestion and Playbook in the error output."
+        )
+        escalation_suggestion = (
+            "Apply the minimal fix indicated by the error message. "
+            "Re-read the Suggestion and Playbook sections above. "
+            "Read the failing test's assertions line-by-line and ensure the implementation satisfies each one."
+        )
+        if failing_test_file:
+            if failing_test_content is not None:
+                escalation_desc += (
+                    f"\n\nFailing test expectations (from {failing_test_file}):\n```\n"
+                    f"{failing_test_content[:3000]}"
+                    f"{'... [truncated]' if len(failing_test_content) > 3000 else ''}\n```"
+                )
+                escalation_suggestion = (
+                    f"The failing test is in {failing_test_file}. "
+                    "Read its assertions line-by-line and ensure the implementation satisfies each one."
+                )
+            elif not (repo_path / failing_test_file).exists():
+                escalation_desc += (
+                    f"\n\nFailing test file: {failing_test_file} (file not found in repo)."
+                )
+        qa_issues.insert(
+            0,
+            {
+                "severity": "critical",
+                "description": escalation_desc,
+                "location": failing_test_file or "",
+                "recommendation": escalation_suggestion,
+            },
+        )
+        if consecutive_failures == 4:
+            # Suggest that test expectations might be wrong
+            qa_issues.insert(
+                0,
+                {
+                    "severity": "critical",
+                    "description": (
+                        "ESCALATION (4th same failure): Consider whether the failing test expectations are wrong. "
+                        "If the test asserts behavior that conflicts with the spec, you may need to update the test "
+                        "rather than the implementation. Explain your reasoning. Either fix the implementation to "
+                        "satisfy the test, or update the test if it incorrectly asserts behavior."
+                    ),
+                    "location": "",
+                    "recommendation": (
+                        "Re-read the failing test and the spec. If the test is wrong, Change the test to match the spec. "
+                        "If the implementation is wrong, Fix the implementation to satisfy the test."
+                    ),
+                },
+            )
 
     @staticmethod
     def _run_code_review(

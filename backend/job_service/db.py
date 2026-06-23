@@ -364,6 +364,37 @@ def apply_patch(
         return _row_to_dict(cur.fetchone(), cur)
 
 
+def cancel_active_job(team: str, job_id: str) -> bool:
+    """Atomically cancel a job only if it is still pending/running.
+
+    Preconditions:
+        - ``team`` / ``job_id`` identify a (possibly absent) job.
+    Postconditions:
+        - The status is set to ``cancelled`` in a single conditional ``UPDATE``
+          (status guarded in the ``WHERE`` clause) and ``True`` is returned ONLY
+          when the row was pending/running at write time. A job that raced to a
+          terminal status (completed/failed/cancelled/interrupted), or does not
+          exist, is left untouched and ``False`` is returned. This closes the
+          check-then-act window a separate get-then-update would leave open.
+    """
+    now = _now_iso()
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute(
+            """
+                UPDATE jobs
+                SET status = 'cancelled',
+                    updated_at = %s,
+                    last_heartbeat_at = %s,
+                    data = jsonb_set(data, '{last_activity_at}', %s::jsonb)
+                WHERE team = %s AND job_id = %s
+                  AND status IN ('pending', 'running')
+                RETURNING job_id
+                """,
+            (now, now, json.dumps(now), team, job_id),
+        )
+        return cur.fetchone() is not None
+
+
 def append_event(
     team: str,
     job_id: str,

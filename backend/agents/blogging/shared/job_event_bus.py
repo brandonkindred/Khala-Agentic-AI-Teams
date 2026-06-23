@@ -40,19 +40,30 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from shared_concurrency import BackgroundHeartbeat
+from shared_env import parse_int
 
 logger = logging.getLogger(__name__)
 
 
 def _env_int(name: str, default: int) -> int:
+    """Parse an int env var via the canonical ``shared_env.parse_int``, warning on a typo.
+
+    Postconditions: returns the parsed value, or ``default`` when the var is
+    unset/blank/unparseable. A *present but unparseable* override additionally
+    logs a warning so a typo'd tuning var is visible rather than silently
+    swallowed; an unset/blank var is silent.
+
+    The explicit ``int(raw)`` probe is deliberate: ``parse_int`` cannot warn, and
+    inferring "unparseable" from "result == default" would false-positive whenever
+    the override legitimately equals the default.
+    """
     raw = os.environ.get(name, "").strip()
-    if not raw:
-        return default
-    try:
-        return int(raw)
-    except ValueError:
-        logger.warning("Invalid %s=%r; using default %d", name, raw, default)
-        return default
+    if raw:
+        try:
+            int(raw)
+        except ValueError:
+            logger.warning("Invalid %s=%r; using default %d", name, raw, default)
+    return parse_int(name, default)
 
 
 # Idle subscriptions older than this are reaped. Pipeline jobs run on the order
