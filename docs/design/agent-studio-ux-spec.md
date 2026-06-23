@@ -60,6 +60,18 @@ indicators show progress, not links. Iteration happens only via the explicit Sta
 (→ Stage 2) and **"iterate roster"** (→ Stage 3). This keeps the journey guided while still allowing controlled
 back‑loops.
 
+**Forward‑only must not trap the user on one agent.** Because the stepper never jumps back to Stage 1, picking a
+*different* agent after advancing is an explicit **in‑context** action, not backward navigation:
+
+- **Stage 2** and **Stage 3** each expose a **`[ Browse agents ]`** affordance that opens the Stage‑1 catalog
+  (browse + filter + inspect drawer, the same `agent-catalog` component) in a slide‑out. Selecting another agent
+  there updates `registryAgentId` in the handoff state **without** resetting later‑stage work.
+- In Stage 3, the **`+ Add → Search registry agents`** path is itself a full catalog browser with inspect, so a
+  roster can be staffed with agents that were never the "current" `registryAgentId`.
+
+The stepper stays forward‑only (no Stage‑1 stepper click, no confirmation dialog needed); the catalog is simply
+reachable as an overlay from the later stages.
+
 ### 2.2 Navigation changes (`user-interface/src/app/models/navigation.model.ts`, `agentic-ai` group)
 
 ```
@@ -110,6 +122,11 @@ level (one instance per Studio session). It holds the current `registryAgentId`,
 - **Persistence:** the service hydrates from / syncs to the server-side **draft API** (see §3.5). The draft is the
   durable source of truth; the service may keep an in‑session `localStorage` cache for unsaved edits, but resume
   across reloads/devices comes from the API, not local storage.
+- **Local‑cache vs server‑draft conflict.** When the user **loads** a server draft while the `localStorage` cache
+  holds unsaved local edits, the Studio prompts: *"You have unsaved changes — save them first, or discard?"*
+  **Save first** flushes the local cache to the current draft (`POST …/drafts`) before hydrating the chosen draft;
+  **Discard** clears the local cache and then hydrates. The server draft is never silently overwritten and local
+  edits are never silently lost — one of the two is always an explicit choice. Loading never merges the two states.
 
 ---
 
@@ -197,6 +214,7 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 
 - **Reuse as‑is:** `process-designer-chat` (LLM design mode, `@Input() team`); team CRUD, process/DAG editing, and roster‑validation display from `agentic-team-dashboard` (`agentic-team-api.service.ts`).
 - **New (one small component): Roster panel.** Lists roster entries with a **`source` badge** (`registry` ✦ / `generated` ⚙) and a delete control. **"+ Add"** offers two paths: **search registry agents** (→ new `POST …/teams/{id}/agents/from-registry`) or **suggest via chat** (existing LLM flow). Deleting calls new `DELETE …/teams/{id}/agents/{agent_name}`.
+- **Editing roster entries.** Clicking a roster entry opens a small inline edit form for its **role / skills / tools** (the `AgenticTeamAgent` fields the old team dashboard exposed), persisted via the existing team‑update endpoint — so the capability the deleted `agentic-team-dashboard` shell provided is preserved, not lost in the cutover. **`generated`** entries are fully editable; **`registry`** entries show their manifest‑projected fields read‑only with an "override for this team" toggle, so edits never mutate the source manifest. Re‑running the process designer can also re‑propose roster changes (the chat flow), but inline editing is the direct path.
 - **Roster validation — "fully staffed":** a roster is *fully staffed* when **every step in the process DAG has at least one assigned agent**, and each assigned agent has the **skills the step requires** (per the process design). This is exactly the existing logic in `roster_validation.py` (it reads the roster's `skills/capabilities/tools` list fields) — registry agents pass uniformly because the `from-registry` projection fills those fields (see §5.3). The `✓ fully staffed` / warning indicator surfaces that module's result; no new validation rules are introduced.
 - **Handoff (`Test this team →`):** **enabled only when the roster is fully staffed AND a process is selected.** Clicking it sets `teamId` + `processId` and advances to Stage 4. While disabled, the button shows a **tooltip** listing what's missing (e.g. "step *Review* has no agent" / "select a process").
 
@@ -227,6 +245,10 @@ agents (the ones you just built/tested) with **LLM‑generated** suggestions.
 
 - **Manual sub‑mode — reuse as‑is:** `agentic-team-test-panel` (composes `agent-test-chat` + `pipeline-test-runner`; drives `…/test-chat/*` and `…/test-pipeline/runs` + `/input`).
 - **Persona sub‑mode — reuse as‑is:** `start-test-dialog`, `persona-editor-dialog`, `persona-test-audit-panel` (from the old persona dashboard). The launcher is **pre‑seeded** with the current team as `target_team_key = "agentic_team:<teamId>"`; the agentic team appears in the dropdown automatically once the backend `/testable-teams` change lands (§5). Personas are picked from the library or created inline.
+- **Run progress UI (sets expectations for slow autonomous runs).** Because founder poll intervals are 15–30s
+  (see §6), the live‑run header shows an **elapsed‑time counter** and, during a `waiting_for_input` WAIT step, an
+  animated **"persona is thinking…"** indicator. When the process DAG length is known, a **step progress bar**
+  (`step 2 of 4`) renders alongside the transcript; otherwise it falls back to the indeterminate "thinking…" state.
 - **Back‑loops:** "iterate roster" → Stage 3; "fix an agent" → Stage 2.
 
 ### 3.5 Drafts & session resume (server‑side)
@@ -242,9 +264,53 @@ match the persisted nature of teams/personas):
   hydrates `AgentStudioStateService` (§2.4) and jumps the stepper to the furthest reachable stage.
 - **Scope** — drafts are **scoped to the authenticated user**; one user cannot see another's drafts.
 
+**Draft payload schema** (the request/response body for `POST`/`GET …/drafts`, so frontend and backend agree):
+
+```ts
+interface AgentStudioDraft {
+  draft_id?: string;          // server-assigned; omitted on first create
+  name?: string;              // user label; defaults to a timestamp
+  updated_at?: string;        // ISO-8601; server-managed
+  // ── handoff state (§2.4) ──
+  registryAgentId?: string;
+  teamId?: string;
+  processId?: string;
+  personaId?: string;
+  // ── partial per-stage work ──
+  stage2Inputs?: {
+    savedInputId?: string;                 // if a saved input was selected
+    formValues?: Record<string, unknown>;  // unsaved schema-form values
+  };
+  stage3RosterDraft?: Array<{
+    agentName: string;
+    source: 'registry' | 'generated';
+    manifestId?: string;                   // set when source === 'registry'
+    role?: string;
+    skills?: string[];
+  }>;
+}
+```
+
+All fields except `agentName`/`source` (within a roster entry) are optional — a draft saved at Stage 1 carries only
+`registryAgentId`. The server persists the blob verbatim under the user id; it does not interpret stage payloads.
+
 This makes draft persistence a **must‑have backend touchpoint** (see §5.5). The frontend `AgentStudioStateService`
 is the single client owner of draft load/save; a transient `localStorage` cache may hold unsaved edits between
 auto‑syncs, but the API is the source of truth.
+
+### 3.6 Loading, empty, and error states
+
+The wireframes above show the happy path; every stage also specifies the three non‑happy states. Where a stage
+reuses an existing component, it inherits that component's existing handling — these are conventions, not new UI.
+
+| State | Convention | Per‑stage specifics |
+|---|---|---|
+| **Loading** | Inline skeleton/spinner in the affected panel (never a full‑page block); the stepper stays interactive. | S1 catalog grid → card skeletons; S2 run → spinner on the output pane + disabled `Run`; S4 live‑run → the §3.5/Stage‑4 elapsed counter + "persona is thinking…". |
+| **Empty** | A centered message **with the primary action**, never a bare "no data". | S1 "No agents match these filters — clear filters"; S2 "No runs yet — run the agent to see history"; S3 "Roster is empty — + Add an agent"; S4 "No personas — + New persona". |
+| **Error** | A dismissible error banner scoped to the panel, with **Retry** where the action is idempotent; the underlying form/selection is preserved. | S1/S2 catalog & invoke errors reuse `agent-catalog`/`agent-runner` error surfaces (`POST …/invoke` failure → banner + Retry, inputs kept); S3 team/roster mutation failure → banner, optimistic row rolled back; S4 pipeline‑start or poll failure → banner on the run card + Retry, persona/process selection kept. |
+
+Sandbox‑specific failures (COLD→WARM warm‑up error in Stage 2) surface through the runner's existing sandbox‑status
+channel (§Stage 2) rather than a new code path.
 
 ---
 
@@ -304,7 +370,10 @@ sequenceDiagram
 2. **Testable‑teams enumeration** — `user_agent_founder/api/main.py:list_testable_teams` also lists agentic teams (cross‑service `GET …/agentic-team-provisioning/teams`, filtered to teams with ≥1 `complete` process). Without this the persona dropdown is empty.
 3. **Registry → roster bridge** — add `source: "generated"|"registry"` + `manifest_id` to `agentic_team_provisioning/models.py:AgenticTeamAgent` (additive, defaulted). New `POST …/teams/{id}/agents/from-registry` (projects an `AgentManifest`'s tags/tools/summary into the roster fields so `roster_validation.py` needs no change) and `DELETE …/teams/{id}/agents/{agent_name}`.
 4. **Studio drafts — `POST /api/agent-studio/drafts` + `GET /api/agent-studio/drafts`** (see §3.5). User‑scoped persistence of the handoff state + partial work, for save/resume across reloads and devices. New backend surface (new route group + a `agent_studio_drafts` store keyed by user id); no dependency on the other touchpoints. Required because the header `Save draft` / load‑draft UX is non‑functional without it.
-5. *(Recommended cleanup)* explicit `process_id` column on `user_agent_founder_runs` instead of overloading `repo_path` to carry the chosen process id.
+
+**Recommended (not required for the UX to ship, but should land alongside it):**
+
+5. Explicit `process_id` column on `user_agent_founder_runs` instead of overloading `repo_path` to carry the chosen process id. Purely a data‑model cleanup — the UX works either way — but doing it with this work avoids cementing the overload. (Tracked as an open decision in §7.)
 
 **Nice‑to‑have (UX works without; flag as follow‑ups):** real registry‑agent invocation inside `pipeline_runner.py` (`source=="registry"` branch — Phase 1 runs them as LLM personas, acceptable for v1); surfacing not‑yet‑rostered registry agents in `recommend_agents_for_step`; faster persona poll interval for agentic runs.
 
@@ -332,9 +401,15 @@ sequenceDiagram
 - **Draft persistence → server‑side.** `POST/GET /api/agent-studio/drafts`, user‑scoped, cross‑device (see §3.5, §5.4).
 - **Relocation homes confirmed:** Provisioning → Stage 1; Backlog/Sprints/Feedback → `/product-delivery`; Cognition → `/cognition`. No legacy routes retained.
 
-**Still open:**
-1. **High‑fidelity Figma mockups** in addition to these wireframes? (Figma MCP is available.)
-2. **`process_id` column vs `repo_path` overload** on `user_agent_founder_runs` (recommend the column).
+**Deferred (explicitly — none block approving this design):**
+
+| # | Question | Disposition | Owner | Resolves at |
+|---|---|---|---|---|
+| 1 | **High‑fidelity Figma mockups** in addition to these wireframes? | Deferred — these ASCII wireframes are sufficient to approve direction and start the build; Figma is a polish step, not a blocker. | UX lead | Implementation kickoff (Phase 3, §9) |
+| 2 | **`process_id` column vs `repo_path` overload** on `user_agent_founder_runs` | Deferred with a standing recommendation: **add the column.** Captured as Recommended item 5 in §5. | Backend lead | The first implementation PR that touches `user_agent_founder_runs` |
+
+Both are tracked here so approval of this spec is not gated on them; each has a named role‑owner and a concrete
+point at which it must be decided.
 
 ---
 
