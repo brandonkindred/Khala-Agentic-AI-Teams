@@ -46,6 +46,10 @@ _PROFILE_COLUMNS = "user_id, display_name, email, bio, profile_json, created_at,
 #: (SELECT) so a schema change is edited once. Trusted literal only.
 _ASSOC_COLUMNS = "id, user_id, artifact_type, team, artifact_id, label, role, created_at"
 
+#: Single-row profile lookup, used twice in ``get_profile`` (initial read + the
+#: lost-insert-race re-read). Kept as one literal so both stay identical.
+_SELECT_PROFILE_BY_ID = f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s"
+
 
 def _now_iso() -> str:
     """Return the current UTC time as an ISO-8601 string.
@@ -127,10 +131,7 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
     """
     assert user_id, "user_id must be non-empty"
     with get_conn() as conn, conn.cursor(row_factory=dict_row) as cur:
-        cur.execute(
-            f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
-            (user_id,),
-        )
+        cur.execute(_SELECT_PROFILE_BY_ID, (user_id,))
         row = cur.fetchone()
         if row is None:
             now = _now_iso()
@@ -152,10 +153,7 @@ def get_profile(user_id: str = DEFAULT_USER_ID) -> UserProfile:
                 }
             else:
                 # Lost an insert race; read the row the winner created.
-                cur.execute(
-                    f"SELECT {_PROFILE_COLUMNS} FROM user_profiles WHERE user_id = %s",
-                    (user_id,),
-                )
+                cur.execute(_SELECT_PROFILE_BY_ID, (user_id,))
                 row = cur.fetchone()
     # Postcondition: the row exists (INSERT ... ON CONFLICT guarantees it; there
     # is no DELETE path for profiles). A None here is a broken invariant, not a

@@ -12,11 +12,14 @@ Endpoints:
 - PUT    /api/user-profile                 -> update profile fields
 - GET    /api/user-profile/associations    -> linked artifacts (optional ?artifact_type=)
 - GET    /api/user-profile/integrations    -> integration status (pass-through)
+- GET    /api/user-profile/overview        -> profile + associations + integrations (one round-trip)
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
@@ -60,28 +63,32 @@ class ProfileOverview(BaseModel):
     integrations: list[IntegrationStatus]
 
 
-def _unavailable(exc: Exception) -> HTTPException:
-    """Map a storage failure (e.g. Postgres disabled) to HTTP 503."""
-    logger.warning("user_profile: storage unavailable: %s", exc, exc_info=True)
-    return HTTPException(status_code=503, detail="User profile storage is unavailable.")
+@contextmanager
+def _storage_guard() -> Iterator[None]:
+    """Map any storage failure (e.g. Postgres disabled) raised in the block to HTTP 503.
+
+    Centralizes the read/write error contract so each endpoint body stays a
+    single store call rather than repeating the same try/except.
+    """
+    try:
+        yield
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("user_profile: storage unavailable: %s", exc, exc_info=True)
+        raise HTTPException(status_code=503, detail="User profile storage is unavailable.") from exc
 
 
 @router.get("", response_model=UserProfile)
 def read_profile() -> UserProfile:
     """Return the current (default) profile, creating it on first access."""
-    try:
+    with _storage_guard():
         return get_profile(DEFAULT_USER_ID)
-    except Exception as exc:  # noqa: BLE001
-        raise _unavailable(exc) from exc
 
 
 @router.put("", response_model=UserProfile)
 def update_profile(update: UserProfileUpdate) -> UserProfile:
     """Apply a partial update to the current profile and return it."""
-    try:
+    with _storage_guard():
         return upsert_profile(update, user_id=DEFAULT_USER_ID)
-    except Exception as exc:  # noqa: BLE001
-        raise _unavailable(exc) from exc
 
 
 @router.get("/associations", response_model=list[Association])
@@ -92,10 +99,8 @@ def read_associations(
     ] = None,
 ) -> list[Association]:
     """List artifacts linked to the current profile, newest first."""
-    try:
+    with _storage_guard():
         return list_associations(DEFAULT_USER_ID, artifact_type)
-    except Exception as exc:  # noqa: BLE001
-        raise _unavailable(exc) from exc
 
 
 def _integrations_list() -> list[IntegrationStatus]:
@@ -130,12 +135,11 @@ def read_integrations() -> list[IntegrationStatus]:
 def read_overview() -> ProfileOverview:
     """Profile + linked artifacts + integration status in a single response, so
     the profile page loads in one round-trip instead of three."""
-    try:
-        profile = get_profile(DEFAULT_USER_ID)
-        associations = list_associations(DEFAULT_USER_ID)
-        # _integrations_list never raises today, but keeping it inside the try
-        # means any future change can't bypass the 503 mapping with a raw 500.
-        integrations = _integrations_list()
-    except Exception as exc:  # noqa: BLE001
-        raise _unavailable(exc) from exc
-    return ProfileOverview(profile=profile, associations=associations, integrations=integrations)
+    # _integrations_list never raises today, but keeping it inside the guard means
+    # any future change can't bypass the 503 mapping with a raw 500.
+    with _storage_guard():
+        return ProfileOverview(
+            profile=get_profile(DEFAULT_USER_ID),
+            associations=list_associations(DEFAULT_USER_ID),
+            integrations=_integrations_list(),
+        )
