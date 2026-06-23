@@ -55,6 +55,77 @@ def test_construction_raises_when_no_url_anywhere(monkeypatch: pytest.MonkeyPatc
 
 
 # ---------------------------------------------------------------------------
+# Real HTTP client wrappers — exercised against an httpx MockTransport so the
+# new cancel endpoint and the bulk shutdown endpoint are covered without a live
+# job service. These pin the wrapper -> URL contract (and confirm the methods
+# the wrapper relies on actually exist on the HTTP client).
+# ---------------------------------------------------------------------------
+
+
+def _route_through_mock_transport(monkeypatch: pytest.MonkeyPatch, handler) -> None:
+    """Make the client's internal ``httpx.Client(...)`` use a MockTransport.
+
+    ``JobServiceClient._request`` constructs ``httpx.Client(timeout=...)`` per
+    call, so patching the module-level ``httpx.Client`` to inject the transport
+    intercepts every request without a live server.
+    """
+    transport = httpx.MockTransport(handler)
+    real_client_cls = httpx.Client
+
+    def factory(*args, **kwargs):
+        kwargs["transport"] = transport
+        return real_client_cls(*args, **kwargs)
+
+    monkeypatch.setattr(httpx, "Client", factory)
+
+
+def test_real_client_cancel_active_job_posts_and_parses(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"cancelled": True})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.cancel_active_job("j1") is True
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://js.example/jobs/t/j1/cancel"
+
+
+def test_real_client_cancel_active_job_false_when_not_cancelled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A terminal/missing job yields ``cancelled: false`` server-side -> False."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    _route_through_mock_transport(monkeypatch, lambda _req: httpx.Response(200, json={"cancelled": False}))
+    client = JobServiceClient(team="t")
+    assert client.cancel_active_job("j1") is False
+
+
+def test_real_client_mark_all_active_jobs_failed_hits_bulk_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shutdown hook routes through the atomic server-side bulk endpoint
+    (``/mark-all-running-failed``), not a client-side list+update loop."""
+    monkeypatch.setenv("JOB_SERVICE_URL", "http://js.example/")
+    captured: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        return httpx.Response(200, json={"failed_job_ids": ["a", "b"]})
+
+    _route_through_mock_transport(monkeypatch, handler)
+    client = JobServiceClient(team="t")
+    assert client.mark_all_active_jobs_failed("shutdown") == ["a", "b"]
+    assert captured["method"] == "POST"
+    assert captured["url"] == "http://js.example/jobs/t/mark-all-running-failed"
+
+
+# ---------------------------------------------------------------------------
 # Fake stale-job sweep — mirrors production exclusions
 # ---------------------------------------------------------------------------
 

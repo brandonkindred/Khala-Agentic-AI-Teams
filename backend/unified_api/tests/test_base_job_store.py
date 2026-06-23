@@ -66,6 +66,14 @@ def test_cancel_terminal_job_is_noop(store: _Store) -> None:
     assert store.get_job("done")["status"] == JOB_STATUS_COMPLETED
 
 
+def test_list_jobs_no_args_returns_all(store: _Store) -> None:
+    # Default behaviour: no running_only, no statuses -> every job, regardless of status.
+    store.create_job("r", status=JOB_STATUS_RUNNING)
+    store.create_job("p", status=JOB_STATUS_PENDING)
+    store.create_job("d", status=JOB_STATUS_COMPLETED)
+    assert {j["job_id"] for j in store.list_jobs()} == {"r", "p", "d"}
+
+
 def test_list_jobs_running_only_and_explicit_statuses(store: _Store) -> None:
     store.create_job("r", status=JOB_STATUS_RUNNING)
     store.create_job("p", status=JOB_STATUS_PENDING)
@@ -83,10 +91,12 @@ def test_list_jobs_running_only_and_explicit_statuses(store: _Store) -> None:
 
 
 def test_mark_all_running_jobs_failed_returns_ids(store: _Store) -> None:
+    # "running" here means *active* — both pending and running jobs are marked
+    # failed (the bulk shutdown sweep targets every non-terminal, non-waiting job).
     store.create_job("a", status=JOB_STATUS_RUNNING)
     store.create_job("b", status=JOB_STATUS_PENDING)
     failed = store.mark_all_running_jobs_failed("shutdown")
-    assert set(failed) == {"a", "b"}
+    assert set(failed) == {"a", "b"}  # pending 'b' is included
     assert store.get_job("a")["status"] == "failed"
 
 
