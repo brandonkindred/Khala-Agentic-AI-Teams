@@ -39,7 +39,6 @@ from ._parse_helpers import (
     parse_retry_budget,
     validate_structured_rules,
 )
-from ._response_schemas import CRITIQUE_SCHEMA, DESIGN_SPEC_SCHEMA
 from .design_review import _coerce_critique, _sizing_owned_by_gate, format_prior_critiques
 from .model_factory import get_strands_model
 
@@ -299,7 +298,7 @@ class DesignAgent:
             # Agent construction is cheap — no I/O, just env reads + object
             # init via get_strands_model — so building one per attempt is safe.
             agent = Agent(
-                model=get_strands_model("strategy_design", response_schema=DESIGN_SPEC_SCHEMA),
+                model=get_strands_model("strategy_design"),
                 system_prompt=system_prompt,
                 tools=[],
             )
@@ -495,7 +494,7 @@ class DesignAgent:
         to the original spec.
         """
         agent = Agent(
-            model=get_strands_model("strategy_design", response_schema=CRITIQUE_SCHEMA),
+            model=get_strands_model("strategy_design"),
             system_prompt=_SELF_REVIEW_SYSTEM_PROMPT,
             tools=[],
         )
