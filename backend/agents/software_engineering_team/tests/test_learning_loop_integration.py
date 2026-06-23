@@ -36,6 +36,7 @@ def _se_schema():
 
 
 def test_crash_to_post_mortem_to_learning_to_prompt(_se_schema, tmp_path) -> None:
+    """A simulated crash flows through post-mortem to learning to the next Tech Lead prompt."""
     from software_engineering_team.shared.learnings_store import count_learnings, retrieve_learnings
     from software_engineering_team.shared.post_mortem import write_post_mortem
     from software_engineering_team.tech_lead_agent.agent import TechLeadAgent

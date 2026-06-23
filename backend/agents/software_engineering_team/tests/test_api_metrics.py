@@ -14,6 +14,7 @@ def _client() -> TestClient:
 
 
 def test_metrics_dora_default_window() -> None:
+    """GET /dora defaults to a 30-day window and returns the full metrics shape."""
     resp = _client().get("/dora")
     assert resp.status_code == 200
     body = resp.json()
@@ -32,6 +33,7 @@ def test_metrics_dora_default_window() -> None:
 
 
 def test_metrics_dora_window_is_clamped() -> None:
+    """window_days is clamped to the [1, 365] range."""
     high = _client().get("/dora", params={"window_days": 10_000}).json()
     assert high["window_days"] == 365.0
     low = _client().get("/dora", params={"window_days": 0}).json()

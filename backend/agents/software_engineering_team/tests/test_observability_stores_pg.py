@@ -29,6 +29,7 @@ def _schema():
 
 
 def test_learnings_upsert_dedup_and_retrieve(_schema) -> None:
+    """Upserting the same fingerprint bumps occurrences and refreshes the counter-measure."""
     from software_engineering_team.shared import learnings_store as ls
 
     assert ls.upsert_learning(
@@ -47,6 +48,7 @@ def test_learnings_upsert_dedup_and_retrieve(_schema) -> None:
 
 
 def test_learnings_category_filter(_schema) -> None:
+    """Learnings category filter."""
     from software_engineering_team.shared import learnings_store as ls
 
     ls.upsert_learning(pattern="qa flake", trigger="timing flaky test", category="qa")
@@ -56,6 +58,7 @@ def test_learnings_category_filter(_schema) -> None:
 
 
 def test_events_roundtrip_and_dora(_schema) -> None:
+    """Events roundtrip and dora."""
     from software_engineering_team.metrics.dora import compute_dora
     from software_engineering_team.shared import se_events
 
@@ -107,6 +110,7 @@ def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
 
 
 def test_se_events_helpers(_schema) -> None:
+    """Se events helpers."""
     from software_engineering_team.shared import se_events
 
     assert se_events.job_has_events("jX") is False
@@ -120,6 +124,7 @@ def test_se_events_helpers(_schema) -> None:
 
 
 def test_record_event_coerces_naive_ts_to_utc(_schema) -> None:
+    """Record event coerces naive ts to utc."""
     from datetime import datetime as _dt
 
     from software_engineering_team.shared import se_events
@@ -132,6 +137,7 @@ def test_record_event_coerces_naive_ts_to_utc(_schema) -> None:
 
 
 def test_trace_write_and_cost(_schema, monkeypatch) -> None:
+    """Trace write and cost."""
     monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
     from software_engineering_team.shared import trace_store
 

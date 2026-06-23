@@ -5,6 +5,7 @@ from __future__ import annotations
 
 
 def test_se_env_config_reexports_shared() -> None:
+    """The SE env_config re-exports the shared env_bool/env_int/env_float readers."""
     from shared_env_config import env_bool as shared_env_bool
     from shared_env_config import env_float as shared_env_float
     from shared_env_config import env_int as shared_env_int

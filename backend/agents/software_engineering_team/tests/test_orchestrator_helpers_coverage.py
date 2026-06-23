@@ -28,7 +28,7 @@ def _autouse_patched_job_store(patched_job_store):
 
 
 def test_iso_now_returns_iso_string():
-
+    """Iso now returns iso string."""
     out = orchestrator._iso_now()
     assert isinstance(out, str)
     # Must be parseable by datetime.fromisoformat (with optional Z)
@@ -38,6 +38,7 @@ def test_iso_now_returns_iso_string():
 
 
 def test_partition_tasks_by_completion_splits_and_preserves_order():
+    """Partition tasks by completion splits and preserves order."""
     import orchestrator
 
     all_tasks = {"a": "ta", "b": "tb", "c": "tc", "d": "td"}
@@ -53,24 +54,22 @@ def test_partition_tasks_by_completion_splits_and_preserves_order():
 
 
 def test_partition_tasks_by_completion_id_in_both_sets_appears_in_both():
+    """Partition tasks by completion id in both sets appears in both."""
     import orchestrator
 
     all_tasks = {"a": "ta", "b": "tb"}
     # "a" is both completed and still listed as remaining: it must appear in both
     # lists, exactly as the two independent comprehensions produced.
-    completed, remaining = orchestrator._partition_tasks_by_completion(
-        all_tasks, {"a"}, {"a", "b"}
-    )
+    completed, remaining = orchestrator._partition_tasks_by_completion(all_tasks, {"a"}, {"a", "b"})
     assert completed == ["ta"]
     assert remaining == ["ta", "tb"]
 
 
 def test_partition_tasks_by_completion_empty_sets_yield_empty_lists():
+    """Partition tasks by completion empty sets yield empty lists."""
     import orchestrator
 
-    completed, remaining = orchestrator._partition_tasks_by_completion(
-        {"a": "ta"}, set(), set()
-    )
+    completed, remaining = orchestrator._partition_tasks_by_completion({"a": "ta"}, set(), set())
     assert completed == []
     assert remaining == []
 
@@ -87,7 +86,7 @@ def test_partition_tasks_by_completion_rejects_non_set_ids():
 
 
 def test_convert_to_structured_questions_assigns_unique_ids_and_options():
-
+    """Convert to structured questions assigns unique ids and options."""
     qs = orchestrator._convert_to_structured_questions(
         ["What is the goal?", "What is the deadline?"], source="planning"
     )
@@ -102,19 +101,19 @@ def test_convert_to_structured_questions_assigns_unique_ids_and_options():
 
 
 def test_convert_to_structured_questions_empty_list_returns_empty():
-
+    """Convert to structured questions empty list returns empty."""
     assert orchestrator._convert_to_structured_questions([]) == []
 
 
 def test_check_cancellation_raises_when_cancel_requested(monkeypatch):
-
+    """Check cancellation raises when cancel requested."""
     monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: True)
     with pytest.raises(orchestrator.CancellationError):
         orchestrator._check_cancellation("job-x")
 
 
 def test_check_cancellation_silent_when_not_requested(monkeypatch):
-
+    """Check cancellation silent when not requested."""
     monkeypatch.setattr(orchestrator, "is_cancel_requested", lambda jid: False)
     # Should return None silently
     assert orchestrator._check_cancellation("job-x") is None
@@ -143,8 +142,8 @@ def test_wait_for_user_answers_returns_false_when_job_failed(monkeypatch):
 
 
 def test_get_task_stats_returns_zeros_with_empty_snapshot(monkeypatch):
-
     # Patch execution_tracker.snapshot to return no tasks
+    """Get task stats returns zeros with empty snapshot."""
     monkeypatch.setattr(orchestrator.execution_tracker, "snapshot", lambda: {"tasks": []})
     stats = orchestrator._get_task_stats()
     assert stats == {
@@ -157,7 +156,7 @@ def test_get_task_stats_returns_zeros_with_empty_snapshot(monkeypatch):
 
 
 def test_get_task_stats_computes_percent_with_completed_tasks(monkeypatch):
-
+    """Get task stats computes percent with completed tasks."""
     monkeypatch.setattr(
         orchestrator.execution_tracker,
         "snapshot",
@@ -179,7 +178,7 @@ def test_get_task_stats_computes_percent_with_completed_tasks(monkeypatch):
 
 
 def test_parse_traceback_for_crash_extracts_top_frame():
-
+    """Parse traceback for crash extracts top frame."""
     try:
         raise KeyError("missing")
     except KeyError as exc:
@@ -190,7 +189,7 @@ def test_parse_traceback_for_crash_extracts_top_frame():
 
 
 def test_parse_traceback_for_crash_handles_exception_without_tb():
-
+    """Parse traceback for crash handles exception without tb."""
     exc = KeyError("missing")
     # No __traceback__ → returns (None, None, None)
     path, line, func = orchestrator._parse_traceback_for_crash(exc)
@@ -200,7 +199,7 @@ def test_parse_traceback_for_crash_handles_exception_without_tb():
 
 
 def test_log_agent_crash_banner_smoke():
-
+    """Log agent crash banner smoke."""
     try:
         raise RuntimeError("boom")
     except RuntimeError as exc:
@@ -209,18 +208,18 @@ def test_log_agent_crash_banner_smoke():
 
 
 def test_apply_repair_fixes_empty_list_returns_false(tmp_path: Path):
-
+    """Apply repair fixes empty list returns false."""
     assert orchestrator._apply_repair_fixes(tmp_path, []) is False
 
 
 def test_apply_repair_fixes_skips_entry_without_file_path(tmp_path: Path):
-
+    """Apply repair fixes skips entry without file path."""
     out = orchestrator._apply_repair_fixes(tmp_path, [{"line_start": 1, "line_end": 1}])
     assert out is False
 
 
 def test_apply_repair_fixes_rejects_path_outside_agent_root(tmp_path: Path):
-
+    """Apply repair fixes rejects path outside agent root."""
     other = tmp_path / "other"
     other.mkdir()
     target = other / "outside.py"
@@ -238,7 +237,7 @@ def test_apply_repair_fixes_rejects_path_outside_agent_root(tmp_path: Path):
 
 
 def test_apply_repair_fixes_skips_missing_file(tmp_path: Path):
-
+    """Apply repair fixes skips missing file."""
     out = orchestrator._apply_repair_fixes(
         tmp_path,
         [{"file_path": "missing.py", "line_start": 1, "line_end": 1, "replacement_content": "x"}],
@@ -247,7 +246,7 @@ def test_apply_repair_fixes_skips_missing_file(tmp_path: Path):
 
 
 def test_apply_repair_fixes_rejects_out_of_bounds_line_range(tmp_path: Path):
-
+    """Apply repair fixes rejects out of bounds line range."""
     target = tmp_path / "f.py"
     target.write_text("a\nb\n", encoding="utf-8")
     out = orchestrator._apply_repair_fixes(
@@ -266,7 +265,7 @@ def test_apply_repair_fixes_rejects_out_of_bounds_line_range(tmp_path: Path):
 
 
 def test_apply_repair_fixes_applies_valid_replacement(tmp_path: Path):
-
+    """Apply repair fixes applies valid replacement."""
     target = tmp_path / "f.py"
     target.write_text("alpha\nbeta\ngamma\n", encoding="utf-8")
     out = orchestrator._apply_repair_fixes(
@@ -285,6 +284,7 @@ def test_apply_repair_fixes_applies_valid_replacement(tmp_path: Path):
 
 
 def test_pop_runnable_task_picks_one_when_deps_met():
+    """Pop runnable task picks one when deps met."""
 
     class _T:
         def __init__(self, id_: str, deps: list[str]):
@@ -303,6 +303,7 @@ def test_pop_runnable_task_picks_one_when_deps_met():
 
 
 def test_pop_runnable_task_returns_none_when_no_deps_satisfied():
+    """Pop runnable task returns none when no deps satisfied."""
 
     class _T:
         def __init__(self, id_: str, deps: list[str]):
@@ -375,6 +376,7 @@ def test_backend_code_v2_worker_marks_failed_when_team_missing():
 
 
 def test_log_task_breakdown_does_not_raise():
+    """Log task breakdown does not raise."""
 
     class _T:
         def __init__(self, id_, assignee):
@@ -398,7 +400,7 @@ def test_log_task_breakdown_does_not_raise():
 
 
 def test_log_task_completion_banner_with_passing_task(monkeypatch):
-
+    """Log task completion banner with passing task."""
     monkeypatch.setattr(
         orchestrator.execution_tracker,
         "snapshot",
@@ -416,7 +418,7 @@ def test_log_task_completion_banner_with_passing_task(monkeypatch):
 
 
 def test_log_task_completion_banner_truncates_long_strings(monkeypatch):
-
+    """Log task completion banner truncates long strings."""
     monkeypatch.setattr(
         orchestrator.execution_tracker,
         "snapshot",
@@ -441,6 +443,7 @@ def test_log_task_completion_banner_truncates_long_strings(monkeypatch):
 
 
 def test_parse_task_states_none_when_input_empty():
+    """Parse task states none when input empty."""
     from software_engineering_team.api import main as api_main
 
     assert api_main._parse_task_states(None) is None
@@ -449,6 +452,7 @@ def test_parse_task_states_none_when_input_empty():
 
 
 def test_parse_task_states_skips_non_dict_entries():
+    """Parse task states skips non dict entries."""
     from software_engineering_team.api import main as api_main
 
     raw = {
@@ -462,6 +466,7 @@ def test_parse_task_states_skips_non_dict_entries():
 
 
 def test_parse_team_progress_handles_simple_entry():
+    """Parse team progress handles simple entry."""
     from software_engineering_team.api import main as api_main
 
     raw = {"backend": {"current_phase": "execution", "progress": 50}}
@@ -471,6 +476,7 @@ def test_parse_team_progress_handles_simple_entry():
 
 
 def test_parse_team_progress_none_for_empty():
+    """Parse team progress none for empty."""
     from software_engineering_team.api import main as api_main
 
     assert api_main._parse_team_progress(None) is None
@@ -479,6 +485,7 @@ def test_parse_team_progress_none_for_empty():
 
 
 def test_coerce_progress_handles_int_float_none():
+    """Coerce progress handles int float none."""
     from software_engineering_team.api import main as api_main
 
     assert api_main._coerce_progress(None) is None
@@ -488,6 +495,7 @@ def test_coerce_progress_handles_int_float_none():
 
 
 def test_coerce_progress_handles_non_numeric_string():
+    """Coerce progress handles non numeric string."""
     from software_engineering_team.api import main as api_main
 
     # Non-numeric strings → None (try/except path)
@@ -495,6 +503,7 @@ def test_coerce_progress_handles_non_numeric_string():
 
 
 def test_get_workspace_base_dir_uses_se_workspace_dir(monkeypatch, tmp_path: Path):
+    """Get workspace base dir uses se workspace dir."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.setenv("SE_WORKSPACE_DIR", str(tmp_path))
@@ -504,6 +513,7 @@ def test_get_workspace_base_dir_uses_se_workspace_dir(monkeypatch, tmp_path: Pat
 
 
 def test_get_workspace_base_dir_falls_back_to_env_workspace_root(monkeypatch, tmp_path: Path):
+    """Get workspace base dir falls back to env workspace root."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -513,6 +523,7 @@ def test_get_workspace_base_dir_falls_back_to_env_workspace_root(monkeypatch, tm
 
 
 def test_get_workspace_base_dir_defaults_to_cwd_se_workspaces(monkeypatch):
+    """Get workspace base dir defaults to cwd se workspaces."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.delenv("SE_WORKSPACE_DIR", raising=False)
@@ -522,6 +533,7 @@ def test_get_workspace_base_dir_defaults_to_cwd_se_workspaces(monkeypatch):
 
 
 def test_create_project_workspace_creates_folder_with_initial_spec(monkeypatch, tmp_path: Path):
+    """Create project workspace creates folder with initial spec."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.setenv("SE_WORKSPACE_DIR", str(tmp_path))
@@ -533,6 +545,7 @@ def test_create_project_workspace_creates_folder_with_initial_spec(monkeypatch, 
 
 
 def test_create_project_workspace_rejects_empty_after_sanitization(tmp_path: Path):
+    """Create project workspace rejects empty after sanitization."""
     from software_engineering_team.api import main as api_main
 
     with pytest.raises(ValueError):
@@ -540,6 +553,7 @@ def test_create_project_workspace_rejects_empty_after_sanitization(tmp_path: Pat
 
 
 def test_create_project_workspace_rejects_empty_spec(monkeypatch, tmp_path: Path):
+    """Create project workspace rejects empty spec."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.setenv("SE_WORKSPACE_DIR", str(tmp_path))
@@ -548,6 +562,7 @@ def test_create_project_workspace_rejects_empty_spec(monkeypatch, tmp_path: Path
 
 
 def test_preflight_sprint_scope_noop_when_none():
+    """Preflight sprint scope noop when none."""
     from software_engineering_team.api import main as api_main
 
     # No sprint_id → returns silently
@@ -555,6 +570,7 @@ def test_preflight_sprint_scope_noop_when_none():
 
 
 def test_preflight_sprint_scope_404_when_sprint_missing(monkeypatch):
+    """Preflight sprint scope 404 when sprint missing."""
     from fastapi import HTTPException
 
     from software_engineering_team.api import main as api_main
@@ -574,6 +590,7 @@ def test_preflight_sprint_scope_404_when_sprint_missing(monkeypatch):
 
 
 def test_preflight_sprint_scope_400_when_no_stories(monkeypatch):
+    """Preflight sprint scope 400 when no stories."""
     from fastapi import HTTPException
 
     from software_engineering_team.api import main as api_main
@@ -595,6 +612,7 @@ def test_preflight_sprint_scope_400_when_no_stories(monkeypatch):
 
 
 def test_preflight_sprint_scope_400_when_all_terminal(monkeypatch):
+    """Preflight sprint scope 400 when all terminal."""
     from fastapi import HTTPException
 
     from software_engineering_team.api import main as api_main
@@ -620,6 +638,7 @@ def test_preflight_sprint_scope_400_when_all_terminal(monkeypatch):
 
 
 def test_preflight_sprint_scope_succeeds_when_executable_story_present():
+    """Preflight sprint scope succeeds when executable story present."""
     from software_engineering_team.api import main as api_main
 
     s_done = MagicMock()
@@ -642,6 +661,7 @@ def test_preflight_sprint_scope_succeeds_when_executable_story_present():
 
 
 def test_preflight_sprint_scope_503_when_storage_unavailable():
+    """Preflight sprint scope 503 when storage unavailable."""
     from fastapi import HTTPException
 
     from software_engineering_team.api import main as api_main
@@ -664,6 +684,7 @@ def test_preflight_sprint_scope_503_when_storage_unavailable():
 
 
 def test_is_orchestrator_alive_returns_false_for_unknown_job():
+    """Is orchestrator alive returns false for unknown job."""
     from software_engineering_team.api import main as api_main
 
     # No thread registered → False
@@ -671,12 +692,14 @@ def test_is_orchestrator_alive_returns_false_for_unknown_job():
 
 
 def test_get_spec_content_for_job_returns_empty_when_no_repo_path():
+    """Get spec content for job returns empty when no repo path."""
     from software_engineering_team.api import main as api_main
 
     assert api_main._get_spec_content_for_job({}) == ""
 
 
 def test_get_spec_content_for_job_reads_via_spec_parser(tmp_path: Path):
+    """Get spec content for job reads via spec parser."""
     from software_engineering_team.api import main as api_main
 
     spec_text = "# Spec\nFeature X\n"
@@ -686,6 +709,7 @@ def test_get_spec_content_for_job_reads_via_spec_parser(tmp_path: Path):
 
 
 def test_get_spec_content_for_job_returns_empty_on_file_not_found(tmp_path: Path):
+    """Get spec content for job returns empty on file not found."""
     from software_engineering_team.api import main as api_main
 
     with patch("spec_parser.get_latest_spec_content", side_effect=FileNotFoundError("no spec")):
@@ -694,6 +718,7 @@ def test_get_spec_content_for_job_returns_empty_on_file_not_found(tmp_path: Path
 
 
 def test_get_spec_content_for_job_truncates_to_12000_chars(tmp_path: Path):
+    """Get spec content for job truncates to 12000 chars."""
     from software_engineering_team.api import main as api_main
 
     huge = "X" * 20000
@@ -703,6 +728,7 @@ def test_get_spec_content_for_job_truncates_to_12000_chars(tmp_path: Path):
 
 
 def test_get_projects_root_uses_workspace_root_when_set(monkeypatch, tmp_path: Path):
+    """Get projects root uses workspace root when set."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.setenv("WORKSPACE_ROOT", str(tmp_path))
@@ -712,6 +738,7 @@ def test_get_projects_root_uses_workspace_root_when_set(monkeypatch, tmp_path: P
 
 
 def test_get_projects_root_defaults_to_tempdir_khala_projects(monkeypatch):
+    """Get projects root defaults to tempdir khala projects."""
     from software_engineering_team.api import main as api_main
 
     monkeypatch.delenv("WORKSPACE_ROOT", raising=False)
