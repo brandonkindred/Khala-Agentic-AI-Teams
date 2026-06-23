@@ -638,7 +638,7 @@ def test_public_llm_service_get_strands_model_accepts_response_format(monkeypatc
     from llm_service.strands_provider import _clear_strands_model_cache_for_testing
 
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    factory._clear_client_cache_for_testing()
+    factory.clear_client_cache()
     _clear_strands_model_cache_for_testing()
     try:
         model_text = public_get_strands_model("test_agent", response_format="text")
@@ -824,7 +824,7 @@ def test_get_strands_model_uses_dummy_client_when_provider_is_dummy(monkeypatch)
     from llm_service import factory
 
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
-    factory._clear_client_cache_for_testing()
+    factory.clear_client_cache()
 
     model = get_strands_model(agent_key="test_agent")
     assert isinstance(model, LLMClientModel)

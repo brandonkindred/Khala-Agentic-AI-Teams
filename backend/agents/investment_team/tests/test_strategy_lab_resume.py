@@ -162,6 +162,10 @@ def patched_worker_env(monkeypatch: pytest.MonkeyPatch):
         "_get_lab_run_job_client",
         lambda: MagicMock(get_job=MagicMock(return_value=None)),
     )
+    # The wave driver reads the prior-records store once per wave; stub it to an
+    # empty in-memory dict so these resume tests (which mock the cycle itself) do
+    # no real job-service I/O. Prior-record content is irrelevant here.
+    monkeypatch.setattr(lab_main, "_strategy_lab_records", {})
     # The worker imports publish / cleanup_job lazily inside its body.
     import investment_team.api.job_event_bus as bus
 
@@ -220,9 +224,9 @@ def test_resume_carries_forward_skipped_cycles(
 
     final_state = lab_main._active_runs[run_id]
     # 2 prior skips + 1 new skip = 3. Before the fix this was just 1.
-    assert final_state["skipped_cycles"] == 3, (
-        f"resume must carry forward prior skipped_cycles; got {final_state['skipped_cycles']}"
-    )
+    assert (
+        final_state["skipped_cycles"] == 3
+    ), f"resume must carry forward prior skipped_cycles; got {final_state['skipped_cycles']}"
     # 3 prior completions + 6 new successes = 9 (cycle 4 skipped, 5..10 succeed).
     assert len(final_state["completed_record_ids"]) == 9
     assert final_state["completed_record_ids"][:3] == prior_ids
@@ -260,12 +264,12 @@ def test_resume_progress_never_moves_backward(
     for snap in spy.snapshots:
         completed = snap.get("completed_cycles", last_completed)
         skipped = snap.get("skipped_cycles", last_skipped)
-        assert completed >= last_completed, (
-            f"completed_cycles moved backward: {last_completed} -> {completed}"
-        )
-        assert skipped >= last_skipped, (
-            f"skipped_cycles moved backward: {last_skipped} -> {skipped}"
-        )
+        assert (
+            completed >= last_completed
+        ), f"completed_cycles moved backward: {last_completed} -> {completed}"
+        assert (
+            skipped >= last_skipped
+        ), f"skipped_cycles moved backward: {last_skipped} -> {skipped}"
         last_completed = completed
         last_skipped = skipped
 

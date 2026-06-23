@@ -158,9 +158,11 @@ The `product_delivery` team (`backend/agents/product_delivery/`, mounted at `/ap
 
 `backend/agents/llm_service/` provides a unified client that supports:
 - **Ollama** (local inference or Cloud API via `OLLAMA_API_KEY`) — including thinking mode
-- **Claude** (via httpx direct calls)
+- **Claude** (via the official `anthropic` Python SDK) — streaming, adaptive thinking + `output_config.effort`; key from `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`, default model `claude-opus-4-8`
 
-Environment variables for LLM: `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_MODEL`
+Provider/model/keys are selectable via env vars **or** the LLM Provider settings UI (`/llm-config` → `PUT /api/llm-config`), which persists them Fernet-encrypted in shared Postgres so every team container reads them through `shared_postgres.secrets` / `llm_service.runtime_config` (resolution order: runtime → env → default).
+
+Environment variables for LLM: `LLM_PROVIDER` (`ollama`/`claude`/`dummy`), `LLM_BASE_URL`, `LLM_MODEL`, `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY`
 
 ## Code Style
 
@@ -188,7 +190,8 @@ Core vars only. The complete reference — every var, defaults, backoff math, fa
 | Variable | Purpose |
 |---|---|
 | `OLLAMA_API_KEY` | Required for Ollama Cloud API |
-| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | LLM provider selection, server URL, model name |
+| `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_MODEL` | LLM provider selection (`ollama`/`claude`/`dummy`), server URL, model name |
+| `LLM_CLAUDE_API_KEY` / `ANTHROPIC_API_KEY` | Anthropic API key — required for `LLM_PROVIDER=claude` |
 | `POSTGRES_HOST` (+ `_PORT`/`_USER`/`_PASSWORD`/`_DB`) | Required for migrated teams; enables Postgres-backed stores via `shared_postgres`; no SQLite fallback |
 | `JOB_SERVICE_URL` | Central job service; required by every team's `JobServiceClient` |
 | `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`/`TEMPORAL_TASK_QUEUE`) | Enables Temporal mode when set |

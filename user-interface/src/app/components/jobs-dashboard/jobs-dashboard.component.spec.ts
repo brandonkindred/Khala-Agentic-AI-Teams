@@ -1422,6 +1422,32 @@ describe('JobsDashboardComponent', () => {
     });
   });
 
+  describe('visibility-based polling', () => {
+    afterEach(() => {
+      // Remove the per-test instance override so document.hidden falls back to its
+      // prototype getter (false) for later tests.
+      delete (document as unknown as { hidden?: boolean }).hidden;
+    });
+
+    function setHidden(hidden: boolean): void {
+      Object.defineProperty(document, 'hidden', { configurable: true, get: () => hidden });
+      document.dispatchEvent(new Event('visibilitychange'));
+    }
+
+    it('suspends polling while the tab is hidden and resumes when visible', () => {
+      // ngOnInit (shared beforeEach detectChanges) started polling.
+      expect(component['pollSub']).not.toBeNull();
+
+      setHidden(true);
+      expect(component['pollSub']).toBeNull(); // polling fully suspended, not just dimmed
+      expect(component.isPollingActive).toBe(false);
+
+      setHidden(false);
+      expect(component['pollSub']).not.toBeNull(); // resumed with an immediate refresh
+      expect(component.isPollingActive).toBe(true);
+    });
+  });
+
   describe('table refresh progress bar', () => {
     const row = (jobId: string) =>
       ({

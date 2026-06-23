@@ -36,9 +36,9 @@ def test_factory_returns_runner_with_run_method(monkeypatch: pytest.MonkeyPatch)
 
     # llm_service.get_client caches by provider/model; clear it so the env
     # change above takes effect for this test.
-    from llm_service import _clear_client_cache_for_testing
+    from llm_service import clear_client_cache
 
-    _clear_client_cache_for_testing()
+    clear_client_cache()
 
     runner = make_blog_planning_agent()
 
@@ -92,9 +92,9 @@ def test_manifest_entrypoint_resolves_via_shim_dispatcher(monkeypatch: pytest.Mo
     """End-to-end: the dispatcher's ``make_``-factory path produces a callable."""
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
 
-    from llm_service import _clear_client_cache_for_testing
+    from llm_service import clear_client_cache
 
-    _clear_client_cache_for_testing()
+    clear_client_cache()
 
     # Mirror what shared_agent_invoke.dispatch.invoke_entrypoint does with the
     # manifest's entrypoint string. No direct dependency on the shim module
@@ -113,9 +113,9 @@ def test_manifest_entrypoint_resolves_via_shim_dispatcher(monkeypatch: pytest.Mo
 def test_factory_default_policy_is_standard_article(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LLM_PROVIDER", "dummy")
 
-    from llm_service import _clear_client_cache_for_testing
+    from llm_service import clear_client_cache
 
-    _clear_client_cache_for_testing()
+    clear_client_cache()
 
     runner = make_blog_planning_agent()
     assert isinstance(runner._default_length_policy, LengthPolicy)
