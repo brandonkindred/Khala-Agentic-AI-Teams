@@ -23,9 +23,10 @@ def test_brief_label_picks_first_nonblank_line() -> None:
     assert _brief_label("Hello\nworld", "fallback") == "Hello"
     # Leading blank lines: must skip to the first line with visible content.
     assert _brief_label("\n   \nReal title\nmore", "fallback") == "Real title"
-    # Whitespace-only and empty briefs fall back instead of raising.
+    # Whitespace-only, empty, and None briefs fall back instead of raising.
     assert _brief_label("\n   \n", "job-123") == "job-123"
     assert _brief_label("", "job-123") == "job-123"
+    assert _brief_label(None, "job-123") == "job-123"
     # Long first line is truncated to 120 chars.
     assert len(_brief_label("x" * 500, "f")) == 120
 

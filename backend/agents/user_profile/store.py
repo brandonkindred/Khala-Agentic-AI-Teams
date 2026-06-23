@@ -190,6 +190,9 @@ def upsert_profile(update: UserProfileUpdate, user_id: str = DEFAULT_USER_ID) ->
     if update.preferences is not None:
         set_clauses.append("profile_json = EXCLUDED.profile_json")
 
+    # `x or default` here only supplies INSERT defaults for a brand-new row; a
+    # field is written on conflict *only* if it's non-None (see set_clauses above),
+    # so an explicit "" / {} from the caller is still persisted, never coerced away.
     params = (
         user_id,
         update.display_name or "",

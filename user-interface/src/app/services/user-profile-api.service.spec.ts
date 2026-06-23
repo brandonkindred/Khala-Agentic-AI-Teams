@@ -100,6 +100,23 @@ describe('UserProfileApiService', () => {
     expect(status).toBe(500);
   });
 
+  it('should propagate a 400 validation error on updateProfile', () => {
+    let nextCalled = false;
+    let status = 0;
+    service.updateProfile({ email: 'not-an-email' }).subscribe({
+      next: () => {
+        nextCalled = true;
+      },
+      error: (err) => {
+        status = err.status;
+      },
+    });
+    const req = httpMock.expectOne(baseUrl);
+    req.flush({ detail: 'invalid email' }, { status: 400, statusText: 'Bad Request' });
+    expect(nextCalled).toBe(false);
+    expect(status).toBe(400);
+  });
+
   it('should propagate a network error on updateProfile', () => {
     let nextCalled = false;
     let errored = false;
