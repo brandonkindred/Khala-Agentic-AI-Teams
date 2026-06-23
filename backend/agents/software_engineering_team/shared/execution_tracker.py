@@ -154,6 +154,7 @@ class ExecutionTracker:
             points before the oldest retained event, the caller resumes from the
             oldest retained one instead (no duplicates within the buffer).
         """
+        assert index >= 0, "events_since index must be a non-negative absolute position"
         with self._lock:
             evicted = self._events_total - len(self._events)  # absolute pos of buffer[0]
             start = max(0, index - evicted)

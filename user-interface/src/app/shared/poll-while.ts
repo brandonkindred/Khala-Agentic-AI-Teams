@@ -1,5 +1,5 @@
-import { Observable, timer } from 'rxjs';
-import { switchMap, takeWhile } from 'rxjs/operators';
+import { EMPTY, Observable, timer } from 'rxjs';
+import { catchError, switchMap, takeWhile } from 'rxjs/operators';
 
 /** Options for {@link pollWhile}. */
 export interface PollWhileOptions {
@@ -7,6 +7,14 @@ export interface PollWhileOptions {
   intervalMs?: number;
   /** Poll immediately on subscribe (default), or wait one interval first. */
   immediate?: boolean;
+  /**
+   * What to do when a poll's `fetch()` errors:
+   * - `'continue'` (default): swallow the error, emit nothing for that tick, and
+   *   keep polling — so a transient network blip doesn't kill live updates. This
+   *   matches the `catchError(() => of(...))` pattern the hand-rolled pollers use.
+   * - `'stop'`: let the error propagate and terminate the stream.
+   */
+  onError?: 'continue' | 'stop';
 }
 
 /**
@@ -17,6 +25,8 @@ export interface PollWhileOptions {
  * - Emits every poll result (including the terminal one), then completes.
  * - `switchMap` cancels an in-flight request when the next tick fires, so slow
  *   responses never overlap or arrive out of order.
+ * - By default a failed poll is swallowed and polling continues (see
+ *   `onError`); pass `onError: 'stop'` to terminate on the first error.
  * - Does NOT manage teardown — the caller adds `takeUntilDestroyed(destroyRef)`
  *   (or `takeUntil`) at the subscription so the poll stops with the component.
  *
@@ -35,9 +45,13 @@ export function pollWhile<T>(
   isDone: (value: T) => boolean,
   options: PollWhileOptions = {},
 ): Observable<T> {
-  const { intervalMs = 2000, immediate = true } = options;
+  const { intervalMs = 2000, immediate = true, onError = 'continue' } = options;
   return timer(immediate ? 0 : intervalMs, intervalMs).pipe(
-    switchMap(() => fetch()),
+    switchMap(() =>
+      // On error, EMPTY completes only the inner poll (no emission); the outer
+      // timer keeps ticking, so the next interval retries.
+      onError === 'stop' ? fetch() : fetch().pipe(catchError(() => EMPTY)),
+    ),
     // `true` = inclusive: emit the terminal value, then complete.
     takeWhile((value) => !isDone(value), true),
   );

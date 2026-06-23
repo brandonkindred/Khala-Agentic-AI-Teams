@@ -12,7 +12,9 @@ interface DemoJob {
 
 @Injectable()
 class DemoJobsApiService extends BaseJobsApiService<DemoJob> {
-  protected readonly baseUrl = 'http://api.test/api/demo';
+  protected jobUrl(jobId: string): string {
+    return `http://api.test/api/demo/jobs/${encodeURIComponent(jobId)}`;
+  }
 }
 
 describe('BaseJobsApiService', () => {

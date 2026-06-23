@@ -6,28 +6,33 @@ import { PollWhileOptions, pollWhile } from '../shared/poll-while';
 /**
  * Abstract base for the per-team job API services. ~26 services currently
  * hand-roll the same `get status / cancel / delete / poll` HTTP shape over
- * `HttpClient` with no shared base. A concrete service supplies its `baseUrl`
- * and gets the common lifecycle methods for free; it can still add or override
+ * `HttpClient` with no shared base. A concrete service supplies `jobUrl()` and
+ * gets the common lifecycle methods for free; it can still add or override
  * team-specific endpoints (list shapes differ per team, so listing is left to
  * subclasses).
  *
+ * `jobUrl()` is abstract on purpose: teams do NOT share a single-job status
+ * route. There is no universal `GET /api/jobs/{team}/{id}` — the unified surface
+ * only exposes list/cancel/delete — and each team mounts its own prefix
+ * (`/assistant/jobs/{id}`, `/jobs/{id}`, `/teams/{id}/jobs/{id}`, …). cancelJob
+ * and deleteJob are derived from `jobUrl()` because every team follows the same
+ * REST shape relative to the job resource (`POST {jobUrl}/cancel`, `DELETE
+ * {jobUrl}`); override them if a team diverges.
+ *
  * @example
  * @Injectable({ providedIn: 'root' })
- * export class SalesApiService extends BaseJobsApiService<SalesJob> {
- *   protected readonly baseUrl = `${API_BASE}/api/sales`;
+ * export class AssistantApiService extends BaseJobsApiService<AssistantJob> {
+ *   protected jobUrl(id: string) {
+ *     return `${API_BASE}/api/personal-assistant/assistant/jobs/${encodeURIComponent(id)}`;
+ *   }
  * }
  */
 @Injectable()
 export abstract class BaseJobsApiService<TJob = unknown> {
   protected readonly http = inject(HttpClient);
 
-  /** Root URL for this team's job endpoints, e.g. `${API_BASE}/api/sales`. */
-  protected abstract readonly baseUrl: string;
-
-  /** URL for a single job. Override if the team uses a different convention. */
-  protected jobUrl(jobId: string): string {
-    return `${this.baseUrl}/jobs/${encodeURIComponent(jobId)}`;
-  }
+  /** Absolute URL for a single job's status resource (encode the id here). */
+  protected abstract jobUrl(jobId: string): string;
 
   getJob(jobId: string): Observable<TJob> {
     return this.http.get<TJob>(this.jobUrl(jobId));

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { of } from 'rxjs';
+import { of, throwError } from 'rxjs';
 import { pollWhile } from './poll-while';
 
 describe('pollWhile', () => {
@@ -48,6 +48,48 @@ describe('pollWhile', () => {
     vi.advanceTimersByTime(50);
     expect(emitted).toEqual([1]);
     sub.unsubscribe();
+  });
+
+  it('keeps polling after a transient fetch error (default onError:continue)', () => {
+    const results = [throwError(() => new Error('boom')), of('running'), of('completed')];
+    let i = 0;
+    const emitted: string[] = [];
+    let completed = false;
+    let errored = false;
+
+    const sub = pollWhile(
+      () => results[Math.min(i++, results.length - 1)],
+      (s) => s === 'completed',
+      { intervalMs: 100 },
+    ).subscribe({
+      next: (v) => emitted.push(v),
+      complete: () => (completed = true),
+      error: () => (errored = true),
+    });
+
+    vi.advanceTimersByTime(0); // first poll errors → swallowed, no emission
+    expect(emitted).toEqual([]);
+    expect(errored).toBe(false);
+    vi.advanceTimersByTime(100);
+    expect(emitted).toEqual(['running']);
+    vi.advanceTimersByTime(100);
+    expect(emitted).toEqual(['running', 'completed']);
+    expect(completed).toBe(true);
+    expect(errored).toBe(false);
+    sub.unsubscribe();
+  });
+
+  it('onError:stop propagates the error and terminates the stream', () => {
+    let errored = false;
+    let completed = false;
+    pollWhile(() => throwError(() => new Error('boom')), () => false, {
+      intervalMs: 100,
+      onError: 'stop',
+    }).subscribe({ error: () => (errored = true), complete: () => (completed = true) });
+
+    vi.advanceTimersByTime(0);
+    expect(errored).toBe(true);
+    expect(completed).toBe(false);
   });
 
   it('completes immediately when the first result is already terminal', () => {

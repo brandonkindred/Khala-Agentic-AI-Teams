@@ -1,6 +1,14 @@
 """ExecutionTracker keeps a bounded event log without breaking absolute-index polling."""
 
+import pytest
+
 from software_engineering_team.shared.execution_tracker import _MAX_EVENTS, ExecutionTracker
+
+
+def test_events_since_rejects_negative_index():
+    t = ExecutionTracker()
+    with pytest.raises(AssertionError):
+        t.events_since(-1)
 
 
 def test_event_log_is_bounded_but_count_is_monotonic():
