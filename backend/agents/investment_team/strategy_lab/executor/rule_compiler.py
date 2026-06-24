@@ -12,6 +12,11 @@ Supported rule kinds (matching the discriminated ``ExitRule`` union in
   ``entry_price`` / ``trailing_high`` / ``trailing_low``.
 * ``TakeProfitRule(pct)`` — close when the bar's high (long) or low
   (short) clears the rule's price target.
+* ``ScaledTakeProfitRule(levels)`` — laddered take-profit: emit one
+  partial-close intent for the next un-fired rung (the per-position cursor)
+  when its target is reached, each sized as a fraction of the original entry
+  qty. Rungs fire in order, one tranche per bar (the dispatcher advances the
+  cursor); the remainder rides the other exit rules.
 * ``SignalExitRule(when)`` — close when a predicate fires.  Requires a
   ``HistoryView`` per symbol passed via the ``views`` keyword to
   :func:`evaluate_exit_rules`.  When no view is available, the rule is
@@ -29,10 +34,12 @@ book.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal, Mapping, Optional, Sequence
 
 from ..spec_dsl import (
     ExitRule,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -40,7 +47,7 @@ from ..spec_dsl import (
 )
 from .predicate_evaluator import HistoryView, evaluate_signal_exit_rules
 
-ExitRuleKind = Literal["stop_loss", "take_profit", "signal_exit"]
+ExitRuleKind = Literal["stop_loss", "take_profit", "scaled_take_profit", "signal_exit"]
 
 
 @dataclass(frozen=True)
@@ -95,6 +102,67 @@ class ExitIntent:
     # the stop for a long, above for a short).
     stop_price: Optional[float] = None
     limit_price: Optional[float] = None
+    # Partial-exit metadata for scaled (laddered) take-profits. ``qty_fraction``
+    # is the fraction of the position's *original entry qty* this intent closes
+    # (``1.0`` = full close, the default for every non-scaled intent).
+    # ``level_index`` identifies which rung of a ``ScaledTakeProfitRule`` fired
+    # (``None`` for every other rule kind), so the dispatcher can fire each rung
+    # at most once and diagnostics can count rungs separately.
+    qty_fraction: float = 1.0
+    level_index: Optional[int] = None
+
+    def __post_init__(self) -> None:
+        """Enforce the intent's structural contract at construction.
+
+        These are invariants every producer (``_intent_for_rule``) already
+        upholds; validating here turns a future producer bug into an immediate,
+        local failure instead of a silently mis-sized or mis-routed close.
+
+        Preconditions (on the constructor arguments):
+          * ``style`` is ``"market"`` or ``"limit"``.
+          * ``0 < qty_fraction <= 1.0`` — a close covers a positive fraction of
+            the original entry qty, at most the whole position.
+          * A scaled rung (``level_index is not None``) is ALWAYS a market
+            scale-out (``style == "market"``): the dispatcher's scale-out path
+            has no resting/requeue lifecycle for a limit rung, and a
+            ``level_index >= 0`` rung index is well-formed.
+        Postconditions: raises ``ValueError`` if any precondition is violated;
+        otherwise the instance is a structurally valid intent.
+        """
+        if self.style not in ("market", "limit"):
+            raise ValueError(f"ExitIntent.style must be 'market' or 'limit', got {self.style!r}")
+        if not (0.0 < self.qty_fraction <= 1.0):
+            raise ValueError(
+                f"ExitIntent.qty_fraction must be in (0, 1], got {self.qty_fraction!r}"
+            )
+        if self.level_index is not None:
+            if self.level_index < 0:
+                raise ValueError(
+                    f"ExitIntent.level_index must be non-negative, got {self.level_index!r}"
+                )
+            if self.style != "market":
+                raise ValueError(
+                    "a scaled-take-profit rung must be a market scale-out "
+                    f"(style='market'), got style={self.style!r}"
+                )
+
+    @property
+    def is_scaled_rung(self) -> bool:
+        """Whether this intent is a scaled-take-profit LADDER RUNG.
+
+        This reflects the intent's ORIGIN, not whether it closes 100%: a rung with
+        ``qty_fraction == 1.0`` (or the final rung of a ladder summing to 1.0) is
+        still a scaled rung, so the dispatcher routes it through the scale-out
+        handler and sizes it off the ORIGINAL entry qty (and defers it while the
+        entry is still filling). The engine then decides full-vs-partial cleanups
+        from the resulting close qty vs the remaining position, not from this flag —
+        so an emptying rung still retires competing resting orders. This keeps the
+        scale-out path decoupled from the literal ``"scaled_take_profit"`` kind.
+
+        Preconditions: none (reads only ``level_index``). Postconditions: ``True``
+        iff ``level_index`` is set (only laddered rungs carry one).
+        """
+        return self.level_index is not None
 
 
 def is_limit_stop_rule(rule: ExitRule) -> bool:
@@ -110,6 +178,16 @@ def is_limit_stop_rule(rule: ExitRule) -> bool:
     return isinstance(rule, StopLossRule) and getattr(rule, "style", "market") == "limit"
 
 
+# Shared immutable empty cursor map — only ``.get()``-queried — so the common
+# no-ladder / no-cursor path allocates nothing per bar, and serves as the default
+# ``cursor_map`` for non-laddered specs. Wrapped in ``MappingProxyType`` so an
+# accidental mutation can't corrupt the shared default for all callers.
+_EMPTY_CURSOR: Mapping[int, int] = MappingProxyType({})
+# The outer (``symbol -> cursor map``) empty default — a distinct type from
+# ``_EMPTY_CURSOR`` so the ``scaled_cursors`` fallback stays type-correct.
+_EMPTY_SYMBOL_CURSORS: Mapping[str, Mapping[int, int]] = MappingProxyType({})
+
+
 def evaluate_exit_rules(
     rules: Sequence[ExitRule],
     positions: Mapping[str, PositionState],
@@ -117,6 +195,7 @@ def evaluate_exit_rules(
     *,
     views: Optional[Mapping[str, HistoryView]] = None,
     first_only: bool = True,
+    scaled_cursors: Optional[Mapping[str, Mapping[int, int]]] = None,
 ) -> list[ExitIntent]:
     """Return triggered ``ExitIntent``\\ s per open position, in spec priority order.
 
@@ -131,15 +210,23 @@ def evaluate_exit_rules(
         symbol (passed via ``views``). When ``views`` is ``None`` or the
         symbol has no view, ``SignalExitRule`` is a silent no-op for
         backward compatibility.
+      * A ``ScaledTakeProfitRule`` yields **at most one** intent per call: its
+        next un-fired rung (the cursor), and only when that rung's target has
+        been reached. ``scaled_cursors`` maps ``symbol -> rule_index -> next
+        un-fired rung index``; an absent entry defaults to cursor ``0``. Because
+        rungs fire in strict order one tranche per bar, the cursor rung is the
+        only one that can fire next, so the evaluator never allocates intents for
+        rungs that already fired or are not yet actionable.
 
     Preconditions: each ``positions``/``bars`` value is keyed by symbol; ``rules``
-    are ``ExitRule`` members; ``views`` (if given) maps symbols to ``HistoryView``.
+    are ``ExitRule`` members; ``views`` (if given) maps symbols to ``HistoryView``;
+    ``scaled_cursors`` (if given) maps symbol to a ``rule_index -> rung`` cursor map.
     Postconditions: returns one ``ExitIntent`` per (open position × triggered rule)
     in spec order — at most one per position when ``first_only``, all triggered
-    otherwise. Positions with non-positive qty or no matching bar yield none. Each
-    limit-style stop intent carries its fully-resolved ``stop_price``/``limit_price``
-    regardless of ``first_only`` (``first_only`` controls only how many intents are
-    returned, never their contents).
+    otherwise; a scaled rule contributes at most its cursor rung. Positions with
+    non-positive qty or no matching bar yield none. Each limit-style stop intent
+    carries its fully-resolved ``stop_price``/``limit_price`` regardless of
+    ``first_only`` (``first_only`` controls only how many intents are returned).
     """
     intents: list[ExitIntent] = []
     for symbol, position in positions.items():
@@ -149,37 +236,281 @@ def evaluate_exit_rules(
         if bar is None:
             continue
         sym_view = views.get(symbol) if views is not None else None
-        for idx, rule in enumerate(rules):
-            if _rule_triggers(rule, position, bar, sym_view):
-                style = getattr(rule, "style", "market") or "market"
-                # A limit-style stop carries its fully-resolved stop level +
-                # protective-side limit so the dispatcher can rest a STOP_LIMIT
-                # without re-deriving prices. (Limit-style is restricted to the
-                # ``entry_price`` basis — see ``StopLossRule`` — so the level is a
-                # static offset off the entry price.)
-                stop_price: Optional[float] = None
-                limit_price: Optional[float] = None
-                if isinstance(rule, StopLossRule) and style == "limit":
-                    stop_price = _stop_loss_level(rule, position)
-                    offset = stop_price * rule.limit_offset_pct
-                    limit_price = protective_limit_price(
-                        stop_price, offset, closing_long=(position.side == "long")
-                    )
-                intents.append(
-                    ExitIntent(
-                        symbol=symbol,
-                        rule_kind=_kind_of(rule),
-                        rule_index=idx,
-                        note=getattr(rule, "note", "") or "",
-                        basis=getattr(rule, "basis", None),
-                        style=style,
-                        stop_price=stop_price,
-                        limit_price=limit_price,
-                    )
-                )
-                if first_only:
-                    break
+        # Explicit ``is not None`` (not ``or``) so an empty ``scaled_cursors`` —
+        # "no cursors for any symbol" — is honoured, mirroring the ``views`` check.
+        outer = scaled_cursors if scaled_cursors is not None else _EMPTY_SYMBOL_CURSORS
+        cursor_map = outer.get(symbol, _EMPTY_CURSOR)
+        intents.extend(
+            evaluate_exit_rules_for_position(
+                rules,
+                symbol,
+                position,
+                bar,
+                view=sym_view,
+                first_only=first_only,
+                cursor_map=cursor_map,
+            )
+        )
     return intents
+
+
+def evaluate_exit_rules_for_position(
+    rules: Sequence[ExitRule],
+    symbol: str,
+    position: PositionState,
+    bar: BarSnapshot,
+    *,
+    view: Optional[HistoryView] = None,
+    first_only: bool = True,
+    cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
+    exclude_limit_style: bool = False,
+    exclude_scaled: bool = False,
+) -> list[ExitIntent]:
+    """Triggered ``ExitIntent``\\ s for ONE open position, in spec priority order.
+
+    The single-symbol core of :func:`evaluate_exit_rules`. The per-bar dispatcher
+    calls this directly, so the hot path never wraps a lone position/bar/cursor in
+    throwaway ``{symbol: ...}`` dicts.
+
+    ``exclude_limit_style`` drops any limit-style stop intent — used when that stop
+    already rests as a STOP_LIMIT — so the first *non-resting* rule wins in a single
+    pass, with no "collect every trigger then filter" second walk. ``exclude_scaled``
+    drops any scaled-take-profit rung (regardless of ``qty_fraction``) — used when
+    the position's entry is still filling, so a deferred rung (which must be sized
+    off the not-yet-settled original qty) does not pre-empt a lower-priority
+    full-position exit (e.g. a stop) that should still fire this bar.
+
+    ``position`` is read-only here and is NOT retained past this call — the engine
+    may pass a single mutable view it reuses each bar (``_PositionStateView``), so a
+    caller must never store the reference; every value an :class:`ExitIntent` needs
+    is copied out before returning.
+
+    Preconditions: ``position.qty > 0``; ``bar`` exposes ``high``/``low``/``close``
+    (a :class:`BarSnapshot`, or any structurally-compatible bar such as
+    ``contract.Bar``); ``cursor_map`` maps a ladder ``rule_index`` to its next
+    un-fired rung.
+    Postconditions: returns the triggered intents in spec order — at most one when
+    ``first_only`` — each ``ScaledTakeProfitRule`` contributing at most its cursor
+    rung; limit-style intents omitted when ``exclude_limit_style`` and scaled rungs
+    omitted when ``exclude_scaled``.
+    """
+    if first_only:
+        # Hot path: the per-bar dispatcher wants only the spec-priority winner, so
+        # delegate to the allocation-free scan and wrap its single result (or none).
+        intent = first_exit_intent_for_position(
+            rules,
+            symbol,
+            position,
+            bar,
+            view=view,
+            cursor_map=cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        return [intent] if intent is not None else []
+    intents: list[ExitIntent] = []
+    for idx, rule in enumerate(rules):
+        intent = _filtered_intent_for_rule(
+            rule,
+            symbol,
+            idx,
+            position,
+            bar,
+            view,
+            cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        if intent is not None:
+            intents.append(intent)
+    return intents
+
+
+def _filtered_intent_for_rule(
+    rule: ExitRule,
+    symbol: str,
+    idx: int,
+    position: PositionState,
+    bar: BarSnapshot,
+    view: Optional[HistoryView],
+    cursor_map: Mapping[int, int],
+    *,
+    exclude_limit_style: bool,
+    exclude_scaled: bool,
+) -> Optional[ExitIntent]:
+    """:func:`_intent_for_rule` with the dispatcher's two skip filters applied.
+
+    Single source of the "does this rule produce an actionable intent this bar"
+    decision, shared by the list-returning :func:`evaluate_exit_rules_for_position`
+    and the allocation-free :func:`first_exit_intent_for_position` so the filter
+    logic (exclude already-resting limit stops / deferred scaled rungs) lives in one
+    place and the two entry points can never diverge.
+
+    Preconditions: as :func:`_intent_for_rule`.
+    Postconditions: returns the rule's intent, or ``None`` when the rule does not
+    fire OR the intent is a limit-style stop and ``exclude_limit_style`` OR the
+    intent is a scaled rung and ``exclude_scaled``.
+    """
+    intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
+    if intent is None:
+        return None
+    if exclude_limit_style and intent.style == "limit":
+        return None
+    if exclude_scaled and intent.is_scaled_rung:
+        return None
+    return intent
+
+
+def first_exit_intent_for_position(
+    rules: Sequence[ExitRule],
+    symbol: str,
+    position: PositionState,
+    bar: BarSnapshot,
+    *,
+    view: Optional[HistoryView] = None,
+    cursor_map: Mapping[int, int] = _EMPTY_CURSOR,
+    exclude_limit_style: bool = False,
+    exclude_scaled: bool = False,
+) -> Optional[ExitIntent]:
+    """The highest-priority triggered ``ExitIntent`` for ONE position, or ``None``.
+
+    The allocation-free ``first_only`` core of
+    :func:`evaluate_exit_rules_for_position`. The per-bar dispatcher evaluates one
+    open position per symbol per bar and acts on a single intent, so this walks the
+    rules in spec order and returns the first that fires and survives the
+    ``exclude_limit_style`` / ``exclude_scaled`` filters — without building the
+    throwaway one-element list the list-returning variant would allocate on every
+    bar of every open position.
+
+    Preconditions: as :func:`evaluate_exit_rules_for_position` — ``position.qty >
+    0``; ``bar`` exposes ``high``/``low``/``close``; ``cursor_map`` maps a ladder
+    ``rule_index`` to its next un-fired rung.
+    Postconditions: returns the spec-priority winning intent — a limit-style intent
+    skipped when ``exclude_limit_style``, a scaled rung skipped when
+    ``exclude_scaled`` — or ``None`` when no rule fires (or the only triggers are
+    excluded). Allocates no result list.
+    """
+    for idx, rule in enumerate(rules):
+        intent = _filtered_intent_for_rule(
+            rule,
+            symbol,
+            idx,
+            position,
+            bar,
+            view,
+            cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        if intent is not None:
+            return intent
+    return None
+
+
+def _intent_for_rule(
+    rule: ExitRule,
+    symbol: str,
+    idx: int,
+    position: PositionState,
+    bar: BarSnapshot,
+    view: Optional[HistoryView],
+    cursor_map: Mapping[int, int],
+) -> Optional[ExitIntent]:
+    """Build the single ``ExitIntent`` a ``rule`` triggers for one position.
+
+    Preconditions: ``position.qty > 0`` and ``bar`` is the symbol's current bar;
+    ``cursor_map`` maps a ladder ``rule_index`` to its next un-fired rung.
+    Postconditions: returns ``None`` when the rule does not fire; one intent for a
+    triggered stop-loss / take-profit / signal-exit; and the cursor-rung intent
+    (only when its target is reached) for a ``ScaledTakeProfitRule``. A limit-style
+    stop's intent carries its fully-resolved ``stop_price`` / ``limit_price``.
+    """
+    if isinstance(rule, ScaledTakeProfitRule):
+        rung = _next_scaled_rung(rule, position, bar, cursor_map.get(idx, 0))
+        if rung is None:
+            return None
+        level = rule.levels[rung]
+        return ExitIntent(
+            symbol=symbol,
+            rule_kind="scaled_take_profit",
+            rule_index=idx,
+            note=level.note or rule.note or "",
+            style="market",  # a scaled rung always emits a market scale-out
+            level_index=rung,
+            qty_fraction=level.qty_fraction,
+        )
+
+    if not _rule_triggers(rule, position, bar, view):
+        return None
+
+    style = getattr(rule, "style", "market") or "market"
+    # A limit-style stop carries its fully-resolved stop level + protective-side
+    # limit so the dispatcher can rest a STOP_LIMIT without re-deriving prices.
+    # (Limit-style is restricted to the ``entry_price`` basis — see
+    # ``StopLossRule`` — so the level is a static offset off the entry price.)
+    stop_price: Optional[float] = None
+    limit_price: Optional[float] = None
+    if isinstance(rule, StopLossRule) and style == "limit":
+        stop_price = _stop_loss_level(rule, position)
+        offset = stop_price * rule.limit_offset_pct
+        limit_price = protective_limit_price(
+            stop_price, offset, closing_long=(position.side == "long")
+        )
+    return ExitIntent(
+        symbol=symbol,
+        rule_kind=_kind_of(rule),
+        rule_index=idx,
+        note=getattr(rule, "note", "") or "",
+        basis=getattr(rule, "basis", None),
+        style=style,
+        stop_price=stop_price,
+        limit_price=limit_price,
+    )
+
+
+def _next_scaled_rung(
+    rule: ScaledTakeProfitRule, position: PositionState, bar: BarSnapshot, cursor: int
+) -> Optional[int]:
+    """The next rung to scale out (``cursor``), if its target has been reached.
+
+    Only the cursor rung can fire next: rungs ``< cursor`` already fired, and
+    because ``pct`` is strictly increasing the un-fired rungs above the cursor
+    have strictly higher targets, so none of them can be reached while the cursor
+    rung is not. Checking the single cursor level is therefore both sufficient and
+    O(1) per bar — no per-bar scan of every rung, no allocation of intents for
+    rungs that already fired or are not yet actionable.
+
+    Eligibility is high-water-mark based: the rung counts as reached once the
+    position's favorable extreme SINCE ENTRY (the running watermark, with this
+    bar's extreme folded in) has reached ``entry * (1 ± level.pct)`` — so a rung a
+    gap bar cleared stays eligible even after a later-bar retrace.
+
+    Preconditions: ``rule.levels`` has strictly-increasing ``pct`` (DSL-enforced);
+    ``0 <= cursor`` is the next un-fired rung (enforced with an explicit raise so it
+    holds under ``python -O``); ``position.side`` is ``"long"`` or ``"short"`` (any
+    other value fails fast); ``position.high_since_entry`` / ``low_since_entry`` are
+    the running watermarks as of the prior bar — non-None ``float``\\ s on
+    :class:`PositionState` (initialized to ``entry_price`` at open, never ``None``),
+    so the ``max``/``min`` below are total.
+    Postconditions: returns ``cursor`` when the cursor rung's target is reached and
+    ``cursor`` is in range, else ``None`` (ladder exhausted or target not reached).
+    """
+    if cursor < 0:
+        raise ValueError(f"cursor must be non-negative (the next un-fired rung), got {cursor}")
+    if cursor >= len(rule.levels):
+        return None
+    level = rule.levels[cursor]
+    if position.side == "long":
+        peak = max(position.high_since_entry, bar.high)
+        return cursor if peak >= position.entry_price * (1.0 + level.pct) else None
+    if position.side == "short":
+        trough = min(position.low_since_entry, bar.low)
+        return cursor if trough <= position.entry_price * (1.0 - level.pct) else None
+    # ``side`` is a Literal["long", "short"]; fail fast rather than silently
+    # applying the short branch to an unexpected value.
+    raise ValueError(  # pragma: no cover - side is Literal["long", "short"]
+        f"Unsupported position side: {position.side!r}"
+    )
 
 
 def _stop_loss_level(rule: StopLossRule, position: PositionState) -> float:
@@ -212,6 +543,8 @@ def _kind_of(rule: ExitRule) -> ExitRuleKind:
         return "stop_loss"
     if isinstance(rule, TakeProfitRule):
         return "take_profit"
+    if isinstance(rule, ScaledTakeProfitRule):
+        return "scaled_take_profit"
     if isinstance(rule, SignalExitRule):
         return "signal_exit"
     raise TypeError(f"unknown ExitRule subclass: {type(rule).__name__}")

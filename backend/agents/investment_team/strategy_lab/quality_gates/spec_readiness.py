@@ -42,9 +42,13 @@ from ..spec_dsl import (
     IndicatorName,
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
+    is_full_position_exit,
+    ladder_closes_full_position,
+    stop_caps_side,
 )
 from .models import GateResultsMixin, QualityGateResult, StrategyLabPhase
 
@@ -652,20 +656,90 @@ class SpecReadinessGate(GateResultsMixin):
     # Rule 4: Exit completeness.
     # ------------------------------------------------------------------
     def _check_exit_completeness(self, ctx: SpecReadinessCtx) -> Iterable[QualityGateResult]:
+        """Verify the spec's exit rules can fully close every position.
+
+        Preconditions: ``ctx.spec`` is a :class:`StrategySpec` (its ``exit_rules``
+        is the authored exit list).
+        Postconditions: returns an iterable (concretely a tuple) of
+        :class:`QualityGateResult` — a single
+        critical when there are no exit rules, when none is of an engine-closable
+        kind (``signal_exit`` / ``stop_loss`` / ``take_profit`` /
+        ``scaled_take_profit``), or when the only exits are scaled ladders summing
+        to < 1.0 with no full-position exit to close the residual; otherwise empty.
+        """
         assert isinstance(ctx.spec, StrategySpec)
-        allowed_kinds = {"signal_exit", "stop_loss", "take_profit"}
+        # Classify by type, not a duck-typed ``kind`` attribute, so a malformed
+        # rule can't slip past the check; ``allowed_kinds`` mirrors these types
+        # purely for the failure message.
+        allowed_rule_types = (SignalExitRule, StopLossRule, TakeProfitRule, ScaledTakeProfitRule)
+        allowed_kinds = {"signal_exit", "stop_loss", "take_profit", "scaled_take_profit"}
         if not ctx.spec.exit_rules:
             return (
                 self._critical(
                     "No exit rules — positions would never close. Add at "
-                    "least one of: signal_exit, stop_loss, take_profit."
+                    "least one of: signal_exit, stop_loss, take_profit, "
+                    "scaled_take_profit."
                 ),
             )
-        if not any(getattr(r, "kind", None) in allowed_kinds for r in ctx.spec.exit_rules):
+        if not any(isinstance(r, allowed_rule_types) for r in ctx.spec.exit_rules):
             return (
                 self._critical(f"exit_rules contains no rule of kind in {sorted(allowed_kinds)}."),
             )
+        # A laddered take-profit whose rung fractions sum to < 1.0 closes only
+        # those tranches and leaves the residual position open indefinitely. That
+        # is exit-complete ONLY if a ladder itself sums to a full close, OR some
+        # full-position exit closes the runner for EVERY side the spec enters — a
+        # side-restricted trailing stop (``trailing_high`` caps only longs,
+        # ``trailing_low`` only shorts) does NOT cover a residual on the opposite
+        # side. A partial ladder whose residual nothing closes would finish the
+        # backtest with an unclosed position — the "positions never close" failure
+        # this rule guards against.
+        ladders = [r for r in ctx.spec.exit_rules if isinstance(r, ScaledTakeProfitRule)]
+        if ladders:
+            covered = any(
+                ladder_closes_full_position(lad) for lad in ladders
+            ) or self._full_exit_covers_all_entry_sides(ctx.spec)
+            if not covered:
+                return (
+                    self._critical(
+                        "scaled_take_profit ladder(s) close only a fraction of the "
+                        "position (rung qty_fraction sums to < 1.0) and no other "
+                        "full-position exit (stop_loss / take_profit / signal_exit) "
+                        "closes the residual — the remainder would never close. Add "
+                        "a full-position exit or make a ladder's fractions sum to 1.0.",
+                        rule_id="exit_completeness:partial_ladder_residual",
+                    ),
+                )
         return ()
+
+    @staticmethod
+    def _full_exit_covers_all_entry_sides(spec: StrategySpec) -> bool:
+        """Whether a FULL-position exit can close a partial ladder's residual for
+        every side the spec enters.
+
+        A take-profit / signal-exit closes either side; a stop-loss closes only the
+        side(s) its basis can fire for (:func:`stop_caps_side` — ``entry_price``
+        both, ``trailing_high`` long only, ``trailing_low`` short only); a
+        ``ScaledTakeProfitRule`` covers the residual only when its rungs sum to a
+        full close (:func:`is_full_position_exit`), in which case it closes either
+        side, and otherwise is a partial scale-out that leaves a residual.
+
+        Preconditions: ``spec`` is a :class:`StrategySpec`.
+        Postconditions: ``True`` iff for every distinct ``entry_rules`` side there is
+        a full-position exit rule that can fire for that side. Vacuously ``True`` when
+        the spec has no entry rules (Rule 2 separately flags missing entries).
+        """
+
+        def covers(rule: object, side: str) -> bool:
+            # Stop-losses are the only side-conditional full exit; every other
+            # full-position exit (TP / signal-exit / full-close ladder) closes
+            # either side, and a partial ladder closes neither.
+            if isinstance(rule, StopLossRule):
+                return stop_caps_side(rule.basis, side)
+            return is_full_position_exit(rule)
+
+        entry_sides = {e.side for e in spec.entry_rules}
+        return all(any(covers(r, side) for r in spec.exit_rules) for side in entry_sides)
 
     # ------------------------------------------------------------------
     # Rule 5: Sizing realisable.
@@ -906,10 +980,21 @@ class SpecReadinessGate(GateResultsMixin):
 
         stop_losses = [r for r in ctx.spec.exit_rules if isinstance(r, StopLossRule)]
         take_profits = [r for r in ctx.spec.exit_rules if isinstance(r, TakeProfitRule)]
-        if stop_losses and take_profits:
-            min_tp = min(r.pct for r in take_profits)
+        # A laddered take-profit's FIRST rung is its effective profit target for
+        # the risk/reward ratio — that is the level the position starts realising
+        # gains at. Fold each ladder's first rung pct into the take-profit pool.
+        # ``levels[0]`` IS the lowest pct (the DSL enforces strictly-increasing pct).
+        scaled_tp_first_rungs = [
+            r.levels[0].pct for r in ctx.spec.exit_rules if isinstance(r, ScaledTakeProfitRule)
+        ]
+        tp_pcts = [r.pct for r in take_profits] + scaled_tp_first_rungs
+        if stop_losses and tp_pcts:
+            min_tp = min(tp_pcts)
             max_sl = max(r.pct for r in stop_losses)
-            assert min_tp > 0 and max_sl > 0, "exit-rule pcts must be strictly positive"
+            # Pydantic already enforces positivity upstream; re-check with an
+            # explicit raise (not ``assert``) so the gate holds under ``python -O``.
+            if min_tp <= 0 or max_sl <= 0:
+                raise ValueError("exit-rule pcts must be strictly positive")
             # Wider stops than profit targets are a deliberate risk/reward
             # choice for trend-following strategies (let losers run a bit
             # further before bailing, take winners quicker). The two legs
@@ -922,7 +1007,8 @@ class SpecReadinessGate(GateResultsMixin):
                     self._warning(
                         f"stop_loss.pct={max_sl} ≥ take_profit.pct={min_tp}; "
                         "wider stop than profit target is a valid risk/reward "
-                        "choice but unusual — confirm the asymmetry is intentional."
+                        "choice but unusual — confirm the asymmetry is intentional.",
+                        rule_id="risk_reward:stop_geq_tp",
                     )
                 )
 

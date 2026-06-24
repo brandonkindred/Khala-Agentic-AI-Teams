@@ -7,14 +7,18 @@ and asserts on the returned intents without touching the trading service.
 
 from __future__ import annotations
 
+import pytest
+
 from investment_team.strategy_lab.executor.predicate_evaluator import (
     BarRecord,
     StreamingHistoryView,
 )
 from investment_team.strategy_lab.executor.rule_compiler import (
     BarSnapshot,
+    ExitIntent,
     PositionState,
     evaluate_exit_rules,
+    first_exit_intent_for_position,
 )
 from investment_team.strategy_lab.spec_dsl import (
     IndicatorRef,
@@ -379,3 +383,81 @@ def test_multi_symbol_skips_when_no_bar_for_symbol() -> None:
     intents = evaluate_exit_rules(rules, positions, bars)
     assert len(intents) == 1
     assert intents[0].symbol == "AAA"
+
+
+# ---------------------------------------------------------------------------
+# ExitIntent — construction-time contract validation
+# ---------------------------------------------------------------------------
+
+
+def test_exit_intent_rejects_unknown_style() -> None:
+    with pytest.raises(ValueError, match="style must be"):
+        ExitIntent(symbol="AAA", rule_kind="stop_loss", rule_index=0, style="trailing")
+
+
+def test_exit_intent_rejects_out_of_range_qty_fraction() -> None:
+    for bad in (0.0, -0.1, 1.5):
+        with pytest.raises(ValueError, match="qty_fraction"):
+            ExitIntent(symbol="AAA", rule_kind="take_profit", rule_index=0, qty_fraction=bad)
+
+
+def test_exit_intent_rejects_negative_level_index() -> None:
+    with pytest.raises(ValueError, match="level_index must be non-negative"):
+        ExitIntent(symbol="AAA", rule_kind="scaled_take_profit", rule_index=0, level_index=-1)
+
+
+def test_exit_intent_rejects_limit_style_scaled_rung() -> None:
+    # A scaled rung must be a market scale-out — the dispatcher's scale-out path has
+    # no resting/requeue lifecycle for a limit rung.
+    with pytest.raises(ValueError, match="market scale-out"):
+        ExitIntent(
+            symbol="AAA",
+            rule_kind="scaled_take_profit",
+            rule_index=0,
+            level_index=0,
+            style="limit",
+        )
+
+
+def test_exit_intent_accepts_valid_scaled_rung() -> None:
+    intent = ExitIntent(
+        symbol="AAA",
+        rule_kind="scaled_take_profit",
+        rule_index=2,
+        level_index=1,
+        qty_fraction=0.5,
+        style="market",
+    )
+    assert intent.is_scaled_rung is True
+    assert intent.qty_fraction == 0.5
+
+
+# ---------------------------------------------------------------------------
+# first_exit_intent_for_position — allocation-free single-intent hot path
+# ---------------------------------------------------------------------------
+
+
+def test_first_exit_intent_returns_spec_priority_winner() -> None:
+    pos = _long()
+    rules = [StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)]
+    # Both fire; the spec-first stop wins, matching evaluate_exit_rules(first_only).
+    intent = first_exit_intent_for_position(rules, "AAA", pos, _bar(high=106, low=94))
+    assert intent is not None
+    assert (intent.rule_kind, intent.rule_index) == ("stop_loss", 0)
+
+
+def test_first_exit_intent_returns_none_when_no_rule_fires() -> None:
+    pos = _long()
+    rules = [StopLossRule(pct=0.05), TakeProfitRule(pct=0.05)]
+    assert first_exit_intent_for_position(rules, "AAA", pos, _bar(high=101, low=99)) is None
+
+
+def test_first_exit_intent_skips_excluded_limit_style_stop() -> None:
+    pos = _long()
+    # Only a limit-style stop fires; excluding it yields no intent (mirrors the
+    # dispatcher dropping an already-resting STOP_LIMIT).
+    rules = [StopLossRule(pct=0.05, style="limit", limit_offset_pct=0.01)]
+    assert (
+        first_exit_intent_for_position(rules, "AAA", pos, _bar(low=94), exclude_limit_style=True)
+        is None
+    )

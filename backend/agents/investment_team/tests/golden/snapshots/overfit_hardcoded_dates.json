@@ -268,6 +268,7 @@
       "orders_rejection_reasons": {},
       "orders_unfilled": 0,
       "risk_capped_entries": 0,
+      "scaled_take_profit_level_firings": {},
       "stop_limit_unfilled_triggers": 0,
       "summary": "Backtest closed 5 trade(s) across 504 post-warmup bar(s).",
       "warmup_orders_dropped": 0,

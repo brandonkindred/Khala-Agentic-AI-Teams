@@ -40,9 +40,8 @@ from ..spec_dsl import (
     EntryRule,
     IndicatorRef,
     SignalExitRule,
-    StopLossRule,
-    TakeProfitRule,
     VolatilityTargetSizing,
+    is_entry_anchored_exit,
 )
 
 
@@ -864,10 +863,11 @@ def _emit_class(
         on_bar_lines.append(f"        {varname} = {call_expr}")
     on_bar_lines.append("        position = ctx.position(bar.symbol)")
 
-    # Conformance gate checks #5/#6 require ``position.entry_price``
-    # when stop-loss or take-profit rules exist.
-    has_engine_handled_exit = any(isinstance(r, (StopLossRule, TakeProfitRule)) for r in exit_rules)
-    if has_engine_handled_exit:
+    # The conformance gate's stop-loss / take-profit enforcement checks require
+    # the compiled class to reference ``position.entry_price`` whenever an
+    # entry-anchored exit (stop-loss / take-profit / scaled take-profit) exists.
+    has_entry_anchored_exit = any(is_entry_anchored_exit(r) for r in exit_rules)
+    if has_entry_anchored_exit:
         on_bar_lines.append(
             "        _entry_ref = position.entry_price if position is not None else None"
         )
