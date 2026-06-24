@@ -1,6 +1,5 @@
 import { Component, DestroyRef, OnInit, inject } from '@angular/core';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { CommonModule } from '@angular/common';
 import { FormBuilder, ReactiveFormsModule, Validators } from '@angular/forms';
 import { MatCardModule } from '@angular/material/card';
 import { MatFormFieldModule } from '@angular/material/form-field';
@@ -27,6 +26,7 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
   { type: 'blog_post', label: 'Blog Posts', icon: 'article' },
   { type: 'project', label: 'Projects', icon: 'terminal' },
   { type: 'agentic_team', label: 'Agentic Teams', icon: 'groups' },
+  { type: 'integration', label: 'Integrations', icon: 'power' },
 ];
 
 /**
@@ -38,7 +38,6 @@ const ARTIFACT_GROUPS: { type: string; label: string; icon: string }[] = [
   selector: 'app-user-profile',
   standalone: true,
   imports: [
-    CommonModule,
     ReactiveFormsModule,
     RouterLink,
     MatCardModule,

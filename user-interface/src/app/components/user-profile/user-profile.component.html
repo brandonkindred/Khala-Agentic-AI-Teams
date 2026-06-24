@@ -53,14 +53,24 @@
 
     <!-- Linked artifacts -->
     <mat-card class="up-card">
-      <mat-card-header>
+      <mat-card-header class="up-card-header">
         <mat-card-title>Linked work ({{ totalAssociations }})</mat-card-title>
+        <button
+          mat-icon-button
+          type="button"
+          class="up-refresh"
+          (click)="load()"
+          [disabled]="loading"
+          aria-label="Refresh linked work"
+        >
+          <mat-icon>refresh</mat-icon>
+        </button>
       </mat-card-header>
       <mat-card-content>
         @if (totalAssociations === 0) {
           <p class="up-empty">
-            Nothing linked yet. Create a brand, blog post, project, or agentic team and it will
-            appear here.
+            Nothing linked yet. Create a brand, blog post, project, or agentic team — or connect an
+            integration — and it will appear here.
           </p>
         } @else {
           @for (group of groups; track group.type) {

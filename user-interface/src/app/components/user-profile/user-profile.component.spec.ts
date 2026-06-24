@@ -79,6 +79,43 @@ describe('UserProfileComponent', () => {
     expect(component.groups[0].label).toBeTruthy();
   });
 
+  it('should group and count integration-type associations', async () => {
+    // Integration configs are recorded as associations too; they must appear in
+    // 'Linked work' and be included in the total, not silently dropped.
+    apiSpy.getOverview.mockReturnValue(
+      of({
+        ...OVERVIEW,
+        associations: [
+          ...ASSOCIATIONS,
+          {
+            id: 'a3',
+            user_id: 'default',
+            artifact_type: 'integration',
+            team: 'integrations',
+            artifact_id: 'slack',
+            label: 'slack',
+            role: 'owner',
+            created_at: '',
+          },
+        ],
+      }),
+    );
+    await setup();
+    expect(component.totalAssociations).toBe(3);
+    const integrationGroup = component.groups.find((g) => g.type === 'integration');
+    expect(integrationGroup?.items.length).toBe(1);
+    expect(integrationGroup?.label).toBe('Integrations');
+  });
+
+  it('should reload the overview when the refresh control is clicked', async () => {
+    await setup();
+    expect(apiSpy.getOverview).toHaveBeenCalledTimes(1);
+    const btn = (fixture.nativeElement as HTMLElement).querySelector('.up-refresh') as HTMLButtonElement;
+    expect(btn).toBeTruthy();
+    btn.click();
+    expect(apiSpy.getOverview).toHaveBeenCalledTimes(2);
+  });
+
   it('should load integration status', async () => {
     await setup();
     expect(component.integrations).toEqual(INTEGRATIONS);

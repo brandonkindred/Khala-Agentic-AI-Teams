@@ -5,8 +5,10 @@ Data is persisted in the shared Khala Postgres instance via
 is registered from the unified_api FastAPI lifespan.
 
 The store is stateless; the connection pool is owned by shared_postgres.
-Every public function is wrapped in ``@timed_query`` so slow reads/writes
-surface as structured log lines.
+Every public function that issues SQL is wrapped in ``@timed_query`` so slow
+reads/writes surface as structured log lines. (``record_association_safe`` is the
+exception: it is a thin best-effort wrapper that delegates to the timed
+``record_association``, so its DB time is already captured there.)
 """
 
 from __future__ import annotations

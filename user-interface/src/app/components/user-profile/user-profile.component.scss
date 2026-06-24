@@ -26,6 +26,14 @@
   margin-bottom: 1.25rem;
 }
 
+// Lay out the card title and its refresh action on one row.
+.up-card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+}
+
 .up-form {
   display: flex;
   flex-direction: column;
