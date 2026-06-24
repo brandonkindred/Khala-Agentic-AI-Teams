@@ -57,6 +57,11 @@ def test_design_schema_excludes_orchestrator_owned_fields() -> None:
     assert not ({"strategy_id", "audit", "strategy_code"} & props)
 
 
+def test_design_schema_surfaces_expectancy_forecast() -> None:
+    """The dual-objective forecast is part of the documented wire shape."""
+    assert "expectancy_forecast" in schemas.DESIGN_SPEC_SCHEMA["properties"]
+
+
 # ---------------------------------------------------------------------------
 # DesignAgent malformed-JSON retry (acceptance criterion 2)
 # ---------------------------------------------------------------------------
