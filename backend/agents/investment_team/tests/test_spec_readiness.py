@@ -26,6 +26,7 @@ from investment_team.strategy_lab.spec_dsl import (
     FixedNotionalSizing,
     IndicatorRef,
     Predicate,
+    ScaledTakeProfitRule,
     SignalExitRule,
     StopLossRule,
     TakeProfitRule,
@@ -92,6 +93,13 @@ def _config() -> BacktestConfig:
 
 def _critical(results) -> list[str]:
     return [r.details for r in results if r.severity == "critical" and not r.passed]
+
+
+def _rule_ids(results) -> list[str]:
+    """Structured ``rule_id`` handles of failing/warning results — assert on these
+    instead of human-readable message substrings where the gate populates them, so a
+    reword of the message text can't silently break the test."""
+    return [r.rule_id for r in results if r.rule_id is not None and not r.passed]
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +306,117 @@ def test_rule4_no_exit_rules_is_critical() -> None:
     spec = _spec(exit_=[])
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
     assert any("No exit rules" in c for c in _critical(results))
+
+
+def test_rule4_partial_scaled_ladder_as_sole_exit_is_critical() -> None:
+    """A laddered take-profit summing to < 1.0 with no other full-position exit
+    leaves the residual open forever — must be flagged critical."""
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.3},
+                ]
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("close only a fraction" in c for c in _critical(results))
+    assert "exit_completeness:partial_ladder_residual" in _rule_ids(results)
+
+
+def test_rule4_partial_ladder_with_stop_loss_is_ok() -> None:
+    """The stop closes the residual the ladder leaves open → exit-complete."""
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_high"),
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+
+
+def test_rule4_full_closing_ladder_alone_is_ok() -> None:
+    """A ladder whose fractions sum to 1.0 fully closes the position on its own."""
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                ]
+            )
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+
+
+def test_rule4_partial_ladder_with_full_closing_ladder_covers_residual_is_ok() -> None:
+    """A partial ladder's residual can be closed by a SECOND, full-closing ladder:
+    a full-close ladder (rungs sum to 1.0) is a full-position exit and covers either
+    side's residual. Pins the corrected ``_full_exit_covers_all_entry_sides`` contract
+    — before the fix the helper treated every ScaledTakeProfitRule as never-covering,
+    which would have wrongly flagged this exit-complete spec as critical."""
+    spec = _spec(
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),  # partial
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                ]
+            ),  # full close → covers the residual
+        ]
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
+    # The public validate() path above short-circuits via ``ladder_closes_full_position``
+    # (the full ladder makes ``any(...)`` true) and so never reaches
+    # ``_full_exit_covers_all_entry_sides`` for a full-close ladder. The direct call
+    # below is therefore the only way to pin the corrected helper contract (a
+    # full-close ladder is classified as covering); it is an intentional white-box
+    # supplement to the public-path assertion, not a replacement for it.
+    assert SpecReadinessGate._full_exit_covers_all_entry_sides(spec) is True
+
+
+def _entry(side: str) -> EntryRule:
+    """An RSI(14) < 30 entry rule on the given ``side``."""
+    return EntryRule(
+        side=side,
+        when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op="<", rhs=30.0),
+    )
+
+
+def test_rule4_partial_ladder_with_side_mismatched_trailing_stop_is_critical() -> None:
+    """A SHORT-only spec whose only full-position exit is a trailing_high stop (which
+    caps LONGS only) leaves the short residual uncloseable — the side-restricted stop
+    does not cover the residual, so this must be critical."""
+    spec = _spec(
+        entry=[_entry("short")],
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_high"),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert any("close only a fraction" in c for c in _critical(results))
+    assert "exit_completeness:partial_ladder_residual" in _rule_ids(results)
+
+
+def test_rule4_partial_ladder_with_side_matched_trailing_stop_is_ok() -> None:
+    """The same short spec with a trailing_low stop (caps SHORTS) closes the residual."""
+    spec = _spec(
+        entry=[_entry("short")],
+        exit_=[
+            ScaledTakeProfitRule(levels=[{"pct": 0.05, "qty_fraction": 0.5}]),
+            StopLossRule(pct=0.03, basis="trailing_low"),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("close only a fraction" in c for c in _critical(results))
 
 
 # ---------------------------------------------------------------------------
@@ -919,6 +1038,50 @@ def test_rule8_stop_loss_geq_take_profit_is_warning_not_critical() -> None:
     assert any("stop_loss.pct" in w for w in warnings), warnings
 
 
+def test_rule8_scaled_ladder_first_rung_folds_into_risk_reward_warning() -> None:
+    """A ladder's FIRST rung is its effective profit target: a wide stop versus
+    that first rung must surface the same risk/reward warning a plain take_profit
+    would. The second rung sits at 0.20 (above the 0.10 stop), so this only warns
+    if the check compares against ``levels[0].pct`` (0.05) — proving the ladder is
+    folded into the take-profit pool by its first rung, not its last (or omitted)."""
+    spec = _spec(
+        exit_=[
+            StopLossRule(pct=0.10),
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.05, "qty_fraction": 0.5},
+                    {"pct": 0.20, "qty_fraction": 0.5},
+                ]
+            ),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    assert not any("stop_loss.pct" in c for c in _critical(results))
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert any("stop_loss.pct" in w for w in warnings), warnings
+    assert "risk_reward:stop_geq_tp" in _rule_ids(results)
+
+
+def test_rule8_scaled_ladder_healthy_first_rung_no_risk_reward_warning() -> None:
+    """When the ladder's first rung (0.10) sits above the stop (0.05), the
+    risk/reward ratio is healthy and no warning fires — confirming the FIRST rung
+    is what the check folds in (a ladder summing to 1.0 also keeps Rule 4 happy)."""
+    spec = _spec(
+        exit_=[
+            StopLossRule(pct=0.05),
+            ScaledTakeProfitRule(
+                levels=[
+                    {"pct": 0.10, "qty_fraction": 0.5},
+                    {"pct": 0.30, "qty_fraction": 0.5},
+                ]
+            ),
+        ],
+    )
+    results = SpecReadinessGate().validate(spec, backtest_config=_config())
+    warnings = [r.details for r in results if r.severity == "warning" and not r.passed]
+    assert not any("stop_loss.pct" in w for w in warnings), warnings
+
+
 def test_rule8_max_position_pct_above_25_is_critical() -> None:
     spec = _spec(risk_limits={"max_position_pct": 30, "max_drawdown_pct": 10})
     results = SpecReadinessGate().validate(spec, backtest_config=_config())
@@ -1243,15 +1406,11 @@ def test_rule9_check_a_stop_magnitude_does_not_change_verdict() -> None:
             risk_limits={"max_position_pct": 5, "max_drawdown_pct": 10},
         )
         results = SpecReadinessGate().validate(spec, backtest_config=_config())
-        return any(
-            r.rule_id == "sizing:position_cap" for r in results if not r.passed
-        )
+        return any(r.rule_id == "sizing:position_cap" for r in results if not r.passed)
 
     signal_exit = [
         SignalExitRule(
-            when=Predicate(
-                lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0
-            )
+            when=Predicate(lhs=IndicatorRef(name="rsi", params={"period": 14}), op=">", rhs=70.0)
         )
     ]
     tight = [StopLossRule(pct=0.01)]
