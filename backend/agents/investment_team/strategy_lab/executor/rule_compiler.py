@@ -310,15 +310,55 @@ def evaluate_exit_rules_for_position(
         return [intent] if intent is not None else []
     intents: list[ExitIntent] = []
     for idx, rule in enumerate(rules):
-        intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
-        if intent is None:
-            continue
-        if exclude_limit_style and intent.style == "limit":
-            continue
-        if exclude_scaled and intent.is_scaled_rung:
-            continue
-        intents.append(intent)
+        intent = _filtered_intent_for_rule(
+            rule,
+            symbol,
+            idx,
+            position,
+            bar,
+            view,
+            cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        if intent is not None:
+            intents.append(intent)
     return intents
+
+
+def _filtered_intent_for_rule(
+    rule: ExitRule,
+    symbol: str,
+    idx: int,
+    position: PositionState,
+    bar: BarSnapshot,
+    view: Optional[HistoryView],
+    cursor_map: Mapping[int, int],
+    *,
+    exclude_limit_style: bool,
+    exclude_scaled: bool,
+) -> Optional[ExitIntent]:
+    """:func:`_intent_for_rule` with the dispatcher's two skip filters applied.
+
+    Single source of the "does this rule produce an actionable intent this bar"
+    decision, shared by the list-returning :func:`evaluate_exit_rules_for_position`
+    and the allocation-free :func:`first_exit_intent_for_position` so the filter
+    logic (exclude already-resting limit stops / deferred scaled rungs) lives in one
+    place and the two entry points can never diverge.
+
+    Preconditions: as :func:`_intent_for_rule`.
+    Postconditions: returns the rule's intent, or ``None`` when the rule does not
+    fire OR the intent is a limit-style stop and ``exclude_limit_style`` OR the
+    intent is a scaled rung and ``exclude_scaled``.
+    """
+    intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
+    if intent is None:
+        return None
+    if exclude_limit_style and intent.style == "limit":
+        return None
+    if exclude_scaled and intent.is_scaled_rung:
+        return None
+    return intent
 
 
 def first_exit_intent_for_position(
@@ -351,14 +391,19 @@ def first_exit_intent_for_position(
     excluded). Allocates no result list.
     """
     for idx, rule in enumerate(rules):
-        intent = _intent_for_rule(rule, symbol, idx, position, bar, view, cursor_map)
-        if intent is None:
-            continue
-        if exclude_limit_style and intent.style == "limit":
-            continue
-        if exclude_scaled and intent.is_scaled_rung:
-            continue
-        return intent
+        intent = _filtered_intent_for_rule(
+            rule,
+            symbol,
+            idx,
+            position,
+            bar,
+            view,
+            cursor_map,
+            exclude_limit_style=exclude_limit_style,
+            exclude_scaled=exclude_scaled,
+        )
+        if intent is not None:
+            return intent
     return None
 
 

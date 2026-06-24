@@ -105,11 +105,29 @@ _MAX_ORDER_EVENTS = 20
 
 # The exact ``reason`` a scaled-take-profit rung's market scale-out carries (see
 # ``_build_close_order`` — a scaled rung is not a ``signal_exit``, so it gets no
-# ``[idx]`` suffix). The pending-order gate uses it to tell an in-flight PARTIAL
-# scale-out apart from an in-flight FULL close: the former must NOT stand the whole
-# bar down (a full-position exit may still need to protect the runner), only defer
-# further rungs.
+# ``[idx]`` suffix today). The pending-order gate uses it to tell an in-flight
+# PARTIAL scale-out apart from an in-flight FULL close: the former must NOT stand
+# the whole bar down (a full-position exit may still need to protect the runner),
+# only defer further rungs.
 _SCALED_TP_ENGINE_REASON = f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
+
+
+def _is_scaled_tp_engine_reason(reason: str) -> bool:
+    """Whether ``reason`` is a scaled-take-profit rung's engine close reason.
+
+    Matches the canonical ``engine_exit:scaled_take_profit`` AND tolerates a future
+    ``[idx]`` index suffix — the exact form ``_build_close_order`` already appends
+    for ``signal_exit`` — so the in-flight-partial gate does not silently revert to
+    standing the bar down (leaving the runner unprotected) if scaled rungs ever gain
+    an indexed reason. Deliberately does NOT plain-prefix-match: a hypothetical
+    longer kind such as ``scaled_take_profit_v2`` is NOT treated as a rung; only the
+    exact kind, or the kind immediately followed by ``[``, counts.
+
+    Preconditions: ``reason`` is an order's ``reason`` string (may be empty).
+    Postconditions: ``True`` iff ``reason`` is the scaled-take-profit engine reason,
+    with or without a trailing ``[idx]`` rule-index suffix.
+    """
+    return reason == _SCALED_TP_ENGINE_REASON or reason.startswith(_SCALED_TP_ENGINE_REASON + "[")
 
 
 def _build_exit_reconciler(
@@ -970,7 +988,7 @@ class _EngineExitDispatcher:
             if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
                 continue
             if po_req.order_type == OrderType.MARKET:
-                if track_continuation and reason == _SCALED_TP_ENGINE_REASON:
+                if track_continuation and _is_scaled_tp_engine_reason(reason):
                     # In-flight PARTIAL scale-out: a scaled rung's market is still
                     # pending (e.g. a participation-capped rung requeued across
                     # bars). Do NOT stand the bar down — that would also block a
@@ -1222,17 +1240,12 @@ class _EngineExitDispatcher:
             qty = intent.qty_fraction * base
         else:
             qty = pos.qty + scale_in_qty
-        # A scaled rung is always a market scale-out (``_intent_for_rule`` pins
-        # style="market"), so it must never take the resting STOP_LIMIT path below:
-        # that path has no REQUEUE_NEXT_BAR and would strand a participation-capped
-        # rung remainder (a rung fires at most once and cannot re-emit). Fail fast if
-        # a future limit-style scaled rule kind ever breaks this invariant.
-        if (
-            intent.is_scaled_rung and intent.style == "limit"
-        ):  # pragma: no cover - scaled rungs are market
-            raise ValueError(
-                "scaled rungs must be market orders; the limit path has no rung requeue"
-            )
+        # A scaled rung is always a market scale-out so it never takes the resting
+        # STOP_LIMIT path below (that path has no REQUEUE_NEXT_BAR and would strand a
+        # participation-capped rung remainder, since a rung fires at most once and
+        # cannot re-emit). This invariant is enforced at the source — ``ExitIntent``'s
+        # ``__post_init__`` rejects a scaled rung with ``style != "market"`` at
+        # construction — so no defensive re-check is needed here.
         if intent.style == "limit":
             req = self._build_stop_limit_close(intent, close_side, qty, reason)
         else:

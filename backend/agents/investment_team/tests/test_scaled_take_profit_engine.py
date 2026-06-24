@@ -36,9 +36,11 @@ from investment_team.trading_service.engine.fill_simulator import (
 from investment_team.trading_service.engine.order_book import OrderBook, PendingOrder
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
+    _SCALED_TP_ENGINE_REASON,
     TradingService,
     TradingServiceResult,
     _EngineExitDispatcher,
+    _is_scaled_tp_engine_reason,
     _PositionStateView,
     _ScaledLadderCursor,
     _TrackedPosition,
@@ -723,6 +725,19 @@ def test_inflight_full_close_still_stands_the_bar_down() -> None:
     )
     assert pending == []  # stood down — no redundant second close emitted
     assert tracker["AAA"].scaled_cursor.mapping == {}
+
+
+def test_is_scaled_tp_engine_reason_tolerates_index_suffix() -> None:
+    """The in-flight-partial matcher recognises the canonical scaled-tp reason AND a
+    future ``[idx]`` suffix variant (so the gate can't silently revert to standing
+    the bar down), but does NOT plain-prefix-match a longer kind name."""
+    assert _is_scaled_tp_engine_reason(_SCALED_TP_ENGINE_REASON) is True
+    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}[0]") is True
+    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}[3]") is True
+    # Not a rung: empty, a different kind, or a longer kind sharing the prefix.
+    assert _is_scaled_tp_engine_reason("") is False
+    assert _is_scaled_tp_engine_reason("engine_exit:stop_loss") is False
+    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}_v2") is False
 
 
 def _submit_competing_short(order_book: OrderBook) -> PendingOrder:
