@@ -139,6 +139,9 @@ FALSE_POSITIVE_VERIFY_PROMPT = (
 - `read_file(path)` — read the full contents of any file in the submission (or "<existing codebase>" for pre-existing code).
 - `list_files()` — list every file you can read.
 - `search_codebase(query)` — find every place a substring (e.g. a function, class, or variable name) appears across all files.
+- `find_function_at_line(path, line_number)` — identify which function, method, or class contains a specific 1-based line number. Use this for an instant lookup instead of scanning the file manually.
+
+**Finding the enclosing construct for a line number:** When a finding cites a line number and you need to know which function or method contains it, use `find_function_at_line(path, line_number)` for a direct, precise answer. If you inspect the file yourself instead, call `read_file(path)` to retrieve the **entire** file in a single call, then scan *all* of the returned content to find the nearest enclosing definition. Do **not** examine the file in a series of partial ranges or incrementally expand your search window — `read_file` always returns the complete file, so one call gives you everything you need.
 
 Before judging a finding, USE THE TOOLS to inspect the code it refers to AND any related code (where a symbol is defined, imported, registered, exported, used, or tested). Findings that are commonly false positives once you look at the whole codebase:
 - "X is undefined / never defined / not imported / not registered" — when X is in fact defined, imported, registered, or exported elsewhere in this file or another file. Search for X before believing it.

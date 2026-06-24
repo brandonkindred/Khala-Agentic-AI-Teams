@@ -26,6 +26,8 @@ from code_review_agent.false_positive_filter import (
     _build_tools,
     _code_fence_for,
     _coerce_verdict,
+    _find_heuristic_function_at_line,
+    _find_python_function_at_line,
     _parse_verdicts,
     filter_false_positives,
 )
@@ -216,14 +218,15 @@ def test_search_rejects_nonpositive_max() -> None:
 
 
 def test_build_tools_delegate_to_index() -> None:
-    """``_build_tools`` returns read_file/list_files/search_codebase tools that delegate to the index."""
+    """``_build_tools`` returns all four tools that delegate to the index."""
     idx = CodebaseIndex(files={"app/main.py": "def foo(): pass\n"}, existing_codebase="old")
-    read_file, list_files, search_codebase = _build_tools(idx)
-    assert {read_file.tool_name, list_files.tool_name, search_codebase.tool_name} == {
-        "read_file",
-        "list_files",
-        "search_codebase",
-    }
+    read_file, list_files, search_codebase, find_function_at_line = _build_tools(idx)
+    assert {
+        read_file.tool_name,
+        list_files.tool_name,
+        search_codebase.tool_name,
+        find_function_at_line.tool_name,
+    } == {"read_file", "list_files", "search_codebase", "find_function_at_line"}
     assert read_file("app/main.py") == "def foo(): pass\n"
     listed = list_files()
     assert "app/main.py" in listed and CodebaseIndex.EXISTING_CODEBASE_PATH in listed
@@ -233,8 +236,77 @@ def test_build_tools_delegate_to_index() -> None:
 
 def test_list_files_tool_handles_empty_index() -> None:
     """The list_files tool returns a placeholder string for an empty index."""
-    _, list_files, _ = _build_tools(CodebaseIndex(files={}))
+    _, list_files, _, _ = _build_tools(CodebaseIndex(files={}))
     assert list_files() == "(no files available)"
+
+
+# --------------------------------------------------------------------------- find_function_at_line
+
+
+def test_find_function_at_line_python_top_level() -> None:
+    """Tool returns the enclosing top-level function for a Python file."""
+    code = "def alpha():\n    x = 1\n    return x\n\ndef beta():\n    pass\n"
+    idx = CodebaseIndex(files={"app/main.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app/main.py", 2)
+    assert "alpha" in result
+    assert "beta" not in result
+
+
+def test_find_function_at_line_python_nested() -> None:
+    """Tool returns the innermost (nested) function, not the outer one."""
+    code = (
+        "def outer():\n"         # line 1
+        "    x = 1\n"            # line 2
+        "    def inner():\n"     # line 3
+        "        return x\n"     # line 4
+        "\n"                      # line 5
+    )
+    idx = CodebaseIndex(files={"svc.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("svc.py", 4)
+    assert "inner" in result
+    assert "outer" not in result
+
+
+def test_find_function_at_line_python_class_method() -> None:
+    """Tool returns the method name when the line is inside a class method."""
+    code = (
+        "class Foo:\n"            # line 1
+        "    def bar(self):\n"   # line 2
+        "        return 42\n"    # line 3
+    )
+    idx = CodebaseIndex(files={"models.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("models.py", 3)
+    assert "bar" in result
+
+
+def test_find_function_at_line_python_module_level() -> None:
+    """Tool reports 'module level' when the line is not inside any construct."""
+    code = "X = 1\nY = 2\n"
+    idx = CodebaseIndex(files={"config.py": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("config.py", 1)
+    assert "module level" in result
+
+
+def test_find_function_at_line_non_python_heuristic() -> None:
+    """Tool falls back to the column-0 heuristic for non-Python files."""
+    code = "function doWork() {\n  const x = 1;\n  return x;\n}\n"
+    idx = CodebaseIndex(files={"app.ts": code})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("app.ts", 2)
+    # Heuristic returns the start line of the enclosing construct.
+    assert "1" in result
+
+
+def test_find_function_at_line_unknown_path() -> None:
+    """Tool returns an error string for a path not in the index."""
+    idx = CodebaseIndex(files={"app/main.py": "x = 1\n"})
+    _, _, _, find_function_at_line = _build_tools(idx)
+    result = find_function_at_line("does/not/exist.py", 5)
+    assert result.startswith("Error")
 
 
 # --------------------------------------------------------------------------- verdict parsing
