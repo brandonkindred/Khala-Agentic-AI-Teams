@@ -648,3 +648,26 @@ def test_getattr_raises_on_unknown():
 
     with pytest.raises(AttributeError, match="no attribute"):
         _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
+def test_pg_cursor_dict_rows_requests_dict_row_factory(monkeypatch):
+    """pg_cursor(dict_rows=True) opens the cursor with psycopg's dict_row factory.
+
+    Placed after ``_psycopg_installed`` so the ``skipif`` resolves at import time;
+    covers the ``dict_rows`` branch (the import + ``row_factory`` cursor) that the
+    plain-cursor test does not reach.
+    """
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from psycopg.rows import dict_row
+
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor(dict_rows=True) as cur:
+        assert cur is not None
+
+    fake.conn.cursor.assert_called_once_with(row_factory=dict_row)
+    fake.conn.commit.assert_called_once()
