@@ -8,6 +8,7 @@ LLM clients never run.
 
 from __future__ import annotations
 
+import json
 from typing import Any, List
 from unittest.mock import MagicMock
 
@@ -1484,12 +1485,10 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
     )
 
     # -- _run_discovery -------------------------------------------------------
-    import json as _json
-
     discovery_received: dict = {}
 
     def _capture_discovery(prospect_json, qual_json, *a, **kw):
-        pid = _json.loads(prospect_json)["id"]
+        pid = json.loads(prospect_json)["id"]
         discovery_received[pid] = qual_json
         return _discovery_body()
 
@@ -1529,7 +1528,7 @@ def test_discovery_and_negotiation_match_by_id_not_company_name(stub_orch, sampl
     negotiation_received: dict = {}
 
     def _capture_negotiation(prospect_json, prop_json, *a, **kw):
-        pid = _json.loads(prospect_json)["id"]
+        pid = json.loads(prospect_json)["id"]
         negotiation_received[pid] = prop_json
         return _closer_body()
 
