@@ -268,6 +268,7 @@
       "orders_rejection_reasons": {},
       "orders_unfilled": 84,
       "risk_capped_entries": 0,
+      "scaled_take_profit_level_firings": {},
       "stop_limit_unfilled_triggers": 0,
       "summary": "Backtest closed zero trades; 84 order(s) left unfilled with no entry fills recorded.",
       "warmup_orders_dropped": 0,

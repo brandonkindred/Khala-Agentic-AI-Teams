@@ -14,6 +14,7 @@ import type {
   LlmConfigResponse,
   LlmConfigUpdate,
   LlmProvider,
+  LlmStorageStatus,
   OllamaModelsResponse,
 } from '../../models/llm-config.model';
 
@@ -71,7 +72,15 @@ export class LlmConfigDashboardComponent implements OnInit {
 
   claudeApiKeyConfigured = false;
   ollamaApiKeyConfigured = false;
-  storageAvailable = true;
+  // Why the store is (un)writable, so the banner can say *why* Save is disabled
+  // rather than always blaming "not configured". The single source of truth —
+  // `storageAvailable` is derived from it so the two can never drift.
+  storageStatus: LlmStorageStatus = 'available';
+
+  /** Save is allowed only when the store is configured AND reachable. */
+  get storageAvailable(): boolean {
+    return this.storageStatus === 'available';
+  }
 
   providerOptions: LlmProvider[] = ['ollama', 'claude'];
   claudeModelOptions: string[] = [];
@@ -98,9 +107,9 @@ export class LlmConfigDashboardComponent implements OnInit {
           this.error = this.friendlyError(err, 'Failed to load LLM configuration.');
           this.loading = false;
           // The config load failed, so we can't confirm the store is reachable;
-          // mark storage unavailable to disable Save rather than letting the user
-          // attempt a write that would fail.
-          this.storageAvailable = false;
+          // mark it unreachable (the API itself didn't answer) so the banner points
+          // at connectivity and Save is disabled (storageAvailable derives from this).
+          this.storageStatus = 'unreachable';
         },
       });
   }
@@ -115,7 +124,9 @@ export class LlmConfigDashboardComponent implements OnInit {
     this.ollamaMode = this.isOllamaCloudUrl(this.ollamaBaseUrl) ? 'cloud' : 'local';
     this.claudeApiKeyConfigured = cfg.claude_api_key_configured;
     this.ollamaApiKeyConfigured = cfg.ollama_api_key_configured;
-    this.storageAvailable = cfg.storage_available;
+    // storageAvailable derives from storageStatus; older backends that omit
+    // storage_status fall back from the storage_available boolean.
+    this.storageStatus = cfg.storage_status ?? (cfg.storage_available ? 'available' : 'unconfigured');
     this.providerOptions = cfg.provider_options?.length ? cfg.provider_options : ['ollama', 'claude'];
     this.claudeModelOptions = cfg.claude_model_options || [];
     this.ollamaModelSuggestions = cfg.ollama_model_suggestions || [];
@@ -244,7 +255,9 @@ export class LlmConfigDashboardComponent implements OnInit {
 
     if (!this.storageAvailable) {
       this.error =
-        'Configuration storage is unavailable (Postgres is not configured). Set the provider via environment variables instead.';
+        this.storageStatus === 'unreachable'
+          ? 'Configuration storage is unreachable (Postgres is configured but not responding). Restore the database connection and try again.'
+          : 'Configuration storage is unavailable (Postgres is not configured). Set the provider via environment variables instead.';
       return;
     }
 

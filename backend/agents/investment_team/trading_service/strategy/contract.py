@@ -160,6 +160,15 @@ class OrderRequest(BaseModel):
     # price. Custom-code orders submitted by the strategy subprocess leave this
     # False, so the gate remains their sole position-cap enforcement point.
     risk_presized: bool = False
+    # True ONLY on the engine's scaled-take-profit rung scale-outs — a PARTIAL
+    # close that leaves the runner open. The per-bar exit gate reads this flag to
+    # tell an in-flight partial from a full close WITHOUT parsing the order's
+    # free-form ``reason`` string: a partial must not stand the whole bar down (a
+    # stop / take-profit / signal exit may still need to protect the runner), it
+    # only defers the next rung. Set by the engine's ``_build_close_order``; every
+    # other order — strategy orders and full-position engine closes — leaves it
+    # False, so this is a structural discriminator decoupled from reason formatting.
+    engine_scaled_partial: bool = False
     unfilled_policy: Optional[UnfilledPolicy] = None
     twap_slices: Optional[int] = None
     attached_stop_loss: Optional[StopAttachment] = None

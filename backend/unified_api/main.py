@@ -660,24 +660,14 @@ async def _probe_postgres_live() -> bool:
     """
 
     def _ping() -> bool:
-        from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled
+        # Delegates to the shared, hard-bounded probe so there is one
+        # ``SELECT 1`` implementation across the platform (the LLM-config
+        # and GitHub-integration routes use the same helper). It returns
+        # False when Postgres is disabled, the host is unreachable, or the
+        # bounded acquisition times out — exactly this branch's contract.
+        from shared_postgres import check_connection
 
-        if not is_postgres_enabled():
-            return False
-        try:
-            # Bound the connection acquisition itself so the worker
-            # thread can't block longer than `_PROBE_DB_TIMEOUT_S`. We
-            # reach through `client._get_or_create_pool` (rather than
-            # `get_conn()`) because the public helper doesn't expose a
-            # timeout knob today and the probe must be hard-bounded.
-            pool = _pg_client._get_or_create_pool()
-            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
-                cur.execute("SELECT 1")
-                row = cur.fetchone()
-                return row is not None and row[0] == 1
-        except Exception:
-            return False
+        return check_connection(timeout_s=_PROBE_DB_TIMEOUT_S)
 
     loop = asyncio.get_running_loop()
     try:
@@ -745,13 +735,20 @@ async def _verify_in_process_schema_present(team_key: str) -> bool:
 
     def _check() -> bool:
         from shared_postgres import client as _pg_client
-        from shared_postgres import is_postgres_enabled
+        from shared_postgres import is_postgres_enabled, probe_cursor
 
         if not is_postgres_enabled():
             return False
         try:
             pool = _pg_client._get_or_create_pool()
-            with pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn, conn.cursor() as cur:
+            # Bound the query itself (not just slot acquisition) via the shared probe
+            # helper's transaction-local statement_timeout, so a post-connect mid-query
+            # stall releases this pooled connection within the budget — same guarantee as
+            # check_connection, instead of an unbounded SELECT on the shared pool.
+            with (
+                pool.connection(timeout=_PROBE_DB_TIMEOUT_S) as conn,
+                probe_cursor(conn, timeout_s=_PROBE_DB_TIMEOUT_S) as cur,
+            ):
                 # `to_regclass` returns NULL for missing tables — fast,
                 # one round-trip, and it doesn't lock anything.
                 placeholders = ", ".join(["to_regclass(%s) IS NOT NULL"] * len(expected))
