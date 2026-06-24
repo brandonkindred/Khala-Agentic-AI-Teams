@@ -13,7 +13,6 @@ import subprocess
 import sys
 import threading
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
@@ -23,7 +22,7 @@ _agents_root = Path(__file__).resolve().parent.parent.parent
 if str(_agents_root) not in sys.path:
     sys.path.insert(0, str(_agents_root))
 
-from fastapi import FastAPI, HTTPException, Query  # noqa: E402
+from fastapi import HTTPException, Query  # noqa: E402
 from pydantic import BaseModel, Field  # noqa: E402
 
 from coding_team import hitl  # noqa: E402
@@ -65,13 +64,14 @@ from coding_team.job_store import (  # noqa: E402
 from coding_team.job_store import submit_answers as store_submit_answers  # noqa: E402
 from coding_team.models import AgentStatusEntry, CodingTeamPlanInput  # noqa: E402
 from coding_team.orchestrator import run_coding_team_orchestrator  # noqa: E402
+from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA  # noqa: E402
 from coding_team.review_history_store import (  # noqa: E402
     list_reviews,
     record_review_start,
     update_review,
 )
 from coding_team.token_crypto import decrypt_token, encrypt_token  # noqa: E402
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared_app import create_team_app  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
     DEVELOPMENT_BRANCH,
     commit_working_tree,
@@ -81,36 +81,14 @@ from software_engineering_team.shared.git_utils import (  # noqa: E402
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="coding-team", team_key="coding_team")
-
-
-@asynccontextmanager
-async def _coding_team_lifespan(
-    app: FastAPI,
-):  # pragma: no cover - exercised only with a live Postgres pool
-    # Register the code-review-history schema (no-op when POSTGRES_HOST is unset).
-    try:
-        from coding_team.postgres import SCHEMA as CODE_REVIEW_SCHEMA
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(CODE_REVIEW_SCHEMA)
-    except Exception:
-        logger.exception("coding_team postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("coding_team shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="coding-team",
+    team_key="coding_team",
     title="Coding Team API",
     description="Tech Lead and Senior SWEs with Task Graph. POST /run to start a job; poll GET /status/{job_id}.",
-    lifespan=_coding_team_lifespan,
+    version="0.1.0",
+    postgres_schema=CODE_REVIEW_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="coding_team")
 
 # Tracks the orchestrator thread per job so the answers endpoint can tell whether a blocked wait
 # loop will pick up answers automatically (thread alive) or the job needs an explicit /resume (the

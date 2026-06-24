@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -32,6 +32,7 @@ if str(_agents_dir) not in sys.path:
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from shared_env_config import env_float
 from unified_api.config import TEAM_CONFIGS, get_enabled_teams
 
 logging.basicConfig(
@@ -512,7 +513,14 @@ app.add_middleware(SecurityGatewayMiddleware)
 try:
     from shared_observability import instrument_fastapi_app
 
-    instrument_fastapi_app(app, team_key="unified_api")
+    # Anchored exclusions: this app hosts the /api/se/metrics business alias, whose
+    # path contains "metrics". Excluding only the exact scrape/health endpoints keeps
+    # the alias traced while still skipping the Prometheus /metrics endpoint.
+    instrument_fastapi_app(
+        app,
+        team_key="unified_api",
+        excluded_urls="^/health$,^/healthz$,^/ready$,^/metrics$",
+    )
 except Exception:
     logger.warning("OpenTelemetry FastAPI instrumentation unavailable", exc_info=True)
 
@@ -524,7 +532,8 @@ try:
     Instrumentator(
         should_group_status_codes=True,
         should_ignore_untemplated=True,
-        excluded_handlers=["/metrics", "/health"],
+        # Anchored so the /api/se/metrics alias is scraped while the scrape endpoint isn't.
+        excluded_handlers=["^/metrics$", "^/health$"],
     ).instrument(app).expose(app, endpoint="/metrics", include_in_schema=False, tags=["observability"])
 except Exception:
     logger.warning("prometheus instrumentator unavailable", exc_info=True)
@@ -961,6 +970,51 @@ async def list_team_jobs(team: str, running_only: bool = False) -> dict[str, Any
         resp = await client.get(url)
         resp.raise_for_status()
         return resp.json()
+
+
+@app.get("/api/se/metrics", tags=["software", "observability"])
+async def se_metrics_alias(window_days: float = 30.0) -> dict[str, Any]:
+    """Alias for the SE team's DORA metrics, proxied to its ``/dora`` route.
+
+    The SDLC review specified ``GET /api/se/metrics`` while the SE team itself
+    mounts under ``/api/software-engineering``; this thin alias satisfies that
+    contract by forwarding to the SE service's ``/dora`` route. This alias prefix
+    (``/api/se``) is registered in the security gateway's scanned prefixes so it
+    shares the proxied path's security posture.
+    """
+    env_var = TEAM_SERVICE_URL_ENVS.get("software_engineering")
+    base = (os.environ.get(env_var, "").strip() if env_var else "") or ""
+    if not base:
+        raise HTTPException(status_code=503, detail="software engineering service URL not configured")
+    # Operability knob parsed via the shared typed reader (missing/garbage → 15s);
+    # a non-positive value is then reset to the default, since a <=0 timeout would
+    # make httpx fail instantly.
+    timeout = env_float("SE_METRICS_ALIAS_TIMEOUT", 15.0)
+    if timeout <= 0:
+        timeout = 15.0
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            resp = await client.get(f"{base.rstrip('/')}/dora", params={"window_days": window_days})
+            resp.raise_for_status()
+            data = resp.json()
+    except httpx.HTTPStatusError as exc:
+        # Forward the upstream failure as a gateway error rather than a 500 with a
+        # leaked traceback.
+        logger.warning("SE metrics alias: upstream returned %s", exc.response.status_code)
+        raise HTTPException(
+            status_code=502,
+            detail=f"software engineering service returned {exc.response.status_code}",
+        ) from exc
+    except httpx.RequestError as exc:
+        logger.warning("SE metrics alias: upstream unreachable: %s", exc)
+        raise HTTPException(status_code=503, detail="software engineering service unreachable") from exc
+    except ValueError as exc:
+        # A 200 with a non-JSON body (e.g. an HTML error page) makes ``resp.json()``
+        # raise ``json.JSONDecodeError`` (a ``ValueError`` subclass); surface a 502
+        # rather than an unhandled 500 with a leaked traceback.
+        logger.warning("SE metrics alias: non-JSON body from upstream: %s", exc)
+        raise HTTPException(status_code=502, detail="invalid JSON from software engineering service") from exc
+    return data
 
 
 @app.delete("/api/jobs/{team}/{job_id}", tags=["jobs"])

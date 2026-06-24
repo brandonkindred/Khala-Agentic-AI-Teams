@@ -1,0 +1,98 @@
+<div class="metrics-tab">
+  <header class="metrics-tab__header">
+    <div>
+      <h2>Engineering Metrics</h2>
+      <p>DORA delivery metrics and LLM cost for the Software Engineering team.</p>
+    </div>
+    <div class="metrics-tab__controls">
+      <mat-button-toggle-group
+        [value]="windowDays()"
+        (change)="setWindow($event.value)"
+        aria-label="Time window"
+      >
+        @for (opt of windowOptions; track opt) {
+          <mat-button-toggle [value]="opt">{{ opt }}d</mat-button-toggle>
+        }
+      </mat-button-toggle-group>
+      <button mat-icon-button (click)="load()" aria-label="Refresh" [disabled]="loading()">
+        <mat-icon>refresh</mat-icon>
+      </button>
+    </div>
+  </header>
+
+  @if (loading()) {
+    <div class="metrics-tab__loading">
+      <mat-spinner diameter="32"></mat-spinner>
+    </div>
+  }
+
+  @if (error()) {
+    <div class="metrics-tab__error">
+      <mat-icon>error_outline</mat-icon>
+      <span>{{ error() }}</span>
+    </div>
+  }
+
+  @if (metrics(); as m) {
+    <div class="metrics-tab__grid">
+      <mat-card class="metric-card">
+        <mat-card-content>
+          <div class="metric-card__label">Deployment frequency</div>
+          <div class="metric-card__value">{{ m.deployment_frequency_per_day }}<span class="metric-card__unit">/day</span></div>
+          <div class="metric-card__sub">{{ m.deployment_count }} merges to main</div>
+        </mat-card-content>
+      </mat-card>
+
+      <mat-card class="metric-card">
+        <mat-card-content>
+          <div class="metric-card__label">Lead time for change</div>
+          <div class="metric-card__value">{{ formatDuration(m.lead_time_seconds_median) }}</div>
+          <div class="metric-card__sub">median over {{ m.lead_time_sample_count }} tasks</div>
+        </mat-card-content>
+      </mat-card>
+
+      <mat-card class="metric-card">
+        <mat-card-content>
+          <div class="metric-card__label">Change-failure rate</div>
+          <div class="metric-card__value">{{ formatPercent(m.change_failure_rate) }}</div>
+          <div class="metric-card__sub">{{ m.gate_reentry_count }} of {{ m.merged_count }} merged</div>
+        </mat-card-content>
+      </mat-card>
+
+      <mat-card class="metric-card">
+        <mat-card-content>
+          <div class="metric-card__label">MTTR (agent crash)</div>
+          <div class="metric-card__value">{{ formatDuration(m.mttr_seconds_median) }}</div>
+          <div class="metric-card__sub">{{ m.crash_resolved_count }} resolved</div>
+        </mat-card-content>
+      </mat-card>
+    </div>
+
+    <mat-card class="metrics-tab__cost">
+      <mat-card-content>
+        <div class="metrics-tab__cost-header">
+          <span class="metric-card__label">LLM cost</span>
+          <span class="metrics-tab__cost-total">{{ formatUsd(m.total_cost_usd) }}</span>
+        </div>
+        @if (jobCosts().length) {
+          <table mat-table [dataSource]="jobCosts()" class="metrics-tab__cost-table">
+            <ng-container matColumnDef="job">
+              <th mat-header-cell *matHeaderCellDef>Job</th>
+              <td mat-cell *matCellDef="let row">{{ row.job }}</td>
+            </ng-container>
+            <ng-container matColumnDef="cost">
+              <th mat-header-cell *matHeaderCellDef>Cost</th>
+              <td mat-cell *matCellDef="let row">{{ formatUsd(row.cost) }}</td>
+            </ng-container>
+            <tr mat-header-row *matHeaderRowDef="['job', 'cost']"></tr>
+            <tr mat-row *matRowDef="let row; columns: ['job', 'cost']"></tr>
+          </table>
+        } @else {
+          <p class="metrics-tab__empty">No cost recorded in this window.</p>
+        }
+      </mat-card-content>
+    </mat-card>
+
+    <p class="metrics-tab__computed">Computed {{ formatTimestamp(m.computed_at) }}</p>
+  }
+</div>

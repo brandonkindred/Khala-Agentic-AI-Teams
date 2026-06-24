@@ -197,11 +197,15 @@ Core vars only. The complete reference — every var, defaults, backoff math, fa
 | `TEMPORAL_ADDRESS` (+ `TEMPORAL_NAMESPACE`/`TEMPORAL_TASK_QUEUE`) | Enables Temporal mode when set |
 | `AGENT_CACHE` | Shared cache root for all teams (Docker: `/data/agents`); each team namespaces under `{team_name}/` |
 | `SE_WORKSPACE_DIR` | Root for software-engineering team per-job workspaces |
+| `SE_TRACE_TO_POSTGRES` / `SE_LEARNINGS_TOPN` | SE observability: persist per-LLM-call traces to `se_agent_traces` (default off); top-N past-sprint learnings injected into the Tech Lead Design prompt (default 5). Full set below + in `docs/ENV_VARS.md` |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` (+ `_PROTOCOL`/`OTEL_METRICS_EXPORTER`/`OTEL_SDK_DISABLED`) | OpenTelemetry trace/metric exporter config; SE LLM spans carry `cost.usd`, `task.id`, `phase`, token counts |
 | `SECURITY_GATEWAY_ENABLED` | Security gateway toggle (default: true) |
 | `UNIFIED_API_PORT` / `UNIFIED_API_HOST` | Bind address/port for the Unified API (default `0.0.0.0:8080`) |
 | `GITHUB_TOKEN` | Token for the coding team's `run-from-github` flow (Issues/PRs/Contents read-write + Metadata read) |
 
 **Agent Cognition:** operability/tuning env lives in `backend/agents/agent_cognition/README.md` (§"Configuration & operability") — the scheduler tick (`AGENT_COGNITION_SCHEDULER_INTERVAL_S`), event retention (manifest `cognition.memory.retention_days_events`), digest budget (`AGENT_COGNITION_DIGEST_EVENT_TOP_N`), per-key model (`LLM_MODEL_cognition`), writeback cap (`AGENT_COGNITION_WRITEBACK_MAX_BYTES`), and ledger TTL (`AGENT_COGNITION_RUN_TTL_S`). Seed rule packs declared in an agent's `cognition.rule_packs` manifest field install lazily and idempotently on the agent's first cognition-gated invoke.
+
+**SE observability & learning layer:** every `llm_service` call emits an OpenTelemetry span with `cost.usd`/`outcome`/`task.id`/`phase` and token counts; per-job cost is accumulated and reported on the job-store entry (`cost_usd`). `GET /api/se/metrics` (alias of `/api/software-engineering/dora`) returns the four DORA metrics over a `window_days` window, rendered in the Agent Console "Metrics" tab. Post-mortems and quality-gate rejections become rows in the `se_learnings` Postgres table, and the Tech Lead's Design prompt is augmented with the top-N relevant learnings. Tuning vars: `SE_TRACE_TO_POSTGRES`, `SE_TRACE_RETENTION_DAYS`, `SE_LEARNINGS_RETENTION_DAYS`, `SE_LEARNINGS_TOPN`, `SE_COST_FLUSH_INTERVAL_S`, and per-model price overrides `LLM_PRICE_<model>` — see `docs/ENV_VARS.md`.
 
 **Blogging pipeline:** `research → planning (ContentPlan) → writer → gates`. See `backend/agents/blogging/README.md`.
 

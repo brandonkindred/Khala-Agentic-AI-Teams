@@ -5,15 +5,14 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from contextlib import asynccontextmanager
 from typing import Any, Optional
 from uuid import uuid4
 
 import httpx
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import HTTPException, Response
 from pydantic import BaseModel, Field
 
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 from user_agent_founder.agent import FounderAgent
 from user_agent_founder.orchestrator import run_workflow
 from user_agent_founder.postgres import SCHEMA as USER_AGENT_FOUNDER_POSTGRES_SCHEMA
@@ -27,17 +26,15 @@ from user_agent_founder.targets import ADAPTERS, get_adapter
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="user-agent-founder", team_key="user_agent_founder")
 
+def _startup() -> None:
+    """Seed builtin personas and start the Temporal worker backstop (best-effort).
 
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(USER_AGENT_FOUNDER_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("user_agent_founder postgres schema registration failed")
+    Both steps log-and-continue on failure. The Temporal start is a backstop for
+    running this app standalone (`uvicorn ...:app`): the team_service entrypoint
+    normally starts the worker via TEAM_TEMPORAL_WORKER_MODULE first; the start
+    helper is idempotent and a no-op when TEMPORAL_ADDRESS is unset.
+    """
     try:
         inserted = get_persona_store().seed_builtins()
         logger.info(
@@ -46,12 +43,6 @@ async def _lifespan(application: FastAPI):
         )
     except Exception:
         logger.exception("user_agent_founder persona seeding failed")
-    # Backstop for local dev (`uvicorn user_agent_founder.api.main:app`):
-    # the team_service entrypoint normally starts the Temporal worker
-    # via TEAM_TEMPORAL_WORKER_MODULE before uvicorn accepts requests, but
-    # when running this app standalone there is no entrypoint. Calling the
-    # idempotent start helper here ensures the worker (and its connected
-    # client) is up either way. No-op when TEMPORAL_ADDRESS is unset.
     try:
         from user_agent_founder.temporal.worker import (
             start_user_agent_founder_temporal_worker_thread,
@@ -63,16 +54,11 @@ async def _lifespan(application: FastAPI):
             "user_agent_founder Temporal worker start (lifespan backstop) failed",
             exc_info=True,
         )
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("user_agent_founder shared_postgres close_pool failed", exc_info=True)
 
 
-app = FastAPI(
+app = create_team_app(
+    service_name="user-agent-founder",
+    team_key="user_agent_founder",
     title="User Agent Founder API",
     description=(
         "Autonomous startup founder agent that generates a product spec, "
@@ -80,9 +66,9 @@ app = FastAPI(
         "through the lens of a budget-conscious, speed-first, UX-obsessed founder."
     ),
     version="1.0.0",
-    lifespan=_lifespan,
+    postgres_schema=USER_AGENT_FOUNDER_POSTGRES_SCHEMA,
+    on_startup=_startup,
 )
-instrument_fastapi_app(app, team_key="user_agent_founder")
 
 # ---------------------------------------------------------------------------
 # Request / Response models
