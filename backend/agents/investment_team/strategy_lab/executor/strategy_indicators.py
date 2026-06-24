@@ -32,9 +32,6 @@ import math
 import numbers
 from typing import Optional, Sequence
 
-import numpy as np
-import pandas as pd
-
 try:  # in-package use (predicate-conformance gate, in-process tests)
     from . import indicators as _impl
 except ImportError:  # flat sandbox layout: harness copies the impl as _indicators_impl.py
@@ -130,24 +127,6 @@ def _ohlc_bars_from_history(history) -> list:
                 )
             )
     return out
-
-
-def _last(series: pd.Series) -> float:
-    """Return the most recent finite value of ``series`` (warm-up → 0.0).
-
-    Preconditions:
-        ``series`` is a ``pd.Series`` (as returned by an ``executor.indicators``
-        helper).
-    Postconditions:
-        Returns a ``float``: the last element, or ``0.0`` when the series is
-        empty or its last value is ``None``/``NaN``.
-    """
-    if series.empty:
-        return 0.0
-    val = series.iloc[-1]
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return 0.0
-    return float(val)
 
 
 def _scalar(value: Optional[float]) -> float:
@@ -309,23 +288,6 @@ _INDICATOR_PARAM_VALIDATORS: dict[str, dict[str, "object"]] = {
 }
 
 
-def _last_or_none(series: pd.Series) -> Optional[float]:
-    """Latest finite value of ``series``, or ``None`` when warm-up/empty.
-
-    Preconditions:
-        ``series`` is a ``pd.Series`` (as returned by an ``_impl`` helper).
-    Postconditions:
-        Returns ``float`` of the last element, or ``None`` when the series is
-        empty or its last value is ``None``/``NaN`` — the warm-up signal.
-    """
-    if series is None or len(series) == 0:
-        return None
-    val = series.iloc[-1]
-    if val is None or (isinstance(val, float) and np.isnan(val)):
-        return None
-    return float(val)
-
-
 def _source_values(history: Sequence, source: str) -> list:
     """Project ``history`` onto a single price series per ``source``.
 
@@ -369,6 +331,15 @@ def indicator_value(
     per bar — so the returned value is byte-identical to the engine's trailing
     value for the same bars (a fresh registry's cold value equals the streamed
     value; see ``tests/test_streaming_indicators.py``).
+
+    Cost note: this is a stateless accessor — it cold-starts a fresh registry
+    and projects ``history`` each call, so cost is O(len(history)) per call.
+    That matches the prior pandas accessor and is fine for ad-hoc and shadow
+    use, but it is NOT the engine's per-bar path: the engine reads indicators
+    through :class:`StreamingHistoryView`, which retains the registry and is
+    O(window) per bar. A ``StrategyContext`` that wants O(window) per-bar reads
+    from ``ctx.indicator`` should retain a registry/view rather than call this
+    repeatedly (a possible follow-up, out of scope here).
 
     Preconditions:
         ``name`` is a known DSL indicator (:data:`_VALID_INDICATORS`);

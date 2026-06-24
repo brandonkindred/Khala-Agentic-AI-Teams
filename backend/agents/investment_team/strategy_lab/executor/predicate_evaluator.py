@@ -528,9 +528,14 @@ class StreamingHistoryView:
             # or addressed. Rebuild over the currently-addressable deque by
             # forward-walking the registry (cold-start, then single-step
             # expand), which the registry detects from the bar fingerprints.
+            # Feed a growing prefix list (append-only, same bar objects) rather
+            # than slicing ``bars_list[:k]`` each step, so the walk is O(length)
+            # in list-building (the slices would total O(length^2)) plus the
+            # registry's O(window) per step.
             buf.clear()
-            for k in range(1, length + 1):
-                prefix = bars_list if k == length else bars_list[:k]
+            prefix: list[BarRecord] = []
+            for bar in bars_list:
+                prefix.append(bar)
                 buf.append(_registry_indicator(reg, ref, prefix))
         else:
             # Contiguous catch-up: feed the bars appended since ``synced`` one at
