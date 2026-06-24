@@ -220,6 +220,30 @@ def test_design_accepts_structured_rules(monkeypatch: pytest.MonkeyPatch) -> Non
     assert "strategy_code" not in parsed
 
 
+def test_design_round_trips_expectancy_forecast(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A structured ``expectancy_forecast`` survives the parse path alongside
+    ``rationale`` (it is neither a rule slot nor a popped field)."""
+    forecast = {
+        "forecast_win_rate": 0.58,
+        "reward_risk": 1.8,
+        "trades_per_year": 24,
+        "projected_annual_return_pct": 11.0,
+        "consistency_note": "coherent",
+    }
+    payload = _design_payload(
+        entry_rules=[_structured_entry_rule_dict()],
+        exit_rules=[_structured_signal_exit_rule_dict()],
+        sizing=_structured_sizing_dict(),
+        extra={"expectancy_forecast": forecast},
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, rationale = DesignAgent().run(prior_records=[])
+
+    assert rationale == "r"
+    assert parsed["expectancy_forecast"] == forecast
+
+
 def test_design_strips_stray_strategy_code(monkeypatch: pytest.MonkeyPatch) -> None:
     """If the LLM emits ``strategy_code`` despite the spec-only contract,
     the agent drops it with a warning so downstream gates never see it."""
