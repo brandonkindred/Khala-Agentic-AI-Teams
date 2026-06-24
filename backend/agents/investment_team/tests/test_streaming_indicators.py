@@ -1299,6 +1299,76 @@ def test_adx_matches_legacy() -> None:
         assert reg.adx(sub, period=14) == pytest.approx(expected, rel=0, abs=1e-12)
 
 
+def _legacy_adx(bars: List[_Bar], period: int) -> float:
+    """Cold reference: rebuild every DM/TR triple from bar 1 (legacy form)."""
+    plus_dms: List[float] = []
+    minus_dms: List[float] = []
+    trs: List[float] = []
+    for i in range(1, len(bars)):
+        up = bars[i].high - bars[i - 1].high
+        down = bars[i - 1].low - bars[i].low
+        plus_dms.append(up if (up > down and up > 0) else 0.0)
+        minus_dms.append(down if (down > up and down > 0) else 0.0)
+        pc = bars[i - 1].close
+        trs.append(max(bars[i].high - bars[i].low, abs(bars[i].high - pc), abs(bars[i].low - pc)))
+    tr_sum = sum(trs[-period:])
+    if tr_sum == 0:
+        return 0.0
+    plus_di = 100.0 * sum(plus_dms[-period:]) / tr_sum
+    minus_di = 100.0 * sum(minus_dms[-period:]) / tr_sum
+    denom = plus_di + minus_di
+    return 0.0 if denom == 0 else 100.0 * abs(plus_di - minus_di) / denom
+
+
+def test_adx_sliding_window_matches_legacy() -> None:
+    """A registry driven with a fixed-length sliding window must match a cold
+    rebuild on each slide — the bounded DM/TR deque is trimmed correctly.
+
+    The expand path is already covered by ``test_adx_matches_legacy`` (growing
+    prefix). This pins the slide path that the incremental deque introduced."""
+    bars = _series(120, seed=91)
+    window_size = 50  # > 2*period + 1 so ADX is computable from the slice
+    reg = IndicatorRegistry()
+    for offset in range(0, len(bars) - window_size + 1):
+        sliding = bars[offset : offset + window_size]
+        streaming = reg.adx(sliding, period=14)
+        cold = _legacy_adx(sliding, 14)
+        assert streaming == pytest.approx(cold, rel=0, abs=1e-12), (
+            f"offset={offset} streaming={streaming!r} cold={cold!r}"
+        )
+
+
+def test_adx_replay_falls_back_to_cold_start() -> None:
+    """Feeding the registry a shorter history forces a cold-start fallback
+    rather than carrying forward the longer history's DM/TR deque."""
+    bars = _series(80, seed=92)
+    reg = IndicatorRegistry()
+    for n in range(29, 81):
+        reg.adx(bars[:n], period=14)
+    replay = reg.adx(bars[:40], period=14)
+    fresh = IndicatorRegistry().adx(bars[:40], period=14)
+    assert replay == pytest.approx(fresh, rel=0, abs=1e-12)
+
+
+def test_adx_same_bar_returns_cached_value() -> None:
+    bars = _series(60, seed=93)
+    reg = IndicatorRegistry()
+    first = reg.adx(bars, period=14)
+    second = reg.adx(bars, period=14)
+    assert first == second
+
+
+def test_adx_streaming_keeps_window_bounded() -> None:
+    """The cached DM/TR deque must stay bounded at ``period`` regardless of how
+    many bars stream through — otherwise per-call cost drifts back to O(N)."""
+    bars = _series(300, seed=94)
+    reg = IndicatorRegistry()
+    for n in range(29, len(bars) + 1):
+        reg.adx(bars[:n], period=14)
+    cached = reg._state[("adx", 14)]
+    assert len(cached["dms"]) == 14
+
+
 def test_bollinger_bands_round_trip_through_select() -> None:
     bars = _series(40, seed=13)
     reg = IndicatorRegistry()
