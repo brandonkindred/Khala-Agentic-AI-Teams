@@ -328,6 +328,16 @@ Shared cache root for all teams (Docker: `/data/agents`); each team namespaces u
 ### UNIFIED_API_PORT / UNIFIED_API_HOST
 Bind address/port for the Unified API (default `0.0.0.0:8080`).
 
+### HTTP_KEEPALIVE_EXPIRY_S
+Seconds an idle keep-alive socket is kept in the shared outbound HTTP pool
+(`shared_http.get_pooled_client`, used by `JobServiceClient` and other hot paths) before it is
+recycled. Default `15.0`, floor `1.0` (a positive value below the floor is clamped up; non-numeric,
+non-finite, or non-positive values fall back to the default). Recommended range: a few seconds up to
+just under the idle-connection timeout of the upstream/proxy, so the client drops a socket before the
+far end closes it — reusing a server-closed connection otherwise raises
+`httpx.RemoteProtocolError` ("server disconnected without sending a response"). Read once at import
+when `shared_http.DEFAULT_LIMITS` is built, so a change takes effect only on a fresh process.
+
 ### POSTGRES_HOST (and POSTGRES_PORT / USER / PASSWORD / DB)
 Required for migrated teams (blogging, branding, team_assistant, startup_advisor,
 user_agent_founder, agentic_team_provisioning, unified_api credentials). Enables Postgres-backed
