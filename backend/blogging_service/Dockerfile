@@ -21,9 +21,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # ── Shared code ──────────────────────────────────────────────────────────────
 # Shared env-var parser (leaf, stdlib-only). Imported by llm_service.config,
-# shared_postgres.client, shared_observability.process_health, and
-# blogging.shared.job_event_bus — copy it first so those imports resolve.
+# shared_postgres.client, and shared_observability.process_health — copy it
+# first so those imports resolve.
 COPY agents/shared_env /app/shared_env
+
+# Typed env-config helpers (env_bool/env_int/env_float; leaf, stdlib-only).
+# Imported by blogging.shared.job_event_bus.
+COPY agents/shared_env_config /app/shared_env_config
+
+# Shared per-job SSE event bus (BusState + pure publish/subscribe/reap; leaf).
+# Imported by blogging.shared.job_event_bus.
+COPY agents/shared_job_event_bus /app/shared_job_event_bus
 
 # LLM service (used by all blogging agents)
 COPY agents/llm_service /app/llm_service
@@ -55,6 +63,11 @@ COPY agents/shared_temporal /app/shared_temporal
 # blogging.api.main. Falls through to no-op when the opentelemetry SDK
 # packages are not installed, so no extra deps needed in this slim image.
 COPY agents/shared_observability /app/shared_observability
+
+# Team FastAPI app factory (create_team_app) imported by blogging.api.main.
+# Wraps init_otel + the schema-registering lifespan; depends only on
+# shared_observability (above) and a lazy shared_postgres import (below).
+COPY agents/shared_app /app/shared_app
 
 # Minimal unified_api modules needed by blogging Medium integration.
 # These are lazy-imported by blogging/shared/medium_integration_access.py.

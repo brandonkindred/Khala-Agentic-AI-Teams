@@ -270,7 +270,14 @@ def _install_global_instrumentors() -> None:
 # ---------------------------------------------------------------------------
 
 
-def instrument_fastapi_app(app: Any, *, team_key: Optional[str] = None) -> None:
+# Default span-exclusion list. Substring-matched by the instrumentor, so these
+# exclude the infra endpoints (e.g. ``/metrics``, ``/health``) on every team app.
+_DEFAULT_EXCLUDED_URLS = "health,healthz,ready,metrics"
+
+
+def instrument_fastapi_app(
+    app: Any, *, team_key: Optional[str] = None, excluded_urls: Optional[str] = None
+) -> None:
     """Attach the FastAPI instrumentor to a team's app — idempotently.
 
     Teams that own their FastAPI app self-instrument at import time, and the
@@ -279,6 +286,11 @@ def instrument_fastapi_app(app: Any, *, team_key: Optional[str] = None) -> None:
     confusing ``Attempting to instrument FastAPI app while already instrumented``
     WARNING that muddies crash debugging. A sentinel attribute makes the repeat
     call a quiet no-op instead.
+
+    ``excluded_urls`` overrides the default span-exclusion list. Apps that host
+    business routes whose path contains an excluded word (e.g. the unified API's
+    ``/api/se/metrics`` alias) pass *anchored* patterns like ``^/metrics$`` so the
+    scrape endpoint stays excluded while the business route is still traced.
 
     Preconditions:
         - ``app`` accepts attribute assignment (a FastAPI instance does).
@@ -299,7 +311,7 @@ def instrument_fastapi_app(app: Any, *, team_key: Optional[str] = None) -> None:
 
         FastAPIInstrumentor.instrument_app(
             app,
-            excluded_urls="health,healthz,ready,metrics",
+            excluded_urls=excluded_urls or _DEFAULT_EXCLUDED_URLS,
         )
         app._khala_otel_instrumented = True
         logger.debug("FastAPI instrumented for team=%s", team_key or _team_key)

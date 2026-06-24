@@ -13,12 +13,16 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _reset_subscribers() -> None:
-    """Clear module-level subscriber state between tests."""
+    """Clear module-level bus state between tests (both maps stay in sync)."""
     from investment_team.api import job_event_bus
 
-    job_event_bus._subscribers.clear()
+    def _clear() -> None:
+        job_event_bus._subscribers.clear()
+        job_event_bus._job_created_at.clear()
+
+    _clear()
     yield
-    job_event_bus._subscribers.clear()
+    _clear()
 
 
 def test_subscribe_returns_handle_with_empty_event_queue() -> None:

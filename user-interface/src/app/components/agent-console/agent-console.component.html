@@ -91,4 +91,17 @@
       </div>
     </ng-template>
   </mat-tab>
+
+  <mat-tab>
+    <ng-template mat-tab-label>
+      <mat-icon>show_chart</mat-icon>
+      <span class="tab-label">Metrics</span>
+    </ng-template>
+    <!-- Lazy body: defer the metrics fetch until the tab is first opened. -->
+    <ng-template matTabContent>
+      <div class="agent-console__tab-content">
+        <app-metrics-tab></app-metrics-tab>
+      </div>
+    </ng-template>
+  </mat-tab>
 </mat-tab-group>

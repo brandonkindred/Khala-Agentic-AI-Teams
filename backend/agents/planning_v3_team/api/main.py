@@ -13,7 +13,7 @@ import threading
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -44,18 +44,17 @@ from planning_v3_team.shared.workspace import (  # noqa: E402
     WorkspaceResolutionError,
     resolve_workspace,
 )
-from shared_observability import init_otel, instrument_fastapi_app  # noqa: E402
+from shared_app import create_team_app  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="planning-v3-team", team_key="planning_v3")
-
-app = FastAPI(
+app = create_team_app(
+    service_name="planning-v3-team",
+    team_key="planning_v3",
     title="Planning V3 API",
     description="Client-facing discovery and requirements; PRD and handoff for dev/UI/UX",
     version="1.0.0",
 )
-instrument_fastapi_app(app, team_key="planning_v3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -200,9 +199,7 @@ def run_planning_v3(request: PlanningV3RunRequest) -> PlanningV3RunResponse:
             # job stuck "running": mark it failed and surface a logged 500.
             logger.exception("Failed to start Planning V3 Temporal workflow %s", job_id)
             mark_job_failed(job_id, error=str(exc))
-            raise HTTPException(
-                status_code=500, detail=f"Failed to start workflow: {exc}"
-            ) from exc
+            raise HTTPException(status_code=500, detail=f"Failed to start workflow: {exc}") from exc
         return PlanningV3RunResponse(
             job_id=job_id,
             status="running",

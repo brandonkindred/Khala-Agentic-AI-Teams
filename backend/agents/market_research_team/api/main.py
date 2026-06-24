@@ -7,7 +7,7 @@ import threading
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
 from market_research_team.models import HumanReview, ResearchMission, TeamTopology
@@ -26,14 +26,17 @@ from market_research_team.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="market-research-team", team_key="market_research")
-
-app = FastAPI(title="Market Research Team API", version="1.0.0")
-instrument_fastapi_app(app, team_key="market_research")
+app = create_team_app(
+    service_name="market-research-team",
+    team_key="market_research",
+    title="Market Research Team API",
+    version="1.0.0",
+    description="Market research team API for competitive analysis and market insights.",
+)
 
 
 class RunMarketResearchRequest(BaseModel):
