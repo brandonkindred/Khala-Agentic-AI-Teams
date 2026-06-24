@@ -573,6 +573,9 @@ export class IntegrationsDashboardComponent implements OnInit {
   githubPat = '';
   githubDefaultLabel = '';
   githubTokenConfigured = false;
+  // True when the PAT store (Postgres) is configured but unreachable, so the panel
+  // can warn that the integration is down rather than implying it was never set up.
+  githubStoreUnreachable = false;
 
   loadGitHubConfig(): void {
     this.githubLoading = true;
@@ -584,12 +587,16 @@ export class IntegrationsDashboardComponent implements OnInit {
         this.githubRepo = res.repo;
         this.githubDefaultLabel = res.default_label;
         this.githubTokenConfigured = res.token_configured;
+        this.githubStoreUnreachable = res.credential_store_unreachable ?? false;
         this.githubPat = '';
         this.githubLoading = false;
       },
       error: (err: { error?: { detail?: string }; message?: string }) => {
         this.githubError = err?.error?.detail || err?.message || 'Failed to load GitHub config.';
         this.githubLoading = false;
+        // Current store state is unknown after a failed reload — clear the stale
+        // unreachable flag so a banner from a prior load doesn't linger.
+        this.githubStoreUnreachable = false;
       },
     });
   }

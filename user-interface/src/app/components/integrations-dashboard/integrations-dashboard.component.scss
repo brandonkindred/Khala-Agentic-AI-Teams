@@ -319,6 +319,12 @@
     color: var(--kh-info);
   }
 
+  &--warn {
+    background: var(--kh-warning-subtle);
+    border-color: var(--kh-border-subtle);
+    color: var(--kh-warning);
+  }
+
   code {
     background: var(--kh-surface-3);
     padding: 0.05em 0.35em;
