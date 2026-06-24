@@ -36,11 +36,10 @@ from investment_team.trading_service.engine.fill_simulator import (
 from investment_team.trading_service.engine.order_book import OrderBook, PendingOrder
 from investment_team.trading_service.engine.portfolio import Portfolio, Position
 from investment_team.trading_service.service import (
-    _SCALED_TP_ENGINE_REASON,
     TradingService,
     TradingServiceResult,
+    _engine_exit_kind,
     _EngineExitDispatcher,
-    _is_scaled_tp_engine_reason,
     _PositionStateView,
     _ScaledLadderCursor,
     _TrackedPosition,
@@ -608,10 +607,10 @@ def test_deferred_scale_out_still_lets_a_same_bar_stop_fire() -> None:
 
 def _submit_inflight_scaled_partial(order_book: OrderBook) -> PendingOrder:
     """Submit a prior scaled rung's market scale-out (a PARTIAL close, closing-side
-    SHORT, carrying the scaled-take-profit engine reason) still resting on the book —
-    e.g. a participation-capped rung requeued across bars. This is the in-flight
-    state the gate must recognise as a partial (defer the next rung) rather than a
-    full close (stand the whole bar down)."""
+    SHORT, carrying the structural ``engine_scaled_partial`` flag) still resting on
+    the book — e.g. a participation-capped rung requeued across bars. This is the
+    in-flight state the gate must recognise as a partial (defer the next rung)
+    rather than a full close (stand the whole bar down)."""
     return order_book.submit(
         OrderRequest(
             client_order_id="e1",
@@ -622,6 +621,7 @@ def _submit_inflight_scaled_partial(order_book: OrderBook) -> PendingOrder:
             tif=TimeInForce.DAY,
             reason=f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit",
             unfilled_policy=UnfilledPolicy.REQUEUE_NEXT_BAR,
+            engine_scaled_partial=True,
         ),
         submitted_at="2024-01-09",
         submitted_equity=1_000_000.0,
@@ -727,17 +727,53 @@ def test_inflight_full_close_still_stands_the_bar_down() -> None:
     assert tracker["AAA"].scaled_cursor.mapping == {}
 
 
-def test_is_scaled_tp_engine_reason_tolerates_index_suffix() -> None:
-    """The in-flight-partial matcher recognises the canonical scaled-tp reason AND a
-    future ``[idx]`` suffix variant (so the gate can't silently revert to standing
-    the bar down), but does NOT plain-prefix-match a longer kind name."""
-    assert _is_scaled_tp_engine_reason(_SCALED_TP_ENGINE_REASON) is True
-    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}[0]") is True
-    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}[3]") is True
-    # Not a rung: empty, a different kind, or a longer kind sharing the prefix.
-    assert _is_scaled_tp_engine_reason("") is False
-    assert _is_scaled_tp_engine_reason("engine_exit:stop_loss") is False
-    assert _is_scaled_tp_engine_reason(f"{_SCALED_TP_ENGINE_REASON}_v2") is False
+def test_scaled_rung_close_carries_structural_partial_flag() -> None:
+    """The engine stamps the structural ``engine_scaled_partial`` flag on a scaled
+    rung's market scale-out — the in-flight-partial gate reads it instead of parsing
+    the order reason. A full-position close leaves the flag False."""
+    disp = _dispatcher(exit_rules=[_ladder(), StopLossRule(pct=0.03)])
+    order_book = OrderBook()
+    result = TradingServiceResult()
+
+    # A scaled rung fires → its close carries engine_scaled_partial=True.
+    tracker = _tracker(OrderSide.LONG)
+    portfolio = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    pending: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=106.0, low=100.0, close=105.0),  # +5% rung only
+        position_tracker=tracker,
+        portfolio=portfolio,
+        pending_for_prev=pending,
+        order_book=order_book,
+        result=result,
+    )
+    assert len(pending) == 1
+    assert pending[0].engine_scaled_partial is True
+
+    # A full-position stop close leaves the flag False.
+    tracker2 = _tracker(OrderSide.LONG)
+    portfolio2 = _portfolio_with(side=OrderSide.LONG, qty=100.0, entry_price=100.0)
+    pending2: list[OrderRequest] = []
+    disp.maybe_emit(
+        cur_bar=_bar(high=100.0, low=96.0, close=97.0),  # 3% stop breached
+        position_tracker=tracker2,
+        portfolio=portfolio2,
+        pending_for_prev=pending2,
+        order_book=OrderBook(),
+        result=TradingServiceResult(),
+    )
+    assert len(pending2) == 1
+    assert "stop_loss" in pending2[0].reason
+    assert pending2[0].engine_scaled_partial is False
+
+
+def test_engine_exit_kind_strips_prefix_and_index_suffix() -> None:
+    """_engine_exit_kind is the single source of engine-reason → rule-kind parsing:
+    it drops the engine_exit: prefix and any signal_exit-style [idx] suffix."""
+    assert _engine_exit_kind("engine_exit:scaled_take_profit") == "scaled_take_profit"
+    assert _engine_exit_kind("engine_exit:stop_loss") == "stop_loss"
+    assert _engine_exit_kind("engine_exit:signal_exit[2]") == "signal_exit"
+    assert _engine_exit_kind("engine_exit:take_profit") == "take_profit"
 
 
 def _submit_competing_short(order_book: OrderBook) -> PendingOrder:

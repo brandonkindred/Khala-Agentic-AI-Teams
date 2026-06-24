@@ -103,31 +103,22 @@ _MAX_ORDER_EVENTS = 20
 # is re-exported here for the many call sites and external importers that read it
 # off this module.
 
-# The exact ``reason`` a scaled-take-profit rung's market scale-out carries (see
-# ``_build_close_order`` — a scaled rung is not a ``signal_exit``, so it gets no
-# ``[idx]`` suffix today). The pending-order gate uses it to tell an in-flight
-# PARTIAL scale-out apart from an in-flight FULL close: the former must NOT stand
-# the whole bar down (a full-position exit may still need to protect the runner),
-# only defer further rungs.
-_SCALED_TP_ENGINE_REASON = f"{ENGINE_EXIT_REASON_PREFIX}scaled_take_profit"
 
+def _engine_exit_kind(reason: str) -> str:
+    """The bare ``rule_kind`` encoded in an engine-exit order ``reason``.
 
-def _is_scaled_tp_engine_reason(reason: str) -> bool:
-    """Whether ``reason`` is a scaled-take-profit rung's engine close reason.
+    Single source of engine-reason → kind parsing: strips the
+    ``ENGINE_EXIT_REASON_PREFIX`` and any trailing ``[idx]`` rule-index suffix
+    (which ``signal_exit`` closes carry) so the result is the diagnostics key
+    (``stop_loss`` / ``take_profit`` / ``scaled_take_profit`` / ``signal_exit``).
 
-    Matches the canonical ``engine_exit:scaled_take_profit`` AND tolerates a future
-    ``[idx]`` index suffix — the exact form ``_build_close_order`` already appends
-    for ``signal_exit`` — so the in-flight-partial gate does not silently revert to
-    standing the bar down (leaving the runner unprotected) if scaled rungs ever gain
-    an indexed reason. Deliberately does NOT plain-prefix-match: a hypothetical
-    longer kind such as ``scaled_take_profit_v2`` is NOT treated as a rung; only the
-    exact kind, or the kind immediately followed by ``[``, counts.
-
-    Preconditions: ``reason`` is an order's ``reason`` string (may be empty).
-    Postconditions: ``True`` iff ``reason`` is the scaled-take-profit engine reason,
-    with or without a trailing ``[idx]`` rule-index suffix.
+    Preconditions: ``reason`` starts with ``ENGINE_EXIT_REASON_PREFIX``.
+    Postconditions: returns the ``rule_kind`` substring — prefix removed and any
+    ``[...]`` index suffix dropped.
     """
-    return reason == _SCALED_TP_ENGINE_REASON or reason.startswith(_SCALED_TP_ENGINE_REASON + "[")
+    kind = reason[len(ENGINE_EXIT_REASON_PREFIX) :]
+    bracket = kind.find("[")
+    return kind[:bracket] if bracket != -1 else kind
 
 
 def _build_exit_reconciler(
@@ -988,13 +979,15 @@ class _EngineExitDispatcher:
             if not reason.startswith(ENGINE_EXIT_REASON_PREFIX):
                 continue
             if po_req.order_type == OrderType.MARKET:
-                if track_continuation and _is_scaled_tp_engine_reason(reason):
+                if track_continuation and po_req.engine_scaled_partial:
                     # In-flight PARTIAL scale-out: a scaled rung's market is still
                     # pending (e.g. a participation-capped rung requeued across
-                    # bars). Do NOT stand the bar down — that would also block a
-                    # stop / take-profit / signal exit from closing the runner the
-                    # partial leaves open. Just flag it so ``maybe_emit`` defers the
-                    # NEXT rung (``exclude_scaled``), preserving the one-rung-at-a-time
+                    # bars), identified by the structural ``engine_scaled_partial``
+                    # flag the emitter set (no reason-string parsing). Do NOT stand
+                    # the bar down — that would also block a stop / take-profit /
+                    # signal exit from closing the runner the partial leaves open.
+                    # Just flag it so ``maybe_emit`` defers the NEXT rung
+                    # (``exclude_scaled``), preserving the one-rung-at-a-time
                     # ordering without starving the runner's protective exits.
                     scaled_partial_in_flight = True
                     continue
@@ -1270,6 +1263,11 @@ class _EngineExitDispatcher:
                 unfilled_policy=(
                     UnfilledPolicy.REQUEUE_NEXT_BAR if intent.is_scaled_rung else None
                 ),
+                # Structural marker the per-bar exit gate reads to tell this PARTIAL
+                # scale-out apart from a full-position close without parsing
+                # ``reason`` (see ``_scan_pending_for_gate``). Only scaled rungs set
+                # it; a full close leaves it False.
+                engine_scaled_partial=intent.is_scaled_rung,
             )
         try:
             req.validate_prices()
@@ -1953,12 +1951,9 @@ def _apply_fill_outcome_events(
             # executed). Distinct, too, from emission-time ``exit_rule_firings``:
             # a limit-style stop can fire (emit) yet gap through unfilled, in
             # which case no engine fill is recorded here.
-            kind = ev.reason[len(ENGINE_EXIT_REASON_PREFIX) :]
-            # ``signal_exit`` stamps a ``[idx]`` suffix; strip it so the fill key
-            # matches the firing key (rule kind only).
-            bracket = kind.find("[")
-            if bracket != -1:
-                kind = kind[:bracket]
+            # ``signal_exit`` stamps a ``[idx]`` suffix; ``_engine_exit_kind`` strips
+            # the prefix and that suffix so the fill key matches the firing key.
+            kind = _engine_exit_kind(ev.reason)
             diagnostics.exit_rule_fills[kind] = diagnostics.exit_rule_fills.get(kind, 0) + 1
             sym_fills = diagnostics.exit_rule_fills_by_symbol.setdefault(ev.symbol, {})
             sym_fills[kind] = sym_fills.get(kind, 0) + 1
