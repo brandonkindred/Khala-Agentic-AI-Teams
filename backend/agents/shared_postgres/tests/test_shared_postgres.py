@@ -618,6 +618,45 @@ def test_get_conn_rolls_back_on_error(monkeypatch):
     fake.conn.commit.assert_not_called()
 
 
+def test_pg_cursor_yields_none_when_disabled(monkeypatch):
+    monkeypatch.delenv("POSTGRES_HOST", raising=False)
+    from shared_postgres import pg_cursor
+
+    with pg_cursor() as cur:
+        assert cur is None  # disabled → no connection opened
+
+
+def test_pg_cursor_yields_cursor_and_commits_when_enabled(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor() as cur:
+        assert cur is not None  # live cursor from the pooled connection
+
+    # Clean exit of the with-block commits and returns the connection to the pool.
+    fake.conn.commit.assert_called_once()
+    fake.conn.rollback.assert_not_called()
+
+
+def test_pg_cursor_rolls_back_on_error(monkeypatch):
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with pg_cursor() as cur:
+            assert cur is not None
+            raise RuntimeError("boom")
+
+    fake.conn.rollback.assert_called_once()
+    fake.conn.commit.assert_not_called()
+
+
 def test_close_pool_is_idempotent():
     client_mod._pools.clear()
     close_pool()
@@ -806,6 +845,29 @@ def test_getattr_raises_on_unknown():
 
     with pytest.raises(AttributeError, match="no attribute"):
         _ = shared_postgres.not_a_real_thing  # type: ignore[attr-defined]
+
+
+@pytest.mark.skipif(not _psycopg_installed(), reason="psycopg not installed")
+def test_pg_cursor_dict_rows_requests_dict_row_factory(monkeypatch):
+    """pg_cursor(dict_rows=True) opens the cursor with psycopg's dict_row factory.
+
+    Placed after ``_psycopg_installed`` so the ``skipif`` resolves at import time;
+    covers the ``dict_rows`` branch (the import + ``row_factory`` cursor) that the
+    plain-cursor test does not reach.
+    """
+    monkeypatch.setenv("POSTGRES_HOST", "postgres")
+    from psycopg.rows import dict_row
+
+    from shared_postgres import pg_cursor
+
+    fake = _FakePool()
+    monkeypatch.setattr(client_mod, "_get_or_create_pool", lambda database=None: fake)
+
+    with pg_cursor(dict_rows=True) as cur:
+        assert cur is not None
+
+    fake.conn.cursor.assert_called_once_with(row_factory=dict_row)
+    fake.conn.commit.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

@@ -92,11 +92,12 @@ def test_health(client):
 def test_lifespan_runs_without_postgres(monkeypatch):
     import asyncio
 
-    # No POSTGRES_HOST -> register_team_schemas is a no-op; lifespan must not raise.
+    # No POSTGRES_HOST -> register_team_schemas is a no-op; the factory-provided
+    # lifespan must still enter and exit cleanly.
     monkeypatch.delenv("POSTGRES_HOST", raising=False)
 
     async def go():
-        async with api_main._lifespan(api_main.app):
+        async with api_main.app.router.lifespan_context(api_main.app):
             pass
 
     asyncio.run(go())

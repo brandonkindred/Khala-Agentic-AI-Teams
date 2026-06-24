@@ -17,11 +17,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import asynccontextmanager
 from typing import Any, Dict
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from job_matching_team.models import (
@@ -51,37 +50,18 @@ from job_matching_team.shared.job_store import (
     list_jobs,
     update_job,
 )
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="job-matching", team_key="job_matching")
-
-
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(JOB_MATCHING_SCHEMA)
-    except Exception:
-        logger.exception("job_matching postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("job_matching shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="job-matching",
+    team_key="job_matching",
     title="Job Matching API",
     description="Scans open roles matching a job-seeker profile and ranks the best to apply for",
     version="1.0.0",
-    lifespan=_lifespan,
+    postgres_schema=JOB_MATCHING_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="job_matching")
 
 app.add_middleware(
     CORSMiddleware,

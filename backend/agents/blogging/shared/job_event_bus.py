@@ -1,7 +1,9 @@
-"""Per-job event bus for SSE streaming.
+"""Per-job event bus for SSE streaming (blogging).
 
-Pipeline threads call :func:`publish` to broadcast events; SSE endpoint generators
-call :func:`subscribe` / :func:`unsubscribe` to receive them via a thread-safe deque.
+A team-local binding over the shared bus algorithm in
+:mod:`shared_job_event_bus`. Pipeline threads call :func:`publish` to broadcast
+events; SSE endpoint generators call :func:`subscribe` / :func:`unsubscribe` to
+receive them via a thread-safe deque.
 
 .. warning::
    **Process-local state.** Subscribers are held in an in-memory dict for the
@@ -31,85 +33,39 @@ touch the subscription.
 from __future__ import annotations
 
 import logging
-import os
-import threading
-import time
-from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from shared_concurrency import BackgroundHeartbeat
-from shared_env import parse_int
+from shared_env_config import env_int
+from shared_job_event_bus import BusState, Subscription
+from shared_job_event_bus import cleanup_job as _cleanup_job
+from shared_job_event_bus import publish as _publish
+from shared_job_event_bus import reap_once as _reap_once_core
+from shared_job_event_bus import subscribe as _subscribe
+from shared_job_event_bus import unsubscribe as _unsubscribe
 
 logger = logging.getLogger(__name__)
 
-
-def _env_int(name: str, default: int) -> int:
-    """Parse an int env var via the canonical ``shared_env.parse_int``, warning on a typo.
-
-    Postconditions: returns the parsed value, or ``default`` when the var is
-    unset/blank/unparseable. A *present but unparseable* override additionally
-    logs a warning so a typo'd tuning var is visible rather than silently
-    swallowed; an unset/blank var is silent.
-
-    The explicit ``int(raw)`` probe is deliberate: ``parse_int`` cannot warn, and
-    inferring "unparseable" from "result == default" would false-positive whenever
-    the override legitimately equals the default.
-    """
-    raw = os.environ.get(name, "").strip()
-    if raw:
-        try:
-            int(raw)
-        except ValueError:
-            logger.warning("Invalid %s=%r; using default %d", name, raw, default)
-    return parse_int(name, default)
+__all__ = ["Subscription", "subscribe", "unsubscribe", "publish", "cleanup_job", "shutdown"]
 
 
 # Idle subscriptions older than this are reaped. Pipeline jobs run on the order
 # of minutes; an hour is long enough to absorb slow/stalled jobs but short
 # enough to bound memory under pathological conditions.
-_SUB_TTL_SECONDS: float = float(_env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 3600))
+_SUB_TTL_SECONDS: float = float(env_int("BLOGGING_EVENT_BUS_TTL_SECONDS", 3600))
 # Hard cap on tracked jobs. When exceeded, the oldest (by creation time) are
 # evicted and their subscribers woken so they exit cleanly.
-_MAX_JOBS_TRACKED: int = _env_int("BLOGGING_EVENT_BUS_MAX_JOBS", 1024)
+_MAX_JOBS_TRACKED: int = env_int("BLOGGING_EVENT_BUS_MAX_JOBS", 1024)
 # Reaper wake-up interval.
-_REAPER_INTERVAL_SECONDS: float = float(_env_int("BLOGGING_EVENT_BUS_REAPER_INTERVAL", 300))
+_REAPER_INTERVAL_SECONDS: float = float(env_int("BLOGGING_EVENT_BUS_REAPER_INTERVAL", 300))
 
-
-@dataclass
-class Subscription:
-    """Handle returned by :func:`subscribe`.
-
-    ``created_at`` is set on construction and never changes. ``last_activity``
-    is the liveness signal used by the reaper: consumers should call
-    :meth:`touch` at least once per :data:`_SUB_TTL_SECONDS` while their
-    stream is alive. :func:`publish` also refreshes it on each delivered
-    event, but publish-side activity alone is not sufficient — legitimate
-    quiet periods (SSE keepalives during a slow job, ghost-writer waiting on
-    human input) must not trigger eviction.
-    """
-
-    notify: threading.Event = field(default_factory=threading.Event)
-    events: deque = field(default_factory=lambda: deque(maxlen=500))
-    created_at: float = field(default_factory=time.monotonic)
-    last_activity: float = field(default_factory=time.monotonic)
-
-    def touch(self) -> None:
-        """Refresh the liveness timestamp. Consumers call this each loop iteration.
-
-        Cheap (single attribute write; no lock needed — CPython attribute
-        assignment is atomic, and a stale read from the reaper is harmless:
-        it will re-check on the next interval).
-        """
-        self.last_activity = time.monotonic()
-
-
-_lock = threading.Lock()
-_subscribers: Dict[str, list[Subscription]] = {}
-# Creation time per job_id, used for LRU-style eviction when the global cap is
-# exceeded. Kept in insertion order (Python dict guarantee from 3.7+).
-_job_created_at: Dict[str, float] = {}
+# This team's independent bus namespace. The module-level aliases expose the
+# shared state for tests and the reaper; they reference the same objects, so
+# in-place mutation by the shared algorithm is visible here.
+_state = BusState()
+_lock = _state.lock
+_subscribers = _state.subscribers
+_job_created_at = _state.job_created_at
 
 _reaper: Optional[BackgroundHeartbeat] = None
 
@@ -137,116 +93,41 @@ def _start_reaper_if_needed() -> None:
 
 
 def _reap_once() -> None:
-    """Single reaper pass. Exposed for tests."""
-    now = time.monotonic()
-    evicted_jobs = 0
-    evicted_subs = 0
-    woken: list[Subscription] = []
+    """Single reaper pass (exposed for tests). Reads the current TTL/cap globals.
 
-    with _lock:
-        # Pass 1: drop subscriptions whose last_activity is older than TTL.
-        for job_id in list(_subscribers.keys()):
-            subs = _subscribers[job_id]
-            kept: list[Subscription] = []
-            for sub in subs:
-                if now - sub.last_activity > _SUB_TTL_SECONDS:
-                    woken.append(sub)
-                    evicted_subs += 1
-                else:
-                    kept.append(sub)
-            if kept:
-                _subscribers[job_id] = kept
-            else:
-                del _subscribers[job_id]
-                _job_created_at.pop(job_id, None)
-                evicted_jobs += 1
-
-        # Pass 2: enforce the global cap by evicting oldest jobs.
-        while len(_subscribers) > _MAX_JOBS_TRACKED:
-            # _job_created_at is insertion-ordered; the first key is the oldest.
-            try:
-                oldest_job = next(iter(_job_created_at))
-            except StopIteration:
-                break
-            subs = _subscribers.pop(oldest_job, None) or []
-            _job_created_at.pop(oldest_job, None)
-            for sub in subs:
-                woken.append(sub)
-                evicted_subs += 1
-            evicted_jobs += 1
-
-    # Wake evicted subscribers OUTSIDE the lock so their consumers can drain
-    # and exit without contending.
-    for sub in woken:
-        sub.notify.set()
-
-    if evicted_jobs or evicted_subs:
-        logger.info(
-            "blogging event-bus reaper: evicted %d job(s) and %d subscription(s)",
-            evicted_jobs,
-            evicted_subs,
-        )
+    Indirecting through the module globals (rather than capturing them once)
+    keeps the documented behaviour that tests can ``monkeypatch`` the tunables
+    and have the very next reap honour them.
+    """
+    _reap_once_core(
+        _state,
+        ttl_seconds=_SUB_TTL_SECONDS,
+        max_jobs=_MAX_JOBS_TRACKED,
+        logger=logger,
+        label="blogging event-bus",
+    )
 
 
 def subscribe(job_id: str) -> Subscription:
     """Create a subscription for *job_id*. The caller must call :func:`unsubscribe` when done."""
-    sub = Subscription()
-    with _lock:
-        if job_id not in _subscribers:
-            _subscribers[job_id] = []
-            _job_created_at[job_id] = sub.created_at
-        _subscribers[job_id].append(sub)
+    sub = _subscribe(_state, job_id)
     _start_reaper_if_needed()
     return sub
 
 
 def unsubscribe(job_id: str, sub: Subscription) -> None:
     """Remove *sub* from *job_id*'s subscriber list."""
-    with _lock:
-        subs = _subscribers.get(job_id)
-        if subs is not None:
-            try:
-                subs.remove(sub)
-            except ValueError:
-                pass
-            if not subs:
-                del _subscribers[job_id]
-                _job_created_at.pop(job_id, None)
+    _unsubscribe(_state, job_id, sub)
 
 
 def publish(job_id: str, event: Dict[str, Any], *, event_type: Optional[str] = None) -> None:
-    """Broadcast *event* to all subscribers of *job_id*.
-
-    Called from pipeline threads — must be thread-safe. If *event_type* is
-    given it is merged as ``type`` into the published dict. Refreshes the
-    ``last_activity`` timestamp on each matched subscription so active
-    streams are not reaped.
-    """
-    payload: Dict[str, Any] = {}
-    if event_type:
-        payload["type"] = event_type
-    payload["ts"] = datetime.now(timezone.utc).isoformat()
-    payload.update(event)
-
-    now = time.monotonic()
-    with _lock:
-        subs = _subscribers.get(job_id)
-        if not subs:
-            return
-        for sub in subs:
-            sub.events.append(payload)
-            sub.last_activity = now
-            sub.notify.set()
+    """Broadcast *event* to all subscribers of *job_id* (thread-safe)."""
+    _publish(_state, job_id, event, event_type=event_type)
 
 
 def cleanup_job(job_id: str) -> None:
     """Remove all subscribers for *job_id* (call after terminal event)."""
-    with _lock:
-        subs = _subscribers.pop(job_id, None)
-        _job_created_at.pop(job_id, None)
-    if subs:
-        for sub in subs:
-            sub.notify.set()  # wake any blocked consumers so they exit
+    _cleanup_job(_state, job_id)
 
 
 def shutdown() -> None:

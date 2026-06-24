@@ -1,0 +1,209 @@
+"""Postgres-backed round-trip tests for the SE observability stores.
+
+Skipped unless run with ``-m integration`` against a live Postgres.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+pytestmark = pytest.mark.integration
+
+
+@pytest.fixture
+def _schema():
+    from shared_postgres import get_conn, is_postgres_enabled, register_team_schemas
+
+    if not is_postgres_enabled():
+        pytest.skip("Postgres not configured")
+    from software_engineering_team.postgres import SCHEMA
+
+    register_team_schemas(SCHEMA)
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("TRUNCATE se_learnings, se_events, se_agent_traces")
+    yield
+    with get_conn() as conn, conn.cursor() as cur:
+        cur.execute("TRUNCATE se_learnings, se_events, se_agent_traces")
+
+
+def test_learnings_upsert_dedup_and_retrieve(_schema) -> None:
+    """Upserting the same fingerprint bumps occurrences and refreshes the counter-measure."""
+    from software_engineering_team.shared import learnings_store as ls
+
+    assert ls.upsert_learning(
+        pattern="security rejection", trigger="hardcoded api key", counter_measure="use env"
+    )
+    # Same fingerprint → occurrences bump, not a new row.
+    assert ls.upsert_learning(
+        pattern="Security Rejection", trigger="Hardcoded API key", counter_measure="use vault"
+    )
+    assert ls.count_learnings() == 1
+
+    hits = ls.retrieve_learnings("hardcoded api key handling")
+    assert len(hits) == 1
+    assert hits[0].occurrences == 2
+    assert hits[0].counter_measure == "use vault"  # refreshed on upsert
+
+
+def test_learnings_category_filter(_schema) -> None:
+    """Learnings category filter."""
+    from software_engineering_team.shared import learnings_store as ls
+
+    ls.upsert_learning(pattern="qa flake", trigger="timing flaky test", category="qa")
+    ls.upsert_learning(pattern="sec issue", trigger="flaky injection", category="security")
+    qa_only = ls.retrieve_learnings("flaky", category="qa")
+    assert [h.category for h in qa_only] == ["qa"]
+
+
+def test_events_roundtrip_and_dora(_schema) -> None:
+    """Events roundtrip and dora."""
+    from software_engineering_team.metrics.dora import compute_dora
+    from software_engineering_team.shared import se_events
+
+    assert se_events.record_event(se_events.MERGE_TO_MAIN, job_id="j1")
+    assert se_events.record_event(se_events.TASK_CREATED, job_id="j1", task_id="t1")
+    assert se_events.record_event(se_events.TASK_MERGED, job_id="j1", task_id="t1")
+
+    rows = se_events.fetch_events_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    assert len(rows) == 3
+
+    m = compute_dora(30.0)
+    assert m.deployment_count == 1
+    assert m.merged_count == 1
+
+
+def test_emit_coding_team_metrics_populates_dora(_schema, monkeypatch) -> None:
+    """The live coding_team path's metrics helper turns a task graph into DORA events."""
+    from datetime import datetime, timedelta, timezone
+
+    from software_engineering_team import orchestrator
+    from software_engineering_team.metrics.dora import compute_dora
+
+    created = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    merged = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+    fake_job = {
+        "created_at": created.isoformat(),
+        "status": "completed",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+            {"id": "t2", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 2},
+            {"id": "t3", "status": "failed", "merged_at": None, "revision_count": 0},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: fake_job)
+    monkeypatch.setattr(orchestrator.cost_tracker, "flush", lambda jid: None)
+
+    orchestrator._emit_coding_team_metrics("job-ct")
+    # Idempotent: a resume/re-run must not double-count the deployment or re-entries.
+    orchestrator._emit_coding_team_metrics("job-ct")
+
+    m = compute_dora(30.0)
+    assert m.deployment_count == 1  # one MERGE_TO_MAIN despite two emit calls
+    assert m.merged_count == 2  # t1 + t2 (t3 failed)
+    assert m.gate_reentry_count == 1  # t2 needed revisions
+    assert m.change_failure_rate == pytest.approx(0.5)
+    assert m.lead_time_sample_count == 2
+    # lead time ~30 min (job creation → merge), tolerant of test timing.
+    assert m.lead_time_seconds_median == pytest.approx(1800, abs=60)
+
+
+def test_emit_coding_team_metrics_resumed_job_captures_new_merges(_schema, monkeypatch) -> None:
+    """A resumed run records newly-merged tasks without re-counting prior ones.
+
+    Regression: the idempotency guard used to skip the whole batch when *any*
+    event existed for the job, so a resume with new merges recorded nothing. The
+    guard is now per ``(job, task)``: the first run's events are not duplicated and
+    the second run's new merge (plus the now-completed ``merge_to_main``) is added.
+    """
+    from software_engineering_team import orchestrator
+    from software_engineering_team.metrics.dora import compute_dora
+
+    created = datetime.now(tz=timezone.utc) - timedelta(hours=1)
+    merged = datetime.now(tz=timezone.utc) - timedelta(minutes=30)
+
+    # First run: only t1 merged, job still running (no merge_to_main yet).
+    first = {
+        "created_at": created.isoformat(),
+        "status": "running",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: first)
+    monkeypatch.setattr(orchestrator.cost_tracker, "flush", lambda jid: None)
+    orchestrator._emit_coding_team_metrics("job-rt")
+
+    # Resume: t2 now merged (and needed a revision); job completed.
+    second = {
+        "created_at": created.isoformat(),
+        "status": "completed",
+        "task_graph_snapshot": [
+            {"id": "t1", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 0},
+            {"id": "t2", "status": "merged", "merged_at": merged.isoformat(), "revision_count": 1},
+        ],
+    }
+    monkeypatch.setattr(orchestrator, "get_job", lambda jid: second)
+    orchestrator._emit_coding_team_metrics("job-rt")
+
+    m = compute_dora(30.0)
+    assert m.merged_count == 2  # t1 (run 1) + t2 (run 2), t1 not double-counted
+    assert m.deployment_count == 1  # merge_to_main emitted once, on the completing run
+    assert m.gate_reentry_count == 1  # only t2 needed a revision
+
+
+def test_se_events_helpers(_schema) -> None:
+    """Se events helpers."""
+    from software_engineering_team.shared import se_events
+
+    assert se_events.job_has_events("jX") is False
+    se_events.record_event(se_events.CRASH_DETECTED, job_id="jX", task_id="t1")
+    assert se_events.job_has_events("jX") is True
+    assert se_events.job_has_events("jX", se_events.MERGE_TO_MAIN) is False
+    # One unresolved crash for t1.
+    assert se_events.unresolved_crashed_task_ids("jX") == {"t1"}
+    se_events.record_event(se_events.CRASH_RESOLVED, job_id="jX", task_id="t1")
+    assert se_events.unresolved_crashed_task_ids("jX") == set()
+
+
+def test_record_event_coerces_naive_ts_to_utc(_schema) -> None:
+    """Record event coerces naive ts to utc."""
+    from datetime import datetime as _dt
+
+    from software_engineering_team.shared import se_events
+
+    naive = _dt(2026, 6, 1, 12, 0, 0)  # no tzinfo
+    se_events.record_event(se_events.MERGE_TO_MAIN, job_id="jZ", ts=naive)
+    rows = se_events.fetch_events_since(_dt(2026, 5, 1, tzinfo=timezone.utc))
+    jz = [r for r in rows if r["job_id"] == "jZ"]
+    assert jz and jz[0]["ts"].tzinfo is not None  # stored/returned tz-aware
+
+
+def test_trace_write_and_cost(_schema, monkeypatch) -> None:
+    """Trace write and cost."""
+    monkeypatch.setenv("SE_TRACE_TO_POSTGRES", "true")
+    from software_engineering_team.shared import trace_store
+
+    class _Rec:
+        timestamp = datetime.now(tz=timezone.utc).timestamp()
+        team = "software_engineering"
+        agent_key = "backend"
+        job_id = "j9"
+        task_id = "t1"
+        phase = "execution"
+        model = "deepseek-v4-pro:cloud"
+        prompt_tokens = 1000
+        completion_tokens = 500
+        total_tokens = 1500
+        cost_usd = 0.42
+        latency_ms = 1200
+        status = "success"
+        outcome = "success"
+        objective = "write code"
+        request_id = "rid1"
+
+    assert trace_store.write_trace(_Rec()) is True
+    summary = trace_store.fetch_cost_since(datetime.now(tz=timezone.utc) - timedelta(days=1))
+    assert summary["total_cost_usd"] == pytest.approx(0.42)
+    assert summary["by_job"]["j9"] == pytest.approx(0.42)

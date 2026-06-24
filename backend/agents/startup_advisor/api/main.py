@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import logging
 import threading
-from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException
+from fastapi import HTTPException
 from pydantic import BaseModel, Field
 
-from shared_observability import init_otel, instrument_fastapi_app
+from shared_app import create_team_app
 from startup_advisor.postgres import SCHEMA as STARTUP_ADVISOR_POSTGRES_SCHEMA
 from startup_advisor.shared.job_store import (
     JOB_STATUS_CANCELLED,
@@ -30,33 +29,14 @@ from startup_advisor.shared.job_store import (
 
 logger = logging.getLogger(__name__)
 
-init_otel(service_name="startup-advisor", team_key="startup_advisor")
-
-
-@asynccontextmanager
-async def _lifespan(application: FastAPI):
-    try:
-        from shared_postgres import register_team_schemas
-
-        register_team_schemas(STARTUP_ADVISOR_POSTGRES_SCHEMA)
-    except Exception:
-        logger.exception("startup_advisor postgres schema registration failed")
-    yield
-    try:
-        from shared_postgres import close_pool
-
-        close_pool()
-    except Exception:
-        logger.warning("startup_advisor shared_postgres close_pool failed", exc_info=True)
-
-
-app = FastAPI(
+app = create_team_app(
+    service_name="startup-advisor",
+    team_key="startup_advisor",
     title="Startup Advisor API",
     description="Persistent conversational startup advisor with probing dialogue",
     version="1.0.0",
-    lifespan=_lifespan,
+    postgres_schema=STARTUP_ADVISOR_POSTGRES_SCHEMA,
 )
-instrument_fastapi_app(app, team_key="startup_advisor")
 
 
 # ---------------------------------------------------------------------------
@@ -233,9 +213,7 @@ def _run_advisor_message_background(job_id: str, message: str) -> None:
         result = _process_advisor_message(message)
         if is_job_cancelled(job_id):
             return
-        update_job(
-            job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json")
-        )
+        update_job(job_id, status=JOB_STATUS_COMPLETED, result=result.model_dump(mode="json"))
     except Exception as exc:
         logger.exception("Startup advisor job %s failed", job_id)
         if is_job_cancelled(job_id):

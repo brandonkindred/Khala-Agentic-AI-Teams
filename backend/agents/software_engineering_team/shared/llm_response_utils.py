@@ -109,6 +109,97 @@ def _looks_like_path(line: str) -> bool:
     return any(s.endswith(ext) for ext in _PATH_EXTENSIONS)
 
 
+def _clean_files_dict(parsed: object) -> Dict[str, str]:
+    """Extract a ``{path: content}`` dict from a parsed object's ``files`` key.
+
+    Postconditions: returns only entries where both key and value are non-empty
+    strings (value non-blank); empty dict when ``parsed`` has no usable ``files``.
+    """
+    files: Dict[str, str] = {}
+    if isinstance(parsed, dict) and isinstance(parsed.get("files"), dict):
+        for k, v in parsed["files"].items():
+            if isinstance(k, str) and isinstance(v, str) and k and v.strip():
+                files[k] = v
+    return files
+
+
+def _files_from_json_object(stripped: str) -> Dict[str, str]:
+    """Strategy 1: the first balanced ``{...}`` carrying a ``files`` dict (model may wrap JSON in text)."""
+    start = stripped.find("{")
+    if start == -1:
+        return {}
+    depth = 0
+    end = -1
+    for i in range(start, len(stripped)):
+        if stripped[i] == "{":
+            depth += 1
+        elif stripped[i] == "}":
+            depth -= 1
+            if depth == 0:
+                end = i
+                break
+    if end == -1:
+        return {}
+    try:
+        return _clean_files_dict(json.loads(stripped[start : end + 1]))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _files_from_json_codeblock(content: str) -> Dict[str, str]:
+    """Strategy 2: a ```` ```json ```` fence wrapping the whole ``{... "files": {...}}`` response."""
+    json_match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
+    if not json_match:
+        return {}
+    try:
+        return _clean_files_dict(json.loads(json_match.group(1).strip()))
+    except (json.JSONDecodeError, TypeError):
+        return {}
+
+
+def _infer_block_path(info: str, lines: list[str]) -> tuple[str | None, int]:
+    """Infer ``(path, body_start_index)`` for one fenced block's info string + body lines.
+
+    Postconditions: ``path`` is ``None`` when no path can be inferred; otherwise
+    ``body_start_index`` is the first body line that is actual file content.
+    """
+    if info and _looks_like_path(info):
+        return info.strip(), 0
+    if lines and _looks_like_path(lines[0]):
+        return lines[0].strip(), 1
+    if info and any(info.endswith(ext) for ext in _PATH_EXTENSIONS):
+        return info.strip(), 0
+    if lines:
+        # Check for a path comment: // path: src/foo.ts or # path: app/foo.py
+        first = lines[0].strip()
+        for prefix in ("path:", "file:", "filepath:"):
+            if prefix in first.lower():
+                idx = first.lower().find(prefix)
+                rest = first[idx + len(prefix) :].strip().strip("'\"").strip()
+                if rest and _looks_like_path(rest):
+                    return rest, 1
+                break
+    return None, 0
+
+
+def _files_from_fenced_blocks(content: str) -> Dict[str, str]:
+    """Strategy 3: each ```` ```(lang_or_path)\\n body ``` ```` block → one inferred file."""
+    files: Dict[str, str] = {}
+    pattern = re.compile(r"```([^\n]*)\n([\s\S]*?)```", re.MULTILINE)
+    for match in pattern.finditer(content):
+        info = match.group(1).strip()
+        body = match.group(2)
+        if not body:
+            continue
+        lines = body.split("\n")
+        path, body_start = _infer_block_path(info, lines)
+        if path and path not in files:
+            content_str = "\n".join(lines[body_start:]).rstrip()
+            if content_str:
+                files[path] = content_str
+    return files
+
+
 def extract_files_from_content(content: str) -> Dict[str, str]:
     """
     Parse markdown code blocks from raw LLM content and build a files dict.
@@ -121,100 +212,21 @@ def extract_files_from_content(content: str) -> Dict[str, str]:
     - ```lang\\n<content>  (single block: infer path from extension)
 
     Returns a dict of path -> content. May be empty if nothing could be parsed.
+    The JSON strategies short-circuit (first non-empty wins); fenced-block
+    parsing is the fallback.
     """
     if not content or not content.strip():
         return {}
-
-    files: Dict[str, str] = {}
     stripped = content.strip()
-
-    # Try to parse content as JSON: find first "files"-bearing object (model may wrap JSON in text)
-    start = stripped.find("{")
-    if start != -1:
-        depth = 0
-        end = -1
-        for i in range(start, len(stripped)):
-            if stripped[i] == "{":
-                depth += 1
-            elif stripped[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    end = i
-                    break
-        if end != -1:
-            try:
-                parsed = json.loads(stripped[start : end + 1])
-                if (
-                    isinstance(parsed, dict)
-                    and parsed.get("files")
-                    and isinstance(parsed["files"], dict)
-                ):
-                    for k, v in parsed["files"].items():
-                        if isinstance(k, str) and isinstance(v, str) and k and v.strip():
-                            files[k] = v
-                    if files:
-                        return files
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-    # Try JSON inside markdown code block - model might have wrapped the whole response in a code block
-    json_match = re.search(r"```(?:json)?\s*\n([\s\S]*?)```", content, re.IGNORECASE)
-    if json_match:
-        try:
-            parsed = json.loads(json_match.group(1).strip())
-            if isinstance(parsed, dict) and parsed.get("files"):
-                f = parsed["files"]
-                if isinstance(f, dict):
-                    for k, v in f.items():
-                        if isinstance(k, str) and isinstance(v, str) and k and v.strip():
-                            files[k] = v
-                    if files:
-                        return files
-        except (json.JSONDecodeError, TypeError):
-            pass
-
-    # Find all fenced code blocks: ```(lang_or_path)?\n(body)```
-    pattern = re.compile(r"```([^\n]*)\n([\s\S]*?)```", re.MULTILINE)
-    for match in pattern.finditer(content):
-        info = match.group(1).strip()
-        body = match.group(2)
-        if not body:
-            continue
-
-        lines = body.split("\n")
-        path: str | None = None
-        body_start = 0
-
-        # First line might be the path
-        if info and _looks_like_path(info):
-            path = info.strip()
-            body_start = 0
-        elif lines and _looks_like_path(lines[0]):
-            path = lines[0].strip()
-            body_start = 1
-        elif info and any(info.endswith(ext) for ext in _PATH_EXTENSIONS):
-            path = info.strip()
-            body_start = 0
-        elif lines:
-            # Check for path comment: // path: src/foo.ts or # path: app/foo.py
-            first = lines[0].strip()
-            path_prefix = ("path:", "file:", "filepath:")
-            for prefix in path_prefix:
-                if prefix in first.lower():
-                    idx = first.lower().find(prefix)
-                    rest = first[idx + len(prefix) :].strip().strip("'\"").strip()
-                    if rest and _looks_like_path(rest):
-                        path = rest
-                        body_start = 1
-                        break
-                    break
-
-        if path and path not in files:
-            content_str = "\n".join(lines[body_start:]).rstrip()
-            if content_str:
-                files[path] = content_str
-
-    return files
+    # JSON strategies short-circuit: the codeblock regex only runs if the
+    # balanced-object scan found nothing.
+    files = _files_from_json_object(stripped)
+    if files:
+        return files
+    files = _files_from_json_codeblock(content)
+    if files:
+        return files
+    return _files_from_fenced_blocks(content)
 
 
 def heuristic_extract_files_from_content(

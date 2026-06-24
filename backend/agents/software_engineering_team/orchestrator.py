@@ -15,7 +15,6 @@ Execution:
 from __future__ import annotations
 
 import logging
-import os
 
 # Path setup when run as module
 import sys
@@ -46,10 +45,11 @@ from llm_service import (  # noqa: E402
     LLMTemporaryError,
     get_client,
     get_strands_model,
+    llm_attribution,
 )
-from software_engineering_team.shared.development_plan_writer import (  # noqa: E402
-    write_architecture_plan,
-    write_tech_lead_plan,
+from software_engineering_team.shared import (  # noqa: E402
+    cost_tracker,
+    se_events,
 )
 from software_engineering_team.shared.execution_tracker import execution_tracker  # noqa: E402
 from software_engineering_team.shared.git_utils import (  # noqa: E402
@@ -661,15 +661,6 @@ MAX_CLARIFICATION_REFINEMENTS = 10  # Max times to refine a task based on specia
 MAX_CODE_REVIEW_ITERATIONS = 10  # Max rounds of code review -> fix -> re-review
 
 
-def _issues_to_dicts(
-    qa_bugs: Any, sec_vulns: Any
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
-    """Convert QA/Security outputs to dict lists for coding agent input."""
-    qa_list = [b.model_dump() if hasattr(b, "model_dump") else b.dict() for b in (qa_bugs or [])]
-    sec_list = [v.model_dump() if hasattr(v, "model_dump") else v.dict() for v in (sec_vulns or [])]
-    return qa_list, sec_list
-
-
 # _read_repo_code and _truncate_for_context are now in shared.repo_utils
 _read_repo_code = read_repo_code
 _truncate_for_context = truncate_for_context
@@ -703,93 +694,6 @@ def _build_coding_team_plan_input(
         open_questions=open_questions,
         assumptions=getattr(adapter_result, "assumptions", None) or [],
     )
-
-
-def _build_task_update(
-    task_id: str, agent_type: str, result: Any, status: str = "completed"
-) -> TaskUpdate:
-    """Construct a TaskUpdate from a specialist agent's output."""
-    summary = getattr(result, "summary", "") or ""
-    files_changed = list((getattr(result, "files", None) or {}).keys())
-    if not files_changed:
-        files_changed = list((getattr(result, "artifacts", None) or {}).keys())
-    needs_followup = bool(getattr(result, "needs_clarification", False))
-    return TaskUpdate(
-        task_id=task_id,
-        agent_type=agent_type,
-        status=status,
-        summary=summary,
-        files_changed=files_changed,
-        needs_followup=needs_followup,
-    )
-
-
-def _run_dbc_comments_review(
-    agents: dict,
-    repo_path: Path,
-    task_id: str,
-    language: str,
-    task_description: str,
-    architecture,
-) -> None:
-    """
-    Run the Design by Contract Comments agent on the current feature branch.
-    Adds DbC-compliant comments to all methods, functions, and classes.
-    Commits changes to the branch if any comments were added.
-
-    Preconditions:
-        - The current branch is the feature branch with code to review
-        - agents dict contains a "dbc_comments" key
-
-    Postconditions:
-        - If comments were added, they are committed to the current branch
-        - If code was already compliant, a praise message is logged
-        - Any failures are logged but do not block the pipeline
-    """
-    from technical_writers.dbc_comments_agent.models import DbcCommentsInput
-
-    from software_engineering_team.shared.git_utils import write_files_and_commit
-
-    try:  # pragma: no cover  # integration-only: DbC agent runs live LLM + writes commits
-        dbc_code = _read_repo_code(repo_path)
-        if not dbc_code or dbc_code == "# No code files found":
-            logger.info("[%s] DbC: no code files to review, skipping", task_id)
-            return
-
-        dbc_result = agents["dbc_comments"].run(
-            DbcCommentsInput(
-                code=dbc_code,
-                language=language,
-                task_description=task_description,
-                architecture=architecture,
-            )
-        )
-
-        if not dbc_result.already_compliant and dbc_result.files:
-            ok, msg = write_files_and_commit(
-                repo_path,
-                dbc_result.files,
-                dbc_result.suggested_commit_message,
-            )
-            if ok:
-                logger.info(
-                    "[%s] DbC: added %s comments, updated %s -- committed to branch",
-                    task_id,
-                    dbc_result.comments_added,
-                    dbc_result.comments_updated,
-                )
-            else:
-                logger.warning("[%s] DbC: commit failed: %s", task_id, msg)
-        else:
-            logger.info(
-                "[%s] DbC: code complies with Design by Contract -- great job coding!",
-                task_id,
-            )
-    except (
-        Exception
-    ) as e:  # pragma: no cover  # integration-only: paired with integration-only try block
-        # Non-blocking: DbC failure should never stop the pipeline
-        logger.warning("[%s] DbC: review failed (non-blocking): %s", task_id, e)
 
 
 def _run_tech_lead_review(
@@ -894,53 +798,6 @@ def _run_code_review(
         existing_codebase=existing_codebase,
     )
     return agents["code_review"].run(review_input)
-
-
-def _code_review_issues_to_dicts(issues: Any) -> List[Dict[str, Any]]:
-    """Convert CodeReviewIssue objects to dicts for coding agent input."""
-    return [i.model_dump() if hasattr(i, "model_dump") else i.dict() for i in (issues or [])]
-
-
-def _log_code_review_result(review_result: Any, task_id: str) -> None:
-    """Log code review result with full issue details for debugging."""
-    if review_result.approved:
-        logger.info("[%s] Code review APPROVED", task_id)
-        if review_result.summary:
-            logger.info("[%s]   Summary: %s", task_id, review_result.summary[:300])
-        return
-    logger.warning(
-        "[%s] Code review REJECTED: %s issues (%s critical/major)",
-        task_id,
-        len(review_result.issues),
-        len([i for i in review_result.issues if i.severity in ("critical", "major")]),
-    )
-    for i, issue in enumerate(review_result.issues, 1):
-        logger.warning(
-            "[%s]   Issue %s: [%s] %s: %s (file: %s)",
-            task_id,
-            i,
-            issue.severity,
-            issue.category,
-            issue.description,
-            issue.file_path or "n/a",
-        )
-        if issue.suggestion:
-            logger.warning(
-                "[%s]     Suggestion: %s",
-                task_id,
-                issue.suggestion[:300],
-            )
-    if review_result.summary:
-        logger.info("[%s]   Review summary: %s", task_id, review_result.summary[:300])
-    if review_result.spec_compliance_notes:
-        logger.info(
-            "[%s]   Spec compliance: %s", task_id, review_result.spec_compliance_notes[:300]
-        )
-    if not review_result.issues:
-        logger.warning(
-            "[%s]   WARNING: Review rejected but returned 0 issues -- coding agent has nothing to fix!",
-            task_id,
-        )
 
 
 def _run_build_verification(
@@ -1523,6 +1380,154 @@ def _pop_runnable_task(
     return None
 
 
+def _code_v2_worker(
+    *,
+    job_id: str,
+    queue: List[str],
+    all_tasks: Dict[str, Any],
+    completed: set,
+    failed: Dict[str, str],
+    completed_code_task_ids: List[str],
+    architecture: Any,
+    agents: Dict[str, Any],
+    repo_path: Path,
+    agents_key: str,
+    team_label: str,
+    label: str,
+    default_assignee: str,
+    forward_tech_lead: bool,
+    surface_rate_limit: bool,
+) -> None:
+    """Drain ``queue`` by calling a code-v2 team-lead's ``run_workflow``, one task at a time.
+
+    The backend (``backend_code_v2_team``) and frontend (``frontend_code_v2_team``) workers
+    are identical except for which team lead they invoke, their progress/log labels, and two
+    backend-only knobs — hence the parametrization. Designed to run in its own thread,
+    parallel with the sibling worker.
+
+    Preconditions:
+        - ``agents_key`` indexes the team lead in ``agents`` (``None`` ⇒ every queued task is
+          failed with "``label`` team not registered" and the worker returns immediately).
+        - ``forward_tech_lead`` forwards ``tech_lead``/``build_fix_specialist`` to
+          ``run_workflow`` (backend only); ``surface_rate_limit`` maps an
+          ``LLMRateLimitError`` to ``OLLAMA_WEEKLY_LIMIT_MESSAGE`` (backend only).
+    Postconditions:
+        - Each drained task ends in exactly one of ``completed`` (and
+          ``completed_code_task_ids``) or ``failed``; ``queue`` is left empty on normal exit.
+        - A ``TASK_MERGED`` event is recorded for every successful task.
+    """
+    from software_engineering_team.shared.models import SystemArchitecture
+
+    team_lead = agents.get(agents_key)
+    if team_lead is None:
+        for tid in queue:
+            failed[tid] = f"{label} team not registered"
+        return
+
+    # Carry the job's creation time on each TASK_MERGED so DORA lead time survives
+    # a metrics-window boundary even when the original task_created event predates
+    # the query window (mirrors _emit_coding_team_metrics on the coding-team path).
+    _job = get_job(job_id) or {}
+    _created_ts = _parse_iso(_job.get("created_at"))
+    _created_iso = _created_ts.isoformat() if _created_ts else None
+
+    while (
+        queue
+    ):  # pragma: no cover  # integration-only: drains queue by calling code-v2 run_workflow
+        # Check for cancellation before starting each task
+        if is_cancel_requested(job_id):
+            logger.info("%s worker: cancellation detected, stopping", label)
+            return
+
+        task_id = queue.pop(0)
+        task = all_tasks.get(task_id)
+        if not task:
+            continue
+
+        update_job(job_id, current_task=task_id)
+        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
+        update_job_team_progress(job_id, team_label, current_task_id=task_id)
+        logger.info("[%s] >>> %s worker starting task", task_id, label)
+        task_start = time.monotonic()
+
+        def _job_updater(**kwargs: Any) -> None:
+            update_job_team_progress(job_id, team_label, **kwargs)
+
+        try:
+            arch = (
+                architecture
+                if isinstance(architecture, SystemArchitecture)
+                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
+            )
+            workflow_kwargs: Dict[str, Any] = dict(
+                repo_path=repo_path,
+                task=task,
+                architecture=arch,
+                qa_agent=agents.get("qa"),
+                security_agent=agents.get("security"),
+                code_review_agent=agents.get("code_review"),
+                build_verifier=_run_build_verification,
+                doc_agent=agents.get("documentation"),
+                linting_tool_agent=agents.get("linting_tool_agent"),
+                job_updater=_job_updater,
+            )
+            if forward_tech_lead:
+                workflow_kwargs["tech_lead"] = agents.get("tech_lead")
+                workflow_kwargs["build_fix_specialist"] = agents.get("build_fix_specialist")
+            # Attribute every LLM call this task makes to the job/task/phase so
+            # telemetry spans and per-job cost accounting can slice by them.
+            with llm_attribution(
+                team="software_engineering",
+                job_id=job_id,
+                task_id=task_id,
+                phase="execution",
+            ):
+                result = team_lead.run_workflow(**workflow_kwargs)
+            elapsed = time.monotonic() - task_start
+            if result.success:
+                completed.add(task_id)
+                completed_code_task_ids.append(task_id)
+                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                se_events.record_event(
+                    se_events.TASK_MERGED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"created_ts": _created_iso} if _created_iso else None,
+                )
+                _log_task_completion_banner(
+                    task_id=task_id,
+                    task_title=getattr(task, "title", "") or task_id,
+                    assignee=getattr(task, "assignee", default_assignee),
+                    elapsed_seconds=elapsed,
+                    description=getattr(task, "description", "") or "",
+                )
+            else:
+                reason = result.failure_reason or f"{label} workflow did not succeed"
+                failed[task_id] = reason
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
+                )
+                logger.warning("[%s] %s task failed: %s", task_id, label, reason)
+        except Exception as exc:
+            if surface_rate_limit and isinstance(exc, LLMRateLimitError):
+                failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
+                update_task_state(
+                    job_id,
+                    task_id,
+                    status="failed",
+                    finished_at=_iso_now(),
+                    error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
+                )
+                logger.warning("[%s] LLM rate limit exceeded in %s worker: %s", task_id, label, exc)
+            else:
+                failed[task_id] = f"{label} exception: {exc}"
+                update_task_state(
+                    job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
+                )
+                logger.exception("[%s] %s worker exception", task_id, label)
+
+
 def _backend_code_v2_worker(
     *,
     job_id: str,
@@ -1535,96 +1540,24 @@ def _backend_code_v2_worker(
     agents: Dict[str, Any],
     repo_path: Path,
 ) -> None:
-    """
-    Worker that drains ``backend_code_v2_queue`` by calling the
-    backend team's (backend_code_v2_team) ``run_workflow``.
-    Designed to run in its own thread, parallel with frontend worker.
-    """
-    from software_engineering_team.shared.models import SystemArchitecture
-
-    team_lead = agents.get("backend")
-    if team_lead is None:
-        for tid in backend_code_v2_queue:
-            failed[tid] = "backend team not registered"
-        return
-
-    while (
-        backend_code_v2_queue
-    ):  # pragma: no cover  # integration-only: drains queue by calling backend-code-v2 run_workflow
-        # Check for cancellation before starting each task
-        if is_cancel_requested(job_id):
-            logger.info("Backend worker: cancellation detected, stopping")
-            return
-
-        task_id = backend_code_v2_queue.pop(0)
-        task = all_tasks.get(task_id)
-        if not task:
-            continue
-
-        update_job(job_id, current_task=task_id)
-        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-        update_job_team_progress(job_id, "backend-code-v2", current_task_id=task_id)
-        logger.info("[%s] >>> backend worker starting task", task_id)
-        task_start = time.monotonic()
-
-        def _job_updater(**kwargs: Any) -> None:
-            update_job_team_progress(job_id, "backend-code-v2", **kwargs)
-
-        try:
-            arch = (
-                architecture
-                if isinstance(architecture, SystemArchitecture)
-                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
-            )
-            result = team_lead.run_workflow(
-                repo_path=repo_path,
-                task=task,
-                architecture=arch,
-                qa_agent=agents.get("qa"),
-                security_agent=agents.get("security"),
-                code_review_agent=agents.get("code_review"),
-                build_verifier=_run_build_verification,
-                doc_agent=agents.get("documentation"),
-                linting_tool_agent=agents.get("linting_tool_agent"),
-                tech_lead=agents.get("tech_lead"),
-                build_fix_specialist=agents.get("build_fix_specialist"),
-                job_updater=_job_updater,
-            )
-            elapsed = time.monotonic() - task_start
-            if result.success:
-                completed.add(task_id)
-                completed_code_task_ids.append(task_id)
-                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee=getattr(task, "assignee", "backend"),
-                    elapsed_seconds=elapsed,
-                    description=getattr(task, "description", "") or "",
-                )
-            else:
-                reason = result.failure_reason or "backend workflow did not succeed"
-                failed[task_id] = reason
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
-                )
-                logger.warning("[%s] backend task failed: %s", task_id, reason)
-        except LLMRateLimitError as exc:
-            failed[task_id] = OLLAMA_WEEKLY_LIMIT_MESSAGE
-            update_task_state(
-                job_id,
-                task_id,
-                status="failed",
-                finished_at=_iso_now(),
-                error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
-            )
-            logger.warning("[%s] LLM rate limit exceeded in backend worker: %s", task_id, exc)
-        except Exception as exc:
-            failed[task_id] = f"backend exception: {exc}"
-            update_task_state(
-                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
-            )
-            logger.exception("[%s] backend worker exception", task_id)
+    """Drain ``backend_code_v2_queue`` via ``backend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
+    _code_v2_worker(
+        job_id=job_id,
+        queue=backend_code_v2_queue,
+        all_tasks=all_tasks,
+        completed=completed,
+        failed=failed,
+        completed_code_task_ids=completed_code_task_ids,
+        architecture=architecture,
+        agents=agents,
+        repo_path=repo_path,
+        agents_key="backend",
+        team_label="backend-code-v2",
+        label="backend",
+        default_assignee="backend",
+        forward_tech_lead=True,
+        surface_rate_limit=True,
+    )
 
 
 def _frontend_code_v2_worker(
@@ -1639,78 +1572,24 @@ def _frontend_code_v2_worker(
     agents: Dict[str, Any],
     repo_path: Path,
 ) -> None:
-    """Worker that drains frontend_code_v2_queue by calling frontend_code_v2_team run_workflow."""
-    from software_engineering_team.shared.models import SystemArchitecture
-
-    team_lead = agents.get("frontend_code_v2")
-    if team_lead is None:
-        for tid in frontend_code_v2_queue:
-            failed[tid] = "frontend_code_v2 team not registered"
-        return
-
-    while frontend_code_v2_queue:  # pragma: no cover  # integration-only: drains queue by calling frontend-code-v2 run_workflow
-        # Check for cancellation before starting each task
-        if is_cancel_requested(job_id):
-            logger.info("Frontend worker: cancellation detected, stopping")
-            return
-
-        task_id = frontend_code_v2_queue.pop(0)
-        task = all_tasks.get(task_id)
-        if not task:
-            continue
-
-        update_job(job_id, current_task=task_id)
-        update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-        update_job_team_progress(job_id, "frontend-code-v2", current_task_id=task_id)
-        logger.info("[%s] >>> frontend_code_v2 worker starting task", task_id)
-        task_start = time.monotonic()
-
-        def _job_updater(**kwargs: Any) -> None:
-            update_job_team_progress(job_id, "frontend-code-v2", **kwargs)
-
-        try:
-            arch = (
-                architecture
-                if isinstance(architecture, SystemArchitecture)
-                else (SystemArchitecture(overview=str(architecture)) if architecture else None)
-            )
-            result = team_lead.run_workflow(
-                repo_path=repo_path,
-                task=task,
-                architecture=arch,
-                qa_agent=agents.get("qa"),
-                security_agent=agents.get("security"),
-                code_review_agent=agents.get("code_review"),
-                build_verifier=_run_build_verification,
-                doc_agent=agents.get("documentation"),
-                linting_tool_agent=agents.get("linting_tool_agent"),
-                job_updater=_job_updater,
-            )
-            elapsed = time.monotonic() - task_start
-            if result.success:
-                completed.add(task_id)
-                completed_code_task_ids.append(task_id)
-                update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                _log_task_completion_banner(
-                    task_id=task_id,
-                    task_title=getattr(task, "title", "") or task_id,
-                    assignee=getattr(task, "assignee", "frontend-code-v2"),
-                    elapsed_seconds=elapsed,
-                    description=getattr(task, "description", "") or "",
-                )
-            else:
-                reason = result.failure_reason or "frontend_code_v2 workflow did not succeed"
-                failed[task_id] = reason
-                update_task_state(
-                    job_id, task_id, status="failed", finished_at=_iso_now(), error=reason
-                )
-                logger.warning("[%s] frontend_code_v2 task failed: %s", task_id, reason)
-        except Exception as exc:
-            failed[task_id] = f"frontend_code_v2 exception: {exc}"
-            update_task_state(
-                job_id, task_id, status="failed", finished_at=_iso_now(), error=str(exc)
-            )
-            logger.exception("[%s] frontend_code_v2 worker exception", task_id)
+    """Drain ``frontend_code_v2_queue`` via ``frontend_code_v2_team.run_workflow`` (see ``_code_v2_worker``)."""
+    _code_v2_worker(
+        job_id=job_id,
+        queue=frontend_code_v2_queue,
+        all_tasks=all_tasks,
+        completed=completed,
+        failed=failed,
+        completed_code_task_ids=completed_code_task_ids,
+        architecture=architecture,
+        agents=agents,
+        repo_path=repo_path,
+        agents_key="frontend_code_v2",
+        team_label="frontend-code-v2",
+        label="frontend_code_v2",
+        default_assignee="frontend-code-v2",
+        forward_tech_lead=False,
+        surface_rate_limit=False,
+    )
 
 
 def _run_backend_frontend_workers(
@@ -1740,6 +1619,10 @@ def _run_backend_frontend_workers(
     llm_limit_exceeded = [False]  # mutable ref for workers
     llm_connectivity_failed = [False]  # frontend could not reach LLM after retries; pause job
     repaired_tasks = set()  # max 1 repair per task
+    # Tasks that crashed and are awaiting a successful retry (MTTR). Seeded from
+    # durable se_events so a crash detected in a prior run still resolves (and pairs
+    # for MTTR) when this resumed/retry run succeeds.
+    crashed_tasks: set[str] = se_events.unresolved_crashed_task_ids(job_id)
     agent_source_path = Path(__file__).resolve().parent  # software_engineering_team/
 
     def _remaining_queue_ids() -> List[str]:
@@ -1838,11 +1721,18 @@ def _run_backend_frontend_workers(
                 elapsed = time.monotonic() - task_start_time
                 failure_reason = workflow_result.failure_reason or "Backend workflow failed"
                 _refine_contract = False
+                crash_resolved_now = False
                 with state_lock:
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                        # MTTR: a previously-crashed task is only *resolved* once it
+                        # actually succeeds on retry (not when a fix was merely applied).
+                        # The event is emitted after the lock is released (below).
+                        if task_id in crashed_tasks:
+                            crashed_tasks.discard(task_id)
+                            crash_resolved_now = True
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -1884,6 +1774,12 @@ def _run_backend_frontend_workers(
                                 elapsed,
                                 failed[task_id],
                             )
+                # Emit outside the lock: keep the blocking Postgres write off the
+                # critical section the other worker contends on.
+                if crash_resolved_now:
+                    se_events.record_event(
+                        se_events.CRASH_RESOLVED, job_id=job_id, task_id=task_id, phase="execution"
+                    )
                 if _refine_contract:
                     try:
                         project_planning_agent = agents.get("project_planning")
@@ -1982,6 +1878,17 @@ def _run_backend_frontend_workers(
                     error=str(e),
                     agent_crash_details=agent_crash_details,
                 )
+                se_events.record_event(
+                    se_events.CRASH_DETECTED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"exception_type": type(e).__name__},
+                )
+                # resolved only when the retry actually succeeds; mutate under the
+                # same lock the resolve path uses, so the shared set stays consistent.
+                with state_lock:
+                    crashed_tasks.add(task_id)
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2169,11 +2076,15 @@ def _run_backend_frontend_workers(
 
                 elapsed = time.monotonic() - task_start_time
                 failure_reason = workflow_result.failure_reason or "Frontend workflow failed"
+                crash_resolved_now = False
                 with state_lock:
                     if workflow_result.success:
                         completed.add(task_id)
                         completed_code_task_ids.append(task_id)
                         update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
+                        if task_id in crashed_tasks:
+                            crashed_tasks.discard(task_id)
+                            crash_resolved_now = True
                         execution_tracker.observe_loop(task_id, 1)
                         execution_tracker.finish_task(task_id)
                         _log_task_completion_banner(
@@ -2202,6 +2113,10 @@ def _run_backend_frontend_workers(
                             elapsed,
                             failed[task_id],
                         )
+                if crash_resolved_now:
+                    se_events.record_event(
+                        se_events.CRASH_RESOLVED, job_id=job_id, task_id=task_id, phase="execution"
+                    )
                 logger.info(
                     "%s[%s] <<< Frontend worker done (completed=%s)",
                     log_prefix,
@@ -2340,6 +2255,17 @@ def _run_backend_frontend_workers(
                     error=str(e),
                     agent_crash_details=agent_crash_details,
                 )
+                se_events.record_event(
+                    se_events.CRASH_DETECTED,
+                    job_id=job_id,
+                    task_id=task_id,
+                    phase="execution",
+                    detail={"exception_type": type(e).__name__},
+                )
+                # resolved only when the retry actually succeeds; mutate under the
+                # same lock the resolve path uses, so the shared set stays consistent.
+                with state_lock:
+                    crashed_tasks.add(task_id)
                 repair_applied = False
                 if type(e) in REPAIRABLE_EXCEPTIONS and task_id not in repaired_tasks:
                     logger.info(
@@ -2426,58 +2352,6 @@ def _run_backend_frontend_workers(
     t_frontend.start()
     t_backend.join()
     t_frontend.join()
-
-
-def _frontend_has_typescript(frontend_dir: Path) -> bool:
-    """Return True when ``frontend_dir`` contains TypeScript source.
-
-    Matches what ``_read_repo_code`` pulls for the actual Integration
-    call (``.ts`` + ``.tsx`` + ``.html`` + ``.scss``). A React-style
-    TSX-only frontend would slip past a ``*.ts``-only check (PR #424
-    Codex P1 round 4) and bypass the integration gate the release
-    hook relies on. We check ``.ts`` and ``.tsx`` only — HTML/SCSS
-    without TS source isn't an integration-relevant frontend.
-    """
-    if not frontend_dir.is_dir():
-        return False
-    # Two rglob walks (rather than scanning every file once) so the
-    # any() short-circuits as soon as the first match hits.
-    return any(frontend_dir.rglob("*.ts")) or any(frontend_dir.rglob("*.tsx"))
-
-
-def _initial_integration_outcome(
-    *,
-    integration_agent: Any,
-    has_backend: bool,
-    has_frontend: bool,
-    completed_code_task_ids: Any,
-) -> str:
-    """Compute the *pre-run* integration outcome.
-
-    Returns one of:
-      * ``"not_run"`` — Integration not applicable (no backend or no
-        frontend or no completed code tasks). Release hook ships.
-      * ``"failed"`` — Integration was applicable but the agent is
-        missing from ``agents``. Treated as a misconfiguration, not
-        N/A (PR #424 Codex P2 round 3): an environment with both
-        backend and frontend code that has no integration agent
-        would otherwise silently mint a release without contract
-        validation. Release hook gates the ship.
-      * ``"pending"`` — Integration is applicable and the agent is
-        present; caller should run it and upgrade the outcome to
-        ``"succeeded"`` (clean return) or ``"failed"`` (the call
-        threw). Sentinel value, not visible to the release hook.
-
-    Centralising the static branching here keeps the new
-    misconfiguration handling unit-testable without driving the
-    whole ``run_orchestrator``.
-    """
-    integration_applicable = bool(has_backend and has_frontend and completed_code_task_ids)
-    if not integration_applicable:
-        return "not_run"
-    if integration_agent is None:
-        return "failed"
-    return "pending"
 
 
 def _maybe_ship_sprint_release(
@@ -2707,6 +2581,108 @@ def _load_requirements_from_sprint(sprint_id: str) -> Tuple[Any, str]:
     return requirements, spec_markdown
 
 
+def _parse_iso(value: Any) -> Optional[datetime]:
+    """Parse an ISO-8601 string to an aware datetime, or None when absent/invalid."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _emit_coding_team_metrics(job_id: str) -> None:
+    """Emit DORA lifecycle events from the coding-team run's persisted task graph.
+
+    The coding-team path runs entirely inside ``run_coding_team_orchestrator`` and
+    persists its task graph to the job record (``task_graph_snapshot``). This reads
+    that snapshot and emits, per merged task, a ``task_created`` + ``task_merged``
+    pair (lead time = job creation → task merge, with the creation time carried on
+    the merge event so it survives a metrics-window boundary), a ``gate_reentry``
+    when the task needed revisions (the change-failure signal), one ``merge_to_main``
+    for a completed job (deployment frequency), and a final cost flush.
+
+    Preconditions: ``job_id`` is a non-empty string.
+    Postconditions: best-effort — never raises; emits nothing when the job or its
+        snapshot is unavailable or Postgres is disabled. Idempotent per
+        ``(job, task)``: a resumed/re-run job emits only the events it has not
+        already recorded, so newly-merged tasks are captured without re-counting
+        the ones a prior run logged. Always flushes job cost.
+    """
+    if not job_id:
+        # Empty job_id is a caller contract violation; surfaced as a no-op rather
+        # than raised, matching this helper's best-effort/never-raises contract
+        # (querying with a blank key would otherwise read the wrong job or None).
+        return
+    try:
+        # Per-task idempotency: emit only the lifecycle events not already recorded
+        # for this job. Guarding the whole batch on a single event's existence would
+        # drop a resumed run's newly-merged tasks (and the job's merge_to_main), so
+        # we fetch the (event_type, task_id) pairs already written and skip just
+        # those — capturing new merges without double-counting prior ones.
+        emitted = se_events.emitted_event_keys(job_id)
+        job = get_job(job_id) or {}
+        snapshot = job.get("task_graph_snapshot") or []
+        created_ts = _parse_iso(job.get("created_at"))
+        created_iso = created_ts.isoformat() if created_ts else None
+        job_status = (job.get("status") or "").lower()
+        for t in snapshot:
+            if not isinstance(t, dict):
+                continue
+            tid = t.get("id") or ""
+            status = (t.get("status") or "").lower()
+            if (se_events.TASK_CREATED, tid) not in emitted:
+                se_events.record_event(
+                    se_events.TASK_CREATED,
+                    job_id=job_id,
+                    task_id=tid,
+                    phase="design",
+                    ts=created_ts,
+                )
+            if status == "merged" and not t.get("resolved_without_changes"):
+                merged_ts = _parse_iso(t.get("merged_at"))
+                if (se_events.TASK_MERGED, tid) not in emitted:
+                    detail = {"created_ts": created_iso} if created_iso else None
+                    se_events.record_event(
+                        se_events.TASK_MERGED,
+                        job_id=job_id,
+                        task_id=tid,
+                        phase="execution",
+                        ts=merged_ts,
+                        detail=detail,
+                    )
+                # A merged task that needed >= 1 revision is a change that initially
+                # failed a quality gate — the DORA change-failure signal.
+                if (
+                    int(t.get("revision_count") or 0) > 0
+                    and (
+                        se_events.GATE_REENTRY,
+                        tid,
+                    )
+                    not in emitted
+                ):
+                    se_events.record_event(
+                        se_events.GATE_REENTRY,
+                        job_id=job_id,
+                        task_id=tid,
+                        phase="execution",
+                        ts=merged_ts,
+                    )
+        if (
+            job_status in ("completed", "completed_with_failures")
+            and (
+                se_events.MERGE_TO_MAIN,
+                "",
+            )
+            not in emitted
+        ):
+            se_events.record_event(se_events.MERGE_TO_MAIN, job_id=job_id, phase="integration")
+    except Exception:
+        logger.debug("failed to emit coding-team DORA metrics for %s", job_id, exc_info=True)
+    finally:
+        cost_tracker.flush(job_id)
+
+
 def run_orchestrator(
     job_id: str,
     repo_path: str | Path,
@@ -2733,8 +2709,6 @@ def run_orchestrator(
       skipped. Mutually exclusive with ``spec_content_override``.
     """
     path = Path(repo_path).resolve()
-    backend_dir = path / "backend"
-    frontend_dir = path / "frontend"
     try:  # pragma: no cover  # integration-only: end-to-end 4-phase orchestration pipeline (LLM + git + npm/pytest)
         # Check for cancellation at start
         _check_cancellation(job_id)
@@ -3010,11 +2984,6 @@ def run_orchestrator(
             Path(path) / "plan" / "planning_team" / "planning_document.md"
         )
         requirements = adapter_result.requirements
-        project_overview = adapter_result.project_overview
-        spec_intake_open_questions = adapter_result.open_questions
-        spec_intake_assumptions = adapter_result.assumptions
-        # Use the final approved product spec from Planning V3 handoff if available
-        spec_content_for_planning = adapter_result.final_spec_content or spec_content
         update_job(job_id, requirements_title=requirements.title)
 
         # Check for cancellation after Planning V3
@@ -3034,24 +3003,36 @@ def run_orchestrator(
             resolved_questions_override = resolved
             adapter_result.open_questions = []
 
-        # Main path: coding_team (replaces Tech Lead + Architecture Expert + backend_code_v2/frontend_code_v2 workers).
-        # Legacy path (tech_lead_agent, backend_code_v2_team, frontend_code_v2_team) retained below for alternate flows.
-        use_coding_team = True
-        if use_coding_team:
-            existing_code_summary = _truncate_for_context(_read_repo_code(path), 8000)
-            if existing_code_summary == "# No code files found":
-                existing_code_summary = None
-            plan_input = _build_coding_team_plan_input(
-                adapter_result, str(path), existing_code_summary, resolved_questions_override
-            )
-            from coding_team.orchestrator import run_coding_team_orchestrator
+        # planning_only: spec intake + planning (+ any decision gate) are done;
+        # stop before execution per the documented contract. The Temporal path
+        # honors this independently; the thread path must too.
+        if planning_only:
+            logger.info("Planning-only run: stopping before execution (job %s)", job_id)
+            update_job(job_id, status=JOB_STATUS_COMPLETED, phase="completed")
+            return
 
-            base, span = PROGRESS_BAND_CODING
-            # get_llm deliberately NOT passed: the coding team's default getter wraps
-            # the LLM clients with reasoning-stream capture, whose periodic flush is
-            # the only thing that refreshes job activity DURING a multi-minute LLM
-            # call — passing the raw get_client here made every long implement call
-            # look like a stall to the UI's activity-based warning.
+        # Execution: delegate to the coding_team orchestrator (it replaces the former
+        # Tech Lead + Architecture Expert + backend/frontend code-v2 worker pipeline).
+        existing_code_summary = _truncate_for_context(_read_repo_code(path), 8000)
+        if existing_code_summary == "# No code files found":
+            existing_code_summary = None
+        plan_input = _build_coding_team_plan_input(
+            adapter_result, str(path), existing_code_summary, resolved_questions_override
+        )
+        from coding_team.orchestrator import run_coding_team_orchestrator
+
+        base, span = PROGRESS_BAND_CODING
+        # get_llm deliberately NOT passed: the coding team's default getter wraps
+        # the LLM clients with reasoning-stream capture, whose periodic flush is
+        # the only thing that refreshes job activity DURING a multi-minute LLM
+        # call — passing the raw get_client here made every long implement call
+        # look like a stall to the UI's activity-based warning.
+        #
+        # Bind team/job_id attribution around the whole coding run so every LLM
+        # call it makes (sequential + via strands' asyncio.to_thread, which
+        # copies the context) is attributed to this SE job — that is what the
+        # cost tracker keys on. Without this the live path records no job cost.
+        with llm_attribution(team="software_engineering", job_id=job_id, phase="execution"):
             run_coding_team_orchestrator(
                 job_id,
                 str(path),
@@ -3061,752 +3042,15 @@ def run_orchestrator(
                 progress_base=base,
                 progress_span=span,
             )
-            # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
-            # completed_with_failures / already_complete / failed / cancelled), so there is nothing
-            # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an
-            # already-complete result it already set. ``already_complete`` (the work was already
-            # done — no changes needed) is a terminal success and is left intact.
-            return
-
-        # Legacy path (deprecated for main path): tech_lead_agent, backend_code_v2_team,
-        # frontend_code_v2_team, and standalone Architecture Expert are retained for
-        # legacy/alternate flows only. The `use_coding_team = True` gate above always
-        # returns, so the block below is unreachable in normal execution and is
-        # excluded from coverage — exercising it end-to-end requires a live LLM, git
-        # workspace, and npm/pytest toolchains.
-        if not use_coding_team:  # pragma: no cover  # integration-only
-            features_and_functionality_doc = (
-                project_overview.get("features_and_functionality_doc") or ""
-            ).strip()
-
-            # Optional: Run Enterprise Architect for richer architecture context (SW_USE_ENTERPRISE_ARCHITECT=true)
-            enterprise_arch_context: Optional[str] = None
-            if (os.environ.get("SW_USE_ENTERPRISE_ARCHITECT") or "").strip().lower() in (
-                "1",
-                "true",
-                "yes",
-            ):
-                try:
-                    if _arch_dir.exists():
-                        from integration import run_enterprise_architect
-
-                        ea_result = run_enterprise_architect(
-                            spec_content=spec_content_for_planning,
-                            work_path=str(path),
-                        )
-                        if ea_result.get("success") and ea_result.get("architecture_overview"):
-                            enterprise_arch_context = ea_result["architecture_overview"]
-                            logger.info(
-                                "Enterprise Architect produced architecture package at %s",
-                                ea_result.get("outputs_path", ""),
-                            )
-                        elif ea_result.get("error"):
-                            logger.warning("Enterprise Architect failed: %s", ea_result["error"])
-                except Exception as e:
-                    logger.warning("Enterprise Architect integration skipped: %s", e)
-
-            from architecture_expert.models import ArchitectureInput
-            from tech_lead_agent.models import TechLeadInput
-
-            from software_engineering_team.shared.context_sizing import compute_existing_code_chars
-
-            arch_agent = agents["architecture"]
-            tech_lead = agents["tech_lead"]
-            max_code_chars = compute_existing_code_chars(tech_lead.llm)
-            existing_code = _truncate_for_context(_read_repo_code(path), max_code_chars)
-
-            # Single-pass planning: Tech Lead produces Initiative/Epic/Story hierarchy
-            # If Planning V3 adapter produced a hierarchy, pass it to Tech Lead to use directly (V3 handoff typically has hierarchy=None)
-            planning_v2_hierarchy = adapter_result.hierarchy
-            tech_lead_output = None
-            assignment = None
-            try:
-                tech_lead_output = tech_lead.run(
-                    TechLeadInput(
-                        requirements=requirements,
-                        repo_path=str(path),
-                        spec_content=spec_content_for_planning,
-                        existing_codebase=existing_code
-                        if existing_code != "# No code files found"
-                        else None,
-                        project_overview=project_overview,
-                        open_questions=[
-                            q.question_text if hasattr(q, "question_text") else str(q)
-                            for q in spec_intake_open_questions
-                        ]
-                        if spec_intake_open_questions
-                        else None,
-                        assumptions=spec_intake_assumptions if spec_intake_assumptions else None,
-                        resolved_questions=resolved_questions_override,
-                        planning_hierarchy=planning_v2_hierarchy,
-                    )
-                )
-            except LLMRateLimitError:
-                logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-                return
-
-            if tech_lead_output.spec_clarification_needed:
-                questions = tech_lead_output.clarification_questions or []
-                if questions:
-                    structured_questions = _convert_to_structured_questions(
-                        questions,
-                        source="tech_lead",
-                    )
-                    add_pending_questions(job_id, structured_questions)
-                    if slack_notify_open_questions:
-                        slack_notify_open_questions(job_id, structured_questions, source="run-team")
-                    logger.info(
-                        "Job %s waiting for %d clarification answers from user",
-                        job_id,
-                        len(structured_questions),
-                    )
-                    _wait_for_user_answers(job_id)
-                    job_data = get_job(job_id)
-                    if job_data and job_data.get("status") == JOB_STATUS_FAILED:
-                        return
-                else:
-                    error_msg = "Spec is unclear but no clarification questions provided."
-                    logger.warning(error_msg)
-                    update_job(job_id, status=JOB_STATUS_FAILED, error=error_msg, phase="completed")
-                    return
-
-            assignment = tech_lead_output.assignment
-            if not assignment or not assignment.tasks:
-                logger.error("Tech Lead produced no tasks; failing job")
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_FAILED,
-                    error="Tech Lead produced no tasks",
-                    phase="completed",
-                )
-                return
-
-            # Architecture (single pass, no iteration)
-            architecture = None
-            arch_input = ArchitectureInput(
-                requirements=requirements,
-                technology_preferences=["Python", "FastAPI", "PostgreSQL", "Docker"],
-                project_overview=project_overview,
-                features_and_functionality_doc=features_and_functionality_doc or None,
-                existing_architecture=enterprise_arch_context,
-            )
-            try:
-                arch_output = arch_agent.run(arch_input)
-            except LLMRateLimitError:
-                logger.warning("Ollama LLM usage limit exceeded for week. Job %s paused.", job_id)
-                update_job(job_id, status="paused_llm_limit", error=OLLAMA_WEEKLY_LIMIT_MESSAGE)
-                return
-            architecture = arch_output.architecture
-            update_job(job_id, architecture_overview=architecture.overview)
-            try:
-                write_architecture_plan(path, architecture, plan_dir=plan_dir)
-            except Exception as e:
-                logger.warning("Failed to write plan/architecture.md: %s", e)
-
-            # Planning consolidation: master plan, risk register, ship checklist
-            try:
-                from software_engineering_team.shared.planning_consolidation import (
-                    run_planning_consolidation,
-                )  # noqa: I001
-
-                run_planning_consolidation(plan_dir, assignment, architecture, project_overview)
-            except Exception as e:
-                logger.warning("Planning consolidation skipped: %s", e)
-
-            # Write Tech Lead development plan
-            try:
-                write_tech_lead_plan(
-                    path,
-                    assignment,
-                    summary=getattr(tech_lead_output, "summary", "") or "",
-                    requirement_task_mapping=getattr(
-                        tech_lead_output, "requirement_task_mapping", None
-                    )
-                    or [],
-                    validation_report=getattr(tech_lead_output, "validation_report", None),
-                    plan_dir=plan_dir,
-                )
-            except Exception as e:
-                logger.warning("Failed to write plan/tech_lead.md: %s", e)
-
-            # Store execution order and per-task state for API tracking panel; set phase to execution
-            _task_map = {t.id: t for t in assignment.tasks}
-
-            def _extract_task_state(tid: str) -> dict:
-                """Extract task state including hierarchy metadata."""
-                task = _task_map.get(tid)
-                metadata = getattr(task, "metadata", {}) or {}
-                return {
-                    "status": "pending",
-                    "assignee": getattr(task, "assignee", "unknown") or "unknown",
-                    "title": getattr(task, "title", tid) or tid,
-                    "dependencies": getattr(task, "dependencies", []) or [],
-                    "initiative_id": metadata.get("initiative_id"),
-                    "epic_id": metadata.get("epic_id"),
-                    "story_id": metadata.get("story_id"),
-                }
-
-            task_states = {tid: _extract_task_state(tid) for tid in assignment.execution_order}
-
-            # Build planning hierarchy summary for UI work breakdown tree
-            hierarchy_summary = None
-            if tech_lead_output and tech_lead_output.planning_hierarchy:
-                hierarchy = tech_lead_output.planning_hierarchy
-                initiatives = []
-                epics = []
-                stories = []
-                for init in hierarchy.initiatives:
-                    initiatives.append(
-                        {
-                            "id": init.id,
-                            "title": init.title,
-                            "description": getattr(init, "description", "") or "",
-                        }
-                    )
-                    for epic in init.epics:
-                        epics.append(
-                            {
-                                "id": epic.id,
-                                "title": epic.title,
-                                "description": getattr(epic, "description", "") or "",
-                                "initiative_id": init.id,
-                            }
-                        )
-                        for story in epic.stories:
-                            stories.append(
-                                {
-                                    "id": story.id,
-                                    "title": story.title,
-                                    "description": getattr(story, "description", "") or "",
-                                    "epic_id": epic.id,
-                                    "initiative_id": init.id,
-                                }
-                            )
-                hierarchy_summary = {
-                    "initiatives": initiatives,
-                    "epics": epics,
-                    "stories": stories,
-                }
-
-            update_job(
-                job_id,
-                execution_order=assignment.execution_order,
-                task_states=task_states,
-                planning_hierarchy=hierarchy_summary,
-                phase="execution",
-                status_text="Starting task execution",
-            )
-
-            # Check for cancellation before execution
-            _check_cancellation(job_id)
-
-            if planning_only:
-                logger.info(
-                    "Planning-only run: stopping before execution (re-plan-with-clarifications)"
-                )
-                update_job(job_id, status="completed", phase="completed")
-                return
-
-            for t in assignment.tasks:
-                execution_tracker.upsert_task(
-                    task_id=t.id,
-                    title=getattr(t, "title", "") or t.id,
-                    assigned_agent=getattr(t, "assignee", "unknown"),
-                    dependencies=getattr(t, "dependencies", []) or [],
-                )
-
-            # 6. Execute tasks: partition into prefix (devops/git_setup), backend, frontend
-            completed = set()
-            failed: Dict[str, str] = {}
-            completed_code_task_ids: List[str] = []
-            all_tasks = {t.id: t for t in assignment.tasks}
-            full_order = list(assignment.execution_order)
-            prefix_queue = [
-                tid
-                for tid in full_order
-                if all_tasks.get(tid)
-                and (
-                    all_tasks[tid].type.value == "git_setup" or all_tasks[tid].assignee == "devops"
-                )
-            ]
-            backend_queue: List[
-                str
-            ] = []  # All backend work routed to backend_code_v2_team via backend_code_v2_queue
-            backend_code_v2_queue: List[str] = [
-                tid
-                for tid in full_order
-                if all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
-            ]
-            frontend_queue: List[
-                str
-            ] = []  # All frontend work routed to frontend_code_v2_team via frontend_code_v2_queue
-            frontend_code_v2_queue: List[str] = [
-                tid
-                for tid in full_order
-                if all_tasks.get(tid)
-                and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
-            ]
-            total_tasks = (
-                len(prefix_queue)
-                + len(backend_queue)
-                + len(backend_code_v2_queue)
-                + len(frontend_queue)
-                + len(frontend_code_v2_queue)
-            )
-
-            logger.info(
-                "=== Starting task execution: prefix=%s, backend=%s, frontend=%s, frontend_code_v2=%s ===",
-                len(prefix_queue),
-                len(backend_code_v2_queue),
-                len(frontend_queue),
-                len(frontend_code_v2_queue),
-            )
-
-            # Run prefix tasks sequentially (work path; devops writes to path/devops, no git)
-            for task_id in prefix_queue:
-                task = all_tasks.get(task_id)
-                if not task:
-                    continue
-                assignee = getattr(task, "assignee", "unknown") or "unknown"
-                update_job(job_id, current_task=task_id)
-                update_task_state(job_id, task_id, status="in_progress", started_at=_iso_now())
-                update_job_team_progress(job_id, assignee, current_task_id=task_id)
-                execution_tracker.start_task(task_id)
-                if task.type.value == "git_setup":
-                    completed.add(task_id)
-                    update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                    execution_tracker.finish_task(task_id)
-                    _log_task_completion_banner(
-                        task_id=task_id,
-                        task_title=getattr(task, "title", "") or task_id,
-                        assignee="git_setup",
-                        elapsed_seconds=0.0,
-                        description=getattr(task, "description", "") or "",
-                    )
-                    continue
-                if task.assignee == "devops":
-                    # Defer containerization to after backend and frontend complete; skip early devops run.
-                    completed.add(task_id)
-                    update_task_state(job_id, task_id, status="done", finished_at=_iso_now())
-                    execution_tracker.finish_task(task_id)
-                    _log_task_completion_banner(
-                        task_id=task_id,
-                        task_title=getattr(task, "title", "") or task_id,
-                        assignee="devops",
-                        elapsed_seconds=0.0,
-                        description=getattr(task, "description", "") or "",
-                    )
-                    continue
-
-            # Backend-code-v2 worker: run in parallel with backend and frontend workers
-            backend_code_v2_thread = None
-            if backend_code_v2_queue:
-                backend_code_v2_thread = threading.Thread(
-                    target=_backend_code_v2_worker,
-                    kwargs=dict(
-                        job_id=job_id,
-                        backend_code_v2_queue=backend_code_v2_queue,
-                        all_tasks=all_tasks,
-                        completed=completed,
-                        failed=failed,
-                        completed_code_task_ids=completed_code_task_ids,
-                        architecture=None,
-                        agents=agents,
-                        repo_path=backend_dir,
-                    ),
-                )
-                backend_code_v2_thread.daemon = True
-                backend_code_v2_thread.start()
-
-            # Frontend-code-v2 worker: run in parallel with other workers
-            frontend_code_v2_thread = None
-            if frontend_code_v2_queue:
-                frontend_code_v2_thread = threading.Thread(
-                    target=_frontend_code_v2_worker,
-                    kwargs=dict(
-                        job_id=job_id,
-                        frontend_code_v2_queue=frontend_code_v2_queue,
-                        all_tasks=all_tasks,
-                        completed=completed,
-                        failed=failed,
-                        completed_code_task_ids=completed_code_task_ids,
-                        architecture=None,
-                        agents=agents,
-                        repo_path=frontend_dir,
-                    ),
-                )
-                frontend_code_v2_thread.daemon = True
-                frontend_code_v2_thread.start()
-
-            # Backend and frontend workers run in parallel (one task per agent type at a time)
-            _run_backend_frontend_workers(
-                job_id=job_id,
-                path=path,
-                backend_dir=backend_dir,
-                frontend_dir=frontend_dir,
-                backend_queue=backend_queue,
-                frontend_queue=frontend_queue,
-                all_tasks=all_tasks,
-                completed=completed,
-                failed=failed,
-                completed_code_task_ids=completed_code_task_ids,
-                spec_content=spec_content,
-                architecture=architecture,
-                agents=agents,
-                tech_lead=tech_lead,
-                total_tasks=total_tasks,
-                is_retry=False,
-            )
-
-            if backend_code_v2_thread is not None:
-                backend_code_v2_thread.join()
-            if frontend_code_v2_thread is not None:
-                frontend_code_v2_thread.join()
-
-            llm_limit_exceeded = any(v == OLLAMA_WEEKLY_LIMIT_MESSAGE for v in failed.values())
-            llm_connectivity_failed = any(
-                v in (LLM_UNREACHABLE_AFTER_RETRIES, LLM_SEMANTIC_EXHAUSTION)
-                for v in failed.values()
-            )
-            remaining_in_queues = (
-                len(backend_code_v2_queue) + len(frontend_queue) + len(frontend_code_v2_queue)
-            )
-            # Log final execution summary with task breakdown
-            logger.info(
-                "=== Task execution finished: %s completed, %s failed, %s remaining (of %s total) ===",
-                len(completed),
-                len(failed),
-                remaining_in_queues,
-                total_tasks,
-            )
-            _log_task_breakdown(
-                completed=completed,
-                all_tasks=all_tasks,
-                total_tasks=total_tasks,
-                failed_count=len(failed),
-                job_id=job_id,
-            )
-            if failed:
-                logger.warning("=== Failed task report ===")
-                for tid, reason in sorted(failed.items()):
-                    task_obj = all_tasks.get(tid)
-                    title = task_obj.title if task_obj else tid
-                    logger.warning("  [%s] %s — Reason: %s", tid, title, reason)
-            if remaining_in_queues:
-                logger.warning(
-                    "Unprocessed tasks still in queues: backend=%s, frontend=%s, frontend_code_v2=%s",
-                    len(backend_code_v2_queue),
-                    len(frontend_queue),
-                    len(frontend_code_v2_queue),
-                )
-
-            # Integration phase: validate backend-frontend API contract alignment
-            integration_agent = agents.get("integration")
-            has_backend = backend_dir.is_dir() and any(backend_dir.rglob("*.py"))
-            # ``_frontend_has_typescript`` accepts both ``.ts`` and ``.tsx``
-            # so a React-style TSX-only frontend can't bypass the
-            # integration gate (PR #424 Codex P1 round 4).
-            has_frontend = _frontend_has_typescript(frontend_dir)
-            # ``int_result`` is hoisted out of the try block so the
-            # release-manager hook (#371) can read its issues list whether
-            # Integration ran or not. ``None`` here means "Integration was
-            # skipped or threw"; ``integration_outcome`` distinguishes the
-            # two cases so the hook only ships when Integration produced a
-            # real signal — Codex review on PR #424 flagged that an
-            # Integration outage would otherwise silently mint a release
-            # row + skip failure-feedback intake.
-            int_result: Any = None
-            # 3-state outcome visible to the release hook (#371): "not_run"
-            # (Integration N/A — no backend or no frontend or no code),
-            # "succeeded" (ran cleanly), "failed" (agent itself threw OR
-            # was missing in an environment that needs it — Codex P2
-            # round 3 on PR #424: "agent missing" with applicable code is
-            # a misconfiguration, not "N/A", so it must gate the ship).
-            # ``_initial_integration_outcome`` returns "pending" when we
-            # should now run the agent in-line.
-            integration_outcome: str = _initial_integration_outcome(
-                integration_agent=integration_agent,
-                has_backend=has_backend,
-                has_frontend=has_frontend,
-                completed_code_task_ids=completed_code_task_ids,
-            )
-            if integration_outcome == "failed":
-                logger.warning(
-                    "Integration agent unavailable but the run has both backend and frontend "
-                    "code with completed code tasks — classifying as failed so the release "
-                    "hook gates the ship and opens a feedback item."
-                )
-            elif integration_outcome == "pending":
-                # Demote "pending" → "not_run" by default; we only upgrade
-                # to "failed" / "succeeded" if we actually attempt the
-                # call. (The "pending" sentinel must never reach the
-                # release hook — that branch isn't a 3-state outcome.)
-                integration_outcome = "not_run"
-                try:
-                    from integration_team import IntegrationInput
-
-                    code_backend = _read_repo_code(backend_dir, [".py"])
-                    code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
-                    if (
-                        code_backend != "# No code files found"
-                        and code_frontend != "# No code files found"
-                    ):
-                        # Mark as failed *before* the call so a thrown
-                        # exception leaves the outcome at "failed"; we
-                        # upgrade to "succeeded" only after the call returns.
-                        integration_outcome = "failed"
-                        int_result = integration_agent.run(
-                            IntegrationInput(
-                                backend_code=code_backend,
-                                frontend_code=code_frontend,
-                                spec_content=spec_content,
-                                architecture=architecture,
-                            )
-                        )
-                        integration_outcome = "succeeded"
-                        if not int_result.passed:
-                            logger.warning(
-                                "Integration agent found %s issues (%s critical/high)",
-                                len(int_result.issues),
-                                len(
-                                    [
-                                        i
-                                        for i in int_result.issues
-                                        if i.severity in ("critical", "high")
-                                    ]
-                                ),
-                            )
-                            for i, issue in enumerate(int_result.issues[:10], 1):
-                                logger.warning(
-                                    "  [%s] %s: %s (backend: %s, frontend: %s)",
-                                    i,
-                                    issue.severity,
-                                    issue.description[:100],
-                                    issue.backend_location or "n/a",
-                                    issue.frontend_location or "n/a",
-                                )
-                        else:
-                            logger.info(
-                                "Integration agent: passed (no critical/high contract mismatches)"
-                            )
-                except Exception as int_err:
-                    logger.warning("Integration phase failed (non-blocking): %s", int_err)
-
-            # Release manager hook (#371). No-op when not a sprint run; on a
-            # sprint run with all stories terminal AND a successful (or N/A)
-            # Integration outcome, it writes the release row +
-            # plan/releases/<version>.md and promotes Integration issues
-            # into sprint-tagged feedback items. When Integration was
-            # attempted and threw, the hook defers the release and opens a
-            # ``release-manager-skipped`` feedback so the next groom sees
-            # the gap (Codex review on PR #424). Always non-fatal.
-            _maybe_ship_sprint_release(
-                sprint_id=sprint_id,
-                plan_dir=plan_dir,
-                int_result=int_result,
-                integration_outcome=integration_outcome,
-                job_id=job_id,
-            )
-
-            # DevOps: containerize every git repo created by the pipeline (backend and frontend)
-            devops_agent = agents.get("devops")
-            if devops_agent and backend_dir.is_dir() and (backend_dir / ".git").exists():
-                logger.info("Next step -> Running DevOps agent to containerize backend repo")
-                existing_pipeline = _read_repo_code(backend_dir, [".yml", ".yaml"])
-                tech_lead.trigger_devops_for_backend(
-                    devops_agent,
-                    backend_dir,
-                    architecture,
-                    spec_content,
-                    existing_pipeline=existing_pipeline
-                    if existing_pipeline != "# No code files found"
-                    else None,
-                    build_verifier=_run_build_verification,
-                )
-            if devops_agent and frontend_dir.is_dir() and (frontend_dir / ".git").exists():
-                logger.info("Next step -> Running DevOps agent to containerize frontend repo")
-                existing_pipeline = _read_repo_code(frontend_dir, [".yml", ".yaml"])
-                tech_lead.trigger_devops_for_frontend(
-                    devops_agent,
-                    frontend_dir,
-                    architecture,
-                    spec_content,
-                    existing_pipeline=existing_pipeline
-                    if existing_pipeline != "# No code files found"
-                    else None,
-                    build_verifier=_run_build_verification,
-                )
-
-            # Persist failed task details and retryable state in job store
-            failed_details = [
-                {
-                    "task_id": tid,
-                    "reason": reason,
-                    "title": (all_tasks.get(tid).title if all_tasks.get(tid) else tid),
-                }
-                for tid, reason in failed.items()
-            ]
-            # Store serializable task data for retry capability
-            all_tasks_serialized = {
-                tid: t.model_dump() if hasattr(t, "model_dump") else t.dict()
-                for tid, t in all_tasks.items()
-            }
-            update_job(
-                job_id,
-                failed_tasks=failed_details,
-                _all_tasks=all_tasks_serialized,
-                _spec_content=spec_content,
-                _architecture_overview=architecture.overview if architecture else None,
-            )
-
-            # Security: run on backend repo and frontend repo separately
-            if completed_code_task_ids and tech_lead.should_run_security(
-                completed_code_task_ids, spec_content, tech_lead_output.requirement_task_mapping
-            ):
-                from security_agent.models import SecurityInput
-
-                has_backend = any(
-                    all_tasks.get(tid) and all_tasks[tid].assignee in ("backend", "backend-code-v2")
-                    for tid in completed_code_task_ids
-                )
-                has_frontend = any(
-                    all_tasks.get(tid)
-                    and all_tasks[tid].assignee in ("frontend", "frontend-code-v2")
-                    for tid in completed_code_task_ids
-                )
-                if has_backend:
-                    logger.info(
-                        "Tech Lead requested security review - running Security agent on backend repo"
-                    )
-                    code_backend = _read_repo_code(backend_dir)
-                    if code_backend and code_backend != "# No code files found":
-                        sec_result = agents["security"].run(
-                            SecurityInput(
-                                code=code_backend,
-                                language="python",
-                                task_description="Full codebase security review",
-                                architecture=architecture,
-                            )
-                        )
-                        if sec_result.vulnerabilities:
-                            logger.warning(
-                                "Security (backend) found %s vulnerabilities",
-                                len(sec_result.vulnerabilities),
-                            )
-                if has_frontend:
-                    logger.info(
-                        "Tech Lead requested security review - running Security agent on frontend repo"
-                    )
-                    code_frontend = _read_repo_code(frontend_dir, [".ts", ".tsx", ".html", ".scss"])
-                    if code_frontend and code_frontend != "# No code files found":
-                        sec_result = agents["security"].run(
-                            SecurityInput(
-                                code=code_frontend,
-                                language="typescript",
-                                task_description="Full codebase security review",
-                                architecture=architecture,
-                            )
-                        )
-                        if sec_result.vulnerabilities:
-                            logger.warning(
-                                "Security (frontend) found %s vulnerabilities",
-                                len(sec_result.vulnerabilities),
-                            )
-
-            # Final documentation pass: always run comprehensive documentation review for each repo
-            doc_agent = agents.get("documentation")
-            if doc_agent and completed_code_task_ids:
-                logger.info(
-                    "Final documentation pass: starting (completed_code_tasks=%d)",
-                    len(completed_code_task_ids),
-                )
-                for repo_name, repo_dir in [("backend", backend_dir), ("frontend", frontend_dir)]:
-                    if not repo_dir.is_dir() or not (repo_dir / ".git").exists():
-                        continue
-                    logger.info(
-                        "Final documentation pass: running comprehensive documentation review for %s repo",
-                        repo_name,
-                    )
-                    try:
-                        if hasattr(doc_agent, "run_final_review"):
-                            doc_agent.run_final_review(
-                                repo_path=repo_dir,
-                                repo_name=repo_name,
-                                spec_content=spec_content,
-                                architecture=architecture,
-                                completed_task_ids=completed_code_task_ids,
-                            )
-                        else:
-                            from software_engineering_team.shared.context_sizing import (
-                                compute_existing_code_chars,
-                            )
-
-                            max_code_chars = compute_existing_code_chars(doc_agent.llm)
-                            codebase_content = _truncate_for_context(
-                                _read_repo_code(
-                                    repo_dir,
-                                    [".py"]
-                                    if repo_name == "backend"
-                                    else [".ts", ".tsx", ".html", ".scss"],
-                                ),
-                                max_code_chars,
-                            )
-                            doc_agent.run_full_workflow(
-                                repo_path=repo_dir,
-                                task_id=f"final-docs-{repo_name}",
-                                task_summary="Final comprehensive documentation review: update all project documentation, README, and CONTRIBUTORS.",
-                                agent_type=repo_name,
-                                spec_content=spec_content,
-                                architecture=architecture,
-                                codebase_content=codebase_content,
-                            )
-                    except Exception as doc_err:
-                        logger.warning(
-                            "Final documentation pass failed for %s repo (non-blocking): %s",
-                            repo_name,
-                            doc_err,
-                        )
-
-            if llm_connectivity_failed:
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_PAUSED_LLM_CONNECTIVITY,
-                    error=_llm_pause_error(failed),
-                    progress=100,
-                    current_task=None,
-                )
-            elif llm_limit_exceeded:
-                update_job(
-                    job_id,
-                    status="paused_llm_limit",
-                    error=OLLAMA_WEEKLY_LIMIT_MESSAGE,
-                    progress=100,
-                    current_task=None,
-                )
-            else:
-                logger.info("")
-                logger.info("=" * BANNER_WIDTH)
-                logger.info("  ★★★  SOFTWARE ENGINEERING TEAM: DELIVERY COMPLETE  ★★★")
-                logger.info(
-                    "  Job %s finished. All tasks executed. Artifacts in work path.", job_id
-                )
-                logger.info("=" * BANNER_WIDTH)
-                _log_task_breakdown(
-                    completed=completed,
-                    all_tasks=all_tasks,
-                    total_tasks=total_tasks,
-                    failed_count=len(failed),
-                    job_id=job_id,
-                )
-                update_job(
-                    job_id,
-                    status=JOB_STATUS_COMPLETED,
-                    progress=100,
-                    current_task=None,
-                    phase="completed",
-                    status_text="All tasks completed successfully",
-                )
+        # Emit DORA lifecycle events (deployment/lead-time/change-failure) from
+        # the coding-team task graph the run persisted, and flush final cost.
+        _emit_coding_team_metrics(job_id)
+        # run_coding_team_orchestrator owns its terminal status on every exit path (completed /
+        # completed_with_failures / already_complete / failed / cancelled), so there is nothing
+        # to finalize here — writing COMPLETED would clobber a failure, a partial-success, or an
+        # already-complete result it already set. ``already_complete`` (the work was already
+        # done — no changes needed) is a terminal success and is left intact.
+        return
 
     except (
         CancellationError
