@@ -16,6 +16,36 @@ def _patched_blog_client(monkeypatch, fake_job_client):
     return fake_job_client
 
 
+def test_brief_label_picks_first_nonblank_line() -> None:
+    """_brief_label is robust to empty/whitespace-led briefs (no IndexError)."""
+    from shared.blog_job_store import _brief_label
+
+    assert _brief_label("Hello\nworld", "fallback") == "Hello"
+    # Leading blank lines: must skip to the first line with visible content.
+    assert _brief_label("\n   \nReal title\nmore", "fallback") == "Real title"
+    # Whitespace-only, empty, and None briefs fall back instead of raising.
+    assert _brief_label("\n   \n", "job-123") == "job-123"
+    assert _brief_label("", "job-123") == "job-123"
+    assert _brief_label(None, "job-123") == "job-123"
+    # Long first line is truncated to 120 chars.
+    assert len(_brief_label("x" * 500, "f")) == 120
+
+
+def test_create_blog_job_records_profile_association(tmp_path: Path, monkeypatch) -> None:
+    """create_blog_job links the new job to the default user profile (best-effort)."""
+    from shared import blog_job_store as bjs
+
+    from user_profile import ArtifactType
+
+    calls: list = []
+    monkeypatch.setattr(bjs, "record_association_safe", lambda *a, **k: calls.append((a, k)))
+
+    job_id = str(uuid.uuid4())
+    bjs.create_blog_job(job_id, "My Title\nbody", cache_dir=tmp_path)
+
+    assert calls == [((ArtifactType.BLOG_POST, "blogging", job_id), {"label": "My Title"})]
+
+
 def test_mark_all_running_jobs_failed(tmp_path: Path) -> None:
     """mark_all_running_jobs_failed sets all running/pending blog jobs to interrupted with reason."""
     from shared.blog_job_store import (

@@ -43,6 +43,11 @@ COPY agents/integrations /app/integrations
 # Postgres schema registry (used by blogging lifespan to register its schema)
 COPY agents/shared_postgres /app/shared_postgres
 
+# Cross-team user profile — blog_job_store records a best-effort artifact
+# association on job creation (`from user_profile import ...`). Depends only on
+# shared_postgres (copied above) + psycopg/pydantic (in requirements.txt).
+COPY agents/user_profile /app/user_profile
+
 # Shared Temporal helpers (checkpoints/runner/worker) imported by blog_job_store
 COPY agents/shared_temporal /app/shared_temporal
 
