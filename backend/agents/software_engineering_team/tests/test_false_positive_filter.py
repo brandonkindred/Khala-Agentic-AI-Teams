@@ -296,7 +296,7 @@ def test_find_function_at_line_non_python_heuristic() -> None:
     _, _, _, find_function_at_line = _build_tools(idx)
     result = find_function_at_line("app.ts", 2)
     # Heuristic returns the start line of the enclosing construct.
-    assert "1" in result
+    assert "starting at line 1" in result
 
 
 def test_find_function_at_line_unknown_path() -> None:

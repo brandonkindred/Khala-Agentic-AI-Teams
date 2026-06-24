@@ -303,6 +303,9 @@ def _find_python_function_at_line(content: str, line_number: int, path: str) -> 
         - Returns a "module level" message when no enclosing construct is found.
         - Returns a parse-error message and never raises on ``SyntaxError`` or
           any other ``ast.parse`` failure so the caller can fall back gracefully.
+        - Requires Python 3.8+ for ``ast.AST.end_lineno``; nodes without
+          ``end_lineno`` are skipped (not possible on the project's Python 3.10
+          target, but handled defensively via ``getattr``).
     """
     try:
         tree = ast.parse(content)
@@ -356,7 +359,7 @@ def _find_heuristic_function_at_line(content: str, line_number: int, path: str) 
         - Returns a "no construct found" message (never raises) when no
           column-0 declaration precedes ``line_number``.
     """
-    _SKIP = ("}", ")", "]", "*/", "/*", "//", "#")
+    _SKIP = ("}", ")", "]", "*/", "/*", "//", "#", "*")
     best_start: Optional[int] = None
     for i, line in enumerate(content.splitlines(), start=1):
         if i > line_number:
