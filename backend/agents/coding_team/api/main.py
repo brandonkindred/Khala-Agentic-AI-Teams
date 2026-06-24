@@ -1415,10 +1415,13 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
           review submitted (REQUEST_CHANGES on critical/high findings from a PR the
           bot did not author, else COMMENT) whose body carries only the summary.
           Every finding produces exactly one comment and no comment lists more than
-          one finding: findings tied to a diff line become individual inline
-          comments; the rest are posted as individual conversation comments, so no
-          finding is dropped. Any failure marks the job ``failed`` and posts a
-          (token-scrubbed) PR comment — never raises.
+          one finding: a finding tied to a changed line becomes an individual
+          line-anchored inline comment; a finding whose file changed but whose
+          cited line is off-diff becomes an individual file-level review comment;
+          only a finding naming a file absent from the diff is posted as a
+          standalone conversation comment, so no finding is dropped. Any failure
+          marks the job ``failed`` and posts a (token-scrubbed) PR comment — never
+          raises.
     """
     owner, repo, pr_number = request.owner, request.repo, request.pr_number
     update_job(job_id, status="running", phase="reviewing", status_text="Reviewing pull request")
@@ -1517,9 +1520,10 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 client, owner, repo, pr_number, pr.head_sha, body, event, comments
             )
 
-            # One comment per finding: post each un-anchorable finding as its own
-            # conversation comment, plus any inline comments the review had to drop
-            # (rare 422 fallback) so no finding is lost and none is batched. These
+            # One comment per finding: post each leftover finding (its file is not
+            # in the diff, so it can't be a review comment) as its own conversation
+            # comment, plus any review comments the submission had to drop (rare 422
+            # body-only fallback) so no finding is lost and none is batched. These
             # findings no longer live in the review body, so a failed post would
             # drop the finding silently — count failures and fail the job instead
             # of falsely reporting every finding as posted.
@@ -1530,11 +1534,18 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 for body in standalone_bodies
             )
 
-            inline_count = len(comments) - len(dropped)
+            # `comments` carries both line-anchored and file-level review
+            # comments; count them by shape (file-level entries carry
+            # "subject_type"). `dropped` is non-empty only on the rare body-only
+            # fallback, where every review comment was dropped and re-posted.
+            posted = comments if not dropped else []
+            inline_count = sum(1 for c in posted if "line" in c)
+            file_comment_count = sum(1 for c in posted if "subject_type" in c)
             comment_findings = len(leftovers) + len(dropped)
             review_summary = {
                 "total_issues": len(output.issues),
                 "inline_comments": inline_count,
+                "file_comments": file_comment_count,
                 "comment_findings": comment_findings,
                 "comments_failed": comments_failed,
                 "event": event,
@@ -1578,7 +1589,8 @@ def _run_pr_review(job_id: str, request: ReviewPrRequest, token: str) -> None:
                 return
             status_text = (
                 f"Review posted: {len(output.issues)} finding(s), "
-                f"{inline_count} inline, {comment_findings} comment(s), event={event}"
+                f"{inline_count} inline, {file_comment_count} file-level, "
+                f"{comment_findings} comment(s), event={event}"
             )
             update_job(
                 job_id,
