@@ -277,7 +277,7 @@
   padding: 6px 10px;
   font-size: 0.88rem;
 
-  &:focus { border-color: var(--kh-accent); }
+  &:focus-visible { border-color: var(--kh-accent); }
 }
 
 .chip-group {
