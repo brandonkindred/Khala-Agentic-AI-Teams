@@ -10,6 +10,8 @@ through ``shared_postgres.secrets`` / ``llm_service.runtime_config`` — see
 Endpoints:
 - ``GET  /api/llm-config`` -> effective provider/model/base URL, ``*_configured``
   booleans (keys are never returned), and the curated option lists for the UI.
+- ``GET  /api/llm-config/ollama-models`` -> the live model list from the effective
+  Ollama endpoint (``/api/tags``), or the curated fallback when it can't be reached.
 - ``PUT  /api/llm-config`` -> validate and persist; empty fields leave the
   existing stored value untouched. Requires Postgres.
 
@@ -34,6 +36,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from llm_service import clear_client_cache, runtime_config
 from llm_service import config as llm_config
+from llm_service.clients import list_ollama_models
 from shared_postgres import is_postgres_enabled, set_secrets
 
 logger = logging.getLogger(__name__)
@@ -120,6 +123,20 @@ class LlmConfigResponse(BaseModel):
     ollama_model_suggestions: list[str]
 
 
+class OllamaModelsResponse(BaseModel):
+    """Response for ``GET /api/llm-config/ollama-models``.
+
+    ``source`` lets the UI tell apart a live listing from the curated fallback so
+    it can hint when the endpoint couldn't be reached.
+    """
+
+    models: list[str] = Field(..., description="Available model ids (live or fallback).")
+    base_url: str = Field(..., description="Effective Ollama base URL the list was fetched from.")
+    source: Literal["live", "fallback"] = Field(
+        ..., description="'live' when fetched from /api/tags, 'fallback' for the curated list."
+    )
+
+
 def _build_response() -> LlmConfigResponse:
     """Assemble the current effective config for the UI (no secrets).
 
@@ -178,6 +195,30 @@ async def get_llm_config() -> LlmConfigResponse:
             exc_info=True,
         )
     return _build_response()
+
+
+@router.get("/ollama-models", response_model=OllamaModelsResponse)
+async def get_ollama_models() -> OllamaModelsResponse:
+    """Return the live Ollama model list for the settings dropdown.
+
+    Queries the effective Ollama endpoint's ``/api/tags`` (via
+    ``llm_service.clients.list_ollama_models``, which uses the resolved base URL
+    and Ollama key — so a Cloud key saved through this page authenticates the
+    request, and a local endpoint needs none). No secret is accepted in the request
+    or returned in the response.
+
+    Preconditions: none. Works regardless of Postgres (reads fall back to env).
+    Postconditions: returns ``source="live"`` with the fetched model ids when the
+        endpoint responds with a non-empty list; otherwise returns
+        ``source="fallback"`` with the curated ``OLLAMA_MODEL_SUGGESTIONS`` so the
+        dropdown is never empty. ``base_url`` is the resolved effective endpoint.
+        Never raises (the underlying fetch degrades to ``[]`` on any error).
+    """
+    base_url = llm_config.resolve_base_url()
+    live = list_ollama_models()
+    if live:
+        return OllamaModelsResponse(models=live, base_url=base_url, source="live")
+    return OllamaModelsResponse(models=list(_OLLAMA_MODEL_SUGGESTIONS), base_url=base_url, source="fallback")
 
 
 @router.put("", response_model=LlmConfigResponse)

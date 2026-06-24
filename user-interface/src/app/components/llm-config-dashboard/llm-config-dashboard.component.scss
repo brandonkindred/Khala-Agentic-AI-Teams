@@ -86,6 +86,12 @@
   .full {
     width: 100%;
   }
+
+  .model-note {
+    margin: -12px 0 16px;
+    color: var(--mat-sys-on-surface-variant, #5f6368);
+    font-size: 0.85rem;
+  }
 }
 
 mat-card-actions {
