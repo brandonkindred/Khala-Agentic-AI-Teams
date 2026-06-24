@@ -1,0 +1,15 @@
+<section class="stage-stub">
+  <mat-icon class="stage-stub__icon">{{ icon() }}</mat-icon>
+  <h2 class="stage-stub__title">{{ title() }}</h2>
+  <p class="stage-stub__blurb">{{ blurb() }}</p>
+  <p class="stage-stub__todo">This stage is part of the Agent Studio scaffold and isn’t built yet.</p>
+
+  <dl class="stage-stub__handoff" aria-label="Current handoff state">
+    @for (entry of entries(); track entry[0]) {
+      <div class="stage-stub__row">
+        <dt>{{ entry[0] }}</dt>
+        <dd>{{ entry[1] }}</dd>
+      </div>
+    }
+  </dl>
+</section>
