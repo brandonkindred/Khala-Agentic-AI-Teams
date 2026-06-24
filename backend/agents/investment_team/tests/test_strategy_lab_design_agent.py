@@ -237,6 +237,91 @@ def test_run_includes_signal_brief_and_directives_in_prompt(
     assert "EXPLORE crypto" in prompt
 
 
+def test_design_prompt_states_dual_objective_and_forecast_step(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The user prompt must state the dual objective (return + win rate, under a
+    positive-expectancy constraint) and direct the agent through the FORECAST
+    step that emits the structured ``expectancy_forecast``."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    capture = _patch_design(monkeypatch, payload)
+
+    DesignAgent().run(prior_records=[])
+
+    prompt = capture.calls[0]
+    lowered = prompt.lower()
+    # Dual objective: both return and win rate are named, under an expectancy constraint.
+    assert "annualized return" in lowered
+    assert "win rate" in lowered
+    assert "expectancy" in lowered
+    # The FORECAST step is wired into the decomposed process and asks for the
+    # machine-readable forecast object.
+    assert "FORECAST" in prompt
+    assert "expectancy_forecast" in prompt
+    assert "reward:risk" in lowered
+
+
+def test_run_returns_structured_expectancy_forecast_when_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A designer-emitted ``expectancy_forecast`` rides through the parse path
+    untouched (it is neither a rule slot nor popped like ``rationale``)."""
+    forecast = {
+        "forecast_win_rate": 0.6,
+        "reward_risk": 2.0,
+        "trades_per_year": 30,
+        "projected_annual_return_pct": 14.0,
+        "consistency_note": "60% wins at 2:1 over 30 trades/yr supports ~14%",
+    }
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+        extra={"expectancy_forecast": forecast},
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert parsed["expectancy_forecast"] == forecast
+
+
+def test_run_without_expectancy_forecast_is_accepted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The forecast is advisory and never gated: a spec emitted without one
+    still parses cleanly."""
+    payload = _payload(
+        entry_rules=[_structured_entry_rule()],
+        exit_rules=[_structured_signal_exit_rule()],
+        sizing=_structured_sizing(),
+    )
+    _patch_design(monkeypatch, payload)
+
+    parsed, _ = DesignAgent().run(prior_records=[])
+
+    assert "expectancy_forecast" not in parsed
+
+
+def test_design_system_prompt_states_dual_objective_and_forecast() -> None:
+    """The design system prompt must frame the dual objective + expectancy
+    constraint, flag the win-rate-alone trap, and wire in the FORECAST step."""
+    from investment_team.strategy_lab.agents.design import _SYSTEM_PROMPT
+
+    text = _SYSTEM_PROMPT
+    lowered = text.lower()
+    assert "dual objective" in lowered
+    assert "win rate" in lowered
+    assert "expectancy after costs" in lowered
+    assert "trap" in lowered  # the win-rate-alone caveat
+    assert "FORECAST" in text  # the new decomposed-process step
+    assert "expectancy_forecast" in text  # the machine-readable forecast field
+
+
 def test_run_includes_exclude_directives_in_prompt(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -65,7 +65,7 @@ _SELF_REVIEW_SYSTEM_PROMPT = (
 
 _DESIGN_USER_TEMPLATE = """\
 Design ONE novel swing-style strategy (typical holds ~2-14 days unless the asset class implies shorter).
-Goal: exceed 8% annualized in principle, with explicit risk controls.
+Objective: maximize annualized return AND win rate, subject to positive, robust expectancy after costs. Clearing ~8% annualized is a necessary floor, not the target — push higher while keeping post-cost expectancy positive. Do NOT chase win rate alone: a tight take-profit against a wide stop posts a high win rate with negative expectancy.
 
 ## Prior Strategy Results ({n_prior} tested so far, chronological)
 {prior_results_text}
@@ -78,7 +78,9 @@ Goal: exceed 8% annualized in principle, with explicit risk controls.
 {convergence_directives}
 
 ## Instructions
-Follow your decomposed reasoning process: ANALYZE → HYPOTHESIZE → DESIGN → STRESS-TEST → OUTPUT.
+Follow your decomposed reasoning process: ANALYZE → HYPOTHESIZE → DESIGN → FORECAST → STRESS-TEST → OUTPUT.
+
+In the FORECAST step you MUST estimate, before committing the spec, your expected win rate, the reward:risk implied by your take-profit/stop geometry, the expected trades per year, and the resulting projected annual return — and show they are mutually consistent (e.g. a 1% take-profit against a 5% stop must defend the ~84% win rate it needs to break even before costs). Record these as the structured `expectancy_forecast` object AND summarize the reasoning in `rationale`.
 
 Each prior entry includes outcome, metrics, rationale, and post-backtest analysis. Generate a strategy that **differs** from prior ones and learns from their failures.
 
@@ -100,7 +102,14 @@ DO NOT emit a `strategy_code` field. Code synthesis is a separate phase.
   "target_symbols": ["UPPERCASE tickers if your hypothesis names specific ones; else []"],
   "risk_limits": {{"max_position_pct": 5, "stop_loss_pct": 3}},
   "speculative": false,
-  "rationale": "Why this strategy and asset class now, given priors and the diversity hint"
+  "expectancy_forecast": {{
+    "forecast_win_rate": 0.0,            /* fraction in [0,1], e.g. 0.55 for 55% */
+    "reward_risk": 0.0,                  /* avg win : avg loss implied by TP/stop geometry, e.g. 2.0 */
+    "trades_per_year": 0.0,              /* expected trade frequency */
+    "projected_annual_return_pct": 0.0,  /* projected annualized return, percent, e.g. 14.0 */
+    "consistency_note": "One line showing win_rate × reward:risk × frequency support the projected return"
+  }},
+  "rationale": "Why this strategy and asset class now, given priors and the diversity hint — including the expectancy reasoning"
 }}
 """
 

@@ -17,6 +17,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Literal, Optional, Set, Tuple
 
+from pydantic import ValidationError
+
 from ..execution.benchmarks import benchmark_for_strategy, build_60_40_equity
 from ..execution.metrics import (
     bootstrap_sharpe_ci,
@@ -38,6 +40,7 @@ from ..models import (
     BacktestRecord,
     BacktestResult,
     DataProvenance,
+    ExpectancyForecast,
     GateEvent,
     StrategyLabRecord,
     StrategySpec,
@@ -146,6 +149,32 @@ def _coerce_requires_custom_code(raw: Any) -> bool:
         if s in {"false", "no", "off", "0", "f", "n", ""}:
             return False
     return False
+
+
+def _coerce_expectancy_forecast(raw: Any) -> Optional[ExpectancyForecast]:
+    """Coerce an LLM-emitted ``expectancy_forecast`` blob to ``ExpectancyForecast``.
+
+    Pre:  ``raw`` is any value from an untrusted JSON source — typically a
+          dict of the forecast fields, ``None`` when the designer omitted it,
+          or an already-built ``ExpectancyForecast``.
+    Post: returns an ``ExpectancyForecast`` (with values clamped by the model's
+          validators) when ``raw`` is a usable dict / instance; returns
+          ``None`` for a missing or unusable forecast.
+    Invariant: never raises. The forecast is advisory and never gated, so a
+          malformed blob degrades to ``None`` rather than aborting the cycle
+          with a ValidationError.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, ExpectancyForecast):
+        return raw
+    if isinstance(raw, dict):
+        try:
+            return ExpectancyForecast(**raw)
+        except (ValidationError, TypeError) as exc:
+            logger.warning("DesignAgent emitted unusable expectancy_forecast (%s); dropping.", exc)
+            return None
+    return None
 
 
 # Refinement output is code-only post-#543. Anything else the LLM emits is
@@ -1457,6 +1486,9 @@ class StrategyLabOrchestrator:
             speculative=strategy_dict.get("speculative", False),
             requires_custom_code=_coerce_requires_custom_code(
                 strategy_dict.get("requires_custom_code")
+            ),
+            expectancy_forecast=_coerce_expectancy_forecast(
+                strategy_dict.get("expectancy_forecast")
             ),
             strategy_code=None,
         )

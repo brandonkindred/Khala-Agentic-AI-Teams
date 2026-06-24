@@ -247,6 +247,58 @@ class PortfolioProposal(BaseModel):
     audit: AuditContext = Field(default_factory=AuditContext)
 
 
+class ExpectancyForecast(BaseModel):
+    """The DesignAgent's pre-commit performance forecast for a strategy.
+
+    The dual-objective design contract requires the agent, before emitting a
+    spec, to forecast its win rate, reward:risk, trade frequency, and the
+    resulting projected annual return, and to show they are mutually
+    self-consistent (a 1% take-profit against a 5% stop must defend the ~84%
+    win rate it needs to clear costs). This record captures that forecast as
+    structured data so downstream consumers can read it without parsing prose.
+
+    The forecast is advisory — it is never gated on. A spec emitted without
+    one (or a persisted record predating this field) carries ``None`` for the
+    owning ``StrategySpec.expectancy_forecast`` and is still valid.
+
+    Preconditions:
+        - ``forecast_win_rate`` is a probability; values outside ``[0, 1]`` are
+          clamped to the nearest bound rather than rejected.
+        - ``reward_risk`` and ``trades_per_year`` are non-negative; negatives
+          are clamped to ``0.0``.
+    Postconditions:
+        - A pure data record with no side effects. After construction,
+          ``forecast_win_rate`` ∈ ``[0, 1]`` and
+          ``reward_risk`` / ``trades_per_year`` ≥ ``0``.
+    Invariants:
+        - Holds no references to engine or LLM state; safe to serialize into a
+          persisted ``StrategySpec``.
+    """
+
+    forecast_win_rate: float = 0.0
+    reward_risk: float = 0.0
+    trades_per_year: float = 0.0
+    projected_annual_return_pct: float = 0.0
+    consistency_note: str = ""
+
+    @field_validator("forecast_win_rate", mode="after")
+    @classmethod
+    def _clamp_win_rate(cls, v: float) -> float:
+        # A probability. The designer emits it as a fraction; a model slip
+        # (a negative, or 84 emitted for "84%") is clamped into [0, 1] rather
+        # than rejected, since the forecast is advisory and never gated.
+        if v < 0.0:
+            return 0.0
+        if v > 1.0:
+            return 1.0
+        return v
+
+    @field_validator("reward_risk", "trades_per_year", mode="after")
+    @classmethod
+    def _floor_non_negative(cls, v: float) -> float:
+        return v if v > 0.0 else 0.0
+
+
 class StrategySpec(BaseModel):
     strategy_id: str
     authored_by: str
@@ -282,6 +334,11 @@ class StrategySpec(BaseModel):
     # expressible subset. Orthogonal to ``requires_redesign``.
     requires_custom_code: bool = False
     unparsed_rules: List[str] = Field(default_factory=list)
+    # The DesignAgent's pre-commit forecast of win rate, reward:risk, trade
+    # frequency, and projected annual return — the expectancy reasoning behind
+    # the spec. Advisory and never gated; ``None`` for specs (or legacy
+    # persisted records) authored without it.
+    expectancy_forecast: Optional[ExpectancyForecast] = None
     audit: AuditContext = Field(default_factory=AuditContext)
 
     @model_validator(mode="before")
