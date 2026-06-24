@@ -44,6 +44,14 @@ describe('LlmConfigApiService', () => {
     req.flush({ provider: 'claude', model: 'claude-opus-4-8' });
   });
 
+  it('getOllamaModels issues GET /api/llm-config/ollama-models', () => {
+    const mock = { models: ['llama3.2'], base_url: 'https://ollama.com', source: 'live' as const };
+    service.getOllamaModels().subscribe((res) => expect(res).toEqual(mock));
+    const req = httpMock.expectOne(`${baseUrl}/ollama-models`);
+    expect(req.request.method).toBe('GET');
+    req.flush(mock);
+  });
+
   it('getConfig propagates an HTTP error to the observable', () => {
     let captured: HttpErrorResponse | undefined;
     service.getConfig().subscribe({
